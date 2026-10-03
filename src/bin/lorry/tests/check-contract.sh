@@ -112,6 +112,9 @@ export HOME="$HOME_DIR"
 export RUSTC="$WORK/rustc-log"
 export REAL_RUSTC="$LORRY_TEST_RUSTC"
 export LORRY_CHECK_RUSTC_LOG="$LOG"
+# The rustc wrapper writes several chunks per invocation; serialize this
+# contract's calls so log counts and fail-fast order are deterministic.
+export LORRY_JOBS=1
 
 (
     cd "$PROJECT"

@@ -67,6 +67,7 @@ pub struct Options<'a> {
     /// Maximum number of units executed concurrently; 1 preserves strict
     /// plan-order execution.
     pub jobs: usize,
+    pub keep_going: bool,
     pub reporter: Option<&'a dyn EventReporter>,
 }
 
@@ -267,7 +268,9 @@ fn execute_inner(
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     let (index, key) = loop {
-                        if !guard.failures.is_empty() || guard.completed == total {
+                        if (!options.keep_going && !guard.failures.is_empty())
+                            || guard.completed == total
+                        {
                             return;
                         }
                         if let Some(entry) = guard.ready.iter().next().cloned() {
@@ -276,6 +279,9 @@ fn execute_inner(
                             break entry;
                         }
                         if guard.dispatched == guard.completed {
+                            if !guard.failures.is_empty() {
+                                return;
+                            }
                             guard.failures.push((
                                 usize::MAX,
                                 Error::failure(
@@ -1241,6 +1247,7 @@ mod tests {
                 admission: &admission,
                 native_tools: &native_tools,
                 jobs: 2,
+                keep_going: false,
                 reporter: None,
             },
         )

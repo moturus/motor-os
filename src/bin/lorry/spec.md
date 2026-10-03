@@ -972,8 +972,10 @@ is a distinct artifact type, and checked dependents use `.rmeta` paths for
 their Rust externs.
 The prepared check plan uses the same source remapping and manifest validation
 as build and test plans.
-An explicit `check --lib` runs its selected library through that planner and
-executor, including Cargo-format compiler messages when requested.
+Selected `check` targets run through that planner and executor, including
+Cargo-format compiler messages when requested. With `--keep-going`, units
+independent of a failed unit continue; without it, no new units start after
+the first observed failure.
 Until example targets are implemented, `check --examples` fails explicitly
 instead of succeeding without checking a target.
 

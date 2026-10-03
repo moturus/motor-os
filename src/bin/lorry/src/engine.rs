@@ -884,7 +884,10 @@ fn build_inner(
     };
     let selected_integration =
         build.test && (build.test_name.is_some() || !build.manifest.integration_tests.is_empty());
-    let integration_binaries = selected_integration.then(|| {
+    let check_integration = check.is_some_and(|(_, options)| {
+        options.selects_tests() && !build.manifest.integration_tests.is_empty()
+    });
+    let integration_binaries = (selected_integration || check_integration).then(|| {
         build
             .manifest
             .binaries
@@ -892,21 +895,30 @@ fn build_inner(
             .map(|binary| {
                 (
                     binary.name.clone(),
-                    bundle_layout.as_ref().map_or_else(
-                        || destination.join(&binary.name),
-                        |layout| layout.program(&binary.name),
-                    ),
+                    if check_integration {
+                        staging.path().join(&binary.name)
+                    } else {
+                        bundle_layout.as_ref().map_or_else(
+                            || destination.join(&binary.name),
+                            |layout| layout.program(&binary.name),
+                        )
+                    },
                 )
             })
             .collect::<BTreeMap<_, _>>()
     });
-    let integration_temp_dir = selected_integration.then(|| {
-        bundle_layout.as_ref().map_or_else(
-            || target_root.join("tmp"),
-            bundle::Layout::temporary_directory,
-        )
+    let integration_temp_dir = (selected_integration || check_integration).then(|| {
+        if check_integration {
+            staging.path().to_owned()
+        } else {
+            bundle_layout.as_ref().map_or_else(
+                || target_root.join("tmp"),
+                bundle::Layout::temporary_directory,
+            )
+        }
     });
     if let Some(directory) = &integration_temp_dir
+        && !check_integration
         && bundle_layout.is_none()
     {
         fs::create_dir_all(directory).map_err(|error| {
@@ -943,25 +955,40 @@ fn build_inner(
         admission: &prepared.admission,
         native_tools: &build.config.native_tools,
         jobs: compile_jobs(),
+        keep_going: check.is_some_and(|(_, options)| options.keep_going),
         reporter: message_reporter
             .as_ref()
             .map(|reporter| reporter as &dyn executor::EventReporter),
     };
-    if let Some((_, options)) = check
-        && options.lib
-        && !options.selects_binaries()
-        && !options.selects_tests()
-    {
-        if build.manifest.library.is_none() {
+    if let Some((_, options)) = check {
+        if options.lib && build.manifest.library.is_none() {
             return Err(Error::failure("selected package has no library target"));
         }
+        validate_binary_selection(build.manifest, options.bin.as_deref())?;
+        if let Some(name) = options.test.as_deref()
+            && !build
+                .manifest
+                .integration_tests
+                .iter()
+                .any(|target| target.name == name)
+        {
+            return Err(unknown_integration_test(build.manifest, name));
+        }
         let plan = selected_check_plan(&CheckTargetSelection {
-            normal: true,
-            binaries: false,
-            binary_name: None,
-            harnesses: false,
-            integrations: false,
-            integration_name: None,
+            normal: options.selects_library() || options.selects_binaries(),
+            binaries: options.selects_binaries(),
+            binary_name: if options.all_targets || options.bins {
+                None
+            } else {
+                options.bin.as_deref()
+            },
+            harnesses: options.all_targets,
+            integrations: options.selects_tests(),
+            integration_name: if options.all_targets {
+                None
+            } else {
+                options.test.as_deref()
+            },
         })?;
         executor::execute(&plan, &manifests, &executor_options)?;
         if build.validation.is_strict() {

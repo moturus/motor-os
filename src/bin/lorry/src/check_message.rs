@@ -16,7 +16,7 @@ use crate::manifest::Manifest;
 use crate::metadata::package::{self, Identity};
 use crate::metadata::wire;
 use crate::resolver::PackageKey;
-use crate::unit::{PlannedUnit, UnitKey, UnitKind};
+use crate::unit::{PlannedUnit, UnitKey, UnitKind, UnitMode, selected_library_key};
 
 struct Package {
     id: String,
@@ -32,6 +32,7 @@ struct State {
 
 pub struct Reporter {
     root: Package,
+    root_key: PackageKey,
     packages: BTreeMap<PackageKey, Package>,
     staging: PathBuf,
     destination: PathBuf,
@@ -77,6 +78,7 @@ impl Reporter {
         }
         Ok(Self {
             root,
+            root_key: selected_library_key(root_manifest)?.package,
             packages,
             staging: staging.to_owned(),
             destination: destination.to_owned(),
@@ -118,6 +120,9 @@ impl Reporter {
     }
 
     fn package(&self, key: &PackageKey) -> Result<&Package> {
+        if key == &self.root_key {
+            return Ok(&self.root);
+        }
         self.packages.get(key).ok_or_else(|| {
             Error::failure(format!(
                 "check messages omit package `{} {}`",
@@ -199,7 +204,7 @@ impl Reporter {
 impl EventReporter for Reporter {
     fn compiler_messages(&self, key: &UnitKey, output: &std::process::Output) -> Result<()> {
         let package = self.package(&key.package)?;
-        let target = package.dependency_target(key.kind)?;
+        let target = package.dependency_target(key.kind, key.target.as_deref())?;
         self.write_compiler_messages(package, target, output)
     }
 
@@ -218,7 +223,7 @@ impl EventReporter for Reporter {
             return Ok(());
         }
         let package = self.package(&key.package)?;
-        let target = package.dependency_target(key.kind)?;
+        let target = package.dependency_target(key.kind, key.target.as_deref())?;
         let (filenames, executable) = match output {
             RustcOutput::Library { rlib, rmeta, .. } => (
                 vec![self.published_path(rlib)?, self.published_path(rmeta)?],
@@ -336,22 +341,27 @@ impl Package {
             .ok_or_else(|| Error::failure(format!("check metadata omits target `{name}`")))
     }
 
-    fn dependency_target(&self, kind: UnitKind) -> Result<&wire::Target> {
+    fn dependency_target(&self, kind: UnitKind, name: Option<&str>) -> Result<&wire::Target> {
         self.targets
             .iter()
-            .find(|target| match kind {
-                UnitKind::Library | UnitKind::ProcMacro => target
-                    .kind
-                    .iter()
-                    .all(|kind| kind != "bin" && kind != "test" && kind != "custom-build"),
-                UnitKind::Binary | UnitKind::BinaryHarness => {
-                    target.kind.iter().any(|kind| kind == "bin")
-                }
-                UnitKind::LibraryHarness => target.kind.iter().any(|kind| kind == "lib"),
-                UnitKind::IntegrationHarness => target.kind.iter().any(|kind| kind == "test"),
-                UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
-                    target.kind.iter().any(|kind| kind == "custom-build")
-                }
+            .find(|target| {
+                name.is_none_or(|name| target.name == name)
+                    && match kind {
+                        UnitKind::Library | UnitKind::ProcMacro => target
+                            .kind
+                            .iter()
+                            .all(|kind| kind != "bin" && kind != "test" && kind != "custom-build"),
+                        UnitKind::Binary | UnitKind::BinaryHarness => {
+                            target.kind.iter().any(|kind| kind == "bin")
+                        }
+                        UnitKind::LibraryHarness => target.kind.iter().any(|kind| kind == "lib"),
+                        UnitKind::IntegrationHarness => {
+                            target.kind.iter().any(|kind| kind == "test")
+                        }
+                        UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
+                            target.kind.iter().any(|kind| kind == "custom-build")
+                        }
+                    }
             })
             .ok_or_else(|| Error::failure("check metadata omits a dependency target"))
     }
@@ -381,7 +391,7 @@ fn dependency_profile(planned: &PlannedUnit) -> Value {
         "debuginfo": debuginfo,
         "debug_assertions": profile.debug_assertions,
         "overflow_checks": profile.overflow_checks,
-        "test": false,
+        "test": matches!(planned.unit.key.mode, UnitMode::Test | UnitMode::CheckTest),
     })
 }
 
