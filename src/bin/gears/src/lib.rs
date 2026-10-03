@@ -17,5 +17,6 @@ pub mod run_lock;
 pub mod runtime;
 pub mod session;
 pub mod state;
+pub mod tools;
 pub mod trace;
 pub mod ui;
