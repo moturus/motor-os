@@ -1110,6 +1110,9 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
     digest.metadata("lorry", inputs.cargo)?;
     digest.metadata("rustc", &inputs.toolchain.rustc)?;
     for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
+        if process::is_removed_cargo_client_environment(&name) {
+            continue;
+        }
         digest.os("environment-name", &name);
         digest.os("environment-value", &value);
     }
@@ -1185,6 +1188,9 @@ fn freshness_base(
         digest.debug("dependency-file-count", &package.evidence.file_count);
     }
     for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
+        if process::is_removed_cargo_client_environment(&name) {
+            continue;
+        }
         digest.os("environment-name", &name);
         digest.os("environment-value", &value);
     }

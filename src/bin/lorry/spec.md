@@ -1016,6 +1016,10 @@ identity, use bounded path/size/mtime fingerprints for mutable path packages,
 and compose dependency cache keys without rereading rlib/rmeta bytes. Strict
 keys hash rustc, sysroot, tools, source trees, dependency artifacts, and
 manifests.
+The three Cargo-client variables that Lorry removes before starting rustc
+(`CARGO_LOG`, `RUSTUP_TOOLCHAIN`, and
+`__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`) are omitted from rustc
+unit keys and completed-profile freshness records.
 
 After a successful non-test build, the completed root profile contains a
 freshness record. An ordinary unchanged `build` or `run` validates parsed

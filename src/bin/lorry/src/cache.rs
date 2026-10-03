@@ -241,6 +241,9 @@ impl BuildCache {
             environment.insert(name.into(), value.clone());
         }
         for (name, value) in &environment {
+            if crate::process::is_removed_cargo_client_environment(name) {
+                continue;
+            }
             digest.os("rustc-environment-name", name, &replacements);
             digest.os("rustc-environment-value", value, &replacements);
         }

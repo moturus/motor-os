@@ -60,10 +60,21 @@ pub fn query_rustc(program: &Path, arguments: &[&str], description: &str) -> Res
 }
 
 pub fn remove_cargo_client_environment(command: &mut Command) {
-    command
-        .env_remove("__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS")
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("CARGO_LOG");
+    for name in REMOVED_CARGO_CLIENT_ENVIRONMENT {
+        command.env_remove(name);
+    }
+}
+
+const REMOVED_CARGO_CLIENT_ENVIRONMENT: [&str; 3] = [
+    "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS",
+    "RUSTUP_TOOLCHAIN",
+    "CARGO_LOG",
+];
+
+pub fn is_removed_cargo_client_environment(name: &OsStr) -> bool {
+    REMOVED_CARGO_CLIENT_ENVIRONMENT
+        .iter()
+        .any(|removed| name == OsStr::new(removed))
 }
 
 pub struct RustcCommand<'a> {

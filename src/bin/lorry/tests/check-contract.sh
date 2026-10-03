@@ -142,6 +142,34 @@ if find "$PROFILE/build/check-fixture" -type f -perm /111 -print -quit | grep .;
     exit 1
 fi
 
+# CARGO_LOG is stripped before rustc. A changed value must not rebuild the
+# dependency cache entry used by a later check.
+: >"$LOG"
+CARGO_LOG=trace "$LORRY" check --lib --quiet \
+    --manifest-path "$PROJECT/Cargo.toml" --target-dir "$TARGET"
+if grep -F "<$DEPENDENCY/src/lib.rs>" "$LOG" >/dev/null; then
+    echo "check-contract: CARGO_LOG rebuilt an unchanged dependency" >&2
+    exit 1
+fi
+
+(
+    cd "$PROJECT"
+    "$LORRY" --quiet build
+    : >"$LOG"
+    "$LORRY" --quiet build
+    if grep -F '<--crate-name>' "$LOG" >/dev/null; then
+        echo "check-contract: same-environment build missed freshness" >&2
+        exit 1
+    fi
+    : >"$LOG"
+    CARGO_LOG=trace "$LORRY" --quiet build
+    : # Keep Bash from replacing the subshell for its final command.
+)
+if grep -F '<--crate-name>' "$LOG" >/dev/null; then
+    echo "check-contract: CARGO_LOG invalidated unchanged build freshness" >&2
+    exit 1
+fi
+
 LIB_TARGET="$WORK/lib-target"
 : >"$LOG"
 "$LORRY" check --lib --quiet --manifest-path "$PROJECT/Cargo.toml" \
