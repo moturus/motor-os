@@ -239,6 +239,9 @@ impl Runtime {
                 "error": error,
             }),
         };
+        // The interrupted work has stopped. Lifecycle hooks need a fresh
+        // token so they can observe the cancelled turn and session changes.
+        self.cancellation.reset();
         let end_result = self
             .notify("turn_end", payload, observer)
             .and_then(|()| observer.event(Event::TurnEnd));
@@ -281,27 +284,18 @@ impl Runtime {
                 Err(error) => {
                     let cancelled =
                         matches!(error, ProviderError::Aborted(_)) || self.cancellation.cancelled();
-                    let entry = self.session.append_error(&error.to_string(), cancelled)?;
-                    self.notify(
-                        "entry",
-                        serde_json::json!({"id": entry, "type": "turn_error"}),
-                        observer,
-                    )?;
-                    return Err(error.to_string());
+                    return self.fail_turn(error.to_string(), cancelled, observer);
                 }
             };
             self.usage.add(&completion.usage);
             if completion.tool_calls.is_empty() && completion.content.trim().is_empty() {
                 self.session.append_usage(&completion.usage)?;
                 observer.event(Event::Usage(self.usage.summary()))?;
-                let error = "model returned an empty reply";
-                let entry = self.session.append_error(error, false)?;
-                self.notify(
-                    "entry",
-                    serde_json::json!({"id": entry, "type": "turn_error"}),
+                return self.fail_turn(
+                    "model returned an empty reply".to_string(),
+                    false,
                     observer,
-                )?;
-                return Err(error.to_string());
+                );
             }
             let assistant = completion.message();
             let entry = self.session.append_message(&assistant)?;
@@ -318,23 +312,33 @@ impl Runtime {
             for call in completion.tool_calls {
                 self.execute_call(call, approver, observer)?;
                 if self.cancellation.cancelled() {
-                    let entry = self.session.append_error("turn cancelled", true)?;
-                    self.notify(
-                        "entry",
-                        serde_json::json!({"id": entry, "type": "turn_error"}),
-                        observer,
-                    )?;
-                    return Err("turn cancelled".to_string());
+                    return self.fail_turn("turn cancelled".to_string(), true, observer);
                 }
             }
         }
         let error = format!("tool round limit ({}) reached", self.max_tool_rounds);
-        let entry = self.session.append_error(&error, false)?;
-        self.notify(
+        self.fail_turn(error, false, observer)
+    }
+
+    fn fail_turn(
+        &mut self,
+        error: String,
+        cancelled: bool,
+        observer: &mut dyn Observer,
+    ) -> Result<(), String> {
+        let cancelled = cancelled || self.cancellation.cancelled();
+        let entry = self.session.append_error(&error, cancelled)?;
+        self.cancellation.reset();
+        let notification = self.notify(
             "entry",
             serde_json::json!({"id": entry, "type": "turn_error"}),
             observer,
-        )?;
+        );
+        if cancelled {
+            self.cancellation.cancel();
+        }
+        // An observer failure must not replace the recorded turn error.
+        let _ = notification;
         Err(error)
     }
 

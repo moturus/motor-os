@@ -647,6 +647,52 @@ fn cancellation_stops_a_streaming_turn_and_records_it() {
 }
 
 #[test]
+fn lifecycle_hooks_run_after_a_cancelled_turn() {
+    let fixture = Fixture::new("cancel-hooks");
+    let log = fixture.root.join("events.jsonl");
+    let hook = fixture.root.join("hook.sh");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ncat >> '{}'\nprintf '\\n' >> '{}'\nprintf '{{}}'\n",
+            log.display(),
+            log.display()
+        ),
+    )
+    .unwrap();
+    let mut config = Config::default();
+    config.hooks.push(HookConfig {
+        name: "log".to_string(),
+        command: vec!["sh".to_string(), hook.display().to_string()],
+        timeout: Duration::from_secs(2),
+        max_output_bytes: 4096,
+    });
+    let mut runtime = fixture.runtime(Arc::new(UntilCancelled), &config);
+    let cancellation = runtime.cancellation();
+    let cancel = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        cancellation.cancel();
+    });
+    let error = runtime
+        .turn(
+            "interrupt".to_string(),
+            &mut FixedApproval(false),
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+    cancel.join().unwrap();
+    assert!(error.contains("cancelled"), "{error}");
+    runtime.new_session(false, None).unwrap();
+    runtime.close();
+    let events = std::fs::read_to_string(log).unwrap();
+    assert!(events.contains("\"event\":\"turn_end\""), "{events}");
+    assert!(events.contains("\"status\":\"cancelled\""), "{events}");
+    assert!(events.contains("\"type\":\"turn_error\""), "{events}");
+    assert_eq!(events.matches("\"event\":\"session_start\"").count(), 2);
+    assert_eq!(events.matches("\"event\":\"session_end\"").count(), 2);
+}
+
+#[test]
 fn automatic_compaction_runs_before_an_oversized_follow_up() {
     let fixture = Fixture::new("automatic-compact");
     let provider = Scripted::new(vec![
