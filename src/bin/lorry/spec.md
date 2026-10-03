@@ -1110,6 +1110,11 @@ Selected-library cache entries retain rustc dep-info and a digest of inputs
 outside the package tree, including each resolved path and file contents.
 An edit, removal, or symlink retarget makes the entry stale; after a
 successful rebuild, the project-local entry is atomically replaced.
+Published library and procedural-macro units also carry a local success
+fingerprint. It binds the cache key to their installed artifacts, and selected
+libraries additionally bind dep-info and external inputs. A matching unit is
+reused at its published path without copying from the cache; a missing or
+stale unit is restored from a verified cache entry or recompiled.
 The three Cargo-client variables that Lorry removes before starting rustc
 (`CARGO_LOG`, `RUSTUP_TOOLCHAIN`, and
 `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`) are omitted from rustc

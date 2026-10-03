@@ -2672,6 +2672,26 @@ mod tests {
         let cold_inode = fs::metadata(cold_binary).unwrap().ino();
         let cold_hash = sha256_file(cold_binary).unwrap();
         assert_eq!(cache_entry_count(&fixture.0), 1);
+        let dependency_rlib = || {
+            fs::read_dir(fixture.0.join("target/lorry/debug/build/local-dependency"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .flat_map(|unit| {
+                    fs::read_dir(unit.join("deps"))
+                        .into_iter()
+                        .flatten()
+                        .map(|entry| entry.unwrap().path())
+                })
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("liblocal_dependency-")
+                        && path.extension().is_some_and(|ext| ext == "rlib")
+                })
+                .unwrap()
+        };
+        let dependency_inode = fs::metadata(dependency_rlib()).unwrap().ino();
         let incremental = fixture
             .0
             .join("target/lorry/.incremental")
@@ -2709,6 +2729,10 @@ mod tests {
         let root_changed = build_once();
         let root_changed_binary = only_binary(&root_changed);
         assert_ne!(fs::metadata(root_changed_binary).unwrap().ino(), cold_inode);
+        assert_eq!(
+            fs::metadata(dependency_rlib()).unwrap().ino(),
+            dependency_inode
+        );
         let output = std::process::Command::new(root_changed_binary)
             .output()
             .unwrap();

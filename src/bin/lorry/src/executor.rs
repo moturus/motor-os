@@ -590,6 +590,69 @@ fn execute_unit(
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| Error::failure("rustc unit has no UTF-8 name"))?;
+                let dependencies = if matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro) {
+                    cache_dependencies(planned, outputs)?
+                } else {
+                    Vec::new()
+                };
+                let selected = options.selected_package == Some(&key.package);
+                let selected_inputs = selected.then_some(SelectedInputs {
+                    package_root: &manifest.root,
+                    working_dir: &planned_invocation.current_dir,
+                    source_remap: planned.source_remap.as_ref(),
+                });
+                let cache_build_script = executed_build_script.map(cache_build_script_input);
+                let caches = options
+                    .cache
+                    .filter(|_| matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro))
+                    .filter(|_| {
+                        matches!(
+                            &planned_invocation.output,
+                            RustcOutput::Library { .. } | RustcOutput::ProcMacro { .. }
+                        )
+                    });
+                let cache_key = caches
+                    .map(|caches| {
+                        caches.for_unit(planned).key(&UnitInput {
+                            key,
+                            selected,
+                            planned,
+                            manifest,
+                            invocation: &planned_invocation,
+                            host_profile: options.host_profile,
+                            target_profile: options.target_profile,
+                            dependencies: &dependencies,
+                            build_script: cache_build_script,
+                        })
+                    })
+                    .transpose()?;
+                if let (Some(caches), Some(cache_key)) = (caches, cache_key) {
+                    let cache = caches.for_unit(planned);
+                    if cache.published_fresh(
+                        cache_key,
+                        &planned_invocation.output,
+                        selected_inputs,
+                    )? {
+                        if options.verbose {
+                            eprintln!(
+                                "Fresh {} v{} (published Lorry unit)",
+                                key.package.name, key.package.version
+                            );
+                        }
+                        if let Some(reporter) = options.reporter {
+                            reporter.compiler_artifact(
+                                key,
+                                planned,
+                                &planned_invocation.output,
+                                true,
+                            )?;
+                        }
+                        return Ok(Executed::Artifact {
+                            output: planned_invocation.output,
+                            cache_key: Some(cache_key),
+                        });
+                    }
+                }
                 let staging = AtomicDirectory::new(parent, label)?;
                 let invocation = planned_invocation.with_output_directory(
                     &staging.path().join(
@@ -599,40 +662,10 @@ fn execute_unit(
                     ),
                 )?;
                 create_output_directories(&invocation.output)?;
-                let dependencies = if matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro) {
-                    cache_dependencies(planned, outputs)?
-                } else {
-                    Vec::new()
-                };
-                let selected = options.selected_package == Some(&key.package);
-                let selected_inputs = selected.then_some(SelectedInputs {
-                    package_root: &manifest.root,
-                    working_dir: &invocation.current_dir,
-                    source_remap: planned.source_remap.as_ref(),
-                });
-                let cache_build_script = executed_build_script.map(cache_build_script_input);
-                let cache_key = if let Some(caches) = options
-                    .cache
-                    .filter(|_| matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro))
-                    .filter(|_| {
-                        matches!(
-                            &invocation.output,
-                            RustcOutput::Library { .. } | RustcOutput::ProcMacro { .. }
-                        )
-                    }) {
+                if let (Some(caches), Some(cache_key)) = (caches, cache_key) {
                     let cache = caches.for_unit(planned);
-                    let cache_key = cache.key(&UnitInput {
-                        key,
-                        selected,
-                        planned,
-                        manifest,
-                        invocation: &planned_invocation,
-                        host_profile: options.host_profile,
-                        target_profile: options.target_profile,
-                        dependencies: &dependencies,
-                        build_script: cache_build_script,
-                    })?;
                     if cache.restore(cache_key, &invocation.output, selected_inputs)? {
+                        cache.record_published(cache_key, &invocation.output, selected_inputs)?;
                         staging.commit(unit_dir)?;
                         if options.verbose {
                             eprintln!(
@@ -662,10 +695,7 @@ fn execute_unit(
                     if options.verbose {
                         eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
                     }
-                    Some(cache_key)
-                } else {
-                    None
-                };
+                }
                 if !options.quiet {
                     let _guard = print
                         .lock()
@@ -725,12 +755,14 @@ fn execute_unit(
                     planned.source_remap.as_ref(),
                 )?;
                 if let (Some(caches), Some(cache_key)) = (options.cache, cache_key) {
-                    caches.for_unit(planned).store(
+                    let cache = caches.for_unit(planned);
+                    cache.store(
                         cache_key,
                         &invocation.output,
                         cache_build_script.as_ref(),
                         selected_inputs,
                     )?;
+                    cache.record_published(cache_key, &invocation.output, selected_inputs)?;
                 }
                 if let RustcOutput::BuildScript {
                     executable,

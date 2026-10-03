@@ -23,6 +23,7 @@ use crate::validation::ValidationMode;
 
 const FORMAT_VERSION: u64 = 1;
 const KEY_TAG: &[u8] = b"lorry-unit-cache-key-v1\0";
+const PUBLISHED_RECORD: &str = ".lorry-unit-v1";
 
 pub struct Options<'a> {
     pub cargo: &'a Path,
@@ -350,6 +351,36 @@ impl BuildCache {
             copy_new_file(&entry.payload.join("library.d"), dep_info_path(output)?)?;
         }
         Ok(true)
+    }
+
+    pub fn published_fresh(
+        &self,
+        key: CacheKey,
+        output: &RustcOutput,
+        selected: Option<SelectedInputs<'_>>,
+    ) -> Result<bool> {
+        let directory = published_unit_directory(output)?;
+        let record = directory.join(PUBLISHED_RECORD);
+        match fs::symlink_metadata(&record) {
+            Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 32 => {}
+            _ => return Ok(false),
+        }
+        let Some(current) = published_fingerprint(key, output, selected, self.validation).ok()
+        else {
+            return Ok(false);
+        };
+        Ok(fs::read(record).ok().as_deref() == Some(current.as_slice()))
+    }
+
+    pub fn record_published(
+        &self,
+        key: CacheKey,
+        output: &RustcOutput,
+        selected: Option<SelectedInputs<'_>>,
+    ) -> Result<()> {
+        let directory = published_unit_directory(output)?;
+        let fingerprint = published_fingerprint(key, output, selected, self.validation)?;
+        write_synced(&directory.join(PUBLISHED_RECORD), &fingerprint)
     }
 
     pub fn store(
@@ -962,6 +993,80 @@ fn dep_info_path(output: &RustcOutput) -> Result<&Path> {
     }
 }
 
+fn published_unit_directory(output: &RustcOutput) -> Result<&Path> {
+    library_paths(output)?
+        .0
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Error::failure("published library has no unit directory"))
+}
+
+fn published_fingerprint(
+    key: CacheKey,
+    output: &RustcOutput,
+    selected: Option<SelectedInputs<'_>>,
+    validation: ValidationMode,
+) -> Result<[u8; 32]> {
+    let (primary, secondary) = library_paths(output)?;
+    let mut files = vec![primary];
+    if secondary != primary {
+        files.push(secondary);
+    }
+    if selected.is_some() {
+        files.push(dep_info_path(output)?);
+    }
+    let mut digest = KeyDigest::new();
+    digest.bytes("schema", b"published-library-unit-v1");
+    digest.bytes("cache-key", &key.0);
+    for path in files {
+        let name = path
+            .file_name()
+            .ok_or_else(|| Error::failure("unit output has no name"))?;
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect unit output `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::failure(format!(
+                "unit output `{}` is not a regular file",
+                path.display()
+            )));
+        }
+        digest.os("artifact-name", name, &[]);
+        if validation.is_strict() {
+            digest.file_contents("artifact-contents", path)?;
+        } else {
+            let modified = metadata
+                .modified()
+                .and_then(|time| {
+                    time.duration_since(UNIX_EPOCH)
+                        .map_err(std::io::Error::other)
+                })
+                .map_err(|error| {
+                    Error::failure(format!(
+                        "failed to inspect unit output time `{}`: {error}",
+                        path.display()
+                    ))
+                })?;
+            digest.bytes("artifact-length", &metadata.len().to_le_bytes());
+            digest.bytes("artifact-mtime-secs", &modified.as_secs().to_le_bytes());
+            digest.bytes(
+                "artifact-mtime-nanos",
+                &modified.subsec_nanos().to_le_bytes(),
+            );
+        }
+    }
+    if let Some(inputs) = selected {
+        digest.bytes(
+            "external-inputs",
+            &external_inputs_digest(dep_info_path(output)?, inputs)?,
+        );
+    }
+    Ok(digest.finish())
+}
+
 fn entry_manifest(key: CacheKey, tree: &Tree, payload_manifest: &[u8]) -> Vec<u8> {
     Value::Object(BTreeMap::from([
         ("cache-key-sha256".to_owned(), Value::String(hex(&key.0))),
@@ -1566,6 +1671,37 @@ mod tests {
 
         fs::remove_file(&external).unwrap();
         assert!(!cache.restore(key, &restored, Some(inputs)).unwrap());
+    }
+
+    #[test]
+    fn published_selected_unit_checks_artifact_and_external_inputs() {
+        let fixture = Fixture::new();
+        let cache = BuildCache::for_test(&fixture.0.join("cache"));
+        let key = CacheKey([12; 32]);
+        let source = fixture.0.join("package");
+        fs::create_dir(&source).unwrap();
+        let external = fixture.0.join("shared.rs");
+        fs::write(&external, b"first").unwrap();
+        let output = output(&fixture.0.join("unit/deps"), b"library");
+        fs::write(
+            dep_info_path(&output).unwrap(),
+            format!("library.rlib: {}\n", external.display()),
+        )
+        .unwrap();
+        let inputs = SelectedInputs {
+            package_root: &source,
+            working_dir: &source,
+            source_remap: None,
+        };
+
+        assert!(!cache.published_fresh(key, &output, Some(inputs)).unwrap());
+        cache.record_published(key, &output, Some(inputs)).unwrap();
+        assert!(cache.published_fresh(key, &output, Some(inputs)).unwrap());
+        fs::write(&external, b"second").unwrap();
+        assert!(!cache.published_fresh(key, &output, Some(inputs)).unwrap());
+        fs::write(&external, b"first").unwrap();
+        fs::write(library_paths(&output).unwrap().0, b"tampered").unwrap();
+        assert!(!cache.published_fresh(key, &output, Some(inputs)).unwrap());
     }
 
     #[cfg(unix)]
