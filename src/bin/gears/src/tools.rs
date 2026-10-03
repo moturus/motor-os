@@ -61,10 +61,22 @@ pub struct Arguments {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ArgumentMapping {
     String,
-    StringOption { flag: String },
-    BooleanFlag { flag: String },
-    IntegerOption { flag: String },
-    Enum { values: BTreeMap<String, String> },
+    StringOption {
+        flag: String,
+    },
+    BooleanFlag {
+        flag: String,
+    },
+    IntegerOption {
+        flag: String,
+    },
+    Enum {
+        values: BTreeMap<String, String>,
+    },
+    EnumOption {
+        flag: String,
+        values: BTreeMap<String, String>,
+    },
     StringList,
 }
 
@@ -591,7 +603,8 @@ impl Arguments {
             let expected = match mapping {
                 ArgumentMapping::String
                 | ArgumentMapping::StringOption { .. }
-                | ArgumentMapping::Enum { .. } => "string",
+                | ArgumentMapping::Enum { .. }
+                | ArgumentMapping::EnumOption { .. } => "string",
                 ArgumentMapping::BooleanFlag { .. } => "boolean",
                 ArgumentMapping::IntegerOption { .. } => "integer",
                 ArgumentMapping::StringList => "array",
@@ -618,6 +631,7 @@ impl Arguments {
                         | ArgumentMapping::BooleanFlag { .. }
                         | ArgumentMapping::IntegerOption { .. }
                         | ArgumentMapping::Enum { .. }
+                        | ArgumentMapping::EnumOption { .. }
                 )
             {
                 return Err(format!(
@@ -625,34 +639,41 @@ impl Arguments {
                     directory.display()
                 ));
             }
-            match mapping {
+            let flag = match mapping {
                 ArgumentMapping::StringOption { flag }
                 | ArgumentMapping::BooleanFlag { flag }
-                | ArgumentMapping::IntegerOption { flag } => {
-                    if !flag.starts_with('-')
-                        || flag == "--"
-                        || flag
-                            .bytes()
-                            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-                    {
-                        return Err(format!(
-                            "{}: invalid fixed flag for {name:?}",
-                            directory.display()
-                        ));
-                    }
+                | ArgumentMapping::IntegerOption { flag }
+                | ArgumentMapping::EnumOption { flag, .. } => Some(flag),
+                _ => None,
+            };
+            if flag.is_some_and(|flag| {
+                !flag.starts_with('-')
+                    || flag == "--"
+                    || flag
+                        .bytes()
+                        .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+            }) {
+                return Err(format!(
+                    "{}: invalid fixed flag for {name:?}",
+                    directory.display()
+                ));
+            }
+            let values = match mapping {
+                ArgumentMapping::Enum { values } | ArgumentMapping::EnumOption { values, .. } => {
+                    Some(values)
                 }
-                ArgumentMapping::Enum { values }
-                    if values.is_empty()
-                        || values.iter().any(|(key, value)| {
-                            key.is_empty() || value.is_empty() || value == "--"
-                        }) =>
-                {
-                    return Err(format!(
-                        "{}: invalid enum values for {name:?}",
-                        directory.display()
-                    ));
-                }
-                _ => {}
+                _ => None,
+            };
+            if values.is_some_and(|values| {
+                values.is_empty()
+                    || values
+                        .iter()
+                        .any(|(key, value)| key.is_empty() || value.is_empty() || value == "--")
+            }) {
+                return Err(format!(
+                    "{}: invalid enum values for {name:?}",
+                    directory.display()
+                ));
             }
         }
         if self.mappings.len() != names.len() {
@@ -782,6 +803,16 @@ impl ProcessTool {
                 let selected = values
                     .get(key)
                     .ok_or_else(|| format!("{name:?} has an unsupported value"))?;
+                before.push(selected.clone());
+            }
+            ArgumentMapping::EnumOption { flag, values } => {
+                let key = value
+                    .as_str()
+                    .ok_or_else(|| format!("{name:?} must be a string"))?;
+                let selected = values
+                    .get(key)
+                    .ok_or_else(|| format!("{name:?} has an unsupported value"))?;
+                before.push(flag.clone());
                 before.push(selected.clone());
             }
             ArgumentMapping::StringList => {
@@ -1003,6 +1034,7 @@ type = "string_list"
                 "limit": {"type": "integer"},
                 "mode": {"type": "string"},
                 "filter": {"type": "string"},
+                "kind": {"type": "string"},
                 "pattern": {"type": "string"},
                 "paths": {"type": "array", "items": {"type": "string"}}
             }
@@ -1013,7 +1045,7 @@ type = "string_list"
             [command]
             common = ["/bin/rg", "--color=never"]
             [arguments]
-            before_double_dash = ["ignore_case", "limit", "mode", "filter"]
+            before_double_dash = ["ignore_case", "limit", "mode", "filter", "kind"]
             after_double_dash = ["pattern", "paths"]
             [arguments.ignore_case]
             type = "boolean_flag"
@@ -1027,6 +1059,10 @@ type = "string_list"
             [arguments.filter]
             type = "string_option"
             flag = "-g"
+            [arguments.kind]
+            type = "enum_option"
+            flag = "-type"
+            values = { file = "f", directory = "d" }
             [arguments.pattern]
             type = "string"
             [arguments.paths]
@@ -1036,7 +1072,7 @@ type = "string_list"
         .unwrap();
         let process = ProcessTool::parse(raw, Path::new("/tmp/example-tool"), &schema).unwrap();
         let arguments = serde_json::json!({
-            "ignore_case": true, "limit": 3, "mode": "files", "filter": "literal [name]",
+            "ignore_case": true, "limit": 3, "mode": "files", "filter": "literal [name]", "kind": "file",
             "pattern": "two words", "paths": ["-literal", "dir with spaces"]
         });
         assert_eq!(
@@ -1050,6 +1086,8 @@ type = "string_list"
                 "-l",
                 "-g",
                 "literal [name]",
+                "-type",
+                "f",
                 "--",
                 "two words",
                 "-literal",
@@ -1057,6 +1095,8 @@ type = "string_list"
             ]
         );
         let invalid = serde_json::json!({"pattern": "ok", "filter": "-unsafe"});
+        assert!(process.expand_arguments(&invalid, &schema).is_err());
+        let invalid = serde_json::json!({"pattern": "ok", "kind": "socket"});
         assert!(process.expand_arguments(&invalid, &schema).is_err());
         assert!(
             process
