@@ -311,9 +311,16 @@ impl Runtime {
             }
             let calls = completion.tool_calls;
             for (index, call) in calls.iter().cloned().enumerate() {
-                self.execute_call(call, approver, observer)?;
+                if let Err(error) = self.execute_call(call, approver, observer) {
+                    self.record_unstarted_calls(
+                        &calls[index + 1..],
+                        "an earlier call ended the round",
+                        observer,
+                    )?;
+                    return self.fail_turn(error, self.cancellation.cancelled(), observer);
+                }
                 if self.cancellation.cancelled() {
-                    self.record_unstarted_calls(&calls[index + 1..], observer)?;
+                    self.record_unstarted_calls(&calls[index + 1..], "turn cancelled", observer)?;
                     return self.fail_turn("turn cancelled".to_string(), true, observer);
                 }
             }
@@ -482,7 +489,14 @@ impl Runtime {
             detail: detail.clone(),
             workspace: self.store.workspace().to_path_buf(),
         };
-        observer.event(Event::Permission(permission.clone()))?;
+        if let Err(error) = observer.event(Event::Permission(permission.clone())) {
+            self.record_unstarted_calls(
+                std::slice::from_ref(&call),
+                "permission event failed",
+                observer,
+            )?;
+            return Err(error);
+        }
         let mut notices = Vec::new();
         let decision = self.hooks.permission(
             &call,
@@ -490,7 +504,14 @@ impl Runtime {
             &self.cancellation,
             &mut |notice| notices.push(notice),
         );
-        emit_notices(observer, notices)?;
+        if let Err(error) = emit_notices(observer, notices) {
+            self.record_unstarted_calls(
+                std::slice::from_ref(&call),
+                "permission notice failed",
+                observer,
+            )?;
+            return Err(error);
+        }
         let allowed = match decision {
             Decision::Deny => false,
             Decision::Allow => true,
@@ -500,18 +521,32 @@ impl Runtime {
                 Approval::Once => true,
                 Approval::Session => {
                     self.allow_all = true;
-                    observer.event(Event::Notice(
+                    if let Err(error) = observer.event(Event::Notice(
                         "tool calls are allowed without asking until the session changes"
                             .to_string(),
-                    ))?;
+                    )) {
+                        self.record_unstarted_calls(
+                            std::slice::from_ref(&call),
+                            "approval notice failed",
+                            observer,
+                        )?;
+                        return Err(error);
+                    }
                     true
                 }
             },
         };
-        observer.event(Event::ToolStart {
+        if let Err(error) = observer.event(Event::ToolStart {
             name: call.name.clone(),
             detail,
-        })?;
+        }) {
+            self.record_unstarted_calls(
+                std::slice::from_ref(&call),
+                "tool start event failed",
+                observer,
+            )?;
+            return Err(error);
+        }
         let (result, outcome) = if !allowed {
             (
                 ToolResult {
@@ -590,30 +625,36 @@ impl Runtime {
     fn record_unstarted_calls(
         &mut self,
         calls: &[ToolCall],
+        reason: &str,
         observer: &mut dyn Observer,
     ) -> Result<(), String> {
+        let cancelled = self.cancellation.cancelled();
         for call in calls {
-            let content = "tool call not started: turn cancelled";
+            let content = format!("tool call not started: {reason}");
             let entry = self
                 .session
                 .append_message(&Message::tool_result_with_outcome(
                     &call.id,
                     &call.name,
-                    content,
+                    &content,
                     true,
                     ToolOutcome::NotStarted,
                 ))?;
-            self.cancellation.reset();
+            if cancelled {
+                self.cancellation.reset();
+            }
             let notification = self.notify(
                 "entry",
                 serde_json::json!({"id": entry, "type": "message", "role": "tool"}),
                 observer,
             );
-            self.cancellation.cancel();
+            if cancelled {
+                self.cancellation.cancel();
+            }
             let _ = notification;
             let _ = observer.event(Event::ToolEnd {
                 name: call.name.clone(),
-                content: content.to_string(),
+                content,
                 is_error: true,
             });
         }

@@ -782,6 +782,52 @@ fn cancellation_keeps_the_tool_result_when_a_result_hook_cannot_run() {
 }
 
 #[test]
+fn an_observer_error_pairs_calls_that_never_started() {
+    let fixture = Fixture::new("observer-before-tools");
+    let provider = Scripted::new(vec![Ok(Completion {
+        tool_calls: vec![
+            ToolCall::new("call_1", "sh", r#"{"command":"touch never-one"}"#),
+            ToolCall::new("call_2", "sh", r#"{"command":"touch never-two"}"#),
+        ],
+        finish_reason: Some(FinishReason::ToolCalls),
+        ..Completion::default()
+    })]);
+    let mut runtime = fixture.runtime(provider, &Config::default());
+    let error = runtime
+        .turn("go".to_string(), &mut FixedApproval(true), &mut |event| {
+            if matches!(event, Event::Permission(_)) {
+                Err("observer refused permission event".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    assert!(error.contains("observer refused"), "{error}");
+    for name in ["never-one", "never-two"] {
+        assert!(!fixture.workspace.join(name).exists());
+    }
+    let outcomes = runtime
+        .session()
+        .context_messages()
+        .unwrap()
+        .into_iter()
+        .flat_map(|message| message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes, [ToolOutcome::NotStarted, ToolOutcome::NotStarted]);
+    assert!(
+        runtime
+            .session()
+            .entries()
+            .iter()
+            .any(|entry| entry.kind == "turn_error")
+    );
+}
+
+#[test]
 fn automatic_compaction_runs_before_an_oversized_follow_up() {
     let fixture = Fixture::new("automatic-compact");
     let provider = Scripted::new(vec![
