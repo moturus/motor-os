@@ -43,11 +43,15 @@ pub fn run(
             continue;
         }
         if line.starts_with('/') {
-            match command(runtime, &line, models, providers, &mut input, &mut renderer)? {
-                Command::Continue => continue,
-                Command::Quit => return Ok(()),
-                Command::Draft(draft) => {
+            match command(runtime, &line, models, providers, &mut input, &mut renderer) {
+                Ok(Command::Continue) => continue,
+                Ok(Command::Quit) => return Ok(()),
+                Ok(Command::Draft(draft)) => {
                     eprintln!("draft> {draft}");
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("gears: {error}");
                     continue;
                 }
             }

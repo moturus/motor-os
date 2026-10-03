@@ -181,6 +181,45 @@ fn configured_tools_are_validated_before_a_provider_request() {
 }
 
 #[test]
+fn malformed_line_commands_report_errors_and_keep_the_session_open() {
+    let root = fixture("line-command-errors");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let server = MockServer::start_one(sse_response(&[
+        r#"{"choices":[{"index":0,"delta":{"content":"still open"},"finish_reason":"stop"}]}"#,
+    ]))
+    .unwrap();
+    let config = config(&root, &server);
+    let mut child = gears(&root, &workspace, &config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            b"/tool enable\n/tool enable missing\n/permission revoke sh --unknown\nhello\n/quit\n",
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("still open"));
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(errors.contains("usage: /tool"), "{errors}");
+    assert!(errors.contains("unknown directory tool"), "{errors}");
+    assert!(errors.contains("usage: /permission"), "{errors}");
+    assert_eq!(server.requests().len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn one_shot_uses_the_selected_named_provider() {
     let root = fixture("named-provider");
     let workspace = root.join("workspace");
