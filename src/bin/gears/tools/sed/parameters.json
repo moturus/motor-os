@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "script": {
+      "type": "string",
+      "description": "One sed program passed after -e. Sed programs can execute commands."
+    },
+    "path": {
+      "type": "string",
+      "description": "One literal workspace-relative or absolute file path."
+    }
+  },
+  "required": ["script", "path"],
+  "additionalProperties": false
+}

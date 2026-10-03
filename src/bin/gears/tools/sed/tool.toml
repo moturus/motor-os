@@ -1,0 +1,26 @@
+version = 1
+kind = "process"
+name = "sed"
+description = "Apply one sed script to one file and return stdout. Scripts may execute commands; no in-place option is exposed."
+parameters = "parameters.json"
+display = "edit stream {path}"
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 1048576
+output = "stdout"
+
+[process.command]
+linux = ["/usr/bin/sed"]
+motor = ["/devtools/bin/sed"]
+
+[process.arguments]
+before_double_dash = ["script"]
+after_double_dash = ["path"]
+
+[process.arguments.script]
+type = "string_option"
+flag = "-e"
+
+[process.arguments.path]
+type = "string"

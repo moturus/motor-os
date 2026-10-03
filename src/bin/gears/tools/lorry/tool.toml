@@ -1,0 +1,28 @@
+version = 1
+kind = "process"
+name = "lorry"
+description = "Build or test a Motor OS package with Lorry in the developer image."
+parameters = "parameters.json"
+display = "lorry {action}"
+
+[process]
+timeout_seconds = 3600
+max_output_bytes = 1048576
+
+[process.command]
+motor = ["/devtools/bin/lorry"]
+
+[process.arguments]
+before_double_dash = ["action", "package", "release"]
+
+[process.arguments.action]
+type = "enum"
+values = { build = "build", test = "test" }
+
+[process.arguments.package]
+type = "string_option"
+flag = "-p"
+
+[process.arguments.release]
+type = "boolean_flag"
+flag = "--release"

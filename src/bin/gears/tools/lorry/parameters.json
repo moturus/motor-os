@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["build", "test"],
+      "description": "Build a package or run its tests."
+    },
+    "package": {
+      "type": "string",
+      "description": "Optional package name passed after -p."
+    },
+    "release": {
+      "type": "boolean",
+      "description": "Pass --release for an optimized build or test."
+    }
+  },
+  "required": ["action"],
+  "additionalProperties": false
+}

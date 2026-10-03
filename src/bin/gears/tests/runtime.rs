@@ -1113,6 +1113,55 @@ fn shipped_diff_treats_differences_as_a_normal_result() {
 }
 
 #[test]
+fn shipped_sed_maps_script_and_literal_path_without_a_shell() {
+    let fixture = Fixture::new("shipped-sed");
+    let path = fixture.workspace.join("a * b.txt");
+    std::fs::write(&path, "first line\n").unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sed"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("sed", r#"{"script":"s/first/second/","path":"a * b.txt"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    runtime
+        .turn(
+            "transform".into(),
+            &mut FixedApproval(true),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+    let context = runtime.session().context_messages().unwrap();
+    assert!(
+        context
+            .iter()
+            .any(|message| message.text_content().contains("second line"))
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "first line\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn shipped_lorry_is_listed_but_unavailable_on_linux() {
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/lorry"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let registry = Registry::load_config(&config).unwrap();
+    assert_eq!(registry.tools()[0].name, "lorry");
+    assert!(!registry.tools()[0].read_only);
+    assert!(registry.enabled("lorry").is_none());
+}
+
+#[test]
 fn text_only_turn_streams_and_is_durable() {
     let fixture = Fixture::new("text");
     let provider = Scripted::new(vec![answer("hello")]);
