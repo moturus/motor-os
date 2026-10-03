@@ -254,6 +254,10 @@ use `GEARS_TOOL_DIR`; it should not assume its package is the working directory.
 Gears also provides `GEARS_TOOL_NAME`, `GEARS_WORKSPACE`, `GEARS_SESSION_ID`,
 and, when the session is saved to disk, `GEARS_SESSION_PATH`, as hooks
 receive it. The provider API key is removed from the environment.
+Process tools that set `shell_state = true` also receive
+`GEARS_SH_STATE_DIR`, a private per-session directory. Gears commits the
+tool's `cwd.pending` and `env.pending` snapshots there after filtering
+`PATH`, `GEARS_*` variables, and oversized exports.
 
 Stdout and stderr are streamed separately to the UI and retained within the
 configured bounds. The result keeps both streams and the raw exit status,
