@@ -119,9 +119,13 @@ impl RustcCommand<'_> {
     }
 
     pub fn finish(output: &Output, color: bool) -> Result<()> {
-        render_rustc_output(&output.stdout, color);
-        render_rustc_output(&output.stderr, color);
+        Self::render_messages(&output.stdout, &output.stderr, color);
         Self::require_success(output)
+    }
+
+    pub fn render_messages(stdout: &[u8], stderr: &[u8], color: bool) {
+        render_rustc_output(stdout, color);
+        render_rustc_output(stderr, color);
     }
 
     pub fn require_success(output: &Output) -> Result<()> {

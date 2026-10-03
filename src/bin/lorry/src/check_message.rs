@@ -103,9 +103,10 @@ impl Reporter {
         &self,
         package: &Package,
         target: &wire::Target,
-        output: &std::process::Output,
+        stdout: &[u8],
+        stderr: &[u8],
     ) -> Result<()> {
-        for bytes in [&output.stdout, &output.stderr] {
+        for bytes in [stdout, stderr] {
             for line in bytes.split(|byte| *byte == b'\n') {
                 let line = line.strip_suffix(b"\r").unwrap_or(line);
                 if line.is_empty() {
@@ -170,10 +171,10 @@ impl Reporter {
 }
 
 impl EventReporter for Reporter {
-    fn compiler_messages(&self, key: &UnitKey, output: &std::process::Output) -> Result<()> {
+    fn compiler_messages(&self, key: &UnitKey, stdout: &[u8], stderr: &[u8]) -> Result<()> {
         let package = self.package(&key.package)?;
         let target = package.dependency_target(key.kind, key.target.as_deref())?;
-        self.write_compiler_messages(package, target, output)
+        self.write_compiler_messages(package, target, stdout, stderr)
     }
 
     fn compiler_artifact(

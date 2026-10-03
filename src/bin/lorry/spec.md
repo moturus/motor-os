@@ -1123,6 +1123,9 @@ dep-info and external inputs. A matching unit is reused at its published path
 without copying from the cache. Missing or stale libraries and proc macros
 are restored from a verified cache entry or recompiled; other compiler units
 are recompiled on a miss.
+Check units retain their compiler stdout and stderr. Reuse validates and
+replays those messages, so a fresh check still reports human or JSON
+diagnostics.
 Published compiler and build-script unit directories carry a package-owner
 record keyed by name, version, and source. A missing or different owner
 prevents compiler-unit reuse. The record also identifies which unit directories

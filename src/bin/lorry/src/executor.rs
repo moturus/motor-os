@@ -24,10 +24,10 @@ use crate::resolver::{CompileKind, PackageKey};
 use crate::sandbox::Executable;
 use crate::source_tree::Limits as TreeLimits;
 use crate::toolchain::{TargetInfo, Toolchain};
-use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind};
+use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind, UnitMode};
 
 pub trait EventReporter: Sync {
-    fn compiler_messages(&self, key: &UnitKey, output: &std::process::Output) -> Result<()>;
+    fn compiler_messages(&self, key: &UnitKey, stdout: &[u8], stderr: &[u8]) -> Result<()>;
 
     fn compiler_artifact(
         &self,
@@ -627,6 +627,7 @@ fn execute_unit(
                         })
                     })
                     .transpose()?;
+                let replay_diagnostics = matches!(key.mode, UnitMode::Check | UnitMode::CheckTest);
                 if let (Some(caches), Some(cache_key)) = (caches, cache_key) {
                     let cache = caches.for_unit(planned);
                     if cache.published_fresh(
@@ -634,12 +635,25 @@ fn execute_unit(
                         &planned_invocation.output,
                         selected_inputs,
                         &key.package,
+                        replay_diagnostics,
                     )? {
                         if options.verbose {
                             eprintln!(
                                 "Fresh {} v{} (published Lorry unit)",
                                 key.package.name, key.package.version
                             );
+                        }
+                        if replay_diagnostics {
+                            let (stdout, stderr) =
+                                cache.published_messages(&planned_invocation.output)?;
+                            if let Some(reporter) = options.reporter {
+                                reporter.compiler_messages(key, &stdout, &stderr)?;
+                            } else {
+                                let _guard = print
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                RustcCommand::render_messages(&stdout, &stderr, options.color);
+                            }
                         }
                         if let Some(reporter) = options.reporter {
                             reporter.compiler_artifact(
@@ -675,6 +689,7 @@ fn execute_unit(
                             &invocation.output,
                             selected_inputs,
                             &key.package,
+                            None,
                         )?;
                         staging.commit(unit_dir)?;
                         if options.verbose {
@@ -748,7 +763,7 @@ fn execute_unit(
                 }
                 .execute()?;
                 if let Some(reporter) = options.reporter {
-                    reporter.compiler_messages(key, &rustc_output)?;
+                    reporter.compiler_messages(key, &rustc_output.stdout, &rustc_output.stderr)?;
                     RustcCommand::require_success(&rustc_output)?;
                 } else {
                     let _guard = print
@@ -790,6 +805,10 @@ fn execute_unit(
                         &invocation.output,
                         selected_inputs,
                         &key.package,
+                        replay_diagnostics.then_some((
+                            rustc_output.stdout.as_slice(),
+                            rustc_output.stderr.as_slice(),
+                        )),
                     )?;
                 }
                 staging.commit(unit_dir)?;
