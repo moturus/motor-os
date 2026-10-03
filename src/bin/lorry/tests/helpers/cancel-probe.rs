@@ -1,7 +1,7 @@
 use std::env;
-use std::fs;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -13,6 +13,12 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args = env::args_os().collect::<Vec<_>>();
+    if let Some(root) = env::var_os("LORRY_HOLD_CHILD_ROOT") {
+        return hold_child(PathBuf::from(root));
+    }
+    if let Some(root) = env::var_os("LORRY_HOLD_ROOT") {
+        return hold_owner(PathBuf::from(root));
+    }
     if env::var_os("LORRY_CANCEL_ROOT").is_some() {
         return wrapper(&args[1..]);
     }
@@ -84,24 +90,17 @@ fn run() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     interrupted.kill().map_err(|error| error.to_string())?;
     interrupted.wait().map_err(|error| error.to_string())?;
-    let alive = Command::new("/system/bin/rush")
-        .args(["-c", &format!("kill -0 {child_pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| error.to_string())?
-        .success();
-    fs::write(root.join("release"), b"").map_err(|error| error.to_string())?;
-    if alive {
-        return Err(format!(
-            "compiler child {child_pid} survived its killed Lorry parent"
-        ));
+    fs::remove_file(root.join("block")).map_err(|error| error.to_string())?;
+    let mut recovery = build().spawn().map_err(|error| error.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while process_alive(child_pid)? {
+        if Instant::now() >= deadline {
+            fs::write(root.join("release"), b"").map_err(|error| error.to_string())?;
+            return Err(format!("compiler child {child_pid} did not terminate"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
-    if !build()
-        .status()
-        .map_err(|error| error.to_string())?
-        .success()
-    {
+    if !wait_success(&mut recovery, deadline)? {
         return Err("recovery Lorry build failed".to_owned());
     }
     let output = Command::new(root.join("target/lorry/debug/cancel-probe-fixture"))
@@ -110,7 +109,129 @@ fn run() -> Result<(), String> {
     if !output.status.success() || output.stdout != b"recovered\n" {
         return Err("recovered executable did not reflect the source edit".to_owned());
     }
-    println!("PASS: Motor killed Lorry's compiler child and recovered the build");
+    verify_held_owner(&root, &build, &source)?;
+    println!("PASS: Motor waited for killed and held compiler children before recovery");
+    Ok(())
+}
+
+fn process_alive(pid: u32) -> Result<bool, String> {
+    Command::new("/system/bin/rush")
+        .args(["-c", &format!("kill -0 {pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .map_err(|error| error.to_string())
+}
+
+fn wait_success(child: &mut Child, deadline: Instant) -> Result<bool, String> {
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Ok(status.success());
+        }
+        if Instant::now() >= deadline {
+            return Err("process did not finish the controlled recovery".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn verify_held_owner(
+    root: &Path,
+    build: &impl Fn() -> Command,
+    source: &Path,
+) -> Result<(), String> {
+    let helper = env::current_exe().map_err(|error| error.to_string())?;
+    let mut holder = Command::new(helper)
+        .env("LORRY_HOLD_ROOT", root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !root.join("hold-ready").is_file() {
+        if let Some(status) = holder.try_wait().map_err(|error| error.to_string())? {
+            return Err(format!("synthetic owner exited before readiness: {status}"));
+        }
+        if Instant::now() >= deadline {
+            return Err("synthetic owner did not become ready".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let owner = format!("{}\n", holder.id());
+    let marker = root.join("target/.lorry-artifacts.owner");
+    fs::write(&marker, &owner).map_err(|error| error.to_string())?;
+    fs::write(
+        source,
+        "fn main() { println!(\"held-owner-recovered\"); }\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let mut blocked = build().spawn().map_err(|error| error.to_string())?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("target/.lorry-artifacts.lock"))
+        .map_err(|error| error.to_string())?;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => lock.unlock().map_err(|error| error.to_string())?,
+            Err(std::fs::TryLockError::WouldBlock) => break,
+            Err(error) => return Err(format!("could not query artifact lock: {error}")),
+        }
+        if let Some(status) = blocked.try_wait().map_err(|error| error.to_string())? {
+            return Err(format!(
+                "recovery exited before acquiring the lock: {status}"
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err("recovery did not acquire the artifact lock".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    if blocked
+        .try_wait()
+        .map_err(|error| error.to_string())?
+        .is_some()
+        || fs::read_to_string(&marker).map_err(|error| error.to_string())? != owner
+    {
+        return Err("recovery passed an active prior owner's child".to_owned());
+    }
+    fs::write(root.join("hold-release"), b"").map_err(|error| error.to_string())?;
+    if !wait_success(&mut holder, deadline)? || !wait_success(&mut blocked, deadline)? {
+        return Err("recovery did not finish after the prior child exited".to_owned());
+    }
+    let output = Command::new(root.join("target/lorry/debug/cancel-probe-fixture"))
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() || output.stdout != b"held-owner-recovered\n" {
+        return Err("published binary did not reflect the held-owner recovery".to_owned());
+    }
+    Ok(())
+}
+
+fn hold_owner(root: PathBuf) -> Result<(), String> {
+    let helper = env::current_exe().map_err(|error| error.to_string())?;
+    let status = Command::new(helper)
+        .env("LORRY_HOLD_CHILD_ROOT", root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("synthetic child exited with {status}"))
+    }
+}
+
+fn hold_child(root: PathBuf) -> Result<(), String> {
+    fs::write(root.join("hold-ready"), b"").map_err(|error| error.to_string())?;
+    while !root.join("hold-release").is_file() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     Ok(())
 }
 
