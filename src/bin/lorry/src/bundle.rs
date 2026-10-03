@@ -31,6 +31,7 @@ pub struct Layout {
 }
 
 pub struct BuildOptions<'a> {
+    pub child_lease_fd: Option<i32>,
     pub layout: &'a Layout,
     pub package_name: &'a str,
     pub package_root: &'a Path,
@@ -172,6 +173,7 @@ pub fn build(options: &BuildOptions<'_>) -> Result<PathBuf> {
     }
     arguments.extend(options.rustflags.iter().map(OsString::from));
     let result = RustcCommand {
+        child_lease_fd: options.child_lease_fd,
         program: options.rustc,
         arguments: &arguments,
         environment: &BTreeMap::new(),

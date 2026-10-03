@@ -293,6 +293,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
         Command::Build(_) => {
             build(Build {
                 target_root: Some(&target_root),
+                child_lease_fd: artifact_lock.child_lease_fd(),
                 manifest: &manifest,
                 global_cache_root: &global_cache_root,
                 config: &config,
@@ -321,6 +322,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
         Command::Check(options) => check(
             Build {
                 target_root: Some(&target_root),
+                child_lease_fd: artifact_lock.child_lease_fd(),
                 manifest: &manifest,
                 global_cache_root: &global_cache_root,
                 config: &config,
@@ -350,6 +352,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
         Command::Run(options) => {
             let artifacts = build(Build {
                 target_root: Some(&target_root),
+                child_lease_fd: artifact_lock.child_lease_fd(),
                 manifest: &manifest,
                 global_cache_root: &global_cache_root,
                 config: &config,
@@ -395,6 +398,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
             }
             let artifacts = build(Build {
                 target_root: Some(&target_root),
+                child_lease_fd: artifact_lock.child_lease_fd(),
                 manifest: &manifest,
                 global_cache_root: &global_cache_root,
                 config: &config,
@@ -461,6 +465,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
 struct Build<'a> {
     manifest: &'a Manifest,
     target_root: Option<&'a Path>,
+    child_lease_fd: Option<i32>,
     global_cache_root: &'a Path,
     config: &'a Config,
     toolchain: &'a Toolchain,
@@ -1050,6 +1055,7 @@ fn build_inner(
     }
     let executor_options = executor::Options {
         cargo: &cargo,
+        child_lease_fd: build.child_lease_fd,
         workspace_root: &build.manifest.workspace_root,
         selected_package: Some(&selected_root.package),
         toolchain: build.toolchain,
@@ -2148,6 +2154,7 @@ fn compile_test_targets(
                 eprintln!("Bundling {} test targets", harnesses.len());
             }
             bundle::build(&bundle::BuildOptions {
+                child_lease_fd: build.child_lease_fd,
                 layout,
                 package_name: &build.manifest.name,
                 package_root: &build.manifest.root,
@@ -2234,6 +2241,7 @@ fn compile_planned_test_targets(
                 eprintln!("Bundling {} test targets", harnesses.len());
             }
             bundle::build(&bundle::BuildOptions {
+                child_lease_fd: build.child_lease_fd,
                 layout,
                 package_name: &build.manifest.name,
                 package_root: &build.manifest.root,
@@ -2796,6 +2804,7 @@ mod tests {
         let build_once = || {
             build(Build {
                 target_root: None,
+                child_lease_fd: None,
                 manifest: &manifest,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
@@ -2919,6 +2928,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifact = build(Build {
             target_root: None,
+            child_lease_fd: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
@@ -2967,6 +2977,7 @@ mod tests {
         let build_with = |binary_selection| {
             build(Build {
                 target_root: None,
+                child_lease_fd: None,
                 manifest: &manifest,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
@@ -3026,6 +3037,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
             target_root: None,
+            child_lease_fd: None,
             manifest: &manifest,
             global_cache_root: &manifest.workspace_root.join("global-cache"),
             config: &config,
@@ -3068,6 +3080,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
             target_root: None,
+            child_lease_fd: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
@@ -3134,6 +3147,7 @@ mod tests {
         let build_once = || {
             build(Build {
                 target_root: None,
+                child_lease_fd: None,
                 manifest: &manifest,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
@@ -3205,6 +3219,7 @@ mod tests {
         let build_once = || {
             build(Build {
                 target_root: None,
+                child_lease_fd: None,
                 manifest: &manifest,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
@@ -3336,6 +3351,7 @@ mod tests {
         let build_once = || {
             build(Build {
                 target_root: None,
+                child_lease_fd: None,
                 manifest: &manifest,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
@@ -3419,6 +3435,7 @@ mod tests {
         let build_bundle = || {
             build(Build {
                 target_root: None,
+                child_lease_fd: None,
                 manifest: &manifest,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
@@ -3559,6 +3576,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
             target_root: None,
+            child_lease_fd: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
@@ -3600,6 +3618,7 @@ mod tests {
 
         let bundled = build(Build {
             target_root: None,
+            child_lease_fd: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
@@ -3674,6 +3693,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let error = build(Build {
             target_root: None,
+            child_lease_fd: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,

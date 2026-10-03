@@ -78,6 +78,7 @@ pub fn is_removed_cargo_client_environment(name: &OsStr) -> bool {
 }
 
 pub struct RustcCommand<'a> {
+    pub child_lease_fd: Option<i32>,
     pub program: &'a Path,
     pub arguments: &'a [OsString],
     pub environment: &'a BTreeMap<String, OsString>,
@@ -107,6 +108,7 @@ impl RustcCommand<'_> {
             .args(self.arguments)
             .envs(self.environment)
             .current_dir(self.current_dir);
+        crate::artifact_lock::configure_child_lease(&mut command, self.child_lease_fd);
         remove_cargo_client_environment(&mut command);
         command.stdin(Stdio::null()).output().map_err(|error| {
             Error::failure(format!(

@@ -41,6 +41,7 @@ pub trait EventReporter: Sync {
 }
 
 pub struct Options<'a> {
+    pub child_lease_fd: Option<i32>,
     pub cargo: &'a Path,
     pub workspace_root: &'a Path,
     pub selected_package: Option<&'a PackageKey>,
@@ -505,6 +506,7 @@ fn execute_unit(
                     );
                 }
                 let build_output = build_script::run(&RunOptions {
+                    child_lease_fd: options.child_lease_fd,
                     executable,
                     arguments: &[],
                     environment: &environment,
@@ -736,6 +738,7 @@ fn execute_unit(
                     );
                 }
                 let rustc_output = RustcCommand {
+                    child_lease_fd: options.child_lease_fd,
                     program: &options.toolchain.rustc,
                     arguments: &invocation.arguments,
                     environment: &invocation.environment,
@@ -1319,6 +1322,7 @@ mod tests {
             &manifests,
             &Options {
                 cargo: &cargo,
+                child_lease_fd: None,
                 workspace_root: &fixture.0,
                 selected_package: None,
                 toolchain: &toolchain,

@@ -61,11 +61,50 @@ impl ArtifactLock {
             _lease: lease,
         })
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn child_lease_fd(&self) -> Option<i32> {
+        use std::os::fd::AsRawFd;
+        Some(self._lease.as_raw_fd())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn child_lease_fd(&self) -> Option<i32> {
+        None
+    }
+}
+
+impl Drop for ArtifactLock {
+    fn drop(&mut self) {
+        // An unrelated thread may be between fork and exec. Releasing the
+        // parent lock explicitly prevents that brief inherited descriptor
+        // from delaying the next command after a normal completion.
+        let _ = self._file.unlock();
+    }
+}
+
+pub fn configure_child_lease(command: &mut std::process::Command, fd: Option<i32>) {
+    #[cfg(target_os = "linux")]
+    if let Some(fd) = fd {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: the closure only calls async-signal-safe fcntl operations
+        // after fork. The parent's descriptor stays close-on-exec.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (command, fd);
 }
 
 #[cfg(target_os = "linux")]
 fn acquire_child_lease(directory: &Path) -> Result<File> {
-    use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
 
     let path = directory.join(LEASE_NAME);
@@ -84,8 +123,8 @@ fn acquire_child_lease(directory: &Path) -> Result<File> {
     verify_open_file(&created, &path)?;
     drop(created);
 
-    // The child inherits a read-only descriptor. Its lifetime holds the
-    // lease after an abrupt parent exit, including while it runs descendants.
+    // The descriptor remains close-on-exec in the parent. Only compiler and
+    // build-script children receive it through configure_child_lease.
     let mut open = OpenOptions::new();
     open.read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
@@ -103,16 +142,6 @@ fn acquire_child_lease(directory: &Path) -> Result<File> {
         ))
     })?;
     verify_open_file(&lease, &path)?;
-    // SAFETY: fcntl only reads or changes flags on this owned descriptor.
-    let flags = unsafe { libc::fcntl(lease.as_raw_fd(), libc::F_GETFD) };
-    if flags < 0
-        || unsafe { libc::fcntl(lease.as_raw_fd(), libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0
-    {
-        return Err(Error::failure(format!(
-            "failed to make artifact child lease inheritable: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
     Ok(lease)
 }
 
@@ -205,12 +234,27 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         let lock = ArtifactLock::acquire(&root).unwrap();
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", "printf ready; read line"])
+        let mut unrelated = Command::new("/bin/sh")
+            .args(["-c", "printf unrelated; read line"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
+        let mut unrelated_ready = [0; 9];
+        unrelated
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut unrelated_ready)
+            .unwrap();
+        assert_eq!(&unrelated_ready, b"unrelated");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "printf ready; read line"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        configure_child_lease(&mut command, lock.child_lease_fd());
+        let mut child = command.spawn().unwrap();
         let mut ready = [0; 5];
         child
             .stdout
@@ -232,6 +276,13 @@ mod tests {
         child.stdin.as_mut().unwrap().write_all(b"done\n").unwrap();
         assert!(child.wait().unwrap().success());
         contender.try_lock().unwrap();
+        unrelated
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"done\n")
+            .unwrap();
+        assert!(unrelated.wait().unwrap().success());
         drop(contender);
         fs::remove_dir_all(root).unwrap();
     }

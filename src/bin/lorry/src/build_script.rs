@@ -58,6 +58,7 @@ pub struct ParseOptions<'a> {
 }
 
 pub struct RunOptions<'a> {
+    pub child_lease_fd: Option<i32>,
     pub executable: &'a Path,
     pub arguments: &'a [OsString],
     pub environment: &'a BTreeMap<String, OsString>,
@@ -292,6 +293,7 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::sandbox::platform().apply(&mut command, &policy)?;
+    crate::artifact_lock::configure_child_lease(&mut command, options.child_lease_fd);
     if options.verbose {
         eprintln!(
             "Running sandboxed {}",
@@ -1017,6 +1019,7 @@ mod tests {
 
         fn options(&self, timeout: Duration, max_output_bytes: u64) -> RunOptions<'_> {
             RunOptions {
+                child_lease_fd: None,
                 executable: &self.executable,
                 arguments: &self.arguments,
                 environment: &self.environment,
