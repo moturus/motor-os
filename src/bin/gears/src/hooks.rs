@@ -385,7 +385,8 @@ impl Manager {
             },
             cancellation,
             &mut |_, _| {},
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         if !output.stderr.trim().is_empty() {
             notice(format!(
                 "hook {}: {}",

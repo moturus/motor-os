@@ -27,6 +27,20 @@ pub struct Request {
     pub remove_env: Vec<String>,
 }
 
+#[derive(Debug)]
+pub struct RunError {
+    pub detail: String,
+    pub started: bool,
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.detail.fmt(f)
+    }
+}
+
+impl std::error::Error for RunError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
     pub stdout: String,
@@ -67,7 +81,7 @@ pub fn sh(
     max_output_bytes: usize,
     cancellation: &Cancellation,
     observer: &mut dyn FnMut(Stream, &str),
-) -> Result<Output, String> {
+) -> Result<Output, RunError> {
     run(
         &Request {
             program: shell_program().to_string(),
@@ -88,7 +102,7 @@ pub fn run(
     request: &Request,
     cancellation: &Cancellation,
     observer: &mut dyn FnMut(Stream, &str),
-) -> Result<Output, String> {
+) -> Result<Output, RunError> {
     let mut command = Command::new(&request.program);
     command
         .args(&request.args)
@@ -106,8 +120,10 @@ pub fn run(
     for name in &request.remove_env {
         command.env_remove(name);
     }
-    let mut child = crate::platform::spawn(&mut command)
-        .map_err(|error| format!("cannot run {}: {error}", request.program))?;
+    let mut child = crate::platform::spawn(&mut command).map_err(|error| RunError {
+        detail: format!("cannot run {}: {error}", request.program),
+        started: false,
+    })?;
     let (sender, receiver) = mpsc::channel();
     let readers = [
         drain(child.stdout.take(), Stream::Stdout, sender.clone()),
@@ -132,10 +148,10 @@ pub fn run(
         while let Ok((stream, bytes)) = receiver.try_recv() {
             receive(stream, &bytes, &mut stdout, &mut stderr, observer);
         }
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("cannot wait for {}: {error}", request.program))?
-        {
+        if let Some(status) = child.try_wait().map_err(|error| RunError {
+            detail: format!("cannot wait for {}: {error}", request.program),
+            started: true,
+        })? {
             break status;
         }
         if cancellation.cancelled() {
@@ -145,9 +161,10 @@ pub fn run(
         }
         if was_cancelled || timed_out {
             cleanup_complete = crate::platform::kill_tree(&child);
-            let status = child
-                .wait()
-                .map_err(|error| format!("cannot reap {}: {error}", request.program))?;
+            let status = child.wait().map_err(|error| RunError {
+                detail: format!("cannot reap {}: {error}", request.program),
+                started: true,
+            })?;
             if !cleanup_complete {
                 crate::trace::log(
                     crate::trace::Level::Warn,
@@ -178,8 +195,14 @@ pub fn run(
     if let Some(input) = input {
         input
             .join()
-            .map_err(|_| format!("{} stdin writer panicked", request.program))?
-            .map_err(|error| format!("{} stdin: {error}", request.program))?;
+            .map_err(|_| RunError {
+                detail: format!("{} stdin writer panicked", request.program),
+                started: true,
+            })?
+            .map_err(|error| RunError {
+                detail: format!("{} stdin: {error}", request.program),
+                started: true,
+            })?;
     }
     let (stdout_text, stdout_dropped) = stdout.finish();
     let (stderr_text, stderr_dropped) = stderr.finish();
@@ -329,6 +352,27 @@ fn ceil_boundary(text: &str, mut at: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_failure_is_identified_as_not_started() {
+        let error = run(
+            &Request {
+                program: "/no-such-gears-test-program".to_string(),
+                args: Vec::new(),
+                cwd: std::env::temp_dir(),
+                stdin: None,
+                timeout: Duration::from_secs(1),
+                max_output_bytes: 4096,
+                env: Vec::new(),
+                remove_env: Vec::new(),
+            },
+            &Cancellation::new(),
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+        assert!(!error.started);
+        assert!(error.to_string().contains("cannot run"));
+    }
 
     #[cfg(unix)]
     #[test]

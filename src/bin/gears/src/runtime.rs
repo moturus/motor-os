@@ -744,10 +744,14 @@ impl Runtime {
             }
             Err(error) => (
                 ToolResult {
-                    content: error,
+                    content: error.to_string(),
                     is_error: true,
                 },
-                ToolOutcome::InterruptedUnknown,
+                if error.started {
+                    ToolOutcome::InterruptedUnknown
+                } else {
+                    ToolOutcome::NotStarted
+                },
             ),
         }
     }
