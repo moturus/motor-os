@@ -14,6 +14,7 @@ use crate::identity::{
 use crate::manifest::{Lto as ManifestLto, Manifest, ReleaseProfile, Strip as ManifestStrip};
 use crate::resolver::{
     CompileKind, FeatureContext, PackageKey, PackageSourceKey, Resolution, ResolvedPackage,
+    selected_root_features,
 };
 use crate::source_tree::Exclusions;
 use crate::sparse::DependencyKind;
@@ -372,6 +373,75 @@ pub fn dependency_units(
 
     let order = topological_order(&units)?;
     Ok(UnitGraph { units, order })
+}
+
+pub fn add_selected_library(
+    graph: &mut UnitGraph,
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    manifest: &Manifest,
+) -> Result<UnitKey> {
+    if manifest.library.is_none() {
+        return Err(Error::failure("selected package has no library target"));
+    }
+    let key = UnitKey {
+        package: PackageKey {
+            name: manifest.name.clone(),
+            version: semver::Version::parse(&manifest.version.original).map_err(|error| {
+                Error::failure(format!(
+                    "invalid selected package version `{}`: {error}",
+                    manifest.version.original
+                ))
+            })?,
+            source: PackageSourceKey::Path(manifest.root.clone()),
+        },
+        kind: UnitKind::Library,
+        compile_kind: CompileKind::Target,
+        features: selected_root_features(manifest)?,
+    };
+    if graph.units.contains_key(&key) {
+        return Err(Error::failure(
+            "selected library is already in the unit graph",
+        ));
+    }
+    insert_unit(&mut graph.units, key.clone());
+    let packages = resolution
+        .packages
+        .iter()
+        .map(|package| (&package.key, package))
+        .collect::<BTreeMap<_, _>>();
+    for edge in &resolution.root_edges {
+        if edge.kind != DependencyKind::Normal {
+            continue;
+        }
+        let package = packages.get(&edge.package).ok_or_else(|| {
+            Error::failure(format!(
+                "selected library dependency `{} {}` has no resolved package",
+                edge.package.name, edge.package.version
+            ))
+        })?;
+        let child_manifest = manifests.get(&edge.package).ok_or_else(|| {
+            Error::failure(format!(
+                "selected library dependency `{} {}` has no manifest",
+                edge.package.name, edge.package.version
+            ))
+        })?;
+        let child = unit_key(
+            package,
+            library_unit_kind(child_manifest),
+            edge.compile_kind,
+            &features_for(package, edge.compile_kind),
+        );
+        add_edge(
+            &mut graph.units,
+            &key,
+            child,
+            UnitEdgeKind::RustDependency,
+            Some(edge.alias.clone()),
+        )?;
+    }
+    graph.order = topological_order(&graph.units)?;
+    Ok(key)
 }
 
 fn library_unit_kind(manifest: &Manifest) -> UnitKind {
@@ -954,6 +1024,78 @@ mod tests {
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
         }
+    }
+
+    #[test]
+    fn selected_library_uses_dependency_units_and_aliases() {
+        let fixture = Fixture::new();
+        fixture.package(
+            "shared",
+            "[package]\nname = \"shared\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+            false,
+        );
+        let root = Manifest::parse(
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\nrenamed = { package = \"shared\", path = \"shared\" }\n",
+        )
+        .unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let resolution = resolve_selected(
+            &root,
+            &Catalog::default(),
+            &Options {
+                resolver: root.resolver,
+                incompatible_rust_versions: None,
+                rust_version: Version::parse("1.98.0").unwrap(),
+                package_limit: crate::policy::PackageLimit::with_max(16),
+                max_depth: 8,
+            },
+            &[],
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let mut manifests = resolution
+            .packages
+            .iter()
+            .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let mut graph = dependency_units(&resolution, &manifests).unwrap();
+        let selected = add_selected_library(&mut graph, &resolution, &manifests, &root).unwrap();
+        manifests.insert(selected.package.clone(), root.clone());
+        let edge = graph.units[&selected].dependencies.iter().next().unwrap();
+        assert_eq!(edge.alias.as_deref(), Some("renamed"));
+        assert_eq!(edge.unit.package.name, "shared");
+        assert!(
+            graph
+                .order
+                .iter()
+                .position(|key| key == &edge.unit)
+                .unwrap()
+                < graph.order.iter().position(|key| key == &selected).unwrap()
+        );
+        let plan = plan_dependency_units(
+            &graph,
+            &manifests,
+            &PlanOptions {
+                workspace_root: &fixture.0,
+                release: true,
+                test_profile: false,
+                panic_abort: false,
+                release_profile: &root.release,
+                rustc: &toolchain(),
+                logical_target: None,
+                rustflags: &[],
+            },
+        )
+        .unwrap();
+        assert!(plan.units.contains_key(&selected));
     }
 
     #[test]

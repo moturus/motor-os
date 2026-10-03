@@ -22,7 +22,7 @@ use crate::resolver::{
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::Toolchain;
 use crate::unit::{
-    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, dependency_units,
+    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, add_selected_library, dependency_units,
     plan_dependency_units_with_remaps,
 };
 
@@ -53,12 +53,36 @@ impl PreparedGraph {
     }
 
     pub fn dependency_plan(&self, options: &PlanOptions<'_>) -> Result<CompilationPlan> {
-        let manifests = self
+        self.plan(options, None)
+    }
+
+    pub fn selected_library_plan(
+        &self,
+        options: &PlanOptions<'_>,
+        selected: &Manifest,
+    ) -> Result<CompilationPlan> {
+        self.plan(options, Some(selected))
+    }
+
+    fn plan(
+        &self,
+        options: &PlanOptions<'_>,
+        selected: Option<&Manifest>,
+    ) -> Result<CompilationPlan> {
+        let mut manifests = self
             .packages
             .iter()
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
-        let graph = dependency_units(&self.resolution, &manifests)?;
+        let mut graph = dependency_units(&self.resolution, &manifests)?;
+        if let Some(selected) = selected {
+            let key = add_selected_library(&mut graph, &self.resolution, &manifests, selected)?;
+            if manifests.insert(key.package, selected.clone()).is_some() {
+                return Err(Error::failure(
+                    "selected package duplicates a dependency package",
+                ));
+            }
+        }
         let mut source_remaps = BTreeMap::<PackageKey, SourceRemap>::new();
         let mut complete_source_trees = BTreeSet::<PackageKey>::new();
         let mut logical_roots = BTreeMap::<PathBuf, PathBuf>::new();

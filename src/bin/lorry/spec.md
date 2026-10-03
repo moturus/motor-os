@@ -919,6 +919,10 @@ family, effective flags/linker/lints, build-script results, and dependency
 metadata. Distinct host/target, feature, profile, panic, and harness contexts
 are distinct units.
 
+The planner can add the selected package's library to the dependency DAG.
+Its normal dependency edges retain the declared extern aliases, and its
+source identity is the package path relative to the workspace root.
+
 Each rustc unit writes into a deterministic private directory below the
 profile's `build` tree. Lorry passes one `-L dependency` search path for every
 unit in the complete transitive Rust dependency closure and passes direct
