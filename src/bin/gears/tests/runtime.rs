@@ -6,9 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gears::config::{Config, ContextConfig, HookConfig};
+use gears::mock::{MockServer, Script, sse_response};
+use gears::net::EgressPolicy;
+use gears::net::host_curl::HostCurl;
 use gears::provider::{
-    Completion, ContentBlock, EventSink, FinishReason, Message, Provider, ProviderError, Request,
-    StreamEvent, ToolCall, ToolOutcome,
+    Completion, ContentBlock, Endpoint, EventSink, FinishReason, Message, OpenAiCompat, Provider,
+    ProviderError, Quirks, Request, StreamEvent, ToolCall, ToolOutcome,
 };
 use gears::runtime::{Approval, Approver, Event, Permission, Runtime};
 use gears::session::Store;
@@ -815,6 +818,91 @@ fn a_provider_switch_is_recorded_and_used_on_the_next_turn() {
             .unwrap()
             .iter()
             .any(|message| message.text_content() == "second answer")
+    );
+}
+
+#[test]
+fn switched_provider_sees_reasoning_cache_markers_and_retry_notice() {
+    let fixture = Fixture::new("provider-phase-two");
+    let first = MockServer::start_one(sse_response(&[
+        r#"{"choices":[{"index":0,"delta":{"reasoning":"considered"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"content":"first answer"},"finish_reason":"stop"}]}"#,
+    ]))
+    .unwrap();
+    let rate_limit = Script::new()
+        .write("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\n\r\n");
+    let second = MockServer::start(vec![
+        rate_limit,
+        sse_response(&[r#"{"choices":[{"index":0,"delta":{"content":"second answer"},"finish_reason":"stop"}]}"#]),
+    ])
+    .unwrap();
+    let make_provider = |url: &str, name: &str| -> Arc<dyn Provider> {
+        let policy = EgressPolicy::new(&["127.0.0.1".into()])
+            .with_plain_http_allowlist(&["127.0.0.1".into()]);
+        let endpoint = Endpoint::new(url)
+            .unwrap()
+            .with_quirks(Quirks::for_host("openrouter.ai"));
+        Arc::new(
+            OpenAiCompat::new(HostCurl::new(policy).unwrap(), endpoint)
+                .without_key()
+                .with_cache_identity(name),
+        )
+    };
+    let mut runtime = fixture.runtime(
+        make_provider(&first.url("/v1"), "default"),
+        &Config::default(),
+    );
+    let second_url = second.url("/v1");
+    runtime.install_provider_factory(Arc::new(move |name| {
+        if name == "second" {
+            Ok(make_provider(&second_url, name))
+        } else {
+            Err(format!("unknown provider {name}"))
+        }
+    }));
+    runtime
+        .turn("one".into(), &mut FixedApproval(false), &mut |_| Ok(()))
+        .unwrap();
+    runtime.set_provider("second", &mut |_| Ok(())).unwrap();
+    let mut events = Vec::new();
+    runtime
+        .turn("two".into(), &mut FixedApproval(false), &mut |event| {
+            events.push(event);
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(text) if text.contains("retrying")))
+    );
+    assert_eq!(second.requests().len(), 2);
+    let request: serde_json::Value = serde_json::from_slice(&second.requests()[1].body).unwrap();
+    assert_eq!(
+        request["messages"][0]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert_eq!(request["messages"][2]["reasoning"], "considered");
+    assert_eq!(
+        request["messages"][2]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert_eq!(
+        request["messages"][3]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert!(
+        request["prompt_cache_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("gears-")
+    );
+    assert_eq!(first.requests().len(), 1);
+    let first_request: serde_json::Value =
+        serde_json::from_slice(&first.requests()[0].body).unwrap();
+    assert_ne!(
+        request["prompt_cache_key"],
+        first_request["prompt_cache_key"]
     );
 }
 
