@@ -8,7 +8,7 @@ use crate::hash::Sha256;
 use crate::resolver::{PackageKey, PackageSourceKey};
 
 const FILE_NAME: &str = ".lorry-owner-v1";
-const PRIMARY_SUFFIX: &str = ".lorry-owner-v1";
+pub(crate) const PRIMARY_SUFFIX: &str = ".lorry-owner-v1";
 
 fn field(hash: &mut Sha256, bytes: &[u8]) {
     hash.update(&(bytes.len() as u64).to_le_bytes());
@@ -89,6 +89,12 @@ pub fn write_primary(path: &Path, package: &PackageKey) -> Result<()> {
     let mut owner = AtomicFile::new(&primary_record(path)?)?;
     owner.write_all(&identity(package))?;
     owner.commit()
+}
+
+pub fn matches_primary(path: &Path, package: &PackageKey) -> bool {
+    primary_record(path)
+        .ok()
+        .is_some_and(|record| matches_record(&record, package))
 }
 
 #[cfg(test)]

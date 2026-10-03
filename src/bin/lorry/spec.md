@@ -170,6 +170,9 @@ root compilation, freshness validation, and artifact publication.
   selected release profile and `--target TRIPLE` removes the selected target;
   either selective form also removes the project-local mutable-unit cache so a
   later build cannot restore a mutable artifact that was explicitly cleaned.
+  `clean -p NAME` removes that package's owned units, top-level executables,
+  freshness record, and project-local cache entries in the selected profile.
+  It leaves other packages' and shared dependencies' outputs intact.
   Project cleaning never removes the per-user immutable-unit cache.
 - `build`, `check`, `run`, `test`, and `clean` serialize artifact reads and
   mutations for one target directory with `target/.lorry-artifacts.lock`.
@@ -230,9 +233,11 @@ workspace inheritance are unsupported. `new` and `cache clean` do not inspect
 a current package.
 
 A W1 workspace shares its root Cargo.lock, resolver, dev and release profiles,
-crates.io patches, and `target/lorry` ownership. Each selected non-root member
-uses `target/lorry/packages/<package>` so atomic profile publication and clean
-remain member-scoped. Portable admission remains beside the selected member.
+crates.io patches, and `target/lorry` ownership. Every selected member uses the
+same `target/lorry` output layout. The first command after upgrading resets
+the previous Lorry artifact tree under the artifact lock, records the shared
+layout version, and reports the migration. Portable admission remains beside
+the selected member.
 Vendoring updates that member's closure while retaining the validated locked
 closures of unselected explicit members.
 

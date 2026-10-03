@@ -113,10 +113,10 @@ echo "== Comparing selected workspace member with Cargo =="
     RUSTC="$NATIVE_RUSTC" "$CARGO" build -p app --locked --offline --release \
         --target-dir "$WORK/cargo-workspace-native"
 )
-cmp "$WORKSPACE/target/lorry/packages/app/release/app" \
+cmp "$WORKSPACE/target/lorry/release/app" \
     "$WORK/cargo-workspace-native/release/app" ||
     fail "native selected member executable differs from Cargo"
-[ "$("$WORKSPACE/target/lorry/packages/app/release/app")" = \
+[ "$("$WORKSPACE/target/lorry/release/app")" = \
     "app/src/main.rs app/src/lib.rs shared/src/lib.rs" ] ||
     fail "selected member source paths differ from Cargo"
 (
@@ -127,9 +127,9 @@ cmp "$WORKSPACE/target/lorry/packages/app/release/app" \
         --no-run --target-dir "$WORK/cargo-workspace-native-test"
 )
 compare_workspace_harnesses \
-    "$WORKSPACE/target/lorry/packages/app/release/build/app" \
+    "$WORKSPACE/target/lorry/release/build/app" \
     "$WORK/cargo-workspace-native-test/release/build/app" native
-cmp "$WORKSPACE/target/lorry/packages/app/release/app" \
+cmp "$WORKSPACE/target/lorry/release/app" \
     "$WORK/cargo-workspace-native-test/release/app" ||
     fail "native integration-test program differs from Cargo"
 
@@ -202,7 +202,7 @@ cp "$PROJECT/.cargo/config.toml" "$WORKSPACE/.cargo/config.toml"
     RUSTC="$MOTOR_RUSTC" "$CARGO" build -p app --locked --offline --release \
         --target "$MOTOR_TARGET" --target-dir "$WORK/cargo-workspace-motor"
 )
-cmp "$WORKSPACE/target/lorry/packages/app/$MOTOR_TARGET/release/app" \
+cmp "$WORKSPACE/target/lorry/$MOTOR_TARGET/release/app" \
     "$WORK/cargo-workspace-motor/$MOTOR_TARGET/release/app" ||
     fail "Motor selected member executable differs from Cargo"
 (
@@ -215,9 +215,9 @@ cmp "$WORKSPACE/target/lorry/packages/app/$MOTOR_TARGET/release/app" \
         --target-dir "$WORK/cargo-workspace-motor-test"
 )
 compare_workspace_harnesses \
-    "$WORKSPACE/target/lorry/packages/app/$MOTOR_TARGET/release/build/app" \
+    "$WORKSPACE/target/lorry/$MOTOR_TARGET/release/build/app" \
     "$WORK/cargo-workspace-motor-test/$MOTOR_TARGET/release/build/app" Motor
-cmp "$WORKSPACE/target/lorry/packages/app/$MOTOR_TARGET/release/app" \
+cmp "$WORKSPACE/target/lorry/$MOTOR_TARGET/release/app" \
     "$WORK/cargo-workspace-motor-test/$MOTOR_TARGET/release/app" ||
     fail "Motor integration-test program differs from Cargo"
 

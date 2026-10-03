@@ -102,6 +102,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
     );
     let target_root = artifact_root_in(&manifest, &target_directory);
     let artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
+    migrate_artifact_layout(&target_root)?;
     crate::trace::event("loaded manifest, admission state, and configuration");
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     check_rust_version(&manifest, &toolchain)?;
@@ -515,13 +516,74 @@ pub(crate) fn artifact_root(manifest: &Manifest) -> PathBuf {
     artifact_root_in(manifest, &manifest.workspace_root.join("target"))
 }
 
-pub(crate) fn artifact_root_in(manifest: &Manifest, target_directory: &Path) -> PathBuf {
-    let root = target_directory.join("lorry");
-    if manifest.workspace_root == manifest.root {
-        root
-    } else {
-        root.join("packages").join(&manifest.name)
+pub(crate) fn artifact_root_in(_manifest: &Manifest, target_directory: &Path) -> PathBuf {
+    target_directory.join("lorry")
+}
+
+const SHARED_LAYOUT_RECORD: &str = ".lorry-shared-layout-v1";
+
+pub(crate) fn migrate_artifact_layout(root: &Path) -> Result<()> {
+    let existed = match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,
+        Ok(_) => {
+            return Err(Error::failure(format!(
+                "Lorry artifact root `{}` is not a real directory",
+                root.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(Error::failure(format!(
+                "failed to inspect Lorry artifact root `{}`: {error}",
+                root.display()
+            )));
+        }
+    };
+    let marker = root.join(SHARED_LAYOUT_RECORD);
+    if existed {
+        match fs::symlink_metadata(&marker) {
+            Ok(metadata)
+                if metadata.file_type().is_file()
+                    && fs::read(&marker).ok().as_deref() == Some(b"lorry-shared-layout-v1\n") =>
+            {
+                return Ok(());
+            }
+            Ok(_) => {
+                return Err(Error::failure(format!(
+                    "Lorry artifact layout record `{}` is invalid",
+                    marker.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to inspect artifact layout record `{}`: {error}",
+                    marker.display()
+                )));
+            }
+        }
     }
+    if existed {
+        fs::remove_dir_all(root).map_err(|error| {
+            Error::failure(format!(
+                "failed to reset legacy Lorry artifacts `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        eprintln!(
+            "Reset legacy Lorry artifacts in `{}` for the shared workspace layout",
+            root.display()
+        );
+    }
+    fs::create_dir_all(root).map_err(|error| {
+        Error::failure(format!(
+            "failed to create Lorry artifact root `{}`: {error}",
+            root.display()
+        ))
+    })?;
+    let mut record = AtomicFile::new(&marker)?;
+    record.write_all(b"lorry-shared-layout-v1\n")?;
+    record.commit()
 }
 
 fn profile_destination(
@@ -2519,6 +2581,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_layout_reset_is_scoped_and_runs_once() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("target/lorry");
+        fs::create_dir_all(root.join("packages/app/debug")).unwrap();
+        fs::write(root.join("packages/app/debug/app"), b"old").unwrap();
+        let cargo_artifact = fixture.0.join("target/debug/app");
+        fs::create_dir_all(cargo_artifact.parent().unwrap()).unwrap();
+        fs::write(&cargo_artifact, b"cargo").unwrap();
+
+        migrate_artifact_layout(&root).unwrap();
+        assert!(!root.join("packages").exists());
+        assert_eq!(fs::read(&cargo_artifact).unwrap(), b"cargo");
+        fs::write(root.join("new-artifact"), b"new").unwrap();
+        migrate_artifact_layout(&root).unwrap();
+        assert_eq!(fs::read(root.join("new-artifact")).unwrap(), b"new");
+    }
+
+    #[test]
     fn invalidating_one_package_keeps_another_freshness_record() {
         let fixture = Fixture::new();
         let profile = fixture.0.join("target/lorry/debug");
@@ -2971,13 +3051,7 @@ mod tests {
         })
         .unwrap();
         let binary = only_binary(&artifacts);
-        assert!(
-            binary.starts_with(
-                manifest
-                    .workspace_root
-                    .join("target/lorry/packages/root-bin/debug")
-            )
-        );
+        assert!(binary.starts_with(manifest.workspace_root.join("target/lorry/debug")));
         let output = std::process::Command::new(binary).output().unwrap();
         assert_eq!(output.stdout, b"dependency-ok");
     }

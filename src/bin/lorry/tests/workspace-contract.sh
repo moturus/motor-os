@@ -100,8 +100,8 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
     "$LORRY" --quiet build -p tool 2>"$WORK/quiet-build.stderr"
     [ ! -s "$WORK/quiet-build.stderr" ]
 )
-[ -x "$WORK/project/target/lorry/packages/app/debug/app" ]
-[ -x "$WORK/project/target/lorry/packages/tool/debug/tool" ]
+[ -x "$WORK/project/target/lorry/debug/app" ]
+[ -x "$WORK/project/target/lorry/debug/tool" ]
 (
     cd "$WORK/project/app"
     [ "$("$LORRY" run)" = app ]
@@ -110,8 +110,8 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
     cd "$WORK/project"
     "$LORRY" clean -p app
 )
-[ ! -e "$WORK/project/target/lorry/packages/app" ]
-[ -x "$WORK/project/target/lorry/packages/tool/debug/tool" ]
+[ ! -e "$WORK/project/target/lorry/debug/app" ]
+[ -x "$WORK/project/target/lorry/debug/tool" ]
 
 # Cargo rejects force-warn in a manifest, in both supported lint forms.
 cp "$WORK/project/app/Cargo.toml" "$WORK/app-baseline.toml"
@@ -141,7 +141,7 @@ for command in build check test run; do
         exit 1
     }
 done
-[ ! -e "$WORK/project/target/lorry/packages/scripted" ]
+[ ! -e "$WORK/project/target/lorry/debug/scripted" ]
 
 # The package limit skips members by directory, not by name: a nonmember
 # below the root that shares a member's name still counts.

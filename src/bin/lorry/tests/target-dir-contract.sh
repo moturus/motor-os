@@ -46,11 +46,11 @@ printf '[build]\ntarget-dir = "configured"\n' \
 (
     cd "$WORK/project/app"
     "$LORRY" build
-    test -f "$WORK/project/configured/lorry/packages/app/debug/app"
+    test -f "$WORK/project/configured/lorry/debug/app"
     CARGO_TARGET_DIR=env-output "$LORRY" build
-    test -f "$WORK/project/app/env-output/lorry/packages/app/debug/app"
+    test -f "$WORK/project/app/env-output/lorry/debug/app"
     CARGO_TARGET_DIR=env-output "$LORRY" build --target-dir cli-output
-    test -f "$WORK/project/app/cli-output/lorry/packages/app/debug/app"
+    test -f "$WORK/project/app/cli-output/lorry/debug/app"
     CARGO_TARGET_DIR=env-output "$LORRY" run --target-dir cli-output \
         >"$WORK/run.out"
     test "$(cat "$WORK/run.out")" = target-dir-ok
@@ -58,10 +58,10 @@ printf '[build]\ntarget-dir = "configured"\n' \
         >"$WORK/test.out"
     test -s "$WORK/test.out"
     CARGO_TARGET_DIR=env-output "$LORRY" check --target-dir check-output
-    test -d "$WORK/project/app/check-output/lorry/packages/app/check"
+    test -d "$WORK/project/app/check-output/lorry/check"
     CARGO_TARGET_DIR=env-output "$LORRY" clean --target-dir cli-output
-    test ! -e "$WORK/project/app/cli-output/lorry/packages/app"
+    test ! -e "$WORK/project/app/cli-output/lorry"
     test -f "$WORK/project/app/cli-output/.lorry-artifacts.lock"
-    test -f "$WORK/project/app/env-output/lorry/packages/app/debug/app"
+    test -f "$WORK/project/app/env-output/lorry/debug/app"
 )
 echo "PASS: CLI, environment, and Cargo config choose target directories like Cargo"

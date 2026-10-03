@@ -1,6 +1,7 @@
 use crate::cli::{CleanOptions, Verbosity};
 use crate::config::Config;
 use crate::diagnostic::{Error, Result};
+use crate::resolver::PackageKey;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -23,11 +24,15 @@ pub fn execute(options: &CleanOptions, package: Option<&str>, verbosity: Verbosi
     } else {
         None
     };
+    if (package.is_some() || options.build.release || target.is_some()) && artifact_root.exists() {
+        crate::engine::migrate_artifact_layout(&artifact_root)?;
+    }
     let removed = clean_manifest_artifacts(
         &manifest,
         &target_directory,
         options.build.release,
         target.as_deref(),
+        package.is_some(),
     )?;
     if verbosity != Verbosity::Quiet {
         if removed {
@@ -49,26 +54,126 @@ fn clean_manifest_artifacts(
     target_parent: &Path,
     release: bool,
     target: Option<&str>,
+    package_selected: bool,
 ) -> Result<bool> {
-    if manifest.root == manifest.workspace_root {
-        return clean_artifacts_root(&target_parent.join("lorry"), release, target);
+    if package_selected {
+        if !real_directory(target_parent, "artifact parent")? {
+            return Ok(false);
+        }
+        let package = crate::unit::selected_library_key(manifest)?.package;
+        return clean_package_artifacts(
+            &target_parent.join("lorry"),
+            manifest,
+            &package,
+            release,
+            target,
+        );
     }
-    if !real_directory(target_parent, "artifact parent")? {
+    clean_artifacts_root(&target_parent.join("lorry"), release, target)
+}
+
+fn clean_package_artifacts(
+    root: &Path,
+    manifest: &crate::manifest::Manifest,
+    package: &PackageKey,
+    release: bool,
+    target: Option<&str>,
+) -> Result<bool> {
+    if !real_directory(root, "Lorry artifact root")? {
         return Ok(false);
     }
-    let lorry_root = target_parent.join("lorry");
-    if !real_directory(&lorry_root, "Lorry artifact root")? {
-        return Ok(false);
+    let mut profile = root.to_owned();
+    if let Some(target) = target {
+        profile.push(target);
     }
-    let packages = lorry_root.join("packages");
-    if !real_directory(&packages, "workspace package artifact root")? {
-        return Ok(false);
+    profile.push(if release { "release" } else { "debug" });
+    let mut removed = false;
+    if real_directory(&profile, "selected profile")? {
+        let package_units = profile.join("build").join(&package.name);
+        if real_directory(&package_units, "package unit directory")? {
+            for child in fs::read_dir(&package_units)
+                .map_err(|error| Error::failure(format!("failed to list package units: {error}")))?
+            {
+                let path = child
+                    .map_err(|error| {
+                        Error::failure(format!("failed to read package unit: {error}"))
+                    })?
+                    .path();
+                if real_directory(&path, "package unit")?
+                    && crate::artifact_owner::matches(&path, package)
+                {
+                    remove_directory(&path)?;
+                    removed = true;
+                }
+            }
+        }
+        for child in fs::read_dir(&profile)
+            .map_err(|error| Error::failure(format!("failed to list profile: {error}")))?
+        {
+            let child = child
+                .map_err(|error| Error::failure(format!("failed to read profile: {error}")))?;
+            let name = child.file_name();
+            let Some(primary_name) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(crate::artifact_owner::PRIMARY_SUFFIX))
+            else {
+                continue;
+            };
+            let primary = profile.join(primary_name);
+            if crate::artifact_owner::matches_primary(&primary, package) {
+                if primary.exists() {
+                    fs::remove_file(&primary).map_err(|error| {
+                        Error::failure(format!(
+                            "failed to remove primary artifact `{}`: {error}",
+                            primary.display()
+                        ))
+                    })?;
+                }
+                fs::remove_file(child.path()).map_err(|error| {
+                    Error::failure(format!("failed to remove primary owner: {error}"))
+                })?;
+                removed = true;
+            }
+        }
+        let freshness = crate::engine::fresh_record_path(&profile, &manifest.root);
+        if freshness.exists() {
+            fs::remove_file(&freshness).map_err(|error| {
+                Error::failure(format!(
+                    "failed to remove package freshness record: {error}"
+                ))
+            })?;
+            removed = true;
+        }
     }
-    let selected = packages.join(&manifest.name);
-    if !real_directory(&selected, "selected package artifact root")? {
-        return Ok(false);
+    let units = root.join(".cache/v1/units/sha256");
+    if real_directory(&units, "project unit cache")? {
+        for prefix in fs::read_dir(&units)
+            .map_err(|error| Error::failure(format!("failed to list project cache: {error}")))?
+        {
+            let prefix = prefix
+                .map_err(|error| Error::failure(format!("failed to read cache prefix: {error}")))?
+                .path();
+            if !real_directory(&prefix, "cache prefix")? {
+                continue;
+            }
+            for entry in fs::read_dir(&prefix)
+                .map_err(|error| Error::failure(format!("failed to list cache prefix: {error}")))?
+            {
+                let entry = entry
+                    .map_err(|error| {
+                        Error::failure(format!("failed to read cache entry: {error}"))
+                    })?
+                    .path();
+                if real_directory(&entry, "cache entry")?
+                    && crate::artifact_owner::matches(&entry, package)
+                {
+                    remove_directory(&entry)?;
+                    removed = true;
+                }
+            }
+        }
     }
-    clean_artifacts_root(&selected, release, target)
+    Ok(removed)
 }
 
 fn clean_artifacts_root(root: &Path, release: bool, target: Option<&str>) -> Result<bool> {
@@ -201,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn cleans_only_the_selected_workspace_member() {
+    fn unselected_clean_removes_the_shared_artifact_tree() {
         let fixture = Fixture::new("workspace");
         fs::create_dir_all(fixture.0.join("app/src")).unwrap();
         fs::write(
@@ -220,8 +325,8 @@ mod tests {
             "version = 4\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        fixture.directory("target/lorry/packages/app/debug");
-        fixture.directory("target/lorry/packages/other/debug");
+        fixture.directory("target/lorry/debug/build/app");
+        fixture.directory("target/lorry/debug/build/other");
         let manifest = crate::manifest::Manifest::load_selected(&fixture.0, Some("app")).unwrap();
         assert_eq!(
             Config::default().target_directory(&manifest.root, &manifest.workspace_root, None),
@@ -237,24 +342,81 @@ mod tests {
         );
 
         assert!(
-            clean_manifest_artifacts(&manifest, &fixture.0.join("target"), false, None).unwrap()
-        );
-        assert!(!fixture.0.join("target/lorry/packages/app").exists());
-        assert!(fixture.0.join("target/lorry/packages/other/debug").is_dir());
-
-        fixture.directory("editor-target/lorry/packages/app/debug");
-        fixture.directory("editor-target/lorry/packages/other/debug");
-        assert!(
-            clean_manifest_artifacts(&manifest, &fixture.0.join("editor-target"), false, None)
+            clean_manifest_artifacts(&manifest, &fixture.0.join("target"), false, None, false)
                 .unwrap()
         );
-        assert!(!fixture.0.join("editor-target/lorry/packages/app").exists());
+        assert!(!fixture.0.join("target/lorry").exists());
+
+        fixture.directory("editor-target/lorry/debug/build/app");
+        fixture.directory("editor-target/lorry/debug/build/other");
         assert!(
-            fixture
-                .0
-                .join("editor-target/lorry/packages/other/debug")
-                .is_dir()
+            clean_manifest_artifacts(
+                &manifest,
+                &fixture.0.join("editor-target"),
+                false,
+                None,
+                false
+            )
+            .unwrap()
         );
+        assert!(!fixture.0.join("editor-target/lorry").exists());
+    }
+
+    #[test]
+    fn package_clean_preserves_other_owners_and_release_outputs() {
+        let fixture = Fixture::new("package");
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fixture.directory("src");
+        fs::write(fixture.0.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            fixture.0.join("Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let manifest = crate::manifest::Manifest::load_selected(&fixture.0, None).unwrap();
+        let package = crate::unit::selected_library_key(&manifest)
+            .unwrap()
+            .package;
+        let other = PackageKey {
+            source: crate::resolver::PackageSourceKey::Path(fixture.0.join("other")),
+            ..package.clone()
+        };
+        let owned = fixture.directory("target/lorry/debug/build/app/owned");
+        let foreign = fixture.directory("target/lorry/debug/build/app/foreign");
+        let release = fixture.directory("target/lorry/release/build/app/owned");
+        crate::artifact_owner::write(&owned, &package).unwrap();
+        crate::artifact_owner::write(&foreign, &other).unwrap();
+        crate::artifact_owner::write(&release, &package).unwrap();
+        let cache_owned = fixture.directory("target/lorry/.cache/v1/units/sha256/aa/owned");
+        let cache_foreign = fixture.directory("target/lorry/.cache/v1/units/sha256/bb/foreign");
+        crate::artifact_owner::write(&cache_owned, &package).unwrap();
+        crate::artifact_owner::write(&cache_foreign, &other).unwrap();
+        let profile = fixture.0.join("target/lorry/debug");
+        let primary = profile.join("app");
+        let other_primary = profile.join("other");
+        fs::write(&primary, b"app").unwrap();
+        fs::write(&other_primary, b"other").unwrap();
+        crate::artifact_owner::write_primary(&primary, &package).unwrap();
+        crate::artifact_owner::write_primary(&other_primary, &other).unwrap();
+        let fresh = crate::engine::fresh_record_path(&profile, &manifest.root);
+        fs::write(&fresh, b"record").unwrap();
+
+        assert!(
+            clean_manifest_artifacts(&manifest, &fixture.0.join("target"), false, None, true,)
+                .unwrap()
+        );
+        assert!(!owned.exists());
+        assert!(foreign.exists());
+        assert!(release.exists());
+        assert!(!cache_owned.exists());
+        assert!(cache_foreign.exists());
+        assert!(!primary.exists());
+        assert!(other_primary.exists());
+        assert!(!fresh.exists());
     }
 
     #[test]
