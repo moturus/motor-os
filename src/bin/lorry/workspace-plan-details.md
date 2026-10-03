@@ -611,34 +611,46 @@ a new artifact database for this feature.
 
 ### Cancellation
 
-Native evidence on 2026-10-03: the controlled Motor fixture killed Lorry
-while its compiler wrapper was blocked. `Child::wait` returned for Lorry, but
-the wrapper's PID was still active at the immediate check. The kernel's
-`KProcessStats::process_dropped` posts child kills asynchronously and retains
-the parent process-stat node while descendants still exist. This explains
-why parent exit alone is not a safe point to discard staging or start another
-writer. The native gate stopped at this assertion; it has not proved eventual
-child termination or recovery yet. Linux's child-held file lease contract
-passed.
+Native evidence on 2026-10-03: the first controlled Motor fixture killed
+Lorry while its compiler wrapper was blocked, but incorrectly retained its
+`Child` handle after `wait()`. Motor schedules descendant kills when the
+process object is dropped, so that probe could not establish a termination
+deadline. The corrected probe drops the handle and passed the native gate:
+recovery completed after the killed child exited. A separate held-owner case
+proved that the next build waits behind an active child. Linux's child-held
+file lease contract passed too.
 
-The proposed Motor-only barrier keeps an atomic owner-PID record outside
+The approved Motor-only barrier keeps an atomic owner-PID record outside
 `target/lorry/`, written under the artifact lock before any writer child is
 spawned and removed before normal lock release. A later command that finds a
 record from a killed owner holds the artifact lock while checking the retained
 Motor process tree and waits until that owner's descendants are no longer
-active. It then cleans only Lorry-owned abandoned staging and continues.
+active. Lorry implements the record and process-tree wait. It removes a unit's
+abandoned staging only after that wait and the lock have completed. A stale
+record matching the current PID can only predate the current process and is
+replaced. Other PID reuse or process-listing uncertainty fails closed, with a
+bounded wait for descendants.
 The native probe must block a compiler, kill Lorry, start the next Lorry
 immediately, and verify that publication waits for the compiler's exit and
-then recovers the edited result. The marker must distinguish stale records
-across PID reuse or reboot; unresolved identity or process-list errors must
-fail closed. This needs no change outside Lorry and adds no child process to
-ordinary builds.
+then recovers the edited result. It also tests a controlled live owner with a
+child that remains active until the probe releases it. This needs no change
+outside Lorry and adds no child process to ordinary builds.
 
 An alternative is a Lorry-owned supervisor for compiler and build-script
 children. It can hold a lease until each child exits, but requires another
 process boundary and handoff protocol for every build and has a larger
-performance and complexity cost. The choice between this and the process-tree
-barrier needs review before implementation.
+performance and complexity cost. The owner chose the process-tree barrier.
+
+The complete Lorry suite passed in 564 seconds on 2026-10-03, including the
+native recovery and abandoned-staging probe. A prior parallel Rust-test run
+failed in `builds_a_selected_workspace_member_into_shared_artifacts` when
+executing its published binary: Linux returned `ETXTBSY` at the test's
+`Command::output()` call. The fixture uses a PID-and-counter directory, and
+the primary executable is committed after its staging file is closed.
+Targeted `lsof` instrumentation did not reproduce the failure, so it did not
+identify a remaining writable handle. A later passing run is not a root-cause
+explanation. Diagnose this before milestone 3; Motor cold/warm `check`,
+resolved `metadata`, and target-size measurements are also outstanding.
 
 A released lock does not itself prove that a killed command's compiler
 or build-script children have stopped writing. Track child completion and

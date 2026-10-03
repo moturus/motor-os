@@ -24,17 +24,21 @@ sidecars. Members now use the shared profile, and `clean -p` removes only the
 selected package's owned files and project-local cache entries. The old Lorry
 artifact tree is reset under the artifact lock on first use.
 An interrupted compiler-unit replacement restores its previous completed
-directory before the next build tries to reuse it; staging cleanup still
-requires child-lifetime proof.
+directory before the next build tries to reuse it; after child-lifetime proof,
+the next build discards that unit's abandoned staging.
 On Linux, a lease passed only to compiler and build-script children keeps
 subsequent Lorry commands from entering the artifact tree while a child
 survives a killed parent.
-The native suite includes a Motor process-lifetime probe that kills Lorry
-during compilation and checks that its child is gone before recovery.
-The first native run found that Motor's child kill is asynchronous: the
-compiler was still active at the immediate check after Lorry exited.
-Milestone 2 remains open pending a recovery barrier and revised native probe;
-the proposed choice is documented in the details file.
+On Motor, an owner-PID record and retained process-tree query make the next
+command wait for interrupted children before touching artifacts. The native
+probe kills Lorry during compilation, checks recovery after its child exits,
+verifies a controlled live child holds the barrier, and checks abandoned
+staging removal. The complete Lorry suite passed in 564 seconds on
+2026-10-03, including online native vendoring and Motor self-build. An earlier
+parallel Rust-test run intermittently failed to execute a just-published
+workspace-member binary with `ETXTBSY`; the cause remains unresolved. Stop
+before milestone 3 under `AGENTS.md`'s preexisting-bug rule, diagnose that
+failure, and record the milestone-2 Motor performance measurements.
 Published check units retain and replay compiler messages, keeping
 rust-analyzer flycheck diagnostics visible when those units are reused.
 
