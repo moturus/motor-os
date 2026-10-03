@@ -399,6 +399,22 @@ fn default_cache_directory(environment: &BTreeMap<String, String>, motor: bool) 
 }
 
 fn reject_environment(environment: &BTreeMap<String, String>) -> Result<()> {
+    for variable in environment.keys() {
+        let unsupported = variable == "CARGO_INCREMENTAL"
+            || variable.starts_with("CARGO_PROFILE_")
+            || variable.starts_with("CARGO_UNSTABLE_")
+            || (variable.starts_with("CARGO_BUILD_")
+                && !matches!(
+                    variable.as_str(),
+                    "CARGO_BUILD_TARGET" | "CARGO_BUILD_RUSTFLAGS"
+                ));
+        if unsupported {
+            return Err(Error::failure(format!(
+                "environment variable `{variable}` changes a build but is not supported"
+            ))
+            .with_help(format!("unset `{variable}` before invoking Lorry")));
+        }
+    }
     for variable in ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
         if environment.contains_key(variable) {
             return Err(Error::failure(format!(
@@ -2461,6 +2477,39 @@ locked = [
             ]);
             assert!(Config::load_with_environment(&package, &environment).is_err());
         }
+    }
+
+    #[test]
+    fn rejects_unsupported_cargo_build_environment() {
+        let temp = TempDir::new();
+        let package = temp.0.join("pkg");
+        fs::create_dir_all(&package).unwrap();
+        let home = temp.0.join("home").display().to_string();
+        for variable in [
+            "CARGO_INCREMENTAL",
+            "CARGO_PROFILE_RELEASE_LTO",
+            "CARGO_UNSTABLE_BUILD_STD",
+            "CARGO_BUILD_JOBS",
+            "CARGO_BUILD_TARGET_DIR",
+        ] {
+            let environment = BTreeMap::from([
+                ("HOME".to_owned(), home.clone()),
+                (variable.to_owned(), "1".to_owned()),
+            ]);
+            assert!(Config::load_with_environment(&package, &environment).is_err());
+        }
+        let environment = BTreeMap::from([
+            ("HOME".to_owned(), home),
+            (
+                "CARGO_BUILD_TARGET".to_owned(),
+                "x86_64-unknown-linux-gnu".to_owned(),
+            ),
+            (
+                "CARGO_BUILD_RUSTFLAGS".to_owned(),
+                "-C debuginfo=0".to_owned(),
+            ),
+        ]);
+        assert!(Config::load_with_environment(&package, &environment).is_ok());
     }
 
     #[test]

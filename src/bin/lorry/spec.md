@@ -214,6 +214,9 @@ root compilation, freshness validation, and artifact publication.
   directory; a relative Cargo config path uses the directory containing its
   `.cargo` directory. Lorry writes only below that target directory's `lorry/`
   subtree.
+- Unimplemented `CARGO_PROFILE_*`, `CARGO_BUILD_*`, `CARGO_UNSTABLE_*`,
+  and `CARGO_INCREMENTAL` build settings are errors. The supported
+  `CARGO_BUILD_TARGET` and `CARGO_BUILD_RUSTFLAGS` settings remain accepted.
 
 ## Package and manifest model
 
