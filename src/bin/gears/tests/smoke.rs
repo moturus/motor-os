@@ -82,6 +82,8 @@ fn a_second_gears_is_refused_while_the_first_holds_the_directory_lock() {
     let root = fixture("directory-lock");
     let workspace = root.join("workspace");
     std::fs::create_dir(&workspace).unwrap();
+    let other_workspace = root.join("other-workspace");
+    std::fs::create_dir(&other_workspace).unwrap();
     let server = MockServer::start_one(sse_response(&[])).unwrap();
     let config = config(&root, &server);
     std::fs::create_dir_all(root.join(".gears")).unwrap();
@@ -110,7 +112,7 @@ fn a_second_gears_is_refused_while_the_first_holds_the_directory_lock() {
     assert_eq!(&prompt, b"gears> ");
     assert!(!root.join(".gears/.gears-tmp-crashed").exists());
 
-    let second = gears(&root, &workspace, &config)
+    let second = gears(&root, &other_workspace, &config)
         .args(["-p", "hello"])
         .output()
         .unwrap();
@@ -130,6 +132,8 @@ fn one_shot_streams_from_the_hermetic_backend() {
     let root = fixture("stream");
     let workspace = root.join("workspace");
     std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir_all(root.join(".gears")).unwrap();
+    std::fs::write(root.join(".gears/gears.lock"), "0\n").unwrap();
     let server = MockServer::start_one(sse_response(&[
         r#"{"choices":[{"index":0,"delta":{"content":"hello "}}]}"#,
         r#"{"choices":[{"index":0,"delta":{"content":"mock"}}]}"#,
@@ -152,6 +156,7 @@ fn one_shot_streams_from_the_hermetic_backend() {
             .contains("hello mock")
     );
     assert_eq!(server.requests().len(), 1);
+    assert!(!root.join(".gears/gears.lock").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 
