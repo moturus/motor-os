@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::artifact_owner;
 use crate::atomic::AtomicDirectory;
 use crate::build_script::{Directive, Output as BuildScriptOutput};
 use crate::compile::{RustcInvocation, RustcOutput};
@@ -366,8 +367,12 @@ impl BuildCache {
         key: CacheKey,
         output: &RustcOutput,
         selected: Option<SelectedInputs<'_>>,
+        package: &crate::resolver::PackageKey,
     ) -> Result<bool> {
         let directory = published_unit_directory(output)?;
+        if !artifact_owner::matches(directory, package) {
+            return Ok(false);
+        }
         let record = directory.join(PUBLISHED_RECORD);
         match fs::symlink_metadata(&record) {
             Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 32 => {}
@@ -385,9 +390,11 @@ impl BuildCache {
         key: CacheKey,
         output: &RustcOutput,
         selected: Option<SelectedInputs<'_>>,
+        package: &crate::resolver::PackageKey,
     ) -> Result<()> {
         let directory = published_unit_directory(output)?;
         let fingerprint = published_fingerprint(key, output, selected, self.validation)?;
+        artifact_owner::write(directory, package)?;
         write_synced(&directory.join(PUBLISHED_RECORD), &fingerprint)
     }
 
@@ -1740,15 +1747,38 @@ mod tests {
             working_dir: &source,
             source_remap: None,
         };
+        let package = crate::resolver::PackageKey {
+            name: "app".to_owned(),
+            version: "1.0.0".parse().unwrap(),
+            source: crate::resolver::PackageSourceKey::Path(source.clone()),
+        };
 
-        assert!(!cache.published_fresh(key, &output, Some(inputs)).unwrap());
-        cache.record_published(key, &output, Some(inputs)).unwrap();
-        assert!(cache.published_fresh(key, &output, Some(inputs)).unwrap());
+        assert!(
+            !cache
+                .published_fresh(key, &output, Some(inputs), &package)
+                .unwrap()
+        );
+        cache
+            .record_published(key, &output, Some(inputs), &package)
+            .unwrap();
+        assert!(
+            cache
+                .published_fresh(key, &output, Some(inputs), &package)
+                .unwrap()
+        );
         fs::write(&external, b"second").unwrap();
-        assert!(!cache.published_fresh(key, &output, Some(inputs)).unwrap());
+        assert!(
+            !cache
+                .published_fresh(key, &output, Some(inputs), &package)
+                .unwrap()
+        );
         fs::write(&external, b"first").unwrap();
         fs::write(library_paths(&output).unwrap().0, b"tampered").unwrap();
-        assert!(!cache.published_fresh(key, &output, Some(inputs)).unwrap());
+        assert!(
+            !cache
+                .published_fresh(key, &output, Some(inputs), &package)
+                .unwrap()
+        );
     }
 
     #[cfg(unix)]

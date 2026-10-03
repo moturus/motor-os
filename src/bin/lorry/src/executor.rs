@@ -437,6 +437,11 @@ fn execute_unit(
                 let temp_dir = root.join("tmp");
                 create_directory(&out_dir, "build-script OUT_DIR")?;
                 create_directory(&temp_dir, "build-script temporary directory")?;
+                crate::artifact_owner::write(
+                    root.parent()
+                        .ok_or_else(|| Error::failure("build-script run has no unit directory"))?,
+                    &key.package,
+                )?;
                 let target = match key.compile_kind {
                     CompileKind::Host => options.host,
                     CompileKind::Target => options.target,
@@ -625,6 +630,7 @@ fn execute_unit(
                         cache_key,
                         &planned_invocation.output,
                         selected_inputs,
+                        &key.package,
                     )? {
                         if options.verbose {
                             eprintln!(
@@ -660,7 +666,12 @@ fn execute_unit(
                     if restorable
                         && cache.restore(cache_key, &invocation.output, selected_inputs)?
                     {
-                        cache.record_published(cache_key, &invocation.output, selected_inputs)?;
+                        cache.record_published(
+                            cache_key,
+                            &invocation.output,
+                            selected_inputs,
+                            &key.package,
+                        )?;
                         staging.commit(unit_dir)?;
                         if options.verbose {
                             eprintln!(
@@ -770,6 +781,7 @@ fn execute_unit(
                         cache_key,
                         &invocation.output,
                         selected_inputs,
+                        &key.package,
                     )?;
                 }
                 staging.commit(unit_dir)?;

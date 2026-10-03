@@ -1116,6 +1116,10 @@ dep-info and external inputs. A matching unit is reused at its published path
 without copying from the cache. Missing or stale libraries and proc macros
 are restored from a verified cache entry or recompiled; other compiler units
 are recompiled on a miss.
+Published compiler and build-script unit directories carry a package-owner
+record keyed by name, version, and source. A missing or different owner
+prevents compiler-unit reuse. The record also identifies which unit directories
+belong to a package when cleaning a shared profile.
 The three Cargo-client variables that Lorry removes before starting rustc
 (`CARGO_LOG`, `RUSTUP_TOOLCHAIN`, and
 `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`) are omitted from rustc
