@@ -527,6 +527,53 @@ fn manual_compaction_appends_a_checkpoint_without_deleting_history() {
 }
 
 #[test]
+fn compaction_bounds_a_large_tool_result_sent_to_the_summarizer() {
+    let fixture = Fixture::new("large-compaction-input");
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let mut session = store.create(false, None).unwrap();
+    session.append_message(&Message::user("start")).unwrap();
+    session
+        .append_message(&Message::assistant_response(
+            String::new(),
+            vec![ToolCall::new("one", "sh", "{}")],
+        ))
+        .unwrap();
+    session
+        .append_message(&Message::tool_result(
+            "one",
+            "sh",
+            "large output ".repeat(20_000),
+            false,
+        ))
+        .unwrap();
+    session.append_message(&Message::assistant("done")).unwrap();
+    session.append_message(&Message::user("continue")).unwrap();
+    let provider = Scripted::new(vec![answer("summary")]);
+    let config = Config {
+        context: ContextConfig {
+            window_tokens: 800,
+            output_reserve_tokens: 200,
+            recent_tail_tokens: 50,
+        },
+        ..Config::default()
+    };
+    let mut runtime = Runtime::new(
+        provider.clone(),
+        store,
+        session,
+        &config,
+        "test/model".to_string(),
+    )
+    .unwrap();
+    runtime.compact(None, &mut |_| Ok(())).unwrap();
+    let requests = provider.requests.lock().unwrap();
+    let request = requests.last().unwrap();
+    let bytes = serde_json::to_vec(&(&request.system, &request.messages)).unwrap();
+    assert!(bytes.len() < 800 * 4, "summarizer input is too large");
+    assert!(request.messages[0].text_content().contains("[truncated]"));
+}
+
+#[test]
 fn provider_failures_are_recorded() {
     let fixture = Fixture::new("error");
     let provider = Scripted::new(vec![Err(ProviderError::Unavailable(

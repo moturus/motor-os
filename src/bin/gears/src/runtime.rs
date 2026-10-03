@@ -10,8 +10,8 @@ use crate::hooks::{Decision, Manager as Hooks, ToolResult};
 use crate::process::{Cancellation, Stream};
 use crate::prompt::Effective;
 use crate::provider::{
-    EventSink, Message, Provider, ProviderError, Request, StreamEvent, ToolCall, ToolOutcome,
-    ToolSpec, UsageMeter,
+    ContentBlock, EventSink, Message, Provider, ProviderError, Request, StreamEvent, ToolCall,
+    ToolOutcome, ToolSpec, UsageMeter,
 };
 use crate::session::{Compaction, Session, SessionInfo, Store, TreeItem};
 
@@ -841,11 +841,20 @@ impl Runtime {
             None => {
                 let mut system = vec![crate::prompt::COMPACTION.trim().to_string()];
                 if let Some(focus) = focus.as_deref() {
-                    system.push(format!("Additional focus: {focus}"));
+                    system.push(format!(
+                        "Additional focus: {}",
+                        clipped_text(focus, self.context.window_tokens as usize / 2)
+                    ));
                 }
-                let request = Request::new(&self.model, older)
+                let input = compaction_input(&older, self.context.window_tokens);
+                let request = Request::new(&self.model, input)
                     .with_system(system)
                     .with_cancellation(self.cancellation.clone());
+                if estimate_request_tokens(&request.system, &request.messages, &[])
+                    >= self.context.window_tokens
+                {
+                    return Err("compaction instructions exceed the model limit".to_string());
+                }
                 let mut sink = CancellationSink {
                     cancellation: &self.cancellation,
                 };
@@ -861,6 +870,7 @@ impl Runtime {
                 (completion.content, retained_tail)
             }
         };
+        let retained_tail = cap_tool_results(retained_tail, self.context.window_tokens);
         let compact_context = {
             let mut context = vec![Message::user(format!("[Conversation summary]\n{summary}"))];
             context.extend(retained_tail.clone());
@@ -1030,6 +1040,68 @@ fn split_tail(messages: &[Message], tail_tokens: u64) -> (Vec<Message>, Vec<Mess
     (messages[..start].to_vec(), messages[start..].to_vec())
 }
 
+fn clipped_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let end = text.floor_char_boundary(max_bytes);
+    format!("{} [truncated]", &text[..end])
+}
+
+fn cap_tool_results(mut messages: Vec<Message>, window_tokens: u64) -> Vec<Message> {
+    let limit = window_tokens.saturating_div(8).saturating_mul(4) as usize;
+    for message in &mut messages {
+        for block in &mut message.content {
+            if let ContentBlock::ToolResult { content, .. } = block
+                && content.len() > limit
+            {
+                *content = clipped_text(content, limit);
+            }
+        }
+    }
+    messages
+}
+
+fn compaction_input(messages: &[Message], window_tokens: u64) -> Vec<Message> {
+    let total_limit = window_tokens.saturating_div(2).saturating_mul(4) as usize;
+    let item_limit = window_tokens.saturating_div(8).saturating_mul(4) as usize;
+    let mut chunks = Vec::new();
+    let mut used = 0;
+    for message in messages.iter().rev() {
+        let mut chunk = format!("{:?}:\n", message.role);
+        for block in &message.content {
+            match block {
+                ContentBlock::Text { text } => chunk.push_str(&clipped_text(text, item_limit)),
+                ContentBlock::ToolCall { call } => chunk.push_str(&format!(
+                    "tool call {} {} {}",
+                    call.id,
+                    call.name,
+                    clipped_text(&call.arguments, item_limit)
+                )),
+                ContentBlock::ToolResult {
+                    tool_name,
+                    content,
+                    outcome,
+                    ..
+                } => chunk.push_str(&format!(
+                    "tool result {tool_name} {outcome:?}: {}",
+                    clipped_text(content, item_limit)
+                )),
+            }
+            chunk.push('\n');
+        }
+        let remaining = total_limit.saturating_sub(used);
+        if remaining == 0 {
+            break;
+        }
+        let chunk = clipped_text(&chunk, remaining);
+        used = used.saturating_add(chunk.len());
+        chunks.push(chunk);
+    }
+    chunks.reverse();
+    vec![Message::user(chunks.concat())]
+}
+
 fn validate_compaction_limits(window: u64, reserve: u64, tail: u64) -> Result<(), String> {
     if reserve >= window || tail >= window.saturating_sub(reserve) {
         return Err("hook returned invalid compaction thresholds".to_string());
@@ -1052,6 +1124,15 @@ mod tests {
         let (older, tail) = split_tail(&messages, 20);
         assert!(!older.is_empty());
         assert_ne!(tail.first().unwrap().role, crate::provider::Role::Tool);
+    }
+
+    #[test]
+    fn retained_tool_result_is_capped_without_changing_history() {
+        let original = vec![Message::tool_result("one", "sh", "x".repeat(10_000), false)];
+        let retained = cap_tool_results(original.clone(), 800);
+        assert!(retained[0].text_content().len() < 500);
+        assert!(retained[0].text_content().contains("[truncated]"));
+        assert_eq!(original[0].text_content().len(), 10_000);
     }
 
     #[test]
