@@ -170,6 +170,28 @@ fn text_only_turn_streams_and_is_durable() {
 }
 
 #[test]
+fn reasoning_only_reply_is_an_error_without_an_empty_assistant_message() {
+    let fixture = Fixture::new("empty-reply");
+    let provider = Scripted::new(vec![Ok(Completion {
+        reasoning: "thinking".to_string(),
+        finish_reason: Some(FinishReason::Stop),
+        ..Completion::default()
+    })]);
+    let mut runtime = fixture.runtime(provider, &Config::default());
+    let error = runtime
+        .turn(
+            "question".to_string(),
+            &mut FixedApproval(false),
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+    assert!(error.contains("empty reply"), "{error}");
+    let messages = runtime.session().context_messages().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text_content(), "question");
+}
+
+#[test]
 fn a_denied_sh_call_is_returned_to_the_model() {
     let fixture = Fixture::new("deny");
     let provider = Scripted::new(vec![

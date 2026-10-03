@@ -291,6 +291,18 @@ impl Runtime {
                 }
             };
             self.usage.add(&completion.usage);
+            if completion.tool_calls.is_empty() && completion.content.trim().is_empty() {
+                self.session.append_usage(&completion.usage)?;
+                observer.event(Event::Usage(self.usage.summary()))?;
+                let error = "model returned an empty reply";
+                let entry = self.session.append_error(error, false)?;
+                self.notify(
+                    "entry",
+                    serde_json::json!({"id": entry, "type": "turn_error"}),
+                    observer,
+                )?;
+                return Err(error.to_string());
+            }
             let assistant = completion.message();
             let entry = self.session.append_message(&assistant)?;
             self.notify(

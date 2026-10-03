@@ -257,6 +257,17 @@ mod tests {
     }
 
     #[test]
+    fn unknown_content_shapes_do_not_discard_later_text() {
+        let (completion, rendered) = run(&[
+            r#"{"choices":[{"index":0,"delta":{"content":[{"type":"image","url":"local"}]}}]}"#,
+            &content_delta("answer"),
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+        ]);
+        assert_eq!(completion.unwrap().content, "answer");
+        assert_eq!(rendered.content, ["answer"]);
+    }
+
+    #[test]
     fn parallel_tool_calls_survive_interleaved_fragments() {
         let (completion, rendered) = run(&[
             r#"{"choices":[{"index":0,"delta":{"tool_calls":[

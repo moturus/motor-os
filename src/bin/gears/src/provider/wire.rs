@@ -27,7 +27,7 @@ pub(super) struct StreamChoice {
 
 #[derive(Deserialize, Debug, Clone, Default)]
 pub(super) struct Delta {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_text")]
     pub content: Option<String>,
     #[serde(
         default,
