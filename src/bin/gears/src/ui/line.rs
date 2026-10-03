@@ -94,6 +94,16 @@ fn command(
             show_session(runtime);
             Ok(Command::Continue)
         }
+        "tools" => {
+            eprintln!("{}", super::format_tools(runtime)?);
+            Ok(Command::Continue)
+        }
+        "tool" => {
+            let (name, state, global) = super::parse_tool_action(argument)?;
+            runtime.set_tool_state(name, state, global)?;
+            eprintln!("{}", super::format_tools(runtime)?);
+            Ok(Command::Continue)
+        }
         "session" => {
             show_session(runtime);
             Ok(Command::Continue)
