@@ -298,10 +298,35 @@ impl Session {
 
     fn saved(path: PathBuf, parsed: Parsed) -> Result<Self, String> {
         let lock = acquire_lock(&path)?;
-        let writer = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let opened = (|| {
+            let writer = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            let size = writer
+                .metadata()
+                .map_err(|error| format!("{}: {error}", path.display()))?
+                .len();
+            if size < parsed.valid_len {
+                return Err(format!("session {} changed while opening", path.display()));
+            }
+            if size > parsed.valid_len {
+                writer
+                    .set_len(parsed.valid_len)
+                    .and_then(|()| writer.sync_data())
+                    .map_err(|error| {
+                        format!("{}: cannot discard partial tail: {error}", path.display())
+                    })?;
+            }
+            Ok(writer)
+        })();
+        let writer = match opened {
+            Ok(writer) => writer,
+            Err(error) => {
+                let _ = std::fs::remove_file(&lock);
+                return Err(error);
+            }
+        };
         Self::from_parts(
             parsed.header,
             parsed.entries,
@@ -634,6 +659,7 @@ impl Drop for Session {
 struct Parsed {
     header: Header,
     entries: Vec<Entry>,
+    valid_len: u64,
 }
 
 fn read_session(path: &Path) -> Result<Parsed, String> {
@@ -646,6 +672,10 @@ fn read_session(path: &Path) -> Result<Parsed, String> {
     File::open(path)
         .and_then(|mut file| file.read_to_end(&mut bytes))
         .map_err(|error| format!("{}: {error}", path.display()))?;
+    let valid_len = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1) as u64;
     let mut lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
     // A trailing newline contributes an empty slice; without one, the last
     // slice is the only record that may have been interrupted by a crash.
@@ -675,7 +705,11 @@ fn read_session(path: &Path) -> Result<Parsed, String> {
         entries.push(entry);
     }
     validate_entries(&entries)?;
-    Ok(Parsed { header, entries })
+    Ok(Parsed {
+        header,
+        entries,
+        valid_len,
+    })
 }
 
 fn validate_entries(entries: &[Entry]) -> Result<(), String> {
@@ -918,6 +952,33 @@ mod tests {
         lines[1] = "{broken}".to_string();
         std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
         assert!(store.open_path(&path).is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_partial_tail_is_removed_before_appending_new_records() {
+        let (base, _, store) = fixture("tail-append");
+        let mut session = store.create(false, None).unwrap();
+        session.append_message(&Message::user("before")).unwrap();
+        let path = session.path().unwrap().to_path_buf();
+        drop(session);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{partial")
+            .unwrap();
+
+        let mut reopened = store.open_path(&path).unwrap();
+        reopened
+            .append_message(&Message::assistant("after"))
+            .unwrap();
+        drop(reopened);
+        let again = store.open_path(&path).unwrap();
+        let context = again.context_messages().unwrap();
+        assert_eq!(context.len(), 2);
+        assert_eq!(context[1].text_content(), "after");
+        drop(again);
         std::fs::remove_dir_all(base).unwrap();
     }
 
