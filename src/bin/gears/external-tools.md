@@ -476,6 +476,14 @@ the fixed command contains no flags, so a path with spaces or a leading `-`
 remains one literal operand after `--`. It returns bounded stdout as plain
 text and treats exit status zero as normal.
 
+`head` has a required `path` string and an optional `lines` integer. Its
+ordered mapping puts `lines` before `--` as `-n` followed by the decimal
+integer, and `path` after `--` as one literal operand. With no `lines`, the
+program's default is ten lines; a negative count keeps the program's own
+`head -n` meaning. The Linux command is `/usr/bin/head` and the Motor OS
+command is `/system/bin/sysbox head`. It returns bounded stdout as plain text,
+is read-only, and treats exit status zero as normal.
+
 The common commands follow the `ls` pattern, each a manifest naming the
 program's path per platform, a one-line description, typed parameters mapped
 to a fixed argument vector, and a timeout. The read-only ones, `rg`, `head`,
