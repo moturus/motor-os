@@ -298,8 +298,26 @@ fn build_body(
             },
         }));
     }
-    for message in &req.messages {
-        messages.extend(wire_messages(message, quirks)?);
+    let cacheable =
+        req.messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| {
+                message.role != Role::Tool
+                    && message.content.iter().any(
+                        |block| matches!(block, ContentBlock::Text { text } if !text.is_empty()),
+                    )
+            })
+            .map(|(index, _)| index)
+            .rev()
+            .take(2)
+            .collect::<Vec<_>>();
+    for (index, message) in req.messages.iter().enumerate() {
+        messages.extend(wire_messages(
+            message,
+            quirks,
+            quirks.cache_markers && cacheable.contains(&index),
+        )?);
     }
     let tools = req
         .tools
@@ -367,9 +385,18 @@ fn hex_prefix(bytes: &[u8]) -> String {
     hex
 }
 
+fn wire_text(text: &str, marked: bool) -> serde_json::Value {
+    if marked {
+        serde_json::json!([marked_text(text)])
+    } else {
+        serde_json::Value::String(text.to_string())
+    }
+}
+
 fn wire_messages(
     message: &Message,
     quirks: Quirks,
+    mark_text: bool,
 ) -> Result<Vec<serde_json::Value>, ProviderError> {
     let text = message
         .content
@@ -383,7 +410,7 @@ fn wire_messages(
     match message.role {
         Role::User => Ok(vec![serde_json::json!({
             "role": "user",
-            "content": text,
+            "content": wire_text(&text, mark_text),
         })]),
         Role::Assistant => {
             let calls = message
@@ -406,7 +433,7 @@ fn wire_messages(
                 "content": if text.is_empty() {
                     serde_json::Value::Null
                 } else {
-                    serde_json::Value::String(text)
+                    wire_text(&text, mark_text)
                 },
             });
             if !calls.is_empty() {
@@ -592,7 +619,7 @@ mod tests {
         assert_eq!(openrouter["stream"], json!(true));
         assert_eq!(openrouter["usage"], json!({"include": true}));
         assert!(openrouter.get("stream_options").is_none());
-        assert_eq!(openrouter["messages"][0]["content"], json!("hi"));
+        assert_eq!(openrouter["messages"][0]["content"][0]["text"], json!("hi"));
 
         let generic = body(&request(), Quirks::for_host("elsewhere.test"));
         assert_eq!(generic["stream"], json!(true));
@@ -650,6 +677,36 @@ mod tests {
                 .get("prompt_cache_key")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn cache_markers_follow_the_last_two_text_messages() {
+        let req = Request::new(
+            "m",
+            vec![
+                Message::user("first"),
+                Message::assistant("second"),
+                Message::assistant_response(
+                    "".into(),
+                    vec![super::super::ToolCall::new("1", "sh", "{}")],
+                ),
+                Message::tool_result("1", "sh", "done", false),
+                Message::user("third"),
+            ],
+        );
+        let marked = body(&req, Quirks::for_host("openrouter.ai"));
+        assert_eq!(marked["messages"][0]["content"], "first");
+        assert_eq!(marked["messages"][1]["content"][0]["text"], "second");
+        assert_eq!(marked["messages"][4]["content"][0]["text"], "third");
+        assert!(
+            marked["messages"][4]["content"][0]
+                .get("cache_control")
+                .is_some()
+        );
+        assert!(marked["messages"][2]["content"].is_null());
+        assert_eq!(marked["messages"][3]["content"], "done");
+        let generic = body(&req, Quirks::for_host("elsewhere.test"));
+        assert_eq!(generic["messages"][4]["content"], "third");
     }
 
     #[test]
