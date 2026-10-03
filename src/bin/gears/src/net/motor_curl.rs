@@ -77,7 +77,9 @@ impl HttpClient for MotorCurl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::{CollectSink, HeaderValue, Method, Url};
+    use crate::net::{CollectSink, Url};
+    #[cfg(unix)]
+    use crate::net::{HeaderValue, Method};
 
     fn policy() -> EgressPolicy {
         EgressPolicy::new(&["openrouter.ai".to_string()])
