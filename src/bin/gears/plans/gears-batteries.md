@@ -304,6 +304,11 @@ selected from `lines`, `words`, and `bytes`. The modes map to `-l`, `-w`, and
 Both systems pass the path after `--`, so spaces, glob characters, and leading
 dashes stay literal.
 
+The `cat` directory takes one required string `path`. Linux passes it after
+`--`; Motor OS's sysbox `cat` does not recognize that delimiter, so it passes
+the path directly. On Motor OS a path beginning with `-` must be written with
+a `./` prefix. Spaces and glob characters remain literal on both systems.
+
 Details:
 
 - **`read_file`** returns numbered lines in pages of about 30 KB and refuses
