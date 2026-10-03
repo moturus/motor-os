@@ -861,6 +861,40 @@ fn build_inner(
     } else {
         None
     };
+    let selected_integration =
+        build.test && (build.test_name.is_some() || !build.manifest.integration_tests.is_empty());
+    let integration_binaries = selected_integration.then(|| {
+        build
+            .manifest
+            .binaries
+            .iter()
+            .map(|binary| {
+                (
+                    binary.name.clone(),
+                    bundle_layout.as_ref().map_or_else(
+                        || destination.join(&binary.name),
+                        |layout| layout.program(&binary.name),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    });
+    let integration_temp_dir = selected_integration.then(|| {
+        bundle_layout.as_ref().map_or_else(
+            || target_root.join("tmp"),
+            bundle::Layout::temporary_directory,
+        )
+    });
+    if let Some(directory) = &integration_temp_dir
+        && bundle_layout.is_none()
+    {
+        fs::create_dir_all(directory).map_err(|error| {
+            Error::failure(format!(
+                "failed to create test temporary directory `{}`: {error}",
+                directory.display()
+            ))
+        })?;
+    }
     let executor_options = executor::Options {
         cargo: &cargo,
         workspace_root: &build.manifest.workspace_root,
@@ -875,8 +909,8 @@ fn build_inner(
         physical_target: build.physical_target,
         host_linker: build.host_options.linker.as_deref(),
         target_linker: build.target_options.linker.as_deref(),
-        integration_binaries: None,
-        integration_temp_dir: None,
+        integration_binaries: integration_binaries.as_ref(),
+        integration_temp_dir: integration_temp_dir.as_deref(),
         release: build.release,
         quiet: build.verbosity == Verbosity::Quiet,
         verbose: build.verbosity == Verbosity::Verbose,
@@ -892,21 +926,50 @@ fn build_inner(
             .as_ref()
             .map(|reporter| reporter as &dyn executor::EventReporter),
     };
-    let selected_integration =
-        build.test && (build.test_name.is_some() || !build.manifest.integration_tests.is_empty());
     let needs_normal_plan = match check {
         Some((_, options)) => options.selects_normal_targets(),
         None => !build.test || (selected_integration && !build.manifest.binaries.is_empty()),
     };
-    let normal = if needs_normal_plan {
-        let plan = dependency_plan(
-            false,
-            check.is_none() && !build.test,
-            check.is_none() && !build.test,
-            false,
-        )?;
+    let normal = if needs_normal_plan || selected_integration {
+        let plan = if selected_integration {
+            if let Some(name) = build.test_name
+                && !build
+                    .manifest
+                    .integration_tests
+                    .iter()
+                    .any(|target| target.name == name)
+            {
+                return Err(unknown_integration_test(build.manifest, name));
+            }
+            prepared.selected_mixed_test_plan(
+                &PlanOptions {
+                    workspace_root: &build.manifest.workspace_root,
+                    release: build.release,
+                    test_profile: false,
+                    panic_abort: build.manifest.panic_abort(build.release),
+                    release_profile: &build.manifest.release,
+                    rustc: build.toolchain,
+                    logical_target: build.logical_target,
+                    rustflags: build.rustflags,
+                },
+                build.manifest,
+                build.test_name.is_none(),
+                build.test_name,
+            )?
+        } else {
+            dependency_plan(
+                false,
+                check.is_none() && !build.test,
+                check.is_none() && !build.test,
+                false,
+            )?
+        };
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
-        let dependencies = root_dependencies(&prepared.resolution, &plan, &outputs)?;
+        let dependencies = if selected_integration {
+            Vec::new()
+        } else {
+            root_dependencies(&prepared.resolution, &plan, &outputs)?
+        };
         crate::trace::event(format_args!(
             "executed {} normal dependency units",
             plan.units.len()
@@ -915,7 +978,8 @@ fn build_inner(
     } else {
         None
     };
-    let needs_test_plan = build.test || check.is_some_and(|(_, options)| options.selects_tests());
+    let needs_test_plan = (!selected_integration && build.test)
+        || check.is_some_and(|(_, options)| options.selects_tests());
     let test_result = if needs_test_plan {
         let test_plan = dependency_plan(
             true,
@@ -1013,7 +1077,22 @@ fn build_inner(
         crate::trace::event("published check profile");
         return Ok(BuildOutcome::Check(0));
     }
-    let compiled = if build.test {
+    let compiled = if selected_integration {
+        let (plan, outputs, _) = normal
+            .as_ref()
+            .ok_or_else(|| Error::failure("integration test has no compilation plan"))?;
+        compile_planned_test_targets(
+            &build,
+            staging.path(),
+            plan,
+            outputs,
+            &TestOutput {
+                destination: &destination,
+                target_root,
+                bundle_layout: bundle_layout.as_ref(),
+            },
+        )?
+    } else if build.test {
         compile_test_targets(
             &build,
             staging.path(),
@@ -2569,6 +2648,92 @@ fn compile_test_targets(
     Ok(StagedArtifacts {
         primary: bundled.clone().unwrap_or(first_harness),
         binaries,
+        harnesses,
+        bundle: bundled,
+        dep_info: Vec::new(),
+    })
+}
+
+fn compile_planned_test_targets(
+    build: &Build<'_>,
+    staging: &Path,
+    plan: &CompilationPlan,
+    outputs: &executor::Outputs,
+    output: &TestOutput<'_>,
+) -> Result<StagedArtifacts> {
+    let selected = selected_library_key(build.manifest)?.package;
+    let mut programs = BTreeMap::new();
+    let mut harnesses = Vec::new();
+    for key in &plan.order {
+        if key.package != selected {
+            continue;
+        }
+        match key.kind {
+            UnitKind::Binary => {
+                let name = key
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| Error::failure("selected program unit has no target name"))?;
+                let Some(crate::compile::RustcOutput::Binary { executable, .. }) =
+                    outputs.artifacts.get(key)
+                else {
+                    return Err(Error::failure(format!(
+                        "selected program `{name}` produced no executable"
+                    )));
+                };
+                let primary = staging.join(name);
+                install_primary(executable, &primary)?;
+                programs.insert(name.clone(), primary);
+            }
+            UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness => {
+                let Some(crate::compile::RustcOutput::Binary { executable, .. }) =
+                    outputs.artifacts.get(key)
+                else {
+                    return Err(Error::failure(
+                        "selected test harness produced no executable",
+                    ));
+                };
+                harnesses.push(executable.clone());
+            }
+            _ => {}
+        }
+    }
+    let first_harness = harnesses.first().cloned().ok_or_else(|| {
+        Error::failure(format!(
+            "package `{}` has no enabled test targets",
+            build.manifest.name
+        ))
+    })?;
+    let bundle_programs = programs
+        .iter()
+        .map(|(name, path)| (name.as_str(), path.as_path()))
+        .collect::<Vec<_>>();
+    let bundled = output
+        .bundle_layout
+        .map(|layout| {
+            if build.verbosity != Verbosity::Quiet {
+                eprintln!("Bundling {} test targets", harnesses.len());
+            }
+            bundle::build(&bundle::BuildOptions {
+                layout,
+                package_name: &build.manifest.name,
+                package_root: &build.manifest.root,
+                staging,
+                rustc: &build.toolchain.rustc,
+                physical_target: build.physical_target,
+                linker: build.target_options.linker.as_deref(),
+                rustflags: build.rustflags,
+                release: build.release,
+                verbose: build.verbosity == Verbosity::Verbose,
+                color: build.color,
+                harnesses: &harnesses,
+                programs: &bundle_programs,
+            })
+        })
+        .transpose()?;
+    Ok(StagedArtifacts {
+        primary: bundled.clone().unwrap_or(first_harness),
+        binaries: programs,
         harnesses,
         bundle: bundled,
         dep_info: Vec::new(),

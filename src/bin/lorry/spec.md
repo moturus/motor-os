@@ -953,8 +953,12 @@ The planner distinguishes library and binary `--test` harnesses from ordinary
 library and binary units, retaining their test-mode profiles and dependency
 edges.
 Selected library and binary harnesses execute on that DAG during `test`.
-Integration-test harnesses keep their existing compilation path until their
-target and generated-code inputs are represented in the unit graph.
+When selected integration tests need program binaries, the executor runs one
+mixed-profile DAG. It builds normal-profile programs and test-profile
+libraries and harnesses in dependency order. The program executables are
+installed into the selected profile before the test artifacts are published.
+An integration test with no program binaries needs only the test-profile
+closure.
 
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected

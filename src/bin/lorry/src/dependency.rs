@@ -105,15 +105,25 @@ impl PreparedGraph {
             .iter()
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
-        let mut graph = dependency_units(&self.resolution, &manifests)?;
-        let mut test_graph = mixed_profile.then(|| graph.clone());
+        let normal_needed = !mixed_profile
+            || selected.is_some_and(|(manifest, _, _, _)| !manifest.binaries.is_empty());
+        let base_graph = dependency_units(&self.resolution, &manifests)?;
+        let mut test_graph = mixed_profile.then(|| base_graph.clone());
+        let mut graph = if normal_needed {
+            base_graph
+        } else {
+            UnitGraph {
+                units: BTreeMap::new(),
+                order: Vec::new(),
+            }
+        };
         if let Some((selected, binary_name, include_binaries, include_harnesses)) = selected {
-            let key = if selected.library.is_some() {
+            let key = if normal_needed && selected.library.is_some() {
                 add_selected_library(&mut graph, &self.resolution, &manifests, selected)?
             } else {
                 selected_library_key(selected)?
             };
-            if include_binaries {
+            if include_binaries && normal_needed {
                 add_selected_binaries(
                     &mut graph,
                     &self.resolution,
@@ -1466,6 +1476,23 @@ mod tests {
                 .filter(|key| key.kind == UnitKind::IntegrationHarness)
                 .map(lorry_node)
                 .collect()
+        );
+
+        fs::remove_file(fixture.0.join("src/main.rs")).unwrap();
+        let library_only = Manifest::load(&fixture.0).unwrap();
+        let library_only_plan = graph
+            .selected_mixed_test_plan(&options, &library_only, false, Some("integration"))
+            .unwrap();
+        assert!(
+            library_only_plan.units.keys().all(|key| {
+                key.package != library.package || key.profile == ProfileContext::Test
+            })
+        );
+        assert!(
+            library_only_plan
+                .units
+                .keys()
+                .any(|key| { key.kind == UnitKind::IntegrationHarness })
         );
     }
 
