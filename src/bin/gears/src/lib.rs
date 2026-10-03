@@ -18,6 +18,7 @@ pub mod runtime;
 pub mod session;
 pub mod shell_state;
 pub mod state;
+pub mod tool_state;
 pub mod tools;
 pub mod trace;
 pub mod ui;
