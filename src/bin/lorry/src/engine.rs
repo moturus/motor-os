@@ -2033,7 +2033,7 @@ fn compile_root_targets(
             )));
         };
         let primary = staging.join(name);
-        install_primary(executable, &primary)?;
+        install_primary(executable, &primary, selected)?;
         binary_dep_info.push(dep_info.clone());
         binaries.insert(name.clone(), primary);
     }
@@ -2139,7 +2139,7 @@ fn compile_planned_test_targets(
                     )));
                 };
                 let primary = staging.join(name);
-                install_primary(executable, &primary)?;
+                install_primary(executable, &primary, &selected)?;
                 programs.insert(name.clone(), primary);
             }
             UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness => {
@@ -2214,10 +2214,12 @@ fn unknown_integration_test(manifest: &Manifest, name: &str) -> Error {
     Error::failure(format!("no integration-test target named `{name}`")).with_help(help)
 }
 
-fn install_primary(source: &Path, destination: &Path) -> Result<()> {
+fn install_primary(source: &Path, destination: &Path, package: &PackageKey) -> Result<()> {
+    crate::artifact_owner::invalidate_primary(destination)?;
     let mut artifact = AtomicFile::new(destination)?;
     artifact.copy_executable_from(source)?;
-    artifact.commit()
+    artifact.commit()?;
+    crate::artifact_owner::write_primary(destination, package)
 }
 
 pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {

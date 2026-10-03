@@ -20,7 +20,8 @@ place. Published unit directories and cache entries now record package
 ownership as groundwork for selective clean. Build-script result reuse, the
 shared member layout, ownership-aware clean, and cancellation recovery remain.
 Completed-profile freshness records are scoped by package path so members
-can coexist in the shared profile.
+can coexist in the shared profile. Top-level executables also carry owner
+sidecars for selective clean.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

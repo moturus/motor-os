@@ -1122,6 +1122,9 @@ prevents compiler-unit reuse. The record also identifies which unit directories
 belong to a package when cleaning a shared profile.
 Cache entries used by a package carry the same owner record, so a selective
 clean can remove its project-local entries without removing another package's.
+Top-level selected executables have sidecar owner records. Installing a new
+executable invalidates its old owner record before atomically replacing the
+file, then records the new owner.
 The three Cargo-client variables that Lorry removes before starting rustc
 (`CARGO_LOG`, `RUSTUP_TOOLCHAIN`, and
 `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`) are omitted from rustc
