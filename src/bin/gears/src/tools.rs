@@ -1,6 +1,6 @@
 //! Directory-backed tool definitions; loading metadata never starts a tool.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -26,12 +26,33 @@ pub struct Tool {
 #[derive(Debug, Clone)]
 pub struct ProcessTool {
     pub command: Option<Vec<String>>,
+    pub arguments: Arguments,
     pub timeout: Duration,
     pub max_output_bytes: usize,
     pub stdin_arguments: bool,
     pub stdout_only: bool,
     pub normal_exit_statuses: Vec<i32>,
     pub allowed_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Arguments {
+    #[serde(default)]
+    pub before_double_dash: Vec<String>,
+    #[serde(default)]
+    pub after_double_dash: Vec<String>,
+    #[serde(flatten)]
+    pub mappings: HashMap<String, ArgumentMapping>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ArgumentMapping {
+    String,
+    BooleanFlag { flag: String },
+    IntegerOption { flag: String },
+    Enum { values: HashMap<String, String> },
+    StringList,
 }
 
 #[derive(Debug, Default)]
@@ -139,7 +160,7 @@ impl Tool {
         if prompt.as_ref().is_some_and(|text| text.trim().is_empty()) {
             return Err(format!("{}: tool prompt is empty", directory.display()));
         }
-        let process = ProcessTool::parse(raw.process, directory)?;
+        let process = ProcessTool::parse(raw.process, directory, &parameters)?;
         Ok(Self {
             name: raw.name,
             description,
@@ -188,6 +209,8 @@ struct RawProcess {
     output: Option<String>,
     normal_exit_statuses: Option<Vec<i32>>,
     allowed_flags: Option<Vec<String>>,
+    #[serde(default)]
+    arguments: Arguments,
     command: RawCommand,
 }
 
@@ -199,7 +222,7 @@ struct RawCommand {
 }
 
 impl ProcessTool {
-    fn parse(raw: RawProcess, directory: &Path) -> Result<Self, String> {
+    fn parse(raw: RawProcess, directory: &Path, parameters: &Value) -> Result<Self, String> {
         let timeout = raw.timeout_seconds.unwrap_or(30);
         let max_output = raw.max_output_bytes.unwrap_or(1024 * 1024);
         if !(1..=3600).contains(&timeout) || !(1024..=16 * 1024 * 1024).contains(&max_output) {
@@ -236,6 +259,21 @@ impl ProcessTool {
                 return Err(format!("{}: empty process command", directory.display()));
             }
             validate_program(directory, &command[0])?;
+            if command
+                .iter()
+                .any(|part| part.starts_with('{') && part.ends_with('}'))
+            {
+                return Err(format!(
+                    "{}: command contains a placeholder",
+                    directory.display()
+                ));
+            }
+            if !raw.arguments.mappings.is_empty() && command.iter().any(|part| part == "--") {
+                return Err(format!(
+                    "{}: mapped command must leave -- to the argument table",
+                    directory.display()
+                ));
+            }
         }
         let normal_exit_statuses = raw.normal_exit_statuses.unwrap_or_else(|| vec![0]);
         if normal_exit_statuses.is_empty()
@@ -258,12 +296,15 @@ impl ProcessTool {
         }) {
             return Err(format!("{}: invalid allowed flag", directory.display()));
         }
+        raw.arguments
+            .validate(directory, parameters, stdin_arguments)?;
         #[cfg(unix)]
         let command = raw.command.linux.or(raw.command.common);
         #[cfg(not(unix))]
         let command = raw.command.motor.or(raw.command.common);
         Ok(Self {
             command,
+            arguments: raw.arguments,
             timeout: Duration::from_secs(timeout),
             max_output_bytes: max_output,
             stdin_arguments,
@@ -271,6 +312,112 @@ impl ProcessTool {
             normal_exit_statuses,
             allowed_flags,
         })
+    }
+}
+
+impl Arguments {
+    fn validate(
+        &self,
+        directory: &Path,
+        schema: &Value,
+        stdin_arguments: bool,
+    ) -> Result<(), String> {
+        let properties = schema.get("properties").and_then(Value::as_object);
+        let mut names = HashSet::new();
+        for (after_delimiter, name) in self
+            .before_double_dash
+            .iter()
+            .map(|name| (false, name))
+            .chain(self.after_double_dash.iter().map(|name| (true, name)))
+        {
+            if !names.insert(name) {
+                return Err(format!(
+                    "{}: duplicate argument mapping {name:?}",
+                    directory.display()
+                ));
+            }
+            let mapping = self.mappings.get(name).ok_or_else(|| {
+                format!("{}: missing argument mapping {name:?}", directory.display())
+            })?;
+            let property = properties
+                .and_then(|items| items.get(name))
+                .ok_or_else(|| {
+                    format!(
+                        "{}: mapped argument {name:?} is absent from the schema",
+                        directory.display()
+                    )
+                })?;
+            let expected = match mapping {
+                ArgumentMapping::String | ArgumentMapping::Enum { .. } => "string",
+                ArgumentMapping::BooleanFlag { .. } => "boolean",
+                ArgumentMapping::IntegerOption { .. } => "integer",
+                ArgumentMapping::StringList => "array",
+            };
+            if property.get("type").and_then(Value::as_str) != Some(expected) {
+                return Err(format!(
+                    "{}: argument {name:?} must have schema type {expected}",
+                    directory.display()
+                ));
+            }
+            if matches!(mapping, ArgumentMapping::StringList)
+                && (!after_delimiter
+                    || property.pointer("/items/type").and_then(Value::as_str) != Some("string"))
+            {
+                return Err(format!(
+                    "{}: string list {name:?} needs string items after --",
+                    directory.display()
+                ));
+            }
+            match mapping {
+                ArgumentMapping::BooleanFlag { flag } | ArgumentMapping::IntegerOption { flag } => {
+                    if !flag.starts_with('-')
+                        || flag == "--"
+                        || flag
+                            .bytes()
+                            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+                    {
+                        return Err(format!(
+                            "{}: invalid fixed flag for {name:?}",
+                            directory.display()
+                        ));
+                    }
+                }
+                ArgumentMapping::Enum { values }
+                    if values.is_empty()
+                        || values.iter().any(|(key, value)| {
+                            key.is_empty() || value.is_empty() || value == "--"
+                        }) =>
+                {
+                    return Err(format!(
+                        "{}: invalid enum values for {name:?}",
+                        directory.display()
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if self.mappings.len() != names.len() {
+            return Err(format!(
+                "{}: argument mapping is not in the order list",
+                directory.display()
+            ));
+        }
+        if !self.mappings.is_empty() && stdin_arguments {
+            return Err(format!(
+                "{}: mapped arguments cannot also use stdin arguments",
+                directory.display()
+            ));
+        }
+        if !stdin_arguments
+            && let Some(properties) = properties
+            && properties.keys().any(|name| !names.contains(name))
+        {
+            return Err(format!(
+                "{}: schema has an unmapped command argument",
+                directory.display()
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -326,6 +473,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn typed_mapping_checks_schema_and_placement() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ignore_case": {"type": "boolean"},
+                "limit": {"type": "integer"},
+                "mode": {"type": "string"},
+                "paths": {"type": "array", "items": {"type": "string"}}
+            }
+        });
+        let raw: RawProcess = toml::from_str(
+            r#"
+            [command]
+            common = ["/bin/rg"]
+            [arguments]
+            before_double_dash = ["ignore_case", "limit", "mode"]
+            after_double_dash = ["paths"]
+            [arguments.ignore_case]
+            type = "boolean_flag"
+            flag = "-i"
+            [arguments.limit]
+            type = "integer_option"
+            flag = "-m"
+            [arguments.mode]
+            type = "enum"
+            values = { files = "-l", count = "-c" }
+            [arguments.paths]
+            type = "string_list"
+        "#,
+        )
+        .unwrap();
+        let directory = Path::new("/tmp/example-tool");
+        assert!(ProcessTool::parse(raw, directory, &schema).is_ok());
+
+        let invalid: RawProcess = toml::from_str(
+            r#"
+            [command]
+            common = ["/bin/rg"]
+            [arguments]
+            before_double_dash = ["paths"]
+            [arguments.paths]
+            type = "string_list"
+        "#,
+        )
+        .unwrap();
+        assert!(
+            ProcessTool::parse(invalid, directory, &schema)
+                .unwrap_err()
+                .contains("after --")
+        );
+    }
+
+    #[test]
     fn listed_directory_loads_without_running_its_command() {
         let root = std::env::temp_dir().join(format!("gears-tools-load-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -347,7 +547,7 @@ stdin = 'arguments'
 output = 'stdout'
 normal_exit_statuses = [0, 1]
 [process.command]
-common = ['/no-such-program', '{path}']
+common = ['/no-such-program']
 "#,
         )
         .unwrap();
