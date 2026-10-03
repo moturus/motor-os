@@ -3,12 +3,12 @@
 Status: implementation in progress. This plan was updated after review on
 2026-10-02 and revises the committed v3 (`3c90c8cf`).
 
-The four first patches are committed. Milestone 1 has moved the selected
-library, binaries, and library/binary test harnesses onto the dependency
-planner and executor. The workspace path rule and a selected `build` graph
-oracle are in place. Selected integration tests and `check` targets still use
-their separate root compilation paths; the complete milestone gate remains
-to be run after those paths move.
+The four first patches and milestone 1 are committed. The selected package's
+library, binaries, test harnesses, integration tests, and check targets use
+one unit planner and executor. Cargo build, test, and check unit graphs and
+byte identity are covered. The complete Lorry suite passed in 556 seconds
+on 2026-10-02, including native Motor self-build and identity checks.
+Milestone 2 is next.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the
