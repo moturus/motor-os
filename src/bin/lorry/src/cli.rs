@@ -175,7 +175,11 @@ impl Cli {
             _ => None,
         };
 
-        if let Some(value) = arguments.iter().find(|value| value.starts_with('+')) {
+        if let Some(value) = arguments
+            .iter()
+            .take_while(|value| value.as_str() != "--")
+            .find(|value| value.starts_with('+'))
+        {
             return Err(Error::usage(
                 format!("toolchain selector `{value}` is not first"),
                 "place `+toolchain` before global options and the command",
@@ -203,18 +207,13 @@ impl Cli {
             Some("never") => Color::Never,
             Some(_) => unreachable!("Clap restricts --color values"),
         };
-        let command_quiet = matches
-            .subcommand()
-            .and_then(|(_, command)| command.try_get_one::<bool>("command-quiet").ok().flatten())
-            .copied()
-            .unwrap_or(false);
-        if command_quiet && (matches.get_flag("quiet") || matches.get_flag("verbose")) {
+        if matches.get_flag("quiet") && matches.get_flag("verbose") {
             return Err(Error::usage(
-                "conflicting or duplicate verbosity option",
-                "pass one of --quiet or --verbose exactly once",
+                "cannot set both --verbose and --quiet",
+                "choose one verbosity",
             ));
         }
-        let verbosity = if matches.get_flag("quiet") || command_quiet {
+        let verbosity = if matches.get_flag("quiet") {
             Verbosity::Quiet
         } else if matches.get_flag("verbose") {
             Verbosity::Verbose
@@ -288,6 +287,7 @@ fn command_line() -> ClapCommand {
             Arg::new("quiet")
                 .long("quiet")
                 .short('q')
+                .global(true)
                 .action(ArgAction::SetTrue)
                 .conflicts_with("verbose"),
         )
@@ -295,12 +295,14 @@ fn command_line() -> ClapCommand {
             Arg::new("verbose")
                 .long("verbose")
                 .short('v')
+                .global(true)
                 .action(ArgAction::SetTrue)
                 .conflicts_with("quiet"),
         )
         .arg(
             Arg::new("color")
                 .long("color")
+                .global(true)
                 .value_name("WHEN")
                 .num_args(1)
                 .action(ArgAction::Set)
@@ -439,12 +441,6 @@ fn check_command() -> ClapCommand {
         .arg(
             Arg::new("workspace")
                 .long("workspace")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("command-quiet")
-                .long("quiet")
-                .short('q')
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -1180,8 +1176,34 @@ mod tests {
         ] {
             assert!(parse(input).unwrap_err().is_usage(), "{input:?}");
         }
-        assert!(parse(&["--quiet", "check", "--quiet"]).is_err());
+        assert_eq!(
+            parse(&["--quiet", "check", "--quiet"]).unwrap().verbosity,
+            Verbosity::Quiet
+        );
         assert!(parse(&["--verbose", "check", "--quiet"]).is_err());
+    }
+
+    #[test]
+    fn global_presentation_options_follow_the_command() {
+        for command in [
+            "build", "check", "run", "test", "clean", "review", "tree", "vendor",
+        ] {
+            assert_eq!(
+                parse(&[command, "--quiet", "--color=never"]).unwrap(),
+                parse(&["--quiet", "--color=never", command]).unwrap()
+            );
+            assert_eq!(
+                parse(&[command, "-v", "--color", "always"]).unwrap(),
+                parse(&["-v", "--color", "always", command]).unwrap()
+            );
+        }
+        let Command::Run(options) = parse(&["run", "--", "+value", "--quiet", "--color=never"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected run");
+        };
+        assert_eq!(options.arguments, ["+value", "--quiet", "--color=never"]);
     }
 
     #[test]
@@ -1334,7 +1356,6 @@ mod tests {
         for input in [
             &[][..],
             &["build", "+motor-current"],
-            &["build", "--quiet"],
             &["build", "--"],
             &["frobnicate"],
             &["help", "unknown"],

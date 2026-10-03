@@ -1025,6 +1025,9 @@ Programs started by `run` and ordinary test harnesses receive `CARGO`,
 `CARGO_PKG_*` values. Integration harnesses also receive `CARGO_BIN_EXE_*`
 for the built programs. `run` preserves the caller's working directory;
 harnesses use their package root. Test bundles retain their launcher rules.
+The global `-q`/`--quiet`, `-v`/`--verbose`, and `--color` options also
+work after the command name. Arguments following `run --` or `test --`
+remain child arguments, including strings starting with `+`.
 
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected
