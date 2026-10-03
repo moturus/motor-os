@@ -172,9 +172,11 @@ fn empty_tool_configuration_is_chat_only() {
     )
     .unwrap();
     runtime
-        .turn("hello".to_string(), &mut FixedApproval(true), &mut |_| {
-            Ok(())
-        })
+        .turn(
+            "hello".to_string(),
+            &mut UnexpectedApproval,
+            &mut |_| Ok(()),
+        )
         .unwrap();
     let requests = provider.requests.lock().unwrap();
     assert!(requests[0].tools.is_empty());
@@ -182,7 +184,7 @@ fn empty_tool_configuration_is_chat_only() {
         requests[1]
             .messages
             .iter()
-            .any(|message| message.text_content().contains("unknown tool"))
+            .any(|message| message.text_content().contains("unknown or disabled tool"))
     );
     assert!(!fixture.workspace.join("must-not-exist").exists());
 }
@@ -267,9 +269,11 @@ type = "string"
     let provider = Scripted::new(vec![tool("print", r#"{"text":"not run"}"#), answer("done")]);
     let mut runtime = fixture.runtime(provider.clone(), &disabled);
     runtime
-        .turn("print".to_string(), &mut FixedApproval(true), &mut |_| {
-            Ok(())
-        })
+        .turn(
+            "print".to_string(),
+            &mut UnexpectedApproval,
+            &mut |_| Ok(()),
+        )
         .unwrap();
     let requests = provider.requests.lock().unwrap();
     assert!(!requests[0].tools.iter().any(|spec| spec.name == "print"));
@@ -283,7 +287,7 @@ type = "string"
         requests[1]
             .messages
             .iter()
-            .any(|message| message.text_content().contains("unknown tool"))
+            .any(|message| message.text_content().contains("unknown or disabled tool"))
     );
 }
 

@@ -588,6 +588,10 @@ impl Runtime {
         approver: &mut dyn Approver,
         observer: &mut dyn Observer,
     ) -> Result<(), String> {
+        if self.tools.enabled(&call.name).is_none() && !self.hooks.owns_tool(&call.name) {
+            let reason = format!("unknown or disabled tool {:?}", call.name);
+            return self.record_unstarted_calls(std::slice::from_ref(&call), &reason, observer);
+        }
         let detail = call_detail(&call);
         let permission = Permission {
             tool: call.name.clone(),
