@@ -931,6 +931,9 @@ edges for the same unit key are rejected.
 The mixed test planner includes normal-profile programs and test-profile
 libraries and harnesses in that DAG. It deduplicates shared dependency units
 before computing identities.
+Selected integration harnesses are distinct test targets in the mixed plan.
+They depend on test-profile Rust libraries and normal-profile program
+artifacts, and the program edges do not become rustc `--extern` arguments.
 
 For `build`, the selected package's library is compiled on the same unit DAG
 and executor as its normal dependencies. Its dependency edges retain the

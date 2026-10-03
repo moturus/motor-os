@@ -347,6 +347,7 @@ impl Package {
                     target.kind.iter().any(|kind| kind == "bin")
                 }
                 UnitKind::LibraryHarness => target.kind.iter().any(|kind| kind == "lib"),
+                UnitKind::IntegrationHarness => target.kind.iter().any(|kind| kind == "test"),
                 UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
                     target.kind.iter().any(|kind| kind == "custom-build")
                 }

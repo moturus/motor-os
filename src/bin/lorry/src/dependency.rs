@@ -23,8 +23,8 @@ use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::Toolchain;
 use crate::unit::{
     CompilationPlan, PlanOptions, ProfileContext, SourceRemap, UnitGraph, add_selected_binaries,
-    add_selected_harnesses, add_selected_library, dependency_units,
-    plan_dependency_units_with_remaps, selected_library_key,
+    add_selected_harnesses, add_selected_integration_harnesses, add_selected_library,
+    dependency_units, plan_dependency_units_with_remaps, selected_library_key,
 };
 
 #[derive(Debug)]
@@ -54,7 +54,7 @@ impl PreparedGraph {
     }
 
     pub fn dependency_plan(&self, options: &PlanOptions<'_>) -> Result<CompilationPlan> {
-        self.plan(options, None, false)
+        self.plan(options, None, false, None)
     }
 
     pub fn selected_targets_plan(
@@ -69,6 +69,7 @@ impl PreparedGraph {
             options,
             Some((selected, binary_name, include_binaries, include_harnesses)),
             false,
+            None,
         )
     }
 
@@ -77,6 +78,7 @@ impl PreparedGraph {
         options: &PlanOptions<'_>,
         selected: &Manifest,
         include_harnesses: bool,
+        integration_name: Option<&str>,
     ) -> Result<CompilationPlan> {
         if options.test_profile {
             return Err(Error::failure(
@@ -87,6 +89,7 @@ impl PreparedGraph {
             options,
             Some((selected, None, true, include_harnesses)),
             true,
+            integration_name,
         )
     }
 
@@ -95,6 +98,7 @@ impl PreparedGraph {
         options: &PlanOptions<'_>,
         selected: Option<(&Manifest, Option<&str>, bool, bool)>,
         mixed_profile: bool,
+        integration_name: Option<&str>,
     ) -> Result<CompilationPlan> {
         let mut manifests = self
             .packages
@@ -137,6 +141,15 @@ impl PreparedGraph {
         }
         if let Some(test_graph) = test_graph {
             graph.merge(test_graph.with_profile(ProfileContext::Test, options.panic_abort))?;
+            let selected = selected.unwrap().0;
+            add_selected_integration_harnesses(
+                &mut graph,
+                &self.resolution,
+                &manifests,
+                selected,
+                integration_name,
+                options.panic_abort,
+            )?;
         } else if options.test_profile {
             graph = graph.with_profile(ProfileContext::Test, options.panic_abort);
         }
@@ -1030,10 +1043,12 @@ mod tests {
     use crate::resolver::PackageSourceKey;
     use crate::source_tree::DEFAULT_LIMITS;
     use crate::toolchain::{CfgSet, Toolchain};
-    use crate::unit::{ProfileContext, UnitKind};
+    use crate::unit::{ProfileContext, UnitEdgeKind, UnitKind};
     use semver::Version;
+    use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -1168,6 +1183,12 @@ mod tests {
         fs::create_dir_all(fixture.0.join("src")).unwrap();
         fs::write(fixture.0.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
         fs::write(fixture.0.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(fixture.0.join("tests")).unwrap();
+        fs::write(
+            fixture.0.join("tests/integration.rs"),
+            "#[test] fn test() {}\n",
+        )
+        .unwrap();
         fs::create_dir_all(fixture.0.join("local/src")).unwrap();
         fs::write(
             fixture.0.join("local/Cargo.toml"),
@@ -1232,7 +1253,7 @@ mod tests {
         let plan = graph.dependency_plan(&options).unwrap();
         assert!(plan.units.values().all(|unit| unit.source_remap.is_none()));
         let mixed = graph
-            .selected_mixed_test_plan(&options, &manifest, true)
+            .selected_mixed_test_plan(&options, &manifest, true, None)
             .unwrap();
         let library = selected_library_key(&manifest).unwrap();
         let test_library = library
@@ -1256,6 +1277,145 @@ mod tests {
         assert_ne!(
             mixed.units[&library].identity,
             mixed.units[&test_library].identity
+        );
+        let integration = mixed
+            .units
+            .keys()
+            .find(|key| key.kind == UnitKind::IntegrationHarness)
+            .unwrap();
+        assert_eq!(integration.profile, ProfileContext::Test);
+        let edges = &mixed.units[integration].unit.dependencies;
+        assert!(edges.iter().any(|edge| {
+            edge.kind == UnitEdgeKind::RustDependency && edge.unit == test_library
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.kind == UnitEdgeKind::ArtifactDependency
+                && edge.unit.kind == UnitKind::Binary
+                && edge.unit.profile == ProfileContext::Normal
+        }));
+
+        let focused = graph
+            .selected_mixed_test_plan(&options, &manifest, false, Some("integration"))
+            .unwrap();
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let output = Command::new(cargo)
+            .args([
+                "-Z",
+                "unstable-options",
+                "test",
+                "--release",
+                "--test",
+                "integration",
+                "--unit-graph",
+                "--offline",
+            ])
+            .arg("--manifest-path")
+            .arg(fixture.0.join("Cargo.toml"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let units = cargo["units"].as_array().unwrap();
+        let cargo_nodes = units
+            .iter()
+            .map(|unit| {
+                let package_id = unit["pkg_id"].as_str().unwrap();
+                let package = if package_id
+                    .starts_with(&format!("path+file://{}#", fixture.0.display()))
+                {
+                    manifest.name.as_str()
+                } else {
+                    package_id.rsplit('/').next().unwrap().split('#').next().unwrap()
+                };
+                (
+                    package.to_owned(),
+                    unit["target"]["kind"][0].as_str().unwrap().to_owned(),
+                    unit["target"]["name"].as_str().unwrap().to_owned(),
+                    unit["profile"]["panic"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let lorry_node = |key: &crate::unit::UnitKey| {
+            let unit = &focused.units[key];
+            let kind = match key.kind {
+                UnitKind::Library => "lib",
+                UnitKind::Binary => "bin",
+                UnitKind::IntegrationHarness => "test",
+                _ => panic!("unexpected unit in integration oracle: {:?}", key.kind),
+            };
+            let name = key.target.as_deref().unwrap_or_else(|| {
+                if key.package == library.package {
+                    manifest.library.as_ref().unwrap().name.as_str()
+                } else {
+                    graph.packages[&key.package]
+                        .manifest
+                        .library
+                        .as_ref()
+                        .unwrap()
+                        .name
+                        .as_str()
+                }
+            });
+            (
+                key.package.name.clone(),
+                kind.to_owned(),
+                name.to_owned(),
+                match unit.settings.profile.panic {
+                    crate::identity::CargoPanicStrategy::Abort => "abort",
+                    crate::identity::CargoPanicStrategy::Unwind => "unwind",
+                    _ => unreachable!(),
+                }
+                .to_owned(),
+            )
+        };
+        let lorry_nodes = focused
+            .units
+            .keys()
+            .map(lorry_node)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(lorry_nodes, cargo_nodes.iter().cloned().collect());
+        let mut cargo_edges = BTreeSet::new();
+        for (parent, unit) in units.iter().enumerate() {
+            for edge in unit["dependencies"].as_array().unwrap() {
+                cargo_edges.insert((
+                    cargo_nodes[parent].clone(),
+                    cargo_nodes[edge["index"].as_u64().unwrap() as usize].clone(),
+                    edge["extern_crate_name"].as_str().unwrap().to_owned(),
+                ));
+            }
+        }
+        let lorry_edges = focused
+            .units
+            .values()
+            .flat_map(|unit| {
+                unit.unit.dependencies.iter().map(|edge| {
+                    (
+                        lorry_node(&unit.unit.key),
+                        lorry_node(&edge.unit),
+                        edge.alias.clone().unwrap(),
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(lorry_edges, cargo_edges);
+        let cargo_roots = cargo["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|index| cargo_nodes[index.as_u64().unwrap() as usize].clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            cargo_roots,
+            focused
+                .units
+                .keys()
+                .filter(|key| key.kind == UnitKind::IntegrationHarness)
+                .map(lorry_node)
+                .collect()
         );
     }
 

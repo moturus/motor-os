@@ -190,6 +190,24 @@ pub fn dependency_rustc_invocation_with_build_output(
                 output_dir,
             )
         }
+        UnitKind::IntegrationHarness => {
+            let name = key
+                .target
+                .as_deref()
+                .ok_or_else(|| Error::failure("selected integration harness has no target name"))?;
+            let target = manifest
+                .integration_tests
+                .iter()
+                .find(|target| target.name == name)
+                .ok_or_else(|| Error::failure(format!("integration harness `{name}` is absent")))?;
+            (
+                binary_crate_name.as_deref().unwrap(),
+                target.path.as_path(),
+                "bin",
+                "dep-info,link",
+                output_dir,
+            )
+        }
         UnitKind::BuildScriptCompile => {
             let source = manifest.build_script.as_deref().ok_or_else(|| {
                 Error::failure(format!(
@@ -230,7 +248,10 @@ pub fn dependency_rustc_invocation_with_build_output(
         &mut arguments,
         "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
     );
-    if matches!(key.kind, UnitKind::LibraryHarness | UnitKind::BinaryHarness) {
+    if matches!(
+        key.kind,
+        UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness
+    ) {
         push(&mut arguments, "--test");
     } else {
         push(&mut arguments, "--crate-type");
@@ -563,6 +584,7 @@ pub(crate) fn unit_output_directory(
         | UnitKind::Binary
         | UnitKind::LibraryHarness
         | UnitKind::BinaryHarness
+        | UnitKind::IntegrationHarness
         | UnitKind::ProcMacro => unit.join("deps"),
         UnitKind::BuildScriptCompile => unit.join("build-script"),
         UnitKind::BuildScriptRun => unit.join("build-script-execution/out"),
@@ -582,12 +604,13 @@ fn expected_output(
             rmeta: output_dir.join(format!("lib{stem}.rmeta")),
             dep_info: output_dir.join(format!("{stem}.d")),
         },
-        UnitKind::Binary | UnitKind::LibraryHarness | UnitKind::BinaryHarness => {
-            RustcOutput::Binary {
-                executable: output_dir.join(&stem),
-                dep_info: output_dir.join(format!("{stem}.d")),
-            }
-        }
+        UnitKind::Binary
+        | UnitKind::LibraryHarness
+        | UnitKind::BinaryHarness
+        | UnitKind::IntegrationHarness => RustcOutput::Binary {
+            executable: output_dir.join(&stem),
+            dep_info: output_dir.join(format!("{stem}.d")),
+        },
         UnitKind::ProcMacro => RustcOutput::ProcMacro {
             dynamic_library: output_dir.join(proc_macro_filename(&stem)),
             dep_info: output_dir.join(format!("{stem}.d")),

@@ -26,6 +26,7 @@ pub enum UnitKind {
     Binary,
     LibraryHarness,
     BinaryHarness,
+    IntegrationHarness,
     ProcMacro,
     BuildScriptCompile,
     BuildScriptRun,
@@ -69,6 +70,7 @@ impl UnitKey {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum UnitEdgeKind {
     RustDependency,
+    ArtifactDependency,
     BuildScriptExecutable,
     BuildScriptOutput,
 }
@@ -461,7 +463,7 @@ pub fn add_selected_library(
         ));
     }
     insert_unit(&mut graph.units, key.clone());
-    add_selected_normal_edges(graph, resolution, manifests, &key)?;
+    add_selected_normal_edges(graph, resolution, manifests, &key, false)?;
     graph.order = topological_order(&graph.units)?;
     Ok(key)
 }
@@ -508,7 +510,7 @@ pub fn add_selected_binaries(
         key.kind = UnitKind::Binary;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, &key)?;
+        add_selected_normal_edges(graph, resolution, manifests, &key, false)?;
         if let Some(library) = &library {
             add_edge(
                 &mut graph.units,
@@ -541,7 +543,7 @@ pub fn add_selected_harnesses(
         key.kind = UnitKind::LibraryHarness;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, &key)?;
+        add_selected_normal_edges(graph, resolution, manifests, &key, false)?;
         harnesses.push(key);
     }
     for target in manifest.binaries.iter().filter(|target| target.test) {
@@ -549,7 +551,7 @@ pub fn add_selected_harnesses(
         key.kind = UnitKind::BinaryHarness;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, &key)?;
+        add_selected_normal_edges(graph, resolution, manifests, &key, false)?;
         if let Some(library) = &library {
             add_edge(
                 &mut graph.units,
@@ -565,11 +567,65 @@ pub fn add_selected_harnesses(
     Ok(harnesses)
 }
 
+pub fn add_selected_integration_harnesses(
+    graph: &mut UnitGraph,
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    manifest: &Manifest,
+    selected_name: Option<&str>,
+    panic_abort: bool,
+) -> Result<Vec<UnitKey>> {
+    let library = manifest
+        .library
+        .as_ref()
+        .map(|_| selected_library_key(manifest))
+        .transpose()?
+        .map(|key| key.with_profile(ProfileContext::Test, panic_abort));
+    let mut harnesses = Vec::new();
+    for target in manifest
+        .integration_tests
+        .iter()
+        .filter(|target| selected_name.is_none_or(|name| name == target.name))
+    {
+        let mut key =
+            selected_library_key(manifest)?.with_profile(ProfileContext::Test, panic_abort);
+        key.kind = UnitKind::IntegrationHarness;
+        key.target = Some(target.name.clone());
+        insert_unit(&mut graph.units, key.clone());
+        add_selected_normal_edges(graph, resolution, manifests, &key, panic_abort)?;
+        if let Some(library) = &library {
+            add_edge(
+                &mut graph.units,
+                &key,
+                library.clone(),
+                UnitEdgeKind::RustDependency,
+                manifest.library.as_ref().map(|target| target.name.clone()),
+            )?;
+        }
+        for binary in &manifest.binaries {
+            let mut program = selected_library_key(manifest)?;
+            program.kind = UnitKind::Binary;
+            program.target = Some(binary.name.clone());
+            add_edge(
+                &mut graph.units,
+                &key,
+                program,
+                UnitEdgeKind::ArtifactDependency,
+                Some(binary.name.clone()),
+            )?;
+        }
+        harnesses.push(key);
+    }
+    graph.order = topological_order(&graph.units)?;
+    Ok(harnesses)
+}
+
 fn add_selected_normal_edges(
     graph: &mut UnitGraph,
     resolution: &Resolution,
     manifests: &BTreeMap<PackageKey, Manifest>,
     parent: &UnitKey,
+    panic_abort: bool,
 ) -> Result<()> {
     let packages = resolution
         .packages
@@ -598,7 +654,8 @@ fn add_selected_normal_edges(
             library_unit_kind(child_manifest),
             edge.compile_kind,
             &features_for(package, edge.compile_kind),
-        );
+        )
+        .with_profile(parent.profile, panic_abort);
         add_edge(
             &mut graph.units,
             parent,
@@ -689,7 +746,10 @@ pub fn plan_dependency_units_with_remaps(
         };
         let features = key.features.iter().cloned().collect::<Vec<_>>();
         let mut edges = unit.dependencies.iter().collect::<Vec<_>>();
-        if matches!(key.kind, UnitKind::Binary | UnitKind::BinaryHarness) {
+        if matches!(
+            key.kind,
+            UnitKind::Binary | UnitKind::BinaryHarness | UnitKind::IntegrationHarness
+        ) {
             edges.sort_by_key(|edge| edge.unit.package == key.package);
         }
         let dependencies = edges
@@ -740,6 +800,12 @@ pub fn plan_dependency_units_with_remaps(
                 } else {
                     CargoTargetKind::Bin
                 },
+            ),
+            UnitKind::IntegrationHarness => (
+                key.target.as_deref().ok_or_else(|| {
+                    Error::failure("selected integration harness unit has no target name")
+                })?,
+                CargoTargetKind::Test,
             ),
             UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
                 ("build-script-build", CargoTargetKind::CustomBuild)
@@ -871,7 +937,9 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
         profile,
         mode: match key.kind {
             UnitKind::BuildScriptRun => CargoCompileMode::RunCustomBuild,
-            UnitKind::LibraryHarness | UnitKind::BinaryHarness => CargoCompileMode::Test,
+            UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness => {
+                CargoCompileMode::Test
+            }
             _ => CargoCompileMode::Build,
         },
         lto: unit_lto(key, options.release, options.release_profile.lto),
@@ -969,7 +1037,10 @@ fn profile_strip(strip: ManifestStrip) -> CargoStrip<'static> {
 }
 
 fn unit_lto(key: &UnitKey, release: bool, configured: ManifestLto) -> CargoUnitLto<'static> {
-    if matches!(key.kind, UnitKind::LibraryHarness | UnitKind::BinaryHarness) {
+    if matches!(
+        key.kind,
+        UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness
+    ) {
         return root_lto(release, configured, RootTargetKind::Binary, true);
     }
     if key.kind == UnitKind::Binary {
