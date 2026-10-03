@@ -607,6 +607,61 @@ fn shipped_cat_reads_a_literal_file_path() {
 }
 
 #[test]
+fn shipped_curl_returns_headers_without_following_redirects() {
+    let server = MockServer::start(vec![
+        Script::new().write(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"),
+        Script::new().write(b"HTTP/1.1 302 Found\r\nLocation: /destination\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+    ])
+    .unwrap();
+    let fixture = Fixture::new("shipped-curl");
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/curl"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool(
+            "curl",
+            &serde_json::json!({"url": server.url("/ok")}).to_string(),
+        ),
+        tool(
+            "curl",
+            &serde_json::json!({"url": server.url("/redirect")}).to_string(),
+        ),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    let mut output = String::new();
+    runtime
+        .turn(
+            "fetch".to_string(),
+            &mut FixedApproval(true),
+            &mut |event| {
+                if let Event::ToolOutput { name, text, .. } = event {
+                    assert_eq!(name, "curl");
+                    output.push_str(&text);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(
+        output.contains("HTTP/1.1 200 OK") && output.contains("hello"),
+        "{output}"
+    );
+    assert!(
+        output.contains("HTTP/1.1 302 Found") && output.contains("Location: /destination"),
+        "{output}"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].target, "/ok");
+    assert_eq!(requests[1].target, "/redirect");
+}
+
+#[test]
 fn shipped_diff_treats_differences_as_a_normal_result() {
     let fixture = Fixture::new("shipped-diff");
     std::fs::write(fixture.workspace.join("old [file].txt"), "old\n").unwrap();

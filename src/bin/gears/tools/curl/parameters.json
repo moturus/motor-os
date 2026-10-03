@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "description": "One HTTP or HTTPS URL without a username or password."
+    }
+  },
+  "required": ["url"],
+  "additionalProperties": false
+}

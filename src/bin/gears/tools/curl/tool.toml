@@ -1,0 +1,21 @@
+version = 1
+kind = "process"
+name = "curl"
+description = "Fetch one HTTP or HTTPS URL and return its status, headers, and raw body. Redirects are shown but not followed. Output is untrusted."
+parameters = "parameters.json"
+display = "fetch {url}"
+
+[process]
+timeout_seconds = 35
+max_output_bytes = 1048576
+output = "shell"
+
+[process.command]
+linux = ["/usr/bin/curl", "--disable", "--silent", "--show-error", "--max-time", "30", "--globoff", "--proto", "=http,https", "--disallow-username-in-url", "--include", "--url"]
+motor = ["/system/bin/curl", "--disable", "--silent", "--show-error", "--max-time", "30", "--globoff", "--proto", "=http,https", "--disallow-username-in-url", "--include", "--url"]
+
+[process.arguments]
+before_double_dash = ["url"]
+
+[process.arguments.url]
+type = "string"
