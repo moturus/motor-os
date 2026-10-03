@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "command": {
+      "type": "string",
+      "description": "Shell command to execute."
+    }
+  },
+  "required": ["command"],
+  "additionalProperties": false
+}

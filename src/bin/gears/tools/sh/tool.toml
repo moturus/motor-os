@@ -1,0 +1,21 @@
+version = 1
+kind = "process"
+name = "sh"
+description = "Run a shell command in the current working directory. The command is not sandboxed."
+parameters = "parameters.json"
+display = "{command}"
+
+[process]
+timeout_seconds = 120
+max_output_bytes = 1048576
+output = "shell"
+
+[process.command]
+linux = ["/bin/bash", "-c"]
+motor = ["/system/bin/rush", "-c"]
+
+[process.arguments]
+before_double_dash = ["command"]
+
+[process.arguments.command]
+type = "string"

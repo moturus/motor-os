@@ -248,6 +248,41 @@ type = "string"
 }
 
 #[test]
+fn shipped_sh_tool_runs_from_its_directory() {
+    let fixture = Fixture::new("shipped-sh");
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"printf made > result.txt"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    runtime
+        .turn("make it".to_string(), &mut FixedApproval(true), &mut |_| {
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("result.txt")).unwrap(),
+        "made"
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(
+        requests[0]
+            .tools
+            .iter()
+            .filter(|spec| spec.name == "sh")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn text_only_turn_streams_and_is_durable() {
     let fixture = Fixture::new("text");
     let provider = Scripted::new(vec![answer("hello")]);
