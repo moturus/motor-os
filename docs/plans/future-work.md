@@ -128,6 +128,22 @@ user-class process that allocates during these tests.
 1. double-copy during process spawn
 2. process text not shared across process copies
 
+## Atomic publication of the Gears directory lock (2026-10-02)
+
+Gears' planned `gears.lock` uses exclusive file creation, then writes its
+PID. Another Gears can see the new file before the PID is written, mistake
+the empty record for a stale lock, remove it, and start concurrently. The
+existing session locks have the same publication window. PID reuse also
+means that liveness alone cannot establish that the holder is the original
+Gears process.
+
+For now, phase 1.5 follows the existing session-lock pattern and treats a
+fresh or unreadable lock conservatively. Revisit a portable way to publish
+and claim the owner atomically on Linux and Motor OS, including crash
+recovery and identity checks. Add a concurrent-start regression on both
+systems before claiming strict single-instance enforcement. Do not add boot
+work or a lock service solely for this.
+
 ## FS block cache at RAM/16 (2026-10-01)
 
 sys-io's block cache (`block_cache_blocks` in
