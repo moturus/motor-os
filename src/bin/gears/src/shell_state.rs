@@ -1,5 +1,6 @@
 //! Commit shell snapshots after filtering variables that must not be restored.
 
+use std::io::Read;
 use std::path::Path;
 
 use crate::state::StateRoot;
@@ -7,6 +8,8 @@ use crate::state::StateRoot;
 const PENDING_CWD: &str = "cwd.pending";
 const PENDING_ENV: &str = "env.pending";
 const MAX_EXPORT_BYTES: usize = 4092;
+const MAX_CWD_BYTES: usize = 16 * 1024;
+const MAX_ENV_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn prepare(directory: &Path) -> Result<(), String> {
     let state = StateRoot::new(directory.to_path_buf())?;
@@ -26,8 +29,8 @@ pub fn finish(directory: &Path, interrupted: bool) -> Result<(), String> {
     let result = (|| match (cwd, env) {
         (None, None) => Ok(()), // `exit` or `exec` bypassed the wrapper's save step.
         (Some(cwd), Some(env)) => {
-            let cwd = std::fs::read_to_string(&cwd).map_err(|error| error.to_string())?;
-            let env = std::fs::read_to_string(&env).map_err(|error| error.to_string())?;
+            let cwd = read_snapshot(&cwd, MAX_CWD_BYTES)?;
+            let env = read_snapshot(&env, MAX_ENV_BYTES)?;
             let cwd = cwd.strip_suffix('\n').unwrap_or(&cwd);
             if !Path::new(cwd).is_absolute() {
                 Err("shell returned a non-absolute working directory".to_string())
@@ -41,6 +44,21 @@ pub fn finish(directory: &Path, interrupted: bool) -> Result<(), String> {
     })();
     let cleanup = clear_pending(&state);
     result.and(cleanup)
+}
+
+fn read_snapshot(path: &Path, limit: usize) -> Result<String, String> {
+    let file = std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    if bytes.len() > limit {
+        return Err(format!(
+            "{}: shell snapshot exceeds {limit} bytes",
+            path.display()
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn clear_pending(state: &StateRoot) -> Result<(), String> {
@@ -130,5 +148,19 @@ mod tests {
     fn rejects_an_incomplete_or_invalid_snapshot() {
         assert!(filter_exports("export ONE='unfinished\n").is_err());
         assert!(filter_exports("export 1BAD='x'\n").is_err());
+    }
+
+    #[test]
+    fn snapshot_read_is_bounded() {
+        let path =
+            std::env::temp_dir().join(format!("gears-snapshot-limit-{}", std::process::id()));
+        std::fs::write(&path, "123456789").unwrap();
+        assert!(
+            read_snapshot(&path, 8)
+                .unwrap_err()
+                .contains("exceeds 8 bytes")
+        );
+        assert_eq!(read_snapshot(&path, 9).unwrap(), "123456789");
+        std::fs::remove_file(path).unwrap();
     }
 }
