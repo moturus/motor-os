@@ -256,7 +256,7 @@ impl Runtime {
         approver: &mut dyn Approver,
         observer: &mut dyn Observer,
     ) -> Result<(), String> {
-        for round in 0..self.max_tool_rounds {
+        for _ in 0..self.max_tool_rounds {
             self.maybe_compact(false, None, observer)?;
             let mut messages = self.session.context_messages()?;
             let mut notices = Vec::new();
@@ -327,18 +327,15 @@ impl Runtime {
                     return Err("turn cancelled".to_string());
                 }
             }
-            if round + 1 == self.max_tool_rounds {
-                let error = format!("tool round limit ({}) reached", self.max_tool_rounds);
-                let entry = self.session.append_error(&error, false)?;
-                self.notify(
-                    "entry",
-                    serde_json::json!({"id": entry, "type": "turn_error"}),
-                    observer,
-                )?;
-                return Err(error);
-            }
         }
-        unreachable!("the bounded loop returns on its last round")
+        let error = format!("tool round limit ({}) reached", self.max_tool_rounds);
+        let entry = self.session.append_error(&error, false)?;
+        self.notify(
+            "entry",
+            serde_json::json!({"id": entry, "type": "turn_error"}),
+            observer,
+        )?;
+        Err(error)
     }
 
     pub fn compact(

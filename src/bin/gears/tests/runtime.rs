@@ -192,6 +192,56 @@ fn reasoning_only_reply_is_an_error_without_an_empty_assistant_message() {
 }
 
 #[test]
+fn zero_tool_round_budget_reports_an_error_instead_of_panicking() {
+    let fixture = Fixture::new("zero-rounds");
+    let config = Config {
+        max_tool_rounds: 0,
+        ..Config::default()
+    };
+    let provider = Scripted::new(Vec::new());
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    let error = runtime
+        .turn(
+            "question".to_string(),
+            &mut FixedApproval(false),
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+    assert!(error.contains("tool round limit (0) reached"), "{error}");
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert!(
+        runtime
+            .session()
+            .entries()
+            .iter()
+            .any(|entry| entry.kind == "turn_error")
+    );
+}
+
+#[test]
+fn tool_round_limit_stops_after_the_last_result() {
+    let fixture = Fixture::new("round-limit");
+    let config = Config {
+        max_tool_rounds: 1,
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![tool("sh", r#"{"command":"touch no-file"}"#)]);
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    let error = runtime
+        .turn(
+            "question".to_string(),
+            &mut FixedApproval(false),
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+    assert!(error.contains("tool round limit (1) reached"), "{error}");
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    let messages = runtime.session().context_messages().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert!(messages[2].text_content().contains("denied"));
+}
+
+#[test]
 fn a_denied_sh_call_is_returned_to_the_model() {
     let fixture = Fixture::new("deny");
     let provider = Scripted::new(vec![
