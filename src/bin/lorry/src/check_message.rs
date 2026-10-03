@@ -11,7 +11,7 @@ use crate::compile::RustcOutput;
 use crate::dependency::PreparedGraph;
 use crate::diagnostic::{Error, Result};
 use crate::executor::{EventReporter, ExecutedBuildScript};
-use crate::identity::{CargoDebugInfo, RootTargetKind};
+use crate::identity::CargoDebugInfo;
 use crate::manifest::Manifest;
 use crate::metadata::package::{self, Identity};
 use crate::metadata::wire;
@@ -85,38 +85,6 @@ impl Reporter {
             ansi: format == MessageFormat::JsonDiagnosticRenderedAnsi,
             state: Mutex::new(State::default()),
         })
-    }
-
-    pub fn root_compiler_messages(
-        &self,
-        kind: RootTargetKind,
-        name: &str,
-        output: &std::process::Output,
-    ) -> Result<()> {
-        let target = self.root.target(kind, name)?;
-        self.write_compiler_messages(&self.root, target, output)
-    }
-
-    pub fn root_artifact(
-        &self,
-        kind: RootTargetKind,
-        name: &str,
-        test: bool,
-        features: &[String],
-        metadata: &Path,
-    ) -> Result<()> {
-        let target = self.root.target(kind, name)?;
-        self.write_value(json!({
-            "reason": "compiler-artifact",
-            "package_id": self.root.id,
-            "manifest_path": self.root.manifest_path,
-            "target": target,
-            "profile": root_profile(test),
-            "features": features,
-            "filenames": [self.published_path(metadata)?],
-            "executable": Value::Null,
-            "fresh": false,
-        }))
     }
 
     fn package(&self, key: &PackageKey) -> Result<&Package> {
@@ -322,25 +290,6 @@ impl Package {
         }
     }
 
-    fn target(&self, kind: RootTargetKind, name: &str) -> Result<&wire::Target> {
-        self.targets
-            .iter()
-            .find(|target| {
-                target.name == name
-                    && match kind {
-                        RootTargetKind::Library => target
-                            .kind
-                            .iter()
-                            .all(|kind| kind != "bin" && kind != "test" && kind != "custom-build"),
-                        RootTargetKind::Binary => target.kind.iter().any(|kind| kind == "bin"),
-                        RootTargetKind::IntegrationTest => {
-                            target.kind.iter().any(|kind| kind == "test")
-                        }
-                    }
-            })
-            .ok_or_else(|| Error::failure(format!("check metadata omits target `{name}`")))
-    }
-
     fn dependency_target(&self, kind: UnitKind, name: Option<&str>) -> Result<&wire::Target> {
         self.targets
             .iter()
@@ -365,16 +314,6 @@ impl Package {
             })
             .ok_or_else(|| Error::failure("check metadata omits a dependency target"))
     }
-}
-
-fn root_profile(test: bool) -> Value {
-    json!({
-        "opt_level": "0",
-        "debuginfo": 2,
-        "debug_assertions": true,
-        "overflow_checks": true,
-        "test": test,
-    })
 }
 
 fn dependency_profile(planned: &PlannedUnit) -> Value {

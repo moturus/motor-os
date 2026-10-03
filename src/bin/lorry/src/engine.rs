@@ -9,26 +9,18 @@ use crate::dependency;
 use crate::diagnostic::{Error, Result};
 use crate::executor;
 use crate::hash::{Sha256, decode_hex, hex, sha256_file};
-use crate::identity::{
-    CargoUnitLto, Identity, IdentityInput, RootTargetKind, cargo_identity, root_lto,
-};
-use crate::manifest::{
-    BinaryTarget, Edition, IntegrationTestTarget, LibraryTarget, Manifest, Strip,
-};
-use crate::process::{self, RustcCommand};
+use crate::manifest::Manifest;
+use crate::process;
 use crate::progress::Progress;
 use crate::repository::RepositorySet;
-use crate::resolver::{
-    CompileKind, PackageKey, Resolution, TargetSelection, selected_root_features,
-};
+use crate::resolver::{PackageKey, Resolution, TargetSelection};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{
-    CheckTargetSelection, CompilationPlan, PlanOptions, UnitEdgeKind, UnitKey, UnitKind,
-    selected_library_key,
+    CheckTargetSelection, CompilationPlan, PlanOptions, UnitKey, UnitKind, selected_library_key,
 };
 use crate::validation::ValidationMode;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -493,10 +485,6 @@ struct BuildArtifacts {
 struct IncrementalRoots {
     host: PathBuf,
     target: PathBuf,
-}
-
-fn incremental_roots(build: &Build<'_>) -> IncrementalRoots {
-    incremental_roots_in(build, &artifact_root(build.manifest))
 }
 
 fn incremental_roots_in(build: &Build<'_>, target_root: &Path) -> IncrementalRoots {
@@ -1003,10 +991,8 @@ fn build_inner(
         }
         return Ok(BuildOutcome::Check(0));
     }
-    let needs_normal_plan = match check {
-        Some((_, options)) => options.selects_normal_targets(),
-        None => !build.test || (selected_integration && !build.manifest.binaries.is_empty()),
-    };
+    let needs_normal_plan =
+        !build.test || (selected_integration && !build.manifest.binaries.is_empty());
     let normal = if needs_normal_plan || selected_integration {
         let plan = if selected_integration {
             if let Some(name) = build.test_name
@@ -1034,29 +1020,18 @@ fn build_inner(
                 build.test_name,
             )?
         } else {
-            dependency_plan(
-                false,
-                check.is_none() && !build.test,
-                check.is_none() && !build.test,
-                false,
-            )?
+            dependency_plan(false, !build.test, !build.test, false)?
         };
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
-        let dependencies = if selected_integration {
-            Vec::new()
-        } else {
-            root_dependencies(&prepared.resolution, &plan, &outputs)?
-        };
         crate::trace::event(format_args!(
             "executed {} normal dependency units",
             plan.units.len()
         ));
-        Some((plan, outputs, dependencies))
+        Some((plan, outputs))
     } else {
         None
     };
-    let needs_test_plan = (!selected_integration && build.test)
-        || check.is_some_and(|(_, options)| options.selects_tests());
+    let needs_test_plan = !selected_integration && build.test;
     let test_result = if needs_test_plan {
         let test_plan = dependency_plan(
             true,
@@ -1065,7 +1040,7 @@ fn build_inner(
             build.test && build.test_name.is_none(),
         )?;
         let outputs = match normal.as_ref() {
-            Some((normal_plan, normal_outputs, _)) => executor::execute_reusing(
+            Some((normal_plan, normal_outputs)) => executor::execute_reusing(
                 &test_plan,
                 &manifests,
                 &executor_options,
@@ -1078,7 +1053,6 @@ fn build_inner(
             "executed {} test dependency units",
             test_plan.units.len()
         ));
-        let dependencies = root_dependencies(&prepared.resolution, &test_plan, &outputs)?;
         let harnesses = test_plan
             .order
             .iter()
@@ -1092,21 +1066,14 @@ fn build_inner(
                 )),
             })
             .collect::<Result<Vec<_>>>()?;
-        Some((dependencies, harnesses))
+        Some(harnesses)
     } else {
         None
     };
-    let (test_dependencies, test_harnesses) = match &test_result {
-        Some((dependencies, harnesses)) => (dependencies.as_slice(), harnesses.as_slice()),
-        None => (&[][..], &[][..]),
-    };
-    let normal_dependencies = normal
-        .as_ref()
-        .map(|(_, _, dependencies)| dependencies.as_slice())
-        .unwrap_or(&[]);
+    let test_harnesses = test_result.as_deref().unwrap_or(&[]);
     let normal_library = match (normal.as_ref(), selected_library.as_ref()) {
-        (Some((plan, outputs, _)), Some(key)) if plan.units.contains_key(key) => {
-            Some(planned_root_library(plan, outputs, key)?)
+        (Some((plan, outputs)), Some(key)) if plan.units.contains_key(key) => {
+            Some(planned_root_library(outputs, key)?)
         }
         _ => None,
     };
@@ -1116,30 +1083,8 @@ fn build_inner(
         )?)?;
         crate::trace::event("revalidated dependency sources");
     }
-    if let Some((_, options)) = check {
-        let success = compile_check_targets(
-            &build,
-            staging.path(),
-            &incremental.target,
-            normal_dependencies,
-            test_dependencies,
-            options,
-            message_reporter.as_ref(),
-        )?;
-        crate::trace::event("checked root targets");
-        drop(prepared);
-        if !success {
-            return Ok(BuildOutcome::Check(101));
-        }
-        staging.commit(&destination)?;
-        if build.verbosity != Verbosity::Quiet {
-            eprintln!("Finished `check` profile");
-        }
-        crate::trace::event("published check profile");
-        return Ok(BuildOutcome::Check(0));
-    }
     let compiled = if selected_integration {
-        let (plan, outputs, _) = normal
+        let (plan, outputs) = normal
             .as_ref()
             .ok_or_else(|| Error::failure("integration test has no compilation plan"))?;
         compile_planned_test_targets(
@@ -1161,7 +1106,7 @@ fn build_inner(
             },
         )?
     } else {
-        let (normal_plan, normal_outputs, _) = normal
+        let (normal_plan, normal_outputs) = normal
             .as_ref()
             .ok_or_else(|| Error::failure("build has no normal compilation plan"))?;
         compile_root_targets(
@@ -1979,195 +1924,12 @@ fn compile_jobs() -> usize {
         })
 }
 
-struct RootDependency {
-    alias: String,
-    identity: Identity,
-    rlib: PathBuf,
-    rmeta: PathBuf,
-    proc_macro: Option<PathBuf>,
-    search_paths: Vec<RootSearchPath>,
-}
-
-#[derive(Clone)]
-struct RootSearchPath {
-    compile_kind: CompileKind,
-    path: PathBuf,
-}
-
-fn root_dependencies(
-    resolution: &Resolution,
-    plan: &CompilationPlan,
-    outputs: &executor::Outputs,
-) -> Result<Vec<RootDependency>> {
-    let mut result = Vec::new();
-    for edge in &resolution.root_edges {
-        let mut matches = plan.units.iter().filter(|(key, _)| {
-            key.package == edge.package
-                && matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
-                && key.compile_kind == edge.compile_kind
-        });
-        let (key, planned) = matches.next().ok_or_else(|| {
-            Error::failure(format!(
-                "root dependency `{} {}` has no target library unit",
-                edge.package.name, edge.package.version
-            ))
-        })?;
-        if matches.next().is_some() {
-            return Err(Error::failure(format!(
-                "root dependency `{} {}` has more than one target library unit",
-                edge.package.name, edge.package.version
-            )));
-        }
-        let (rlib, rmeta, proc_macro) = match outputs.artifacts.get(key) {
-            Some(crate::compile::RustcOutput::Library { rlib, rmeta, .. }) => {
-                (rlib.clone(), rmeta.clone(), None)
-            }
-            Some(crate::compile::RustcOutput::ProcMacro {
-                dynamic_library, ..
-            }) => (
-                dynamic_library.clone(),
-                dynamic_library.clone(),
-                Some(dynamic_library.clone()),
-            ),
-            _ => {
-                return Err(Error::failure(format!(
-                    "root dependency `{} {}` did not produce a library artifact",
-                    edge.package.name, edge.package.version
-                )));
-            }
-        };
-        let alias = edge.alias.replace('-', "_");
-        if result
-            .iter()
-            .any(|existing: &RootDependency| existing.alias == alias)
-        {
-            return Err(Error::failure(format!(
-                "selected root dependency alias `{alias}` is ambiguous"
-            )));
-        }
-        result.push(RootDependency {
-            alias,
-            identity: planned.identity.clone(),
-            rlib,
-            rmeta,
-            proc_macro,
-            search_paths: root_dependency_search_paths(plan, outputs, key)?,
-        });
-    }
-    Ok(result)
-}
-
-fn root_dependency_search_paths(
-    plan: &CompilationPlan,
-    outputs: &executor::Outputs,
-    root: &UnitKey,
-) -> Result<Vec<RootSearchPath>> {
-    let mut selected = BTreeSet::new();
-    let mut pending = vec![root.clone()];
-    while let Some(key) = pending.pop() {
-        if !selected.insert(key.clone()) {
-            continue;
-        }
-        let planned = plan.units.get(&key).ok_or_else(|| {
-            Error::failure(format!(
-                "root dependency search path references absent unit `{} {}`",
-                key.package.name, key.package.version
-            ))
-        })?;
-        pending.extend(
-            planned
-                .unit
-                .dependencies
-                .iter()
-                .filter(|edge| edge.kind == UnitEdgeKind::RustDependency)
-                .map(|edge| edge.unit.clone()),
-        );
-    }
-    plan.order
-        .iter()
-        .filter(|key| selected.contains(*key))
-        .map(|key| {
-            let artifact = outputs.artifacts.get(key).ok_or_else(|| {
-                Error::failure(format!(
-                    "root dependency search unit `{} {}` has no artifact",
-                    key.package.name, key.package.version
-                ))
-            })?;
-            let path = match artifact {
-                crate::compile::RustcOutput::Library { rlib, .. } => rlib,
-                crate::compile::RustcOutput::ProcMacro {
-                    dynamic_library, ..
-                } => dynamic_library,
-                crate::compile::RustcOutput::Binary { .. }
-                | crate::compile::RustcOutput::Metadata { .. }
-                | crate::compile::RustcOutput::BuildScript { .. } => {
-                    return Err(Error::failure(
-                        "root Rust dependency resolved to a build-script artifact",
-                    ));
-                }
-            }
-            .parent()
-            .ok_or_else(|| Error::failure("root dependency artifact has no parent directory"))?;
-            Ok(RootSearchPath {
-                compile_kind: key.compile_kind,
-                path: path.to_owned(),
-            })
-        })
-        .collect()
-}
-
-#[derive(Clone, Copy)]
-enum RootTarget<'a> {
-    Library(&'a LibraryTarget),
-    Binary(&'a BinaryTarget),
-    IntegrationTest(&'a IntegrationTestTarget),
-}
-
-impl<'a> RootTarget<'a> {
-    fn name(self) -> &'a str {
-        match self {
-            Self::Library(target) => &target.name,
-            Self::Binary(target) => &target.name,
-            Self::IntegrationTest(target) => &target.name,
-        }
-    }
-
-    fn crate_name(self) -> String {
-        self.name().replace('-', "_")
-    }
-
-    fn path(self) -> &'a Path {
-        match self {
-            Self::Library(target) => &target.path,
-            Self::Binary(target) => &target.path,
-            Self::IntegrationTest(target) => &target.path,
-        }
-    }
-
-    fn kind(self) -> RootTargetKind {
-        match self {
-            Self::Library(_) => RootTargetKind::Library,
-            Self::Binary(_) => RootTargetKind::Binary,
-            Self::IntegrationTest(_) => RootTargetKind::IntegrationTest,
-        }
-    }
-}
-
 struct RootLibraryArtifact {
-    identity: Identity,
     extern_path: PathBuf,
     dep_info: PathBuf,
 }
 
-fn planned_root_library(
-    plan: &CompilationPlan,
-    outputs: &executor::Outputs,
-    key: &UnitKey,
-) -> Result<RootLibraryArtifact> {
-    let planned = plan
-        .units
-        .get(key)
-        .ok_or_else(|| Error::failure("selected library is missing from its compilation plan"))?;
+fn planned_root_library(outputs: &executor::Outputs, key: &UnitKey) -> Result<RootLibraryArtifact> {
     let Some(crate::compile::RustcOutput::Library { rlib, dep_info, .. }) =
         outputs.artifacts.get(key)
     else {
@@ -2176,7 +1938,6 @@ fn planned_root_library(
         ));
     };
     Ok(RootLibraryArtifact {
-        identity: planned.identity.clone(),
         extern_path: rlib.clone(),
         dep_info: dep_info.clone(),
     })
@@ -2212,277 +1973,9 @@ impl CheckOptions {
         self.all_targets || self.bins || self.bin.is_some() || !self.has_target_selector()
     }
 
-    fn selects_normal_targets(&self) -> bool {
-        self.selects_library() || self.selects_binaries() || self.test.is_some()
-    }
-
     fn selects_tests(&self) -> bool {
         self.all_targets || self.test.is_some()
     }
-}
-
-fn compile_check_targets(
-    build: &Build<'_>,
-    staging: &Path,
-    incremental_target: &Path,
-    normal_dependencies: &[RootDependency],
-    test_dependencies: &[RootDependency],
-    options: &CheckOptions,
-    reporter: Option<&crate::check_message::Reporter>,
-) -> Result<bool> {
-    let features = selected_root_features(build.manifest)?
-        .into_iter()
-        .collect::<Vec<_>>();
-    let mut success = true;
-
-    let normal_library = if options.selects_normal_targets() {
-        build
-            .manifest
-            .library
-            .as_ref()
-            .map(|target| {
-                check_root_target(
-                    build,
-                    RootTarget::Library(target),
-                    false,
-                    staging,
-                    normal_dependencies,
-                    None,
-                    &features,
-                    false,
-                    incremental_target,
-                    reporter,
-                    None,
-                    &[],
-                )
-            })
-            .transpose()?
-            .flatten()
-    } else {
-        None
-    };
-    if build.manifest.library.is_some()
-        && options.selects_normal_targets()
-        && normal_library.is_none()
-    {
-        success = false;
-        if !options.keep_going {
-            return Ok(false);
-        }
-    }
-
-    let mut binary_identities = Vec::new();
-    if options.selects_binaries() && (build.manifest.library.is_none() || normal_library.is_some())
-    {
-        for target in &build.manifest.binaries {
-            if !options.all_targets
-                && !options.bins
-                && options
-                    .bin
-                    .as_ref()
-                    .is_some_and(|name| *name != target.name)
-            {
-                continue;
-            }
-            match check_root_target(
-                build,
-                RootTarget::Binary(target),
-                false,
-                staging,
-                normal_dependencies,
-                normal_library.as_ref(),
-                &features,
-                false,
-                incremental_target,
-                reporter,
-                None,
-                &[],
-            )? {
-                Some(artifact) => binary_identities.push(artifact.identity),
-                None => {
-                    success = false;
-                    if !options.keep_going {
-                        return Ok(false);
-                    }
-                }
-            }
-        }
-    }
-
-    if !options.selects_tests() {
-        return Ok(success);
-    }
-
-    if let Some(target) = build
-        .manifest
-        .library
-        .as_ref()
-        .filter(|target| target.test && options.all_targets)
-        && check_root_target(
-            build,
-            RootTarget::Library(target),
-            true,
-            staging,
-            test_dependencies,
-            None,
-            &features,
-            true,
-            incremental_target,
-            reporter,
-            None,
-            &[],
-        )?
-        .is_none()
-    {
-        success = false;
-        if !options.keep_going {
-            return Ok(false);
-        }
-    }
-
-    if build.manifest.library.is_none() || normal_library.is_some() {
-        for target in build
-            .manifest
-            .binaries
-            .iter()
-            .filter(|target| target.test && options.all_targets)
-        {
-            if check_root_target(
-                build,
-                RootTarget::Binary(target),
-                true,
-                staging,
-                test_dependencies,
-                normal_library.as_ref(),
-                &features,
-                true,
-                incremental_target,
-                reporter,
-                None,
-                &[],
-            )?
-            .is_none()
-            {
-                success = false;
-                if !options.keep_going {
-                    return Ok(false);
-                }
-            }
-        }
-
-        let integration_environment = IntegrationEnvironment {
-            binaries: build
-                .manifest
-                .binaries
-                .iter()
-                .map(|binary| (binary.name.as_str(), staging.join(&binary.name)))
-                .collect(),
-            temporary_directory: staging,
-        };
-        for target in &build.manifest.integration_tests {
-            if !options.all_targets
-                && options
-                    .test
-                    .as_ref()
-                    .is_some_and(|name| *name != target.name)
-            {
-                continue;
-            }
-            if check_root_target(
-                build,
-                RootTarget::IntegrationTest(target),
-                true,
-                staging,
-                test_dependencies,
-                normal_library.as_ref(),
-                &features,
-                true,
-                incremental_target,
-                reporter,
-                Some(integration_environment.clone()),
-                &binary_identities,
-            )?
-            .is_none()
-            {
-                success = false;
-                if !options.keep_going {
-                    return Ok(false);
-                }
-            }
-        }
-    }
-    Ok(success)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn check_root_target(
-    build: &Build<'_>,
-    target: RootTarget<'_>,
-    test: bool,
-    staging: &Path,
-    dependencies: &[RootDependency],
-    library: Option<&RootLibraryArtifact>,
-    features: &[String],
-    test_profile: bool,
-    incremental_target: &Path,
-    reporter: Option<&crate::check_message::Reporter>,
-    integration_environment: Option<IntegrationEnvironment<'_>>,
-    artifact_dependencies: &[Identity],
-) -> Result<Option<RootLibraryArtifact>> {
-    let mut identities = dependencies
-        .iter()
-        .map(|dependency| dependency.identity.clone())
-        .collect::<Vec<_>>();
-    if let Some(library) = library {
-        identities.push(library.identity.clone());
-    }
-    identities.extend_from_slice(artifact_dependencies);
-    let identity = root_identity(build, target, test, test_profile, features, &identities)?;
-    let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
-    create_directory(&output_dir, "root rustc output directory")?;
-    let arguments = rustc_arguments(
-        build,
-        target,
-        test,
-        &identity,
-        staging,
-        dependencies,
-        library,
-        features,
-        test_profile,
-        true,
-        Some(incremental_target),
-    );
-    let output = execute_root_rustc(
-        build,
-        target,
-        test,
-        dependencies,
-        &arguments,
-        integration_environment,
-    )?;
-    let finished = if let Some(reporter) = reporter {
-        reporter.root_compiler_messages(target.kind(), target.name(), &output)?;
-        RustcCommand::require_success(&output)
-    } else {
-        RustcCommand::finish(&output, build.color)
-    };
-    if let Err(error) = finished {
-        eprint!("{}", error.render());
-        return Ok(None);
-    }
-    let stem = format!("{}{}", target.crate_name(), identity.extra_filename);
-    let metadata = output_dir.join(format!("lib{stem}.rmeta"));
-    let dep_info = output_dir.join(format!("{stem}.d"));
-    verify_artifacts([&metadata, &dep_info])?;
-    if let Some(reporter) = reporter {
-        reporter.root_artifact(target.kind(), target.name(), test, features, &metadata)?;
-    }
-    Ok(Some(RootLibraryArtifact {
-        identity,
-        extern_path: metadata,
-        dep_info,
-    }))
 }
 
 fn compile_root_targets(
@@ -2695,118 +2188,6 @@ fn unknown_integration_test(manifest: &Manifest, name: &str) -> Error {
     Error::failure(format!("no integration-test target named `{name}`")).with_help(help)
 }
 
-#[derive(Clone)]
-struct IntegrationEnvironment<'a> {
-    binaries: Vec<(&'a str, PathBuf)>,
-    temporary_directory: &'a Path,
-}
-
-fn root_identity(
-    build: &Build<'_>,
-    target: RootTarget<'_>,
-    test: bool,
-    test_profile: bool,
-    features: &[String],
-    dependencies: &[Identity],
-) -> Result<Identity> {
-    let source_path = build
-        .manifest
-        .root
-        .strip_prefix(&build.manifest.workspace_root)
-        .map_err(|_| Error::failure("selected package is outside its workspace root"))?
-        .to_str()
-        .ok_or_else(|| Error::failure("selected package path is not valid UTF-8"))?;
-    Ok(cargo_identity(&IdentityInput {
-        package_name: &build.manifest.name,
-        version: &build.manifest.version,
-        source_path,
-        target_name: target.name(),
-        target_kind: target.kind(),
-        features,
-        release: build.release,
-        test,
-        test_profile,
-        panic_abort: build.manifest.panic_abort(build.release),
-        logical_target: build.logical_target,
-        release_profile: &build.manifest.release,
-        rustc: build.toolchain,
-        rustflags: build.rustflags,
-        dependencies,
-    }))
-}
-
-fn root_output_directory(staging: &Path, package_name: &str, identity: &Identity) -> PathBuf {
-    staging
-        .join("build")
-        .join(package_name)
-        .join(identity.extra_filename.trim_start_matches('-'))
-        .join("deps")
-}
-
-fn execute_root_rustc(
-    build: &Build<'_>,
-    target: RootTarget<'_>,
-    test: bool,
-    dependencies: &[RootDependency],
-    arguments: &[OsString],
-    integration_environment: Option<IntegrationEnvironment<'_>>,
-) -> Result<std::process::Output> {
-    if build.verbosity != Verbosity::Quiet {
-        let target_kind = if test {
-            "test"
-        } else {
-            match target.kind() {
-                RootTargetKind::Library => "library",
-                RootTargetKind::Binary => "binary",
-                RootTargetKind::IntegrationTest => "integration test",
-            }
-        };
-        eprintln!(
-            "Compiling {} v{} ({}) [{target_kind} `{}`]",
-            build.manifest.name,
-            build.manifest.version.original,
-            build.manifest.root.display(),
-            target.name()
-        );
-    }
-    let environment = rustc_environment(
-        build,
-        dependencies,
-        target,
-        integration_environment.as_ref(),
-    )?;
-    RustcCommand {
-        program: &build.toolchain.rustc,
-        arguments,
-        environment: &environment,
-        current_dir: &build.manifest.workspace_root,
-        verbose: build.verbosity == Verbosity::Verbose,
-        color: build.color,
-    }
-    .execute()
-}
-
-fn verify_artifacts<'a>(artifacts: impl IntoIterator<Item = &'a PathBuf>) -> Result<()> {
-    for artifact in artifacts {
-        if !artifact.is_file() {
-            return Err(Error::failure(format!(
-                "rustc succeeded but expected artifact `{}` is missing",
-                artifact.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn create_directory(path: &Path, description: &str) -> Result<()> {
-    fs::create_dir_all(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to create {description} `{}`: {error}",
-            path.display()
-        ))
-    })
-}
-
 fn install_primary(source: &Path, destination: &Path) -> Result<()> {
     match fs::hard_link(source, destination) {
         Ok(()) => Ok(()),
@@ -2817,299 +2198,6 @@ fn install_primary(source: &Path, destination: &Path) -> Result<()> {
             ))
         }),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn rustc_arguments(
-    build: &Build<'_>,
-    target: RootTarget<'_>,
-    test: bool,
-    identity: &Identity,
-    staging: &Path,
-    root_dependencies: &[RootDependency],
-    root_library: Option<&RootLibraryArtifact>,
-    features: &[String],
-    test_profile: bool,
-    metadata_only: bool,
-    incremental_target: Option<&Path>,
-) -> Vec<OsString> {
-    let mut args = Vec::new();
-    push(&mut args, "--crate-name");
-    push(&mut args, &target.crate_name());
-    push(
-        &mut args,
-        &format!("--edition={}", edition_name(build.manifest.edition)),
-    );
-    args.push(
-        target
-            .path()
-            .strip_prefix(&build.manifest.workspace_root)
-            .expect("root target path came from a validated relative manifest path")
-            .as_os_str()
-            .to_owned(),
-    );
-    push(&mut args, "--error-format=json");
-    push(
-        &mut args,
-        "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
-    );
-    if !test {
-        push(&mut args, "--crate-type");
-        push(
-            &mut args,
-            match target.kind() {
-                RootTargetKind::Library => "lib",
-                RootTargetKind::Binary | RootTargetKind::IntegrationTest => "bin",
-            },
-        );
-    }
-    push(
-        &mut args,
-        if metadata_only {
-            "--emit=dep-info,metadata"
-        } else if target.kind() == RootTargetKind::Library && !test {
-            "--emit=dep-info,metadata,link"
-        } else {
-            "--emit=dep-info,link"
-        },
-    );
-
-    let panic_abort = build.manifest.panic_abort(build.release);
-    if build.release {
-        codegen(&mut args, "opt-level=3");
-        if panic_abort && !test_profile {
-            codegen(&mut args, "panic=abort");
-        }
-        root_lto_arguments(
-            &mut args,
-            root_lto(
-                build.release,
-                build.manifest.release.lto,
-                target.kind(),
-                test,
-            ),
-        );
-        if let Some(units) = build.manifest.release.codegen_units {
-            codegen(&mut args, &format!("codegen-units={units}"));
-        }
-    } else {
-        codegen(&mut args, "embed-bitcode=no");
-        codegen(&mut args, "debuginfo=2");
-        if panic_abort && !test_profile {
-            codegen(&mut args, "panic=abort");
-        }
-    }
-    args.extend(crate::compile::lint_arguments(build.manifest));
-    for feature in features {
-        push(&mut args, "--cfg");
-        push(&mut args, &format!("feature=\"{feature}\""));
-    }
-    if test {
-        push(&mut args, "--test");
-    }
-    push(&mut args, "--check-cfg");
-    push(&mut args, "cfg(docsrs,test)");
-    push(&mut args, "--check-cfg");
-    push(
-        &mut args,
-        &format!(
-            "cfg(feature, values({}))",
-            crate::compile::declared_features(build.manifest)
-                .iter()
-                .map(|feature| format!("\"{feature}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    );
-    codegen(&mut args, &format!("metadata={}", identity.metadata));
-    codegen(
-        &mut args,
-        &format!("extra-filename={}", identity.extra_filename),
-    );
-    push(&mut args, "--out-dir");
-    args.push(root_output_directory(staging, &build.manifest.name, identity).into_os_string());
-    if let Some(target) = build.physical_target {
-        push(&mut args, "--target");
-        push(&mut args, target);
-    }
-    if !build.release {
-        let default_incremental;
-        let incremental_target = match incremental_target {
-            Some(path) => path,
-            None => {
-                default_incremental = incremental_roots(build);
-                &default_incremental.target
-            }
-        };
-        codegen(
-            &mut args,
-            &format!("incremental={}", incremental_target.display()),
-        );
-    }
-    if build.release {
-        match build.manifest.release.strip {
-            Strip::None => {}
-            Strip::Debuginfo => codegen(&mut args, "strip=debuginfo"),
-            Strip::Symbols => codegen(&mut args, "strip=symbols"),
-        }
-    }
-    if let Some(linker) = &build.target_options.linker {
-        codegen(&mut args, &format!("linker={}", linker.display()));
-    }
-    let mut seen = BTreeSet::new();
-    for directory in root_dependencies
-        .iter()
-        .flat_map(|dependency| &dependency.search_paths)
-    {
-        if seen.insert(&directory.path) {
-            push(&mut args, "-L");
-            args.push(format!("dependency={}", directory.path.display()).into());
-        }
-    }
-    for dependency in root_dependencies {
-        push(&mut args, "--extern");
-        let artifact = if let Some(proc_macro) = &dependency.proc_macro {
-            proc_macro
-        } else if target.kind() == RootTargetKind::Library && !test {
-            &dependency.rmeta
-        } else {
-            &dependency.rlib
-        };
-        args.push(format!("{}={}", dependency.alias, artifact.display()).into());
-    }
-    if let Some(library) = root_library {
-        let name = build
-            .manifest
-            .library
-            .as_ref()
-            .unwrap()
-            .name
-            .replace('-', "_");
-        push(&mut args, "--extern");
-        args.push(format!("{name}={}", library.extern_path.display()).into());
-    }
-    args.extend(build.rustflags.iter().map(OsString::from));
-    push(&mut args, "--verbose");
-    args
-}
-
-fn root_lto_arguments(arguments: &mut Vec<OsString>, lto: CargoUnitLto<'_>) {
-    match lto {
-        CargoUnitLto::Run(None) => codegen(arguments, "lto"),
-        CargoUnitLto::Run(Some(mode)) => codegen(arguments, &format!("lto={mode}")),
-        CargoUnitLto::Off => {
-            codegen(arguments, "lto=off");
-            codegen(arguments, "embed-bitcode=no");
-        }
-        CargoUnitLto::OnlyBitcode => codegen(arguments, "linker-plugin-lto"),
-        CargoUnitLto::ObjectAndBitcode => {}
-        CargoUnitLto::OnlyObject => codegen(arguments, "embed-bitcode=no"),
-    }
-}
-
-fn rustc_environment(
-    build: &Build<'_>,
-    dependencies: &[RootDependency],
-    target: RootTarget<'_>,
-    integration_environment: Option<&IntegrationEnvironment<'_>>,
-) -> Result<BTreeMap<String, OsString>> {
-    let manifest = build.manifest;
-    let version = &manifest.version;
-    let mut values = BTreeMap::new();
-    let current_exe = env::current_exe()
-        .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
-    value(&mut values, "CARGO", current_exe.as_os_str());
-    if let RootTarget::Binary(binary) = target {
-        value(&mut values, "CARGO_BIN_NAME", &binary.name);
-    }
-    if let Some(integration) = integration_environment {
-        for (name, path) in &integration.binaries {
-            value(
-                &mut values,
-                &format!("CARGO_BIN_EXE_{name}"),
-                path.as_os_str(),
-            );
-        }
-        value(
-            &mut values,
-            "CARGO_TARGET_TMPDIR",
-            integration.temporary_directory.as_os_str(),
-        );
-    }
-    value(&mut values, "CARGO_CRATE_NAME", target.crate_name());
-    value(&mut values, "CARGO_MANIFEST_DIR", manifest.root.as_os_str());
-    value(
-        &mut values,
-        "CARGO_MANIFEST_PATH",
-        manifest.path.as_os_str(),
-    );
-    value(
-        &mut values,
-        "CARGO_PKG_AUTHORS",
-        manifest.metadata.authors.join(":"),
-    );
-    value(
-        &mut values,
-        "CARGO_PKG_DESCRIPTION",
-        &manifest.metadata.description,
-    );
-    value(
-        &mut values,
-        "CARGO_PKG_HOMEPAGE",
-        &manifest.metadata.homepage,
-    );
-    value(&mut values, "CARGO_PKG_LICENSE", &manifest.metadata.license);
-    value(
-        &mut values,
-        "CARGO_PKG_LICENSE_FILE",
-        &manifest.metadata.license_file,
-    );
-    value(&mut values, "CARGO_PKG_NAME", &manifest.name);
-    value(&mut values, "CARGO_PKG_README", &manifest.metadata.readme);
-    value(
-        &mut values,
-        "CARGO_PKG_REPOSITORY",
-        &manifest.metadata.repository,
-    );
-    value(
-        &mut values,
-        "CARGO_PKG_RUST_VERSION",
-        &manifest.metadata.rust_version,
-    );
-    value(&mut values, "CARGO_PKG_VERSION", &version.original);
-    value(
-        &mut values,
-        "CARGO_PKG_VERSION_MAJOR",
-        version.major.to_string(),
-    );
-    value(
-        &mut values,
-        "CARGO_PKG_VERSION_MINOR",
-        version.minor.to_string(),
-    );
-    value(
-        &mut values,
-        "CARGO_PKG_VERSION_PATCH",
-        version.patch.to_string(),
-    );
-    value(&mut values, "CARGO_PKG_VERSION_PRE", &version.pre);
-    value(&mut values, "CARGO_PRIMARY_PACKAGE", "1");
-    let mut seen = BTreeSet::new();
-    let dynamic_library_paths = dependencies
-        .iter()
-        .flat_map(|dependency| &dependency.search_paths)
-        .filter(|directory| directory.compile_kind == CompileKind::Host)
-        .filter_map(|directory| {
-            seen.insert(directory.path.clone())
-                .then_some(&directory.path)
-        });
-    let dynamic = env::join_paths(dynamic_library_paths).map_err(|error| {
-        Error::failure(format!(
-            "failed to construct root rustc dynamic-library search path: {error}"
-        ))
-    })?;
-    value(&mut values, dynamic_library_path_variable(), dynamic);
-    Ok(values)
 }
 
 pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {
@@ -3207,44 +2295,12 @@ pub(crate) fn check_rust_version(manifest: &Manifest, toolchain: &Toolchain) -> 
     Ok(())
 }
 
-fn edition_name(edition: Edition) -> &'static str {
-    match edition {
-        Edition::E2015 => "2015",
-        Edition::E2018 => "2018",
-        Edition::E2021 => "2021",
-        Edition::E2024 => "2024",
-    }
-}
-
 fn use_color(color: Color) -> bool {
     match color {
         Color::Always => true,
         Color::Never => false,
         Color::Auto => env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal(),
     }
-}
-
-fn dynamic_library_path_variable() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "DYLD_FALLBACK_LIBRARY_PATH"
-    } else if cfg!(windows) {
-        "PATH"
-    } else {
-        "LD_LIBRARY_PATH"
-    }
-}
-
-fn value(values: &mut BTreeMap<String, OsString>, key: &str, value: impl AsRef<OsStr>) {
-    values.insert(key.to_owned(), value.as_ref().to_owned());
-}
-
-fn push(args: &mut Vec<OsString>, value: &str) {
-    args.push(value.into());
-}
-
-fn codegen(args: &mut Vec<OsString>, value: &str) {
-    push(args, "-C");
-    push(args, value);
 }
 
 #[cfg(all(test, target_os = "linux"))]
