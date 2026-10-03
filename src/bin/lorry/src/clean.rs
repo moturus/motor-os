@@ -10,6 +10,7 @@ pub fn execute(options: &CleanOptions, package: Option<&str>, verbosity: Verbosi
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = crate::manifest::Manifest::load_selected(&current, package)?;
     let target_directory = target_directory(&current, &manifest, options.target_dir.as_deref());
+    let _artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
     let artifact_root = super::engine::artifact_root_in(&manifest, &target_directory);
 
     let target = if options.build.release || options.build.target.is_some() {

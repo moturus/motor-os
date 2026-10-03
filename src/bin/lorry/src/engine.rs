@@ -93,6 +93,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
         _ => manifest.workspace_root.join("target"),
     };
     let target_root = artifact_root_in(&manifest, &target_directory);
+    let artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
     let compact_state = CompactState::load(&manifest.root)?;
     let mut config = Config::load(&manifest.root)?;
     crate::trace::event("loaded manifest, admission state, and configuration");
@@ -203,6 +204,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
                 let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
                     Error::failure("selected binary is absent from the fresh build profile")
                 })?;
+                drop(artifact_lock);
                 crate::trace::event("starting program");
                 let status = run_artifact(
                     artifact,
@@ -363,6 +365,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
             let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
                 Error::failure("selected binary is absent from the completed build")
             })?;
+            drop(artifact_lock);
             crate::trace::event("starting program");
             let status = run_artifact(
                 artifact,
@@ -413,6 +416,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
                 }
                 return Ok(0);
             }
+            drop(artifact_lock);
             if let Some(bundle) = &artifacts.bundle {
                 return run_artifact(
                     bundle,

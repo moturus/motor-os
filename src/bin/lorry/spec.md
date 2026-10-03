@@ -169,6 +169,10 @@ root compilation, freshness validation, and artifact publication.
   either selective form also removes the project-local mutable-unit cache so a
   later build cannot restore a mutable artifact that was explicitly cleaned.
   Project cleaning never removes the per-user immutable-unit cache.
+- `build`, `check`, `run`, `test`, and `clean` serialize artifact reads and
+  mutations for one target directory with `target/.lorry-artifacts.lock`.
+  The lock file remains outside the cleanable `lorry/` tree. `run` and `test`
+  release the lock before starting a program or harness.
 - `cache clean` requires no current package and removes exactly
   the configured global cache directory. Its default is `$HOME/.cache/lorry`
   on Linux and `/devtools/lorry/cache` on Motor. An absent cache is success. A

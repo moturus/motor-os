@@ -1,5 +1,6 @@
 mod admission_state;
 mod archive;
+mod artifact_lock;
 mod atomic;
 mod build_script;
 mod bundle;
