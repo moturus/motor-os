@@ -1,6 +1,12 @@
 //! Symlink-safe access to Gears-owned user state.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+const TEMP_PREFIX: &str = ".gears-tmp-";
+static NEXT_TEMP: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone)]
 pub struct StateRoot {
@@ -73,6 +79,66 @@ impl StateRoot {
             Err(error) => Err(format!("{}: {error}", path.display())),
         }
     }
+
+    /// Replace one Gears-owned file without exposing a partially written value.
+    pub fn replace_file(&self, relative: &Path, bytes: &[u8]) -> Result<(), String> {
+        let destination = self.file(relative)?;
+        let parent = destination.parent().expect("state files have a parent");
+        let temp = parent.join(format!(
+            "{TEMP_PREFIX}{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&temp)
+                .map_err(|error| format!("{}: {error}", temp.display()))?;
+            file.write_all(bytes)
+                .and_then(|()| file.sync_data())
+                .map_err(|error| format!("{}: {error}", temp.display()))?;
+            std::fs::rename(&temp, &destination)
+                .map_err(|error| format!("{}: {error}", destination.display()))
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result
+    }
+
+    /// Remove only temporary files made by `replace_file` after a crash.
+    pub fn cleanup_temporary_files(&self) -> Result<usize, String> {
+        let Some(root) = self.existing_directory(Path::new(""))? else {
+            return Ok(0);
+        };
+        cleanup_temporary_files(&root)
+    }
+}
+
+fn cleanup_temporary_files(directory: &Path) -> Result<usize, String> {
+    let mut removed = 0;
+    for entry in
+        std::fs::read_dir(directory).map_err(|error| format!("{}: {error}", directory.display()))?
+    {
+        let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if kind.is_dir() {
+            removed += cleanup_temporary_files(&path)?;
+        } else if kind.is_file() && entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+            std::fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 fn ensure_ancestors(path: &Path) -> Result<(), String> {
@@ -208,6 +274,35 @@ mod tests {
                 .existing_file(Path::new("sessions/work/session.jsonl"))
                 .unwrap(),
             Some(file)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replacement_is_complete_and_crash_temporaries_are_cleaned() {
+        let root = temp("replacement");
+        let _ = std::fs::remove_dir_all(&root);
+        let state = StateRoot::new(root.clone()).unwrap();
+        let relative = Path::new("settings/provider.toml");
+        state.replace_file(relative, b"first").unwrap();
+        state.replace_file(relative, b"second").unwrap();
+        assert_eq!(
+            std::fs::read(state.file(relative).unwrap()).unwrap(),
+            b"second"
+        );
+
+        let settings = root.join("settings");
+        std::fs::write(settings.join(".gears-tmp-crashed"), "partial").unwrap();
+        std::fs::write(settings.join("keep.txt"), "keep").unwrap();
+        assert_eq!(state.cleanup_temporary_files().unwrap(), 1);
+        assert!(!settings.join(".gears-tmp-crashed").exists());
+        assert_eq!(
+            std::fs::read_to_string(settings.join("keep.txt")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            std::fs::read(state.file(relative).unwrap()).unwrap(),
+            b"second"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
