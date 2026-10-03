@@ -514,6 +514,35 @@ has no Linux command. It returns the command's status and bounded output,
 leaves `read_only` false, and has a 3600-second timeout because a local build
 or test can be long. It does not expose `vendor`, `run`, or arbitrary arguments.
 
+`rg` has required `pattern` and `path` strings, passed in that order after
+`--`. Optional booleans `ignore_case`, `fixed_strings`, and `line_numbers`
+map to `-i`, `-F`, and `-n` before `--`. It uses `/usr/bin/rg` on Linux and
+`/system/bin/rg` on Motor OS, is read-only, and returns plain stdout with a
+30-second timeout. Status zero (matches) and one (no matches) are normal.
+No shell expands the pattern or path.
+
+`gix` uses `/devtools/bin/gix` on Motor OS and has no Linux command. Its
+required `action` enum selects `status`, `diff`, `log`, `add`, or `commit`.
+An optional `repository` string maps to the global `-r` option before the
+action. Optional `message`, `staged`, and `all` parameters map to `-m`,
+`--staged`, and `-A`; `paths` is an optional string array passed literally
+after `--`. Gix checks which options each action accepts: `message` is for
+`commit`, `staged` for `diff`, and `all` for `add`. `commit` needs a message;
+`add` needs paths or `all`. The tool is not marked read-only, returns status
+and bounded output, and has a 120-second timeout. Network commands remain
+available through `sh`.
+
+`cargo` has a required `action` enum (`build`, `check`, or `test`), an
+optional `package` string mapped to `-p`, and optional `release` and `offline`
+booleans mapped to `--release` and `--offline`. It uses `/usr/bin/cargo` on
+Linux and has no Motor OS command. It is not marked read-only, returns status
+and bounded output, and has a 3600-second timeout.
+
+The Linux `rg` and `cargo` reference manifests expect system installations
+under `/usr/bin`. When using a different installation, such as Cargo from
+rustup, change the copied manifest to that executable's absolute path. The
+selected path is part of its approval identity.
+
 The common commands follow the `ls` pattern, each a manifest naming the
 program's path per platform, a one-line description, typed parameters mapped
 to a fixed argument vector, and a timeout. The read-only ones, `rg`, `head`,
