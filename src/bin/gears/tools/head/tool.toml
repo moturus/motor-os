@@ -1,0 +1,27 @@
+version = 1
+kind = "process"
+name = "head"
+description = "Read the first lines of one file without changing it."
+parameters = "parameters.json"
+display = "{path}"
+read_only = true
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 1048576
+output = "stdout"
+
+[process.command]
+linux = ["/usr/bin/head"]
+motor = ["/system/bin/sysbox", "head"]
+
+[process.arguments]
+before_double_dash = ["lines"]
+after_double_dash = ["path"]
+
+[process.arguments.lines]
+type = "integer_option"
+flag = "-n"
+
+[process.arguments.path]
+type = "string"
