@@ -78,6 +78,7 @@ pub enum ArgumentMapping {
         values: BTreeMap<String, String>,
     },
     StringList,
+    TimeoutSeconds,
 }
 
 #[derive(Debug, Default)]
@@ -181,6 +182,13 @@ impl Tool {
                 detail,
                 started: false,
             })?;
+        let timeout = self
+            .process
+            .call_timeout(&values)
+            .map_err(|detail| process::RunError {
+                detail,
+                started: false,
+            })?;
         let program = command.remove(0);
         let program = if let Some(relative) = program.strip_prefix("./") {
             self.directory.join(relative)
@@ -234,7 +242,7 @@ impl Tool {
                     .process
                     .stdin_arguments
                     .then(|| arguments.as_bytes().to_vec()),
-                timeout: self.process.timeout,
+                timeout,
                 max_output_bytes: self.process.max_output_bytes,
                 env,
                 remove_env,
@@ -607,6 +615,7 @@ impl Arguments {
                 | ArgumentMapping::EnumOption { .. } => "string",
                 ArgumentMapping::BooleanFlag { .. } => "boolean",
                 ArgumentMapping::IntegerOption { .. } => "integer",
+                ArgumentMapping::TimeoutSeconds => "integer",
                 ArgumentMapping::StringList => "array",
             };
             if property.get("type").and_then(Value::as_str) != Some(expected) {
@@ -632,6 +641,7 @@ impl Arguments {
                         | ArgumentMapping::IntegerOption { .. }
                         | ArgumentMapping::Enum { .. }
                         | ArgumentMapping::EnumOption { .. }
+                        | ArgumentMapping::TimeoutSeconds
                 )
             {
                 return Err(format!(
@@ -682,6 +692,18 @@ impl Arguments {
                 directory.display()
             ));
         }
+        if self
+            .mappings
+            .values()
+            .filter(|mapping| matches!(mapping, ArgumentMapping::TimeoutSeconds))
+            .count()
+            > 1
+        {
+            return Err(format!(
+                "{}: more than one timeout argument",
+                directory.display()
+            ));
+        }
         if !self.mappings.is_empty() && stdin_arguments {
             return Err(format!(
                 "{}: mapped arguments cannot also use stdin arguments",
@@ -702,6 +724,30 @@ impl Arguments {
 }
 
 impl ProcessTool {
+    pub fn call_timeout(&self, arguments: &Value) -> Result<Duration, String> {
+        let Some((name, _)) = self
+            .arguments
+            .mappings
+            .iter()
+            .find(|(_, mapping)| matches!(mapping, ArgumentMapping::TimeoutSeconds))
+        else {
+            return Ok(self.timeout);
+        };
+        let Some(value) = arguments.get(name) else {
+            return Ok(self.timeout);
+        };
+        let seconds = value
+            .as_u64()
+            .ok_or_else(|| format!("{name:?} must be a positive integer"))?;
+        if seconds == 0 || seconds > self.timeout.as_secs() {
+            return Err(format!(
+                "{name:?} must be between 1 and {} seconds",
+                self.timeout.as_secs()
+            ));
+        }
+        Ok(Duration::from_secs(seconds))
+    }
+
     pub fn expand_arguments(
         &self,
         arguments: &Value,
@@ -826,6 +872,7 @@ impl ProcessTool {
                     self.push_model_string(text, true, before, after)?;
                 }
             }
+            ArgumentMapping::TimeoutSeconds => {}
         }
         Ok(())
     }
@@ -1023,6 +1070,47 @@ type = "string_list"
                 .unwrap_err()
                 .contains("after --")
         );
+    }
+
+    #[test]
+    fn typed_timeout_is_bounded_by_the_manifest_without_adding_argv() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"timeout": {"type": "integer"}}
+        });
+        let raw: RawProcess = toml::from_str(
+            r#"
+            timeout_seconds = 3
+            [command]
+            common = ["/bin/true"]
+            [arguments]
+            before_double_dash = ["timeout"]
+            [arguments.timeout]
+            type = "timeout_seconds"
+        "#,
+        )
+        .unwrap();
+        let process = ProcessTool::parse(raw, Path::new("/tmp/example-tool"), &schema).unwrap();
+        assert_eq!(
+            process.call_timeout(&serde_json::json!({})).unwrap(),
+            Duration::from_secs(3)
+        );
+        let arguments = serde_json::json!({"timeout": 1});
+        assert_eq!(
+            process.call_timeout(&arguments).unwrap(),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            process.expand_arguments(&arguments, &schema).unwrap(),
+            ["/bin/true"]
+        );
+        for value in [0, 4, -1] {
+            assert!(
+                process
+                    .call_timeout(&serde_json::json!({"timeout": value}))
+                    .is_err()
+            );
+        }
     }
 
     #[test]
