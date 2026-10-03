@@ -22,6 +22,8 @@ pub struct CommandOptions<'a> {
     pub physical_target: Option<&'a str>,
     pub host_linker: Option<&'a Path>,
     pub target_linker: Option<&'a Path>,
+    pub integration_binaries: Option<&'a BTreeMap<String, PathBuf>>,
+    pub integration_temp_dir: Option<&'a Path>,
     pub verbose: bool,
 }
 
@@ -319,6 +321,31 @@ pub fn dependency_rustc_invocation_with_build_output(
             &mut environment,
             "CARGO_BIN_NAME",
             key.target.as_deref().unwrap(),
+        );
+    }
+    if key.kind == UnitKind::IntegrationHarness {
+        let binaries = options
+            .integration_binaries
+            .ok_or_else(|| Error::failure("integration harness has no program environment"))?;
+        for binary in &manifest.binaries {
+            let path = binaries.get(&binary.name).ok_or_else(|| {
+                Error::failure(format!(
+                    "integration harness has no path for program `{}`",
+                    binary.name
+                ))
+            })?;
+            value(
+                &mut environment,
+                &format!("CARGO_BIN_EXE_{}", binary.name),
+                path,
+            );
+        }
+        value(
+            &mut environment,
+            "CARGO_TARGET_TMPDIR",
+            options
+                .integration_temp_dir
+                .ok_or_else(|| Error::failure("integration harness has no temporary directory"))?,
         );
     }
     if options.selected_package == Some(&key.package) {
@@ -987,6 +1014,8 @@ mod tests {
             physical_target: None,
             host_linker: None,
             target_linker: None,
+            integration_binaries: None,
+            integration_temp_dir: None,
             verbose: true,
         };
 
@@ -1287,6 +1316,8 @@ mod tests {
             physical_target: Some("x86_64-unknown-motor"),
             host_linker: Some(Path::new("/host-cc")),
             target_linker: Some(Path::new("/target-cc")),
+            integration_binaries: None,
+            integration_temp_dir: None,
             verbose: true,
         };
         let target_key = cross_plan
@@ -1433,6 +1464,8 @@ mod tests {
             physical_target: Some("x86_64-unknown-motor"),
             host_linker: None,
             target_linker: None,
+            integration_binaries: None,
+            integration_temp_dir: None,
             verbose: false,
         };
         let derive_key = plan

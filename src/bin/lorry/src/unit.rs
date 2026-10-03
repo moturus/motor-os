@@ -1479,6 +1479,8 @@ mod tests {
                 physical_target: None,
                 host_linker: None,
                 target_linker: None,
+                integration_binaries: None,
+                integration_temp_dir: None,
                 verbose: false,
             },
         )
@@ -1503,6 +1505,8 @@ mod tests {
                 physical_target: None,
                 host_linker: None,
                 target_linker: None,
+                integration_binaries: None,
+                integration_temp_dir: None,
                 verbose: false,
             },
         )

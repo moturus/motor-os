@@ -1039,6 +1039,7 @@ fn prepare_locked_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::{CommandOptions, dependency_rustc_invocation};
     use crate::config::{CargoCompat, IncompatibleRustVersions, Repositories};
     use crate::resolver::PackageSourceKey;
     use crate::source_tree::DEFAULT_LIMITS;
@@ -1297,6 +1298,50 @@ mod tests {
         let focused = graph
             .selected_mixed_test_plan(&options, &manifest, false, Some("integration"))
             .unwrap();
+        let integration = focused
+            .units
+            .keys()
+            .find(|key| key.kind == UnitKind::IntegrationHarness)
+            .unwrap();
+        let mut manifests = graph
+            .packages
+            .iter()
+            .map(|(key, package)| (key.clone(), package.manifest.clone()))
+            .collect::<BTreeMap<_, _>>();
+        manifests.insert(library.package.clone(), manifest.clone());
+        let binary_path = fixture.0.join("output/root");
+        let binary_paths = BTreeMap::from([("root".to_owned(), binary_path.clone())]);
+        let temp_dir = fixture.0.join("output/tmp");
+        let invocation = dependency_rustc_invocation(
+            &focused,
+            &manifests,
+            integration,
+            &CommandOptions {
+                cargo: Path::new("/cargo"),
+                workspace_root: &fixture.0,
+                selected_package: Some(&library.package),
+                host_profile: Path::new("/target/release"),
+                target_profile: Path::new("/target/release"),
+                host_incremental: Path::new("/incremental/host"),
+                target_incremental: Path::new("/incremental/target"),
+                physical_target: None,
+                host_linker: None,
+                target_linker: None,
+                integration_binaries: Some(&binary_paths),
+                integration_temp_dir: Some(&temp_dir),
+                verbose: false,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            invocation
+                .arguments
+                .iter()
+                .any(|argument| argument == "--test")
+        );
+        assert_eq!(invocation.environment["CARGO_BIN_EXE_root"], binary_path);
+        assert_eq!(invocation.environment["CARGO_TARGET_TMPDIR"], temp_dir);
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let output = Command::new(cargo)
             .args([
@@ -1324,13 +1369,18 @@ mod tests {
             .iter()
             .map(|unit| {
                 let package_id = unit["pkg_id"].as_str().unwrap();
-                let package = if package_id
-                    .starts_with(&format!("path+file://{}#", fixture.0.display()))
-                {
-                    manifest.name.as_str()
-                } else {
-                    package_id.rsplit('/').next().unwrap().split('#').next().unwrap()
-                };
+                let package =
+                    if package_id.starts_with(&format!("path+file://{}#", fixture.0.display())) {
+                        manifest.name.as_str()
+                    } else {
+                        package_id
+                            .rsplit('/')
+                            .next()
+                            .unwrap()
+                            .split('#')
+                            .next()
+                            .unwrap()
+                    };
                 (
                     package.to_owned(),
                     unit["target"]["kind"][0].as_str().unwrap().to_owned(),

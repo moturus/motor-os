@@ -934,6 +934,8 @@ before computing identities.
 Selected integration harnesses are distinct test targets in the mixed plan.
 They depend on test-profile Rust libraries and normal-profile program
 artifacts, and the program edges do not become rustc `--extern` arguments.
+The integration compiler invocation receives `CARGO_BIN_EXE_<name>` for each
+program and `CARGO_TARGET_TMPDIR` from the selected test environment.
 
 For `build`, the selected package's library is compiled on the same unit DAG
 and executor as its normal dependencies. Its dependency edges retain the

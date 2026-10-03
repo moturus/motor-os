@@ -875,6 +875,8 @@ fn build_inner(
         physical_target: build.physical_target,
         host_linker: build.host_options.linker.as_deref(),
         target_linker: build.target_options.linker.as_deref(),
+        integration_binaries: None,
+        integration_temp_dir: None,
         release: build.release,
         quiet: build.verbosity == Verbosity::Quiet,
         verbose: build.verbosity == Verbosity::Verbose,
