@@ -97,6 +97,7 @@ struct RawNet {
 struct RawProvider {
     base_url: Option<String>,
     model: Option<String>,
+    #[serde(alias = "api_key_file")]
     key_file: Option<PathBuf>,
     ca_cert: Option<PathBuf>,
 }
@@ -137,6 +138,23 @@ impl Config {
     pub fn default_path() -> Option<PathBuf> {
         #[cfg(target_os = "motor")]
         {
+            Some(PathBuf::from("/user/cfg/gears/gears.toml"))
+        }
+        #[cfg(all(unix, not(target_os = "motor")))]
+        {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".gears/gears.toml"))
+        }
+        #[cfg(not(any(target_os = "motor", unix)))]
+        {
+            None
+        }
+    }
+
+    fn legacy_path() -> Option<PathBuf> {
+        #[cfg(target_os = "motor")]
+        {
             Some(PathBuf::from("/user/cfg/gears.toml"))
         }
         #[cfg(all(unix, not(target_os = "motor")))]
@@ -152,23 +170,41 @@ impl Config {
     }
 
     pub fn load_user(explicit: Option<&Path>) -> Result<Self, String> {
-        let (path, required) = match explicit {
-            Some(path) => (path.to_path_buf(), true),
-            None => match Self::default_path() {
-                Some(path) => (path, false),
-                None => return Ok(Self::default()),
-            },
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Self::parse(&text).map_err(|error| format!("{}: {error}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => {
-                Ok(Self::default())
+        if let Some(path) = explicit {
+            return Self::read_config(path)?
+                .ok_or_else(|| format!("{}: not found", path.display()));
+        }
+        Self::load_candidates([Self::default_path(), Self::legacy_path()])
+    }
+
+    fn load_candidates(paths: [Option<PathBuf>; 2]) -> Result<Self, String> {
+        for path in paths.into_iter().flatten() {
+            if let Some(config) = Self::read_config(&path)? {
+                return Ok(config);
             }
+        }
+        Ok(Self::default())
+    }
+
+    fn read_config(path: &Path) -> Result<Option<Self>, String> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::parse_at(&text, path)
+                .map(Some)
+                .map_err(|error| format!("{}: {error}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(format!("{}: {error}", path.display())),
         }
     }
 
     pub fn parse(text: &str) -> Result<Self, String> {
+        Self::parse_with_base(text, None)
+    }
+
+    fn parse_at(text: &str, path: &Path) -> Result<Self, String> {
+        Self::parse_with_base(text, path.parent())
+    }
+
+    fn parse_with_base(text: &str, base: Option<&Path>) -> Result<Self, String> {
         let raw: RawConfig = toml::from_str(text).map_err(|error| error.to_string())?;
         if raw.version != 1 {
             return Err(format!(
@@ -209,14 +245,8 @@ impl Config {
                     )
                 })?;
         }
-        for path in [&raw.provider.key_file, &raw.provider.ca_cert]
-            .into_iter()
-            .flatten()
-        {
-            if !path.is_absolute() {
-                return Err(format!("provider path {} must be absolute", path.display()));
-            }
-        }
+        let key_file = provider_path(raw.provider.key_file, base)?;
+        let ca_cert = provider_path(raw.provider.ca_cert, base)?;
         let log_level = match raw.trace.level {
             Some(level) => crate::trace::Level::parse(&level)
                 .ok_or_else(|| format!("unknown trace level {level:?}"))?,
@@ -287,8 +317,8 @@ impl Config {
             plain_http,
             model: raw.provider.model.filter(|model| !model.trim().is_empty()),
             models,
-            key_file: raw.provider.key_file,
-            ca_cert: raw.provider.ca_cert,
+            key_file,
+            ca_cert,
             log_file: raw.trace.file,
             log_level,
             sh_timeout,
@@ -297,6 +327,18 @@ impl Config {
             hooks,
         })
     }
+}
+
+fn provider_path(path: Option<PathBuf>, base: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    path.map(|path| {
+        if path.is_absolute() {
+            Ok(path)
+        } else {
+            base.map(|base| base.join(&path))
+                .ok_or_else(|| format!("provider path {} needs a config file", path.display()))
+        }
+    })
+    .transpose()
 }
 
 fn bounded_seconds(name: &str, value: u64, minimum: u64, maximum: u64) -> Result<Duration, String> {
@@ -429,6 +471,41 @@ plain_http_allowlist = ["192.168.4.1"]"#,
         assert_eq!(config.max_tool_rounds, 32);
         assert_eq!(config.context.output_reserve_tokens, 16_384);
         assert!(config.hooks.is_empty());
+    }
+
+    #[test]
+    fn new_config_path_precedes_legacy_and_resolves_provider_files() {
+        let root = std::env::temp_dir().join(format!("gears-config-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("new")).unwrap();
+        let current = root.join("new/gears.toml");
+        let legacy = root.join("legacy.toml");
+        std::fs::write(&legacy, "version = 1\n[provider]\nmodel = 'legacy'\n").unwrap();
+        let paths = [Some(current.clone()), Some(legacy.clone())];
+        assert_eq!(
+            Config::load_candidates(paths.clone())
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("legacy")
+        );
+
+        std::fs::write(
+            &current,
+            "version = 1\n[provider]\nmodel = 'current'\napi_key_file = 'secrets/key'\nca_cert = 'ca.pem'\n",
+        )
+        .unwrap();
+        let config = Config::load_candidates(paths).unwrap();
+        assert_eq!(config.model.as_deref(), Some("current"));
+        assert_eq!(config.key_file, Some(root.join("new/secrets/key")));
+        assert_eq!(config.ca_cert, Some(root.join("new/ca.pem")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_key_file_name_remains_accepted() {
+        let config = Config::parse("version = 1\n[provider]\nkey_file = '/secret/key'\n").unwrap();
+        assert_eq!(config.key_file, Some(PathBuf::from("/secret/key")));
     }
 
     #[test]
