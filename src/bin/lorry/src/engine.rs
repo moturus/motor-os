@@ -778,7 +778,7 @@ fn build_inner(
         }
         crate::trace::event("root profile requires rebuilding");
     }
-    let dependency_plan = |test_profile, include_selected, include_binaries| {
+    let dependency_plan = |test_profile, include_selected, include_binaries, include_harnesses| {
         let options = PlanOptions {
             workspace_root: &build.manifest.workspace_root,
             release: build.release,
@@ -795,6 +795,7 @@ fn build_inner(
                 build.manifest,
                 build.binary_selection,
                 include_binaries,
+                include_harnesses,
             )
         } else {
             prepared.dependency_plan(&options)
@@ -804,7 +805,7 @@ fn build_inner(
         Some((_, options)) if options.message_format != MessageFormat::Human => {
             let roots =
                 crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
-            let metadata_plan = dependency_plan(false, false, false)?;
+            let metadata_plan = dependency_plan(false, false, false, false)?;
             let metadata = crate::metadata::graph::resolved(
                 build.manifest,
                 &prepared,
@@ -899,6 +900,7 @@ fn build_inner(
             false,
             check.is_none() && !build.test,
             check.is_none() && !build.test,
+            false,
         )?;
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
         let dependencies = root_dependencies(&prepared.resolution, &plan, &outputs)?;
@@ -912,7 +914,12 @@ fn build_inner(
     };
     let needs_test_plan = build.test || check.is_some_and(|(_, options)| options.selects_tests());
     let test_result = if needs_test_plan {
-        let test_plan = dependency_plan(true, build.test && selected_library.is_some(), false)?;
+        let test_plan = dependency_plan(
+            true,
+            build.test,
+            false,
+            build.test && build.test_name.is_none(),
+        )?;
         let outputs = match normal.as_ref() {
             Some((normal_plan, normal_outputs, _)) => executor::execute_reusing(
                 &test_plan,
@@ -934,13 +941,30 @@ fn build_inner(
             }
             _ => None,
         };
-        Some((dependencies, library))
+        let harnesses = test_plan
+            .order
+            .iter()
+            .filter(|key| matches!(key.kind, UnitKind::LibraryHarness | UnitKind::BinaryHarness))
+            .map(|key| match outputs.artifacts.get(key) {
+                Some(crate::compile::RustcOutput::Binary { executable, .. }) => {
+                    Ok(executable.clone())
+                }
+                _ => Err(Error::failure(
+                    "selected test harness produced no executable",
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Some((dependencies, library, harnesses))
     } else {
         None
     };
-    let (test_dependencies, test_library) = match &test_result {
-        Some((dependencies, library)) => (dependencies.as_slice(), library.as_ref()),
-        None => (&[][..], None),
+    let (test_dependencies, test_library, test_harnesses) = match &test_result {
+        Some((dependencies, library, harnesses)) => (
+            dependencies.as_slice(),
+            library.as_ref(),
+            harnesses.as_slice(),
+        ),
+        None => (&[][..], None, &[][..]),
     };
     let normal_dependencies = normal
         .as_ref()
@@ -988,6 +1012,7 @@ fn build_inner(
             normal_dependencies,
             test_dependencies,
             test_library,
+            test_harnesses,
             &TestOutput {
                 destination: &destination,
                 target_root,
@@ -2389,6 +2414,7 @@ fn compile_test_targets(
     normal_dependencies: &[RootDependency],
     test_dependencies: &[RootDependency],
     test_library: Option<&RootLibraryArtifact>,
+    planned_harnesses: &[PathBuf],
     output: &TestOutput<'_>,
 ) -> Result<StagedArtifacts> {
     let features = selected_root_features(build.manifest)?
@@ -2445,35 +2471,7 @@ fn compile_test_targets(
         }
     }
 
-    let mut harnesses = Vec::new();
-    if build.test_name.is_none() {
-        if let Some(library) = build.manifest.library.as_ref().filter(|target| target.test) {
-            harnesses.push(compile_root_harness(
-                build,
-                RootTarget::Library(library),
-                staging,
-                host_profile,
-                test_dependencies,
-                None,
-                &features,
-                None,
-                &[],
-            )?);
-        }
-        for binary in build.manifest.binaries.iter().filter(|target| target.test) {
-            harnesses.push(compile_root_harness(
-                build,
-                RootTarget::Binary(binary),
-                staging,
-                host_profile,
-                test_dependencies,
-                test_library,
-                &features,
-                None,
-                &[],
-            )?);
-        }
-    }
+    let mut harnesses = planned_harnesses.to_vec();
 
     if !integration_tests.is_empty() {
         let temporary_directory = output.bundle_layout.map_or_else(

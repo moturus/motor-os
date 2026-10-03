@@ -23,8 +23,8 @@ use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::Toolchain;
 use crate::unit::{
     CompilationPlan, PlanOptions, SourceRemap, UnitGraph, add_selected_binaries,
-    add_selected_library, dependency_units, plan_dependency_units_with_remaps,
-    selected_library_key,
+    add_selected_harnesses, add_selected_library, dependency_units,
+    plan_dependency_units_with_remaps, selected_library_key,
 };
 
 #[derive(Debug)]
@@ -63,14 +63,18 @@ impl PreparedGraph {
         selected: &Manifest,
         binary_name: Option<&str>,
         include_binaries: bool,
+        include_harnesses: bool,
     ) -> Result<CompilationPlan> {
-        self.plan(options, Some((selected, binary_name, include_binaries)))
+        self.plan(
+            options,
+            Some((selected, binary_name, include_binaries, include_harnesses)),
+        )
     }
 
     fn plan(
         &self,
         options: &PlanOptions<'_>,
-        selected: Option<(&Manifest, Option<&str>, bool)>,
+        selected: Option<(&Manifest, Option<&str>, bool, bool)>,
     ) -> Result<CompilationPlan> {
         let mut manifests = self
             .packages
@@ -78,7 +82,7 @@ impl PreparedGraph {
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
         let mut graph = dependency_units(&self.resolution, &manifests)?;
-        if let Some((selected, binary_name, include_binaries)) = selected {
+        if let Some((selected, binary_name, include_binaries, include_harnesses)) = selected {
             let key = if selected.library.is_some() {
                 add_selected_library(&mut graph, &self.resolution, &manifests, selected)?
             } else {
@@ -92,6 +96,9 @@ impl PreparedGraph {
                     selected,
                     binary_name,
                 )?;
+            }
+            if include_harnesses {
+                add_selected_harnesses(&mut graph, &self.resolution, &manifests, selected)?;
             }
             if manifests.insert(key.package, selected.clone()).is_some() {
                 return Err(Error::failure(

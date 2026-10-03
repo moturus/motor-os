@@ -931,6 +931,9 @@ also scheduled on the dependency DAG and remains outside the unit cache.
 The planner distinguishes library and binary `--test` harnesses from ordinary
 library and binary units, retaining their test-mode profiles and dependency
 edges.
+Selected library and binary harnesses execute on that DAG during `test`.
+Integration-test harnesses keep their existing compilation path until their
+target and generated-code inputs are represented in the unit graph.
 
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected
