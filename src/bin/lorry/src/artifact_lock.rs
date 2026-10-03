@@ -224,6 +224,30 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn child_keeps_lease_after_parent_releases_target_lock() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "artifact_lock::tests::isolated_child_lease_worker",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("LORRY_LEASE_WORKER", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated lease test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn isolated_child_lease_worker() {
+        if std::env::var_os("LORRY_LEASE_WORKER").is_none() {
+            return;
+        }
         use std::io::{Read, Write};
         use std::process::{Command, Stdio};
 
