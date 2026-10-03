@@ -31,6 +31,7 @@ pub struct ProcessTool {
     pub stdin_arguments: bool,
     pub stdout_only: bool,
     pub normal_exit_statuses: Vec<i32>,
+    pub allowed_flags: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -134,8 +135,10 @@ impl Tool {
             .prompt
             .or(raw.prompt)
             .map(|file| read_file(directory, &file))
-            .transpose()?
-            .filter(|text| !text.trim().is_empty());
+            .transpose()?;
+        if prompt.as_ref().is_some_and(|text| text.trim().is_empty()) {
+            return Err(format!("{}: tool prompt is empty", directory.display()));
+        }
         let process = ProcessTool::parse(raw.process, directory)?;
         Ok(Self {
             name: raw.name,
@@ -184,6 +187,7 @@ struct RawProcess {
     stdin: Option<String>,
     output: Option<String>,
     normal_exit_statuses: Option<Vec<i32>>,
+    allowed_flags: Option<Vec<String>>,
     command: RawCommand,
 }
 
@@ -231,6 +235,28 @@ impl ProcessTool {
             if command.is_empty() || command[0].is_empty() {
                 return Err(format!("{}: empty process command", directory.display()));
             }
+            validate_program(directory, &command[0])?;
+        }
+        let normal_exit_statuses = raw.normal_exit_statuses.unwrap_or_else(|| vec![0]);
+        if normal_exit_statuses.is_empty()
+            || normal_exit_statuses
+                .iter()
+                .any(|status| !(0..=255).contains(status))
+        {
+            return Err(format!(
+                "{}: invalid normal exit statuses",
+                directory.display()
+            ));
+        }
+        let allowed_flags = raw.allowed_flags.unwrap_or_default();
+        if allowed_flags.iter().any(|flag| {
+            !flag.starts_with('-')
+                || flag == "--"
+                || flag
+                    .bytes()
+                    .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        }) {
+            return Err(format!("{}: invalid allowed flag", directory.display()));
         }
         #[cfg(unix)]
         let command = raw.command.linux.or(raw.command.common);
@@ -242,9 +268,26 @@ impl ProcessTool {
             max_output_bytes: max_output,
             stdin_arguments,
             stdout_only,
-            normal_exit_statuses: raw.normal_exit_statuses.unwrap_or_else(|| vec![0]),
+            normal_exit_statuses,
+            allowed_flags,
         })
     }
+}
+
+fn validate_program(directory: &Path, program: &str) -> Result<(), String> {
+    if program == "gears-batteries" || Path::new(program).is_absolute() {
+        return Ok(());
+    }
+    let Some(relative) = program.strip_prefix("./") else {
+        return Err(format!(
+            "{directory:?}: program {program:?} needs an absolute or ./ path"
+        ));
+    };
+    let state = StateRoot::new(directory.to_path_buf())?;
+    state
+        .existing_file(Path::new(relative))?
+        .ok_or_else(|| format!("{directory:?}: program {program:?} not found"))?;
+    Ok(())
 }
 
 fn checked_directory(path: &Path) -> Result<PathBuf, String> {
@@ -320,6 +363,36 @@ common = ['/no-such-program', '{path}']
         assert_eq!(tool.process.normal_exit_statuses, [0, 1]);
         assert_eq!(tool.prompt.as_deref(), Some("Use this tool when needed."));
         assert!(Registry::load(&[entries[0].clone(), entries[0].clone()], &root).is_err());
+        let manifest = std::fs::read_to_string(directory.join("tool.toml")).unwrap();
+        std::fs::write(
+            directory.join("tool.toml"),
+            manifest.replace("/no-such-program", "sh"),
+        )
+        .unwrap();
+        assert!(
+            Registry::load(&entries, &root)
+                .unwrap_err()
+                .contains("absolute or ./")
+        );
+        std::fs::write(
+            directory.join("tool.toml"),
+            manifest.replace("/no-such-program", "./../run"),
+        )
+        .unwrap();
+        assert!(Registry::load(&entries, &root).is_err());
+        std::fs::write(directory.join("run"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            directory.join("tool.toml"),
+            manifest.replace("/no-such-program", "./run"),
+        )
+        .unwrap();
+        assert!(Registry::load(&entries, &root).is_ok());
+        std::fs::write(directory.join("prompt.md"), "\n").unwrap();
+        assert!(
+            Registry::load(&entries, &root)
+                .unwrap_err()
+                .contains("prompt is empty")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }
