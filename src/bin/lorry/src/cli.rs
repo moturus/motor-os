@@ -67,6 +67,7 @@ pub struct BuildOptions {
     pub target_dir: Option<String>,
     pub bin: Option<String>,
     pub validation: ValidationMode,
+    pub message_format: MessageFormat,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -144,6 +145,16 @@ pub struct UpgradeOptions {
 }
 
 impl Cli {
+    pub fn message_format(&self) -> MessageFormat {
+        match &self.command {
+            Command::Build(options) => options.message_format,
+            Command::Check(options) => options.message_format,
+            Command::Run(options) => options.build.message_format,
+            Command::Test(options) => options.build.message_format,
+            _ => MessageFormat::Human,
+        }
+    }
+
     pub fn parse<I>(arguments: I) -> Result<Self>
     where
         I: IntoIterator<Item = String>,
@@ -314,7 +325,11 @@ fn command_line() -> ClapCommand {
                 .action(ArgAction::SetTrue)
                 .exclusive(true),
         )
-        .subcommand(compile_command("build", true).dont_delimit_trailing_values(true))
+        .subcommand(
+            compile_command("build", true)
+                .arg(message_format_argument())
+                .dont_delimit_trailing_values(true),
+        )
         .subcommand(
             ClapCommand::new("cache")
                 .disable_help_flag(true)
@@ -461,17 +476,35 @@ fn check_command() -> ClapCommand {
                 .long("examples")
                 .action(ArgAction::SetTrue),
         )
-        .arg(
-            Arg::new("message-format")
-                .long("message-format")
-                .value_name("FORMAT")
-                .num_args(1)
-                .action(ArgAction::Set)
-                .value_parser(PossibleValuesParser::new([
-                    "json",
-                    "json-diagnostic-rendered-ansi",
-                ])),
-        )
+        .arg(message_format_argument())
+}
+
+fn message_format_argument() -> Arg {
+    Arg::new("message-format")
+        .long("message-format")
+        .value_name("FORMAT")
+        .value_parser(parse_message_format)
+}
+
+fn parse_message_format(value: &str) -> std::result::Result<MessageFormat, String> {
+    let mut format = MessageFormat::Json;
+    for component in value.split(',') {
+        match component {
+            "json" => {}
+            "json-diagnostic-rendered-ansi" => format = MessageFormat::JsonDiagnosticRenderedAnsi,
+            _ => return Err(format!("unsupported message format `{component}`")),
+        }
+    }
+    Ok(format)
+}
+
+fn message_format(matches: &ArgMatches) -> MessageFormat {
+    matches
+        .try_get_one::<MessageFormat>("message-format")
+        .ok()
+        .flatten()
+        .copied()
+        .unwrap_or(MessageFormat::Human)
 }
 
 fn tree_command() -> ClapCommand {
@@ -660,31 +693,20 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             Some((name, _)) => unreachable!("unexpected cache subcommand {name}"),
             None => unreachable!("Clap requires a cache subcommand"),
         },
-        Some(("check", options)) => {
-            let message_format = match options
-                .get_one::<String>("message-format")
-                .map(String::as_str)
-            {
-                None => MessageFormat::Human,
-                Some("json") => MessageFormat::Json,
-                Some("json-diagnostic-rendered-ansi") => MessageFormat::JsonDiagnosticRenderedAnsi,
-                Some(_) => unreachable!("Clap restricts --message-format values"),
-            };
-            Ok(Command::Check(CheckOptions {
-                manifest_path: options.get_one::<String>("manifest-path").cloned(),
-                target_dir: options.get_one::<String>("target-dir").cloned(),
-                target: options.get_one::<String>("target").cloned(),
-                workspace: options.get_flag("workspace"),
-                keep_going: options.get_flag("keep-going"),
-                all_targets: options.get_flag("all-targets"),
-                lib: options.get_flag("lib"),
-                bins: options.get_flag("bins"),
-                bin: options.get_one::<String>("bin").cloned(),
-                test: options.get_one::<String>("test").cloned(),
-                examples: options.get_flag("examples"),
-                message_format,
-            }))
-        }
+        Some(("check", options)) => Ok(Command::Check(CheckOptions {
+            manifest_path: options.get_one::<String>("manifest-path").cloned(),
+            target_dir: options.get_one::<String>("target-dir").cloned(),
+            target: options.get_one::<String>("target").cloned(),
+            workspace: options.get_flag("workspace"),
+            keep_going: options.get_flag("keep-going"),
+            all_targets: options.get_flag("all-targets"),
+            lib: options.get_flag("lib"),
+            bins: options.get_flag("bins"),
+            bin: options.get_one::<String>("bin").cloned(),
+            test: options.get_one::<String>("test").cloned(),
+            examples: options.get_flag("examples"),
+            message_format: message_format(options),
+        })),
         Some(("clean", options)) => Ok(Command::Clean(CleanOptions {
             build: build_options(options, false),
         })),
@@ -801,6 +823,7 @@ fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOption
         target: matches.get_one::<String>("target").cloned(),
         target_dir: matches.get_one::<String>("target-dir").cloned(),
         bin: matches.try_get_one::<String>("bin").ok().flatten().cloned(),
+        message_format: message_format(matches),
         validation: if supports_validation && matches.get_flag("strict-validation") {
             ValidationMode::Strict
         } else {
@@ -883,6 +906,7 @@ mod tests {
                 target_dir: None,
                 bin: Some("server".to_owned()),
                 validation: ValidationMode::Strict,
+                message_format: MessageFormat::Human,
             })
         );
     }
@@ -906,6 +930,7 @@ mod tests {
                     target_dir: Some("/tmp/editor-target".to_owned()),
                     bin: None,
                     validation: ValidationMode::Trusted,
+                    message_format: MessageFormat::Human,
                 },
             })
         );
@@ -1093,6 +1118,48 @@ mod tests {
             flycheck.message_format,
             MessageFormat::JsonDiagnosticRenderedAnsi
         );
+    }
+
+    #[test]
+    fn parses_shared_build_and_check_message_formats() {
+        for command in ["build", "check"] {
+            for (value, expected) in [
+                ("json", MessageFormat::Json),
+                (
+                    "json,json-diagnostic-rendered-ansi",
+                    MessageFormat::JsonDiagnosticRenderedAnsi,
+                ),
+                (
+                    "json-diagnostic-rendered-ansi,json",
+                    MessageFormat::JsonDiagnosticRenderedAnsi,
+                ),
+            ] {
+                let equals = format!("--message-format={value}");
+                assert_eq!(
+                    parse(&[command, &equals]).unwrap().message_format(),
+                    expected
+                );
+                assert_eq!(
+                    parse(&[command, "--message-format", value])
+                        .unwrap()
+                        .message_format(),
+                    expected
+                );
+            }
+            for value in [
+                "",
+                "json,",
+                "human",
+                "json-render-diagnostics",
+                "json,short",
+            ] {
+                assert!(
+                    parse(&[command, "--message-format", value])
+                        .unwrap_err()
+                        .is_usage()
+                );
+            }
+        }
     }
 
     #[test]

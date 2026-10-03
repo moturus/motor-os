@@ -31,9 +31,7 @@ use std::time::{Duration, UNIX_EPOCH};
 const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 
 pub fn execute(cli: &Cli) -> Result<i32> {
-    if let Command::Check(options) = &cli.command
-        && options.message_format != MessageFormat::Human
-    {
+    if cli.message_format() != MessageFormat::Human {
         let result = execute_inner(cli);
         let finished = crate::check_message::build_finished(matches!(&result, Ok(0)));
         return match (result, finished) {
@@ -174,6 +172,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
     let ordinary_freshness_base = (!validation.is_strict()
+        && cli.message_format() == MessageFormat::Human
         && matches!(&cli.command, Command::Build(_) | Command::Run(_)))
     .then(|| {
         trusted_freshness_base(&TrustedFreshness {
@@ -290,33 +289,36 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
     let global_cache_root = config.cache_directory()?;
 
     match &cli.command {
-        Command::Build(_) => {
-            build(Build {
-                target_root: Some(&target_root),
-                child_lease_fd: artifact_lock.child_lease_fd(),
-                manifest: &manifest,
-                global_cache_root: &global_cache_root,
-                config: &config,
-                toolchain: &toolchain,
-                host: &host_info,
-                target: &target_info,
-                host_options: &host_options,
-                target_options: &target_options,
-                physical_target: physical_target.as_deref(),
-                logical_target,
-                rustflags: &rustflags,
-                release,
-                test: false,
-                test_name: None,
-                color,
-                verbosity: cli.verbosity,
-                use_cargo_registry: cli.use_cargo_registry,
-                source: Some((source, &direct, verified_resolution)),
-                bundle: false,
-                validation,
-                ordinary_freshness_base,
-                binary_selection,
-            })?;
+        Command::Build(options) => {
+            build_reported(
+                Build {
+                    target_root: Some(&target_root),
+                    child_lease_fd: artifact_lock.child_lease_fd(),
+                    manifest: &manifest,
+                    global_cache_root: &global_cache_root,
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &host_info,
+                    target: &target_info,
+                    host_options: &host_options,
+                    target_options: &target_options,
+                    physical_target: physical_target.as_deref(),
+                    logical_target,
+                    rustflags: &rustflags,
+                    release,
+                    test: false,
+                    test_name: None,
+                    color,
+                    verbosity: cli.verbosity,
+                    use_cargo_registry: cli.use_cargo_registry,
+                    source: Some((source, &direct, verified_resolution)),
+                    bundle: false,
+                    validation,
+                    ordinary_freshness_base,
+                    binary_selection,
+                },
+                options.message_format,
+            )?;
             Ok(0)
         }
         Command::Check(options) => check(
@@ -711,7 +713,11 @@ enum BuildOutcome {
 }
 
 fn build(build: Build<'_>) -> Result<BuildArtifacts> {
-    match build_inner(build, None)? {
+    build_reported(build, MessageFormat::Human)
+}
+
+fn build_reported(build: Build<'_>, format: MessageFormat) -> Result<BuildArtifacts> {
+    match build_inner(build, None, format)? {
         BuildOutcome::Artifacts(artifacts) => Ok(artifacts),
         BuildOutcome::Check(_) => unreachable!("ordinary build returned a check result"),
     }
@@ -755,7 +761,7 @@ fn check(build: Build<'_>, target_root: &Path, options: &CheckOptions) -> Result
             "`check --examples` is not supported until example targets are implemented",
         ));
     }
-    match build_inner(build, Some((target_root, options)))? {
+    match build_inner(build, Some((target_root, options)), options.message_format)? {
         BuildOutcome::Check(code) => Ok(code),
         BuildOutcome::Artifacts(_) => unreachable!("check returned ordinary build artifacts"),
     }
@@ -764,6 +770,7 @@ fn check(build: Build<'_>, target_root: &Path, options: &CheckOptions) -> Result
 fn build_inner(
     mut build: Build<'_>,
     check: Option<(&Path, &CheckOptions)>,
+    format: MessageFormat,
 ) -> Result<BuildOutcome> {
     if let Some(name) = build.test_name
         && !build
@@ -938,8 +945,8 @@ fn build_inner(
             selection,
         )
     };
-    let message_reporter = match check {
-        Some((_, options)) if options.message_format != MessageFormat::Human => {
+    let message_reporter = match format {
+        format if format != MessageFormat::Human => {
             let roots =
                 crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
             let metadata_plan = dependency_plan(false, false, false, false)?;
@@ -955,7 +962,7 @@ fn build_inner(
                 metadata,
                 &destination,
                 &destination,
-                options.message_format,
+                format,
             )?)
         }
         _ => None,

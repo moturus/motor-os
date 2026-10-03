@@ -1008,6 +1008,13 @@ the first observed failure.
 Until example targets are implemented, `check --examples` fails explicitly
 instead of succeeding without checking a target.
 
+`build` and `check` share the Cargo message writer. Both accept
+`--message-format json` and `json-diagnostic-rendered-ansi`, including the
+comma-separated combination and equals option form. The stream identifies
+packages and targets exactly as metadata does, reports completed artifacts
+and build-script results, and ends with one `build-finished` event, including
+on failure. Progress and Lorry errors remain on stderr.
+
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected
 library when present. Its hashed executable is installed at the selected

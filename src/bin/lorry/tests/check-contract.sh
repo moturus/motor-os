@@ -209,6 +209,20 @@ JSON_TARGET="$WORK/json-target"
 # rust-analyzer does when saving a binary or integration-test target.
 PACKAGE_ID="$(sed -n 's/.*"root":[[:space:]]*"\([^"]*\)".*/\1/p' "$WORK/metadata.json")"
 [[ "$PACKAGE_ID" == path+file://* ]] || { echo "missing metadata root ID" >&2; exit 1; }
+for format in json json,json-diagnostic-rendered-ansi; do
+    ansi=plain
+    [ "$format" = json ] || ansi=ansi
+    (
+        cd "$PROJECT"
+        "$LORRY" --quiet build --message-format "$format" \
+            --target-dir "$WORK/build-$ansi"
+    ) >"$WORK/build-$ansi.json" 2>"$WORK/build-$ansi.err"
+    CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+        --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+        -- messages "$WORK/build-$ansi.json" "$WORK/metadata.json" success "$ansi" any
+    [ -x "$WORK/build-$ansi/lorry/debug/first" ]
+    [ -x "$WORK/build-$ansi/lorry/debug/second" ]
+done
 for selector in first second; do
     : >"$LOG"
     "$LORRY" check -p "$PACKAGE_ID" --bin "$selector" --quiet \
