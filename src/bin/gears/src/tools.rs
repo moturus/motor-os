@@ -228,20 +228,26 @@ impl Tool {
                 raw.name
             ));
         }
-        // Check resources on both systems so a dormant override cannot hide
-        // a missing file until this directory is copied to another machine.
+        // Validate both platforms before selecting one, so a dormant override
+        // cannot hide a broken schema or mapping until deployment elsewhere.
+        let mut schemas = BTreeMap::new();
+        let stdin_arguments = raw.process.stdin.as_deref() == Some("arguments");
         for platform in [&raw.linux, &raw.motor] {
-            if let Some(file) = &platform.parameters {
-                let schema: Value = serde_json::from_str(&read_file(directory, file)?)
-                    .map_err(|error| format!("{}/{}: {error}", directory.display(), file))?;
-                if schema.get("type").and_then(Value::as_str) != Some("object") {
-                    return Err(format!(
-                        "{}/{}: parameters must be an object schema",
-                        directory.display(),
-                        file
-                    ));
-                }
+            let file = platform
+                .parameters
+                .as_ref()
+                .or(raw.parameters.as_ref())
+                .ok_or_else(|| format!("{}: tool needs parameters", directory.display()))?;
+            if !schemas.contains_key(file) {
+                schemas.insert(file.clone(), read_schema(directory, file)?);
             }
+            let schema = &schemas[file];
+            let arguments = platform
+                .process
+                .arguments
+                .as_ref()
+                .unwrap_or(&raw.process.arguments);
+            arguments.validate(directory, schema, stdin_arguments)?;
             if let Some(file) = &platform.prompt {
                 read_file(directory, file)?;
             }
@@ -261,15 +267,9 @@ impl Tool {
             .parameters
             .or(raw.parameters)
             .ok_or_else(|| format!("{}: tool needs parameters", directory.display()))?;
-        let parameters: Value = serde_json::from_str(&read_file(directory, &parameters_file)?)
-            .map_err(|error| format!("{}/{}: {error}", directory.display(), parameters_file))?;
-        if parameters.get("type").and_then(Value::as_str) != Some("object") {
-            return Err(format!(
-                "{}/{}: parameters must be an object schema",
-                directory.display(),
-                parameters_file
-            ));
-        }
+        let parameters = schemas
+            .remove(&parameters_file)
+            .expect("selected schema was validated");
         let prompt = platform
             .prompt
             .or(raw.prompt)
@@ -278,7 +278,12 @@ impl Tool {
         if prompt.as_ref().is_some_and(|text| text.trim().is_empty()) {
             return Err(format!("{}: tool prompt is empty", directory.display()));
         }
-        let process = ProcessTool::parse(raw.process, directory, &parameters)?;
+        let process = ProcessTool::parse_with_arguments(
+            raw.process,
+            directory,
+            &parameters,
+            platform.process.arguments,
+        )?;
         let display = platform.display.or(raw.display);
         if let Some(template) = display.as_deref() {
             validate_display(template, &parameters, directory)?;
@@ -295,6 +300,19 @@ impl Tool {
             process,
         })
     }
+}
+
+fn read_schema(directory: &Path, file: &str) -> Result<Value, String> {
+    let schema: Value = serde_json::from_str(&read_file(directory, file)?)
+        .map_err(|error| format!("{}/{}: {error}", directory.display(), file))?;
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return Err(format!(
+            "{}/{}: parameters must be an object schema",
+            directory.display(),
+            file
+        ));
+    }
+    Ok(schema)
 }
 
 fn display_field(part: &str) -> Option<&str> {
@@ -354,6 +372,13 @@ struct RawPlatform {
     parameters: Option<String>,
     prompt: Option<String>,
     display: Option<String>,
+    #[serde(default)]
+    process: RawPlatformProcess,
+}
+
+#[derive(Default, Deserialize)]
+struct RawPlatformProcess {
+    arguments: Option<Arguments>,
 }
 
 #[derive(Deserialize)]
@@ -377,7 +402,20 @@ struct RawCommand {
 }
 
 impl ProcessTool {
+    #[cfg(test)]
     fn parse(raw: RawProcess, directory: &Path, parameters: &Value) -> Result<Self, String> {
+        Self::parse_with_arguments(raw, directory, parameters, None)
+    }
+
+    fn parse_with_arguments(
+        mut raw: RawProcess,
+        directory: &Path,
+        parameters: &Value,
+        override_arguments: Option<Arguments>,
+    ) -> Result<Self, String> {
+        if let Some(arguments) = override_arguments {
+            raw.arguments = arguments;
+        }
         let timeout = raw.timeout_seconds.unwrap_or(30);
         let max_output = raw.max_output_bytes.unwrap_or(1024 * 1024);
         if !(1..=3600).contains(&timeout) || !(1024..=16 * 1024 * 1024).contains(&max_output) {
@@ -768,6 +806,77 @@ fn read_file(directory: &Path, name: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_argument_overrides_match_each_schema() {
+        let root = std::env::temp_dir().join(format!("gears-platform-map-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("linux.json"),
+            r#"{"type":"object","properties":{"path":{"type":"string"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("motor.json"),
+            r#"{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}}}"#).unwrap();
+        std::fs::write(
+            root.join("tool.toml"),
+            r#"
+version = 1
+kind = "process"
+name = "example"
+description = "Example"
+parameters = "linux.json"
+[motor]
+parameters = "motor.json"
+[process.command]
+common = ["/no-program"]
+[process.arguments]
+after_double_dash = ["path"]
+[process.arguments.path]
+type = "string"
+[motor.process.arguments]
+after_double_dash = ["paths"]
+[motor.process.arguments.paths]
+type = "string_list"
+"#,
+        )
+        .unwrap();
+        let entries = [ToolDirectory {
+            directory: root.clone(),
+            enabled: true,
+        }];
+        let registry = Registry::load(&entries, &root).unwrap();
+        let tool = &registry.tools()[0];
+        #[cfg(unix)]
+        assert_eq!(
+            tool.process
+                .expand_arguments(&serde_json::json!({"path":"one"}), &tool.parameters)
+                .unwrap(),
+            ["/no-program", "--", "one"]
+        );
+        #[cfg(not(unix))]
+        assert_eq!(
+            tool.process
+                .expand_arguments(
+                    &serde_json::json!({"paths":["one","two"]}),
+                    &tool.parameters
+                )
+                .unwrap(),
+            ["/no-program", "--", "one", "two"]
+        );
+        std::fs::write(
+            root.join("motor.json"),
+            r#"{"type":"object","properties":{"paths":{"type":"string"}}}"#,
+        )
+        .unwrap();
+        assert!(
+            Registry::load(&entries, &root)
+                .unwrap_err()
+                .contains("schema type array")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn typed_mapping_checks_schema_and_placement() {

@@ -134,6 +134,9 @@ The fields mean:
   program whose arguments differ between systems, as sysbox's `find` differs
   from GNU `find`, describes each version to the model exactly; a program
   that is the same on both, such as `rg`, needs only the top-level fields.
+  `[linux.process.arguments]` and `[motor.process.arguments]` may replace the
+  whole common argument mapping table on that system. Gears checks both tables
+  against their effective parameter schemas when the directory loads.
 - `read_only`, when true, declares that the tool only reads. The batteries
   use this mark when recording evidence. Tools still run in request order.
   A tool that writes, publishes or runs arbitrary commands leaves it false.
