@@ -728,19 +728,18 @@ case "$event" in
   *) printf '%s' '{{}}' ;;
 esac"#
             );
-            let timeout = if name == "timeout" {
-                std::time::Duration::from_millis(20)
-            } else {
-                std::time::Duration::from_secs(2)
-            };
-            let manager = Manager::initialize(
-                vec![hook(name, &script, timeout)],
+            let mut manager = Manager::initialize(
+                vec![hook(name, &script, std::time::Duration::from_secs(2))],
                 workspace,
                 &mut session,
                 &Cancellation::new(),
                 &mut |_| {},
             )
             .unwrap();
+            if name == "timeout" {
+                // The short deadline tests permission, not setup process scheduling.
+                manager.hooks[0].config.timeout = std::time::Duration::from_millis(20);
+            }
             let mut notices = Vec::new();
             assert_eq!(
                 manager.permission(

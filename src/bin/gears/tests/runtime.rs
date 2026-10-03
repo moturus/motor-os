@@ -2152,18 +2152,21 @@ fn cancellation_stops_a_streaming_turn_and_records_it() {
     let fixture = Fixture::new("cancel");
     let mut runtime = fixture.runtime(Arc::new(UntilCancelled), &Config::default());
     let cancellation = runtime.cancellation();
-    let cancel = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(20));
-        cancellation.cancel();
-    });
+    let mut saw_text = false;
     let error = runtime
         .turn(
             "keep going".to_string(),
             &mut FixedApproval(false),
-            &mut |_| Ok(()),
+            &mut |event| {
+                if matches!(event, Event::Text(_)) {
+                    saw_text = true;
+                    cancellation.cancel();
+                }
+                Ok(())
+            },
         )
         .unwrap_err();
-    cancel.join().unwrap();
+    assert!(saw_text);
     assert!(error.contains("cancelled"));
     assert!(
         runtime
@@ -2197,18 +2200,21 @@ fn lifecycle_hooks_run_after_a_cancelled_turn() {
     });
     let mut runtime = fixture.runtime(Arc::new(UntilCancelled), &config);
     let cancellation = runtime.cancellation();
-    let cancel = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(20));
-        cancellation.cancel();
-    });
+    let mut saw_text = false;
     let error = runtime
         .turn(
             "interrupt".to_string(),
             &mut FixedApproval(false),
-            &mut |_| Ok(()),
+            &mut |event| {
+                if matches!(event, Event::Text(_)) {
+                    saw_text = true;
+                    cancellation.cancel();
+                }
+                Ok(())
+            },
         )
         .unwrap_err();
-    cancel.join().unwrap();
+    assert!(saw_text);
     assert!(error.contains("cancelled"), "{error}");
     runtime.new_session(false, None).unwrap();
     runtime.close();
@@ -2225,7 +2231,7 @@ fn cancellation_pairs_every_call_in_a_tool_round() {
     let fixture = Fixture::new("cancel-round");
     let provider = Scripted::new(vec![Ok(Completion {
         tool_calls: vec![
-            ToolCall::new("call_1", "sh", r#"{"command":"sleep 2"}"#),
+            ToolCall::new("call_1", "sh", r#"{"command":"printf started; sleep 2"}"#),
             ToolCall::new("call_2", "sh", r#"{"command":"touch never"}"#),
         ],
         finish_reason: Some(FinishReason::ToolCalls),
@@ -2233,14 +2239,17 @@ fn cancellation_pairs_every_call_in_a_tool_round() {
     })]);
     let mut runtime = fixture.runtime(provider, &Config::default());
     let cancellation = runtime.cancellation();
-    let cancel = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(30));
-        cancellation.cancel();
-    });
+    let mut saw_output = false;
     let error = runtime
-        .turn("go".to_string(), &mut FixedApproval(true), &mut |_| Ok(()))
+        .turn("go".to_string(), &mut FixedApproval(true), &mut |event| {
+            if matches!(event, Event::ToolOutput { .. }) {
+                saw_output = true;
+                cancellation.cancel();
+            }
+            Ok(())
+        })
         .unwrap_err();
-    cancel.join().unwrap();
+    assert!(saw_output);
     assert!(error.contains("cancelled"), "{error}");
     assert!(!fixture.workspace.join("never").exists());
     let outcomes = runtime
@@ -2279,7 +2288,7 @@ fn cancellation_keeps_the_tool_result_when_a_result_hook_cannot_run() {
     });
     let provider = Scripted::new(vec![Ok(Completion {
         tool_calls: vec![
-            ToolCall::new("call_1", "sh", r#"{"command":"sleep 2"}"#),
+            ToolCall::new("call_1", "sh", r#"{"command":"printf started; sleep 2"}"#),
             ToolCall::new("call_2", "sh", r#"{"command":"touch never"}"#),
         ],
         finish_reason: Some(FinishReason::ToolCalls),
@@ -2287,14 +2296,17 @@ fn cancellation_keeps_the_tool_result_when_a_result_hook_cannot_run() {
     })]);
     let mut runtime = fixture.runtime(provider, &config);
     let cancellation = runtime.cancellation();
-    let cancel = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(30));
-        cancellation.cancel();
-    });
+    let mut saw_output = false;
     let error = runtime
-        .turn("go".to_string(), &mut FixedApproval(true), &mut |_| Ok(()))
+        .turn("go".to_string(), &mut FixedApproval(true), &mut |event| {
+            if matches!(event, Event::ToolOutput { .. }) {
+                saw_output = true;
+                cancellation.cancel();
+            }
+            Ok(())
+        })
         .unwrap_err();
-    cancel.join().unwrap();
+    assert!(saw_output);
     assert!(error.contains("cancelled"), "{error}");
     let results = runtime
         .session()

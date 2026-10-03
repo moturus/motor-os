@@ -34,12 +34,24 @@ fn request() -> Request {
 struct Rendered {
     events: Vec<StreamEvent>,
     abort_after_content: bool,
+    cancel_on_notice: Option<Cancellation>,
+    signal_text: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl EventSink for Rendered {
     fn on_event(&mut self, event: StreamEvent) -> std::io::Result<()> {
         if self.abort_after_content && matches!(event, StreamEvent::Text(_)) {
             return Err(std::io::Error::other("scripted cancellation"));
+        }
+        if matches!(event, StreamEvent::Notice(_))
+            && let Some(signal) = &self.cancel_on_notice
+        {
+            signal.cancel();
+        }
+        if matches!(event, StreamEvent::Text(_))
+            && let Some(signal) = self.signal_text.take()
+        {
+            signal.send(()).unwrap();
         }
         self.events.push(event);
         Ok(())
@@ -117,15 +129,13 @@ fn cancellation_ends_a_retry_wait() {
     let server = MockServer::start(vec![limited, sse_response(&[])]).unwrap();
     let cancellation = Cancellation::new();
     let signal = cancellation.clone();
-    let cancel = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(100));
-        signal.cancel();
-    });
-    let mut rendered = Rendered::default();
+    let mut rendered = Rendered {
+        cancel_on_notice: Some(signal),
+        ..Rendered::default()
+    };
     let started = Instant::now();
     let result =
         provider(&server).complete(&request().with_cancellation(cancellation), &mut rendered);
-    cancel.join().unwrap();
     assert!(matches!(
         result,
         Err(gears::provider::ProviderError::Aborted(_))
@@ -204,14 +214,21 @@ fn cancellation_interrupts_a_silent_transport() {
     .unwrap();
     let cancellation = Cancellation::new();
     let signal = cancellation.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
     let cancel = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(100));
+        receiver
+            .recv()
+            .expect("transport must deliver its first text");
         signal.cancel();
     });
     let started = Instant::now();
-    let mut rendered = Rendered::default();
+    let mut rendered = Rendered {
+        signal_text: Some(sender),
+        ..Rendered::default()
+    };
     let result =
         provider(&server).complete(&request().with_cancellation(cancellation), &mut rendered);
+    rendered.signal_text.take();
     cancel.join().unwrap();
 
     assert!(

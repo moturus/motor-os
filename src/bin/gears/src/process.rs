@@ -433,21 +433,20 @@ mod tests {
     #[test]
     fn cancellation_kills_the_process_group() {
         let cancellation = Cancellation::new();
-        let cancel = cancellation.clone();
-        let thread = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(30));
-            cancel.cancel();
-        });
+        let mut saw_output = false;
         let output = sh(
             std::env::temp_dir(),
-            "sleep 5",
+            "printf started; sleep 5",
             Duration::from_secs(10),
             4096,
             &cancellation,
-            &mut |_, _| {},
+            &mut |_, _| {
+                saw_output = true;
+                cancellation.cancel();
+            },
         )
         .unwrap();
-        thread.join().unwrap();
+        assert!(saw_output);
         assert!(output.cancelled);
     }
 
@@ -455,15 +454,11 @@ mod tests {
     #[test]
     fn cancellation_does_not_report_the_killed_childs_broken_stdin() {
         let cancellation = Cancellation::new();
-        let signal = cancellation.clone();
-        let cancel = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(30));
-            signal.cancel();
-        });
+        let mut saw_output = false;
         let output = run(
             &Request {
                 program: "sh".into(),
-                args: vec!["-c".into(), "sleep 5".into()],
+                args: vec!["-c".into(), "printf started; sleep 5".into()],
                 cwd: std::env::temp_dir(),
                 stdin: Some(vec![b'x'; 1024 * 1024]),
                 timeout: Duration::from_secs(10),
@@ -472,10 +467,13 @@ mod tests {
                 remove_env: Vec::new(),
             },
             &cancellation,
-            &mut |_, _| {},
+            &mut |_, _| {
+                saw_output = true;
+                cancellation.cancel();
+            },
         )
         .unwrap();
-        cancel.join().unwrap();
+        assert!(saw_output);
         assert!(output.cancelled);
     }
 
