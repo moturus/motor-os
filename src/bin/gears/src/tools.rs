@@ -180,7 +180,9 @@ impl Tool {
             "name": self.name,
             "kind": "process",
             "owner": self.directory,
+            "description": self.description,
             "parameters": self.parameters,
+            "prompt": self.prompt,
             "display": self.display,
             "read_only": self.read_only,
             "process": self.process,
@@ -1034,6 +1036,18 @@ mod tests {
             serde_json::json!({"type":"object","properties":{"x":{"type":"string"}}});
         assert_ne!(
             changed_schema.approval_identity().unwrap(),
+            tool.approval_identity().unwrap()
+        );
+        let mut changed_description = tool.clone();
+        changed_description.description.push_str(" updated");
+        assert_ne!(
+            changed_description.approval_identity().unwrap(),
+            tool.approval_identity().unwrap()
+        );
+        let mut changed_prompt = tool.clone();
+        changed_prompt.prompt = Some("New guidance".into());
+        assert_ne!(
+            changed_prompt.approval_identity().unwrap(),
             tool.approval_identity().unwrap()
         );
         std::fs::remove_dir_all(directory).unwrap();
