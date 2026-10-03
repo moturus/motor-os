@@ -121,7 +121,7 @@ The fields mean:
 - `description` is sent to the model and must be non-empty.
 - `parameters` names a JSON file in the same directory. It must contain an
   object-valued JSON Schema. The schema is sent to the provider. Version 1
-  checks the top-level shape and command placeholders, but does not implement
+  checks the top-level shape and mapped property types, but does not implement
   a complete JSON Schema validator; the tool must still validate its input.
 - `prompt`, when present, names a UTF-8 Markdown file in the same directory.
   Its non-empty contents become a system-prompt fragment only while the tool is
@@ -165,14 +165,25 @@ directory: absolute paths and `..` are rejected. This keeps the reviewable
 parts of a tool together. The command itself may deliberately name an absolute
 system program because that is the program the external tool wraps.
 
-### Command templates
+### Command arguments
 
-The model supplies typed parameters, never a flag vector. A manifest maps
-each parameter to a fixed command vector. A string fills one entire argument;
-a boolean adds its fixed flag or nothing; an integer fills a fixed flag's
-value; an enum selects a fixed subcommand; and a list expands into separate
-arguments after a literal `--`. The manifest declares each field's type and
-placement, and the JSON schema must agree. Gears never performs shell
+The model supplies typed parameters, never a flag vector. `process.command`
+contains only fixed arguments. `process.arguments.before_double_dash` and
+`after_double_dash` list parameter names in output order; each name has a
+`[process.arguments.NAME]` mapping table. Gears inserts one literal `--`
+between the two groups when `after_double_dash` is non-empty. A field omitted
+from a tool call adds nothing. Mapped fields must be declared in the JSON
+schema, have the matching type, and may not appear twice in the order lists.
+The schema's `required` array controls which fields may be omitted. Unmapped
+properties are refused for command-mapped tools; tools with a fixed command
+and `stdin = "arguments"` may instead validate all parameters themselves.
+
+Mapping types are `string` (one whole argument), `boolean_flag` (a fixed
+`flag` when true), `integer_option` (a fixed `flag` followed by a decimal
+integer), `enum` (one fixed argument selected by a `values` table), and
+`string_list` (one argument per element, only after `--`). Fixed flags and
+enum outputs belong to the manifest; only string and list values from the
+model are subject to the leading-`-` rule below. Gears never performs shell
 interpolation or word splitting. Invalid or missing required values fail
 before execution.
 
@@ -180,8 +191,14 @@ For example:
 
 ```toml
 [process.command]
-linux = ["/bin/ls", "--", "{path}"]
-motor = ["/system/bin/sysbox", "ls", "--", "{path}"]
+linux = ["/bin/ls"]
+motor = ["/system/bin/sysbox", "ls"]
+
+[process.arguments]
+after_double_dash = ["path"]
+
+[process.arguments.path]
+type = "string"
 ```
 
 with `{"path":"directory with spaces"}` runs the equivalent of the following
@@ -190,6 +207,13 @@ argument vector, not a shell command:
 ```text
 ["ls", "--", "directory with spaces"]
 ```
+
+For example, a tool with `before_double_dash = ["ignore_case", "count"]`
+could map `ignore_case` to `type = "boolean_flag", flag = "-i"` and `count`
+to `type = "integer_option", flag = "-m"`; a `mode` field could use
+`type = "enum", values = { names = "-l", details = "-a" }`. These fixed
+flags appear before `--`, while each value of a `string_list` field appears
+after it.
 
 Tools with behavior beyond these mappings may use a fixed command such as
 `["./run"]`, select `process.stdin = "arguments"`, and validate the JSON
@@ -200,9 +224,10 @@ their actual argument vector can be reviewed together.
 bad or missing placeholder makes that tool call fail visibly; it never falls
 back to executing an ambiguous command.
 
-A model value beginning with `-` is refused unless it is placed after a
-literal `--` or is exactly listed in the manifest's `allowed_flags` (such as
-`--release` for `lorry`). Allowed flags go before `--`. The shipped manifests
+A model string value beginning with `-` is refused unless it is placed after
+the inserted `--` or is exactly listed in the manifest's `allowed_flags`
+(such as `--release` for `lorry`). Allowed values from either group go before
+`--`. The shipped manifests
 put `--` before free-form paths and patterns; in a prototype, a search path
 of `--pre=sh` made `rg` run arbitrary commands. Each shipped common command's
 typed parameters are specified before its tool directory is built. GNU
