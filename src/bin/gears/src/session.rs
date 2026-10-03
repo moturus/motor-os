@@ -514,6 +514,18 @@ impl Session {
                         messages.push(context);
                     }
                 }
+                "turn_error" => {
+                    let ended_at_tool = messages.last().is_some_and(|message| {
+                        message.role == Role::Tool || message.tool_calls().next().is_some()
+                    });
+                    if ended_at_tool {
+                        // Keep the next user message out of the interrupted
+                        // tool round without adding another session record.
+                        messages.push(Message::assistant(
+                            "The previous tool round ended early. The next user message starts a new turn.",
+                        ));
+                    }
+                }
                 _ => {}
             }
         }
@@ -906,6 +918,71 @@ mod tests {
         lines[1] = "{broken}".to_string();
         std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
         assert!(store.open_path(&path).is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_tool_round_has_a_transient_assistant_closer() {
+        let (base, _, store) = fixture("interrupted-closer");
+        let mut session = store.create(false, None).unwrap();
+        session.append_message(&Message::user("first")).unwrap();
+        session
+            .append_message(&Message::assistant_response(
+                String::new(),
+                vec![crate::provider::ToolCall::new("call_1", "sh", "{}")],
+            ))
+            .unwrap();
+        session
+            .append_message(&Message::tool_result("call_1", "sh", "done", false))
+            .unwrap();
+        session.append_error("turn cancelled", true).unwrap();
+        session.append_message(&Message::user("next")).unwrap();
+
+        let context = session.context_messages().unwrap();
+        assert_eq!(context.len(), 5);
+        assert_eq!(context[3].role, Role::Assistant);
+        assert!(context[3].text_content().contains("ended early"));
+        assert_eq!(context[4].text_content(), "next");
+        assert_eq!(
+            session
+                .entries()
+                .iter()
+                .filter(|entry| entry.kind == "message")
+                .count(),
+            4
+        );
+        drop(session);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn an_error_before_tools_needs_no_closer() {
+        let (base, _, store) = fixture("no-closer");
+        let mut session = store.create(false, None).unwrap();
+        session.append_message(&Message::user("first")).unwrap();
+        session.append_error("provider failed", false).unwrap();
+        session.append_message(&Message::user("next")).unwrap();
+        assert_eq!(session.context_messages().unwrap().len(), 2);
+        drop(session);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn an_unpaired_tool_call_also_gets_a_closer() {
+        let (base, _, store) = fixture("unpaired-closer");
+        let mut session = store.create(false, None).unwrap();
+        session.append_message(&Message::user("first")).unwrap();
+        session
+            .append_message(&Message::assistant_response(
+                String::new(),
+                vec![crate::provider::ToolCall::new("call_1", "sh", "{}")],
+            ))
+            .unwrap();
+        session.append_error("turn cancelled", true).unwrap();
+        let context = session.context_messages().unwrap();
+        assert_eq!(context.len(), 3);
+        assert!(context[2].text_content().contains("ended early"));
+        drop(session);
         std::fs::remove_dir_all(base).unwrap();
     }
 

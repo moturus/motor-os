@@ -237,8 +237,9 @@ fn tool_round_limit_stops_after_the_last_result() {
     assert!(error.contains("tool round limit (1) reached"), "{error}");
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
     let messages = runtime.session().context_messages().unwrap();
-    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.len(), 4);
     assert!(messages[2].text_content().contains("denied"));
+    assert!(messages[3].text_content().contains("ended early"));
 }
 
 #[test]
