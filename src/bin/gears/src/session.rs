@@ -1,6 +1,6 @@
 //! Versioned append-only session trees.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -59,6 +59,20 @@ pub struct HookState {
     pub state: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Message>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolState {
+    Enabled,
+    Disabled,
+    Inherit,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ToolStateEntry {
+    pub name: String,
+    pub state: ToolState,
 }
 
 #[derive(Debug, Clone)]
@@ -536,6 +550,37 @@ impl Session {
 
     pub fn append_hook_state(&mut self, state: &HookState) -> Result<String, String> {
         self.append("hook_state", state)
+    }
+
+    pub fn set_tool_state(&mut self, name: &str, state: ToolState) -> Result<String, String> {
+        self.append(
+            "tool_state",
+            &ToolStateEntry {
+                name: name.to_string(),
+                state,
+            },
+        )
+    }
+
+    /// Only the selected conversation branch contributes enablement overrides.
+    pub fn tool_states(&self) -> Result<BTreeMap<String, ToolState>, String> {
+        let mut states = BTreeMap::new();
+        for entry in self.active_entries()? {
+            if entry.kind != "tool_state" {
+                continue;
+            }
+            let change: ToolStateEntry = serde_json::from_value(entry.data)
+                .map_err(|error| format!("entry {}: bad tool state: {error}", entry.id))?;
+            if change.name.is_empty() {
+                return Err(format!("entry {}: empty tool name", entry.id));
+            }
+            if change.state == ToolState::Inherit {
+                states.remove(&change.name);
+            } else {
+                states.insert(change.name, change.state);
+            }
+        }
+        Ok(states)
     }
 
     pub fn append_runtime_identity(
@@ -1111,6 +1156,32 @@ mod tests {
             "other"
         );
         drop(session);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn tool_state_follows_branch_and_survives_clone_and_resume() {
+        let (base, _, store) = fixture("tool-state");
+        let mut session = store.create(false, None).unwrap();
+        let branch_point = session.append_message(&Message::user("first")).unwrap();
+        session.set_tool_state("sh", ToolState::Disabled).unwrap();
+        let disabled_leaf = session.active_leaf().unwrap().to_string();
+        session.set_tool_state("sh", ToolState::Inherit).unwrap();
+        assert!(session.tool_states().unwrap().is_empty());
+        session.select(&disabled_leaf).unwrap();
+        assert_eq!(session.tool_states().unwrap()["sh"], ToolState::Disabled);
+        let cloned = store.clone_active(&session).unwrap();
+        assert_eq!(cloned.tool_states().unwrap()["sh"], ToolState::Disabled);
+        drop(cloned);
+        session.select(&branch_point).unwrap();
+        assert!(session.tool_states().unwrap().is_empty());
+        session.set_tool_state("ls", ToolState::Enabled).unwrap();
+        let path = session.path().unwrap().to_path_buf();
+        drop(session);
+        let resumed = store.open_path(&path).unwrap();
+        assert_eq!(resumed.tool_states().unwrap()["ls"], ToolState::Enabled);
+        assert!(!resumed.tool_states().unwrap().contains_key("sh"));
+        drop(resumed);
         std::fs::remove_dir_all(base).unwrap();
     }
 
