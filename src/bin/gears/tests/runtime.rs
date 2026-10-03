@@ -574,6 +574,39 @@ fn shipped_wc_counts_a_literal_file_path() {
 }
 
 #[test]
+fn shipped_cat_reads_a_literal_file_path() {
+    let fixture = Fixture::new("shipped-cat");
+    std::fs::write(
+        fixture.workspace.join("-read [glob].txt"),
+        "literal contents\n",
+    )
+    .unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/cat"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("cat", r#"{"path":"-read [glob].txt"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    let mut output = String::new();
+    runtime
+        .turn("read".to_string(), &mut FixedApproval(true), &mut |event| {
+            if let Event::ToolOutput { name, text, .. } = event {
+                assert_eq!(name, "cat");
+                output.push_str(&text);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(output, "literal contents\n");
+}
+
+#[test]
 fn shipped_diff_treats_differences_as_a_normal_result() {
     let fixture = Fixture::new("shipped-diff");
     std::fs::write(fixture.workspace.join("old [file].txt"), "old\n").unwrap();

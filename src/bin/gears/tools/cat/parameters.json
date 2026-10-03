@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "One workspace-relative or absolute text-file path."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}

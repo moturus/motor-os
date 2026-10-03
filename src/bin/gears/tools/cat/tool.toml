@@ -1,0 +1,31 @@
+version = 1
+kind = "process"
+name = "cat"
+description = "Print one file without changing it. The path is passed literally."
+parameters = "parameters.json"
+display = "{path}"
+read_only = true
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 1048576
+output = "stdout"
+
+[process.command]
+linux = ["/usr/bin/cat"]
+motor = ["/system/bin/sysbox", "cat"]
+
+[process.arguments]
+after_double_dash = ["path"]
+
+[process.arguments.path]
+type = "string"
+
+[motor]
+description = "Print one text file with sysbox cat. Prefix a leading-dash path with ./; glob characters are literal."
+
+[motor.process.arguments]
+before_double_dash = ["path"]
+
+[motor.process.arguments.path]
+type = "string"
