@@ -187,6 +187,85 @@ impl Drop for AtomicFile {
 }
 
 impl AtomicDirectory {
+    /// Restores a completed unit left between the two renames of a replacement.
+    /// Staging directories are intentionally untouched: a child may still own
+    /// one after its parent was killed.
+    pub fn recover_previous(destination: &Path) -> Result<()> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| Error::failure("output destination has no parent"))?;
+        match fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(Error::failure("output parent is not a real directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to inspect output parent `{}`: {error}",
+                    parent.display()
+                )));
+            }
+        }
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::failure("output destination has no UTF-8 name"))?;
+        let prefix = format!(".{name}.lorry-previous-");
+        let mut backups = Vec::new();
+        for entry in fs::read_dir(parent)
+            .map_err(|error| Error::failure(format!("failed to list output parent: {error}")))?
+        {
+            let entry = entry.map_err(|error| {
+                Error::failure(format!("failed to read output parent: {error}"))
+            })?;
+            if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                Error::failure(format!("failed to inspect previous output: {error}"))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(Error::failure(format!(
+                    "previous output `{}` is not a real directory",
+                    path.display()
+                )));
+            }
+            backups.push(path);
+        }
+        if backups.is_empty() {
+            return Ok(());
+        }
+        backups.sort();
+        match fs::symlink_metadata(destination) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(Error::failure("published output is not a real directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let previous = backups.pop().unwrap();
+                fs::rename(&previous, destination).map_err(|error| {
+                    Error::failure(format!(
+                        "failed to recover previous output `{}`: {error}",
+                        destination.display()
+                    ))
+                })?;
+            }
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to inspect published output `{}`: {error}",
+                    destination.display()
+                )));
+            }
+        }
+        for backup in backups {
+            fs::remove_dir_all(&backup).map_err(|error| {
+                Error::failure(format!(
+                    "failed to remove obsolete output `{}`: {error}",
+                    backup.display()
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn new(parent: &Path, label: &str) -> Result<Self> {
         Self::create(parent, || unique_name(label, "staging"))
     }
@@ -518,6 +597,28 @@ mod tests {
                 .count(),
             1
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovers_interrupted_directory_replacement_without_touching_staging() {
+        let root = temp_root("recover");
+        let destination = root.join("unit");
+        let previous = root.join(".unit.lorry-previous-dead");
+        let staging = root.join(".unit.lorry-staging-live");
+        fs::create_dir(&previous).unwrap();
+        fs::create_dir(&staging).unwrap();
+        fs::write(previous.join("complete"), b"old").unwrap();
+        fs::write(staging.join("partial"), b"in progress").unwrap();
+
+        AtomicDirectory::recover_previous(&destination).unwrap();
+        assert_eq!(fs::read(destination.join("complete")).unwrap(), b"old");
+        assert!(staging.join("partial").is_file());
+
+        let obsolete = root.join(".unit.lorry-previous-obsolete");
+        fs::create_dir(&obsolete).unwrap();
+        AtomicDirectory::recover_previous(&destination).unwrap();
+        assert!(!obsolete.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

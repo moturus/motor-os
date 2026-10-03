@@ -23,6 +23,9 @@ can coexist in the shared profile. Top-level executables also carry owner
 sidecars. Members now use the shared profile, and `clean -p` removes only the
 selected package's owned files and project-local cache entries. The old Lorry
 artifact tree is reset under the artifact lock on first use.
+An interrupted compiler-unit replacement restores its previous completed
+directory before the next build tries to reuse it; staging cleanup still
+requires child-lifetime proof.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

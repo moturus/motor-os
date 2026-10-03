@@ -595,6 +595,7 @@ fn execute_unit(
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| Error::failure("rustc unit has no UTF-8 name"))?;
+                AtomicDirectory::recover_previous(unit_dir)?;
                 let dependencies = cache_dependencies(planned, outputs)?;
                 let selected = options.selected_package == Some(&key.package);
                 let selected_inputs = selected.then_some(SelectedInputs {

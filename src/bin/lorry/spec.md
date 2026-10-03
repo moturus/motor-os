@@ -1151,6 +1151,10 @@ reused by this profile-level check.
 The completed-profile record and each top-level selected binary are written
 through private file staging and atomically installed, so a failed copy or
 record write leaves the preceding complete file in place.
+If a compiler-unit replacement is interrupted between preserving the old
+directory and installing the new one, the next build restores the previous
+completed directory under the artifact lock. It leaves abandoned staging
+untouched until it can establish that no child still writes there.
 
 Unit-cache writers publish atomically. A selected-library entry is replaced
 when an external dep-info input changes; other entries are never replaced.
