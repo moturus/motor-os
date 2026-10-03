@@ -22,9 +22,10 @@ use crate::resolver::{
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::Toolchain;
 use crate::unit::{
-    CompilationPlan, PlanOptions, ProfileContext, SourceRemap, UnitGraph, add_selected_binaries,
-    add_selected_harnesses, add_selected_integration_harnesses, add_selected_library,
-    dependency_units, plan_dependency_units_with_remaps, selected_library_key,
+    CheckTargetSelection, CompilationPlan, PlanOptions, ProfileContext, SourceRemap, UnitGraph,
+    add_selected_binaries, add_selected_harnesses, add_selected_integration_harnesses,
+    add_selected_library, dependency_units, plan_dependency_units_with_remaps,
+    selected_check_units, selected_library_key,
 };
 
 #[derive(Debug)]
@@ -91,6 +92,33 @@ impl PreparedGraph {
             true,
             integration_name,
         )
+    }
+
+    pub fn selected_check_plan(
+        &self,
+        options: &PlanOptions<'_>,
+        selected: &Manifest,
+        selection: &CheckTargetSelection<'_>,
+    ) -> Result<CompilationPlan> {
+        let mut manifests = self
+            .packages
+            .iter()
+            .map(|(key, package)| (key.clone(), package.manifest.clone()))
+            .collect();
+        let graph = selected_check_units(
+            &self.resolution,
+            &manifests,
+            selected,
+            selection,
+            options.panic_abort,
+        )?;
+        let key = selected_library_key(selected)?;
+        if manifests.insert(key.package, selected.clone()).is_some() {
+            return Err(Error::failure(
+                "selected package duplicates a dependency package",
+            ));
+        }
+        self.finish_plan(options, manifests, graph)
     }
 
     fn plan(
@@ -164,6 +192,15 @@ impl PreparedGraph {
         } else if options.test_profile {
             graph = graph.with_profile(ProfileContext::Test, options.panic_abort);
         }
+        self.finish_plan(options, manifests, graph)
+    }
+
+    fn finish_plan(
+        &self,
+        options: &PlanOptions<'_>,
+        manifests: BTreeMap<PackageKey, Manifest>,
+        graph: UnitGraph,
+    ) -> Result<CompilationPlan> {
         let mut source_remaps = BTreeMap::<PackageKey, SourceRemap>::new();
         let mut complete_source_trees = BTreeSet::<PackageKey>::new();
         let mut logical_roots = BTreeMap::<PathBuf, PathBuf>::new();
@@ -1055,10 +1092,7 @@ mod tests {
     use crate::resolver::PackageSourceKey;
     use crate::source_tree::DEFAULT_LIMITS;
     use crate::toolchain::{CfgSet, Toolchain};
-    use crate::unit::{
-        CheckTargetSelection, ProfileContext, UnitEdgeKind, UnitKind, UnitMode,
-        plan_dependency_units, selected_check_units,
-    };
+    use crate::unit::{CheckTargetSelection, ProfileContext, UnitEdgeKind, UnitKind, UnitMode};
     use semver::Version;
     use serde_json::Value;
     use std::fs;
@@ -1479,24 +1513,20 @@ mod tests {
                 .collect()
         );
 
-        let mut dependency_manifests = manifests.clone();
-        dependency_manifests.remove(&library.package);
-        let check_graph = selected_check_units(
-            &graph.resolution,
-            &dependency_manifests,
-            &manifest,
-            &CheckTargetSelection {
-                normal: false,
-                binaries: false,
-                binary_name: None,
-                harnesses: false,
-                integrations: true,
-                integration_name: Some("integration"),
-            },
-            options.panic_abort,
-        )
-        .unwrap();
-        let check_plan = plan_dependency_units(&check_graph, &manifests, &options).unwrap();
+        let check_plan = graph
+            .selected_check_plan(
+                &options,
+                &manifest,
+                &CheckTargetSelection {
+                    normal: false,
+                    binaries: false,
+                    binary_name: None,
+                    harnesses: false,
+                    integrations: true,
+                    integration_name: Some("integration"),
+                },
+            )
+            .unwrap();
         assert!(
             check_plan.units.keys().all(|key| {
                 key.package != library.package || key.profile == ProfileContext::Test
