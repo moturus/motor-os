@@ -1012,7 +1012,7 @@ fn an_approved_sh_call_runs_in_the_workspace() {
 }
 
 #[test]
-fn always_allow_lasts_until_the_session_changes() {
+fn session_allow_survives_resume_but_not_a_new_session() {
     let fixture = Fixture::new("always");
     let touch = |name: &str| tool("sh", &format!(r#"{{"command":"touch {name}"}}"#));
     let provider = Scripted::new(vec![
@@ -1032,20 +1032,13 @@ fn always_allow_lasts_until_the_session_changes() {
         answer: Approval::Session,
         asked: 0,
     };
-    let mut notices = Vec::new();
     // One answer covers the rest of the turn and the following turns.
     for prompt in ["first", "second"] {
         runtime
-            .turn(prompt.to_string(), &mut always, &mut |event| {
-                if let Event::Notice(notice) = event {
-                    notices.push(notice);
-                }
-                Ok(())
-            })
+            .turn(prompt.to_string(), &mut always, &mut |_| Ok(()))
             .unwrap();
     }
     assert_eq!(always.asked, 1);
-    assert_eq!(notices.len(), 1, "{notices:?}");
     for name in ["one", "two", "three"] {
         assert!(fixture.workspace.join(name).exists(), "{name}");
     }
@@ -1055,27 +1048,21 @@ fn always_allow_lasts_until_the_session_changes() {
         asked: 0,
     };
     runtime.new_session(false, None).unwrap();
-    assert!(
-        runtime
-            .take_startup_notices()
-            .iter()
-            .any(|notice| notice.contains("need approval again"))
-    );
     runtime
         .turn("third".to_string(), &mut deny, &mut |_| Ok(()))
         .unwrap();
-    // Coming back to the session that was granted "always" asks again too.
+    // The original session retains its own grant after returning to it.
     runtime.resume(&first).unwrap();
     runtime
         .turn("fourth".to_string(), &mut deny, &mut |_| Ok(()))
         .unwrap();
-    assert_eq!(deny.asked, 2);
+    assert_eq!(deny.asked, 1);
     assert!(!fixture.workspace.join("four").exists());
-    assert!(!fixture.workspace.join("five").exists());
+    assert!(fixture.workspace.join("five").exists());
 }
 
 #[test]
-fn always_allow_is_not_stored_with_the_session() {
+fn session_allow_is_stored_with_the_session() {
     let fixture = Fixture::new("always-restart");
     let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
     let open = |session, script| {
@@ -1110,7 +1097,7 @@ fn always_allow_is_not_stored_with_the_session() {
     let id = runtime.summary().id;
     drop(runtime);
 
-    // A restarted binary resuming the same session starts unapproved.
+    // A restarted binary resuming the same session uses its saved grant.
     let mut resumed = open(
         store.open(&id).unwrap(),
         vec![tool("sh", r#"{"command":"touch after"}"#), answer("done")],
@@ -1122,9 +1109,9 @@ fn always_allow_is_not_stored_with_the_session() {
     resumed
         .turn("second".to_string(), &mut deny, &mut |_| Ok(()))
         .unwrap();
-    assert_eq!(deny.asked, 1);
+    assert_eq!(deny.asked, 0);
     assert!(fixture.workspace.join("before").exists());
-    assert!(!fixture.workspace.join("after").exists());
+    assert!(fixture.workspace.join("after").exists());
 }
 
 #[test]

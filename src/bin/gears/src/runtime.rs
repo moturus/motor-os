@@ -7,13 +7,16 @@ use serde_json::Value;
 
 use crate::config::{Config, ContextConfig};
 use crate::hooks::{Decision, Manager as Hooks, ToolResult};
+use crate::permissions::{Grant, Grants};
 use crate::process::{Cancellation, Stream};
 use crate::prompt::Effective;
 use crate::provider::{
     ContentBlock, EventSink, Message, Provider, ProviderError, Request, StreamEvent, ToolCall,
     ToolOutcome, ToolSpec, UsageMeter,
 };
-use crate::session::{Compaction, Session, SessionInfo, Store, ToolState, TreeItem};
+use crate::session::{
+    Compaction, PermissionGrant, Session, SessionInfo, Store, ToolState, TreeItem,
+};
 use crate::tool_state::Overrides;
 use crate::tools::{ExecutionContext, Registry};
 
@@ -87,12 +90,18 @@ where
 pub enum Approval {
     Deny,
     Once,
-    /// Allow this call and stop asking until the session changes.
     Session,
+    Global,
+    DenySession,
+    DenyGlobal,
 }
 
 pub trait Approver {
     fn approve(&mut self, request: &Permission) -> Approval;
+
+    fn attended(&self) -> bool {
+        true
+    }
 }
 
 impl<F> Approver for F
@@ -122,8 +131,6 @@ pub struct Runtime {
     cancellation: Cancellation,
     usage: UsageMeter,
     startup_notices: Vec<String>,
-    // Never persisted: a restarted or resumed session asks again.
-    allow_all: bool,
 }
 
 impl Runtime {
@@ -233,7 +240,6 @@ impl Runtime {
             cancellation,
             usage,
             startup_notices,
-            allow_all: false,
         })
     }
 
@@ -308,6 +314,40 @@ impl Runtime {
         self.prompt = prompt;
         self.startup_notices.extend(notices);
         Ok(())
+    }
+
+    fn save_approval(
+        &mut self,
+        name: &str,
+        identity: &str,
+        answer: Approval,
+    ) -> Result<(), String> {
+        let allow = match answer {
+            Approval::Session | Approval::Global => Some(true),
+            Approval::DenySession | Approval::DenyGlobal => Some(false),
+            Approval::Once | Approval::Deny => None,
+        };
+        let Some(allow) = allow else {
+            return Ok(());
+        };
+        if matches!(answer, Approval::Global | Approval::DenyGlobal) {
+            let mut grants = Grants::load(&self.tool_state_directory)?;
+            grants.by_identity.insert(
+                identity.to_string(),
+                Grant {
+                    name: name.to_string(),
+                    allow,
+                },
+            );
+            grants.save(&self.tool_state_directory)
+        } else {
+            self.session.append_permission_grant(&PermissionGrant {
+                name: name.to_string(),
+                identity: identity.to_string(),
+                allow: Some(allow),
+            })?;
+            Ok(())
+        }
     }
 
     pub fn take_startup_notices(&mut self) -> Vec<String> {
@@ -669,10 +709,6 @@ impl Runtime {
             self.provider_name = provider_name;
         }
         self.session = session;
-        if std::mem::take(&mut self.allow_all) {
-            self.startup_notices
-                .push("session changed; tool calls need approval again".to_string());
-        }
         self.usage = self.session.usage();
         self.hooks.notify(
             "session_start",
@@ -709,6 +745,35 @@ impl Runtime {
         } else {
             call_detail(&call)
         };
+        let identity = if let Some(tool) = self.tools.enabled(&call.name) {
+            tool.approval_identity()
+        } else {
+            self.hooks
+                .approval_identity(&call.name)
+                .ok_or_else(|| format!("no approval identity for {:?}", call.name))
+        };
+        let identity = match identity {
+            Ok(identity) => identity,
+            Err(error) => {
+                return self.record_unstarted_calls(std::slice::from_ref(&call), &error, observer);
+            }
+        };
+        let saved_answer = (|| {
+            let session = self.session.permission_grants()?;
+            let global = Grants::load(&self.tool_state_directory)?;
+            Ok::<_, String>(
+                session
+                    .get(&identity)
+                    .and_then(|grant| grant.allow)
+                    .or_else(|| global.by_identity.get(&identity).map(|grant| grant.allow)),
+            )
+        })();
+        let saved_answer = match saved_answer {
+            Ok(answer) => answer,
+            Err(error) => {
+                return self.record_unstarted_calls(std::slice::from_ref(&call), &error, observer);
+            }
+        };
         let permission = Permission {
             tool: call.name.clone(),
             detail: detail.clone(),
@@ -723,12 +788,16 @@ impl Runtime {
             return Err(error);
         }
         let mut notices = Vec::new();
-        let decision = self.hooks.permission(
-            &call,
-            &mut self.session,
-            &self.cancellation,
-            &mut |notice| notices.push(notice),
-        );
+        let decision = if saved_answer == Some(false) {
+            Decision::Deny
+        } else {
+            self.hooks.permission(
+                &call,
+                &mut self.session,
+                &self.cancellation,
+                &mut |notice| notices.push(notice),
+            )
+        };
         if let Err(error) = emit_notices(observer, notices) {
             self.record_unstarted_calls(
                 std::slice::from_ref(&call),
@@ -740,26 +809,22 @@ impl Runtime {
         let allowed = match decision {
             Decision::Deny => false,
             Decision::Allow => true,
-            Decision::Ask if self.allow_all => true,
-            Decision::Ask => match approver.approve(&permission) {
-                Approval::Deny => false,
-                Approval::Once => true,
-                Approval::Session => {
-                    self.allow_all = true;
-                    if let Err(error) = observer.event(Event::Notice(
-                        "tool calls are allowed without asking until the session changes"
-                            .to_string(),
-                    )) {
-                        self.record_unstarted_calls(
-                            std::slice::from_ref(&call),
-                            "approval notice failed",
-                            observer,
-                        )?;
-                        return Err(error);
-                    }
-                    true
+            Decision::Ask if saved_answer == Some(true) && approver.attended() => true,
+            Decision::Ask | Decision::Confirm if approver.attended() => {
+                let answer = approver.approve(&permission);
+                if let Err(error) = self.save_approval(&call.name, &identity, answer) {
+                    return self.record_unstarted_calls(
+                        std::slice::from_ref(&call),
+                        &error,
+                        observer,
+                    );
                 }
-            },
+                matches!(
+                    answer,
+                    Approval::Once | Approval::Session | Approval::Global
+                )
+            }
+            Decision::Ask | Decision::Confirm => false,
         };
         if let Err(error) = observer.event(Event::ToolStart {
             name: call.name.clone(),

@@ -403,6 +403,10 @@ struct ChannelApprover {
 }
 
 impl Approver for ChannelApprover {
+    fn attended(&self) -> bool {
+        self.interactive
+    }
+
     fn approve(&mut self, request: &Permission) -> Approval {
         if !self.interactive {
             eprintln!("gears: denied unattended tool call: {}", request.detail);

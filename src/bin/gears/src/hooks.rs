@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::config::HookConfig;
 use crate::process::{Cancellation, Request as ProcessRequest, run};
@@ -53,6 +54,7 @@ pub enum Decision {
     Allow,
     Deny,
     Ask,
+    Confirm,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -241,6 +243,8 @@ impl Manager {
             result = match (result, decision) {
                 (_, Decision::Deny) => Decision::Deny,
                 (Decision::Deny, _) => Decision::Deny,
+                (_, Decision::Confirm) => Decision::Confirm,
+                (Decision::Confirm, _) => Decision::Confirm,
                 (_, Decision::Allow) => Decision::Allow,
                 (current, Decision::Ask) => current,
             };
@@ -250,6 +254,24 @@ impl Manager {
 
     pub fn owns_tool(&self, name: &str) -> bool {
         self.tool_owner.contains_key(name)
+    }
+
+    pub fn approval_identity(&self, name: &str) -> Option<String> {
+        let index = *self.tool_owner.get(name)?;
+        let spec = self.tools.iter().find(|tool| tool.name == name)?;
+        let config = &self.hooks[index].config;
+        let identity = serde_json::json!({
+            "name": name,
+            "kind": "hook",
+            "owner": config.name,
+            "command": config.command,
+            "timeout_ms": config.timeout.as_millis(),
+            "max_output_bytes": config.max_output_bytes,
+            "spec": spec,
+        });
+        let bytes = serde_json::to_vec(&identity).ok()?;
+        let digest = Sha256::digest(bytes);
+        Some(digest.iter().map(|byte| format!("{byte:02x}")).collect())
     }
 
     pub fn execute_tool(
