@@ -298,6 +298,12 @@ what the model sees.
 | `worker` | batteries | phase 10, optional |
 | `web_search`, `web_extract` | batteries | phase 11, optional |
 
+The `wc` directory takes one required string `path` and an optional `mode`
+selected from `lines`, `words`, and `bytes`. The modes map to `-l`, `-w`, and
+`-c` respectively; omitting the mode uses the program's default counts.
+Both systems pass the path after `--`, so spaces, glob characters, and leading
+dashes stay literal.
+
 Details:
 
 - **`read_file`** returns numbered lines in pages of about 30 KB and refuses
