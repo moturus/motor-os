@@ -643,6 +643,7 @@ fn execute_unit(
                 validate_dep_info(
                     &invocation.output,
                     &manifest.root,
+                    &invocation.current_dir,
                     executed_build_script.map(|build| build.out_dir.as_path()),
                     planned.source_remap.as_ref(),
                 )?;
@@ -772,6 +773,7 @@ fn verify_outputs(output: &RustcOutput) -> Result<()> {
 fn validate_dep_info(
     output: &RustcOutput,
     package_root: &Path,
+    working_dir: &Path,
     build_out_dir: Option<&Path>,
     source_remap: Option<&crate::unit::SourceRemap>,
 ) -> Result<()> {
@@ -823,7 +825,7 @@ fn validate_dep_info(
                 if path.is_absolute() {
                     path
                 } else {
-                    root.join(path)
+                    working_dir.join(path)
                 }
             });
         let canonical = fs::canonicalize(&path).map_err(|error| {

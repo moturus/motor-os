@@ -1,0 +1,9 @@
+[workspace]
+members = ["app", "shared"]
+resolver = "2"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

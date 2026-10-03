@@ -16,6 +16,7 @@ pub struct Identity {
 pub struct IdentityInput<'a> {
     pub package_name: &'a str,
     pub version: &'a Version,
+    pub source_path: &'a str,
     pub target_name: &'a str,
     pub target_kind: RootTargetKind,
     pub features: &'a [String],
@@ -37,7 +38,7 @@ pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
     cargo_unit_identity(&CargoUnitIdentityInput {
         package_name: input.package_name,
         version: input.version,
-        source: CargoSource::Path(""),
+        source: CargoSource::Path(input.source_path),
         features: input.features,
         profile: &profile,
         mode: if input.test {
@@ -665,6 +666,7 @@ mod tests {
             let identity = cargo_identity(&IdentityInput {
                 package_name: "red",
                 version: &version,
+                source_path: "",
                 target_name: "red",
                 target_kind: RootTargetKind::Binary,
                 features: &[],
@@ -706,6 +708,7 @@ mod tests {
             cargo_identity(&IdentityInput {
                 package_name: "host-build-helper",
                 version: &version(),
+                source_path: "",
                 target_name: "host_build_helper",
                 target_kind: RootTargetKind::Binary,
                 features: &[],
@@ -737,6 +740,7 @@ mod tests {
         let library = cargo_identity(&IdentityInput {
             package_name: "moto-rush",
             version: &version,
+            source_path: "",
             target_name: "moto_rush",
             target_kind: RootTargetKind::Library,
             features: &[],
@@ -756,6 +760,7 @@ mod tests {
         let binary = cargo_identity(&IdentityInput {
             package_name: "moto-rush",
             version: &version,
+            source_path: "",
             target_name: "rush",
             target_kind: RootTargetKind::Binary,
             features: &[],
@@ -782,6 +787,7 @@ mod tests {
         let root_library = cargo_identity(&IdentityInput {
             package_name: "moto-rush",
             version: &version,
+            source_path: "",
             target_name: "moto_rush",
             target_kind: RootTargetKind::Library,
             features: &[],
@@ -801,6 +807,7 @@ mod tests {
         let library_harness = cargo_identity(&IdentityInput {
             package_name: "moto-rush",
             version: &version,
+            source_path: "",
             target_name: "moto_rush",
             target_kind: RootTargetKind::Library,
             features: &[],
@@ -821,6 +828,7 @@ mod tests {
         let binary_harness = cargo_identity(&IdentityInput {
             package_name: "moto-rush",
             version: &version,
+            source_path: "",
             target_name: "rush",
             target_kind: RootTargetKind::Binary,
             features: &[],
@@ -846,6 +854,7 @@ mod tests {
         let integration = cargo_identity(&IdentityInput {
             package_name: "moto-rush",
             version: &version,
+            source_path: "",
             target_name: "phase5",
             target_kind: RootTargetKind::IntegrationTest,
             features: &[],

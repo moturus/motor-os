@@ -160,7 +160,16 @@ pub fn dependency_rustc_invocation_with_build_output(
         &mut arguments,
         &format!("--edition={}", edition_name(manifest.edition)),
     );
-    arguments.push(source.as_os_str().to_owned());
+    let source_argument = if matches!(key.package.source, PackageSourceKey::Path(_))
+        && planned.source_remap.is_none()
+    {
+        source
+            .strip_prefix(options.workspace_root)
+            .unwrap_or(source)
+    } else {
+        source
+    };
+    arguments.push(source_argument.as_os_str().to_owned());
     push(&mut arguments, "--error-format=json");
     push(
         &mut arguments,

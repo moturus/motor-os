@@ -95,6 +95,8 @@ impl PreparedGraph {
                             "path package `{} {}` has distinct logical and physical roots",
                             package.key.name, package.key.version
                         )));
+                    } else if physical_root.starts_with(options.workspace_root) {
+                        None
                     } else {
                         Some(SourceRemap::path(
                             options.workspace_root,
@@ -1143,27 +1145,7 @@ mod tests {
                 rustflags: &[],
             })
             .unwrap();
-        let remap = plan
-            .units
-            .values()
-            .next()
-            .unwrap()
-            .source_remap
-            .as_ref()
-            .unwrap();
-        let ResolvedSource::Path {
-            source_tree_sha256, ..
-        } = &graph.resolution.packages[0].source
-        else {
-            unreachable!()
-        };
-        assert_eq!(
-            remap.presented_root,
-            PathBuf::from(format!(
-                ".lorry/path/sha256/{}/source",
-                hex(source_tree_sha256)
-            ))
-        );
+        assert!(plan.units.values().all(|unit| unit.source_remap.is_none()));
     }
 
     #[test]

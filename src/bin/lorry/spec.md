@@ -356,11 +356,14 @@ host-independent logical paths without changing their physical storage:
 
 - each crates.io object has the logical root
   `.lorry/registry/sha256/<locked-checksum>/source`;
-- each ordinary non-root path dependency has the logical root
+- a path package inside the workspace root keeps its workspace-relative
+  source path and package identity, with no source remapping. Its rustc and
+  dep-info paths are relative to the workspace root, including when selected;
+- each path dependency outside the workspace root has the logical root
   `.lorry/path/sha256/<source-tree-sha256>/source`;
 - dependency rustc runs from the workspace root and receives an internal
   `--remap-path-prefix` from the physical source root to the
-  workspace-relative logical root;
+  workspace-relative logical root for remapped packages;
 - an approved C compiler receives the equivalent
   `-ffile-prefix-map=<physical-root>=<workspace-relative-logical-root>`.
   Archivers and other native tools are unchanged;

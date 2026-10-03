@@ -86,6 +86,25 @@ CARGO_NATIVE_HELPER_TEST="$(find \
 cmp "$LORRY_NATIVE_HELPER_TEST" "$CARGO_NATIVE_HELPER_TEST" ||
     fail "native release helper test harness differs from Cargo"
 
+cp -R "$SCRIPT_DIR/fixtures/cargo-identity-workspace" "$WORK/workspace"
+WORKSPACE="$WORK/workspace"
+echo "== Comparing selected workspace member with Cargo =="
+(
+    cd "$WORKSPACE"
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        RUSTC="$NATIVE_RUSTC" "$LORRY" vendor -p app --accept-all
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        RUSTC="$NATIVE_RUSTC" "$LORRY" build -p app --release
+    RUSTC="$NATIVE_RUSTC" "$CARGO" build -p app --locked --offline --release \
+        --target-dir "$WORK/cargo-workspace-native"
+)
+cmp "$WORKSPACE/target/lorry/packages/app/release/app" \
+    "$WORK/cargo-workspace-native/release/app" ||
+    fail "native selected member executable differs from Cargo"
+[ "$("$WORKSPACE/target/lorry/packages/app/release/app")" = \
+    "app/src/main.rs shared/src/lib.rs" ] ||
+    fail "selected member source paths differ from Cargo"
+
 echo "== Comparing native dev panic-abort artifacts with Cargo =="
 (
     cd "$PROJECT"
@@ -145,6 +164,19 @@ CARGO_MOTOR_HELPER_TEST="$(find \
     -type f -perm -111 -name 'helper-*' -print -quit)"
 cmp "$LORRY_MOTOR_HELPER_TEST" "$CARGO_MOTOR_HELPER_TEST" ||
     fail "Motor release helper test harness differs from Cargo"
+
+mkdir "$WORKSPACE/.cargo"
+cp "$PROJECT/.cargo/config.toml" "$WORKSPACE/.cargo/config.toml"
+(
+    cd "$WORKSPACE"
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        "$LORRY" +"$MOTOR_TOOLCHAIN" build -p app --release --target "$MOTOR_TARGET"
+    RUSTC="$MOTOR_RUSTC" "$CARGO" build -p app --locked --offline --release \
+        --target "$MOTOR_TARGET" --target-dir "$WORK/cargo-workspace-motor"
+)
+cmp "$WORKSPACE/target/lorry/packages/app/$MOTOR_TARGET/release/app" \
+    "$WORK/cargo-workspace-motor/$MOTOR_TARGET/release/app" ||
+    fail "Motor selected member executable differs from Cargo"
 
 echo "== Cleaning the package-independent global Lorry cache =="
 [ -d "$GLOBAL_CACHE/v1/units/sha256" ] ||

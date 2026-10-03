@@ -193,7 +193,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
     if let Some(base) = ordinary_freshness_base
         && let Some(artifacts) = restore_fresh_profile(
             &profile_destination(&target_root, physical_target.as_deref(), release),
-            &manifest.root,
+            &manifest.workspace_root,
             base,
             validation,
         )
@@ -754,9 +754,12 @@ fn build_inner(
         .transpose()?;
     if let Some(base) = freshness_base {
         crate::trace::event("fingerprinted build inputs");
-        if let Some(artifacts) =
-            restore_fresh_profile(&destination, &build.manifest.root, base, build.validation)
-        {
+        if let Some(artifacts) = restore_fresh_profile(
+            &destination,
+            &build.manifest.workspace_root,
+            base,
+            build.validation,
+        ) {
             crate::trace::event("validated fresh root profile");
             finish_build(&build, &artifacts)?;
             crate::trace::event("reported build result");
@@ -959,7 +962,7 @@ fn build_inner(
     if let Some(base) = freshness_base {
         write_fresh_profile(
             staging.path(),
-            &build.manifest.root,
+            &build.manifest.workspace_root,
             base,
             &compiled,
             &local_source_roots(&prepared.resolution),
@@ -2195,7 +2198,7 @@ fn check_root_target(
         identities.push(library.identity.clone());
     }
     identities.extend_from_slice(artifact_dependencies);
-    let identity = root_identity(build, target, test, test_profile, features, &identities);
+    let identity = root_identity(build, target, test, test_profile, features, &identities)?;
     let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
     create_directory(&output_dir, "root rustc output directory")?;
     let arguments = rustc_arguments(
@@ -2553,7 +2556,7 @@ fn compile_root_library(
         .map(|dependency| dependency.identity.clone())
         .collect::<Vec<_>>();
     let target = RootTarget::Library(target);
-    let identity = root_identity(build, target, false, test_profile, features, &identities);
+    let identity = root_identity(build, target, false, test_profile, features, &identities)?;
     let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
     create_directory(&output_dir, "root rustc output directory")?;
     let arguments = rustc_arguments(
@@ -2602,7 +2605,7 @@ fn compile_root_binary(
         identities.push(library.identity.clone());
     }
     let target = RootTarget::Binary(target);
-    let identity = root_identity(build, target, test, test_profile, features, &identities);
+    let identity = root_identity(build, target, test, test_profile, features, &identities)?;
     let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
     create_directory(&output_dir, "root rustc output directory")?;
     let arguments = rustc_arguments(
@@ -2667,7 +2670,7 @@ fn compile_root_harness(
         identities.push(library.identity.clone());
     }
     identities.extend_from_slice(artifact_dependencies);
-    let identity = root_identity(build, target, true, true, features, &identities);
+    let identity = root_identity(build, target, true, true, features, &identities)?;
     let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
     create_directory(&output_dir, "root rustc output directory")?;
     let arguments = rustc_arguments(
@@ -2707,10 +2710,18 @@ fn root_identity(
     test_profile: bool,
     features: &[String],
     dependencies: &[Identity],
-) -> Identity {
-    cargo_identity(&IdentityInput {
+) -> Result<Identity> {
+    let source_path = build
+        .manifest
+        .root
+        .strip_prefix(&build.manifest.workspace_root)
+        .map_err(|_| Error::failure("selected package is outside its workspace root"))?
+        .to_str()
+        .ok_or_else(|| Error::failure("selected package path is not valid UTF-8"))?;
+    Ok(cargo_identity(&IdentityInput {
         package_name: &build.manifest.name,
         version: &build.manifest.version,
+        source_path,
         target_name: target.name(),
         target_kind: target.kind(),
         features,
@@ -2723,7 +2734,7 @@ fn root_identity(
         rustc: build.toolchain,
         rustflags: build.rustflags,
         dependencies,
-    })
+    }))
 }
 
 fn root_output_directory(staging: &Path, package_name: &str, identity: &Identity) -> PathBuf {
@@ -2789,7 +2800,7 @@ fn execute_root_rustc(
         program: &build.toolchain.rustc,
         arguments,
         environment: &environment,
-        current_dir: &build.manifest.root,
+        current_dir: &build.manifest.workspace_root,
         verbose: build.verbosity == Verbosity::Verbose,
         color: build.color,
     }
@@ -2853,7 +2864,7 @@ fn rustc_arguments(
     args.push(
         target
             .path()
-            .strip_prefix(&build.manifest.root)
+            .strip_prefix(&build.manifest.workspace_root)
             .expect("root target path came from a validated relative manifest path")
             .as_os_str()
             .to_owned(),
