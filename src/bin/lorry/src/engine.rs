@@ -24,7 +24,8 @@ use crate::resolver::{
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{
-    CompilationPlan, PlanOptions, UnitEdgeKind, UnitKey, UnitKind, selected_library_key,
+    CheckTargetSelection, CompilationPlan, PlanOptions, UnitEdgeKind, UnitKey, UnitKind,
+    selected_library_key,
 };
 use crate::validation::ValidationMode;
 use std::collections::{BTreeMap, BTreeSet};
@@ -806,6 +807,22 @@ fn build_inner(
             prepared.dependency_plan(&options)
         }
     };
+    let selected_check_plan = |selection: &CheckTargetSelection<'_>| {
+        prepared.selected_check_plan(
+            &PlanOptions {
+                workspace_root: &build.manifest.workspace_root,
+                release: build.release,
+                test_profile: false,
+                panic_abort: build.manifest.panic_abort(build.release),
+                release_profile: &build.manifest.release,
+                rustc: build.toolchain,
+                logical_target: build.logical_target,
+                rustflags: build.rustflags,
+            },
+            build.manifest,
+            selection,
+        )
+    };
     let message_reporter = match check {
         Some((_, options)) if options.message_format != MessageFormat::Human => {
             let roots =
@@ -930,6 +947,35 @@ fn build_inner(
             .as_ref()
             .map(|reporter| reporter as &dyn executor::EventReporter),
     };
+    if let Some((_, options)) = check
+        && options.lib
+        && !options.selects_binaries()
+        && !options.selects_tests()
+    {
+        if build.manifest.library.is_none() {
+            return Err(Error::failure("selected package has no library target"));
+        }
+        let plan = selected_check_plan(&CheckTargetSelection {
+            normal: true,
+            binaries: false,
+            binary_name: None,
+            harnesses: false,
+            integrations: false,
+            integration_name: None,
+        })?;
+        executor::execute(&plan, &manifests, &executor_options)?;
+        if build.validation.is_strict() {
+            prepared.revalidate_cargo_registry_sources(repository_tree_limits(
+                &build.config.policy.limits,
+            )?)?;
+        }
+        drop(prepared);
+        staging.commit(&destination)?;
+        if build.verbosity != Verbosity::Quiet {
+            eprintln!("Finished `check` profile");
+        }
+        return Ok(BuildOutcome::Check(0));
+    }
     let needs_normal_plan = match check {
         Some((_, options)) => options.selects_normal_targets(),
         None => !build.test || (selected_integration && !build.manifest.binaries.is_empty()),
