@@ -859,6 +859,7 @@ mod tests {
             kind: UnitKind::BuildScriptRun,
             target: None,
             compile_kind: CompileKind::Target,
+            profile: crate::unit::ProfileContext::Normal,
             features: BTreeSet::from(["default".to_owned(), "fancy-feature".to_owned()]),
         };
         let unit = Unit {

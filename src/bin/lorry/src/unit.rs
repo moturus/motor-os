@@ -31,13 +31,39 @@ pub enum UnitKind {
     BuildScriptRun,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ProfileContext {
+    Normal,
+    Test,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct UnitKey {
     pub package: PackageKey,
     pub kind: UnitKind,
     pub target: Option<String>,
     pub compile_kind: CompileKind,
+    pub profile: ProfileContext,
     pub features: BTreeSet<String>,
+}
+
+impl UnitKey {
+    pub fn with_profile(mut self, profile: ProfileContext, panic_abort: bool) -> Self {
+        self.profile =
+            if panic_abort && !self.uses_host_profile() && self.kind != UnitKind::BuildScriptRun {
+                profile
+            } else {
+                ProfileContext::Normal
+            };
+        self
+    }
+
+    fn uses_host_profile(&self) -> bool {
+        matches!(
+            self.kind,
+            UnitKind::BuildScriptCompile | UnitKind::ProcMacro
+        ) || self.compile_kind == CompileKind::Host
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -64,6 +90,29 @@ pub struct Unit {
 pub struct UnitGraph {
     pub units: BTreeMap<UnitKey, Unit>,
     pub order: Vec<UnitKey>,
+}
+
+impl UnitGraph {
+    pub fn with_profile(mut self, profile: ProfileContext, panic_abort: bool) -> Self {
+        let mut units = BTreeMap::new();
+        for (_, mut unit) in std::mem::take(&mut self.units) {
+            unit.key = unit.key.with_profile(profile, panic_abort);
+            unit.dependencies = unit
+                .dependencies
+                .into_iter()
+                .map(|mut edge| {
+                    edge.unit = edge.unit.with_profile(profile, panic_abort);
+                    edge
+                })
+                .collect();
+            units.insert(unit.key.clone(), unit);
+        }
+        for key in &mut self.order {
+            *key = key.clone().with_profile(profile, panic_abort);
+        }
+        self.units = units;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -415,6 +464,7 @@ pub fn selected_library_key(manifest: &Manifest) -> Result<UnitKey> {
         kind: UnitKind::Library,
         target: None,
         compile_kind: CompileKind::Target,
+        profile: ProfileContext::Normal,
         features: selected_root_features(manifest)?,
     })
 }
@@ -766,10 +816,9 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
         options.release_profile,
         options.panic_abort,
         local,
-        options.test_profile,
+        key.profile == ProfileContext::Test,
     );
-    let for_host = matches!(key.kind, UnitKind::BuildScriptCompile | UnitKind::ProcMacro)
-        || key.compile_kind == CompileKind::Host;
+    let for_host = key.uses_host_profile();
     if for_host {
         profile.opt_level = "0";
         profile.codegen_units = None;
@@ -989,6 +1038,7 @@ fn unit_key(
         kind,
         target: None,
         compile_kind,
+        profile: ProfileContext::Normal,
         features: features.clone(),
     }
 }
@@ -1268,6 +1318,42 @@ mod tests {
         assert_ne!(
             plan.units[&binaries[0]].identity,
             plan.units[&binaries[1]].identity
+        );
+        let test_graph = graph.clone().with_profile(ProfileContext::Test, true);
+        let test_key = UnitKey {
+            profile: ProfileContext::Test,
+            ..selected.clone()
+        };
+        assert_eq!(test_graph.units.len(), graph.units.len());
+        assert!(
+            test_graph.units[&test_key]
+                .dependencies
+                .iter()
+                .all(|edge| edge.unit.profile == ProfileContext::Test)
+        );
+        let options = PlanOptions {
+            workspace_root: &fixture.0,
+            release: true,
+            test_profile: false,
+            panic_abort: true,
+            release_profile: &root.release,
+            rustc: &toolchain(),
+            logical_target: None,
+            rustflags: &[],
+        };
+        let normal_plan = plan_dependency_units(&graph, &manifests, &options).unwrap();
+        let test_plan = plan_dependency_units(&test_graph, &manifests, &options).unwrap();
+        assert_eq!(
+            normal_plan.units[&selected].settings.profile.panic,
+            CargoPanicStrategy::Abort
+        );
+        assert_eq!(
+            test_plan.units[&test_key].settings.profile.panic,
+            CargoPanicStrategy::Unwind
+        );
+        assert_ne!(
+            normal_plan.units[&selected].identity,
+            test_plan.units[&test_key].identity
         );
         let invocation = dependency_rustc_invocation(
             &plan,
@@ -2025,6 +2111,7 @@ mod tests {
             kind: UnitKind::Library,
             target: None,
             compile_kind: CompileKind::Target,
+            profile: ProfileContext::Normal,
             features: BTreeSet::new(),
         };
         let incomplete = Resolution {

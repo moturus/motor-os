@@ -24,7 +24,8 @@ use crate::resolver::{
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{
-    CompilationPlan, PlanOptions, UnitEdgeKind, UnitKey, UnitKind, selected_library_key,
+    CompilationPlan, PlanOptions, ProfileContext, UnitEdgeKind, UnitKey, UnitKind,
+    selected_library_key,
 };
 use crate::validation::ValidationMode;
 use std::collections::{BTreeMap, BTreeSet};
@@ -935,7 +936,13 @@ fn build_inner(
             test_plan.units.len()
         ));
         let dependencies = root_dependencies(&prepared.resolution, &test_plan, &outputs)?;
-        let library = match selected_library.as_ref() {
+        let test_library = selected_library.as_ref().map(|key| {
+            key.clone().with_profile(
+                ProfileContext::Test,
+                build.manifest.panic_abort(build.release),
+            )
+        });
+        let library = match test_library.as_ref() {
             Some(key) if test_plan.units.contains_key(key) => {
                 Some(planned_root_library(&test_plan, &outputs, key)?)
             }

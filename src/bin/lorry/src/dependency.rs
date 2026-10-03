@@ -22,7 +22,7 @@ use crate::resolver::{
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::Toolchain;
 use crate::unit::{
-    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, add_selected_binaries,
+    CompilationPlan, PlanOptions, ProfileContext, SourceRemap, UnitGraph, add_selected_binaries,
     add_selected_harnesses, add_selected_library, dependency_units,
     plan_dependency_units_with_remaps, selected_library_key,
 };
@@ -105,6 +105,9 @@ impl PreparedGraph {
                     "selected package duplicates a dependency package",
                 ));
             }
+        }
+        if options.test_profile {
+            graph = graph.with_profile(ProfileContext::Test, options.panic_abort);
         }
         let mut source_remaps = BTreeMap::<PackageKey, SourceRemap>::new();
         let mut complete_source_trees = BTreeSet::<PackageKey>::new();
