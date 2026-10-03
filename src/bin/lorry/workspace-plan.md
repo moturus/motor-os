@@ -153,6 +153,11 @@ Each later feature is then written once.
 | 8 | Remaining targets and commands | Member build scripts, dev-dependencies, examples, benches, workspace tests, `run`, `clean` |
 | 9 | Editor integration and native acceptance | Full rust-analyzer support, and the acceptance cases on Motor |
 
+For milestone 2, build scripts use Cargo's stable `OUT_DIR` for the same
+unit. A failed replacement may change files there; Lorry invalidates its
+freshness before rerunning the script and never reuses a failed result.
+Other completed units survive an unrelated failure.
+
 ### First patches
 
 Four small fixes depend on nothing else. They land before milestone 1.

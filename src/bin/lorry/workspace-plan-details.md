@@ -519,9 +519,10 @@ builds.
 ## Milestone 2: per-unit publication
 
 **Result.** Each finished unit is published by itself, into one layout, and
-is reused there. Finished outputs survive another selection, a later
-failure, and a killed command. This closes findings 19 and 20, and the
-copying part of finding 13.
+is reused there. Finished outputs survive another selection and failure of
+an unrelated unit. Replacement of the same unit follows Cargo's ordinary
+artifact lifetime. This closes findings 19 and 20, and the copying part of
+finding 13.
 
 ### Layout
 
@@ -568,14 +569,22 @@ For each completed unit:
 2. Publish files or the unit's output directory safely, with its success
    and freshness record last. A failed or interrupted write must not
    create a valid fresh record.
-3. Preserve the previous completed result until replacement succeeds.
-   Recover an interrupted replacement under the same lock.
+3. Preserve the previous completed result until replacement succeeds for
+   compiler artifacts that can be staged. Recover an interrupted replacement
+   under the same lock. A build script's `OUT_DIR` is the exception below.
 4. Emit artifact/build-script messages only after their paths exist in
    the published layout.
 
-A script's consumers must use its published `OUT_DIR` and generated
-files. Do not compile them against a temporary path and rename it away
-afterwards. Cover embedded `OUT_DIR` paths as well as JSON filenames.
+A build-script run uses a stable, published `OUT_DIR` for the same unit,
+including when its source changes. Its consumers use that path and the
+generated files. Do not compile them against a temporary path and rename it
+away afterwards. Cargo allows a failed replacement script to change files
+in the previous `OUT_DIR`; Lorry does too. Invalidate the script's freshness
+before running it, and publish a fresh success record only after it succeeds.
+Never treat a failed or interrupted replacement as fresh. Cover embedded
+`OUT_DIR` paths as well as JSON filenames. The pinned Cargo oracle confirmed
+that the `OUT_DIR` path stayed the same after a `build.rs` edit, a failing
+replacement changed a file there, and the old binary remained on disk.
 
 Keep successful units when another unit fails. Under `--keep-going`,
 independent units finish normally; dependents of failed units are skipped.
