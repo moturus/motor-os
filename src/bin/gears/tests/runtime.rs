@@ -92,6 +92,18 @@ impl Approver for UnexpectedApproval {
     }
 }
 
+struct UnattendedApproval;
+
+impl Approver for UnattendedApproval {
+    fn approve(&mut self, _request: &Permission) -> Approval {
+        panic!("unattended run must not ask for approval")
+    }
+
+    fn attended(&self) -> bool {
+        false
+    }
+}
+
 fn answer(text: &str) -> Result<Completion, ProviderError> {
     Ok(Completion {
         content: text.to_string(),
@@ -279,6 +291,62 @@ fn permission_listing_marks_stale_grants_and_revoke_clears_each_scope() {
     assert_eq!(runtime.permission_statuses().unwrap().len(), 1);
     runtime.revoke_permission("sh", true).unwrap();
     assert!(runtime.permission_statuses().unwrap().is_empty());
+}
+
+#[test]
+fn global_allow_survives_new_sessions_but_not_unattended_calls() {
+    let fixture = Fixture::new("global-allow-unattended");
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let session = store.create(false, None).unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let registry = Registry::load_config(&config).unwrap();
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"touch first"}"#),
+        answer("done"),
+        tool("sh", r#"{"command":"touch unattended"}"#),
+        answer("done"),
+        tool("sh", r#"{"command":"touch third"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = Runtime::new_with_registry_at(
+        provider,
+        store,
+        session,
+        &config,
+        "test/model".into(),
+        registry,
+        fixture.root.join("global"),
+    )
+    .unwrap();
+    let mut grant = CountingApproval {
+        answer: Approval::Global,
+        asked: 0,
+    };
+    runtime
+        .turn("first".into(), &mut grant, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(grant.asked, 1);
+    runtime.new_session(false, None).unwrap();
+    runtime
+        .turn("second".into(), &mut UnattendedApproval, &mut |_| Ok(()))
+        .unwrap();
+    let mut deny = CountingApproval {
+        answer: Approval::Deny,
+        asked: 0,
+    };
+    runtime
+        .turn("third".into(), &mut deny, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(deny.asked, 0);
+    assert!(fixture.workspace.join("first").exists());
+    assert!(!fixture.workspace.join("unattended").exists());
+    assert!(fixture.workspace.join("third").exists());
 }
 
 #[test]
@@ -1172,6 +1240,106 @@ fn session_allow_is_stored_with_the_session() {
     assert_eq!(deny.asked, 0);
     assert!(fixture.workspace.join("before").exists());
     assert!(fixture.workspace.join("after").exists());
+}
+
+#[test]
+fn saved_denial_prevents_a_permission_hook_from_allowing_the_call() {
+    let fixture = Fixture::new("saved-denial-before-hook");
+    let hook = fixture.root.join("hook.sh");
+    let checks = fixture.root.join("checks");
+    std::fs::write(
+        &hook,
+        format!(
+            "event=$(cat)\ncase \"$event\" in\n  *'\"event\":\"permission\"'*) printf x >> '{}' ; printf '%s' '{{\"decision\":\"allow\"}}' ;;\n  *) printf '%s' '{{}}' ;;\nesac\n",
+            checks.display()
+        ),
+    )
+    .unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        hooks: vec![HookConfig {
+            name: "fixture".into(),
+            command: vec!["sh".into(), hook.display().to_string()],
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 4096,
+        }],
+        ..Config::default()
+    };
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let mut session = store.create(false, None).unwrap();
+    let identity = Registry::load_config(&config).unwrap().tools()[0]
+        .approval_identity()
+        .unwrap();
+    session
+        .append_permission_grant(&PermissionGrant {
+            name: "sh".into(),
+            identity,
+            allow: Some(false),
+        })
+        .unwrap();
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"touch denied"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = Runtime::new(provider, store, session, &config, "test/model".into()).unwrap();
+    runtime
+        .turn("try".into(), &mut UnexpectedApproval, &mut |_| Ok(()))
+        .unwrap();
+    assert!(!fixture.workspace.join("denied").exists());
+    assert!(!checks.exists());
+}
+
+#[test]
+fn hook_confirm_asks_even_after_a_saved_allowance() {
+    let fixture = Fixture::new("confirm-after-grant");
+    let hook = fixture.root.join("hook.sh");
+    std::fs::write(
+        &hook,
+        "event=$(cat)\ncase \"$event\" in\n  *'\"event\":\"permission\"'*) printf '%s' '{\"decision\":\"confirm\"}' ;;\n  *) printf '%s' '{}' ;;\nesac\n",
+    )
+    .unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        hooks: vec![HookConfig {
+            name: "fixture".into(),
+            command: vec!["sh".into(), hook.display().to_string()],
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 4096,
+        }],
+        ..Config::default()
+    };
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let mut session = store.create(false, None).unwrap();
+    let identity = Registry::load_config(&config).unwrap().tools()[0]
+        .approval_identity()
+        .unwrap();
+    session
+        .append_permission_grant(&PermissionGrant {
+            name: "sh".into(),
+            identity,
+            allow: Some(true),
+        })
+        .unwrap();
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"touch unconfirmed"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = Runtime::new(provider, store, session, &config, "test/model".into()).unwrap();
+    let mut deny = CountingApproval {
+        answer: Approval::Deny,
+        asked: 0,
+    };
+    runtime
+        .turn("try".into(), &mut deny, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(deny.asked, 1);
+    assert!(!fixture.workspace.join("unconfirmed").exists());
 }
 
 #[test]
