@@ -24,8 +24,7 @@ use crate::resolver::{
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{
-    CompilationPlan, PlanOptions, ProfileContext, UnitEdgeKind, UnitKey, UnitKind,
-    selected_library_key,
+    CompilationPlan, PlanOptions, UnitEdgeKind, UnitKey, UnitKind, selected_library_key,
 };
 use crate::validation::ValidationMode;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1002,18 +1001,6 @@ fn build_inner(
             test_plan.units.len()
         ));
         let dependencies = root_dependencies(&prepared.resolution, &test_plan, &outputs)?;
-        let test_library = selected_library.as_ref().map(|key| {
-            key.clone().with_profile(
-                ProfileContext::Test,
-                build.manifest.panic_abort(build.release),
-            )
-        });
-        let library = match test_library.as_ref() {
-            Some(key) if test_plan.units.contains_key(key) => {
-                Some(planned_root_library(&test_plan, &outputs, key)?)
-            }
-            _ => None,
-        };
         let harnesses = test_plan
             .order
             .iter()
@@ -1027,17 +1014,13 @@ fn build_inner(
                 )),
             })
             .collect::<Result<Vec<_>>>()?;
-        Some((dependencies, library, harnesses))
+        Some((dependencies, harnesses))
     } else {
         None
     };
-    let (test_dependencies, test_library, test_harnesses) = match &test_result {
-        Some((dependencies, library, harnesses)) => (
-            dependencies.as_slice(),
-            library.as_ref(),
-            harnesses.as_slice(),
-        ),
-        None => (&[][..], None, &[][..]),
+    let (test_dependencies, test_harnesses) = match &test_result {
+        Some((dependencies, harnesses)) => (dependencies.as_slice(), harnesses.as_slice()),
+        None => (&[][..], &[][..]),
     };
     let normal_dependencies = normal
         .as_ref()
@@ -1087,8 +1070,6 @@ fn build_inner(
             plan,
             outputs,
             &TestOutput {
-                destination: &destination,
-                target_root,
                 bundle_layout: bundle_layout.as_ref(),
             },
         )?
@@ -1096,14 +1077,8 @@ fn build_inner(
         compile_test_targets(
             &build,
             staging.path(),
-            &host_profile,
-            normal_dependencies,
-            test_dependencies,
-            test_library,
             test_harnesses,
             &TestOutput {
-                destination: &destination,
-                target_root,
                 bundle_layout: bundle_layout.as_ref(),
             },
         )?
@@ -2137,8 +2112,6 @@ struct StagedArtifacts {
 }
 
 struct TestOutput<'a> {
-    destination: &'a Path,
-    target_root: &'a Path,
     bundle_layout: Option<&'a bundle::Layout>,
 }
 
@@ -2498,130 +2471,16 @@ fn compile_root_targets(
 fn compile_test_targets(
     build: &Build<'_>,
     staging: &Path,
-    host_profile: &Path,
-    normal_dependencies: &[RootDependency],
-    test_dependencies: &[RootDependency],
-    test_library: Option<&RootLibraryArtifact>,
     planned_harnesses: &[PathBuf],
     output: &TestOutput<'_>,
 ) -> Result<StagedArtifacts> {
-    let features = selected_root_features(build.manifest)?
-        .into_iter()
-        .collect::<Vec<_>>();
-    let integration_tests = match build.test_name {
-        Some(name) => vec![
-            build
-                .manifest
-                .integration_tests
-                .iter()
-                .find(|target| target.name == name)
-                .ok_or_else(|| unknown_integration_test(build.manifest, name))?,
-        ],
-        None => build.manifest.integration_tests.iter().collect::<Vec<_>>(),
-    };
-
-    let normal_library = if integration_tests.is_empty() || build.manifest.binaries.is_empty() {
-        None
-    } else {
-        build
-            .manifest
-            .library
-            .as_ref()
-            .map(|target| {
-                compile_root_library(
-                    build,
-                    target,
-                    staging,
-                    host_profile,
-                    normal_dependencies,
-                    &features,
-                    false,
-                )
-            })
-            .transpose()?
-    };
-    let mut programs = BTreeMap::new();
-    if !integration_tests.is_empty() {
-        for target in &build.manifest.binaries {
-            let binary = compile_root_binary(
-                build,
-                target,
-                false,
-                staging,
-                host_profile,
-                normal_dependencies,
-                normal_library.as_ref(),
-                &features,
-                false,
-            )?;
-            install_primary(&binary.hashed, &binary.primary)?;
-            programs.insert(target.name.clone(), binary);
-        }
-    }
-
-    let mut harnesses = planned_harnesses.to_vec();
-
-    if !integration_tests.is_empty() {
-        let temporary_directory = output.bundle_layout.map_or_else(
-            || output.target_root.join("tmp"),
-            bundle::Layout::temporary_directory,
-        );
-        if output.bundle_layout.is_none() {
-            fs::create_dir_all(&temporary_directory).map_err(|error| {
-                Error::failure(format!(
-                    "failed to create test temporary directory `{}`: {error}",
-                    temporary_directory.display()
-                ))
-            })?;
-        }
-        for target in integration_tests {
-            harnesses.push(compile_root_harness(
-                build,
-                RootTarget::IntegrationTest(target),
-                staging,
-                host_profile,
-                test_dependencies,
-                test_library,
-                &features,
-                Some(IntegrationEnvironment {
-                    binaries: build
-                        .manifest
-                        .binaries
-                        .iter()
-                        .map(|binary| {
-                            (
-                                binary.name.as_str(),
-                                output.bundle_layout.map_or_else(
-                                    || output.destination.join(&binary.name),
-                                    |layout| layout.program(&binary.name),
-                                ),
-                            )
-                        })
-                        .collect(),
-                    temporary_directory: &temporary_directory,
-                }),
-                &programs
-                    .values()
-                    .map(|binary| binary.identity.clone())
-                    .collect::<Vec<_>>(),
-            )?);
-        }
-    }
-
+    let harnesses = planned_harnesses.to_vec();
     let first_harness = harnesses.first().cloned().ok_or_else(|| {
         Error::failure(format!(
             "package `{}` has no enabled test targets",
             build.manifest.name
         ))
     })?;
-    let binaries = programs
-        .iter()
-        .map(|(name, binary)| (name.clone(), binary.primary.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let bundle_programs = programs
-        .iter()
-        .map(|(name, binary)| (name.as_str(), binary.primary.as_path()))
-        .collect::<Vec<_>>();
     let bundled = output
         .bundle_layout
         .map(|layout| {
@@ -2641,13 +2500,13 @@ fn compile_test_targets(
                 verbose: build.verbosity == Verbosity::Verbose,
                 color: build.color,
                 harnesses: &harnesses,
-                programs: &bundle_programs,
+                programs: &[],
             })
         })
         .transpose()?;
     Ok(StagedArtifacts {
         primary: bundled.clone().unwrap_or(first_harness),
-        binaries,
+        binaries: BTreeMap::new(),
         harnesses,
         bundle: bundled,
         dep_info: Vec::new(),
@@ -2757,163 +2616,10 @@ fn unknown_integration_test(manifest: &Manifest, name: &str) -> Error {
     Error::failure(format!("no integration-test target named `{name}`")).with_help(help)
 }
 
-fn compile_root_library(
-    build: &Build<'_>,
-    target: &LibraryTarget,
-    staging: &Path,
-    _host_profile: &Path,
-    dependencies: &[RootDependency],
-    features: &[String],
-    test_profile: bool,
-) -> Result<RootLibraryArtifact> {
-    let identities = dependencies
-        .iter()
-        .map(|dependency| dependency.identity.clone())
-        .collect::<Vec<_>>();
-    let target = RootTarget::Library(target);
-    let identity = root_identity(build, target, false, test_profile, features, &identities)?;
-    let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
-    create_directory(&output_dir, "root rustc output directory")?;
-    let arguments = rustc_arguments(
-        build,
-        target,
-        false,
-        &identity,
-        staging,
-        dependencies,
-        None,
-        features,
-        test_profile,
-        false,
-        None,
-    );
-    run_root_rustc(build, target, false, dependencies, &arguments, None)?;
-    let stem = format!("{}{}", target.crate_name(), identity.extra_filename);
-    let rlib = output_dir.join(format!("lib{stem}.rlib"));
-    let rmeta = output_dir.join(format!("lib{stem}.rmeta"));
-    let dep_info = output_dir.join(format!("{stem}.d"));
-    verify_artifacts([&rlib, &rmeta, &dep_info])?;
-    Ok(RootLibraryArtifact {
-        identity,
-        extern_path: rlib,
-        dep_info,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compile_root_binary(
-    build: &Build<'_>,
-    target: &BinaryTarget,
-    test: bool,
-    staging: &Path,
-    _host_profile: &Path,
-    dependencies: &[RootDependency],
-    library: Option<&RootLibraryArtifact>,
-    features: &[String],
-    test_profile: bool,
-) -> Result<RootBinaryArtifact> {
-    let mut identities = dependencies
-        .iter()
-        .map(|dependency| dependency.identity.clone())
-        .collect::<Vec<_>>();
-    if let Some(library) = library {
-        identities.push(library.identity.clone());
-    }
-    let target = RootTarget::Binary(target);
-    let identity = root_identity(build, target, test, test_profile, features, &identities)?;
-    let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
-    create_directory(&output_dir, "root rustc output directory")?;
-    let arguments = rustc_arguments(
-        build,
-        target,
-        test,
-        &identity,
-        staging,
-        dependencies,
-        library,
-        features,
-        test_profile,
-        false,
-        None,
-    );
-    run_root_rustc(build, target, test, dependencies, &arguments, None)?;
-    let hashed = output_dir.join(format!(
-        "{}{}",
-        target.crate_name(),
-        identity.extra_filename
-    ));
-    let dep_info = hashed.with_extension("d");
-    verify_artifacts([&hashed, &dep_info])?;
-    Ok(RootBinaryArtifact {
-        identity,
-        hashed,
-        primary: staging.join(target.name()),
-    })
-}
-
-struct RootBinaryArtifact {
-    identity: Identity,
-    hashed: PathBuf,
-    primary: PathBuf,
-}
-
 #[derive(Clone)]
 struct IntegrationEnvironment<'a> {
     binaries: Vec<(&'a str, PathBuf)>,
     temporary_directory: &'a Path,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compile_root_harness(
-    build: &Build<'_>,
-    target: RootTarget<'_>,
-    staging: &Path,
-    _host_profile: &Path,
-    dependencies: &[RootDependency],
-    library: Option<&RootLibraryArtifact>,
-    features: &[String],
-    integration_environment: Option<IntegrationEnvironment<'_>>,
-    artifact_dependencies: &[Identity],
-) -> Result<PathBuf> {
-    let mut identities = dependencies
-        .iter()
-        .map(|dependency| dependency.identity.clone())
-        .collect::<Vec<_>>();
-    if let Some(library) = library {
-        identities.push(library.identity.clone());
-    }
-    identities.extend_from_slice(artifact_dependencies);
-    let identity = root_identity(build, target, true, true, features, &identities)?;
-    let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
-    create_directory(&output_dir, "root rustc output directory")?;
-    let arguments = rustc_arguments(
-        build,
-        target,
-        true,
-        &identity,
-        staging,
-        dependencies,
-        library,
-        features,
-        true,
-        false,
-        None,
-    );
-    run_root_rustc(
-        build,
-        target,
-        true,
-        dependencies,
-        &arguments,
-        integration_environment,
-    )?;
-    let artifact = output_dir.join(format!(
-        "{}{}",
-        target.crate_name(),
-        identity.extra_filename
-    ));
-    verify_artifacts([&artifact])?;
-    Ok(artifact)
 }
 
 fn root_identity(
@@ -2956,25 +2662,6 @@ fn root_output_directory(staging: &Path, package_name: &str, identity: &Identity
         .join(package_name)
         .join(identity.extra_filename.trim_start_matches('-'))
         .join("deps")
-}
-
-fn run_root_rustc(
-    build: &Build<'_>,
-    target: RootTarget<'_>,
-    test: bool,
-    dependencies: &[RootDependency],
-    arguments: &[OsString],
-    integration_environment: Option<IntegrationEnvironment<'_>>,
-) -> Result<()> {
-    let output = execute_root_rustc(
-        build,
-        target,
-        test,
-        dependencies,
-        arguments,
-        integration_environment,
-    )?;
-    RustcCommand::finish(&output, build.color)
 }
 
 fn execute_root_rustc(

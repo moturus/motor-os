@@ -959,6 +959,8 @@ libraries and harnesses in dependency order. The program executables are
 installed into the selected profile before the test artifacts are published.
 An integration test with no program binaries needs only the test-profile
 closure.
+`build` and `test` no longer use the separate selected-package rustc path;
+the remaining direct root compiler handles `check` targets.
 
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected
