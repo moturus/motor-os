@@ -489,6 +489,12 @@ read the last lines instead. Its fixed commands are `/usr/bin/tail` and
 `/system/bin/sysbox tail`; it does not expose follow mode. It is read-only,
 returns bounded stdout as plain text, and treats exit status zero as normal.
 
+`diff` has required `left` and `right` string paths, in that order after
+`--`; it exposes no options. Its fixed commands are `/usr/bin/diff` and
+`/system/bin/sysbox diff`. It is read-only and returns bounded stdout as plain
+text. Exit statuses zero (same) and one (different) are both normal outcomes;
+any other status is an execution error.
+
 The common commands follow the `ls` pattern, each a manifest naming the
 program's path per platform, a one-line description, typed parameters mapped
 to a fixed argument vector, and a timeout. The read-only ones, `rg`, `head`,
