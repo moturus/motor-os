@@ -118,6 +118,29 @@ impl Tool {
         ToolSpec::new(&self.name, &self.description, self.parameters.clone())
     }
 
+    pub fn display_detail(&self, arguments: &str) -> Result<Option<String>, String> {
+        let Some(template) = self.display.as_deref() else {
+            return Ok(None);
+        };
+        let values: Value = serde_json::from_str(arguments)
+            .map_err(|error| format!("invalid arguments for {}: {error}", self.name))?;
+        let values = values
+            .as_object()
+            .ok_or_else(|| format!("{} arguments must be an object", self.name))?;
+        let mut rendered = Vec::new();
+        for part in template.split_whitespace() {
+            if let Some(name) = display_field(part) {
+                let value = values
+                    .get(name)
+                    .ok_or_else(|| format!("{} display needs argument {name:?}", self.name))?;
+                rendered.push(value.to_string());
+            } else {
+                rendered.push(part.to_string());
+            }
+        }
+        Ok(Some(rendered.join(" ")))
+    }
+
     pub fn execute(
         &self,
         arguments: &str,
@@ -256,18 +279,55 @@ impl Tool {
             return Err(format!("{}: tool prompt is empty", directory.display()));
         }
         let process = ProcessTool::parse(raw.process, directory, &parameters)?;
+        let display = platform.display.or(raw.display);
+        if let Some(template) = display.as_deref() {
+            validate_display(template, &parameters, directory)?;
+        }
         Ok(Self {
             name: raw.name,
             description,
             parameters,
             prompt,
-            display: platform.display.or(raw.display),
+            display,
             read_only: raw.read_only,
             directory: directory.to_path_buf(),
             enabled_by_default,
             process,
         })
     }
+}
+
+fn display_field(part: &str) -> Option<&str> {
+    part.strip_prefix('{')?.strip_suffix('}')
+}
+
+fn validate_display(template: &str, schema: &Value, directory: &Path) -> Result<(), String> {
+    if template.trim().is_empty() {
+        return Err(format!("{}: tool display is empty", directory.display()));
+    }
+    for part in template.split_whitespace() {
+        if let Some(name) = display_field(part) {
+            if name.is_empty()
+                || name.contains(['{', '}'])
+                || schema
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .and_then(|properties| properties.get(name))
+                    .is_none()
+            {
+                return Err(format!(
+                    "{}: invalid display placeholder {part:?}",
+                    directory.display()
+                ));
+            }
+        } else if part.contains(['{', '}']) {
+            return Err(format!(
+                "{}: display placeholders must occupy a whole field",
+                directory.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -878,13 +938,25 @@ mod tests {
             description: "Print text".to_string(),
             parameters: schema.clone(),
             prompt: None,
-            display: None,
+            display: Some("print {text}".to_string()),
             read_only: true,
             directory: directory.clone(),
             enabled_by_default: true,
             process: ProcessTool::parse(raw, &directory, &schema).unwrap(),
         };
         let workspace = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert!(validate_display("print {text}", &schema, &directory).is_ok());
+        assert!(validate_display("print prefix{text}", &schema, &directory).is_err());
+        assert!(validate_display("print {missing}", &schema, &directory).is_err());
+        assert_eq!(
+            tool.display_detail(r#"{"text":"two words"}"#).unwrap(),
+            Some("print \"two words\"".to_string())
+        );
+        assert!(
+            tool.display_detail("{}")
+                .unwrap_err()
+                .contains("display needs argument")
+        );
         let output = tool
             .execute(
                 r#"{"text":"two words"}"#,

@@ -220,9 +220,11 @@ Tools with behavior beyond these mappings may use a fixed command such as
 themselves. Shipped common commands use typed mappings so the schema and
 their actual argument vector can be reviewed together.
 
-`display` uses the same whole-field placeholders, but is presentation only. A
-bad or missing placeholder makes that tool call fail visibly; it never falls
-back to executing an ambiguous command.
+`display` is presentation only. Its `{name}` placeholders occupy standalone
+whitespace-separated fields and refer to schema properties. Values are shown
+as JSON, so spaces and control characters are visible. A bad or missing
+placeholder makes that tool call fail visibly; it never falls back to
+executing an ambiguous command.
 
 A model string value beginning with `-` is refused unless it is placed after
 the inserted `--` or is exactly listed in the manifest's `allowed_flags`

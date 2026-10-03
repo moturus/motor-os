@@ -209,6 +209,7 @@ name = "print"
 description = "Print one string"
 parameters = "parameters.json"
 prompt = "prompt.md"
+display = "{text}"
 read_only = true
 [process]
 output = "stdout"
@@ -234,20 +235,26 @@ type = "string"
     ]);
     let mut runtime = fixture.runtime(provider.clone(), &config);
     let mut output = String::new();
+    let mut detail = String::new();
     runtime
         .turn(
             "print".to_string(),
             &mut FixedApproval(true),
             &mut |event| {
-                if let Event::ToolOutput { name, text, .. } = event {
-                    assert_eq!(name, "print");
-                    output.push_str(&text);
+                match event {
+                    Event::ToolOutput { name, text, .. } => {
+                        assert_eq!(name, "print");
+                        output.push_str(&text);
+                    }
+                    Event::Permission(permission) => detail = permission.detail,
+                    _ => {}
                 }
                 Ok(())
             },
         )
         .unwrap();
     assert_eq!(output, "two words");
+    assert_eq!(detail, "\"two words\"");
     let requests = provider.requests.lock().unwrap();
     assert!(requests[0].tools.iter().any(|spec| spec.name == "print"));
     assert!(
@@ -263,6 +270,22 @@ type = "string"
             .any(|message| message.text_content() == "two words")
     );
     drop(requests);
+
+    let provider = Scripted::new(vec![tool("print", "{}"), answer("done")]);
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    runtime
+        .turn(
+            "print".to_string(),
+            &mut UnexpectedApproval,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+    assert!(
+        provider.requests.lock().unwrap()[1]
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("display needs argument"))
+    );
 
     let mut disabled = config;
     disabled.tools[0].enabled = false;
