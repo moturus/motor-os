@@ -501,6 +501,14 @@ impl BuildCache {
         Ok(())
     }
 
+    pub fn record_cache_owner(
+        &self,
+        key: CacheKey,
+        package: &crate::resolver::PackageKey,
+    ) -> Result<()> {
+        artifact_owner::write(&self.entry_path(key), package)
+    }
+
     fn entry_path(&self, key: CacheKey) -> PathBuf {
         let hash = hex(&key.0);
         self.units.join(&hash[..2]).join(hash)
@@ -556,7 +564,15 @@ impl BuildCache {
             })
             .collect::<Result<Vec<_>>>()?;
         names.sort();
-        if names != ["manifest.json", "payload", "payload-manifest.json"] {
+        if names != ["manifest.json", "payload", "payload-manifest.json"]
+            && names
+                != [
+                    ".lorry-owner-v1",
+                    "manifest.json",
+                    "payload",
+                    "payload-manifest.json",
+                ]
+        {
             return Err(Error::failure(
                 "cache entry does not contain the exact format-1 file set",
             ));
@@ -1631,6 +1647,13 @@ mod tests {
         let key = CacheKey([9; 32]);
         let built = output(&fixture.0.join("built"), b"library");
         cache.store(key, &built, None, None).unwrap();
+        let package = crate::resolver::PackageKey {
+            name: "library".to_owned(),
+            version: "1.0.0".parse().unwrap(),
+            source: crate::resolver::PackageSourceKey::Path(fixture.0.join("library")),
+        };
+        cache.record_cache_owner(key, &package).unwrap();
+        assert!(artifact_owner::matches(&cache.entry_path(key), &package));
 
         let restored_root = fixture.0.join("restored");
         fs::create_dir(&restored_root).unwrap();

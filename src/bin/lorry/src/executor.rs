@@ -666,6 +666,7 @@ fn execute_unit(
                     if restorable
                         && cache.restore(cache_key, &invocation.output, selected_inputs)?
                     {
+                        cache.record_cache_owner(cache_key, &key.package)?;
                         cache.record_published(
                             cache_key,
                             &invocation.output,
@@ -767,6 +768,9 @@ fn execute_unit(
                         cache_build_script.as_ref(),
                         selected_inputs,
                     )?;
+                    caches
+                        .for_unit(planned)
+                        .record_cache_owner(cache_key, &key.package)?;
                 }
                 if let RustcOutput::BuildScript {
                     executable,

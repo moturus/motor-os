@@ -1120,6 +1120,8 @@ Published compiler and build-script unit directories carry a package-owner
 record keyed by name, version, and source. A missing or different owner
 prevents compiler-unit reuse. The record also identifies which unit directories
 belong to a package when cleaning a shared profile.
+Cache entries used by a package carry the same owner record, so a selective
+clean can remove its project-local entries without removing another package's.
 The three Cargo-client variables that Lorry removes before starting rustc
 (`CARGO_LOG`, `RUSTUP_TOOLCHAIN`, and
 `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`) are omitted from rustc
