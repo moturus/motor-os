@@ -102,7 +102,7 @@ cmp "$WORKSPACE/target/lorry/packages/app/release/app" \
     "$WORK/cargo-workspace-native/release/app" ||
     fail "native selected member executable differs from Cargo"
 [ "$("$WORKSPACE/target/lorry/packages/app/release/app")" = \
-    "app/src/main.rs shared/src/lib.rs" ] ||
+    "app/src/main.rs app/src/lib.rs shared/src/lib.rs" ] ||
     fail "selected member source paths differ from Cargo"
 
 echo "== Comparing native dev panic-abort artifacts with Cargo =="

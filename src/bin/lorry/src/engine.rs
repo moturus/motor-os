@@ -21,7 +21,9 @@ use crate::repository::RepositorySet;
 use crate::resolver::{CompileKind, Resolution, TargetSelection, selected_root_features};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
-use crate::unit::{CompilationPlan, PlanOptions, UnitEdgeKind, UnitKey, UnitKind};
+use crate::unit::{
+    CompilationPlan, PlanOptions, UnitEdgeKind, UnitKey, UnitKind, selected_library_key,
+};
 use crate::validation::ValidationMode;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -742,11 +744,20 @@ fn build_inner(
         "prepared and verified {} dependency packages",
         prepared.packages.len()
     ));
-    let manifests = prepared
+    let mut manifests = prepared
         .packages
         .iter()
         .map(|(key, package)| (key.clone(), package.manifest.clone()))
         .collect::<BTreeMap<_, _>>();
+    let selected_library = build
+        .manifest
+        .library
+        .as_ref()
+        .map(|_| selected_library_key(build.manifest))
+        .transpose()?;
+    if let Some(key) = &selected_library {
+        manifests.insert(key.package.clone(), build.manifest.clone());
+    }
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
     let freshness_base = (check.is_none() && !build.test)
@@ -767,8 +778,8 @@ fn build_inner(
         }
         crate::trace::event("root profile requires rebuilding");
     }
-    let dependency_plan = |test_profile| {
-        prepared.dependency_plan(&PlanOptions {
+    let dependency_plan = |test_profile, include_selected_library| {
+        let options = PlanOptions {
             workspace_root: &build.manifest.workspace_root,
             release: build.release,
             test_profile,
@@ -777,13 +788,18 @@ fn build_inner(
             rustc: build.toolchain,
             logical_target: build.logical_target,
             rustflags: build.rustflags,
-        })
+        };
+        if include_selected_library && selected_library.is_some() {
+            prepared.selected_library_plan(&options, build.manifest)
+        } else {
+            prepared.dependency_plan(&options)
+        }
     };
     let message_reporter = match check {
         Some((_, options)) if options.message_format != MessageFormat::Human => {
             let roots =
                 crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
-            let metadata_plan = dependency_plan(false)?;
+            let metadata_plan = dependency_plan(false, false)?;
             let metadata = crate::metadata::graph::resolved(
                 build.manifest,
                 &prepared,
@@ -841,6 +857,7 @@ fn build_inner(
     let executor_options = executor::Options {
         cargo: &cargo,
         workspace_root: &build.manifest.workspace_root,
+        selected_package: selected_library.as_ref().map(|key| &key.package),
         toolchain: build.toolchain,
         host: build.host,
         target: build.target,
@@ -873,7 +890,7 @@ fn build_inner(
         None => !build.test || (selected_integration && !build.manifest.binaries.is_empty()),
     };
     let normal = if needs_normal_plan {
-        let plan = dependency_plan(false)?;
+        let plan = dependency_plan(false, check.is_none() && !build.test)?;
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
         let dependencies = root_dependencies(&prepared.resolution, &plan, &outputs)?;
         crate::trace::event(format_args!(
@@ -886,7 +903,7 @@ fn build_inner(
     };
     let needs_test_plan = build.test || check.is_some_and(|(_, options)| options.selects_tests());
     let test_dependencies = if needs_test_plan {
-        let test_plan = dependency_plan(true)?;
+        let test_plan = dependency_plan(true, false)?;
         let outputs = match normal.as_ref() {
             Some((normal_plan, normal_outputs, _)) => executor::execute_reusing(
                 &test_plan,
@@ -913,6 +930,12 @@ fn build_inner(
         .as_ref()
         .map(|(_, _, dependencies)| dependencies.as_slice())
         .unwrap_or(&[]);
+    let normal_library = match (normal.as_ref(), selected_library.as_ref()) {
+        (Some((plan, outputs, _)), Some(key)) if plan.units.contains_key(key) => {
+            Some(planned_root_library(plan, outputs, key)?)
+        }
+        _ => None,
+    };
     if build.validation.is_strict() {
         prepared.revalidate_cargo_registry_sources(repository_tree_limits(
             &build.config.policy.limits,
@@ -955,7 +978,13 @@ fn build_inner(
             },
         )?
     } else {
-        compile_root_targets(&build, staging.path(), &host_profile, normal_dependencies)?
+        compile_root_targets(
+            &build,
+            staging.path(),
+            &host_profile,
+            normal_dependencies,
+            normal_library.as_ref(),
+        )?
     };
     crate::trace::event("compiled root targets");
 
@@ -1941,6 +1970,29 @@ struct RootLibraryArtifact {
     dep_info: PathBuf,
 }
 
+fn planned_root_library(
+    plan: &CompilationPlan,
+    outputs: &executor::Outputs,
+    key: &UnitKey,
+) -> Result<RootLibraryArtifact> {
+    let planned = plan
+        .units
+        .get(key)
+        .ok_or_else(|| Error::failure("selected library is missing from its compilation plan"))?;
+    let Some(crate::compile::RustcOutput::Library { rlib, dep_info, .. }) =
+        outputs.artifacts.get(key)
+    else {
+        return Err(Error::failure(
+            "selected library produced no library artifact",
+        ));
+    };
+    Ok(RootLibraryArtifact {
+        identity: planned.identity.clone(),
+        extern_path: rlib.clone(),
+        dep_info: dep_info.clone(),
+    })
+}
+
 struct StagedArtifacts {
     primary: PathBuf,
     binaries: BTreeMap<String, PathBuf>,
@@ -2251,26 +2303,11 @@ fn compile_root_targets(
     staging: &Path,
     host_profile: &Path,
     dependencies: &[RootDependency],
+    library: Option<&RootLibraryArtifact>,
 ) -> Result<StagedArtifacts> {
     let features = selected_root_features(build.manifest)?
         .into_iter()
         .collect::<Vec<_>>();
-    let library = build
-        .manifest
-        .library
-        .as_ref()
-        .map(|target| {
-            compile_root_library(
-                build,
-                target,
-                staging,
-                host_profile,
-                dependencies,
-                &features,
-                false,
-            )
-        })
-        .transpose()?;
     let targets = build.manifest.binaries.iter().filter(|target| {
         build
             .binary_selection
@@ -2286,7 +2323,7 @@ fn compile_root_targets(
             staging,
             host_profile,
             dependencies,
-            library.as_ref(),
+            library,
             &features,
             false,
         )?;
@@ -2296,7 +2333,6 @@ fn compile_root_targets(
     }
     if let Some(primary) = binaries.values().next().cloned() {
         let mut dep_info = library
-            .as_ref()
             .map(|library| library.dep_info.clone())
             .into_iter()
             .collect::<Vec<_>>();
@@ -2316,11 +2352,11 @@ fn compile_root_targets(
         ))
     })?;
     Ok(StagedArtifacts {
-        primary: library.extern_path,
+        primary: library.extern_path.clone(),
         binaries,
         harnesses: Vec::new(),
         bundle: None,
-        dep_info: vec![library.dep_info],
+        dep_info: vec![library.dep_info.clone()],
     })
 }
 

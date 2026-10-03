@@ -14,6 +14,7 @@ use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind}
 pub struct CommandOptions<'a> {
     pub cargo: &'a Path,
     pub workspace_root: &'a Path,
+    pub selected_package: Option<&'a PackageKey>,
     pub host_profile: &'a Path,
     pub target_profile: &'a Path,
     pub host_incremental: &'a Path,
@@ -234,6 +235,9 @@ pub fn dependency_rustc_invocation_with_build_output(
     }
     let mut environment =
         rustc_environment(options.cargo, manifest, crate_name, &dependency_directories)?;
+    if options.selected_package == Some(&key.package) {
+        value(&mut environment, "CARGO_PRIMARY_PACKAGE", "1");
+    }
     if let Some(build_output) = build_output {
         apply_build_output(&mut arguments, &mut environment, build_output);
     }
@@ -877,6 +881,7 @@ mod tests {
         let command_options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
+            selected_package: None,
             host_profile: host,
             target_profile: host,
             host_incremental: Path::new("/incremental/host"),
@@ -1176,6 +1181,7 @@ mod tests {
         let cross_options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
+            selected_package: None,
             host_profile: Path::new("/target/release"),
             target_profile: Path::new("/target/x86_64-unknown-motor/release"),
             host_incremental: Path::new("/incremental/host"),
@@ -1321,6 +1327,7 @@ mod tests {
         let options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
+            selected_package: None,
             host_profile: Path::new("/target/debug/.host"),
             target_profile: Path::new("/target/debug"),
             host_incremental: Path::new("/incremental/host"),

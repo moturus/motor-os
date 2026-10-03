@@ -1,3 +1,3 @@
 fn main() {
-    println!("{} {}", file!(), shared::source());
+    println!("{} {} {}", file!(), app::source(), shared::source());
 }

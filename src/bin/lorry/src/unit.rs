@@ -384,21 +384,7 @@ pub fn add_selected_library(
     if manifest.library.is_none() {
         return Err(Error::failure("selected package has no library target"));
     }
-    let key = UnitKey {
-        package: PackageKey {
-            name: manifest.name.clone(),
-            version: semver::Version::parse(&manifest.version.original).map_err(|error| {
-                Error::failure(format!(
-                    "invalid selected package version `{}`: {error}",
-                    manifest.version.original
-                ))
-            })?,
-            source: PackageSourceKey::Path(manifest.root.clone()),
-        },
-        kind: UnitKind::Library,
-        compile_kind: CompileKind::Target,
-        features: selected_root_features(manifest)?,
-    };
+    let key = selected_library_key(manifest)?;
     if graph.units.contains_key(&key) {
         return Err(Error::failure(
             "selected library is already in the unit graph",
@@ -442,6 +428,24 @@ pub fn add_selected_library(
     }
     graph.order = topological_order(&graph.units)?;
     Ok(key)
+}
+
+pub fn selected_library_key(manifest: &Manifest) -> Result<UnitKey> {
+    Ok(UnitKey {
+        package: PackageKey {
+            name: manifest.name.clone(),
+            version: semver::Version::parse(&manifest.version.original).map_err(|error| {
+                Error::failure(format!(
+                    "invalid selected package version `{}`: {error}",
+                    manifest.version.original
+                ))
+            })?,
+            source: PackageSourceKey::Path(manifest.root.clone()),
+        },
+        kind: UnitKind::Library,
+        compile_kind: CompileKind::Target,
+        features: selected_root_features(manifest)?,
+    })
 }
 
 fn library_unit_kind(manifest: &Manifest) -> UnitKind {

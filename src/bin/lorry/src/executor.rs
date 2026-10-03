@@ -40,6 +40,7 @@ pub trait EventReporter: Sync {
 pub struct Options<'a> {
     pub cargo: &'a Path,
     pub workspace_root: &'a Path,
+    pub selected_package: Option<&'a PackageKey>,
     pub toolchain: &'a Toolchain,
     pub host: &'a TargetInfo,
     pub target: &'a TargetInfo,
@@ -194,6 +195,7 @@ fn execute_inner(
     let commands = CommandOptions {
         cargo: options.cargo,
         workspace_root: options.workspace_root,
+        selected_package: options.selected_package,
         host_profile: options.host_profile,
         target_profile: options.target_profile,
         host_incremental: options.host_incremental,
@@ -564,6 +566,7 @@ fn execute_unit(
                 let cache_key = if let Some(caches) = options
                     .cache
                     .filter(|_| matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro))
+                    .filter(|_| options.selected_package != Some(&key.package))
                 {
                     let cache = caches.for_unit(planned);
                     let cache_key = cache.key(&UnitInput {
@@ -644,6 +647,7 @@ fn execute_unit(
                     &invocation.output,
                     &manifest.root,
                     &invocation.current_dir,
+                    options.selected_package == Some(&key.package),
                     executed_build_script.map(|build| build.out_dir.as_path()),
                     planned.source_remap.as_ref(),
                 )?;
@@ -774,6 +778,7 @@ fn validate_dep_info(
     output: &RustcOutput,
     package_root: &Path,
     working_dir: &Path,
+    selected: bool,
     build_out_dir: Option<&Path>,
     source_remap: Option<&crate::unit::SourceRemap>,
 ) -> Result<()> {
@@ -834,7 +839,8 @@ fn validate_dep_info(
                 path.display()
             ))
         })?;
-        if !canonical.starts_with(&root)
+        if !selected
+            && !canonical.starts_with(&root)
             && !out_dir
                 .as_ref()
                 .is_some_and(|out_dir| canonical.starts_with(out_dir))
@@ -1174,6 +1180,7 @@ mod tests {
             &Options {
                 cargo: &cargo,
                 workspace_root: &fixture.0,
+                selected_package: None,
                 toolchain: &toolchain,
                 host: &target,
                 target: &target,
