@@ -32,6 +32,7 @@ pub struct NamedProvider {
     pub model: Option<String>,
     pub key_file: Option<PathBuf>,
     pub ca_cert: Option<PathBuf>,
+    pub reasoning_echo: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +46,7 @@ pub struct Config {
     pub models: Vec<String>,
     pub key_file: Option<PathBuf>,
     pub ca_cert: Option<PathBuf>,
+    pub reasoning_echo: Option<bool>,
     pub providers: BTreeMap<String, NamedProvider>,
     pub default_provider: String,
     pub default_model: Option<String>,
@@ -67,6 +69,7 @@ impl Default for Config {
             models: Vec::new(),
             key_file: None,
             ca_cert: None,
+            reasoning_echo: None,
             providers: BTreeMap::new(),
             default_provider: "default".to_string(),
             default_model: None,
@@ -120,6 +123,7 @@ struct RawProvider {
     #[serde(alias = "api_key_file")]
     key_file: Option<PathBuf>,
     ca_cert: Option<PathBuf>,
+    reasoning_echo: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -163,6 +167,7 @@ impl Config {
                 model: self.model.clone(),
                 key_file: self.key_file.clone(),
                 ca_cert: self.ca_cert.clone(),
+                reasoning_echo: self.reasoning_echo,
             })
         } else {
             self.providers.get(name).cloned()
@@ -306,6 +311,7 @@ impl Config {
                     model: provider.model.filter(|model| !model.trim().is_empty()),
                     key_file: provider_path(provider.key_file, base)?,
                     ca_cert: provider_path(provider.ca_cert, base)?,
+                    reasoning_echo: provider.reasoning_echo,
                 },
             );
         }
@@ -390,6 +396,7 @@ impl Config {
             models,
             key_file,
             ca_cert,
+            reasoning_echo: raw.provider.reasoning_echo,
             providers,
             default_provider,
             default_model: raw.default_model.filter(|model| !model.trim().is_empty()),
@@ -545,6 +552,7 @@ plain_http_allowlist = ["192.168.4.1"]"#,
         assert_eq!(config.max_tool_rounds, 32);
         assert_eq!(config.context.output_reserve_tokens, 16_384);
         assert!(config.hooks.is_empty());
+        assert_eq!(config.provider("default").unwrap().reasoning_echo, None);
     }
 
     #[test]
@@ -596,8 +604,10 @@ plain_http_allowlist = ['127.0.0.1']
 base_url = 'http://127.0.0.1:9090/v1'
 api_key_file = 'secrets/local.key'
 model = 'local/model'
+reasoning_echo = true
 [providers.remote]
 base_url = 'https://openrouter.ai/api/v1'
+reasoning_echo = false
 "#,
             path,
         )
@@ -606,6 +616,8 @@ base_url = 'https://openrouter.ai/api/v1'
         assert_eq!(config.default_model.as_deref(), Some("small"));
         assert_eq!(config.providers.len(), 2);
         assert!(config.providers["local"].plain_http);
+        assert_eq!(config.providers["local"].reasoning_echo, Some(true));
+        assert_eq!(config.providers["remote"].reasoning_echo, Some(false));
         assert_eq!(
             config.providers["local"].key_file,
             Some(PathBuf::from("/tmp/gears-test-config/secrets/local.key"))

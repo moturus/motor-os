@@ -153,6 +153,9 @@ matching: an entry permits any port on that host, not just port 8080. HTTP
 sends prompts and any bearer key without encryption. HTTPS remains the
 default; a TLS failure never falls back to HTTP. A plaintext `base_url`
 whose host is missing from either list is refused when the config loads.
+OpenRouter receives earlier assistant reasoning on subsequent turns. Other
+hosts omit it by default; set `reasoning_echo = true` or `false` under
+`[provider]` or a named `[providers.NAME]` to override the host default.
 
 Gears refuses implicit default-key-file fallback over HTTP. An explicit key
 file is allowed, but `OPENROUTER_API_KEY` takes precedence even if inherited

@@ -84,6 +84,13 @@ impl Endpoint {
         self
     }
 
+    pub fn with_reasoning_echo(mut self, enabled: Option<bool>) -> Endpoint {
+        if let Some(enabled) = enabled {
+            self.quirks.reasoning_echo = enabled;
+        }
+        self
+    }
+
     pub fn url(&self) -> &Url {
         &self.url
     }
@@ -503,6 +510,19 @@ mod tests {
         assert_eq!(other.usage, UsageStyle::StreamOptions);
         assert!(!other.reports_cost);
         assert!(!other.reasoning_echo);
+        assert!(
+            !Endpoint::openrouter()
+                .with_reasoning_echo(Some(false))
+                .quirks()
+                .reasoning_echo
+        );
+        assert!(
+            Endpoint::new("https://provider.test/v1")
+                .unwrap()
+                .with_reasoning_echo(Some(true))
+                .quirks()
+                .reasoning_echo
+        );
     }
 
     #[test]

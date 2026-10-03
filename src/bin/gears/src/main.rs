@@ -298,7 +298,9 @@ fn connect(
         Some(path) => http.with_ca_cert(path).map_err(|error| error.to_string())?,
         None => http,
     };
-    let endpoint = Endpoint::new(&provider.base_url).map_err(|error| error.to_string())?;
+    let endpoint = Endpoint::new(&provider.base_url)
+        .map_err(|error| error.to_string())?
+        .with_reasoning_echo(provider.reasoning_echo);
     Ok(OpenAiCompat::new(http, endpoint))
 }
 
