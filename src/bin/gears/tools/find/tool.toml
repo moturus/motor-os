@@ -1,0 +1,34 @@
+version = 1
+kind = "process"
+name = "find"
+description = "Find paths under one directory by optional name pattern and file type; no command execution."
+parameters = "parameters.json"
+display = "search {path}"
+read_only = true
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 1048576
+output = "stdout"
+
+[process.command]
+linux = ["/usr/bin/find"]
+motor = ["/system/bin/sysbox", "find"]
+
+[process.arguments]
+before_double_dash = ["path", "name", "type"]
+
+[process.arguments.path]
+type = "string"
+
+[process.arguments.name]
+type = "string_option"
+flag = "-name"
+
+[process.arguments.type]
+type = "enum_option"
+flag = "-type"
+values = { file = "f", directory = "d" }
+
+[motor]
+description = "Find paths with sysbox find. Prefix a leading-dash path with ./; name patterns are interpreted by find, not by the shell."

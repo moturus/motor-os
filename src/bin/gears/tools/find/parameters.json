@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory to search, relative to the workspace or absolute."
+    },
+    "name": {
+      "type": "string",
+      "description": "Optional file-name pattern interpreted by find."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["file", "directory"],
+      "description": "Limit results to files or directories."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}

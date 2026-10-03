@@ -662,6 +662,42 @@ fn shipped_curl_returns_headers_without_following_redirects() {
 }
 
 #[test]
+fn shipped_find_keeps_paths_literal_and_filters_results() {
+    let fixture = Fixture::new("shipped-find");
+    let directory = fixture.workspace.join("dir [glob]");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("wanted file.txt"), "yes").unwrap();
+    std::fs::write(directory.join("other.txt"), "no").unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/find"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool(
+            "find",
+            r#"{"path":"dir [glob]","name":"wanted*","type":"file"}"#,
+        ),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    let mut output = String::new();
+    runtime
+        .turn("find".to_string(), &mut FixedApproval(true), &mut |event| {
+            if let Event::ToolOutput { name, text, .. } = event {
+                assert_eq!(name, "find");
+                output.push_str(&text);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(output.contains("dir [glob]/wanted file.txt"), "{output}");
+    assert!(!output.contains("other.txt"), "{output}");
+}
+
+#[test]
 fn shipped_diff_treats_differences_as_a_normal_result() {
     let fixture = Fixture::new("shipped-diff");
     std::fs::write(fixture.workspace.join("old [file].txt"), "old\n").unwrap();
