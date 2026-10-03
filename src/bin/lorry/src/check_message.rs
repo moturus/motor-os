@@ -227,6 +227,10 @@ impl EventReporter for Reporter {
             RustcOutput::ProcMacro {
                 dynamic_library, ..
             } => (vec![self.published_path(dynamic_library)?], None),
+            RustcOutput::Binary { executable, .. } => (
+                vec![self.published_path(executable)?],
+                Some(self.published_path(executable)?),
+            ),
             RustcOutput::BuildScript {
                 executable,
                 unhashed_executable,
@@ -339,6 +343,7 @@ impl Package {
                     .kind
                     .iter()
                     .all(|kind| kind != "bin" && kind != "test" && kind != "custom-build"),
+                UnitKind::Binary => target.kind.iter().any(|kind| kind == "bin"),
                 UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
                     target.kind.iter().any(|kind| kind == "custom-build")
                 }

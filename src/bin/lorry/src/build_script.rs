@@ -857,6 +857,7 @@ mod tests {
                 source: PackageSourceKey::Path(manifest.root.clone()),
             },
             kind: UnitKind::BuildScriptRun,
+            target: None,
             compile_kind: CompileKind::Target,
             features: BTreeSet::from(["default".to_owned(), "fancy-feature".to_owned()]),
         };

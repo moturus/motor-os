@@ -303,6 +303,7 @@ fn execute_inner(
                                 .cloned()
                                 .map(Executed::BuildScript),
                             UnitKind::Library
+                            | UnitKind::Binary
                             | UnitKind::ProcMacro
                             | UnitKind::BuildScriptCompile => {
                                 previous_outputs.artifacts.get(&key).cloned().map(|output| {
@@ -514,7 +515,10 @@ fn execute_unit(
                 }
                 Ok(Executed::BuildScript(executed))
             }
-            UnitKind::Library | UnitKind::ProcMacro | UnitKind::BuildScriptCompile => {
+            UnitKind::Library
+            | UnitKind::Binary
+            | UnitKind::ProcMacro
+            | UnitKind::BuildScriptCompile => {
                 let manifest = manifests.get(&key.package).ok_or_else(|| {
                     Error::failure(format!(
                         "dependency execution has no manifest for `{} {}`",
@@ -613,6 +617,7 @@ fn execute_unit(
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     let unit = match key.kind {
                         UnitKind::Library => "library",
+                        UnitKind::Binary => "binary",
                         UnitKind::ProcMacro => "proc macro",
                         UnitKind::BuildScriptCompile => "build script",
                         UnitKind::BuildScriptRun => unreachable!(),
@@ -725,6 +730,7 @@ fn cache_dependencies<'a>(
 fn create_output_directories(output: &RustcOutput) -> Result<()> {
     let path = match output {
         RustcOutput::Library { rlib, .. } => rlib,
+        RustcOutput::Binary { executable, .. } => executable,
         RustcOutput::ProcMacro {
             dynamic_library, ..
         } => dynamic_library,
@@ -753,6 +759,10 @@ fn verify_outputs(output: &RustcOutput) -> Result<()> {
             rmeta,
             dep_info,
         } => vec![rlib, rmeta, dep_info],
+        RustcOutput::Binary {
+            executable,
+            dep_info,
+        } => vec![executable, dep_info],
         RustcOutput::BuildScript {
             executable,
             dep_info,
@@ -785,6 +795,7 @@ fn validate_dep_info(
     const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
     let dep_info = match output {
         RustcOutput::Library { dep_info, .. }
+        | RustcOutput::Binary { dep_info, .. }
         | RustcOutput::ProcMacro { dep_info, .. }
         | RustcOutput::BuildScript { dep_info, .. } => dep_info,
     };

@@ -1911,7 +1911,8 @@ fn root_dependency_search_paths(
                 crate::compile::RustcOutput::ProcMacro {
                     dynamic_library, ..
                 } => dynamic_library,
-                crate::compile::RustcOutput::BuildScript { .. } => {
+                crate::compile::RustcOutput::Binary { .. }
+                | crate::compile::RustcOutput::BuildScript { .. } => {
                     return Err(Error::failure(
                         "root Rust dependency resolved to a build-script artifact",
                     ));

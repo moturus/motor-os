@@ -9,7 +9,7 @@ use crate::hash::{Sha256, hex};
 use crate::identity::{
     CargoCompileMode, CargoCrateType, CargoDebugInfo, CargoPanicStrategy, CargoProfile,
     CargoProfileLto, CargoSource, CargoStrip, CargoTargetKind, CargoUnitIdentityInput,
-    CargoUnitLto, Identity, cargo_unit_identity,
+    CargoUnitLto, Identity, RootTargetKind, cargo_unit_identity, root_lto,
 };
 use crate::manifest::{Lto as ManifestLto, Manifest, ReleaseProfile, Strip as ManifestStrip};
 use crate::resolver::{
@@ -23,6 +23,7 @@ use crate::toolchain::Toolchain;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum UnitKind {
     Library,
+    Binary,
     ProcMacro,
     BuildScriptCompile,
     BuildScriptRun,
@@ -32,6 +33,7 @@ pub enum UnitKind {
 pub struct UnitKey {
     pub package: PackageKey,
     pub kind: UnitKind,
+    pub target: Option<String>,
     pub compile_kind: CompileKind,
     pub features: BTreeSet<String>,
 }
@@ -443,9 +445,83 @@ pub fn selected_library_key(manifest: &Manifest) -> Result<UnitKey> {
             source: PackageSourceKey::Path(manifest.root.clone()),
         },
         kind: UnitKind::Library,
+        target: None,
         compile_kind: CompileKind::Target,
         features: selected_root_features(manifest)?,
     })
+}
+
+pub fn add_selected_binaries(
+    graph: &mut UnitGraph,
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    manifest: &Manifest,
+    selected_name: Option<&str>,
+) -> Result<Vec<UnitKey>> {
+    let library = manifest
+        .library
+        .as_ref()
+        .map(|_| selected_library_key(manifest))
+        .transpose()?;
+    let packages = resolution
+        .packages
+        .iter()
+        .map(|package| (&package.key, package))
+        .collect::<BTreeMap<_, _>>();
+    let mut binaries = Vec::new();
+    for target in manifest
+        .binaries
+        .iter()
+        .filter(|target| selected_name.is_none_or(|name| name == target.name))
+    {
+        let mut key = selected_library_key(manifest)?;
+        key.kind = UnitKind::Binary;
+        key.target = Some(target.name.clone());
+        insert_unit(&mut graph.units, key.clone());
+        for edge in resolution
+            .root_edges
+            .iter()
+            .filter(|edge| edge.kind == DependencyKind::Normal)
+        {
+            let package = packages.get(&edge.package).ok_or_else(|| {
+                Error::failure(format!(
+                    "selected binary dependency `{} {}` has no resolved package",
+                    edge.package.name, edge.package.version
+                ))
+            })?;
+            let child_manifest = manifests.get(&edge.package).ok_or_else(|| {
+                Error::failure(format!(
+                    "selected binary dependency `{} {}` has no manifest",
+                    edge.package.name, edge.package.version
+                ))
+            })?;
+            let child = unit_key(
+                package,
+                library_unit_kind(child_manifest),
+                edge.compile_kind,
+                &features_for(package, edge.compile_kind),
+            );
+            add_edge(
+                &mut graph.units,
+                &key,
+                child,
+                UnitEdgeKind::RustDependency,
+                Some(edge.alias.clone()),
+            )?;
+        }
+        if let Some(library) = &library {
+            add_edge(
+                &mut graph.units,
+                &key,
+                library.clone(),
+                UnitEdgeKind::RustDependency,
+                manifest.library.as_ref().map(|target| target.name.clone()),
+            )?;
+        }
+        binaries.push(key);
+    }
+    graph.order = topological_order(&graph.units)?;
+    Ok(binaries)
 }
 
 fn library_unit_kind(manifest: &Manifest) -> UnitKind {
@@ -526,9 +602,12 @@ pub fn plan_dependency_units_with_remaps(
             }
         };
         let features = key.features.iter().cloned().collect::<Vec<_>>();
-        let dependencies = unit
-            .dependencies
-            .iter()
+        let mut edges = unit.dependencies.iter().collect::<Vec<_>>();
+        if key.kind == UnitKind::Binary {
+            edges.sort_by_key(|edge| edge.unit.package == key.package);
+        }
+        let dependencies = edges
+            .into_iter()
             .map(|dependency| {
                 planned
                     .get(&dependency.unit)
@@ -560,6 +639,12 @@ pub fn plan_dependency_units_with_remaps(
                     }]),
                 )
             }
+            UnitKind::Binary => (
+                key.target
+                    .as_deref()
+                    .ok_or_else(|| Error::failure("selected binary unit has no target name"))?,
+                CargoTargetKind::Bin,
+            ),
             UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
                 ("build-script-build", CargoTargetKind::CustomBuild)
             }
@@ -789,6 +874,9 @@ fn profile_strip(strip: ManifestStrip) -> CargoStrip<'static> {
 }
 
 fn unit_lto(key: &UnitKey, release: bool, configured: ManifestLto) -> CargoUnitLto<'static> {
+    if key.kind == UnitKind::Binary {
+        return root_lto(release, configured, RootTargetKind::Binary, false);
+    }
     if !release || key.compile_kind == CompileKind::Host || key.kind != UnitKind::Library {
         return CargoUnitLto::OnlyObject;
     }
@@ -867,6 +955,7 @@ fn unit_key(
     UnitKey {
         package: package.key.clone(),
         kind,
+        target: None,
         compile_kind,
         features: features.clone(),
     }
@@ -970,6 +1059,7 @@ fn topological_order(units: &BTreeMap<UnitKey, Unit>) -> Result<Vec<UnitKey>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::{CommandOptions, RustcOutput, dependency_rustc_invocation};
     use crate::config::CargoCompat;
     use crate::manifest::Manifest;
     use crate::resolver::{
@@ -1031,8 +1121,10 @@ mod tests {
     }
 
     #[test]
-    fn selected_library_uses_dependency_units_and_aliases() {
+    fn selected_targets_use_dependency_units_and_aliases() {
         let fixture = Fixture::new();
+        fs::write(fixture.0.join("src/one.rs"), "fn main() {}\n").unwrap();
+        fs::write(fixture.0.join("src/two.rs"), "fn main() {}\n").unwrap();
         fixture.package(
             "shared",
             "[package]\nname = \"shared\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
@@ -1042,7 +1134,9 @@ mod tests {
             &fixture.0,
             &fixture.0.join("Cargo.toml"),
             "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             [dependencies]\nrenamed = { package = \"shared\", path = \"shared\" }\n",
+             [dependencies]\nrenamed = { package = \"shared\", path = \"shared\" }\n\
+             [[bin]]\nname = \"one\"\npath = \"src/one.rs\"\n\
+             [[bin]]\nname = \"two\"\npath = \"src/two.rs\"\n",
         )
         .unwrap();
         let cfg = CfgSet::parse("unix\n").unwrap();
@@ -1072,6 +1166,25 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         let mut graph = dependency_units(&resolution, &manifests).unwrap();
         let selected = add_selected_library(&mut graph, &resolution, &manifests, &root).unwrap();
+        let binaries =
+            add_selected_binaries(&mut graph, &resolution, &manifests, &root, None).unwrap();
+        assert_eq!(binaries.len(), 2);
+        assert_eq!(binaries[0].target.as_deref(), Some("one"));
+        assert_eq!(binaries[1].target.as_deref(), Some("two"));
+        for binary in &binaries {
+            assert!(
+                graph.units[binary]
+                    .dependencies
+                    .iter()
+                    .any(|edge| edge.unit == selected)
+            );
+            assert!(
+                graph.units[binary]
+                    .dependencies
+                    .iter()
+                    .any(|edge| edge.alias.as_deref() == Some("renamed"))
+            );
+        }
         manifests.insert(selected.package.clone(), root.clone());
         let edge = graph.units[&selected].dependencies.iter().next().unwrap();
         assert_eq!(edge.alias.as_deref(), Some("renamed"));
@@ -1100,6 +1213,34 @@ mod tests {
         )
         .unwrap();
         assert!(plan.units.contains_key(&selected));
+        assert_ne!(
+            plan.units[&binaries[0]].identity,
+            plan.units[&binaries[1]].identity
+        );
+        let invocation = dependency_rustc_invocation(
+            &plan,
+            &manifests,
+            &binaries[0],
+            &CommandOptions {
+                cargo: Path::new("/cargo"),
+                workspace_root: &fixture.0,
+                selected_package: Some(&selected.package),
+                host_profile: Path::new("/target/debug"),
+                target_profile: Path::new("/target/debug"),
+                host_incremental: Path::new("/incremental/host"),
+                target_incremental: Path::new("/incremental/target"),
+                physical_target: None,
+                host_linker: None,
+                target_linker: None,
+                verbose: false,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(invocation.arguments[3], "src/one.rs");
+        assert_eq!(invocation.environment["CARGO_BIN_NAME"], "one");
+        assert_eq!(invocation.environment["CARGO_PRIMARY_PACKAGE"], "1");
+        assert!(matches!(invocation.output, RustcOutput::Binary { .. }));
     }
 
     #[test]
@@ -1588,6 +1729,7 @@ mod tests {
                 source: crate::resolver::PackageSourceKey::Path(Path::new("/cycle").to_owned()),
             },
             kind: UnitKind::Library,
+            target: None,
             compile_kind: CompileKind::Target,
             features: BTreeSet::new(),
         };

@@ -40,6 +40,10 @@ pub enum RustcOutput {
         rmeta: PathBuf,
         dep_info: PathBuf,
     },
+    Binary {
+        executable: PathBuf,
+        dep_info: PathBuf,
+    },
     ProcMacro {
         dynamic_library: PathBuf,
         dep_info: PathBuf,
@@ -133,6 +137,24 @@ pub fn dependency_rustc_invocation_with_build_output(
                 } else {
                     "dep-info,metadata,link"
                 },
+                output_dir,
+            )
+        }
+        UnitKind::Binary => {
+            let name = key
+                .target
+                .as_deref()
+                .ok_or_else(|| Error::failure("selected binary unit has no target name"))?;
+            let binary = manifest
+                .binaries
+                .iter()
+                .find(|binary| binary.name == name)
+                .ok_or_else(|| Error::failure(format!("selected binary `{name}` is absent")))?;
+            (
+                name,
+                binary.path.as_path(),
+                "bin",
+                "dep-info,link",
                 output_dir,
             )
         }
@@ -235,6 +257,9 @@ pub fn dependency_rustc_invocation_with_build_output(
     }
     let mut environment =
         rustc_environment(options.cargo, manifest, crate_name, &dependency_directories)?;
+    if key.kind == UnitKind::Binary {
+        value(&mut environment, "CARGO_BIN_NAME", crate_name);
+    }
     if options.selected_package == Some(&key.package) {
         value(&mut environment, "CARGO_PRIMARY_PACKAGE", "1");
     }
@@ -494,7 +519,7 @@ pub(crate) fn unit_output_directory(
         .join(&planned.unit.key.package.name)
         .join(planned.identity.extra_filename.trim_start_matches('-'));
     match planned.unit.key.kind {
-        UnitKind::Library | UnitKind::ProcMacro => unit.join("deps"),
+        UnitKind::Library | UnitKind::Binary | UnitKind::ProcMacro => unit.join("deps"),
         UnitKind::BuildScriptCompile => unit.join("build-script"),
         UnitKind::BuildScriptRun => unit.join("build-script-execution/out"),
     }
@@ -511,6 +536,10 @@ fn expected_output(
         UnitKind::Library => RustcOutput::Library {
             rlib: output_dir.join(format!("lib{stem}.rlib")),
             rmeta: output_dir.join(format!("lib{stem}.rmeta")),
+            dep_info: output_dir.join(format!("{stem}.d")),
+        },
+        UnitKind::Binary => RustcOutput::Binary {
+            executable: output_dir.join(&stem),
             dep_info: output_dir.join(format!("{stem}.d")),
         },
         UnitKind::ProcMacro => RustcOutput::ProcMacro {
