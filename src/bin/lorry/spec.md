@@ -955,15 +955,14 @@ program and `CARGO_TARGET_TMPDIR` from the selected test environment.
 For `build`, the selected package's library is compiled on the same unit DAG
 and executor as its normal dependencies. Its dependency edges retain the
 declared extern aliases, and its source identity is the package path relative
-to the workspace root. The selected library remains outside the dependency
-unit cache; the completed-profile record controls reuse until per-unit
-publication is available.
+to the workspace root. Selected libraries use the project-local unit cache;
+the completed-profile record also covers an unchanged `build` or `run`.
 An offline unit-graph oracle compares a selected workspace member's library,
 binary, and renamed path dependency with Cargo's `build --unit-graph` nodes,
 edges, aliases, roots, and development profile.
 
 When `test` needs the selected library in its test profile, that library is
-also scheduled on the dependency DAG and remains outside the unit cache.
+also scheduled on the dependency DAG and uses the project-local unit cache.
 The planner distinguishes library and binary `--test` harnesses from ordinary
 library and binary units, retaining their test-mode profiles and dependency
 edges.
@@ -974,8 +973,12 @@ libraries and harnesses in dependency order. The program executables are
 installed into the selected profile before the test artifacts are published.
 An integration test with no program binaries needs only the test-profile
 closure.
-`build` and `test` no longer use the separate selected-package rustc path;
-the remaining direct root compiler handles `check` targets.
+`build`, `test`, and `check` run selected compiler targets on the unit DAG.
+Each compiler unit writes into a private sibling directory, then replaces
+its planned unit directory only after rustc succeeds, its outputs and dep-info
+are validated, and any cache entry is stored. Downstream units and artifact
+messages use the published path. The outer profile is still published as a
+whole until per-unit profile publication is complete.
 The check planner represents selected libraries, binaries, and enabled test
 harnesses with distinct check modes. It gives integration checks test-profile
 library dependencies without program-artifact edges. Dependency libraries
@@ -1125,7 +1128,8 @@ when an external dep-info input changes; other entries are never replaced.
 Partial entries are ignored. Ordinary reads require the exact entry structure
 and required regular files, then trust the atomically published payload.
 Strict reads compare the payload with its content manifest; corrupt entries
-are warned about, quarantined within the cache that owns them, and rebuilt. Repository
+are warned about, quarantined within the cache that owns them, and rebuilt.
+Repository
 corruption found by strict validation is fatal and is never treated as cache
 corruption. Cache contents remain writable per-user performance state and are
 never an integrity authority for immutable dependency sources.

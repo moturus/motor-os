@@ -15,6 +15,9 @@ libraries use the verified local unit cache with dep-info. Per-unit publication,
 reuse in place, ownership-aware clean, and cancellation recovery remain.
 Selected-library cache entries now track external dep-info inputs, so their
 edits and symlink retargets invalidate reuse.
+Compiler outputs are staged and validated per unit before entering the
+current profile staging tree; replacing a failed compiler unit leaves its
+previous directory intact within that tree.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

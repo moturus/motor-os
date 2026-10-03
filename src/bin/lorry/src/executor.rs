@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::atomic::AtomicDirectory;
 use crate::build_script::{self, EnvironmentOptions, RunOptions};
 use crate::cache::{
     BuildCaches, BuildScriptInput, CacheKey, DependencyInput, SelectedInputs, UnitInput,
@@ -567,7 +568,7 @@ fn execute_unit(
                     output: &output.output,
                     out_dir: &output.out_dir,
                 });
-                let invocation = match build_output {
+                let planned_invocation = match build_output {
                     Some(output) => dependency_rustc_invocation_with_build_output(
                         plan,
                         manifests,
@@ -578,6 +579,25 @@ fn execute_unit(
                     None => dependency_rustc_invocation(plan, manifests, key, commands)?,
                 }
                 .ok_or_else(|| Error::failure("rustc invocation unexpectedly missing"))?;
+                let output_dir = unit_output_directory(planned, commands);
+                let unit_dir = output_dir
+                    .parent()
+                    .ok_or_else(|| Error::failure("rustc unit has no output directory"))?;
+                let parent = unit_dir
+                    .parent()
+                    .ok_or_else(|| Error::failure("rustc unit has no parent directory"))?;
+                let label = unit_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| Error::failure("rustc unit has no UTF-8 name"))?;
+                let staging = AtomicDirectory::new(parent, label)?;
+                let invocation = planned_invocation.with_output_directory(
+                    &staging.path().join(
+                        output_dir
+                            .file_name()
+                            .ok_or_else(|| Error::failure("rustc output has no directory name"))?,
+                    ),
+                )?;
                 create_output_directories(&invocation.output)?;
                 let dependencies = if matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro) {
                     cache_dependencies(planned, outputs)?
@@ -606,13 +626,14 @@ fn execute_unit(
                         selected,
                         planned,
                         manifest,
-                        invocation: &invocation,
+                        invocation: &planned_invocation,
                         host_profile: options.host_profile,
                         target_profile: options.target_profile,
                         dependencies: &dependencies,
                         build_script: cache_build_script,
                     })?;
                     if cache.restore(cache_key, &invocation.output, selected_inputs)? {
+                        staging.commit(unit_dir)?;
                         if options.verbose {
                             eprintln!(
                                 "Fresh {} v{} (verified Lorry cache)",
@@ -620,10 +641,15 @@ fn execute_unit(
                             );
                         }
                         if let Some(reporter) = options.reporter {
-                            reporter.compiler_artifact(key, planned, &invocation.output, true)?;
+                            reporter.compiler_artifact(
+                                key,
+                                planned,
+                                &planned_invocation.output,
+                                true,
+                            )?;
                         }
                         return Ok(Executed::Artifact {
-                            output: invocation.output,
+                            output: planned_invocation.output,
                             cache_key: Some(cache_key),
                         });
                     }
@@ -714,11 +740,12 @@ fn execute_unit(
                 {
                     install_unhashed(executable, unhashed_executable)?;
                 }
+                staging.commit(unit_dir)?;
                 if let Some(reporter) = options.reporter {
-                    reporter.compiler_artifact(key, planned, &invocation.output, false)?;
+                    reporter.compiler_artifact(key, planned, &planned_invocation.output, false)?;
                 }
                 Ok(Executed::Artifact {
-                    output: invocation.output,
+                    output: planned_invocation.output,
                     cache_key,
                 })
             }

@@ -66,6 +66,58 @@ pub struct BuildOutput<'a> {
     pub out_dir: &'a Path,
 }
 
+impl RustcInvocation {
+    /// Keep rustc's output private until the unit has succeeded and its
+    /// complete directory can be published at the planned path.
+    pub fn with_output_directory(&self, directory: &Path) -> Result<Self> {
+        let mut staged = self.clone();
+        let mut positions = self
+            .arguments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument)| (argument == "--out-dir").then_some(index + 1));
+        let index = positions
+            .next()
+            .ok_or_else(|| Error::failure("rustc has no output directory"))?;
+        if positions.next().is_some() || index >= staged.arguments.len() {
+            return Err(Error::failure("rustc has an ambiguous output directory"));
+        }
+        let original = PathBuf::from(&staged.arguments[index]);
+        staged.arguments[index] = directory.as_os_str().to_owned();
+        let paths = match &mut staged.output {
+            RustcOutput::Library {
+                rlib,
+                rmeta,
+                dep_info,
+            } => vec![rlib, rmeta, dep_info],
+            RustcOutput::Binary {
+                executable,
+                dep_info,
+            }
+            | RustcOutput::Metadata {
+                metadata: executable,
+                dep_info,
+            }
+            | RustcOutput::ProcMacro {
+                dynamic_library: executable,
+                dep_info,
+            } => vec![executable, dep_info],
+            RustcOutput::BuildScript {
+                executable,
+                unhashed_executable,
+                dep_info,
+            } => vec![executable, unhashed_executable, dep_info],
+        };
+        for path in paths {
+            let relative = path.strip_prefix(&original).map_err(|_| {
+                Error::failure("rustc output is outside its declared output directory")
+            })?;
+            *path = directory.join(relative);
+        }
+        Ok(staged)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DependencyDirectory {
     pub compile_kind: CompileKind,
@@ -928,6 +980,43 @@ mod tests {
             .iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn staging_changes_only_the_compiler_unit_output() {
+        let final_dir = PathBuf::from("/target/build/package/hash/build-script");
+        let private_dir = PathBuf::from("/target/build/package/.hash.staging/build-script");
+        let invocation = RustcInvocation {
+            arguments: vec![
+                OsString::from("--out-dir"),
+                final_dir.as_os_str().to_owned(),
+                OsString::from("--extern"),
+                OsString::from("dep=/target/build/other/deps/libdep.rlib"),
+            ],
+            environment: BTreeMap::new(),
+            current_dir: PathBuf::from("/workspace"),
+            output: RustcOutput::BuildScript {
+                executable: final_dir.join("build_script_build-hash"),
+                unhashed_executable: final_dir.join("build-script-build"),
+                dep_info: final_dir.join("build_script_build-hash.d"),
+            },
+        };
+        let staged = invocation.with_output_directory(&private_dir).unwrap();
+        assert_eq!(staged.arguments[1], private_dir.as_os_str());
+        assert_eq!(staged.arguments[3], invocation.arguments[3]);
+        assert_eq!(
+            staged.output,
+            RustcOutput::BuildScript {
+                executable: private_dir.join("build_script_build-hash"),
+                unhashed_executable: private_dir.join("build-script-build"),
+                dep_info: private_dir.join("build_script_build-hash.d"),
+            }
+        );
+        assert_eq!(
+            invocation.arguments[1],
+            final_dir.as_os_str(),
+            "cache identity retains the planned published path"
+        );
     }
 
     #[test]
