@@ -109,7 +109,7 @@ fn process_group_has_live_members(group: libc::pid_t) -> Result<bool, ()> {
         }
         let stat = match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if vanished_process(&error) => continue,
             Err(_) => return Err(()),
         };
         let Some((_, fields)) = stat.rsplit_once(") ") else {
@@ -126,6 +126,11 @@ fn process_group_has_live_members(group: libc::pid_t) -> Result<bool, ()> {
         }
     }
     Ok(false)
+}
+
+fn vanished_process(error: &io::Error) -> bool {
+    // An exiting /proc entry can report ESRCH even after read_dir found it.
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
 }
 
 pub fn cancellation_text(complete: bool) -> &'static str {
@@ -211,6 +216,17 @@ fn parent_pid(pid: u32) -> Option<u32> {
 #[cfg(test)]
 mod lock_tests {
     use super::*;
+
+    #[test]
+    fn exiting_proc_entries_are_skipped_without_hiding_other_errors() {
+        assert!(vanished_process(&io::Error::from_raw_os_error(
+            libc::ENOENT
+        )));
+        assert!(vanished_process(&io::Error::from_raw_os_error(libc::ESRCH)));
+        assert!(!vanished_process(&io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+    }
 
     #[test]
     fn ancestry_excludes_self_and_includes_parent() {
