@@ -1,0 +1,134 @@
+//! Commit shell snapshots after filtering variables that must not be restored.
+
+use std::path::Path;
+
+use crate::state::StateRoot;
+
+const PENDING_CWD: &str = "cwd.pending";
+const PENDING_ENV: &str = "env.pending";
+const MAX_EXPORT_BYTES: usize = 4092;
+
+pub fn prepare(directory: &Path) -> Result<(), String> {
+    let state = StateRoot::new(directory.to_path_buf())?;
+    for name in ["cwd", "env.sh"] {
+        state.existing_file(Path::new(name))?;
+    }
+    clear_pending(&state)
+}
+
+pub fn finish(directory: &Path, interrupted: bool) -> Result<(), String> {
+    let state = StateRoot::new(directory.to_path_buf())?;
+    if interrupted {
+        return clear_pending(&state);
+    }
+    let cwd = state.existing_file(Path::new(PENDING_CWD))?;
+    let env = state.existing_file(Path::new(PENDING_ENV))?;
+    let result = (|| match (cwd, env) {
+        (None, None) => Ok(()), // `exit` or `exec` bypassed the wrapper's save step.
+        (Some(cwd), Some(env)) => {
+            let cwd = std::fs::read_to_string(&cwd).map_err(|error| error.to_string())?;
+            let env = std::fs::read_to_string(&env).map_err(|error| error.to_string())?;
+            let cwd = cwd.strip_suffix('\n').unwrap_or(&cwd);
+            if !Path::new(cwd).is_absolute() {
+                Err("shell returned a non-absolute working directory".to_string())
+            } else {
+                let filtered = filter_exports(&env)?;
+                state.replace_file(Path::new("env.sh"), filtered.as_bytes())?;
+                state.replace_file(Path::new("cwd"), format!("{cwd}\n").as_bytes())
+            }
+        }
+        _ => Err("shell returned an incomplete state snapshot".to_string()),
+    })();
+    let cleanup = clear_pending(&state);
+    result.and(cleanup)
+}
+
+fn clear_pending(state: &StateRoot) -> Result<(), String> {
+    for name in [PENDING_CWD, PENDING_ENV] {
+        if let Some(path) = state.existing_file(Path::new(name))? {
+            std::fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn filter_exports(raw: &str) -> Result<String, String> {
+    let mut filtered = String::new();
+    let mut record = String::new();
+    for line in raw.split_inclusive('\n') {
+        record.push_str(line);
+        if !complete_record(&record) {
+            continue;
+        }
+        let assignment = record
+            .strip_prefix("export ")
+            .or_else(|| record.strip_prefix("declare -x "))
+            .ok_or("unexpected shell export format")?;
+        let name = assignment.split(['=', '\n']).next().unwrap_or("");
+        if name.is_empty()
+            || !name.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+            })
+        {
+            return Err("invalid exported variable name".to_string());
+        }
+        if name != "PATH" && !name.starts_with("GEARS_") && assignment.len() <= MAX_EXPORT_BYTES {
+            filtered.push_str(&record);
+        }
+        record.clear();
+    }
+    if !record.is_empty() {
+        return Err("incomplete shell export snapshot".to_string());
+    }
+    Ok(filtered)
+}
+
+fn complete_record(record: &str) -> bool {
+    let mut quote = b' ';
+    let mut escaped = false;
+    let mut previous = b' ';
+    for byte in record.bytes() {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' && quote != b'\'' {
+            escaped = true;
+        } else if quote == b' ' && (byte == b'\'' || byte == b'"') {
+            quote = if byte == b'\'' && previous == b'$' {
+                b'$'
+            } else {
+                byte
+            };
+        } else if (quote == b'\'' && byte == b'\'')
+            || (quote == b'"' && byte == b'"')
+            || (quote == b'$' && byte == b'\'')
+        {
+            quote = b' ';
+        }
+        previous = byte;
+    }
+    quote == b' ' && !escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_bash_and_rush_exports_without_breaking_multiline_values() {
+        let raw = "export KEEP='one\ntwo'\nexport PATH='/bad'\nexport GEARS_SESSION_ID='old'\ndeclare -x ALSO=$'a\\nb'\n";
+        assert_eq!(
+            filter_exports(raw).unwrap(),
+            "export KEEP='one\ntwo'\ndeclare -x ALSO=$'a\\nb'\n"
+        );
+        assert_eq!(
+            filter_exports(&format!("export BIG='{}'\n", "x".repeat(4093))).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn rejects_an_incomplete_or_invalid_snapshot() {
+        assert!(filter_exports("export ONE='unfinished\n").is_err());
+        assert!(filter_exports("export 1BAD='x'\n").is_err());
+    }
+}
