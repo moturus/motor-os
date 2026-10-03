@@ -11,13 +11,12 @@ on 2026-10-02, including native Motor self-build and identity checks.
 Milestone 2 is in progress. An artifact lock now serializes builds and clean
 for one target directory, Cargo's target-directory precedence is supported,
 unsupported build-setting environment variables fail explicitly, and selected
-libraries use the verified local unit cache with dep-info. Per-unit publication,
-reuse in place, ownership-aware clean, and cancellation recovery remain.
-Selected-library cache entries now track external dep-info inputs, so their
-edits and symlink retargets invalidate reuse.
-Compiler outputs are staged and validated per unit before entering the
-current profile staging tree; replacing a failed compiler unit leaves its
-previous directory intact within that tree.
+libraries use the verified local unit cache with dep-info. Selected-library
+cache entries track external dep-info inputs, including edits and symlink
+retargets. Compiler units publish into the final profile after validation,
+and build scripts use a stable published `OUT_DIR`. Successful units survive
+a later failure. In-place freshness/reuse, the shared member layout,
+ownership-aware clean, and cancellation recovery remain.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

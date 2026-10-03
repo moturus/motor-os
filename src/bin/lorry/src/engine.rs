@@ -536,6 +536,51 @@ fn profile_destination(
     profile
 }
 
+fn create_published_profile(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).map_err(|error| {
+        Error::failure(format!(
+            "failed to create build profile `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::failure(format!(
+            "failed to inspect build profile `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::failure(format!(
+            "build profile `{}` is not a real directory",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn invalidate_fresh_profile(profile: &Path) -> Result<()> {
+    let path = profile.join(FRESH_PROFILE_FILE);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(Error::failure(format!(
+                "build freshness record `{}` is not a regular file",
+                path.display()
+            )))
+        }
+        Ok(_) => fs::remove_file(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to invalidate build freshness record `{}`: {error}",
+                path.display()
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::failure(format!(
+            "failed to inspect build freshness record `{}`: {error}",
+            path.display()
+        ))),
+    }
+}
+
 fn validate_binary_selection<'a>(
     manifest: &'a Manifest,
     requested: Option<&'a str>,
@@ -688,7 +733,7 @@ fn build_inner(
         profile_destination(target_root, build.physical_target, build.release)
     };
     let staging = AtomicDirectory::new_compact(&profile_parent)?;
-    crate::trace::event("created build staging directory");
+    crate::trace::event("created dependency preparation directory");
 
     Progress::new(build.verbosity != Verbosity::Quiet).report("Preparing dependency graph")?;
     let resolver_options =
@@ -832,7 +877,7 @@ fn build_inner(
                 build.manifest,
                 &prepared,
                 metadata,
-                staging.path(),
+                &destination,
                 &destination,
                 options.message_format,
             )?)
@@ -840,10 +885,20 @@ fn build_inner(
         _ => None,
     };
     let host_profile = if build.physical_target.is_some() {
-        staging.path().join(".host")
+        target_root.join(if check.is_some() {
+            "check"
+        } else if build.release {
+            "release"
+        } else {
+            "debug"
+        })
     } else {
-        staging.path().to_owned()
+        destination.clone()
     };
+    create_published_profile(&destination)?;
+    if host_profile != destination {
+        create_published_profile(&host_profile)?;
+    }
     let source_limits = repository_tree_limits(&build.config.policy.limits)?;
     let cache = cache::BuildCaches::new(
         build.global_cache_root,
@@ -890,7 +945,7 @@ fn build_inner(
                 (
                     binary.name.clone(),
                     if check_integration {
-                        staging.path().join(&binary.name)
+                        destination.join(&binary.name)
                     } else {
                         bundle_layout.as_ref().map_or_else(
                             || destination.join(&binary.name),
@@ -903,7 +958,7 @@ fn build_inner(
     });
     let integration_temp_dir = (selected_integration || check_integration).then(|| {
         if check_integration {
-            staging.path().to_owned()
+            destination.clone()
         } else {
             bundle_layout.as_ref().map_or_else(
                 || target_root.join("tmp"),
@@ -930,7 +985,7 @@ fn build_inner(
         host: build.host,
         target: build.target,
         host_profile: &host_profile,
-        target_profile: staging.path(),
+        target_profile: &destination,
         host_incremental: &incremental.host,
         target_incremental: &incremental.target,
         physical_target: build.physical_target,
@@ -991,12 +1046,12 @@ fn build_inner(
             )?)?;
         }
         drop(prepared);
-        staging.commit(&destination)?;
         if build.verbosity != Verbosity::Quiet {
             eprintln!("Finished `check` profile");
         }
         return Ok(BuildOutcome::Check(0));
     }
+    invalidate_fresh_profile(&destination)?;
     let needs_normal_plan =
         !build.test || (selected_integration && !build.manifest.binaries.is_empty());
     let normal = if needs_normal_plan || selected_integration {
@@ -1095,7 +1150,7 @@ fn build_inner(
             .ok_or_else(|| Error::failure("integration test has no compilation plan"))?;
         compile_planned_test_targets(
             &build,
-            staging.path(),
+            &destination,
             plan,
             outputs,
             &TestOutput {
@@ -1105,7 +1160,7 @@ fn build_inner(
     } else if build.test {
         compile_test_targets(
             &build,
-            staging.path(),
+            &destination,
             test_harnesses,
             &TestOutput {
                 bundle_layout: bundle_layout.as_ref(),
@@ -1117,7 +1172,7 @@ fn build_inner(
             .ok_or_else(|| Error::failure("build has no normal compilation plan"))?;
         compile_root_targets(
             &build,
-            staging.path(),
+            &destination,
             &selected_root.package,
             normal_plan,
             normal_outputs,
@@ -1128,7 +1183,7 @@ fn build_inner(
 
     if let Some(base) = freshness_base {
         write_fresh_profile(
-            staging.path(),
+            &destination,
             &build.manifest.workspace_root,
             base,
             &compiled,
@@ -1139,55 +1194,11 @@ fn build_inner(
     }
 
     drop(prepared);
-    if build.physical_target.is_some() {
-        match fs::remove_dir_all(&host_profile) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(Error::failure(format!(
-                    "failed to remove temporary host dependency output `{}`: {error}",
-                    host_profile.display()
-                )));
-            }
-        }
-    }
-
-    let relative_primary = compiled
-        .primary
-        .strip_prefix(staging.path())
-        .unwrap()
-        .to_path_buf();
-    let relative_binaries = compiled
-        .binaries
-        .iter()
-        .map(|(name, artifact)| {
-            (
-                name.clone(),
-                artifact.strip_prefix(staging.path()).unwrap().to_path_buf(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let relative_harnesses = compiled
-        .harnesses
-        .iter()
-        .map(|artifact| artifact.strip_prefix(staging.path()).unwrap().to_path_buf())
-        .collect::<Vec<_>>();
-    let relative_bundle = compiled
-        .bundle
-        .as_ref()
-        .map(|artifact| artifact.strip_prefix(staging.path()).unwrap().to_path_buf());
-    staging.commit(&destination)?;
     let artifacts = BuildArtifacts {
-        primary: destination.join(relative_primary),
-        binaries: relative_binaries
-            .into_iter()
-            .map(|(name, artifact)| (name, destination.join(artifact)))
-            .collect(),
-        harnesses: relative_harnesses
-            .into_iter()
-            .map(|artifact| destination.join(artifact))
-            .collect(),
-        bundle: relative_bundle.map(|artifact| destination.join(artifact)),
+        primary: compiled.primary,
+        binaries: compiled.binaries,
+        harnesses: compiled.harnesses,
+        bundle: compiled.bundle,
     };
 
     crate::trace::event("published build profile");
@@ -3018,37 +3029,95 @@ mod tests {
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
-        let artifact = build(Build {
-            target_root: None,
-            manifest: &manifest,
-            global_cache_root: &manifest.root.join("global-cache"),
-            config: &config,
-            toolchain: &toolchain,
-            host: &target,
-            target: &target,
-            host_options: &target_options,
-            target_options: &target_options,
-            physical_target: None,
-            logical_target: None,
-            rustflags: &[],
-            release: false,
-            test: false,
-            test_name: None,
-            color: false,
-            verbosity: Verbosity::Quiet,
-            use_cargo_registry: false,
-            source: None,
-            bundle: false,
-            validation: ValidationMode::Trusted,
-            ordinary_freshness_base: None,
-            binary_selection: None,
-        })
-        .unwrap();
+        let build_once = || {
+            build(Build {
+                target_root: None,
+                manifest: &manifest,
+                global_cache_root: &manifest.root.join("global-cache"),
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: false,
+                test_name: None,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                use_cargo_registry: false,
+                source: None,
+                bundle: false,
+                validation: ValidationMode::Trusted,
+                ordinary_freshness_base: None,
+                binary_selection: None,
+            })
+        };
+        let artifact = build_once().unwrap();
         let output = std::process::Command::new(only_binary(&artifact))
             .output()
             .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"build-script-ok");
+        let script = fs::read_to_string(fixture.0.join("local/build.rs")).unwrap();
+        let output_directory = || {
+            fs::read_dir(fixture.0.join("target/lorry/debug/build/local-dependency"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path().join("build-script-execution/out"))
+                .find(|path| path.is_dir())
+                .unwrap()
+        };
+        let out_dir = output_directory();
+        let updated = script.replace("build-script-ok", "build-script-new");
+        fs::write(fixture.0.join("local/build.rs"), &updated).unwrap();
+        let rebuilt = build_once().unwrap();
+        assert_eq!(output_directory(), out_dir);
+        assert_eq!(
+            std::process::Command::new(only_binary(&rebuilt))
+                .output()
+                .unwrap()
+                .stdout,
+            b"build-script-new"
+        );
+
+        let failed = updated
+            .replace("build-script-new", "build-script-failed")
+            .replace(
+                "println!(\"cargo:rerun-if-changed=build.rs\");",
+                "panic!(\"intentional failure\");",
+            );
+        fs::write(fixture.0.join("local/build.rs"), failed).unwrap();
+        assert!(build_once().is_err());
+        assert_eq!(output_directory(), out_dir);
+        assert!(
+            fs::read_to_string(out_dir.join("generated.rs"))
+                .unwrap()
+                .contains("build-script-failed")
+        );
+        assert_eq!(
+            std::process::Command::new(only_binary(&rebuilt))
+                .output()
+                .unwrap()
+                .stdout,
+            b"build-script-new"
+        );
+        fs::write(
+            fixture.0.join("local/build.rs"),
+            updated.replace("build-script-new", "build-script-final"),
+        )
+        .unwrap();
+        let final_artifact = build_once().unwrap();
+        assert_eq!(output_directory(), out_dir);
+        assert_eq!(
+            std::process::Command::new(only_binary(&final_artifact))
+                .output()
+                .unwrap()
+                .stdout,
+            b"build-script-final"
+        );
     }
 
     #[test]

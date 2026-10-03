@@ -977,8 +977,12 @@ closure.
 Each compiler unit writes into a private sibling directory, then replaces
 its planned unit directory only after rustc succeeds, its outputs and dep-info
 are validated, and any cache entry is stored. Downstream units and artifact
-messages use the published path. The outer profile is still published as a
-whole until per-unit profile publication is complete.
+messages use the published path. Compiler units now publish directly into the
+profile; successful units remain available if a later unit fails. Build
+scripts run against their stable published `OUT_DIR`, including replacement
+runs after `build.rs` changes. A failed script can change files there, as in
+Cargo. Lorry removes the completed-profile freshness record before rebuilding
+and writes a new one last, after successful compilation and validation.
 The check planner represents selected libraries, binaries, and enabled test
 harnesses with distinct check modes. It gives integration checks test-profile
 library dependencies without program-artifact edges. Dependency libraries
@@ -1001,8 +1005,9 @@ library when present. Its hashed executable is installed at the selected
 profile's top level after compilation; these binaries remain outside the
 dependency unit cache until per-unit publication is available.
 
-Each rustc unit writes into a deterministic private directory below the
-profile's `build` tree. Lorry passes one `-L dependency` search path for every
+Each rustc unit writes into a private sibling directory below the profile's
+`build` tree, then publishes to its deterministic unit path. Lorry passes one
+`-L dependency` search path for every
 unit in the complete transitive Rust dependency closure and passes direct
 artifacts through exact `--extern` paths. A unit's own output directory is
 never one of its dependency search paths, and completed unit directories are
