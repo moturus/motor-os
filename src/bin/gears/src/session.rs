@@ -278,6 +278,7 @@ pub struct Session {
     writer: Option<File>,
     lock: Option<PathBuf>,
     recovered_entries: usize,
+    ephemeral_shell_state: Option<PathBuf>,
 }
 
 impl Session {
@@ -368,6 +369,7 @@ impl Session {
             writer,
             lock,
             recovered_entries,
+            ephemeral_shell_state: None,
         })
     }
 
@@ -385,6 +387,30 @@ impl Session {
 
     pub fn is_ephemeral(&self) -> bool {
         self.path.is_none()
+    }
+
+    /// Allocate shell state only when the session first runs `sh`.
+    pub fn shell_state_directory(&mut self) -> Result<PathBuf, String> {
+        if let Some(path) = &self.ephemeral_shell_state {
+            return Ok(path.clone());
+        }
+        if let Some(path) = &self.path {
+            let directory = path.with_extension("sh-state");
+            private_directory(&directory)?;
+            return Ok(directory);
+        }
+        for suffix in 0..1000_u32 {
+            let directory = std::env::temp_dir().join(format!("gears-sh-{}-{suffix}", self.id()));
+            match create_private_directory(&directory) {
+                Ok(()) => {
+                    self.ephemeral_shell_state = Some(directory.clone());
+                    return Ok(directory);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(format!("{}: {error}", directory.display())),
+            }
+        }
+        Err("could not allocate an ephemeral shell state directory".to_string())
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -676,10 +702,48 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.writer.take();
+        if let Some(directory) = self.ephemeral_shell_state.take() {
+            let _ = std::fs::remove_dir_all(directory);
+        }
         if let Some(lock) = self.lock.take() {
             let _ = std::fs::remove_file(lock);
         }
     }
+}
+
+fn private_directory(path: &Path) -> Result<(), String> {
+    match create_private_directory(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            if !metadata.file_type().is_dir() {
+                return Err(format!(
+                    "{}: shell state is not a directory",
+                    path.display()
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+                    return Err(format!("{}: shell state is not private", path.display()));
+                }
+            }
+            Ok(())
+        }
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
 }
 
 struct Parsed {
@@ -964,6 +1028,46 @@ fn system_ms(time: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_shell_state_stays_beside_the_session() {
+        let (base, _, store) = fixture("saved-shell-state");
+        let mut session = store.create(false, None).unwrap();
+        let path = session.path().unwrap().to_path_buf();
+        let state = session.shell_state_directory().unwrap();
+        assert_eq!(state, path.with_extension("sh-state"));
+        assert_eq!(session.shell_state_directory().unwrap(), state);
+        drop(session);
+        let mut reopened = store.open_path(&path).unwrap();
+        assert_eq!(reopened.shell_state_directory().unwrap(), state);
+        drop(reopened);
+        assert!(state.is_dir());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn ephemeral_shell_state_is_removed_with_the_session() {
+        let (base, _, store) = fixture("ephemeral-shell-state");
+        let mut session = store.create(true, None).unwrap();
+        let state = session.shell_state_directory().unwrap();
+        assert!(state.starts_with(std::env::temp_dir()));
+        assert_eq!(session.shell_state_directory().unwrap(), state);
+        drop(session);
+        assert!(!state.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_shell_state_rejects_a_symlink() {
+        let (base, _, store) = fixture("shell-state-symlink");
+        let mut session = store.create(false, None).unwrap();
+        let state = session.path().unwrap().with_extension("sh-state");
+        std::os::unix::fs::symlink(&base, &state).unwrap();
+        assert!(session.shell_state_directory().is_err());
+        drop(session);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     fn fixture(name: &str) -> (PathBuf, PathBuf, Store) {
         let base =
