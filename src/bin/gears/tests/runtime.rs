@@ -14,7 +14,8 @@ use gears::provider::{
     ProviderError, Quirks, Request, StreamEvent, ToolCall, ToolOutcome,
 };
 use gears::runtime::{Approval, Approver, Event, Permission, Runtime};
-use gears::session::Store;
+use gears::session::{Store, ToolState};
+use gears::tools::Registry;
 
 struct Scripted {
     responses: Mutex<VecDeque<Result<Completion, ProviderError>>>,
@@ -152,6 +153,72 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn tool_toggles_update_the_next_request_and_preserve_scope_precedence() {
+    let fixture = Fixture::new("tool-toggles");
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let session = store.create(false, None).unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let registry = Registry::load_config(&config).unwrap();
+    let provider = Scripted::new(vec![answer("one"), answer("two"), answer("three")]);
+    let mut runtime = Runtime::new_with_registry_at(
+        provider.clone(),
+        store,
+        session,
+        &config,
+        "test/model".into(),
+        registry,
+        fixture.root.join("global"),
+    )
+    .unwrap();
+    runtime
+        .turn("first".into(), &mut FixedApproval(false), &mut |_| Ok(()))
+        .unwrap();
+    let enabled_identity = runtime.session().latest_runtime_identity().unwrap();
+    runtime
+        .set_tool_state("sh", ToolState::Disabled, false)
+        .unwrap();
+    runtime
+        .turn("second".into(), &mut FixedApproval(false), &mut |_| Ok(()))
+        .unwrap();
+    let disabled_identity = runtime.session().latest_runtime_identity().unwrap();
+    runtime
+        .set_tool_state("sh", ToolState::Enabled, true)
+        .unwrap();
+    assert_eq!(runtime.tool_statuses().unwrap()[0].source, "session");
+    assert!(!runtime.tool_statuses().unwrap()[0].enabled);
+    runtime
+        .set_tool_state("sh", ToolState::Inherit, false)
+        .unwrap();
+    assert_eq!(runtime.tool_statuses().unwrap()[0].source, "global");
+    runtime
+        .turn("third".into(), &mut FixedApproval(false), &mut |_| Ok(()))
+        .unwrap();
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].tools.iter().any(|spec| spec.name == "sh"));
+    assert!(!requests[1].tools.iter().any(|spec| spec.name == "sh"));
+    assert!(requests[2].tools.iter().any(|spec| spec.name == "sh"));
+    assert_ne!(
+        enabled_identity.manifest_hash,
+        disabled_identity.manifest_hash
+    );
+    assert_eq!(
+        enabled_identity.manifest_hash,
+        runtime
+            .session()
+            .latest_runtime_identity()
+            .unwrap()
+            .manifest_hash
+    );
 }
 
 #[test]

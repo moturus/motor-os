@@ -61,6 +61,14 @@ pub struct SessionSummary {
     pub ephemeral: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolStatus {
+    pub name: String,
+    pub enabled: bool,
+    pub available: bool,
+    pub source: &'static str,
+}
+
 pub trait Observer {
     fn event(&mut self, event: Event) -> Result<(), String>;
 }
@@ -235,6 +243,71 @@ impl Runtime {
 
     pub fn tools(&self) -> &Registry {
         &self.tools
+    }
+
+    pub fn tool_statuses(&self) -> Result<Vec<ToolStatus>, String> {
+        let global = Overrides::load(&self.tool_state_directory)?;
+        let session = self.session.tool_states()?;
+        Ok(self
+            .tools
+            .tools()
+            .iter()
+            .map(|tool| {
+                let source = if session.contains_key(&tool.name) {
+                    "session"
+                } else if global.tools.contains_key(&tool.name) {
+                    "global"
+                } else {
+                    "config"
+                };
+                ToolStatus {
+                    name: tool.name.clone(),
+                    enabled: tool.enabled,
+                    available: tool.process.command.is_some(),
+                    source,
+                }
+            })
+            .collect())
+    }
+
+    pub fn set_tool_state(
+        &mut self,
+        name: &str,
+        state: ToolState,
+        global_scope: bool,
+    ) -> Result<(), String> {
+        if !self.tools.tools().iter().any(|tool| tool.name == name) {
+            return Err(format!("unknown directory tool {name:?}"));
+        }
+        let mut global = Overrides::load(&self.tool_state_directory)?;
+        if global_scope {
+            match state {
+                ToolState::Enabled => {
+                    global.tools.insert(name.to_string(), true);
+                }
+                ToolState::Disabled => {
+                    global.tools.insert(name.to_string(), false);
+                }
+                ToolState::Inherit => {
+                    global.tools.remove(name);
+                }
+            }
+            global.save(&self.tool_state_directory)?;
+        } else {
+            self.session.set_tool_state(name, state)?;
+        }
+        self.refresh_tools(&global)
+    }
+
+    fn refresh_tools(&mut self, global: &Overrides) -> Result<(), String> {
+        let mut tools = self.tools.clone();
+        let notices = apply_tool_states(&mut tools, global, &self.session)?;
+        let prompt = effective_prompt(self.store.workspace(), &tools, &self.hooks);
+        self.session.append_runtime_identity(&prompt.identity())?;
+        self.tools = tools;
+        self.prompt = prompt;
+        self.startup_notices.extend(notices);
+        Ok(())
     }
 
     pub fn take_startup_notices(&mut self) -> Vec<String> {
@@ -498,7 +571,9 @@ impl Runtime {
     }
 
     pub fn select_entry(&mut self, id: &str) -> Result<Option<String>, String> {
-        self.session.select(id)
+        let draft = self.session.select(id)?;
+        self.refresh_tools(&Overrides::load(&self.tool_state_directory)?)?;
+        Ok(draft)
     }
 
     pub fn new_session(&mut self, ephemeral: bool, name: Option<&str>) -> Result<(), String> {
