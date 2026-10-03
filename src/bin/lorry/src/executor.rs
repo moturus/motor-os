@@ -616,10 +616,15 @@ fn execute_unit(
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     let unit = match key.kind {
-                        UnitKind::Library => "library",
-                        UnitKind::Binary => "binary",
-                        UnitKind::ProcMacro => "proc macro",
-                        UnitKind::BuildScriptCompile => "build script",
+                        UnitKind::Library => "library".to_owned(),
+                        UnitKind::Binary => format!(
+                            "binary `{}`",
+                            key.target.as_deref().ok_or_else(|| Error::failure(
+                                "selected binary has no target name"
+                            ))?
+                        ),
+                        UnitKind::ProcMacro => "proc macro".to_owned(),
+                        UnitKind::BuildScriptCompile => "build script".to_owned(),
                         UnitKind::BuildScriptRun => unreachable!(),
                     };
                     eprintln!(

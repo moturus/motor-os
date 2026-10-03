@@ -18,7 +18,9 @@ use crate::manifest::{
 use crate::process::{self, RustcCommand};
 use crate::progress::Progress;
 use crate::repository::RepositorySet;
-use crate::resolver::{CompileKind, Resolution, TargetSelection, selected_root_features};
+use crate::resolver::{
+    CompileKind, PackageKey, Resolution, TargetSelection, selected_root_features,
+};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{
@@ -749,15 +751,13 @@ fn build_inner(
         .iter()
         .map(|(key, package)| (key.clone(), package.manifest.clone()))
         .collect::<BTreeMap<_, _>>();
+    let selected_root = selected_library_key(build.manifest)?;
     let selected_library = build
         .manifest
         .library
         .as_ref()
-        .map(|_| selected_library_key(build.manifest))
-        .transpose()?;
-    if let Some(key) = &selected_library {
-        manifests.insert(key.package.clone(), build.manifest.clone());
-    }
+        .map(|_| selected_root.clone());
+    manifests.insert(selected_root.package.clone(), build.manifest.clone());
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
     let freshness_base = (check.is_none() && !build.test)
@@ -789,8 +789,8 @@ fn build_inner(
             logical_target: build.logical_target,
             rustflags: build.rustflags,
         };
-        if include_selected_library && selected_library.is_some() {
-            prepared.selected_library_plan(&options, build.manifest)
+        if include_selected_library {
+            prepared.selected_targets_plan(&options, build.manifest, build.binary_selection)
         } else {
             prepared.dependency_plan(&options)
         }
@@ -857,7 +857,7 @@ fn build_inner(
     let executor_options = executor::Options {
         cargo: &cargo,
         workspace_root: &build.manifest.workspace_root,
-        selected_package: selected_library.as_ref().map(|key| &key.package),
+        selected_package: Some(&selected_root.package),
         toolchain: build.toolchain,
         host: build.host,
         target: build.target,
@@ -978,11 +978,15 @@ fn build_inner(
             },
         )?
     } else {
+        let (normal_plan, normal_outputs, _) = normal
+            .as_ref()
+            .ok_or_else(|| Error::failure("build has no normal compilation plan"))?;
         compile_root_targets(
             &build,
             staging.path(),
-            &host_profile,
-            normal_dependencies,
+            &selected_root.package,
+            normal_plan,
+            normal_outputs,
             normal_library.as_ref(),
         )?
     };
@@ -2302,35 +2306,35 @@ fn check_root_target(
 fn compile_root_targets(
     build: &Build<'_>,
     staging: &Path,
-    host_profile: &Path,
-    dependencies: &[RootDependency],
+    selected: &PackageKey,
+    plan: &CompilationPlan,
+    outputs: &executor::Outputs,
     library: Option<&RootLibraryArtifact>,
 ) -> Result<StagedArtifacts> {
-    let features = selected_root_features(build.manifest)?
-        .into_iter()
-        .collect::<Vec<_>>();
-    let targets = build.manifest.binaries.iter().filter(|target| {
-        build
-            .binary_selection
-            .is_none_or(|selected| target.name == selected)
-    });
     let mut binaries = BTreeMap::new();
     let mut binary_dep_info = Vec::new();
-    for target in targets {
-        let binary = compile_root_binary(
-            build,
-            target,
-            false,
-            staging,
-            host_profile,
-            dependencies,
-            library,
-            &features,
-            false,
-        )?;
-        install_primary(&binary.hashed, &binary.primary)?;
-        binary_dep_info.push(binary.dep_info);
-        binaries.insert(target.name.clone(), binary.primary);
+    for key in plan
+        .order
+        .iter()
+        .filter(|key| key.package == *selected && key.kind == UnitKind::Binary)
+    {
+        let name = key
+            .target
+            .as_ref()
+            .ok_or_else(|| Error::failure("planned binary has no target name"))?;
+        let Some(crate::compile::RustcOutput::Binary {
+            executable,
+            dep_info,
+        }) = outputs.artifacts.get(key)
+        else {
+            return Err(Error::failure(format!(
+                "selected binary `{name}` produced no executable artifact"
+            )));
+        };
+        let primary = staging.join(name);
+        install_primary(executable, &primary)?;
+        binary_dep_info.push(dep_info.clone());
+        binaries.insert(name.clone(), primary);
     }
     if let Some(primary) = binaries.values().next().cloned() {
         let mut dep_info = library
@@ -2670,7 +2674,6 @@ fn compile_root_binary(
         identity,
         hashed,
         primary: staging.join(target.name()),
-        dep_info,
     })
 }
 
@@ -2678,7 +2681,6 @@ struct RootBinaryArtifact {
     identity: Identity,
     hashed: PathBuf,
     primary: PathBuf,
-    dep_info: PathBuf,
 }
 
 #[derive(Clone)]

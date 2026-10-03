@@ -22,8 +22,9 @@ use crate::resolver::{
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::Toolchain;
 use crate::unit::{
-    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, add_selected_library, dependency_units,
-    plan_dependency_units_with_remaps,
+    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, add_selected_binaries,
+    add_selected_library, dependency_units, plan_dependency_units_with_remaps,
+    selected_library_key,
 };
 
 #[derive(Debug)]
@@ -56,18 +57,19 @@ impl PreparedGraph {
         self.plan(options, None)
     }
 
-    pub fn selected_library_plan(
+    pub fn selected_targets_plan(
         &self,
         options: &PlanOptions<'_>,
         selected: &Manifest,
+        binary_name: Option<&str>,
     ) -> Result<CompilationPlan> {
-        self.plan(options, Some(selected))
+        self.plan(options, Some((selected, binary_name)))
     }
 
     fn plan(
         &self,
         options: &PlanOptions<'_>,
-        selected: Option<&Manifest>,
+        selected: Option<(&Manifest, Option<&str>)>,
     ) -> Result<CompilationPlan> {
         let mut manifests = self
             .packages
@@ -75,8 +77,19 @@ impl PreparedGraph {
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
         let mut graph = dependency_units(&self.resolution, &manifests)?;
-        if let Some(selected) = selected {
-            let key = add_selected_library(&mut graph, &self.resolution, &manifests, selected)?;
+        if let Some((selected, binary_name)) = selected {
+            let key = if selected.library.is_some() {
+                add_selected_library(&mut graph, &self.resolution, &manifests, selected)?
+            } else {
+                selected_library_key(selected)?
+            };
+            add_selected_binaries(
+                &mut graph,
+                &self.resolution,
+                &manifests,
+                selected,
+                binary_name,
+            )?;
             if manifests.insert(key.package, selected.clone()).is_some() {
                 return Err(Error::failure(
                     "selected package duplicates a dependency package",

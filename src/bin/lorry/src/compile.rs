@@ -116,6 +116,7 @@ pub fn dependency_rustc_invocation_with_build_output(
         ))
     })?;
     let output_dir = unit_output_directory(planned, options);
+    let binary_crate_name = key.target.as_deref().map(|name| name.replace('-', "_"));
     let (crate_name, source, crate_type, emit, output_dir) = match key.kind {
         UnitKind::Library | UnitKind::ProcMacro => {
             let library = manifest.library.as_ref().ok_or_else(|| {
@@ -151,7 +152,7 @@ pub fn dependency_rustc_invocation_with_build_output(
                 .find(|binary| binary.name == name)
                 .ok_or_else(|| Error::failure(format!("selected binary `{name}` is absent")))?;
             (
-                name,
+                binary_crate_name.as_deref().unwrap(),
                 binary.path.as_path(),
                 "bin",
                 "dep-info,link",
@@ -258,7 +259,11 @@ pub fn dependency_rustc_invocation_with_build_output(
     let mut environment =
         rustc_environment(options.cargo, manifest, crate_name, &dependency_directories)?;
     if key.kind == UnitKind::Binary {
-        value(&mut environment, "CARGO_BIN_NAME", crate_name);
+        value(
+            &mut environment,
+            "CARGO_BIN_NAME",
+            key.target.as_deref().unwrap(),
+        );
     }
     if options.selected_package == Some(&key.package) {
         value(&mut environment, "CARGO_PRIMARY_PACKAGE", "1");

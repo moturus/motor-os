@@ -925,8 +925,11 @@ declared extern aliases, and its source identity is the package path relative
 to the workspace root. The selected library remains outside the dependency
 unit cache; the completed-profile record controls reuse until per-unit
 publication is available.
-The unit model distinguishes binaries by target name, and a planned binary
-has edges to its normal dependencies and the selected library when present.
+For `build` and `run`, selected binaries are distinct named units on that
+same DAG. Each binary has edges to its normal dependencies and the selected
+library when present. Its hashed executable is installed at the selected
+profile's top level after compilation; these binaries remain outside the
+dependency unit cache until per-unit publication is available.
 
 Each rustc unit writes into a deterministic private directory below the
 profile's `build` tree. Lorry passes one `-L dependency` search path for every
