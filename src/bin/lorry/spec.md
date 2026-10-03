@@ -1098,6 +1098,10 @@ identity, use bounded path/size/mtime fingerprints for mutable path packages,
 and compose dependency cache keys without rereading rlib/rmeta bytes. Strict
 keys hash rustc, sysroot, tools, source trees, dependency artifacts, and
 manifests.
+Selected-library cache entries retain rustc dep-info and a digest of inputs
+outside the package tree, including each resolved path and file contents.
+An edit, removal, or symlink retarget makes the entry stale; after a
+successful rebuild, the project-local entry is atomically replaced.
 The three Cargo-client variables that Lorry removes before starting rustc
 (`CARGO_LOG`, `RUSTUP_TOOLCHAIN`, and
 `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`) are omitted from rustc
@@ -1116,11 +1120,12 @@ contents before reuse. A missing, malformed, stale, or differently-modeled
 record causes a normal rebuild. Test harnesses and bundle launchers are not
 reused by this profile-level check.
 
-Unit-cache writers publish atomically with no replacement. Partial entries are
-ignored. Ordinary reads require the exact entry structure and required regular
-files, then trust the atomically published payload. Strict reads compare the
-payload with its content manifest; corrupt entries are warned about,
-quarantined within the cache that owns them, and rebuilt. Repository
+Unit-cache writers publish atomically. A selected-library entry is replaced
+when an external dep-info input changes; other entries are never replaced.
+Partial entries are ignored. Ordinary reads require the exact entry structure
+and required regular files, then trust the atomically published payload.
+Strict reads compare the payload with its content manifest; corrupt entries
+are warned about, quarantined within the cache that owns them, and rebuilt. Repository
 corruption found by strict validation is fatal and is never treated as cache
 corruption. Cache contents remain writable per-user performance state and are
 never an integrity authority for immutable dependency sources.

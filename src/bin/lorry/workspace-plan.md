@@ -13,6 +13,8 @@ for one target directory, Cargo's target-directory precedence is supported,
 unsupported build-setting environment variables fail explicitly, and selected
 libraries use the verified local unit cache with dep-info. Per-unit publication,
 reuse in place, ownership-aware clean, and cancellation recovery remain.
+Selected-library cache entries now track external dep-info inputs, so their
+edits and symlink retargets invalidate reuse.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

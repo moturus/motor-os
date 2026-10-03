@@ -65,6 +65,13 @@ pub struct UnitInput<'a> {
     pub build_script: Option<BuildScriptInput<'a>>,
 }
 
+#[derive(Clone, Copy)]
+pub struct SelectedInputs<'a> {
+    pub package_root: &'a Path,
+    pub working_dir: &'a Path,
+    pub source_remap: Option<&'a crate::unit::SourceRemap>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheKey([u8; 32]);
 
@@ -212,7 +219,7 @@ impl BuildCache {
             &input.planned.identity.extra_filename,
         );
         if input.selected {
-            digest.string("selected-root-cache", "dep-info-v1");
+            digest.string("selected-root-cache", "external-dep-info-v2");
         }
 
         let mut replacements = vec![
@@ -315,19 +322,31 @@ impl BuildCache {
         Ok(CacheKey(digest.finish()))
     }
 
-    pub fn restore(&self, key: CacheKey, output: &RustcOutput, selected: bool) -> Result<bool> {
+    pub fn restore(
+        &self,
+        key: CacheKey,
+        output: &RustcOutput,
+        selected: Option<SelectedInputs<'_>>,
+    ) -> Result<bool> {
         let Some(entry) = self.verified_or_quarantine(key)? else {
             return Ok(false);
         };
-        if selected && !entry.payload.join("library.d").is_file() {
-            return Ok(false);
+        if let Some(inputs) = selected {
+            let dep_info = entry.payload.join("library.d");
+            let recorded = entry.payload.join("external-inputs.sha256");
+            let Some(current) = external_inputs_digest(&dep_info, inputs).ok() else {
+                return Ok(false);
+            };
+            if fs::read(recorded).ok().as_deref() != Some(current.as_slice()) {
+                return Ok(false);
+            }
         }
         let (rlib, rmeta) = library_paths(output)?;
         copy_new_file(&entry.payload.join("library.rlib"), rlib)?;
         if rmeta != rlib {
             copy_new_file(&entry.payload.join("library.rmeta"), rmeta)?;
         }
-        if selected {
+        if selected.is_some() {
             copy_new_file(&entry.payload.join("library.d"), dep_info_path(output)?)?;
         }
         Ok(true)
@@ -338,24 +357,42 @@ impl BuildCache {
         key: CacheKey,
         output: &RustcOutput,
         build_script: Option<&BuildScriptInput<'_>>,
-        selected: bool,
+        selected: Option<SelectedInputs<'_>>,
     ) -> Result<()> {
         let (rlib, rmeta) = library_paths(output)?;
-        let dep_info = selected.then(|| dep_info_path(output)).transpose()?;
+        let dep_info = selected.map(|_| dep_info_path(output)).transpose()?;
         let destination = self.entry_path(key);
+        let external_inputs = selected
+            .map(|inputs| external_inputs_digest(dep_info.unwrap(), inputs))
+            .transpose()?;
+        let mut replace = false;
         if let Some(existing) = self.verified_or_quarantine(key)? {
-            if !self.validation.is_strict() {
-                return Ok(());
+            replace = external_inputs.as_ref().is_some_and(|wanted| {
+                fs::read(existing.payload.join("external-inputs.sha256"))
+                    .ok()
+                    .as_deref()
+                    != Some(wanted.as_slice())
+            });
+            if !replace {
+                if !self.validation.is_strict() {
+                    return Ok(());
+                }
+                let wanted = payload_manifest(
+                    rlib,
+                    rmeta,
+                    dep_info,
+                    external_inputs.as_ref(),
+                    build_script,
+                    self.payload_limits,
+                )?;
+                if existing.payload_manifest == wanted {
+                    return Ok(());
+                }
+                return Err(Error::failure(format!(
+                    "concurrent cache writers produced different verified outputs for `{}`",
+                    hex(&key.0)
+                )));
             }
-            let wanted =
-                payload_manifest(rlib, rmeta, dep_info, build_script, self.payload_limits)?;
-            if existing.payload_manifest == wanted {
-                return Ok(());
-            }
-            return Err(Error::failure(format!(
-                "concurrent cache writers produced different verified outputs for `{}`",
-                hex(&key.0)
-            )));
         }
 
         let parent = destination
@@ -373,6 +410,10 @@ impl BuildCache {
         copy_synced_file(rmeta, &payload.join("library.rmeta"))?;
         if let Some(dep_info) = dep_info {
             copy_synced_file(dep_info, &payload.join("library.d"))?;
+            write_synced(
+                &payload.join("external-inputs.sha256"),
+                external_inputs.as_ref().unwrap(),
+            )?;
         }
         if let Some(build) = build_script {
             write_synced(
@@ -394,6 +435,10 @@ impl BuildCache {
         let manifest = entry_manifest(key, &tree, &payload_manifest);
         write_synced(&staging.path().join("manifest.json"), &manifest)?;
 
+        if replace {
+            staging.commit(&destination)?;
+            return Ok(());
+        }
         if staging.commit_no_replace(&destination)? {
             return Ok(());
         }
@@ -950,6 +995,7 @@ fn payload_manifest(
     rlib: &Path,
     rmeta: &Path,
     dep_info: Option<&Path>,
+    external_inputs: Option<&[u8; 32]>,
     build_script: Option<&BuildScriptInput<'_>>,
     limits: TreeLimits,
 ) -> Result<Vec<u8>> {
@@ -977,6 +1023,10 @@ fn payload_manifest(
     copy_synced_file(rmeta, &payload.join("library.rmeta"))?;
     if let Some(dep_info) = dep_info {
         copy_synced_file(dep_info, &payload.join("library.d"))?;
+        write_synced(
+            &payload.join("external-inputs.sha256"),
+            external_inputs.ok_or_else(|| Error::failure("missing external-input fingerprint"))?,
+        )?;
     }
     if let Some(build) = build_script {
         write_synced(
@@ -1195,6 +1245,64 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     digest.finish()
 }
 
+fn external_inputs_digest(dep_info: &Path, inputs: SelectedInputs<'_>) -> Result<[u8; 32]> {
+    const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
+    let metadata = fs::symlink_metadata(dep_info).map_err(|error| {
+        Error::failure(format!(
+            "failed to inspect rustc dep-info `{}`: {error}",
+            dep_info.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_DEP_INFO_BYTES {
+        return Err(Error::failure(format!(
+            "invalid rustc dep-info `{}`",
+            dep_info.display()
+        )));
+    }
+    let bytes = fs::read(dep_info).map_err(|error| {
+        Error::failure(format!(
+            "failed to read rustc dep-info `{}`: {error}",
+            dep_info.display()
+        ))
+    })?;
+    let root = fs::canonicalize(inputs.package_root).map_err(|error| {
+        Error::failure(format!(
+            "failed to resolve package root `{}`: {error}",
+            inputs.package_root.display()
+        ))
+    })?;
+    let mut external = BTreeMap::new();
+    for source in crate::executor::parse_dep_info_paths(&bytes)? {
+        let path = inputs
+            .source_remap
+            .and_then(|remap| remap.restore_physical_path(&source))
+            .unwrap_or_else(|| {
+                if source.is_absolute() {
+                    source
+                } else {
+                    inputs.working_dir.join(source)
+                }
+            });
+        let resolved = fs::canonicalize(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to resolve rustc dep-info input `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if !resolved.starts_with(&root) {
+            external.insert(path, resolved);
+        }
+    }
+    let mut digest = KeyDigest::new();
+    digest.bytes("schema", b"external-dep-info-v1");
+    for (path, resolved) in external {
+        digest.os("source-path", path.as_os_str(), &[]);
+        digest.os("resolved-path", resolved.as_os_str(), &[]);
+        digest.file_contents("source-contents", &resolved)?;
+    }
+    Ok(digest.finish())
+}
+
 struct KeyDigest(Sha256);
 
 impl KeyDigest {
@@ -1363,7 +1471,7 @@ mod tests {
         let cache = BuildCache::for_test(&fixture.0.join("cache"));
         let key = CacheKey([9; 32]);
         let built = output(&fixture.0.join("built"), b"library");
-        cache.store(key, &built, None, false).unwrap();
+        cache.store(key, &built, None, None).unwrap();
 
         let restored_root = fixture.0.join("restored");
         fs::create_dir(&restored_root).unwrap();
@@ -1372,7 +1480,7 @@ mod tests {
             rmeta: restored_root.join("restored.rmeta"),
             dep_info: restored_root.join("restored.d"),
         };
-        assert!(cache.restore(key, &restored, false).unwrap());
+        assert!(cache.restore(key, &restored, None).unwrap());
         let (rlib, rmeta) = library_paths(&restored).unwrap();
         assert_eq!(fs::read(rlib).unwrap(), b"library");
         assert_eq!(fs::read(rmeta).unwrap(), b"metadata");
@@ -1385,9 +1493,17 @@ mod tests {
         let cache = BuildCache::for_test(&fixture.0.join("cache"));
         let key = CacheKey([10; 32]);
         let built = output(&fixture.0.join("built"), b"library");
+        let source = fixture.0.join("package");
+        fs::create_dir_all(source.join("src")).unwrap();
+        fs::write(source.join("src/lib.rs"), b"pub fn value() {}\n").unwrap();
+        let inputs = SelectedInputs {
+            package_root: &source,
+            working_dir: &source,
+            source_remap: None,
+        };
         let dep_info = dep_info_path(&built).unwrap();
         fs::write(dep_info, b"library.rlib: src/lib.rs\n").unwrap();
-        cache.store(key, &built, None, true).unwrap();
+        cache.store(key, &built, None, Some(inputs)).unwrap();
 
         let restored_root = fixture.0.join("restored");
         fs::create_dir(&restored_root).unwrap();
@@ -1396,11 +1512,85 @@ mod tests {
             rmeta: restored_root.join("library.rmeta"),
             dep_info: restored_root.join("library.d"),
         };
-        assert!(cache.restore(key, &restored, true).unwrap());
+        assert!(cache.restore(key, &restored, Some(inputs)).unwrap());
+        cache.store(key, &built, None, Some(inputs)).unwrap();
         assert_eq!(
             fs::read(restored_root.join("library.d")).unwrap(),
             b"library.rlib: src/lib.rs\n"
         );
+    }
+
+    #[test]
+    fn selected_cache_replaces_entry_when_external_dep_info_input_changes() {
+        let fixture = Fixture::new();
+        let cache = BuildCache::for_test(&fixture.0.join("cache"));
+        let key = CacheKey([11; 32]);
+        let source = fixture.0.join("package");
+        fs::create_dir(&source).unwrap();
+        let external = fixture.0.join("shared.rs");
+        fs::write(&external, b"first").unwrap();
+        let inputs = SelectedInputs {
+            package_root: &source,
+            working_dir: &source,
+            source_remap: None,
+        };
+        let built = output(&fixture.0.join("built"), b"old library");
+        fs::write(
+            dep_info_path(&built).unwrap(),
+            format!("library.rlib: {}\n", external.display()),
+        )
+        .unwrap();
+        cache.store(key, &built, None, Some(inputs)).unwrap();
+
+        let restored_root = fixture.0.join("restored");
+        fs::create_dir(&restored_root).unwrap();
+        let restored = RustcOutput::Library {
+            rlib: restored_root.join("library.rlib"),
+            rmeta: restored_root.join("library.rmeta"),
+            dep_info: restored_root.join("library.d"),
+        };
+        assert!(cache.restore(key, &restored, Some(inputs)).unwrap());
+        fs::remove_file(restored_root.join("library.rlib")).unwrap();
+        fs::remove_file(restored_root.join("library.rmeta")).unwrap();
+        fs::remove_file(restored_root.join("library.d")).unwrap();
+
+        fs::write(&external, b"second").unwrap();
+        assert!(!cache.restore(key, &restored, Some(inputs)).unwrap());
+        fs::write(library_paths(&built).unwrap().0, b"new library").unwrap();
+        cache.store(key, &built, None, Some(inputs)).unwrap();
+        assert!(cache.restore(key, &restored, Some(inputs)).unwrap());
+        assert_eq!(
+            fs::read(library_paths(&restored).unwrap().0).unwrap(),
+            b"new library"
+        );
+
+        fs::remove_file(&external).unwrap();
+        assert!(!cache.restore(key, &restored, Some(inputs)).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_dep_info_digest_detects_symlink_retarget() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("package");
+        fs::create_dir(&source).unwrap();
+        let first = fixture.0.join("first.rs");
+        let second = fixture.0.join("second.rs");
+        fs::write(&first, b"same contents").unwrap();
+        fs::write(&second, b"same contents").unwrap();
+        let link = fixture.0.join("shared.rs");
+        std::os::unix::fs::symlink(&first, &link).unwrap();
+        let dep_info = fixture.0.join("library.d");
+        fs::write(&dep_info, format!("library.rlib: {}\n", link.display())).unwrap();
+        let inputs = SelectedInputs {
+            package_root: &source,
+            working_dir: &source,
+            source_remap: None,
+        };
+        let previous = external_inputs_digest(&dep_info, inputs).unwrap();
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&second, &link).unwrap();
+        assert_ne!(previous, external_inputs_digest(&dep_info, inputs).unwrap());
     }
 
     #[test]
@@ -1436,7 +1626,7 @@ mod tests {
             build_script_manifest(&second)
         );
 
-        cache.store(key, &built, Some(&first), false).unwrap();
+        cache.store(key, &built, Some(&first), None).unwrap();
         let payload = cache.entry_path(key).join("payload");
         assert_eq!(
             fs::read(payload.join("build-output/generated.rs")).unwrap(),
@@ -1451,7 +1641,7 @@ mod tests {
         let cache = BuildCache::for_test(&fixture.0.join("cache"));
         let key = CacheKey([7; 32]);
         let built = output(&fixture.0.join("built"), b"good");
-        cache.store(key, &built, None, false).unwrap();
+        cache.store(key, &built, None, None).unwrap();
         fs::write(cache.entry_path(key).join("payload/library.rlib"), b"bad").unwrap();
 
         let restore = RustcOutput::Library {
@@ -1459,9 +1649,9 @@ mod tests {
             rmeta: fixture.0.join("miss.rmeta"),
             dep_info: fixture.0.join("miss.d"),
         };
-        assert!(!cache.restore(key, &restore, false).unwrap());
+        assert!(!cache.restore(key, &restore, None).unwrap());
         assert_eq!(fs::read_dir(&cache.quarantine).unwrap().count(), 1);
-        cache.store(key, &built, None, false).unwrap();
+        cache.store(key, &built, None, None).unwrap();
         assert!(cache.entry_path(key).is_dir());
     }
 
@@ -1472,7 +1662,7 @@ mod tests {
             BuildCache::for_test_with_validation(&fixture.0.join("cache"), ValidationMode::Trusted);
         let key = CacheKey([6; 32]);
         let built = output(&fixture.0.join("built"), b"original");
-        cache.store(key, &built, None, false).unwrap();
+        cache.store(key, &built, None, None).unwrap();
         fs::write(
             cache.entry_path(key).join("payload/library.rlib"),
             b"changed",
@@ -1484,7 +1674,7 @@ mod tests {
             rmeta: fixture.0.join("restored.rmeta"),
             dep_info: fixture.0.join("restored.d"),
         };
-        assert!(cache.restore(key, &restored, false).unwrap());
+        assert!(cache.restore(key, &restored, None).unwrap());
         assert_eq!(
             fs::read(library_paths(&restored).unwrap().0).unwrap(),
             b"changed"
@@ -1539,7 +1729,7 @@ mod tests {
             rmeta: fixture.0.join("miss.rmeta"),
             dep_info: fixture.0.join("miss.d"),
         };
-        assert!(!cache.restore(key, &restore, false).unwrap());
+        assert!(!cache.restore(key, &restore, None).unwrap());
     }
 
     #[test]
@@ -1557,7 +1747,7 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    cache.store(key, &output, None, false).unwrap();
+                    cache.store(key, &output, None, None).unwrap();
                 })
             })
             .collect::<Vec<_>>();

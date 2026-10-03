@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::build_script::{self, EnvironmentOptions, RunOptions};
-use crate::cache::{BuildCaches, BuildScriptInput, CacheKey, DependencyInput, UnitInput};
+use crate::cache::{
+    BuildCaches, BuildScriptInput, CacheKey, DependencyInput, SelectedInputs, UnitInput,
+};
 use crate::compile::{
     BuildOutput, CommandOptions, RustcOutput, dependency_directories, dependency_rustc_invocation,
     dependency_rustc_invocation_with_build_output, unit_output_directory,
@@ -583,6 +585,11 @@ fn execute_unit(
                     Vec::new()
                 };
                 let selected = options.selected_package == Some(&key.package);
+                let selected_inputs = selected.then_some(SelectedInputs {
+                    package_root: &manifest.root,
+                    working_dir: &invocation.current_dir,
+                    source_remap: planned.source_remap.as_ref(),
+                });
                 let cache_build_script = executed_build_script.map(cache_build_script_input);
                 let cache_key = if let Some(caches) = options
                     .cache
@@ -605,7 +612,7 @@ fn execute_unit(
                         dependencies: &dependencies,
                         build_script: cache_build_script,
                     })?;
-                    if cache.restore(cache_key, &invocation.output, selected)? {
+                    if cache.restore(cache_key, &invocation.output, selected_inputs)? {
                         if options.verbose {
                             eprintln!(
                                 "Fresh {} v{} (verified Lorry cache)",
@@ -696,7 +703,7 @@ fn execute_unit(
                         cache_key,
                         &invocation.output,
                         cache_build_script.as_ref(),
-                        selected,
+                        selected_inputs,
                     )?;
                 }
                 if let RustcOutput::BuildScript {
