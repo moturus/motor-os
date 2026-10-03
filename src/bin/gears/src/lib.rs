@@ -12,6 +12,7 @@ pub mod prompt;
 #[cfg(test)]
 mod property;
 pub mod provider;
+pub mod run_lock;
 pub mod runtime;
 pub mod session;
 pub mod state;
