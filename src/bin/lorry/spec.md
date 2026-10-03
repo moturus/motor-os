@@ -928,6 +928,9 @@ publication is available.
 
 When `test` needs the selected library in its test profile, that library is
 also scheduled on the dependency DAG and remains outside the unit cache.
+The planner distinguishes library and binary `--test` harnesses from ordinary
+library and binary units, retaining their test-mode profiles and dependency
+edges.
 
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected

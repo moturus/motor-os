@@ -159,6 +159,37 @@ pub fn dependency_rustc_invocation_with_build_output(
                 output_dir,
             )
         }
+        UnitKind::LibraryHarness => {
+            let library = manifest
+                .library
+                .as_ref()
+                .ok_or_else(|| Error::failure("selected library harness has no library target"))?;
+            (
+                library.name.as_str(),
+                library.path.as_path(),
+                "bin",
+                "dep-info,link",
+                output_dir,
+            )
+        }
+        UnitKind::BinaryHarness => {
+            let name = key
+                .target
+                .as_deref()
+                .ok_or_else(|| Error::failure("selected binary harness has no target name"))?;
+            let binary = manifest
+                .binaries
+                .iter()
+                .find(|binary| binary.name == name)
+                .ok_or_else(|| Error::failure(format!("binary harness `{name}` is absent")))?;
+            (
+                binary_crate_name.as_deref().unwrap(),
+                binary.path.as_path(),
+                "bin",
+                "dep-info,link",
+                output_dir,
+            )
+        }
         UnitKind::BuildScriptCompile => {
             let source = manifest.build_script.as_deref().ok_or_else(|| {
                 Error::failure(format!(
@@ -199,8 +230,12 @@ pub fn dependency_rustc_invocation_with_build_output(
         &mut arguments,
         "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
     );
-    push(&mut arguments, "--crate-type");
-    push(&mut arguments, crate_type);
+    if matches!(key.kind, UnitKind::LibraryHarness | UnitKind::BinaryHarness) {
+        push(&mut arguments, "--test");
+    } else {
+        push(&mut arguments, "--crate-type");
+        push(&mut arguments, crate_type);
+    }
     push(&mut arguments, &format!("--emit={emit}"));
     if key.kind == UnitKind::ProcMacro {
         codegen(&mut arguments, "prefer-dynamic");
@@ -258,7 +293,7 @@ pub fn dependency_rustc_invocation_with_build_output(
     }
     let mut environment =
         rustc_environment(options.cargo, manifest, crate_name, &dependency_directories)?;
-    if key.kind == UnitKind::Binary {
+    if matches!(key.kind, UnitKind::Binary | UnitKind::BinaryHarness) {
         value(
             &mut environment,
             "CARGO_BIN_NAME",
@@ -524,7 +559,11 @@ pub(crate) fn unit_output_directory(
         .join(&planned.unit.key.package.name)
         .join(planned.identity.extra_filename.trim_start_matches('-'));
     match planned.unit.key.kind {
-        UnitKind::Library | UnitKind::Binary | UnitKind::ProcMacro => unit.join("deps"),
+        UnitKind::Library
+        | UnitKind::Binary
+        | UnitKind::LibraryHarness
+        | UnitKind::BinaryHarness
+        | UnitKind::ProcMacro => unit.join("deps"),
         UnitKind::BuildScriptCompile => unit.join("build-script"),
         UnitKind::BuildScriptRun => unit.join("build-script-execution/out"),
     }
@@ -543,10 +582,12 @@ fn expected_output(
             rmeta: output_dir.join(format!("lib{stem}.rmeta")),
             dep_info: output_dir.join(format!("{stem}.d")),
         },
-        UnitKind::Binary => RustcOutput::Binary {
-            executable: output_dir.join(&stem),
-            dep_info: output_dir.join(format!("{stem}.d")),
-        },
+        UnitKind::Binary | UnitKind::LibraryHarness | UnitKind::BinaryHarness => {
+            RustcOutput::Binary {
+                executable: output_dir.join(&stem),
+                dep_info: output_dir.join(format!("{stem}.d")),
+            }
+        }
         UnitKind::ProcMacro => RustcOutput::ProcMacro {
             dynamic_library: output_dir.join(proc_macro_filename(&stem)),
             dep_info: output_dir.join(format!("{stem}.d")),

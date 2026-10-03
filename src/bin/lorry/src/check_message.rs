@@ -343,7 +343,10 @@ impl Package {
                     .kind
                     .iter()
                     .all(|kind| kind != "bin" && kind != "test" && kind != "custom-build"),
-                UnitKind::Binary => target.kind.iter().any(|kind| kind == "bin"),
+                UnitKind::Binary | UnitKind::BinaryHarness => {
+                    target.kind.iter().any(|kind| kind == "bin")
+                }
+                UnitKind::LibraryHarness => target.kind.iter().any(|kind| kind == "lib"),
                 UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
                     target.kind.iter().any(|kind| kind == "custom-build")
                 }

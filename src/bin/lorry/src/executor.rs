@@ -304,6 +304,8 @@ fn execute_inner(
                                 .map(Executed::BuildScript),
                             UnitKind::Library
                             | UnitKind::Binary
+                            | UnitKind::LibraryHarness
+                            | UnitKind::BinaryHarness
                             | UnitKind::ProcMacro
                             | UnitKind::BuildScriptCompile => {
                                 previous_outputs.artifacts.get(&key).cloned().map(|output| {
@@ -517,6 +519,8 @@ fn execute_unit(
             }
             UnitKind::Library
             | UnitKind::Binary
+            | UnitKind::LibraryHarness
+            | UnitKind::BinaryHarness
             | UnitKind::ProcMacro
             | UnitKind::BuildScriptCompile => {
                 let manifest = manifests.get(&key.package).ok_or_else(|| {
@@ -621,6 +625,12 @@ fn execute_unit(
                             "binary `{}`",
                             key.target.as_deref().ok_or_else(|| Error::failure(
                                 "selected binary has no target name"
+                            ))?
+                        ),
+                        UnitKind::LibraryHarness | UnitKind::BinaryHarness => format!(
+                            "test `{}`",
+                            key.target.as_deref().ok_or_else(|| Error::failure(
+                                "selected harness has no target name"
                             ))?
                         ),
                         UnitKind::ProcMacro => "proc macro".to_owned(),

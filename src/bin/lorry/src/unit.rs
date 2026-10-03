@@ -24,6 +24,8 @@ use crate::toolchain::Toolchain;
 pub enum UnitKind {
     Library,
     Binary,
+    LibraryHarness,
+    BinaryHarness,
     ProcMacro,
     BuildScriptCompile,
     BuildScriptRun,
@@ -393,41 +395,7 @@ pub fn add_selected_library(
         ));
     }
     insert_unit(&mut graph.units, key.clone());
-    let packages = resolution
-        .packages
-        .iter()
-        .map(|package| (&package.key, package))
-        .collect::<BTreeMap<_, _>>();
-    for edge in &resolution.root_edges {
-        if edge.kind != DependencyKind::Normal {
-            continue;
-        }
-        let package = packages.get(&edge.package).ok_or_else(|| {
-            Error::failure(format!(
-                "selected library dependency `{} {}` has no resolved package",
-                edge.package.name, edge.package.version
-            ))
-        })?;
-        let child_manifest = manifests.get(&edge.package).ok_or_else(|| {
-            Error::failure(format!(
-                "selected library dependency `{} {}` has no manifest",
-                edge.package.name, edge.package.version
-            ))
-        })?;
-        let child = unit_key(
-            package,
-            library_unit_kind(child_manifest),
-            edge.compile_kind,
-            &features_for(package, edge.compile_kind),
-        );
-        add_edge(
-            &mut graph.units,
-            &key,
-            child,
-            UnitEdgeKind::RustDependency,
-            Some(edge.alias.clone()),
-        )?;
-    }
+    add_selected_normal_edges(graph, resolution, manifests, &key)?;
     graph.order = topological_order(&graph.units)?;
     Ok(key)
 }
@@ -463,11 +431,6 @@ pub fn add_selected_binaries(
         .as_ref()
         .map(|_| selected_library_key(manifest))
         .transpose()?;
-    let packages = resolution
-        .packages
-        .iter()
-        .map(|package| (&package.key, package))
-        .collect::<BTreeMap<_, _>>();
     let mut binaries = Vec::new();
     for target in manifest
         .binaries
@@ -478,37 +441,7 @@ pub fn add_selected_binaries(
         key.kind = UnitKind::Binary;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
-        for edge in resolution
-            .root_edges
-            .iter()
-            .filter(|edge| edge.kind == DependencyKind::Normal)
-        {
-            let package = packages.get(&edge.package).ok_or_else(|| {
-                Error::failure(format!(
-                    "selected binary dependency `{} {}` has no resolved package",
-                    edge.package.name, edge.package.version
-                ))
-            })?;
-            let child_manifest = manifests.get(&edge.package).ok_or_else(|| {
-                Error::failure(format!(
-                    "selected binary dependency `{} {}` has no manifest",
-                    edge.package.name, edge.package.version
-                ))
-            })?;
-            let child = unit_key(
-                package,
-                library_unit_kind(child_manifest),
-                edge.compile_kind,
-                &features_for(package, edge.compile_kind),
-            );
-            add_edge(
-                &mut graph.units,
-                &key,
-                child,
-                UnitEdgeKind::RustDependency,
-                Some(edge.alias.clone()),
-            )?;
-        }
+        add_selected_normal_edges(graph, resolution, manifests, &key)?;
         if let Some(library) = &library {
             add_edge(
                 &mut graph.units,
@@ -522,6 +455,92 @@ pub fn add_selected_binaries(
     }
     graph.order = topological_order(&graph.units)?;
     Ok(binaries)
+}
+
+pub fn add_selected_harnesses(
+    graph: &mut UnitGraph,
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    manifest: &Manifest,
+) -> Result<Vec<UnitKey>> {
+    let library = manifest
+        .library
+        .as_ref()
+        .map(|_| selected_library_key(manifest))
+        .transpose()?;
+    let mut harnesses = Vec::new();
+    if let Some(target) = manifest.library.as_ref().filter(|target| target.test) {
+        let mut key = selected_library_key(manifest)?;
+        key.kind = UnitKind::LibraryHarness;
+        key.target = Some(target.name.clone());
+        insert_unit(&mut graph.units, key.clone());
+        add_selected_normal_edges(graph, resolution, manifests, &key)?;
+        harnesses.push(key);
+    }
+    for target in manifest.binaries.iter().filter(|target| target.test) {
+        let mut key = selected_library_key(manifest)?;
+        key.kind = UnitKind::BinaryHarness;
+        key.target = Some(target.name.clone());
+        insert_unit(&mut graph.units, key.clone());
+        add_selected_normal_edges(graph, resolution, manifests, &key)?;
+        if let Some(library) = &library {
+            add_edge(
+                &mut graph.units,
+                &key,
+                library.clone(),
+                UnitEdgeKind::RustDependency,
+                manifest.library.as_ref().map(|target| target.name.clone()),
+            )?;
+        }
+        harnesses.push(key);
+    }
+    graph.order = topological_order(&graph.units)?;
+    Ok(harnesses)
+}
+
+fn add_selected_normal_edges(
+    graph: &mut UnitGraph,
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    parent: &UnitKey,
+) -> Result<()> {
+    let packages = resolution
+        .packages
+        .iter()
+        .map(|package| (&package.key, package))
+        .collect::<BTreeMap<_, _>>();
+    for edge in resolution
+        .root_edges
+        .iter()
+        .filter(|edge| edge.kind == DependencyKind::Normal)
+    {
+        let package = packages.get(&edge.package).ok_or_else(|| {
+            Error::failure(format!(
+                "selected target dependency `{} {}` has no resolved package",
+                edge.package.name, edge.package.version
+            ))
+        })?;
+        let child_manifest = manifests.get(&edge.package).ok_or_else(|| {
+            Error::failure(format!(
+                "selected target dependency `{} {}` has no manifest",
+                edge.package.name, edge.package.version
+            ))
+        })?;
+        let child = unit_key(
+            package,
+            library_unit_kind(child_manifest),
+            edge.compile_kind,
+            &features_for(package, edge.compile_kind),
+        );
+        add_edge(
+            &mut graph.units,
+            parent,
+            child,
+            UnitEdgeKind::RustDependency,
+            Some(edge.alias.clone()),
+        )?;
+    }
+    Ok(())
 }
 
 fn library_unit_kind(manifest: &Manifest) -> UnitKind {
@@ -603,7 +622,7 @@ pub fn plan_dependency_units_with_remaps(
         };
         let features = key.features.iter().cloned().collect::<Vec<_>>();
         let mut edges = unit.dependencies.iter().collect::<Vec<_>>();
-        if key.kind == UnitKind::Binary {
+        if matches!(key.kind, UnitKind::Binary | UnitKind::BinaryHarness) {
             edges.sort_by_key(|edge| edge.unit.package == key.package);
         }
         let dependencies = edges
@@ -644,6 +663,16 @@ pub fn plan_dependency_units_with_remaps(
                     .as_deref()
                     .ok_or_else(|| Error::failure("selected binary unit has no target name"))?,
                 CargoTargetKind::Bin,
+            ),
+            UnitKind::LibraryHarness | UnitKind::BinaryHarness => (
+                key.target
+                    .as_deref()
+                    .ok_or_else(|| Error::failure("selected harness unit has no target name"))?,
+                if key.kind == UnitKind::LibraryHarness {
+                    CargoTargetKind::Lib(vec![CargoCrateType::Lib])
+                } else {
+                    CargoTargetKind::Bin
+                },
             ),
             UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
                 ("build-script-build", CargoTargetKind::CustomBuild)
@@ -774,10 +803,10 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
     };
     UnitSettings {
         profile,
-        mode: if key.kind == UnitKind::BuildScriptRun {
-            CargoCompileMode::RunCustomBuild
-        } else {
-            CargoCompileMode::Build
+        mode: match key.kind {
+            UnitKind::BuildScriptRun => CargoCompileMode::RunCustomBuild,
+            UnitKind::LibraryHarness | UnitKind::BinaryHarness => CargoCompileMode::Test,
+            _ => CargoCompileMode::Build,
         },
         lto: unit_lto(key, options.release, options.release_profile.lto),
         logical_target,
@@ -874,6 +903,9 @@ fn profile_strip(strip: ManifestStrip) -> CargoStrip<'static> {
 }
 
 fn unit_lto(key: &UnitKey, release: bool, configured: ManifestLto) -> CargoUnitLto<'static> {
+    if matches!(key.kind, UnitKind::LibraryHarness | UnitKind::BinaryHarness) {
+        return root_lto(release, configured, RootTargetKind::Binary, true);
+    }
     if key.kind == UnitKind::Binary {
         return root_lto(release, configured, RootTargetKind::Binary, false);
     }
@@ -1169,6 +1201,24 @@ mod tests {
         let binaries =
             add_selected_binaries(&mut graph, &resolution, &manifests, &root, None).unwrap();
         assert_eq!(binaries.len(), 2);
+        let harnesses = add_selected_harnesses(&mut graph, &resolution, &manifests, &root).unwrap();
+        assert_eq!(harnesses.len(), 3);
+        assert!(
+            harnesses
+                .iter()
+                .any(|key| key.kind == UnitKind::LibraryHarness)
+        );
+        assert!(
+            harnesses
+                .iter()
+                .filter(|key| key.kind == UnitKind::BinaryHarness)
+                .all(|key| {
+                    graph.units[key]
+                        .dependencies
+                        .iter()
+                        .any(|edge| edge.unit == selected)
+                })
+        );
         assert_eq!(binaries[0].target.as_deref(), Some("one"));
         assert_eq!(binaries[1].target.as_deref(), Some("two"));
         for binary in &binaries {
@@ -1241,6 +1291,38 @@ mod tests {
         assert_eq!(invocation.environment["CARGO_BIN_NAME"], "one");
         assert_eq!(invocation.environment["CARGO_PRIMARY_PACKAGE"], "1");
         assert!(matches!(invocation.output, RustcOutput::Binary { .. }));
+        let harness = dependency_rustc_invocation(
+            &plan,
+            &manifests,
+            &harnesses[0],
+            &CommandOptions {
+                cargo: Path::new("/cargo"),
+                workspace_root: &fixture.0,
+                selected_package: Some(&selected.package),
+                host_profile: Path::new("/target/debug"),
+                target_profile: Path::new("/target/debug"),
+                host_incremental: Path::new("/incremental/host"),
+                target_incremental: Path::new("/incremental/target"),
+                physical_target: None,
+                host_linker: None,
+                target_linker: None,
+                verbose: false,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            harness
+                .arguments
+                .iter()
+                .any(|argument| argument == "--test")
+        );
+        assert!(
+            !harness
+                .arguments
+                .iter()
+                .any(|argument| argument == "--crate-type")
+        );
     }
 
     #[test]
