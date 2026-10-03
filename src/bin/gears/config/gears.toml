@@ -1,0 +1,63 @@
+# Copy config/gears.toml and tools/ into your Gears directory.
+# Select a model with --model, then enable tools with /tool enable NAME.
+version = 1
+
+[provider]
+base_url = "https://openrouter.ai/api/v1"
+key_file = "openrouter.key"
+
+[[tools]]
+directory = "tools/sh"
+enabled = false
+
+[[tools]]
+directory = "tools/ls"
+enabled = false
+
+[[tools]]
+directory = "tools/rg"
+enabled = false
+
+[[tools]]
+directory = "tools/head"
+enabled = false
+
+[[tools]]
+directory = "tools/tail"
+enabled = false
+
+[[tools]]
+directory = "tools/diff"
+enabled = false
+
+[[tools]]
+directory = "tools/find"
+enabled = false
+
+[[tools]]
+directory = "tools/wc"
+enabled = false
+
+[[tools]]
+directory = "tools/cat"
+enabled = false
+
+[[tools]]
+directory = "tools/sed"
+enabled = false
+
+[[tools]]
+directory = "tools/gix"
+enabled = false
+
+[[tools]]
+directory = "tools/lorry"
+enabled = false
+
+[[tools]]
+directory = "tools/cargo"
+enabled = false
+
+[[tools]]
+directory = "tools/curl"
+enabled = false

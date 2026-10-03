@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "action": {"type": "string", "enum": ["build", "check", "test"]},
+    "package": {"type": "string", "description": "Optional package name passed after -p."},
+    "release": {"type": "boolean", "description": "Use optimized release mode."},
+    "offline": {"type": "boolean", "description": "Avoid network access and use cached dependencies."}
+  },
+  "required": ["action"],
+  "additionalProperties": false
+}

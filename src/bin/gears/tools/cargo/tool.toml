@@ -1,0 +1,32 @@
+version = 1
+kind = "process"
+name = "cargo"
+description = "Build, check, or test a Linux Rust package with Cargo. May run package build scripts or tests."
+parameters = "parameters.json"
+display = "cargo {action}"
+
+[process]
+timeout_seconds = 3600
+max_output_bytes = 1048576
+
+[process.command]
+linux = ["/usr/bin/cargo"]
+
+[process.arguments]
+before_double_dash = ["action", "package", "release", "offline"]
+
+[process.arguments.action]
+type = "enum"
+values = { build = "build", check = "check", test = "test" }
+
+[process.arguments.package]
+type = "string_option"
+flag = "-p"
+
+[process.arguments.release]
+type = "boolean_flag"
+flag = "--release"
+
+[process.arguments.offline]
+type = "boolean_flag"
+flag = "--offline"

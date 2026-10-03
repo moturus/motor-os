@@ -55,6 +55,11 @@ No directory tool is enabled by default. To add the shipped shell tool, copy
     [models]
     used = ["provider/model", "another/model"]
 
+[config/gears.toml](config/gears.toml) lists all shipped directories with tools
+disabled. Copy it and `tools/` into the Gears directory for the complete
+example. Linux manifests for `rg` and `cargo` use `/usr/bin`; adjust their
+absolute executable paths for other installations.
+
 Important optional fields are:
 
     [net]

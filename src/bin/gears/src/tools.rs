@@ -1011,6 +1011,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_example_lists_all_shipped_tools_disabled() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config = Config::load_user(Some(&base.join("config/gears.toml"))).unwrap();
+        let registry = Registry::load(&config.tools, base).unwrap();
+        assert_eq!(registry.tools().len(), 14);
+        assert_eq!(registry.enabled_tools().count(), 0);
+        assert!(registry.tools().iter().all(|tool| !tool.enabled_by_default));
+        let configured = config
+            .tools
+            .iter()
+            .map(|tool| &tool.directory)
+            .collect::<HashSet<_>>();
+        for directory in std::fs::read_dir(base.join("tools")).unwrap() {
+            let directory = directory.unwrap();
+            if directory.file_type().unwrap().is_dir() {
+                assert!(configured.contains(&PathBuf::from("tools").join(directory.file_name())));
+            }
+        }
+        let cargo = registry
+            .tools()
+            .iter()
+            .find(|tool| tool.name == "cargo")
+            .unwrap();
+        #[cfg(unix)]
+        assert_eq!(cargo.process.command.as_ref().unwrap(), &["/usr/bin/cargo"]);
+        #[cfg(not(unix))]
+        assert!(cargo.process.command.is_none());
+    }
+
+    #[test]
     fn shipped_rg_and_gix_have_typed_platform_commands() {
         let base = Path::new(env!("CARGO_MANIFEST_DIR"));
         let registry = Registry::load(
