@@ -104,6 +104,16 @@ fn command(
             eprintln!("{}", super::format_tools(runtime)?);
             Ok(Command::Continue)
         }
+        "permissions" => {
+            eprintln!("{}", super::format_permissions(runtime)?);
+            Ok(Command::Continue)
+        }
+        "permission" => {
+            let (name, global) = super::parse_permission_action(argument)?;
+            runtime.revoke_permission(name, global)?;
+            eprintln!("{}", super::format_permissions(runtime)?);
+            Ok(Command::Continue)
+        }
         "session" => {
             show_session(runtime);
             Ok(Command::Continue)

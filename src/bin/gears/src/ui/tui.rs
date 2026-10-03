@@ -840,7 +840,7 @@ fn handle_command(
         "quit" | "exit" => app.quit = true,
         "help" => app.push(
             Kind::Notice,
-            "commands: /new /resume /name /session /tree /label /fork /clone /compact /provider /model /tools /tool /status /help /quit"
+            "commands: /new /resume /name /session /tree /label /fork /clone /compact /provider /model /tools /tool /permissions /permission /status /help /quit"
                 .to_string(),
             false,
         ),
@@ -860,6 +860,12 @@ fn handle_command(
             let (name, state, global) = super::parse_tool_action(argument)?;
             runtime.set_tool_state(name, state, global)?;
             app.push(Kind::Notice, super::format_tools(runtime)?, false);
+        }
+        "permissions" => app.push(Kind::Notice, super::format_permissions(runtime)?, false),
+        "permission" => {
+            let (name, global) = super::parse_permission_action(argument)?;
+            runtime.revoke_permission(name, global)?;
+            app.push(Kind::Notice, super::format_permissions(runtime)?, false);
         }
         "session" => {
             let session = runtime.summary();

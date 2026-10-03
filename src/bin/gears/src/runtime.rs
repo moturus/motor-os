@@ -72,6 +72,15 @@ pub struct ToolStatus {
     pub source: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionStatus {
+    pub name: String,
+    pub identity: String,
+    pub allow: bool,
+    pub scope: &'static str,
+    pub current: bool,
+}
+
 pub trait Observer {
     fn event(&mut self, event: Event) -> Result<(), String>;
 }
@@ -274,6 +283,86 @@ impl Runtime {
                 }
             })
             .collect())
+    }
+
+    pub fn permission_statuses(&self) -> Result<Vec<PermissionStatus>, String> {
+        let current = self.current_permission_identities()?;
+        let mut statuses = Vec::new();
+        for (identity, grant) in self.session.permission_grants()? {
+            statuses.push(PermissionStatus {
+                current: current.get(&grant.name) == Some(&identity),
+                name: grant.name,
+                identity,
+                allow: grant
+                    .allow
+                    .expect("effective session grants have an answer"),
+                scope: "session",
+            });
+        }
+        for (identity, grant) in Grants::load(&self.tool_state_directory)?.by_identity {
+            statuses.push(PermissionStatus {
+                current: current.get(&grant.name) == Some(&identity),
+                name: grant.name,
+                identity,
+                allow: grant.allow,
+                scope: "global",
+            });
+        }
+        statuses.sort_by(|left, right| {
+            (&left.name, left.scope, &left.identity).cmp(&(
+                &right.name,
+                right.scope,
+                &right.identity,
+            ))
+        });
+        Ok(statuses)
+    }
+
+    pub fn revoke_permission(&mut self, name: &str, global_scope: bool) -> Result<(), String> {
+        if global_scope {
+            let mut grants = Grants::load(&self.tool_state_directory)?;
+            let before = grants.by_identity.len();
+            grants.by_identity.retain(|_, grant| grant.name != name);
+            if grants.by_identity.len() == before {
+                return Err(format!("no global grant for {name:?}"));
+            }
+            grants.save(&self.tool_state_directory)
+        } else {
+            let matching = self
+                .session
+                .permission_grants()?
+                .into_iter()
+                .filter(|(_, grant)| grant.name == name)
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                return Err(format!("no session grant for {name:?}"));
+            }
+            for (identity, _) in matching {
+                self.session.append_permission_grant(&PermissionGrant {
+                    name: name.to_string(),
+                    identity,
+                    allow: None,
+                })?;
+            }
+            Ok(())
+        }
+    }
+
+    fn current_permission_identities(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, String> {
+        let mut identities = std::collections::BTreeMap::new();
+        for tool in self.tools.tools() {
+            identities.insert(tool.name.clone(), tool.approval_identity()?);
+        }
+        for tool in self.hooks.initialized().tools {
+            let identity = self
+                .hooks
+                .approval_identity(&tool.name)
+                .ok_or_else(|| format!("no approval identity for {:?}", tool.name))?;
+            identities.insert(tool.name, identity);
+        }
+        Ok(identities)
     }
 
     pub fn set_tool_state(

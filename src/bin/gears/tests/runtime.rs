@@ -9,12 +9,13 @@ use gears::config::{Config, ContextConfig, HookConfig, ToolDirectory};
 use gears::mock::{MockServer, Script, sse_response};
 use gears::net::EgressPolicy;
 use gears::net::host_curl::HostCurl;
+use gears::permissions::{Grant, Grants};
 use gears::provider::{
     Completion, ContentBlock, Endpoint, EventSink, FinishReason, Message, OpenAiCompat, Provider,
     ProviderError, Quirks, Request, StreamEvent, ToolCall, ToolOutcome,
 };
 use gears::runtime::{Approval, Approver, Event, Permission, Runtime};
-use gears::session::{Store, ToolState};
+use gears::session::{PermissionGrant, Store, ToolState};
 use gears::tools::Registry;
 
 struct Scripted {
@@ -219,6 +220,65 @@ fn tool_toggles_update_the_next_request_and_preserve_scope_precedence() {
             .unwrap()
             .manifest_hash
     );
+}
+
+#[test]
+fn permission_listing_marks_stale_grants_and_revoke_clears_each_scope() {
+    let fixture = Fixture::new("permission-listing");
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let mut session = store.create(false, None).unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let registry = Registry::load_config(&config).unwrap();
+    let identity = registry.tools()[0].approval_identity().unwrap();
+    session
+        .append_permission_grant(&PermissionGrant {
+            name: "sh".into(),
+            identity: identity.clone(),
+            allow: Some(false),
+        })
+        .unwrap();
+    let global_dir = fixture.root.join("global");
+    let mut global = Grants::default();
+    global.by_identity.insert(
+        "a".repeat(64),
+        Grant {
+            name: "sh".into(),
+            allow: true,
+        },
+    );
+    global.save(&global_dir).unwrap();
+    let mut runtime = Runtime::new_with_registry_at(
+        Scripted::new(Vec::new()),
+        store,
+        session,
+        &config,
+        "test/model".into(),
+        registry,
+        global_dir,
+    )
+    .unwrap();
+    let listed = runtime.permission_statuses().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(
+        listed
+            .iter()
+            .any(|grant| grant.scope == "session" && grant.current && !grant.allow)
+    );
+    assert!(
+        listed
+            .iter()
+            .any(|grant| grant.scope == "global" && !grant.current && grant.allow)
+    );
+    runtime.revoke_permission("sh", false).unwrap();
+    assert_eq!(runtime.permission_statuses().unwrap().len(), 1);
+    runtime.revoke_permission("sh", true).unwrap();
+    assert!(runtime.permission_statuses().unwrap().is_empty());
 }
 
 #[test]

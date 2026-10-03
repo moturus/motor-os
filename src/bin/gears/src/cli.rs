@@ -28,8 +28,10 @@ Options:
   --help              Print this help
 
 Interactive commands include /new, /resume, /name, /session, /tree, /label,
-/fork, /clone, /compact, /provider, /model, /tools, /tool, /status, /help, and /quit.
+/fork, /clone, /compact, /provider, /model, /tools, /tool, /permissions,
+/permission, /status, /help, and /quit.
 Use /tool enable|disable|reset NAME [--global] to change directory tools.
+Use /permission revoke NAME [--global] to remove saved grants.
 Use /provider NAME --default or /model ID --default to save both defaults.
 ";
 

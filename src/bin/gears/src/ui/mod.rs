@@ -44,6 +44,35 @@ pub(crate) fn format_tools(runtime: &Runtime) -> Result<String, String> {
         .join("\n"))
 }
 
+pub(crate) fn parse_permission_action(argument: &str) -> Result<(&str, bool), String> {
+    let parts = argument.split_whitespace().collect::<Vec<_>>();
+    let (["revoke", name] | ["revoke", name, "--global"]) = parts.as_slice() else {
+        return Err("usage: /permission revoke NAME [--global]".to_string());
+    };
+    Ok((name, parts.len() == 3))
+}
+
+pub(crate) fn format_permissions(runtime: &Runtime) -> Result<String, String> {
+    let grants = runtime.permission_statuses()?;
+    if grants.is_empty() {
+        return Ok("no saved permissions".to_string());
+    }
+    Ok(grants
+        .iter()
+        .map(|grant| {
+            format!(
+                "{}: {} {} [{}] {}",
+                grant.name,
+                grant.scope,
+                if grant.allow { "allow" } else { "deny" },
+                &grant.identity[..12],
+                if grant.current { "current" } else { "stale" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 pub(crate) fn selection_and_default(argument: &str) -> (&str, bool) {
     let argument = argument.trim();
     if argument == "--default" {
@@ -77,6 +106,18 @@ mod tests {
             "other sh",
         ] {
             assert!(parse_tool_action(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn permission_command_grammar_is_strict() {
+        assert_eq!(parse_permission_action("revoke sh").unwrap(), ("sh", false));
+        assert_eq!(
+            parse_permission_action("revoke sh --global").unwrap(),
+            ("sh", true)
+        );
+        for invalid in ["", "revoke", "revoke sh extra", "revoke --global sh"] {
+            assert!(parse_permission_action(invalid).is_err(), "{invalid}");
         }
     }
 }
