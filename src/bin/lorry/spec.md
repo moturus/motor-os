@@ -117,17 +117,19 @@ The current command surface is:
 ```text
 lorry [+toolchain] [GLOBAL] build  [-p NAME] [--bin NAME]
                                   [--release|-r] [--target TRIPLE]
-                                  [--strict-validation]
+                                  [--target-dir DIRECTORY] [--strict-validation]
 lorry [+toolchain] [GLOBAL] cache clean
 lorry [+toolchain] [GLOBAL] clean  [-p NAME]
                                   [--release|-r] [--target TRIPLE]
+                                  [--target-dir DIRECTORY]
 lorry [+toolchain] [GLOBAL] new PATH
 lorry [+toolchain] [GLOBAL] review [-p NAME]
 lorry [+toolchain] [GLOBAL] run    [-p NAME] [--bin NAME]
                                   [--release|-r] [--target TRIPLE]
-                                  [--strict-validation] [-- ARGS...]
+                                  [--target-dir DIRECTORY] [--strict-validation] [-- ARGS...]
 lorry [+toolchain] [GLOBAL] test   [-p NAME]
                                   [--release|-r] [--target TRIPLE]
+                                  [--target-dir DIRECTORY]
                                   [--strict-validation] [--test NAME]
                                   [--no-run] [--bundle]
                                   [-- ARGS...]
@@ -206,8 +208,12 @@ root compilation, freshness validation, and artifact publication.
 - Tool/build/operational failures return 101, usage errors return 1,
   help/version return 0, and POSIX-style interruption returns 130 where
   supported.
-- `CARGO_TARGET_DIR` and Cargo `build.target-dir` must be rejected because
-  Lorry owns an isolated artifact tree.
+- Build, check, run, test, and clean select a target directory in this order:
+  `--target-dir`, `CARGO_TARGET_DIR`, Cargo `build.target-dir`, then the
+  workspace's `target/`. Relative CLI and environment paths use the invocation
+  directory; a relative Cargo config path uses the directory containing its
+  `.cargo` directory. Lorry writes only below that target directory's `lorry/`
+  subtree.
 
 ## Package and manifest model
 

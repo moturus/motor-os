@@ -86,16 +86,22 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
             return Err(unknown_integration_test(&manifest, name));
         }
     }
-    let target_directory = match &cli.command {
-        Command::Check(options) => {
-            selected_target_directory(&current, &manifest, options.target_dir.as_deref())
-        }
-        _ => manifest.workspace_root.join("target"),
-    };
-    let target_root = artifact_root_in(&manifest, &target_directory);
-    let artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
     let compact_state = CompactState::load(&manifest.root)?;
     let mut config = Config::load(&manifest.root)?;
+    let requested_target_directory = match &cli.command {
+        Command::Build(options) => options.target_dir.as_deref(),
+        Command::Check(options) => options.target_dir.as_deref(),
+        Command::Run(options) => options.build.target_dir.as_deref(),
+        Command::Test(options) => options.build.target_dir.as_deref(),
+        _ => unreachable!("non-build command passed to engine"),
+    };
+    let target_directory = config.target_directory(
+        &current,
+        &manifest.workspace_root,
+        requested_target_directory,
+    );
+    let target_root = artifact_root_in(&manifest, &target_directory);
+    let artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
     crate::trace::event("loaded manifest, admission state, and configuration");
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     check_rust_version(&manifest, &toolchain)?;
@@ -284,6 +290,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
     match &cli.command {
         Command::Build(_) => {
             build(Build {
+                target_root: Some(&target_root),
                 manifest: &manifest,
                 global_cache_root: &global_cache_root,
                 config: &config,
@@ -311,6 +318,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
         }
         Command::Check(options) => check(
             Build {
+                target_root: Some(&target_root),
                 manifest: &manifest,
                 global_cache_root: &global_cache_root,
                 config: &config,
@@ -339,6 +347,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
         ),
         Command::Run(options) => {
             let artifacts = build(Build {
+                target_root: Some(&target_root),
                 manifest: &manifest,
                 global_cache_root: &global_cache_root,
                 config: &config,
@@ -383,6 +392,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
                 eprintln!("note: documentation tests are not supported");
             }
             let artifacts = build(Build {
+                target_root: Some(&target_root),
                 manifest: &manifest,
                 global_cache_root: &global_cache_root,
                 config: &config,
@@ -448,6 +458,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
 
 struct Build<'a> {
     manifest: &'a Manifest,
+    target_root: Option<&'a Path>,
     global_cache_root: &'a Path,
     config: &'a Config,
     toolchain: &'a Toolchain,
@@ -523,18 +534,6 @@ fn profile_destination(
     }
     profile.push(if release { "release" } else { "debug" });
     profile
-}
-
-fn selected_target_directory(
-    current: &Path,
-    manifest: &Manifest,
-    requested: Option<&str>,
-) -> PathBuf {
-    match requested.map(Path::new) {
-        Some(path) if path.is_absolute() => path.to_owned(),
-        Some(path) => current.join(path),
-        None => manifest.workspace_root.join("target"),
-    }
 }
 
 fn validate_binary_selection<'a>(
@@ -656,7 +655,10 @@ fn build_inner(
         return Err(unknown_integration_test(build.manifest, name));
     }
     let default_target_root = artifact_root(build.manifest);
-    let target_root = check.map_or(default_target_root.as_path(), |(root, _)| root);
+    let target_root = check.map_or(
+        build.target_root.unwrap_or(default_target_root.as_path()),
+        |(root, _)| root,
+    );
     let incremental = incremental_roots_in(&build, target_root);
     if !build.release {
         fs::create_dir_all(&incremental.host).map_err(|error| {
@@ -2636,6 +2638,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let build_once = || {
             build(Build {
+                target_root: None,
                 manifest: &manifest,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
@@ -2734,6 +2737,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifact = build(Build {
+            target_root: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
@@ -2781,6 +2785,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let build_with = |binary_selection| {
             build(Build {
+                target_root: None,
                 manifest: &manifest,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
@@ -2839,6 +2844,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
+            target_root: None,
             manifest: &manifest,
             global_cache_root: &manifest.workspace_root.join("global-cache"),
             config: &config,
@@ -2886,6 +2892,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
+            target_root: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
@@ -2951,6 +2958,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let build_once = || {
             build(Build {
+                target_root: None,
                 manifest: &manifest,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
@@ -3020,6 +3028,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifact = build(Build {
+            target_root: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
@@ -3090,6 +3099,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
+            target_root: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
@@ -3155,6 +3165,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let build_bundle = || {
             build(Build {
+                target_root: None,
                 manifest: &manifest,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
@@ -3294,6 +3305,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
+            target_root: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
@@ -3334,6 +3346,7 @@ mod tests {
         );
 
         let bundled = build(Build {
+            target_root: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
@@ -3407,6 +3420,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let error = build(Build {
+            target_root: None,
             manifest: &manifest,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,

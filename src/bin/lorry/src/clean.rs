@@ -3,18 +3,23 @@ use crate::config::Config;
 use crate::diagnostic::{Error, Result};
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn execute(options: &CleanOptions, package: Option<&str>, verbosity: Verbosity) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = crate::manifest::Manifest::load_selected(&current, package)?;
-    let target_directory = target_directory(&current, &manifest, options.target_dir.as_deref());
+    let config = Config::load(&manifest.root)?;
+    let target_directory = config.target_directory(
+        &current,
+        &manifest.workspace_root,
+        options.build.target_dir.as_deref(),
+    );
     let _artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
     let artifact_root = super::engine::artifact_root_in(&manifest, &target_directory);
 
     let target = if options.build.release || options.build.target.is_some() {
-        Config::load(&manifest.root)?.selected_target(options.build.target.as_deref())?
+        config.selected_target(options.build.target.as_deref())?
     } else {
         None
     };
@@ -32,18 +37,6 @@ pub fn execute(options: &CleanOptions, package: Option<&str>, verbosity: Verbosi
         }
     }
     Ok(0)
-}
-
-fn target_directory(
-    current: &Path,
-    manifest: &crate::manifest::Manifest,
-    requested: Option<&str>,
-) -> PathBuf {
-    match requested.map(Path::new) {
-        Some(path) if path.is_absolute() => path.to_owned(),
-        Some(path) => current.join(path),
-        None => manifest.workspace_root.join("target"),
-    }
 }
 
 #[cfg(test)]
@@ -231,11 +224,15 @@ mod tests {
         fixture.directory("target/lorry/packages/other/debug");
         let manifest = crate::manifest::Manifest::load_selected(&fixture.0, Some("app")).unwrap();
         assert_eq!(
-            target_directory(&manifest.root, &manifest, None),
+            Config::default().target_directory(&manifest.root, &manifest.workspace_root, None),
             fixture.0.join("target")
         );
         assert_eq!(
-            target_directory(&manifest.root, &manifest, Some("editor-target")),
+            Config::default().target_directory(
+                &manifest.root,
+                &manifest.workspace_root,
+                Some("editor-target"),
+            ),
             manifest.root.join("editor-target")
         );
 

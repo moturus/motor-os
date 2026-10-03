@@ -19,6 +19,8 @@ pub struct Config {
     pub cargo_compat: Option<CargoCompat>,
     pub rustc: Option<PathBuf>,
     pub default_target: Option<String>,
+    pub build_target_dir: Option<PathBuf>,
+    pub environment_target_dir: Option<PathBuf>,
     pub build_rustflags: Vec<String>,
     pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
     pub targets: BTreeMap<TargetSelector, TargetOptions>,
@@ -301,6 +303,27 @@ impl Config {
         Ok(target)
     }
 
+    pub fn target_directory(
+        &self,
+        current: &Path,
+        workspace_root: &Path,
+        requested: Option<&str>,
+    ) -> PathBuf {
+        let selected = requested
+            .map(PathBuf::from)
+            .or_else(|| self.environment_target_dir.clone());
+        if let Some(path) = selected {
+            return if path.is_absolute() {
+                path
+            } else {
+                current.join(path)
+            };
+        }
+        self.build_target_dir
+            .clone()
+            .unwrap_or_else(|| workspace_root.join("target"))
+    }
+
     pub fn target_options(&self, target: &str, matching_cfgs: &[String]) -> Result<TargetOptions> {
         let mut result = TargetOptions::default();
         let mut matching_runners = Vec::new();
@@ -376,19 +399,10 @@ fn default_cache_directory(environment: &BTreeMap<String, String>, motor: bool) 
 }
 
 fn reject_environment(environment: &BTreeMap<String, String>) -> Result<()> {
-    for variable in [
-        "CARGO_TARGET_DIR",
-        "RUSTC_WRAPPER",
-        "RUSTC_WORKSPACE_WRAPPER",
-    ] {
+    for variable in ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
         if environment.contains_key(variable) {
-            let explanation = if variable == "CARGO_TARGET_DIR" {
-                "Lorry uses the isolated `target/lorry` artifact root"
-            } else {
-                "compiler wrappers are outside the Stage-2 identity contract"
-            };
             return Err(Error::failure(format!(
-                "environment variable `{variable}` is not supported: {explanation}"
+                "environment variable `{variable}` is not supported: compiler wrappers are outside the Stage-2 identity contract"
             ))
             .with_help(format!("unset `{variable}` before invoking Lorry")));
         }
@@ -1270,12 +1284,21 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
                     )?);
                 }
                 "target-dir" => {
-                    return Err(Error::at(
-                        path,
-                        document.line_of_item(item),
-                        "Cargo `build.target-dir` is not supported",
-                        "remove it; Lorry always writes below `target/lorry`",
-                    ));
+                    let value = require_string(path, &document, item, "build.target-dir")?;
+                    if value.is_empty() {
+                        return Err(Error::at(
+                            path,
+                            document.line_of_item(item),
+                            "Cargo `build.target-dir` must not be empty",
+                            "set it to a target directory path",
+                        ));
+                    }
+                    let directory = PathBuf::from(value);
+                    config.build_target_dir = Some(if directory.is_absolute() {
+                        directory
+                    } else {
+                        definition_root.join(directory)
+                    });
                 }
                 "rustc-wrapper" | "rustc-workspace-wrapper" => {
                     return Err(Error::at(
@@ -1359,6 +1382,12 @@ fn apply_cargo_environment(
     environment: &BTreeMap<String, String>,
     config: &mut Config,
 ) -> Result<()> {
+    if let Some(directory) = environment.get("CARGO_TARGET_DIR") {
+        if directory.is_empty() {
+            return Err(Error::failure("CARGO_TARGET_DIR must not be empty"));
+        }
+        config.environment_target_dir = Some(PathBuf::from(directory));
+    }
     if let Some(target) = environment.get("CARGO_BUILD_TARGET") {
         validate_target(target)?;
         config.default_target = Some(target.clone());
@@ -2371,30 +2400,67 @@ locked = [
     }
 
     #[test]
-    fn rejects_output_overrides_wrappers_and_unknown_keys() {
+    fn selects_cargo_target_directory_by_cli_environment_and_config() {
         let temp = TempDir::new();
         let package = temp.0.join("pkg");
         fs::create_dir_all(package.join(".cargo")).unwrap();
         let home = temp.0.join("home").display().to_string();
-        for variable in [
-            "CARGO_TARGET_DIR",
-            "RUSTC_WRAPPER",
-            "RUSTC_WORKSPACE_WRAPPER",
-        ] {
+        let current = package.join("member");
+        let base_environment = BTreeMap::from([("HOME".to_owned(), home.clone())]);
+        let config = Config::load_with_environment(&package, &base_environment).unwrap();
+        assert_eq!(
+            config.target_directory(&current, &package, None),
+            package.join("target")
+        );
+        fs::write(
+            package.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"elsewhere\"\n",
+        )
+        .unwrap();
+        let config = Config::load_with_environment(&package, &base_environment).unwrap();
+        assert_eq!(
+            config.target_directory(&current, &package, None),
+            package.join("elsewhere")
+        );
+        let environment = BTreeMap::from([
+            ("HOME".to_owned(), home.clone()),
+            ("CARGO_TARGET_DIR".to_owned(), "env-output".to_owned()),
+        ]);
+        let config = Config::load_with_environment(&package, &environment).unwrap();
+        assert_eq!(
+            config.target_directory(&current, &package, None),
+            current.join("env-output")
+        );
+        assert_eq!(
+            config.target_directory(&current, &package, Some("cli-output")),
+            current.join("cli-output")
+        );
+        let environment = BTreeMap::from([
+            ("HOME".to_owned(), home.clone()),
+            ("CARGO_TARGET_DIR".to_owned(), String::new()),
+        ]);
+        assert!(Config::load_with_environment(&package, &environment).is_err());
+        fs::write(
+            package.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"\"\n",
+        )
+        .unwrap();
+        assert!(Config::load_with_environment(&package, &base_environment).is_err());
+    }
+
+    #[test]
+    fn rejects_compiler_wrappers() {
+        let temp = TempDir::new();
+        let package = temp.0.join("pkg");
+        fs::create_dir_all(&package).unwrap();
+        let home = temp.0.join("home").display().to_string();
+        for variable in ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
             let environment = BTreeMap::from([
                 ("HOME".to_owned(), home.clone()),
                 (variable.to_owned(), "".into()),
             ]);
             assert!(Config::load_with_environment(&package, &environment).is_err());
         }
-
-        fs::write(
-            package.join(".cargo/config.toml"),
-            "[build]\ntarget-dir = \"elsewhere\"\n",
-        )
-        .unwrap();
-        let environment = BTreeMap::from([("HOME".to_owned(), home)]);
-        assert!(Config::load_with_environment(&package, &environment).is_err());
     }
 
     #[test]

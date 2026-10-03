@@ -64,6 +64,7 @@ pub enum RustcQueryKind {
 pub struct BuildOptions {
     pub release: bool,
     pub target: Option<String>,
+    pub target_dir: Option<String>,
     pub bin: Option<String>,
     pub validation: ValidationMode,
 }
@@ -71,7 +72,6 @@ pub struct BuildOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CleanOptions {
     pub build: BuildOptions,
-    pub target_dir: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -557,18 +557,19 @@ fn build_command(name: &'static str) -> ClapCommand {
                 .num_args(1)
                 .action(ArgAction::Set),
         )
+        .arg(
+            Arg::new("target-dir")
+                .long("target-dir")
+                .value_name("DIRECTORY")
+                .num_args(1)
+                .action(ArgAction::Set)
+                .value_parser(NonEmptyStringValueParser::new()),
+        )
         .arg(package_argument())
 }
 
 fn clean_command() -> ClapCommand {
-    build_command("clean").arg(
-        Arg::new("target-dir")
-            .long("target-dir")
-            .value_name("DIRECTORY")
-            .num_args(1)
-            .action(ArgAction::Set)
-            .value_parser(NonEmptyStringValueParser::new()),
-    )
+    build_command("clean")
 }
 
 fn package_argument() -> Arg {
@@ -686,7 +687,6 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
         }
         Some(("clean", options)) => Ok(Command::Clean(CleanOptions {
             build: build_options(options, false),
-            target_dir: options.get_one::<String>("target-dir").cloned(),
         })),
         Some(("locate-project", options)) => Ok(Command::LocateProject {
             manifest_path: options
@@ -799,6 +799,7 @@ fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOption
     BuildOptions {
         release: matches.get_flag("release"),
         target: matches.get_one::<String>("target").cloned(),
+        target_dir: matches.get_one::<String>("target-dir").cloned(),
         bin: matches.try_get_one::<String>("bin").ok().flatten().cloned(),
         validation: if supports_validation && matches.get_flag("strict-validation") {
             ValidationMode::Strict
@@ -879,6 +880,7 @@ mod tests {
             Command::Build(BuildOptions {
                 release: true,
                 target: Some("x86_64-unknown-motor".to_owned()),
+                target_dir: None,
                 bin: Some("server".to_owned()),
                 validation: ValidationMode::Strict,
             })
@@ -901,10 +903,10 @@ mod tests {
                 build: BuildOptions {
                     release: true,
                     target: Some("x86_64-unknown-motor".to_owned()),
+                    target_dir: Some("/tmp/editor-target".to_owned()),
                     bin: None,
                     validation: ValidationMode::Trusted,
                 },
-                target_dir: Some("/tmp/editor-target".to_owned()),
             })
         );
         assert!(parse(&["--use-cargo-registry", "clean"]).is_err());
