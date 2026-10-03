@@ -1,0 +1,26 @@
+version = 1
+kind = "process"
+name = "diff"
+description = "Compare two files without changing them. Exit status one means they differ."
+parameters = "parameters.json"
+display = "compare {left} {right}"
+read_only = true
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 1048576
+output = "stdout"
+normal_exit_statuses = [0, 1]
+
+[process.command]
+linux = ["/usr/bin/diff"]
+motor = ["/system/bin/sysbox", "diff"]
+
+[process.arguments]
+after_double_dash = ["left", "right"]
+
+[process.arguments.left]
+type = "string"
+
+[process.arguments.right]
+type = "string"

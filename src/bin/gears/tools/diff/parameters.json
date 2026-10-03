@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "left": {
+      "type": "string",
+      "description": "Path to the first file."
+    },
+    "right": {
+      "type": "string",
+      "description": "Path to the second file."
+    }
+  },
+  "required": ["left", "right"],
+  "additionalProperties": false
+}

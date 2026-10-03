@@ -464,6 +464,55 @@ fn shipped_tail_limits_a_literal_file_path() {
 }
 
 #[test]
+fn shipped_diff_treats_differences_as_a_normal_result() {
+    let fixture = Fixture::new("shipped-diff");
+    std::fs::write(fixture.workspace.join("old [file].txt"), "old\n").unwrap();
+    std::fs::write(fixture.workspace.join("new [file].txt"), "new\n").unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/diff"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool(
+            "diff",
+            r#"{"left":"old [file].txt","right":"new [file].txt"}"#,
+        ),
+        tool("diff", r#"{"left":"old [file].txt","right":"missing"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    runtime
+        .turn("compare".to_string(), &mut FixedApproval(true), &mut |_| {
+            Ok(())
+        })
+        .unwrap();
+    let results = runtime
+        .session()
+        .context_messages()
+        .unwrap()
+        .into_iter()
+        .flat_map(|message| message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_name,
+                content,
+                is_error,
+                ..
+            } if tool_name == "diff" => Some((content, is_error)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    assert!(!results[0].1, "{}", results[0].0);
+    assert!(results[0].0.contains("old") && results[0].0.contains("new"));
+    assert!(results[1].1);
+    assert!(results[1].0.contains("exit status 2"), "{}", results[1].0);
+}
+
+#[test]
 fn text_only_turn_streams_and_is_durable() {
     let fixture = Fixture::new("text");
     let provider = Scripted::new(vec![answer("hello")]);
