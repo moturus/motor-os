@@ -54,7 +54,7 @@ impl PreparedGraph {
     }
 
     pub fn dependency_plan(&self, options: &PlanOptions<'_>) -> Result<CompilationPlan> {
-        self.plan(options, None)
+        self.plan(options, None, false)
     }
 
     pub fn selected_targets_plan(
@@ -68,6 +68,25 @@ impl PreparedGraph {
         self.plan(
             options,
             Some((selected, binary_name, include_binaries, include_harnesses)),
+            false,
+        )
+    }
+
+    pub fn selected_mixed_test_plan(
+        &self,
+        options: &PlanOptions<'_>,
+        selected: &Manifest,
+        include_harnesses: bool,
+    ) -> Result<CompilationPlan> {
+        if options.test_profile {
+            return Err(Error::failure(
+                "mixed test plan requires normal profile options",
+            ));
+        }
+        self.plan(
+            options,
+            Some((selected, None, true, include_harnesses)),
+            true,
         )
     }
 
@@ -75,6 +94,7 @@ impl PreparedGraph {
         &self,
         options: &PlanOptions<'_>,
         selected: Option<(&Manifest, Option<&str>, bool, bool)>,
+        mixed_profile: bool,
     ) -> Result<CompilationPlan> {
         let mut manifests = self
             .packages
@@ -82,6 +102,7 @@ impl PreparedGraph {
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
         let mut graph = dependency_units(&self.resolution, &manifests)?;
+        let mut test_graph = mixed_profile.then(|| graph.clone());
         if let Some((selected, binary_name, include_binaries, include_harnesses)) = selected {
             let key = if selected.library.is_some() {
                 add_selected_library(&mut graph, &self.resolution, &manifests, selected)?
@@ -97,8 +118,16 @@ impl PreparedGraph {
                     binary_name,
                 )?;
             }
-            if include_harnesses {
+            if include_harnesses && !mixed_profile {
                 add_selected_harnesses(&mut graph, &self.resolution, &manifests, selected)?;
+            }
+            if let Some(test_graph) = test_graph.as_mut() {
+                if selected.library.is_some() {
+                    add_selected_library(test_graph, &self.resolution, &manifests, selected)?;
+                }
+                if include_harnesses {
+                    add_selected_harnesses(test_graph, &self.resolution, &manifests, selected)?;
+                }
             }
             if manifests.insert(key.package, selected.clone()).is_some() {
                 return Err(Error::failure(
@@ -106,7 +135,9 @@ impl PreparedGraph {
                 ));
             }
         }
-        if options.test_profile {
+        if let Some(test_graph) = test_graph {
+            graph.merge(test_graph.with_profile(ProfileContext::Test, options.panic_abort))?;
+        } else if options.test_profile {
             graph = graph.with_profile(ProfileContext::Test, options.panic_abort);
         }
         let mut source_remaps = BTreeMap::<PackageKey, SourceRemap>::new();
@@ -999,6 +1030,7 @@ mod tests {
     use crate::resolver::PackageSourceKey;
     use crate::source_tree::DEFAULT_LIMITS;
     use crate::toolchain::{CfgSet, Toolchain};
+    use crate::unit::{ProfileContext, UnitKind};
     use semver::Version;
     use std::fs;
     use std::path::PathBuf;
@@ -1133,6 +1165,9 @@ mod tests {
     #[test]
     fn prepares_a_path_only_graph_without_a_repository_or_staging() {
         let fixture = Fixture::new();
+        fs::create_dir_all(fixture.0.join("src")).unwrap();
+        fs::write(fixture.0.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+        fs::write(fixture.0.join("src/main.rs"), "fn main() {}\n").unwrap();
         fs::create_dir_all(fixture.0.join("local/src")).unwrap();
         fs::write(
             fixture.0.join("local/Cargo.toml"),
@@ -1144,7 +1179,8 @@ mod tests {
         fs::write(
             fixture.0.join("Cargo.toml"),
             "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             [dependencies]\nlocal = { path = \"local\" }\n",
+             [dependencies]\nlocal = { path = \"local\" }\n\
+             [profile.release]\npanic = \"abort\"\n",
         )
         .unwrap();
         fs::write(
@@ -1183,19 +1219,44 @@ mod tests {
         assert_eq!(package.source_root(), fixture.0.join("local"));
         assert!(!package.is_ephemeral());
         assert!(graph.admission.packages.contains_key(key));
-        let plan = graph
-            .dependency_plan(&PlanOptions {
-                workspace_root: &manifest.root,
-                release: true,
-                test_profile: false,
-                panic_abort: manifest.release.panic_abort,
-                release_profile: &manifest.release,
-                rustc: &toolchain(),
-                logical_target: None,
-                rustflags: &[],
-            })
-            .unwrap();
+        let options = PlanOptions {
+            workspace_root: &manifest.root,
+            release: true,
+            test_profile: false,
+            panic_abort: manifest.release.panic_abort,
+            release_profile: &manifest.release,
+            rustc: &toolchain(),
+            logical_target: None,
+            rustflags: &[],
+        };
+        let plan = graph.dependency_plan(&options).unwrap();
         assert!(plan.units.values().all(|unit| unit.source_remap.is_none()));
+        let mixed = graph
+            .selected_mixed_test_plan(&options, &manifest, true)
+            .unwrap();
+        let library = selected_library_key(&manifest).unwrap();
+        let test_library = library
+            .clone()
+            .with_profile(ProfileContext::Test, options.panic_abort);
+        assert!(mixed.units.contains_key(&library));
+        assert!(mixed.units.contains_key(&test_library));
+        assert_eq!(
+            mixed
+                .units
+                .keys()
+                .filter(|key| key.package == library.package && key.kind == UnitKind::Binary)
+                .count(),
+            1
+        );
+        assert!(mixed.units.keys().any(|key| {
+            key.package == library.package
+                && key.kind == UnitKind::BinaryHarness
+                && key.profile == ProfileContext::Test
+        }));
+        assert_ne!(
+            mixed.units[&library].identity,
+            mixed.units[&test_library].identity
+        );
     }
 
     #[test]
