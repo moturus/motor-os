@@ -17,6 +17,7 @@ use gears::provider_choice::ProviderChoice;
 use gears::run_lock::DirectoryLock;
 use gears::runtime::{ProviderFactory, Runtime};
 use gears::session::{Session, Store};
+use gears::tools::Registry;
 
 fn main() -> ExitCode {
     let key_from_env = std::env::var(KEY_ENV).ok();
@@ -54,6 +55,18 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if !config.tools.is_empty() {
+        let Some(directory) =
+            Config::default_path().and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        else {
+            diagnostic("cannot locate Gears directory for configured tools");
+            return ExitCode::FAILURE;
+        };
+        if let Err(error) = Registry::load(&config.tools, &directory) {
+            diagnostic(&format!("tools: {error}"));
+            return ExitCode::FAILURE;
+        }
+    }
     let directory_lock = match DirectoryLock::acquire_default() {
         Ok(lock) => lock,
         Err(error) => {

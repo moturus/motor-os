@@ -161,6 +161,26 @@ fn one_shot_streams_from_the_hermetic_backend() {
 }
 
 #[test]
+fn configured_tools_are_validated_before_a_provider_request() {
+    let root = fixture("tool-validation");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let server = MockServer::start_one(sse_response(&[])).unwrap();
+    let config = config(&root, &server);
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("\n[[tools]]\ndirectory = 'tools/missing'\nenabled = false\n");
+    std::fs::write(&config, text).unwrap();
+    let output = gears(&root, &workspace, &config)
+        .args(["-p", "hello"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("tools/missing"));
+    assert!(server.requests().is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn one_shot_uses_the_selected_named_provider() {
     let root = fixture("named-provider");
     let workspace = root.join("workspace");
