@@ -1,7 +1,7 @@
 version = 1
 kind = "process"
 name = "sh"
-description = "Run a shell command in the current working directory. The command is not sandboxed."
+description = "Run a shell command. Working directory and exported variables persist within this session. The command is not sandboxed."
 parameters = "parameters.json"
 display = "{command}"
 
@@ -11,8 +11,8 @@ max_output_bytes = 1048576
 output = "shell"
 
 [process.command]
-linux = ["/bin/bash", "-c"]
-motor = ["/system/bin/rush", "-c"]
+linux = ["/bin/bash", "-c", "GEARS_SH_FIXED_PATH=/usr/local/bin:/usr/bin:/bin; . \"$GEARS_TOOL_DIR/run.sh\"", "gears-sh"]
+motor = ["/system/bin/rush", "-c", "GEARS_SH_FIXED_PATH=/system/bin:/devtools/bin; . \"$GEARS_TOOL_DIR/run.sh\"", "gears-sh"]
 
 [process.arguments]
 before_double_dash = ["command"]

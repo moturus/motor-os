@@ -11,6 +11,7 @@ use crate::config::{Config, ToolDirectory};
 use crate::process::{self, Cancellation, Stream};
 use crate::provider::KEY_ENV;
 use crate::provider::ToolSpec;
+use crate::shell_state;
 use crate::state::StateRoot;
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,7 +205,13 @@ impl Tool {
         } else {
             remove_env.push("GEARS_SH_STATE_DIR".to_string());
         }
-        process::run(
+        if let Some(directory) = context.shell_state {
+            shell_state::prepare(directory).map_err(|detail| process::RunError {
+                detail: format!("cannot prepare shell state: {detail}"),
+                started: false,
+            })?;
+        }
+        let output = process::run(
             &process::Request {
                 program: program.display().to_string(),
                 args: command,
@@ -220,7 +227,27 @@ impl Tool {
             },
             cancellation,
             observer,
-        )
+        );
+        if let Some(directory) = context.shell_state {
+            let interrupted = match &output {
+                Ok(output) => output.cancelled || output.timed_out,
+                Err(_) => true,
+            };
+            if let Err(detail) = shell_state::finish(directory, interrupted) {
+                let detail = format!("cannot save shell state: {detail}");
+                return Err(match output {
+                    Ok(_) => process::RunError {
+                        detail,
+                        started: true,
+                    },
+                    Err(mut error) => {
+                        error.detail.push_str(&format!("; {detail}"));
+                        error
+                    }
+                });
+            }
+        }
+        output
     }
 
     fn load(directory: &Path, enabled_by_default: bool) -> Result<Self, String> {

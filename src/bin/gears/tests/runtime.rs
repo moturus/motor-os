@@ -361,6 +361,71 @@ fn shipped_sh_tool_runs_from_its_directory() {
 }
 
 #[test]
+fn shipped_sh_restores_directory_and_exports_after_resume() {
+    let fixture = Fixture::new("sh-state-resume");
+    std::fs::create_dir(fixture.workspace.join("nested")).unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool(
+            "sh",
+            r#"{"command":"cd nested && export SH_TEST_VALUE='two words'"}"#,
+        ),
+        tool(
+            "sh",
+            r#"{"command":"printf '%s' \"$SH_TEST_VALUE\" > first.txt"}"#,
+        ),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    runtime
+        .turn(
+            "set state".to_string(),
+            &mut FixedApproval(true),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("nested/first.txt")).unwrap(),
+        "two words"
+    );
+    let path = runtime.session().path().unwrap().to_path_buf();
+    let state = path.with_extension("sh-state");
+    let exports = std::fs::read_to_string(state.join("env.sh")).unwrap();
+    assert!(!exports.lines().any(|line| line.contains(" GEARS_")));
+    assert!(!exports.lines().any(|line| line.contains(" PATH=")));
+    drop(runtime);
+
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let session = store.open_path(&path).unwrap();
+    let provider = Scripted::new(vec![
+        tool(
+            "sh",
+            r#"{"command":"printf '%s' \"$SH_TEST_VALUE\" > resumed.txt"}"#,
+        ),
+        answer("done"),
+    ]);
+    let mut resumed =
+        Runtime::new(provider, store, session, &config, "test/model".to_string()).unwrap();
+    resumed
+        .turn(
+            "use state".to_string(),
+            &mut FixedApproval(true),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("nested/resumed.txt")).unwrap(),
+        "two words"
+    );
+}
+
+#[test]
 fn shipped_ls_passes_literal_paths_to_the_program() {
     let fixture = Fixture::new("shipped-ls");
     let spaced = fixture.workspace.join("dir with spaces");
