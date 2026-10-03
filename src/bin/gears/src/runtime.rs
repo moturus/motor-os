@@ -10,8 +10,8 @@ use crate::hooks::{Decision, Manager as Hooks, ToolResult};
 use crate::process::{Cancellation, Stream};
 use crate::prompt::Effective;
 use crate::provider::{
-    EventSink, Message, Provider, ProviderError, Request, StreamEvent, ToolCall, ToolSpec,
-    UsageMeter,
+    EventSink, Message, Provider, ProviderError, Request, StreamEvent, ToolCall, ToolOutcome,
+    ToolSpec, UsageMeter,
 };
 use crate::session::{Compaction, Session, SessionInfo, Store, TreeItem};
 
@@ -309,9 +309,11 @@ impl Runtime {
             if completion.tool_calls.is_empty() {
                 return Ok(());
             }
-            for call in completion.tool_calls {
+            let calls = completion.tool_calls;
+            for (index, call) in calls.iter().cloned().enumerate() {
                 self.execute_call(call, approver, observer)?;
                 if self.cancellation.cancelled() {
+                    self.record_unstarted_calls(&calls[index + 1..], observer)?;
                     return self.fail_turn("turn cancelled".to_string(), true, observer);
                 }
             }
@@ -510,11 +512,14 @@ impl Runtime {
             name: call.name.clone(),
             detail,
         })?;
-        let result = if !allowed {
-            ToolResult {
-                content: "tool call denied".to_string(),
-                is_error: true,
-            }
+        let (result, outcome) = if !allowed {
+            (
+                ToolResult {
+                    content: "tool call denied".to_string(),
+                    is_error: true,
+                },
+                ToolOutcome::NotStarted,
+            )
         } else if call.name == "sh" {
             self.execute_sh(&call, observer)
         } else if self.hooks.owns_tool(&call.name) {
@@ -526,31 +531,50 @@ impl Runtime {
                 &mut |notice| notices.push(notice),
             );
             emit_notices(observer, notices)?;
-            result.unwrap_or_else(|error| ToolResult {
-                content: error,
-                is_error: true,
-            })
+            let outcome = if self.cancellation.cancelled() {
+                ToolOutcome::InterruptedUnknown
+            } else {
+                ToolOutcome::Completed
+            };
+            (
+                result.unwrap_or_else(|error| ToolResult {
+                    content: error,
+                    is_error: true,
+                }),
+                outcome,
+            )
         } else {
-            ToolResult {
-                content: format!("unknown tool {:?}", call.name),
-                is_error: true,
-            }
+            (
+                ToolResult {
+                    content: format!("unknown tool {:?}", call.name),
+                    is_error: true,
+                },
+                ToolOutcome::NotStarted,
+            )
         };
-        let mut notices = Vec::new();
-        let result = self.hooks.transform_tool_result(
-            &call,
-            result,
-            &mut self.session,
-            &self.cancellation,
-            &mut |notice| notices.push(notice),
-        )?;
-        emit_notices(observer, notices)?;
-        let entry = self.session.append_message(&Message::tool_result(
-            &call.id,
-            &call.name,
-            &result.content,
-            result.is_error,
-        ))?;
+        let result = if self.cancellation.cancelled() {
+            result
+        } else {
+            let mut notices = Vec::new();
+            let transformed = self.hooks.transform_tool_result(
+                &call,
+                result,
+                &mut self.session,
+                &self.cancellation,
+                &mut |notice| notices.push(notice),
+            )?;
+            emit_notices(observer, notices)?;
+            transformed
+        };
+        let entry = self
+            .session
+            .append_message(&Message::tool_result_with_outcome(
+                &call.id,
+                &call.name,
+                &result.content,
+                result.is_error,
+                outcome,
+            ))?;
         self.notify(
             "entry",
             serde_json::json!({"id": entry, "type": "message", "role": "tool"}),
@@ -563,21 +587,64 @@ impl Runtime {
         })
     }
 
-    fn execute_sh(&self, call: &ToolCall, observer: &mut dyn Observer) -> ToolResult {
+    fn record_unstarted_calls(
+        &mut self,
+        calls: &[ToolCall],
+        observer: &mut dyn Observer,
+    ) -> Result<(), String> {
+        for call in calls {
+            let content = "tool call not started: turn cancelled";
+            let entry = self
+                .session
+                .append_message(&Message::tool_result_with_outcome(
+                    &call.id,
+                    &call.name,
+                    content,
+                    true,
+                    ToolOutcome::NotStarted,
+                ))?;
+            self.cancellation.reset();
+            let notification = self.notify(
+                "entry",
+                serde_json::json!({"id": entry, "type": "message", "role": "tool"}),
+                observer,
+            );
+            self.cancellation.cancel();
+            let _ = notification;
+            let _ = observer.event(Event::ToolEnd {
+                name: call.name.clone(),
+                content: content.to_string(),
+                is_error: true,
+            });
+        }
+        Ok(())
+    }
+
+    fn execute_sh(
+        &self,
+        call: &ToolCall,
+        observer: &mut dyn Observer,
+    ) -> (ToolResult, ToolOutcome) {
         let arguments: Value = match serde_json::from_str(&call.arguments) {
             Ok(arguments) => arguments,
             Err(error) => {
-                return ToolResult {
-                    content: format!("invalid sh arguments: {error}"),
-                    is_error: true,
-                };
+                return (
+                    ToolResult {
+                        content: format!("invalid sh arguments: {error}"),
+                        is_error: true,
+                    },
+                    ToolOutcome::NotStarted,
+                );
             }
         };
         let Some(command) = arguments.get("command").and_then(Value::as_str) else {
-            return ToolResult {
-                content: "sh requires a string field named command".to_string(),
-                is_error: true,
-            };
+            return (
+                ToolResult {
+                    content: "sh requires a string field named command".to_string(),
+                    is_error: true,
+                },
+                ToolOutcome::NotStarted,
+            );
         };
         let mut observer_error = None;
         let output = crate::process::sh(
@@ -598,20 +665,36 @@ impl Runtime {
             },
         );
         if let Some(error) = observer_error {
-            return ToolResult {
-                content: error,
-                is_error: true,
-            };
+            return (
+                ToolResult {
+                    content: error,
+                    is_error: true,
+                },
+                ToolOutcome::InterruptedUnknown,
+            );
         }
         match output {
-            Ok(output) => ToolResult {
-                content: output.model_text(MODEL_STREAM_BYTES),
-                is_error: !output.success(),
-            },
-            Err(error) => ToolResult {
-                content: error,
-                is_error: true,
-            },
+            Ok(output) => {
+                let outcome = if output.cancelled || output.timed_out {
+                    ToolOutcome::InterruptedUnknown
+                } else {
+                    ToolOutcome::Completed
+                };
+                (
+                    ToolResult {
+                        content: output.model_text(MODEL_STREAM_BYTES),
+                        is_error: !output.success(),
+                    },
+                    outcome,
+                )
+            }
+            Err(error) => (
+                ToolResult {
+                    content: error,
+                    is_error: true,
+                },
+                ToolOutcome::InterruptedUnknown,
+            ),
         }
     }
 

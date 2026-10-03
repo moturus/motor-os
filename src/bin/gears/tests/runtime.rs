@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use gears::config::{Config, ContextConfig, HookConfig};
 use gears::provider::{
-    Completion, EventSink, FinishReason, Provider, ProviderError, Request, StreamEvent, ToolCall,
+    Completion, ContentBlock, EventSink, FinishReason, Provider, ProviderError, Request,
+    StreamEvent, ToolCall, ToolOutcome,
 };
 use gears::runtime::{Approval, Approver, Event, Permission, Runtime};
 use gears::session::Store;
@@ -690,6 +691,94 @@ fn lifecycle_hooks_run_after_a_cancelled_turn() {
     assert!(events.contains("\"type\":\"turn_error\""), "{events}");
     assert_eq!(events.matches("\"event\":\"session_start\"").count(), 2);
     assert_eq!(events.matches("\"event\":\"session_end\"").count(), 2);
+}
+
+#[test]
+fn cancellation_pairs_every_call_in_a_tool_round() {
+    let fixture = Fixture::new("cancel-round");
+    let provider = Scripted::new(vec![Ok(Completion {
+        tool_calls: vec![
+            ToolCall::new("call_1", "sh", r#"{"command":"sleep 2"}"#),
+            ToolCall::new("call_2", "sh", r#"{"command":"touch never"}"#),
+        ],
+        finish_reason: Some(FinishReason::ToolCalls),
+        ..Completion::default()
+    })]);
+    let mut runtime = fixture.runtime(provider, &Config::default());
+    let cancellation = runtime.cancellation();
+    let cancel = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        cancellation.cancel();
+    });
+    let error = runtime
+        .turn("go".to_string(), &mut FixedApproval(true), &mut |_| Ok(()))
+        .unwrap_err();
+    cancel.join().unwrap();
+    assert!(error.contains("cancelled"), "{error}");
+    assert!(!fixture.workspace.join("never").exists());
+    let outcomes = runtime
+        .session()
+        .context_messages()
+        .unwrap()
+        .into_iter()
+        .flat_map(|message| message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                call_id, outcome, ..
+            } => Some((call_id, outcome)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcomes,
+        [
+            ("call_1".to_string(), ToolOutcome::InterruptedUnknown),
+            ("call_2".to_string(), ToolOutcome::NotStarted),
+        ]
+    );
+}
+
+#[test]
+fn cancellation_keeps_the_tool_result_when_a_result_hook_cannot_run() {
+    let fixture = Fixture::new("cancel-result-hook");
+    let hook = fixture.root.join("hook.sh");
+    std::fs::write(&hook, "#!/bin/sh\ncat >/dev/null\nprintf '{}'\n").unwrap();
+    let mut config = Config::default();
+    config.hooks.push(HookConfig {
+        name: "fixture".to_string(),
+        command: vec!["sh".to_string(), hook.display().to_string()],
+        timeout: Duration::from_secs(2),
+        max_output_bytes: 4096,
+    });
+    let provider = Scripted::new(vec![Ok(Completion {
+        tool_calls: vec![
+            ToolCall::new("call_1", "sh", r#"{"command":"sleep 2"}"#),
+            ToolCall::new("call_2", "sh", r#"{"command":"touch never"}"#),
+        ],
+        finish_reason: Some(FinishReason::ToolCalls),
+        ..Completion::default()
+    })]);
+    let mut runtime = fixture.runtime(provider, &config);
+    let cancellation = runtime.cancellation();
+    let cancel = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        cancellation.cancel();
+    });
+    let error = runtime
+        .turn("go".to_string(), &mut FixedApproval(true), &mut |_| Ok(()))
+        .unwrap_err();
+    cancel.join().unwrap();
+    assert!(error.contains("cancelled"), "{error}");
+    let results = runtime
+        .session()
+        .context_messages()
+        .unwrap()
+        .into_iter()
+        .flat_map(|message| message.content)
+        .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        .count();
+    assert_eq!(results, 2);
+    assert!(!fixture.workspace.join("never").exists());
 }
 
 #[test]
