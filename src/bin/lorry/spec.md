@@ -1014,6 +1014,11 @@ comma-separated combination and equals option form. The stream identifies
 packages and targets exactly as metadata does, reports completed artifacts
 and build-script results, and ends with one `build-finished` event, including
 on failure. Progress and Lorry errors remain on stderr.
+`run` and `test` accept the same formats and emit `build-finished` after
+compilation, before starting programs or harnesses. Its success describes
+the build even when the child later fails. Child stdout remains plain text.
+`test --no-run` emits harness artifact paths with `profile.test = true`
+without adding human path lines to the Cargo stream.
 
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected

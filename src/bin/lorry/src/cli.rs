@@ -634,11 +634,14 @@ fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
 }
 
 fn run_command() -> ClapCommand {
-    compile_command("run", true).arg(child_arguments())
+    compile_command("run", true)
+        .arg(message_format_argument())
+        .arg(child_arguments())
 }
 
 fn test_command() -> ClapCommand {
     compile_command("test", false)
+        .arg(message_format_argument())
         .arg(
             Arg::new("test")
                 .long("test")
@@ -1122,7 +1125,7 @@ mod tests {
 
     #[test]
     fn parses_shared_build_and_check_message_formats() {
-        for command in ["build", "check"] {
+        for command in ["build", "check", "run", "test"] {
             for (value, expected) in [
                 ("json", MessageFormat::Json),
                 (

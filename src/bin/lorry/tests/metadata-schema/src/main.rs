@@ -12,7 +12,7 @@ fn parse(document: &str) -> Metadata {
 fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     if let [command, path, metadata, success, ansi, fresh] = arguments.as_slice() {
-        assert_eq!(command, "messages");
+        assert!(matches!(command.as_str(), "messages" | "test-messages"));
         check_messages(
             Path::new(path),
             Path::new(metadata),
@@ -20,6 +20,21 @@ fn main() {
             ansi == "ansi",
             fresh == "fresh",
         );
+        if command == "test-messages" {
+            let harnesses = read_messages(Path::new(path))
+                .into_iter()
+                .filter_map(|message| match message {
+                    Message::CompilerArtifact(artifact) if artifact.profile.test => Some(artifact),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(!harnesses.is_empty(), "test stream omits harness artifacts");
+            for harness in harnesses {
+                let executable = harness.executable.expect("harness executable");
+                assert!(executable.is_file());
+                assert!(harness.filenames.contains(&executable));
+            }
+        }
         return;
     }
     if let [command, lorry, cargo] = arguments.as_slice() {

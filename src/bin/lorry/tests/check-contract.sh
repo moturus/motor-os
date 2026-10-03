@@ -223,6 +223,52 @@ for format in json json,json-diagnostic-rendered-ansi; do
     [ -x "$WORK/build-$ansi/lorry/debug/first" ]
     [ -x "$WORK/build-$ansi/lorry/debug/second" ]
 done
+(
+    cd "$PROJECT"
+    "$LORRY" --quiet test --no-run --message-format=json \
+        --target-dir "$WORK/test-json"
+) >"$WORK/test-no-run.json" 2>"$WORK/test-no-run.err"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- test-messages "$WORK/test-no-run.json" "$WORK/metadata.json" success plain any
+
+printf 'fn main() { println!("program output"); std::process::exit(7); }\n' \
+    >"$PROJECT/src/bin/first.rs"
+if (
+    cd "$PROJECT"
+    "$LORRY" --quiet run --bin first --message-format=json \
+        --target-dir "$WORK/run-json"
+) >"$WORK/run-json.out" 2>"$WORK/run-json.err"; then
+    echo "check-contract: run lost the program's failure status" >&2
+    exit 1
+else
+    [ "$?" -eq 7 ]
+fi
+[ "$(tail -1 "$WORK/run-json.out")" = 'program output' ]
+sed '$d' "$WORK/run-json.out" >"$WORK/run-json-prefix.json"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- messages "$WORK/run-json-prefix.json" "$WORK/metadata.json" success plain any
+printf 'fn main() { assert_eq!(check_fixture::old_value(), 42); }\n' \
+    >"$PROJECT/src/bin/first.rs"
+
+printf '\n#[test]\nfn failing_harness() { panic!("harness failure"); }\n' \
+    >>"$PROJECT/tests/integration.rs"
+if (
+    cd "$PROJECT"
+    "$LORRY" --quiet test --test integration --message-format=json \
+        --target-dir "$WORK/test-json" -- --nocapture
+) >"$WORK/test-json.out" 2>"$WORK/test-json.err"; then
+    echo "check-contract: test lost the harness's failure status" >&2
+    exit 1
+else
+    [ "$?" -eq 101 ]
+fi
+sed '/"reason":"build-finished"/q' "$WORK/test-json.out" >"$WORK/test-json-prefix.json"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- test-messages "$WORK/test-json-prefix.json" "$WORK/metadata.json" success plain any
+grep -F 'test result: FAILED' "$WORK/test-json.out" >/dev/null
 for selector in first second; do
     : >"$LOG"
     "$LORRY" check -p "$PACKAGE_ID" --bin "$selector" --quiet \

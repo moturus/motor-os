@@ -31,8 +31,9 @@ use std::time::{Duration, UNIX_EPOCH};
 const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 
 pub fn execute(cli: &Cli) -> Result<i32> {
-    if cli.message_format() != MessageFormat::Human {
-        let result = execute_inner(cli);
+    let mut reported = false;
+    let result = execute_inner(cli, &mut reported);
+    if cli.message_format() != MessageFormat::Human && !reported {
         let finished = crate::check_message::build_finished(matches!(&result, Ok(0)));
         return match (result, finished) {
             (Ok(code), Ok(())) => Ok(code),
@@ -40,10 +41,18 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             (Ok(_), Err(error)) => Err(error),
         };
     }
-    execute_inner(cli)
+    result
 }
 
-fn execute_inner(cli: &Cli) -> Result<i32> {
+fn report_build_completion(cli: &Cli, reported: &mut bool) -> Result<()> {
+    if cli.message_format() != MessageFormat::Human {
+        *reported = true;
+        crate::check_message::build_finished(true)?;
+    }
+    Ok(())
+}
+
+fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = match &cli.command {
@@ -352,35 +361,39 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
             options,
         ),
         Command::Run(options) => {
-            let artifacts = build(Build {
-                target_root: Some(&target_root),
-                child_lease_fd: artifact_lock.child_lease_fd(),
-                manifest: &manifest,
-                global_cache_root: &global_cache_root,
-                config: &config,
-                toolchain: &toolchain,
-                host: &host_info,
-                target: &target_info,
-                host_options: &host_options,
-                target_options: &target_options,
-                physical_target: physical_target.as_deref(),
-                logical_target,
-                rustflags: &rustflags,
-                release,
-                test: false,
-                test_name: None,
-                color,
-                verbosity: cli.verbosity,
-                use_cargo_registry: cli.use_cargo_registry,
-                source: Some((source, &direct, verified_resolution)),
-                bundle: false,
-                validation,
-                ordinary_freshness_base,
-                binary_selection: None,
-            })?;
+            let artifacts = build_reported(
+                Build {
+                    target_root: Some(&target_root),
+                    child_lease_fd: artifact_lock.child_lease_fd(),
+                    manifest: &manifest,
+                    global_cache_root: &global_cache_root,
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &host_info,
+                    target: &target_info,
+                    host_options: &host_options,
+                    target_options: &target_options,
+                    physical_target: physical_target.as_deref(),
+                    logical_target,
+                    rustflags: &rustflags,
+                    release,
+                    test: false,
+                    test_name: None,
+                    color,
+                    verbosity: cli.verbosity,
+                    use_cargo_registry: cli.use_cargo_registry,
+                    source: Some((source, &direct, verified_resolution)),
+                    bundle: false,
+                    validation,
+                    ordinary_freshness_base,
+                    binary_selection: None,
+                },
+                options.build.message_format,
+            )?;
             let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
                 Error::failure("selected binary is absent from the completed build")
             })?;
+            report_build_completion(cli, reported)?;
             drop(artifact_lock);
             crate::trace::event("starting program");
             let status = run_artifact(
@@ -398,34 +411,40 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
             if cli.verbosity != Verbosity::Quiet {
                 eprintln!("note: documentation tests are not supported");
             }
-            let artifacts = build(Build {
-                target_root: Some(&target_root),
-                child_lease_fd: artifact_lock.child_lease_fd(),
-                manifest: &manifest,
-                global_cache_root: &global_cache_root,
-                config: &config,
-                toolchain: &toolchain,
-                host: &host_info,
-                target: &target_info,
-                host_options: &host_options,
-                target_options: &target_options,
-                physical_target: physical_target.as_deref(),
-                logical_target,
-                rustflags: &rustflags,
-                release,
-                test: true,
-                test_name: options.test.as_deref(),
-                color,
-                verbosity: cli.verbosity,
-                use_cargo_registry: cli.use_cargo_registry,
-                source: Some((source, &direct, verified_resolution)),
-                bundle: options.bundle,
-                validation,
-                ordinary_freshness_base,
-                binary_selection: None,
-            })?;
+            let artifacts = build_reported(
+                Build {
+                    target_root: Some(&target_root),
+                    child_lease_fd: artifact_lock.child_lease_fd(),
+                    manifest: &manifest,
+                    global_cache_root: &global_cache_root,
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &host_info,
+                    target: &target_info,
+                    host_options: &host_options,
+                    target_options: &target_options,
+                    physical_target: physical_target.as_deref(),
+                    logical_target,
+                    rustflags: &rustflags,
+                    release,
+                    test: true,
+                    test_name: options.test.as_deref(),
+                    color,
+                    verbosity: cli.verbosity,
+                    use_cargo_registry: cli.use_cargo_registry,
+                    source: Some((source, &direct, verified_resolution)),
+                    bundle: options.bundle,
+                    validation,
+                    ordinary_freshness_base,
+                    binary_selection: None,
+                },
+                options.build.message_format,
+            )?;
+            report_build_completion(cli, reported)?;
             if options.no_run {
-                if let Some(bundle) = &artifacts.bundle {
+                if options.build.message_format != MessageFormat::Human {
+                    return Ok(0);
+                } else if let Some(bundle) = &artifacts.bundle {
                     println!("{}", bundle.display());
                 } else {
                     for harness in &artifacts.harnesses {
@@ -712,6 +731,7 @@ enum BuildOutcome {
     Check(i32),
 }
 
+#[cfg(test)]
 fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     build_reported(build, MessageFormat::Human)
 }
