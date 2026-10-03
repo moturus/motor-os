@@ -540,6 +540,40 @@ fn shipped_tail_limits_a_literal_file_path() {
 }
 
 #[test]
+fn shipped_wc_counts_a_literal_file_path() {
+    let fixture = Fixture::new("shipped-wc");
+    std::fs::write(fixture.workspace.join("-count [glob].txt"), "one\ntwo\n").unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/wc"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("wc", r#"{"mode":"lines","path":"-count [glob].txt"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    let mut output = String::new();
+    runtime
+        .turn(
+            "count".to_string(),
+            &mut FixedApproval(true),
+            &mut |event| {
+                if let Event::ToolOutput { name, text, .. } = event {
+                    assert_eq!(name, "wc");
+                    output.push_str(&text);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(output.trim_start().starts_with("2 "), "{output}");
+    assert!(output.contains("-count [glob].txt"), "{output}");
+}
+
+#[test]
 fn shipped_diff_treats_differences_as_a_normal_result() {
     let fixture = Fixture::new("shipped-diff");
     std::fs::write(fixture.workspace.join("old [file].txt"), "old\n").unwrap();

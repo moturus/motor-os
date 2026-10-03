@@ -1,0 +1,27 @@
+version = 1
+kind = "process"
+name = "wc"
+description = "Count lines, words, or bytes in one file without changing it."
+parameters = "parameters.json"
+display = "count {path}"
+read_only = true
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 1048576
+output = "stdout"
+
+[process.command]
+linux = ["/usr/bin/wc"]
+motor = ["/system/bin/sysbox", "wc"]
+
+[process.arguments]
+before_double_dash = ["mode"]
+after_double_dash = ["path"]
+
+[process.arguments.mode]
+type = "enum"
+values = { lines = "-l", words = "-w", bytes = "-c" }
+
+[process.arguments.path]
+type = "string"

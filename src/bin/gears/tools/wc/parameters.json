@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["lines", "words", "bytes"],
+      "description": "Count only lines, words, or bytes. Omit for default counts."
+    },
+    "path": {
+      "type": "string",
+      "description": "One workspace-relative or absolute file path."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}
