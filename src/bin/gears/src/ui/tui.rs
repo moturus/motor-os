@@ -423,6 +423,22 @@ impl App {
         self.last_frame = None;
     }
 
+    fn begin_approval(&mut self, permission: Permission) {
+        self.push(
+            Kind::Notice,
+            format!(
+                "Permission for {} in {}:\n{}",
+                permission.tool,
+                permission.workspace.display(),
+                permission.detail
+            ),
+            false,
+        );
+        self.scroll = 0;
+        self.approval = Some(permission);
+        self.status = "waiting for permission".to_string();
+    }
+
     fn frame(&self, width: u16, height: u16) -> Frame {
         let width = usize::from(width).max(1);
         let height = usize::from(height);
@@ -452,7 +468,7 @@ impl App {
                     )),
                     width,
                 ),
-                clipped(&single_line(&permission.detail), width),
+                clipped("Full detail above; PgUp/PgDn scroll", width),
                 clipped("allow: [y] once  [s] session  [g] global", width),
                 clipped("deny:  [n] once  [S] session  [G] global", width),
             ];
@@ -640,11 +656,11 @@ fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), 
                             dirty = true;
                         }
                         TurnMessage::Permission(permission, reply) => {
-                            app.approval = Some(permission);
-                            app.status = "waiting for permission".to_string();
+                            app.begin_approval(permission);
                             app.render()?;
                             let answer = permission_input(&cancellation, app)?;
                             app.approval = None;
+                            app.scroll = 0;
                             app.status = if cancellation.cancelled() {
                                 "cancelling"
                             } else {
@@ -772,6 +788,11 @@ fn permission_input(
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     cancellation.cancel();
                     return Ok(Approval::Deny);
+                }
+                if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+                    app.key(key);
+                    app.render()?;
+                    continue;
                 }
                 if let Some(approval) = approval_key(key) {
                     return Ok(approval);
@@ -1295,6 +1316,42 @@ mod tests {
             None
         );
         assert_eq!(approval_key(key(KeyCode::Char('x'), none)), None);
+    }
+
+    #[test]
+    fn long_permission_details_can_be_read_before_answering() {
+        let mut app = app();
+        let detail = (0..30)
+            .map(|index| format!("command line {index}\n"))
+            .collect::<String>();
+        let workspace = format!("/work/{}", "long-path/".repeat(10));
+        app.begin_approval(Permission {
+            tool: "sh".into(),
+            detail: detail.clone(),
+            workspace: workspace.clone().into(),
+        });
+        let entry = app.transcript.back().unwrap();
+        assert!(entry.text.contains(&workspace));
+        assert!(entry.text.ends_with(&detail));
+        let rendered = |app: &App| {
+            app.frame(80, 24)
+                .lines
+                .iter()
+                .map(|line| line.0.iter().map(|cell| cell.character).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let frame = rendered(&app);
+        assert!(frame.contains("command line 29"), "{frame}");
+        assert!(frame.contains("[s] session  [g] global"));
+        assert!(frame.contains("[S] session  [G] global"));
+        app.key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(app.scroll, 10);
+        let scrolled = rendered(&app);
+        assert!(scrolled.contains("command line 10"), "{scrolled}");
+        app.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.scroll, 0);
+        assert_eq!(rendered(&app), frame);
     }
 
     #[test]
