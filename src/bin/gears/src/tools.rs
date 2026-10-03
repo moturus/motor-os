@@ -185,8 +185,11 @@ impl Tool {
             ),
             ("GEARS_SESSION_ID".to_string(), session_id.to_string()),
         ];
+        let mut remove_env = vec![KEY_ENV.to_string()];
         if let Some(path) = session_path {
             env.push(("GEARS_SESSION_PATH".to_string(), path.display().to_string()));
+        } else {
+            remove_env.push("GEARS_SESSION_PATH".to_string());
         }
         process::run(
             &process::Request {
@@ -200,7 +203,7 @@ impl Tool {
                 timeout: self.process.timeout,
                 max_output_bytes: self.process.max_output_bytes,
                 env,
-                remove_env: vec![KEY_ENV.to_string()],
+                remove_env,
             },
             cancellation,
             observer,
