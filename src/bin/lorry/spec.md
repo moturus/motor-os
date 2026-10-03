@@ -926,6 +926,8 @@ Each unit key carries its normal or test profile context. Test plans rekey
 units and dependency edges only where their effective panic profile differs,
 so normal and test plans share host tools and build-script runs while a build
 can name separate abort-profile and unwind-profile target libraries.
+The key also names the compiler mode, keeping build, test harness, and check
+invocations of the same target distinct.
 Equivalent units from those contexts merge into one dependency DAG; conflicting
 edges for the same unit key are rejected.
 The mixed test planner includes normal-profile programs and test-profile

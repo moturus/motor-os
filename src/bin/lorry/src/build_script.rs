@@ -857,6 +857,7 @@ mod tests {
                 source: PackageSourceKey::Path(manifest.root.clone()),
             },
             kind: UnitKind::BuildScriptRun,
+            mode: crate::unit::UnitMode::Build,
             target: None,
             compile_kind: CompileKind::Target,
             profile: crate::unit::ProfileContext::Normal,

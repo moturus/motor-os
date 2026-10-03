@@ -38,10 +38,19 @@ pub enum ProfileContext {
     Test,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum UnitMode {
+    Build,
+    Test,
+    Check,
+    CheckTest,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct UnitKey {
     pub package: PackageKey,
     pub kind: UnitKind,
+    pub mode: UnitMode,
     pub target: Option<String>,
     pub compile_kind: CompileKind,
     pub profile: ProfileContext,
@@ -481,6 +490,7 @@ pub fn selected_library_key(manifest: &Manifest) -> Result<UnitKey> {
             source: PackageSourceKey::Path(manifest.root.clone()),
         },
         kind: UnitKind::Library,
+        mode: UnitMode::Build,
         target: None,
         compile_kind: CompileKind::Target,
         profile: ProfileContext::Normal,
@@ -541,6 +551,7 @@ pub fn add_selected_harnesses(
     if let Some(target) = manifest.library.as_ref().filter(|target| target.test) {
         let mut key = selected_library_key(manifest)?;
         key.kind = UnitKind::LibraryHarness;
+        key.mode = UnitMode::Test;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
         add_selected_normal_edges(graph, resolution, manifests, &key, false)?;
@@ -549,6 +560,7 @@ pub fn add_selected_harnesses(
     for target in manifest.binaries.iter().filter(|target| target.test) {
         let mut key = selected_library_key(manifest)?;
         key.kind = UnitKind::BinaryHarness;
+        key.mode = UnitMode::Test;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
         add_selected_normal_edges(graph, resolution, manifests, &key, false)?;
@@ -590,6 +602,7 @@ pub fn add_selected_integration_harnesses(
         let mut key =
             selected_library_key(manifest)?.with_profile(ProfileContext::Test, panic_abort);
         key.kind = UnitKind::IntegrationHarness;
+        key.mode = UnitMode::Test;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
         add_selected_normal_edges(graph, resolution, manifests, &key, panic_abort)?;
@@ -935,12 +948,14 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
     };
     UnitSettings {
         profile,
-        mode: match key.kind {
-            UnitKind::BuildScriptRun => CargoCompileMode::RunCustomBuild,
-            UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness => {
-                CargoCompileMode::Test
+        mode: match key.mode {
+            UnitMode::Build if key.kind == UnitKind::BuildScriptRun => {
+                CargoCompileMode::RunCustomBuild
             }
-            _ => CargoCompileMode::Build,
+            UnitMode::Build => CargoCompileMode::Build,
+            UnitMode::Test => CargoCompileMode::Test,
+            UnitMode::Check => CargoCompileMode::Check { test: false },
+            UnitMode::CheckTest => CargoCompileMode::Check { test: true },
         },
         lto: unit_lto(key, options.release, options.release_profile.lto),
         logical_target,
@@ -1124,6 +1139,7 @@ fn unit_key(
     UnitKey {
         package: package.key.clone(),
         kind,
+        mode: UnitMode::Build,
         target: None,
         compile_kind,
         profile: ProfileContext::Normal,
@@ -2222,6 +2238,7 @@ mod tests {
                 source: crate::resolver::PackageSourceKey::Path(Path::new("/cycle").to_owned()),
             },
             kind: UnitKind::Library,
+            mode: UnitMode::Build,
             target: None,
             compile_kind: CompileKind::Target,
             profile: ProfileContext::Normal,
