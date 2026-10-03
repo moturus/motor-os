@@ -458,7 +458,9 @@ fn run_turn(
                             request.workspace.display(),
                             request.detail
                         );
-                        let answer = input.read_line("[y/N/a = always this session] ")?;
+                        let answer = input.read_line(
+                            "[y allow once / s session / g global / n deny once / S session / G global] ",
+                        )?;
                         let _ = reply.send(parse_approval(answer.as_deref()));
                     }
                     Ok(TurnMessage::Done(result)) => return result,
@@ -475,11 +477,14 @@ fn run_turn(
     })
 }
 
-/// Anything but an explicit yes or always denies, including end of input.
+/// Anything but one explicit choice denies once, including end of input.
 fn parse_approval(answer: Option<&str>) -> Approval {
     match answer.map(str::trim) {
-        Some("y" | "Y" | "yes" | "YES") => Approval::Once,
-        Some("a" | "A" | "always" | "ALWAYS") => Approval::Session,
+        Some("y") => Approval::Once,
+        Some("s") => Approval::Session,
+        Some("g") => Approval::Global,
+        Some("S") => Approval::DenySession,
+        Some("G") => Approval::DenyGlobal,
         _ => Approval::Deny,
     }
 }
@@ -611,11 +616,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_explicit_answers_grant_approval() {
+    fn all_six_approval_answers_are_distinct() {
         assert_eq!(parse_approval(Some(" y ")), Approval::Once);
-        assert_eq!(parse_approval(Some("a")), Approval::Session);
-        assert_eq!(parse_approval(Some("always")), Approval::Session);
-        for answer in [None, Some(""), Some("n"), Some("all"), Some("ya")] {
+        assert_eq!(parse_approval(Some("s")), Approval::Session);
+        assert_eq!(parse_approval(Some("g")), Approval::Global);
+        assert_eq!(parse_approval(Some("S")), Approval::DenySession);
+        assert_eq!(parse_approval(Some("G")), Approval::DenyGlobal);
+        for answer in [None, Some(""), Some("n"), Some("a"), Some("ya")] {
             assert_eq!(parse_approval(answer), Approval::Deny);
         }
     }

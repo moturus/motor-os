@@ -198,7 +198,7 @@ fn screen_layout(height: usize, editor_rows: usize, approval: bool) -> Layout {
     let status_row = height.saturating_sub(1);
     let available = status_row;
     let approval_rows = if approval {
-        3.min(available.saturating_sub(1))
+        4.min(available.saturating_sub(1))
     } else {
         0
     };
@@ -453,7 +453,8 @@ impl App {
                     width,
                 ),
                 clipped(&single_line(&permission.detail), width),
-                clipped("[y] allow  [a] always this session  [n/esc] deny", width),
+                clipped("allow: [y] once  [s] session  [g] global", width),
+                clipped("deny:  [n] once  [S] session  [G] global", width),
             ];
             for (index, line) in approval.iter().take(layout.approval_rows).enumerate() {
                 frame.lines[layout.approval_start + index].push(Color::Yellow, line, width);
@@ -786,7 +787,10 @@ fn approval_key(key: KeyEvent) -> Option<Approval> {
     let plain = !key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Char('y') if plain => Some(Approval::Once),
-        KeyCode::Char('a') if plain => Some(Approval::Session),
+        KeyCode::Char('s') if plain => Some(Approval::Session),
+        KeyCode::Char('g') if plain => Some(Approval::Global),
+        KeyCode::Char('S') if plain => Some(Approval::DenySession),
+        KeyCode::Char('G') if plain => Some(Approval::DenyGlobal),
         KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter => Some(Approval::Deny),
         _ => None,
     }
@@ -1253,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_keys_map_to_once_session_and_deny() {
+    fn permission_keys_map_to_six_answers() {
         let key = |code, modifiers| KeyEvent::new(code, modifiers);
         let none = KeyModifiers::NONE;
         assert_eq!(
@@ -1261,15 +1265,27 @@ mod tests {
             Some(Approval::Once)
         );
         assert_eq!(
-            approval_key(key(KeyCode::Char('a'), none)),
+            approval_key(key(KeyCode::Char('s'), none)),
             Some(Approval::Session)
+        );
+        assert_eq!(
+            approval_key(key(KeyCode::Char('g'), none)),
+            Some(Approval::Global)
+        );
+        assert_eq!(
+            approval_key(key(KeyCode::Char('S'), none)),
+            Some(Approval::DenySession)
+        );
+        assert_eq!(
+            approval_key(key(KeyCode::Char('G'), none)),
+            Some(Approval::DenyGlobal)
         );
         for code in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Enter] {
             assert_eq!(approval_key(key(code, none)), Some(Approval::Deny));
         }
-        // Ctrl-A is a line-editing chord, never a grant.
+        // Modified keys are never grants.
         assert_eq!(
-            approval_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            approval_key(key(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             None
         );
         assert_eq!(approval_key(key(KeyCode::Char('x'), none)), None);
@@ -1304,9 +1320,9 @@ mod tests {
         assert_eq!(
             screen_layout(24, 1, true),
             Layout {
-                transcript_rows: 19,
-                approval_start: 19,
-                approval_rows: 3,
+                transcript_rows: 18,
+                approval_start: 18,
+                approval_rows: 4,
                 editor_start: 22,
                 editor_rows: 1,
                 status_row: 23,
