@@ -313,6 +313,12 @@ The `curl` directory takes one required string `url`. Its manifest fixes the
 HTTP and HTTPS protocol set, one request, the 30-second transfer limit, and
 response headers; the model cannot add flags or request data.
 
+The `find` directory takes one required `path` and optional `name` and `type`.
+`name` is one pattern passed after `-name`; `type` selects `file` or
+`directory`, mapped to `-type f` or `-type d`. The path precedes both filters.
+Neither platform's mapping exposes command execution. Because sysbox `find`
+has no `--`, a leading-dash path must use a `./` prefix.
+
 Details:
 
 - **`read_file`** returns numbered lines in pages of about 30 KB and refuses
