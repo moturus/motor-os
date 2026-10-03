@@ -198,6 +198,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
         && let Some(artifacts) = restore_fresh_profile(
             &profile_destination(&target_root, physical_target.as_deref(), release),
             &manifest.workspace_root,
+            &manifest.root,
             base,
             validation,
         )
@@ -558,8 +559,15 @@ fn create_published_profile(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn invalidate_fresh_profile(profile: &Path) -> Result<()> {
-    let path = profile.join(FRESH_PROFILE_FILE);
+pub(crate) fn fresh_record_path(profile: &Path, package_root: &Path) -> PathBuf {
+    let mut hash = Sha256::new();
+    hash.update(b"lorry-fresh-owner-v1");
+    hash.update(package_root.as_os_str().as_encoded_bytes());
+    profile.join(format!("{FRESH_PROFILE_FILE}-{}", hex(&hash.finish())))
+}
+
+fn invalidate_fresh_profile(profile: &Path, package_root: &Path) -> Result<()> {
+    let path = fresh_record_path(profile, package_root);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(Error::failure(format!(
@@ -813,6 +821,7 @@ fn build_inner(
         if let Some(artifacts) = restore_fresh_profile(
             &destination,
             &build.manifest.workspace_root,
+            &build.manifest.root,
             base,
             build.validation,
         ) {
@@ -1051,7 +1060,7 @@ fn build_inner(
         }
         return Ok(BuildOutcome::Check(0));
     }
-    invalidate_fresh_profile(&destination)?;
+    invalidate_fresh_profile(&destination, &build.manifest.root)?;
     let needs_normal_plan =
         !build.test || (selected_integration && !build.manifest.binaries.is_empty());
     let normal = if needs_normal_plan || selected_integration {
@@ -1185,6 +1194,7 @@ fn build_inner(
         write_fresh_profile(
             &destination,
             &build.manifest.workspace_root,
+            &build.manifest.root,
             base,
             &compiled,
             &local_source_roots(&prepared.resolution),
@@ -1403,10 +1413,11 @@ fn freshness_base(
 fn restore_fresh_profile(
     profile: &Path,
     package_root: &Path,
+    owner_root: &Path,
     base: [u8; 32],
     validation: ValidationMode,
 ) -> Option<BuildArtifacts> {
-    let record = read_fresh_profile(profile)?;
+    let record = read_fresh_profile(profile, owner_root)?;
     if record.base != base {
         return None;
     }
@@ -1444,6 +1455,7 @@ fn restore_fresh_profile(
 fn write_fresh_profile(
     profile: &Path,
     package_root: &Path,
+    owner_root: &Path,
     base: [u8; 32],
     artifacts: &StagedArtifacts,
     local_roots: &[PathBuf],
@@ -1493,13 +1505,13 @@ fn write_fresh_profile(
     for path in dep_info {
         document.push_str(&format!("dep-info={}\n", path.display()));
     }
-    let mut record = AtomicFile::new(&profile.join(FRESH_PROFILE_FILE))?;
+    let mut record = AtomicFile::new(&fresh_record_path(profile, owner_root))?;
     record.write_all(document.as_bytes())?;
     record.commit()
 }
 
-fn read_fresh_profile(profile: &Path) -> Option<FreshProfile> {
-    let path = profile.join(FRESH_PROFILE_FILE);
+fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfile> {
+    let path = fresh_record_path(profile, package_root);
     let metadata = fs::symlink_metadata(&path).ok()?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_FRESH_PROFILE_BYTES {
         return None;
@@ -2505,6 +2517,21 @@ mod tests {
     }
 
     #[test]
+    fn invalidating_one_package_keeps_another_freshness_record() {
+        let fixture = Fixture::new();
+        let profile = fixture.0.join("target/lorry/debug");
+        fs::create_dir_all(&profile).unwrap();
+        let first = fresh_record_path(&profile, &fixture.0.join("first"));
+        let second = fresh_record_path(&profile, &fixture.0.join("second"));
+        assert_ne!(first, second);
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        invalidate_fresh_profile(&profile, &fixture.0.join("first")).unwrap();
+        assert!(!first.exists());
+        assert_eq!(fs::read(second).unwrap(), b"second");
+    }
+
+    #[test]
     fn ordinary_freshness_trusts_artifact_contents_but_strict_mode_does_not() {
         let fixture = Fixture::new();
         let profile = fixture.0.join("target/lorry/debug");
@@ -2530,6 +2557,7 @@ mod tests {
         write_fresh_profile(
             &profile,
             &fixture.0,
+            &fixture.0,
             base,
             &staged,
             &[],
@@ -2538,14 +2566,29 @@ mod tests {
         .unwrap();
         fs::write(&artifact, b"tampered-artifact").unwrap();
         assert!(
-            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Trusted).is_some()
+            restore_fresh_profile(
+                &profile,
+                &fixture.0,
+                &fixture.0,
+                base,
+                ValidationMode::Trusted
+            )
+            .is_some()
         );
         assert!(
-            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_none()
+            restore_fresh_profile(
+                &profile,
+                &fixture.0,
+                &fixture.0,
+                base,
+                ValidationMode::Strict
+            )
+            .is_none()
         );
 
         write_fresh_profile(
             &profile,
+            &fixture.0,
             &fixture.0,
             base,
             &staged,
@@ -2554,11 +2597,25 @@ mod tests {
         )
         .unwrap();
         assert!(
-            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_some()
+            restore_fresh_profile(
+                &profile,
+                &fixture.0,
+                &fixture.0,
+                base,
+                ValidationMode::Strict
+            )
+            .is_some()
         );
         fs::write(&artifact, b"changed--artifact").unwrap();
         assert!(
-            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_none()
+            restore_fresh_profile(
+                &profile,
+                &fixture.0,
+                &fixture.0,
+                base,
+                ValidationMode::Strict
+            )
+            .is_none()
         );
     }
 
@@ -2600,6 +2657,7 @@ mod tests {
         write_fresh_profile(
             &profile,
             &fixture.0,
+            &fixture.0,
             base,
             &staged,
             &[],
@@ -2608,11 +2666,19 @@ mod tests {
         .unwrap();
         overwrite_preserving_metadata(b'/');
         assert!(
-            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Trusted).is_some()
+            restore_fresh_profile(
+                &profile,
+                &fixture.0,
+                &fixture.0,
+                base,
+                ValidationMode::Trusted
+            )
+            .is_some()
         );
 
         write_fresh_profile(
             &profile,
+            &fixture.0,
             &fixture.0,
             base,
             &staged,
@@ -2622,7 +2688,14 @@ mod tests {
         .unwrap();
         overwrite_preserving_metadata(b'f');
         assert!(
-            restore_fresh_profile(&profile, &fixture.0, base, ValidationMode::Strict).is_none()
+            restore_fresh_profile(
+                &profile,
+                &fixture.0,
+                &fixture.0,
+                base,
+                ValidationMode::Strict
+            )
+            .is_none()
         );
     }
 

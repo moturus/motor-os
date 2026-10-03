@@ -1128,7 +1128,8 @@ The three Cargo-client variables that Lorry removes before starting rustc
 unit keys and completed-profile freshness records.
 
 After a successful non-test build, the completed root profile contains a
-freshness record. An ordinary unchanged `build` or `run` validates parsed
+freshness record scoped to the selected package path. An ordinary unchanged
+`build` or `run` validates parsed
 manifest, lock, compact admission, configuration, compiler, target, flags,
 environment, and tool metadata plus rustc dep-info and mutable path-source
 path/size/mtime fingerprints. It requires the installed artifact to exist but
