@@ -98,6 +98,17 @@ impl Manager {
         cancellation: &Cancellation,
         notice: &mut dyn FnMut(String),
     ) -> Result<Self, String> {
+        Self::initialize_with_reserved(configs, workspace, &[], session, cancellation, notice)
+    }
+
+    pub fn initialize_with_reserved(
+        configs: Vec<HookConfig>,
+        workspace: PathBuf,
+        reserved_names: &[String],
+        session: &mut Session,
+        cancellation: &Cancellation,
+        notice: &mut dyn FnMut(String),
+    ) -> Result<Self, String> {
         let hooks = configs
             .into_iter()
             .map(|config| Hook { config })
@@ -110,6 +121,7 @@ impl Manager {
             tools: Vec::new(),
         };
         let mut names = HashSet::from(["sh".to_string()]);
+        names.extend(reserved_names.iter().cloned());
         for index in 0..manager.hooks.len() {
             let response = manager.invoke(
                 index,
@@ -612,6 +624,16 @@ printf '%s' '{"tools":[{"name":"same","description":"test","parameters":{"type":
                 hook("two", script, std::time::Duration::from_secs(2)),
             ],
             workspace,
+            &mut session,
+            &Cancellation::new(),
+            &mut |_| {},
+        );
+        assert!(matches!(result, Err(error) if error.contains("duplicate tool name")));
+        let (workspace, mut session) = fixture("reserved-tool");
+        let result = Manager::initialize_with_reserved(
+            vec![hook("one", script, std::time::Duration::from_secs(2))],
+            workspace,
+            &["same".to_string()],
             &mut session,
             &Cancellation::new(),
             &mut |_| {},
