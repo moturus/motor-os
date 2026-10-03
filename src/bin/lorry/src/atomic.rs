@@ -119,9 +119,10 @@ impl AtomicFile {
         {
             use std::os::fd::AsRawFd;
             let file = self.file.as_ref().unwrap();
+            // Motor permits the transition from writable staging to read/execute.
             moto_rt::fs::set_file_perm(
                 file.as_raw_fd(),
-                moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC,
+                moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
             )
             .map_err(|error| {
                 Error::failure(format!(

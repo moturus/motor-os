@@ -1158,6 +1158,7 @@ through private file staging and atomically installed, so a failed copy or
 record write leaves the preceding complete file in place.
 Staging names use one leading dot even when the destination is a hidden file,
 so they remain valid on Motor.
+Copied executables are made read/execute on Motor before publication.
 If a compiler-unit replacement is interrupted between preserving the old
 directory and installing the new one, the next build restores the previous
 completed directory under the artifact lock. It leaves abandoned staging
