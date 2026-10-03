@@ -1,10 +1,16 @@
 use crate::diagnostic::{Error, Result};
 use std::fs::{self, File, OpenOptions};
 use std::path::Path;
+#[cfg(target_os = "motor")]
+use std::path::PathBuf;
+#[cfg(target_os = "motor")]
+use std::time::{Duration, Instant};
 
 const LOCK_NAME: &str = ".lorry-artifacts.lock";
 #[cfg(target_os = "linux")]
 const LEASE_NAME: &str = ".lorry-artifacts.lease";
+#[cfg(target_os = "motor")]
+const OWNER_NAME: &str = ".lorry-artifacts.owner";
 
 /// Held while one command reads or changes a target directory's Lorry outputs.
 /// The file stays outside the cleanable `lorry/` tree and is never unlinked.
@@ -12,6 +18,8 @@ pub struct ArtifactLock {
     _file: File,
     #[cfg(target_os = "linux")]
     _lease: File,
+    #[cfg(target_os = "motor")]
+    owner_path: PathBuf,
 }
 
 impl ArtifactLock {
@@ -55,10 +63,21 @@ impl ArtifactLock {
         verify_open_file(&file, &path)?;
         #[cfg(target_os = "linux")]
         let lease = acquire_child_lease(&directory)?;
+        #[cfg(target_os = "motor")]
+        let owner_path = {
+            let path = directory.join(OWNER_NAME);
+            wait_for_previous_owner(&path)?;
+            let mut record = crate::atomic::AtomicFile::new(&path)?;
+            record.write_all(format!("{}\n", std::process::id()).as_bytes())?;
+            record.commit()?;
+            path
+        };
         Ok(Self {
             _file: file,
             #[cfg(target_os = "linux")]
             _lease: lease,
+            #[cfg(target_os = "motor")]
+            owner_path,
         })
     }
 
@@ -76,10 +95,65 @@ impl ArtifactLock {
 
 impl Drop for ArtifactLock {
     fn drop(&mut self) {
+        #[cfg(target_os = "motor")]
+        {
+            let expected = format!("{}\n", std::process::id());
+            if fs::read_to_string(&self.owner_path).ok().as_deref() == Some(expected.as_str()) {
+                if let Err(error) = fs::remove_file(&self.owner_path) {
+                    eprintln!("failed to clear Motor artifact owner: {error}");
+                }
+            } else {
+                eprintln!("Motor artifact owner record changed before lock release");
+            }
+        }
         // An unrelated thread may be between fork and exec. Releasing the
         // parent lock explicitly prevents that brief inherited descriptor
         // from delaying the next command after a normal completion.
         let _ = self._file.unlock();
+    }
+}
+
+#[cfg(target_os = "motor")]
+fn wait_for_previous_owner(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(Error::failure("Motor artifact owner is not a regular file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(Error::failure(format!(
+                "failed to inspect Motor artifact owner: {error}"
+            )));
+        }
+    }
+    let record = fs::read_to_string(path)
+        .map_err(|error| Error::failure(format!("failed to read Motor artifact owner: {error}")))?;
+    let pid = record
+        .strip_suffix('\n')
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| Error::failure("Motor artifact owner record is malformed"))?;
+    if pid == u64::from(std::process::id()) {
+        return Ok(()); // A stale record after a reboot reused our PID.
+    }
+
+    let started = Instant::now();
+    let mut child = [moto_sys::stats::ProcessInfoV1::default(); 1];
+    loop {
+        let count =
+            moto_sys::stats::ProcessInfoV1::list_children(pid, &mut child).map_err(|error| {
+                Error::failure(format!(
+                    "failed to query previous Motor build's children: {error}"
+                ))
+            })?;
+        if count == 0 {
+            return Ok(());
+        }
+        if started.elapsed() >= Duration::from_secs(30) {
+            return Err(Error::failure(format!(
+                "previous Motor build {pid} still has children after 30 seconds; artifacts were not changed"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
