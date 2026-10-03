@@ -500,6 +500,20 @@ returns bounded stdout as plain text, and treats exit status zero as normal.
 text. Exit statuses zero (same) and one (different) are both normal outcomes;
 any other status is an execution error.
 
+`sed` has a required `script` string passed as one `-e` argument and a
+required `path` string passed as one literal operand after `--`. Its commands
+are `/usr/bin/sed` on Linux and `/devtools/bin/sed` on the Motor OS developer
+image. It does not expose `-i`, but sed scripts can execute commands, so its
+manifest is not marked read-only. It returns bounded stdout as plain text and
+has a 30-second timeout.
+
+`lorry` has a required `action` enum (`build` or `test`), an optional `package`
+string mapped to `-p`, and an optional `release` boolean mapped to
+`--release`. It uses `/devtools/bin/lorry` on the Motor OS developer image and
+has no Linux command. It returns the command's status and bounded output,
+leaves `read_only` false, and has a 3600-second timeout because a local build
+or test can be long. It does not expose `vendor`, `run`, or arbitrary arguments.
+
 The common commands follow the `ls` pattern, each a manifest naming the
 program's path per platform, a one-line description, typed parameters mapped
 to a fixed argument vector, and a timeout. The read-only ones, `rg`, `head`,
