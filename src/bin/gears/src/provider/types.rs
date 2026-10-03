@@ -27,7 +27,18 @@ pub enum ContentBlock {
         tool_name: String,
         content: String,
         is_error: bool,
+        #[serde(default)]
+        outcome: ToolOutcome,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    #[default]
+    Completed,
+    NotStarted,
+    InterruptedUnknown,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -67,6 +78,22 @@ impl Message {
         content: impl Into<String>,
         is_error: bool,
     ) -> Self {
+        Self::tool_result_with_outcome(
+            call_id,
+            tool_name,
+            content,
+            is_error,
+            ToolOutcome::Completed,
+        )
+    }
+
+    pub fn tool_result_with_outcome(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+        outcome: ToolOutcome,
+    ) -> Self {
         Self {
             role: Role::Tool,
             content: vec![ContentBlock::ToolResult {
@@ -74,6 +101,7 @@ impl Message {
                 tool_name: tool_name.into(),
                 content: content.into(),
                 is_error,
+                outcome,
             }],
         }
     }
@@ -289,6 +317,35 @@ mod tests {
             }
             .total(),
             9
+        );
+    }
+
+    #[test]
+    fn tool_outcomes_are_recorded_and_old_results_remain_readable() {
+        let message = Message::tool_result_with_outcome(
+            "call_1",
+            "sh",
+            "the process was interrupted; outcome unknown",
+            true,
+            ToolOutcome::InterruptedUnknown,
+        );
+        let stored = serde_json::to_value(&message).unwrap();
+        assert_eq!(stored["content"][0]["outcome"], "interrupted_unknown");
+        assert_eq!(serde_json::from_value::<Message>(stored).unwrap(), message);
+
+        let old = serde_json::json!({
+            "role": "tool",
+            "content": [{
+                "type": "tool_result",
+                "call_id": "call_1",
+                "tool_name": "sh",
+                "content": "exit status: 0",
+                "is_error": false
+            }]
+        });
+        assert_eq!(
+            serde_json::from_value::<Message>(old).unwrap(),
+            Message::tool_result("call_1", "sh", "exit status: 0", false)
         );
     }
 }

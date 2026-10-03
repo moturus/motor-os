@@ -19,7 +19,7 @@ pub use key::ApiKey;
 pub use openai_compat::{Endpoint, OpenAiCompat, Quirks, UsageStyle};
 pub use types::{
     Completion, ContentBlock, FinishReason, Message, Request, Role, StreamEvent, ToolCall,
-    ToolSpec, Usage,
+    ToolOutcome, ToolSpec, Usage,
 };
 pub use usage::UsageMeter;
 
