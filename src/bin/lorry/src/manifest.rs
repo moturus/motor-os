@@ -3629,9 +3629,14 @@ members = ["ignored-member"]
         assert!(root.join("Cargo.toml").is_file());
         let manifest = Manifest::load(root).unwrap();
         assert_eq!(manifest.name, "lorry");
-        assert_eq!(manifest.dependencies.len(), 12);
+        assert_eq!(manifest.dependencies.len(), 13);
         assert!(manifest.dependencies.iter().any(|dependency| {
             dependency.package == "moto-rt"
+                && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
+                && matches!(dependency.source, DependencySource::CratesIo)
+        }));
+        assert!(manifest.dependencies.iter().any(|dependency| {
+            dependency.package == "moto-sys"
                 && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
                 && matches!(dependency.source, DependencySource::CratesIo)
         }));
@@ -3640,7 +3645,7 @@ members = ["ignored-member"]
                 && dependency.target.as_deref() == Some("cfg(target_os = \"linux\")")
                 && matches!(dependency.source, DependencySource::CratesIo)
         }));
-        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 153);
+        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 154);
     }
 
     #[test]
