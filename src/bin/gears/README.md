@@ -2,7 +2,7 @@
 
 Gears is a small extensible agent harness that runs on Linux and Motor OS. Its
 core owns provider streaming, one agent loop, cancellation, sessions, terminal
-UIs, command hooks, and one built-in tool named sh. It does not prescribe a
+UIs, command hooks, and configured directory tools. It does not prescribe a
 coding workflow.
 
 ## Run
@@ -17,8 +17,9 @@ model, and run:
 Gears chooses the full-screen UI when both input and output are terminals.
 Use --ui line or --ui tui to choose explicitly.
 
-The sh tool receives one string command and runs it in the selected workspace
-through sh -c on Linux or /system/bin/rush -c on Motor OS. It is not a
+The optional `tools/sh` directory receives one string command and runs it in
+the selected workspace through `bash -c` on Linux or `/system/bin/rush -c` on
+Motor OS. It is not a
 sandbox: an approved command has the same filesystem authority as Gears and
 may leave the workspace. Stdout, stderr, status, timeout, cancellation, and
 truncation remain distinct.
@@ -30,18 +31,25 @@ in this session without asking). The a answer is kept in memory only: it ends
 when the session changes or Gears exits, and resuming the session asks again.
 A hook deny still blocks a call after a. An unattended run denies a call that
 still needs an answer. Gears does not infer safe shell commands. The provider
-credential is removed from the environment inherited by sh and hook processes.
+credential is removed from the environment inherited by tool and hook processes.
 
 ## Configuration
 
-The default configuration is ~/.config/gears.toml on Linux and
-/user/cfg/gears.toml on Motor OS. A minimal file is:
+The default configuration is ~/.gears/gears.toml on Linux and
+/user/cfg/gears/gears.toml on Motor OS. A minimal file is:
 
     version = 1
 
     [provider]
     base_url = "https://openrouter.ai/api/v1"
     model = "provider/model"
+
+No directory tool is enabled by default. To add the shipped shell tool, copy
+`tools/sh` into the Gears directory and add:
+
+    [[tools]]
+    directory = "tools/sh"
+    enabled = true
 
     [models]
     used = ["provider/model", "another/model"]
@@ -56,7 +64,6 @@ Important optional fields are:
     ca_cert = "/absolute/path/to/ca.pem"
 
     [runtime]
-    sh_timeout_seconds = 120
     max_tool_rounds = 32
 
     [context]

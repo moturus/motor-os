@@ -16,7 +16,6 @@ use crate::provider::{
 use crate::session::{Compaction, Session, SessionInfo, Store, TreeItem};
 use crate::tools::Registry;
 
-const PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
 const MODEL_STREAM_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone)]
@@ -108,7 +107,6 @@ pub struct Runtime {
     tools: Registry,
     prompt: Effective,
     model: String,
-    sh_timeout: std::time::Duration,
     max_tool_rounds: usize,
     context: ContextConfig,
     cancellation: Cancellation,
@@ -161,9 +159,7 @@ impl Runtime {
             &mut |notice| startup_notices.push(notice),
         )?;
         let initialized = hooks.initialized();
-        let builtin_sh = !tools.tools().iter().any(|tool| tool.name == "sh");
         let manifest = serde_json::json!({
-            "builtin_tools": if builtin_sh { vec![sh_spec()] } else { Vec::new() },
             "directory_tools": tools.enabled_tools().collect::<Vec<_>>(),
             "hooks": hooks.manifest(),
         });
@@ -203,7 +199,6 @@ impl Runtime {
             tools,
             prompt,
             model,
-            sh_timeout: config.sh_timeout,
             max_tool_rounds: config.max_tool_rounds,
             context: config.context,
             cancellation,
@@ -668,8 +663,6 @@ impl Runtime {
             )
         } else if let Some(tool) = self.tools.enabled(&call.name) {
             self.execute_directory_tool(tool, &call, observer)
-        } else if call.name == "sh" && !self.tools.tools().iter().any(|tool| tool.name == "sh") {
-            self.execute_sh(&call, observer)
         } else if self.hooks.owns_tool(&call.name) {
             let mut notices = Vec::new();
             let result = self.hooks.execute_tool(
@@ -788,88 +781,6 @@ impl Runtime {
         Ok(())
     }
 
-    fn execute_sh(
-        &self,
-        call: &ToolCall,
-        observer: &mut dyn Observer,
-    ) -> (ToolResult, ToolOutcome) {
-        let arguments: Value = match serde_json::from_str(&call.arguments) {
-            Ok(arguments) => arguments,
-            Err(error) => {
-                return (
-                    ToolResult {
-                        content: format!("invalid sh arguments: {error}"),
-                        is_error: true,
-                    },
-                    ToolOutcome::NotStarted,
-                );
-            }
-        };
-        let Some(command) = arguments.get("command").and_then(Value::as_str) else {
-            return (
-                ToolResult {
-                    content: "sh requires a string field named command".to_string(),
-                    is_error: true,
-                },
-                ToolOutcome::NotStarted,
-            );
-        };
-        let mut observer_error = None;
-        let output = crate::process::sh(
-            self.store.workspace().to_path_buf(),
-            command,
-            self.sh_timeout,
-            PROCESS_OUTPUT_BYTES,
-            &self.cancellation,
-            &mut |stream, text| {
-                if let Err(error) = observer.event(Event::ToolOutput {
-                    name: "sh".to_string(),
-                    stream,
-                    text: text.to_string(),
-                }) {
-                    observer_error = Some(error);
-                    self.cancellation.cancel();
-                }
-            },
-        );
-        if let Some(error) = observer_error {
-            return (
-                ToolResult {
-                    content: error,
-                    is_error: true,
-                },
-                ToolOutcome::InterruptedUnknown,
-            );
-        }
-        match output {
-            Ok(output) => {
-                let outcome = if output.cancelled || output.timed_out {
-                    ToolOutcome::InterruptedUnknown
-                } else {
-                    ToolOutcome::Completed
-                };
-                (
-                    ToolResult {
-                        content: output.model_text(MODEL_STREAM_BYTES),
-                        is_error: !output.success(),
-                    },
-                    outcome,
-                )
-            }
-            Err(error) => (
-                ToolResult {
-                    content: error.to_string(),
-                    is_error: true,
-                },
-                if error.started {
-                    ToolOutcome::InterruptedUnknown
-                } else {
-                    ToolOutcome::NotStarted
-                },
-            ),
-        }
-    }
-
     fn execute_directory_tool(
         &self,
         tool: &crate::tools::Tool,
@@ -946,11 +857,7 @@ impl Runtime {
             .with_system(self.prompt.fragments().to_vec())
             .with_cancellation(self.cancellation.clone());
         if tools {
-            let mut specs = if self.tools.tools().iter().any(|tool| tool.name == "sh") {
-                Vec::new()
-            } else {
-                vec![sh_spec()]
-            };
+            let mut specs = Vec::new();
             specs.extend(self.tools.enabled_tools().map(crate::tools::Tool::spec));
             specs.extend(self.hooks.initialized().tools);
             request.with_tools(specs)
@@ -1118,24 +1025,6 @@ impl Runtime {
         );
         emit_notices(observer, notices)
     }
-}
-
-fn sh_spec() -> ToolSpec {
-    ToolSpec::new(
-        "sh",
-        "Run a shell command in the current working directory. The command is not sandboxed.",
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "Shell command to execute."
-                }
-            },
-            "required": ["command"],
-            "additionalProperties": false
-        }),
-    )
 }
 
 fn call_detail(call: &ToolCall) -> String {

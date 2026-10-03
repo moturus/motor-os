@@ -120,7 +120,7 @@ impl Manager {
             prompt_fragments: Vec::new(),
             tools: Vec::new(),
         };
-        let mut names = HashSet::from(["sh".to_string()]);
+        let mut names = HashSet::new();
         names.extend(reserved_names.iter().cloned());
         for index in 0..manager.hooks.len() {
             let response = manager.invoke(

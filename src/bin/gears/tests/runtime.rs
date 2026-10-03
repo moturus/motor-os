@@ -137,7 +137,14 @@ impl Fixture {
     fn runtime(&self, provider: Arc<dyn Provider>, config: &Config) -> Runtime {
         let store = Store::with_root(&self.workspace, self.root.join("state")).unwrap();
         let session = store.create(false, None).unwrap();
-        Runtime::new(provider, store, session, config, "test/model".to_string()).unwrap()
+        let mut config = config.clone();
+        if config.tools.is_empty() {
+            config.tools.push(ToolDirectory {
+                directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+                enabled: true,
+            });
+        }
+        Runtime::new(provider, store, session, &config, "test/model".to_string()).unwrap()
     }
 }
 
@@ -145,6 +152,39 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn empty_tool_configuration_is_chat_only() {
+    let fixture = Fixture::new("chat-only");
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let session = store.create(false, None).unwrap();
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"touch must-not-exist"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = Runtime::new(
+        provider.clone(),
+        store,
+        session,
+        &Config::default(),
+        "test/model".to_string(),
+    )
+    .unwrap();
+    runtime
+        .turn("hello".to_string(), &mut FixedApproval(true), &mut |_| {
+            Ok(())
+        })
+        .unwrap();
+    let requests = provider.requests.lock().unwrap();
+    assert!(requests[0].tools.is_empty());
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("unknown tool"))
+    );
+    assert!(!fixture.workspace.join("must-not-exist").exists());
 }
 
 #[test]
@@ -491,11 +531,18 @@ fn always_allow_is_not_stored_with_the_session() {
     let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
     let open = |session, script| {
         let provider = Scripted::new(script);
+        let config = Config {
+            tools: vec![ToolDirectory {
+                directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+                enabled: true,
+            }],
+            ..Config::default()
+        };
         Runtime::new(
             provider,
             store.clone(),
             session,
-            &Config::default(),
+            &config,
             "test/model".to_string(),
         )
         .unwrap()

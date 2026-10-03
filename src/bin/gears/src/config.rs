@@ -59,7 +59,6 @@ pub struct Config {
     pub default_model: Option<String>,
     pub log_file: Option<PathBuf>,
     pub log_level: crate::trace::Level,
-    pub sh_timeout: Duration,
     pub max_tool_rounds: usize,
     pub context: ContextConfig,
     pub hooks: Vec<HookConfig>,
@@ -83,7 +82,6 @@ impl Default for Config {
             default_model: None,
             log_file: None,
             log_level: crate::trace::Level::Info,
-            sh_timeout: Duration::from_secs(120),
             max_tool_rounds: 32,
             context: ContextConfig {
                 window_tokens: DEFAULT_CONTEXT_TOKENS,
@@ -364,12 +362,9 @@ impl Config {
                 .ok_or_else(|| format!("unknown trace level {level:?}"))?,
             None => defaults.log_level,
         };
-        let sh_timeout = bounded_seconds(
-            "runtime.sh_timeout_seconds",
-            raw.runtime.sh_timeout_seconds.unwrap_or(120),
-            1,
-            3600,
-        )?;
+        if raw.runtime.sh_timeout_seconds.is_some() {
+            return Err("runtime.sh_timeout_seconds moved to the sh tool manifest".to_string());
+        }
         let max_tool_rounds = raw.runtime.max_tool_rounds.unwrap_or(32);
         if !(1..=256).contains(&max_tool_rounds) {
             return Err("runtime.max_tool_rounds must be between 1 and 256".to_string());
@@ -438,7 +433,6 @@ impl Config {
             default_model: raw.default_model.filter(|model| !model.trim().is_empty()),
             log_file: raw.trace.file,
             log_level,
-            sh_timeout,
             max_tool_rounds,
             context,
             hooks,
