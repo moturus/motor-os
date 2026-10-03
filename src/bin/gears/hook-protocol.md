@@ -33,7 +33,7 @@ Event-specific result fields are:
 | initialize | prompt_fragments, tools |
 | input | input |
 | context | messages |
-| permission | decision: allow, deny, or ask |
+| permission | decision: allow, deny, ask, or confirm |
 | tool_execute | tool_result |
 | tool_result | tool_result |
 | before_compact | compaction |
@@ -50,7 +50,11 @@ invalid for its current event. Incompatible protocol changes require a new
 protocol_version.
 
 Hooks run sequentially in configuration order. Later transformations see
-earlier ones. Permission aggregation is deny over allow over ask. A permission
-hook that fails, times out, or returns invalid output denies the call.
+earlier ones. Permission aggregation is deny over confirm over allow over ask.
+A saved denial refuses the call before permission hooks run. `confirm` requires
+a fresh attended answer even when an allowance was saved; unattended calls are
+refused. Otherwise hooks may allow the call, followed by saved attended
+allowances and the user prompt. A permission hook that fails, times out, or
+returns invalid output denies the call.
 Observational-hook failures are reported and ignored; failures in transforming
 hooks stop the operation rather than silently changing its meaning.

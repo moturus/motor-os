@@ -600,8 +600,8 @@ impl Session {
         {
             let grant: PermissionGrant = serde_json::from_value(entry.data.clone())
                 .map_err(|error| format!("entry {}: bad permission grant: {error}", entry.id))?;
-            if grant.name.is_empty() || grant.identity.is_empty() {
-                return Err(format!("entry {}: incomplete permission grant", entry.id));
+            if grant.name.is_empty() || !crate::permissions::valid_identity(&grant.identity) {
+                return Err(format!("entry {}: invalid permission grant", entry.id));
             }
             if grant.allow.is_some() {
                 grants.insert(grant.identity.clone(), grant);
@@ -1242,7 +1242,7 @@ mod tests {
         let user = session.append_message(&Message::user("first")).unwrap();
         let grant = PermissionGrant {
             name: "sh".into(),
-            identity: "fingerprint".into(),
+            identity: "a".repeat(64),
             allow: Some(false),
             ..PermissionGrant::default()
         };
@@ -1255,14 +1255,14 @@ mod tests {
         assert_eq!(cloned.context_messages().unwrap().len(), 2);
         drop(cloned);
         session.select(&user).unwrap();
-        assert_eq!(session.permission_grants().unwrap()["fingerprint"], grant);
+        assert_eq!(session.permission_grants().unwrap()[&grant.identity], grant);
         let (forked, _) = store.fork_at_user(&session, &user).unwrap();
         assert!(forked.permission_grants().unwrap().is_empty());
         drop(forked);
         let path = session.path().unwrap().to_path_buf();
         drop(session);
         let mut resumed = store.open_path(&path).unwrap();
-        assert_eq!(resumed.permission_grants().unwrap()["fingerprint"], grant);
+        assert_eq!(resumed.permission_grants().unwrap()[&grant.identity], grant);
         resumed
             .append_permission_grant(&PermissionGrant {
                 allow: None,
@@ -1271,6 +1271,24 @@ mod tests {
             .unwrap();
         assert!(resumed.permission_grants().unwrap().is_empty());
         drop(resumed);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn malformed_permission_identities_are_reported() {
+        let (base, _, store) = fixture("bad-permission-identity");
+        for identity in ["short".to_string(), "é".repeat(32), "z".repeat(64)] {
+            let mut session = store.create(true, None).unwrap();
+            session
+                .append_permission_grant(&PermissionGrant {
+                    name: "sh".into(),
+                    identity,
+                    allow: Some(true),
+                    ..PermissionGrant::default()
+                })
+                .unwrap();
+            assert!(session.permission_grants().is_err());
+        }
         std::fs::remove_dir_all(base).unwrap();
     }
 

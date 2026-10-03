@@ -71,6 +71,13 @@ impl Grants {
     }
 
     pub fn save(&self, directory: &Path) -> Result<(), String> {
+        if self
+            .by_identity
+            .iter()
+            .any(|(identity, grant)| !valid_identity(identity) || grant.name.is_empty())
+        {
+            return Err("invalid permission grant".to_string());
+        }
         let text = toml::to_string(&FileFormat {
             version: VERSION,
             grants: self.by_identity.clone(),
@@ -80,7 +87,7 @@ impl Grants {
     }
 }
 
-fn valid_identity(value: &str) -> bool {
+pub(crate) fn valid_identity(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
@@ -105,6 +112,15 @@ mod tests {
         );
         grants.save(&directory).unwrap();
         assert_eq!(Grants::load(&directory).unwrap(), grants);
+        grants.by_identity.insert(
+            "short".into(),
+            Grant {
+                name: "sh".into(),
+                ..Grant::default()
+            },
+        );
+        assert!(grants.save(&directory).is_err());
+        assert_eq!(Grants::load(&directory).unwrap().by_identity.len(), 1);
         std::fs::write(directory.join(FILE), "version = 2\n").unwrap();
         assert!(Grants::load(&directory).is_err());
         std::fs::remove_dir_all(directory).unwrap();
