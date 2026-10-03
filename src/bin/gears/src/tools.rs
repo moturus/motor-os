@@ -1,18 +1,19 @@
 //! Directory-backed tool definitions; loading metadata never starts a tool.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::ToolDirectory;
 use crate::process::{self, Cancellation, Stream};
 use crate::provider::KEY_ENV;
+use crate::provider::ToolSpec;
 use crate::state::StateRoot;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Tool {
     pub name: String,
     pub description: String,
@@ -25,7 +26,7 @@ pub struct Tool {
     pub process: ProcessTool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProcessTool {
     pub command: Option<Vec<String>>,
     pub arguments: Arguments,
@@ -37,23 +38,23 @@ pub struct ProcessTool {
     pub allowed_flags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Arguments {
     #[serde(default)]
     pub before_double_dash: Vec<String>,
     #[serde(default)]
     pub after_double_dash: Vec<String>,
     #[serde(flatten)]
-    pub mappings: HashMap<String, ArgumentMapping>,
+    pub mappings: BTreeMap<String, ArgumentMapping>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ArgumentMapping {
     String,
     BooleanFlag { flag: String },
     IntegerOption { flag: String },
-    Enum { values: HashMap<String, String> },
+    Enum { values: BTreeMap<String, String> },
     StringList,
 }
 
@@ -88,9 +89,25 @@ impl Registry {
     pub fn tools(&self) -> &[Tool] {
         &self.tools
     }
+
+    pub fn enabled(&self, name: &str) -> Option<&Tool> {
+        self.tools.iter().find(|tool| {
+            tool.name == name && tool.enabled_by_default && tool.process.command.is_some()
+        })
+    }
+
+    pub fn enabled_tools(&self) -> impl Iterator<Item = &Tool> {
+        self.tools
+            .iter()
+            .filter(|tool| tool.enabled_by_default && tool.process.command.is_some())
+    }
 }
 
 impl Tool {
+    pub fn spec(&self) -> ToolSpec {
+        ToolSpec::new(&self.name, &self.description, self.parameters.clone())
+    }
+
     pub fn execute(
         &self,
         arguments: &str,
@@ -906,10 +923,22 @@ common = ['/no-such-program']
         let registry = Registry::load(&entries, &root).unwrap();
         let tool = &registry.tools()[0];
         assert_eq!(tool.name, "example");
+        assert_eq!(registry.enabled_tools().count(), 1);
+        assert_eq!(registry.enabled("example").unwrap().spec().name, "example");
         assert!(tool.enabled_by_default && tool.read_only);
         assert!(tool.process.stdin_arguments && tool.process.stdout_only);
         assert_eq!(tool.process.normal_exit_statuses, [0, 1]);
         assert_eq!(tool.prompt.as_deref(), Some("Use this tool when needed."));
+        let disabled = Registry::load(
+            &[ToolDirectory {
+                directory: PathBuf::from("tools/example"),
+                enabled: false,
+            }],
+            &root,
+        )
+        .unwrap();
+        assert_eq!(disabled.enabled_tools().count(), 0);
+        assert!(disabled.enabled("example").is_none());
         assert!(Registry::load(&[entries[0].clone(), entries[0].clone()], &root).is_err());
         let manifest = std::fs::read_to_string(directory.join("tool.toml")).unwrap();
         std::fs::write(
