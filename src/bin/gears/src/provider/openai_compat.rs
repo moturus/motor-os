@@ -38,6 +38,7 @@ pub struct Quirks {
     /// Echo plaintext assistant reasoning in later requests.
     pub reasoning_echo: bool,
     pub prompt_cache_key: bool,
+    pub cache_markers: bool,
 }
 
 impl Quirks {
@@ -51,12 +52,14 @@ impl Quirks {
                 reports_cost: true,
                 reasoning_echo: true,
                 prompt_cache_key: true,
+                cache_markers: true,
             },
             _ => Quirks {
                 usage: UsageStyle::StreamOptions,
                 reports_cost: false,
                 reasoning_echo: false,
                 prompt_cache_key: false,
+                cache_markers: false,
             },
         }
     }
@@ -285,9 +288,14 @@ fn build_body(
 ) -> Result<Vec<u8>, ProviderError> {
     let mut messages = Vec::new();
     if !req.system.is_empty() {
+        let text = req.system.join("\n\n");
         messages.push(serde_json::json!({
             "role": "system",
-            "content": req.system.join("\n\n"),
+            "content": if quirks.cache_markers {
+                serde_json::json!([marked_text(&text)])
+            } else {
+                serde_json::json!(text)
+            },
         }));
     }
     for message in &req.messages {
@@ -340,6 +348,14 @@ fn build_body(
     object.entry(name.to_string()).or_insert(knob);
     serde_json::to_vec(&object)
         .map_err(|e| ProviderError::Protocol(format!("cannot serialize the request: {e}")))
+}
+
+fn marked_text(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "text",
+        "text": text,
+        "cache_control": {"type": "ephemeral"},
+    })
 }
 
 fn hex_prefix(bytes: &[u8]) -> String {
@@ -544,6 +560,7 @@ mod tests {
         assert!(openrouter.reports_cost);
         assert!(openrouter.reasoning_echo);
         assert!(openrouter.prompt_cache_key);
+        assert!(openrouter.cache_markers);
 
         // Anything else gets the generic dialect: usable, just untested.
         let other = Endpoint::new("https://router.huggingface.co/v1")
@@ -553,6 +570,7 @@ mod tests {
         assert!(!other.reports_cost);
         assert!(!other.reasoning_echo);
         assert!(!other.prompt_cache_key);
+        assert!(!other.cache_markers);
         assert!(
             !Endpoint::openrouter()
                 .with_reasoning_echo(Some(false))
@@ -641,7 +659,14 @@ mod tests {
             .push(Message::tool_result("call_1", "sh", "exit status 0", false));
         let sent = body(&req, Quirks::for_host("openrouter.ai"));
         assert_eq!(sent["messages"][0]["role"], "system");
-        assert_eq!(sent["messages"][0]["content"], "system one\n\nsystem two");
+        assert_eq!(
+            sent["messages"][0]["content"][0]["text"],
+            "system one\n\nsystem two"
+        );
+        assert_eq!(
+            sent["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
         assert_eq!(sent["messages"][2]["role"], "tool");
         assert_eq!(sent["messages"][2]["tool_call_id"], "call_1");
     }
