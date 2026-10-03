@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "lines": {
+      "type": "integer",
+      "description": "Line count passed to tail -n. Omit for ten lines."
+    },
+    "path": {
+      "type": "string",
+      "description": "One workspace-relative or absolute file path."
+    }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}

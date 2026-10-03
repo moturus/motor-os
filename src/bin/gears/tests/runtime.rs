@@ -431,6 +431,39 @@ fn shipped_head_limits_a_literal_file_path() {
 }
 
 #[test]
+fn shipped_tail_limits_a_literal_file_path() {
+    let fixture = Fixture::new("shipped-tail");
+    std::fs::write(
+        fixture.workspace.join("-input [glob].txt"),
+        "first\nsecond\nthird\n",
+    )
+    .unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/tail"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("tail", r#"{"lines":2,"path":"-input [glob].txt"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    let mut output = String::new();
+    runtime
+        .turn("read".to_string(), &mut FixedApproval(true), &mut |event| {
+            if let Event::ToolOutput { name, text, .. } = event {
+                assert_eq!(name, "tail");
+                output.push_str(&text);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(output, "second\nthird\n");
+}
+
+#[test]
 fn text_only_turn_streams_and_is_durable() {
     let fixture = Fixture::new("text");
     let provider = Scripted::new(vec![answer("hello")]);
