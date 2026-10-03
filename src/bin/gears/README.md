@@ -24,14 +24,15 @@ sandbox: an approved command has the same filesystem authority as Gears and
 may leave the workspace. Stdout, stderr, status, timeout, cancellation, and
 truncation remain distinct.
 
-Permission hooks run before a tool call. Any deny wins; otherwise any allow
-wins; otherwise an attended UI asks about the exact command. The answers are
-y (allow this call), n (deny it), and a (allow this call and every later one
-in this session without asking). The a answer is kept in memory only: it ends
-when the session changes or Gears exits, and resuming the session asks again.
-A hook deny still blocks a call after a. An unattended run denies a call that
-still needs an answer. Gears does not infer safe shell commands. The provider
-credential is removed from the environment inherited by tool and hook processes.
+Gears checks saved permission grants before hooks. A saved denial or hook
+denial blocks the call. A hook may allow it or require fresh confirmation.
+Otherwise a saved allowance runs only in an attended UI, which asks when no
+answer is saved. The choices are `y/s/g` to allow once, for this session, or
+globally, and `n/S/G` to deny at those scopes. Session grants survive resume;
+new, forked, and cloned sessions do not inherit them. In `-p` runs, saved
+allowances are ignored and calls without hook authority are denied. Gears does
+not infer safe shell commands. The provider credential is removed from the
+environment inherited by tool and hook processes.
 
 ## Configuration
 
@@ -98,9 +99,12 @@ after a crash, while earlier corruption is reported.
 
 Useful startup options are --continue, --resume ID, --session ID,
 --fork ID, --ephemeral, and --name NAME. Interactive commands include /new,
-/resume, /name, /session, /tree, /label, /fork, /clone, and /compact. Use
+/resume, /name, /session, /tree, /label, /fork, /clone, /compact, /tools,
+/tool, /permissions, and /permission. Use
 /label ENTRY [TEXT] to set or clear an entry label. Fork selects an earlier
 user prompt; clone copies the current active branch into a new file.
+Use `/tool enable|disable|reset NAME [--global]` to change a directory tool's
+effective state and `/permission revoke NAME [--global]` to remove grants.
 
 Compaction summarizes older active-branch context and retains a recent tail.
 It appends a compaction entry but never deletes history. /compact accepts optional

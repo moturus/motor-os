@@ -106,20 +106,21 @@ and renderers can wait until there is a demonstrated need.
 
 ### Tool authorization
 
-There are only two decision points. Permission hooks run first. Any `deny`
-blocks the call; otherwise any `allow` executes it without a prompt; otherwise
-Gears asks the user to allow or deny the exact command in the current
-workspace. A missing permission hook is the same as no opinion. A configured
-permission hook that times out, crashes, or returns invalid output denies the
-call with a visible diagnostic.
+Gears first checks saved session and global grants for the tool's approval
+identity. A saved denial blocks the call before hooks run. A hook denial or
+failure also blocks it; a hook's `confirm` answer asks an attended user even
+after a saved allowance. Otherwise a hook allowance runs the call, followed
+by an attended saved allowance or a fresh prompt. An unattended run ignores
+saved allowances and denies a call without hook authority.
 
 Gears does not parse shell strings into a policy, infer safe commands, or add a
-sandbox in v1. Approval applies to the exact displayed command, unless the
-user answers `a` ("always allow this session"): Gears then stops asking until
-the session changes or the process exits. That answer lives in memory only and
-is never written to the session file; hook denials keep applying. The provider
-credential must continue to be passed only to the provider transport, never
-through the environment inherited by `sh` or hooks.
+sandbox in v1. `y` and `n` answer once; `s` and `S` save a session allowance or
+denial; `g` and `G` save a global one. Grants apply to the tool identity and
+all its arguments, so a persistent `sh` allowance permits later shell
+commands. Session grants survive resume but do not transfer to new, forked,
+or cloned sessions. Hook denials keep applying. The provider credential must
+continue to be passed only to the provider transport, never through the
+environment inherited by `sh` or hooks.
 
 ### Composition
 

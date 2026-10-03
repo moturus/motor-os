@@ -6,6 +6,9 @@ to preserve the old architecture, CLI, or behavior. The finished
 implementation must preserve Linux and Motor OS support, the hermetic backend,
 and the useful parts of the current TUI.
 
+The later [external-tools plan](plans/gears-external-tools.md) replaces this
+plan's built-in `sh` step with optional directory tools and scoped grants.
+
 ## Working rules
 
 - Commit the finished change unless explicitly requested not to. Intermediate
@@ -51,7 +54,7 @@ and replaced directly.
 - Adapt the mock provider and tests to drive text, reasoning, tool calls,
   continuation, usage, cancellation, and errors through the new loop.
 
-### 2. Implement the only built-in tool
+### 2. Implement the initial shell tool (superseded)
 
 - Expose sh(command: string) through a small generic tool registry.
 - Run it in the selected workspace using the POSIX shell on Linux and the
