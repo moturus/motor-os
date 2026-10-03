@@ -929,6 +929,9 @@ declared extern aliases, and its source identity is the package path relative
 to the workspace root. The selected library remains outside the dependency
 unit cache; the completed-profile record controls reuse until per-unit
 publication is available.
+An offline unit-graph oracle compares a selected workspace member's library,
+binary, and renamed path dependency with Cargo's `build --unit-graph` nodes,
+edges, aliases, roots, and development profile.
 
 When `test` needs the selected library in its test profile, that library is
 also scheduled on the dependency DAG and remains outside the unit cache.

@@ -1099,8 +1099,10 @@ mod tests {
     };
     use crate::toolchain::CfgSet;
     use semver::Version;
+    use serde_json::Value;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -1323,6 +1325,216 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "--crate-type")
         );
+    }
+
+    #[test]
+    fn selected_build_graph_matches_cargo_unit_graph() {
+        let fixture = Fixture::new();
+        let workspace = fixture.0.join("workspace");
+        fs::create_dir_all(workspace.join("app/src")).unwrap();
+        fs::create_dir_all(workspace.join("shared/src")).unwrap();
+        fs::write(
+            workspace.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"shared\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\
+             dependencies = [\"shared\"]\n[[package]]\nname = \"shared\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [dependencies]\nrenamed = { package = \"shared\", path = \"../shared\" }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("shared/Cargo.toml"),
+            "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(workspace.join("app/src/lib.rs"), "pub fn value() {}\n").unwrap();
+        fs::write(workspace.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(workspace.join("shared/src/lib.rs"), "pub fn value() {}\n").unwrap();
+
+        let root = Manifest::load_selected(&workspace, Some("app")).unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let resolution = resolve_selected(
+            &root,
+            &Catalog::default(),
+            &Options {
+                resolver: root.resolver,
+                incompatible_rust_versions: None,
+                rust_version: Version::parse("1.99.0").unwrap(),
+                package_limit: crate::policy::PackageLimit::with_max(16),
+                max_depth: 8,
+            },
+            &[],
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let mut manifests = resolution
+            .packages
+            .iter()
+            .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let mut graph = dependency_units(&resolution, &manifests).unwrap();
+        let library = add_selected_library(&mut graph, &resolution, &manifests, &root).unwrap();
+        let binaries =
+            add_selected_binaries(&mut graph, &resolution, &manifests, &root, None).unwrap();
+        manifests.insert(library.package.clone(), root.clone());
+        let plan = plan_dependency_units(
+            &graph,
+            &manifests,
+            &PlanOptions {
+                workspace_root: &workspace,
+                release: false,
+                test_profile: false,
+                panic_abort: false,
+                release_profile: &root.release,
+                rustc: &toolchain(),
+                logical_target: None,
+                rustflags: &[],
+            },
+        )
+        .unwrap();
+
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let result = Command::new(cargo)
+            .args([
+                "-Z",
+                "unstable-options",
+                "build",
+                "--unit-graph",
+                "--offline",
+            ])
+            .arg("--manifest-path")
+            .arg(workspace.join("Cargo.toml"))
+            .args(["-p", "app"])
+            .env("CARGO_NET_OFFLINE", "true")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let cargo: Value = serde_json::from_slice(&result.stdout).unwrap();
+        let units = cargo["units"].as_array().unwrap();
+        let cargo_nodes = units
+            .iter()
+            .map(|unit| {
+                let package = unit["pkg_id"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .split('#')
+                    .next()
+                    .unwrap();
+                let kind = unit["target"]["kind"][0].as_str().unwrap();
+                let name = unit["target"]["name"].as_str().unwrap();
+                (package.to_owned(), kind.to_owned(), name.to_owned())
+            })
+            .collect::<Vec<_>>();
+        let lorry_node = |key: &UnitKey| {
+            let kind = match key.kind {
+                UnitKind::Library => "lib",
+                UnitKind::Binary => "bin",
+                _ => panic!("unexpected unit in build oracle: {:?}", key.kind),
+            };
+            let name = key.target.as_deref().unwrap_or_else(|| {
+                manifests[&key.package]
+                    .library
+                    .as_ref()
+                    .unwrap()
+                    .name
+                    .as_str()
+            });
+            (key.package.name.clone(), kind.to_owned(), name.to_owned())
+        };
+        let lorry_nodes = plan.units.keys().map(lorry_node).collect::<Vec<_>>();
+        assert_eq!(
+            cargo_nodes.iter().cloned().collect::<BTreeSet<_>>(),
+            lorry_nodes.iter().cloned().collect::<BTreeSet<_>>()
+        );
+        let mut cargo_edges = BTreeSet::new();
+        for (parent, unit) in units.iter().enumerate() {
+            for edge in unit["dependencies"].as_array().unwrap() {
+                cargo_edges.insert((
+                    cargo_nodes[parent].clone(),
+                    cargo_nodes[edge["index"].as_u64().unwrap() as usize].clone(),
+                    edge["extern_crate_name"].as_str().unwrap().to_owned(),
+                ));
+            }
+        }
+        let lorry_edges = plan
+            .units
+            .values()
+            .flat_map(|planned| {
+                planned.unit.dependencies.iter().map(|edge| {
+                    (
+                        lorry_node(&planned.unit.key),
+                        lorry_node(&edge.unit),
+                        edge.alias.clone().unwrap(),
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(cargo_edges, lorry_edges);
+        let cargo_roots = cargo["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|index| cargo_nodes[index.as_u64().unwrap() as usize].clone())
+            .collect::<BTreeSet<_>>();
+        let lorry_roots = std::iter::once(library)
+            .chain(binaries)
+            .map(|key| lorry_node(&key))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(cargo_roots, lorry_roots);
+        for (key, planned) in &plan.units {
+            let node = lorry_node(key);
+            let unit = &units[cargo_nodes
+                .iter()
+                .position(|candidate| *candidate == node)
+                .unwrap()];
+            let profile = &unit["profile"];
+            assert_eq!(unit["mode"], "build");
+            assert!(unit["platform"].is_null());
+            assert_eq!(unit["features"], serde_json::json!([]));
+            assert_eq!(profile["name"], "dev");
+            assert_eq!(profile["opt_level"], planned.settings.profile.opt_level);
+            assert_eq!(planned.settings.mode, CargoCompileMode::Build);
+            assert_eq!(planned.settings.profile.lto, CargoProfileLto::Bool(false));
+            assert_eq!(profile["lto"], "false");
+            assert!(profile["codegen_backend"].is_null());
+            assert!(profile["codegen_units"].is_null());
+            assert_eq!(profile["debuginfo"], 2);
+            assert!(profile["split_debuginfo"].is_null());
+            assert_eq!(
+                profile["debug_assertions"],
+                planned.settings.profile.debug_assertions
+            );
+            assert_eq!(
+                profile["overflow_checks"],
+                planned.settings.profile.overflow_checks
+            );
+            assert_eq!(profile["incremental"], planned.settings.profile.incremental);
+            assert_eq!(profile["panic"], "unwind");
+            assert_eq!(planned.settings.profile.strip, CargoStrip::None);
+            assert_eq!(profile["strip"], serde_json::json!({ "deferred": "None" }));
+            assert_eq!(profile["rpath"], false);
+            assert!(planned.settings.rustflags.is_empty());
+        }
     }
 
     #[test]
