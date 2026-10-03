@@ -582,15 +582,21 @@ fn execute_unit(
                 } else {
                     Vec::new()
                 };
+                let selected = options.selected_package == Some(&key.package);
                 let cache_build_script = executed_build_script.map(cache_build_script_input);
                 let cache_key = if let Some(caches) = options
                     .cache
                     .filter(|_| matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro))
-                    .filter(|_| options.selected_package != Some(&key.package))
-                {
+                    .filter(|_| {
+                        matches!(
+                            &invocation.output,
+                            RustcOutput::Library { .. } | RustcOutput::ProcMacro { .. }
+                        )
+                    }) {
                     let cache = caches.for_unit(planned);
                     let cache_key = cache.key(&UnitInput {
                         key,
+                        selected,
                         planned,
                         manifest,
                         invocation: &invocation,
@@ -599,7 +605,7 @@ fn execute_unit(
                         dependencies: &dependencies,
                         build_script: cache_build_script,
                     })?;
-                    if cache.restore(cache_key, &invocation.output)? {
+                    if cache.restore(cache_key, &invocation.output, selected)? {
                         if options.verbose {
                             eprintln!(
                                 "Fresh {} v{} (verified Lorry cache)",
@@ -681,7 +687,7 @@ fn execute_unit(
                     &invocation.output,
                     &manifest.root,
                     &invocation.current_dir,
-                    options.selected_package == Some(&key.package),
+                    selected,
                     executed_build_script.map(|build| build.out_dir.as_path()),
                     planned.source_remap.as_ref(),
                 )?;
@@ -690,6 +696,7 @@ fn execute_unit(
                         cache_key,
                         &invocation.output,
                         cache_build_script.as_ref(),
+                        selected,
                     )?;
                 }
                 if let RustcOutput::BuildScript {

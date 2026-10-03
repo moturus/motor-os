@@ -1084,9 +1084,9 @@ Immutable crates.io and Git units are stored in the
 per-user cache below
 `$HOME/.cache/lorry/v1/units/sha256/` on Linux and
 `/devtools/lorry/cache/v1/units/sha256/` on Motor, unless `cache.directory`
-selects another root. Mutable path-package units are stored in the project
-below `target/lorry/.cache/v1/units/sha256/`. Root linked artifacts, tests, and
-incremental state are not unit-cache entries.
+selects another root. Mutable path-package units, including selected package
+libraries, are stored in the project below `target/lorry/.cache/v1/units/sha256/`.
+Selected binaries, tests, and incremental state are not unit-cache entries.
 
 Cache keys cover Lorry/cache schema, compiler identity, normalized rustc
 arguments and child environment, package source identity, dependency unit
