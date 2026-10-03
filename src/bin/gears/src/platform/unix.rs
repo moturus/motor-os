@@ -132,3 +132,52 @@ pub fn process_alive(pid: u32) -> bool {
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
+
+/// A live non-Gears PID cannot keep a stale Gears directory lock.
+pub fn process_is_gears(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(name) => name.trim() == "gears",
+        Err(_) => process_alive(pid), // Unknown identity must not break a live lock.
+    }
+}
+
+/// Only a Gears process started by the lock holder may share its lock.
+pub fn process_is_descendant_of(ancestor: u32) -> bool {
+    let mut current = std::process::id();
+    for _ in 0..1024 {
+        let Some(parent) = parent_pid(current) else {
+            return false;
+        };
+        if parent == ancestor {
+            return true;
+        }
+        if parent == 0 || parent == current {
+            return false;
+        }
+        current = parent;
+    }
+    false
+}
+
+fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command field is parenthesized and may itself contain spaces.
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn ancestry_excludes_self_and_includes_parent() {
+        assert!(!process_is_descendant_of(std::process::id()));
+        assert!(process_is_descendant_of(unsafe { libc::getppid() } as u32));
+        assert!(!process_is_gears(std::process::id()));
+    }
+}

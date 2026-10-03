@@ -14,7 +14,7 @@ mod unix;
 #[cfg(unix)]
 pub use unix::{
     TerminalInput, cancellation_text, install_interrupt_handler, kill_tree, process_alive,
-    raw_console, spawn, status_text,
+    process_is_descendant_of, process_is_gears, raw_console, spawn, status_text,
 };
 
 #[cfg(not(unix))]
@@ -22,7 +22,7 @@ mod motor;
 #[cfg(not(unix))]
 pub use motor::{
     TerminalInput, cancellation_text, install_interrupt_handler, kill_tree, process_alive,
-    raw_console, spawn, status_text,
+    process_is_descendant_of, process_is_gears, raw_console, spawn, status_text,
 };
 
 use std::sync::atomic::{AtomicBool, Ordering};

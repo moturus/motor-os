@@ -123,6 +123,45 @@ pub fn process_alive(pid: u32) -> bool {
     process_active(u64::from(pid))
 }
 
+pub fn process_is_gears(pid: u32) -> bool {
+    match process_info(u64::from(pid)) {
+        Ok(Some(info)) => {
+            info.active != 0
+                && std::path::Path::new(info.debug_name())
+                    .file_name()
+                    .is_some_and(|name| name == "gears")
+        }
+        Ok(None) => false,
+        Err(()) => true, // Unknown identity must not break a live lock.
+    }
+}
+
+pub fn process_is_descendant_of(ancestor: u32) -> bool {
+    let mut current = u64::from(std::process::id());
+    for _ in 0..1024 {
+        let Ok(Some(info)) = process_info(current) else {
+            return false;
+        };
+        if info.parent_pid == u64::from(ancestor) {
+            return true;
+        }
+        if info.parent_pid == 0 || info.parent_pid == current {
+            return false;
+        }
+        current = info.parent_pid;
+    }
+    false
+}
+
+fn process_info(pid: u64) -> Result<Option<moto_sys::stats::ProcessInfoV1>, ()> {
+    let mut buf = [moto_sys::stats::ProcessInfoV1::default(); 1];
+    match moto_sys::stats::ProcessInfoV1::list(pid, &mut buf) {
+        Ok(n) if n > 0 && buf[0].pid == pid => Ok(Some(buf[0])),
+        Ok(_) => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
 fn process_active(pid: u64) -> bool {
     let mut buf = [moto_sys::stats::ProcessInfoV1::default(); 1];
     match moto_sys::stats::ProcessInfoV1::list(pid, &mut buf) {
