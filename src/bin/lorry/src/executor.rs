@@ -590,11 +590,7 @@ fn execute_unit(
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| Error::failure("rustc unit has no UTF-8 name"))?;
-                let dependencies = if matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro) {
-                    cache_dependencies(planned, outputs)?
-                } else {
-                    Vec::new()
-                };
+                let dependencies = cache_dependencies(planned, outputs)?;
                 let selected = options.selected_package == Some(&key.package);
                 let selected_inputs = selected.then_some(SelectedInputs {
                     package_root: &manifest.root,
@@ -602,15 +598,12 @@ fn execute_unit(
                     source_remap: planned.source_remap.as_ref(),
                 });
                 let cache_build_script = executed_build_script.map(cache_build_script_input);
-                let caches = options
-                    .cache
-                    .filter(|_| matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro))
-                    .filter(|_| {
-                        matches!(
-                            &planned_invocation.output,
-                            RustcOutput::Library { .. } | RustcOutput::ProcMacro { .. }
-                        )
-                    });
+                let caches = options.cache;
+                let restorable = matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
+                    && matches!(
+                        &planned_invocation.output,
+                        RustcOutput::Library { .. } | RustcOutput::ProcMacro { .. }
+                    );
                 let cache_key = caches
                     .map(|caches| {
                         caches.for_unit(planned).key(&UnitInput {
@@ -664,7 +657,9 @@ fn execute_unit(
                 create_output_directories(&invocation.output)?;
                 if let (Some(caches), Some(cache_key)) = (caches, cache_key) {
                     let cache = caches.for_unit(planned);
-                    if cache.restore(cache_key, &invocation.output, selected_inputs)? {
+                    if restorable
+                        && cache.restore(cache_key, &invocation.output, selected_inputs)?
+                    {
                         cache.record_published(cache_key, &invocation.output, selected_inputs)?;
                         staging.commit(unit_dir)?;
                         if options.verbose {
@@ -686,13 +681,13 @@ fn execute_unit(
                             cache_key: Some(cache_key),
                         });
                     }
-                    if !options.quiet && caches.report_shared_rebuild(planned) {
+                    if restorable && !options.quiet && caches.report_shared_rebuild(planned) {
                         let _guard = print
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         eprintln!("Rebuilding global dependency cache");
                     }
-                    if options.verbose {
+                    if restorable && options.verbose {
                         eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
                     }
                 }
@@ -754,15 +749,13 @@ fn execute_unit(
                     executed_build_script.map(|build| build.out_dir.as_path()),
                     planned.source_remap.as_ref(),
                 )?;
-                if let (Some(caches), Some(cache_key)) = (options.cache, cache_key) {
-                    let cache = caches.for_unit(planned);
-                    cache.store(
+                if restorable && let (Some(caches), Some(cache_key)) = (options.cache, cache_key) {
+                    caches.for_unit(planned).store(
                         cache_key,
                         &invocation.output,
                         cache_build_script.as_ref(),
                         selected_inputs,
                     )?;
-                    cache.record_published(cache_key, &invocation.output, selected_inputs)?;
                 }
                 if let RustcOutput::BuildScript {
                     executable,
@@ -771,6 +764,13 @@ fn execute_unit(
                 } = &invocation.output
                 {
                     install_unhashed(executable, unhashed_executable)?;
+                }
+                if let (Some(caches), Some(cache_key)) = (options.cache, cache_key) {
+                    caches.for_unit(planned).record_published(
+                        cache_key,
+                        &invocation.output,
+                        selected_inputs,
+                    )?;
                 }
                 staging.commit(unit_dir)?;
                 if let Some(reporter) = options.reporter {
@@ -819,6 +819,13 @@ fn cache_dependencies<'a>(
                 alias: edge.alias.as_deref(),
                 rlib: dynamic_library,
                 rmeta: dynamic_library,
+                cache_key: outputs.cache_keys.get(&edge.unit).copied(),
+            }),
+            Some(RustcOutput::Metadata { metadata, .. }) => Ok(DependencyInput {
+                key: &edge.unit,
+                alias: edge.alias.as_deref(),
+                rlib: metadata,
+                rmeta: metadata,
                 cache_key: outputs.cache_keys.get(&edge.unit).copied(),
             }),
             _ => Err(Error::failure(format!(

@@ -3146,6 +3146,8 @@ mod tests {
 
     #[test]
     fn builds_and_runs_unit_and_integration_test_harnesses() {
+        use std::os::unix::fs::MetadataExt;
+
         let fixture = Fixture::new();
         fixture.add_test_targets();
         fixture.add_multiple_binaries();
@@ -3182,38 +3184,56 @@ mod tests {
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
-        let artifacts = build(Build {
-            target_root: None,
-            manifest: &manifest,
-            global_cache_root: &manifest.root.join("global-cache"),
-            config: &config,
-            toolchain: &toolchain,
-            host: &target,
-            target: &target,
-            host_options: &target_options,
-            target_options: &target_options,
-            physical_target: None,
-            logical_target: None,
-            rustflags: &[],
-            release: false,
-            test: true,
-            test_name: None,
-            color: false,
-            verbosity: Verbosity::Quiet,
-            use_cargo_registry: false,
-            source: None,
-            bundle: false,
-            validation: ValidationMode::Trusted,
-            ordinary_freshness_base: None,
-            binary_selection: None,
-        })
-        .unwrap();
+        let build_once = || {
+            build(Build {
+                target_root: None,
+                manifest: &manifest,
+                global_cache_root: &manifest.root.join("global-cache"),
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: true,
+                test_name: None,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                use_cargo_registry: false,
+                source: None,
+                bundle: false,
+                validation: ValidationMode::Trusted,
+                ordinary_freshness_base: None,
+                binary_selection: None,
+            })
+        };
+        let artifacts = build_once().unwrap();
         assert_eq!(artifacts.harnesses.len(), 6);
         assert_eq!(artifacts.binaries.len(), 3);
+        let first_inodes = artifacts
+            .harnesses
+            .iter()
+            .map(|path| fs::metadata(path).unwrap().ino())
+            .collect::<Vec<_>>();
         for harness in &artifacts.harnesses {
             let status = std::process::Command::new(harness).status().unwrap();
             assert!(status.success(), "harness `{}` failed", harness.display());
         }
+        let repeated = build_once().unwrap();
+        assert_eq!(repeated.harnesses, artifacts.harnesses);
+        assert_eq!(
+            repeated
+                .harnesses
+                .iter()
+                .map(|path| fs::metadata(path).unwrap().ino())
+                .collect::<Vec<_>>(),
+            first_inodes,
+            "unchanged test harnesses should be reused in place"
+        );
     }
 
     #[test]

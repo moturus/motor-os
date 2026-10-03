@@ -168,9 +168,9 @@ impl BuildCache {
     }
 
     pub fn key(&self, input: &UnitInput<'_>) -> Result<CacheKey> {
-        if !matches!(input.key.kind, UnitKind::Library | UnitKind::ProcMacro) {
+        if input.key.kind == UnitKind::BuildScriptRun {
             return Err(Error::failure(
-                "only library and proc-macro units have build-cache keys",
+                "build-script runs have no compiler identity",
             ));
         }
         let mut digest = KeyDigest::new();
@@ -179,12 +179,20 @@ impl BuildCache {
         digest.string("package-version", &input.key.package.version.to_string());
         digest.string(
             "unit-kind",
-            if input.key.kind == UnitKind::ProcMacro {
-                "proc-macro"
-            } else {
-                "library"
+            match input.key.kind {
+                UnitKind::Library => "library",
+                UnitKind::Binary => "binary",
+                UnitKind::LibraryHarness => "library-harness",
+                UnitKind::BinaryHarness => "binary-harness",
+                UnitKind::IntegrationHarness => "integration-harness",
+                UnitKind::ProcMacro => "proc-macro",
+                UnitKind::BuildScriptCompile => "build-script-compile",
+                UnitKind::BuildScriptRun => unreachable!(),
             },
         );
+        if !matches!(input.key.kind, UnitKind::Library | UnitKind::ProcMacro) {
+            digest.string("target", input.key.target.as_deref().unwrap_or(""));
+        }
         let workspace_replacement = [(
             self.workspace_root.as_os_str(),
             b"<workspace-root>".as_slice(),
@@ -984,18 +992,26 @@ fn library_paths(output: &RustcOutput) -> Result<(&Path, &Path)> {
 
 fn dep_info_path(output: &RustcOutput) -> Result<&Path> {
     match output {
-        RustcOutput::Library { dep_info, .. } | RustcOutput::ProcMacro { dep_info, .. } => {
-            Ok(dep_info)
-        }
-        _ => Err(Error::failure(
-            "only library units can cache rustc dep-info",
-        )),
+        RustcOutput::Library { dep_info, .. }
+        | RustcOutput::Binary { dep_info, .. }
+        | RustcOutput::Metadata { dep_info, .. }
+        | RustcOutput::ProcMacro { dep_info, .. }
+        | RustcOutput::BuildScript { dep_info, .. } => Ok(dep_info),
     }
 }
 
 fn published_unit_directory(output: &RustcOutput) -> Result<&Path> {
-    library_paths(output)?
-        .0
+    let primary = match output {
+        RustcOutput::Library { rlib, .. } => rlib,
+        RustcOutput::Binary { executable, .. } | RustcOutput::BuildScript { executable, .. } => {
+            executable
+        }
+        RustcOutput::Metadata { metadata, .. } => metadata,
+        RustcOutput::ProcMacro {
+            dynamic_library, ..
+        } => dynamic_library,
+    };
+    primary
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| Error::failure("published library has no unit directory"))
@@ -1007,16 +1023,47 @@ fn published_fingerprint(
     selected: Option<SelectedInputs<'_>>,
     validation: ValidationMode,
 ) -> Result<[u8; 32]> {
-    let (primary, secondary) = library_paths(output)?;
-    let mut files = vec![primary];
-    if secondary != primary {
-        files.push(secondary);
-    }
-    if selected.is_some() {
-        files.push(dep_info_path(output)?);
-    }
+    let files: Vec<&Path> = match output {
+        RustcOutput::Library {
+            rlib,
+            rmeta,
+            dep_info,
+        } => {
+            let mut files = vec![rlib.as_path()];
+            if rmeta != rlib {
+                files.push(rmeta);
+            }
+            if selected.is_some() {
+                files.push(dep_info);
+            }
+            files
+        }
+        RustcOutput::ProcMacro {
+            dynamic_library,
+            dep_info,
+        } => {
+            let mut files = vec![dynamic_library.as_path()];
+            if selected.is_some() {
+                files.push(dep_info);
+            }
+            files
+        }
+        RustcOutput::Binary {
+            executable,
+            dep_info,
+        }
+        | RustcOutput::Metadata {
+            metadata: executable,
+            dep_info,
+        } => vec![executable, dep_info],
+        RustcOutput::BuildScript {
+            executable,
+            unhashed_executable,
+            dep_info,
+        } => vec![executable, unhashed_executable, dep_info],
+    };
     let mut digest = KeyDigest::new();
-    digest.bytes("schema", b"published-library-unit-v1");
+    digest.bytes("schema", b"published-compiler-unit-v1");
     digest.bytes("cache-key", &key.0);
     for path in files {
         let name = path

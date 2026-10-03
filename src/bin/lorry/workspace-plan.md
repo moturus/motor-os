@@ -15,9 +15,9 @@ libraries use the verified local unit cache with dep-info. Selected-library
 cache entries track external dep-info inputs, including edits and symlink
 retargets. Compiler units publish into the final profile after validation,
 and build scripts use a stable published `OUT_DIR`. Successful units survive
-a later failure. Published library and proc-macro units now reuse their
-validated artifacts in place. Other unit records, the shared member layout,
-ownership-aware clean, and cancellation recovery remain.
+a later failure. Published compiler units reuse their validated artifacts in
+place. Build-script result reuse, the shared member layout, ownership-aware
+clean, and cancellation recovery remain.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

@@ -191,6 +191,9 @@ if grep -F '<src/bin/' "$LOG" >/dev/null; then
 fi
 
 : >"$LOG"
+# In-place unit reuse skips unchanged compiler invocations. Change the root
+# source so this assertion still observes both all-targets compiler modes.
+printf '\n' >>"$PROJECT/src/lib.rs"
 "$LORRY" check --all-targets --keep-going --quiet \
     --manifest-path "$PROJECT/Cargo.toml" --target-dir "$TARGET"
 [ "$(grep -Fc '<src/lib.rs>' "$LOG")" -eq 2 ]
@@ -262,6 +265,8 @@ done
 CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
     --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
     -- messages "$WORK/messages.json" "$WORK/metadata.json" success plain any
+# Exercise ANSI diagnostics while still requiring fresh dependency artifacts.
+printf '\n' >>"$PROJECT/src/lib.rs"
 "$LORRY" check --all-targets --keep-going --quiet \
     --message-format=json-diagnostic-rendered-ansi \
     --manifest-path "$PROJECT/Cargo.toml" --target-dir "$JSON_TARGET" \
