@@ -61,6 +61,7 @@ pub struct Arguments {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ArgumentMapping {
     String,
+    StringOption { flag: String },
     BooleanFlag { flag: String },
     IntegerOption { flag: String },
     Enum { values: BTreeMap<String, String> },
@@ -588,7 +589,9 @@ impl Arguments {
                     )
                 })?;
             let expected = match mapping {
-                ArgumentMapping::String | ArgumentMapping::Enum { .. } => "string",
+                ArgumentMapping::String
+                | ArgumentMapping::StringOption { .. }
+                | ArgumentMapping::Enum { .. } => "string",
                 ArgumentMapping::BooleanFlag { .. } => "boolean",
                 ArgumentMapping::IntegerOption { .. } => "integer",
                 ArgumentMapping::StringList => "array",
@@ -611,7 +614,8 @@ impl Arguments {
             if after_delimiter
                 && matches!(
                     mapping,
-                    ArgumentMapping::BooleanFlag { .. }
+                    ArgumentMapping::StringOption { .. }
+                        | ArgumentMapping::BooleanFlag { .. }
                         | ArgumentMapping::IntegerOption { .. }
                         | ArgumentMapping::Enum { .. }
                 )
@@ -622,7 +626,9 @@ impl Arguments {
                 ));
             }
             match mapping {
-                ArgumentMapping::BooleanFlag { flag } | ArgumentMapping::IntegerOption { flag } => {
+                ArgumentMapping::StringOption { flag }
+                | ArgumentMapping::BooleanFlag { flag }
+                | ArgumentMapping::IntegerOption { flag } => {
                     if !flag.starts_with('-')
                         || flag == "--"
                         || flag
@@ -741,6 +747,16 @@ impl ProcessTool {
                     .as_str()
                     .ok_or_else(|| format!("{name:?} must be a string"))?;
                 self.push_model_string(text, after_delimiter, before, after)?;
+            }
+            ArgumentMapping::StringOption { flag } => {
+                let text = value
+                    .as_str()
+                    .ok_or_else(|| format!("{name:?} must be a string"))?;
+                if text.starts_with('-') {
+                    return Err(format!("argument {text:?} needs -- or an allowed flag"));
+                }
+                before.push(flag.clone());
+                before.push(text.to_string());
             }
             ArgumentMapping::BooleanFlag { flag } => {
                 let enabled = value
@@ -986,6 +1002,7 @@ type = "string_list"
                 "ignore_case": {"type": "boolean"},
                 "limit": {"type": "integer"},
                 "mode": {"type": "string"},
+                "filter": {"type": "string"},
                 "pattern": {"type": "string"},
                 "paths": {"type": "array", "items": {"type": "string"}}
             }
@@ -996,7 +1013,7 @@ type = "string_list"
             [command]
             common = ["/bin/rg", "--color=never"]
             [arguments]
-            before_double_dash = ["ignore_case", "limit", "mode"]
+            before_double_dash = ["ignore_case", "limit", "mode", "filter"]
             after_double_dash = ["pattern", "paths"]
             [arguments.ignore_case]
             type = "boolean_flag"
@@ -1007,6 +1024,9 @@ type = "string_list"
             [arguments.mode]
             type = "enum"
             values = { files = "-l", count = "-c" }
+            [arguments.filter]
+            type = "string_option"
+            flag = "-g"
             [arguments.pattern]
             type = "string"
             [arguments.paths]
@@ -1016,7 +1036,7 @@ type = "string_list"
         .unwrap();
         let process = ProcessTool::parse(raw, Path::new("/tmp/example-tool"), &schema).unwrap();
         let arguments = serde_json::json!({
-            "ignore_case": true, "limit": 3, "mode": "files",
+            "ignore_case": true, "limit": 3, "mode": "files", "filter": "literal [name]",
             "pattern": "two words", "paths": ["-literal", "dir with spaces"]
         });
         assert_eq!(
@@ -1028,12 +1048,16 @@ type = "string_list"
                 "-m",
                 "3",
                 "-l",
+                "-g",
+                "literal [name]",
                 "--",
                 "two words",
                 "-literal",
                 "dir with spaces"
             ]
         );
+        let invalid = serde_json::json!({"pattern": "ok", "filter": "-unsafe"});
+        assert!(process.expand_arguments(&invalid, &schema).is_err());
         assert!(
             process
                 .expand_arguments(&serde_json::json!({"paths": []}), &schema)
