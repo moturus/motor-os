@@ -249,6 +249,8 @@ explicit `[[bin]]` targets, and honors `package.autobins = false`. `[lib]` and
 `[[bin]]` accept the Cargo-defaulted `name`, `path`, and `test` fields needed
 by the supported packages. Lorry discovers top-level `tests/*.rs` integration
 crates automatically.
+`lib.doc-scrape-examples` accepts a boolean as inert documentation metadata;
+it does not change build, check, or test units.
 Dependency manifests may describe up to 1,024 integration-test targets;
 these targets are not built when that package is only a dependency.
 

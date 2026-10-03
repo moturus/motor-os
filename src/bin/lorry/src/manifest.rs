@@ -1287,11 +1287,19 @@ fn parse_library(
     for (key, item) in table.iter() {
         if !matches!(
             key,
-            "name" | "path" | "test" | "doctest" | "crate-type" | "bench" | "doc" | "proc-macro"
+            "name"
+                | "path"
+                | "test"
+                | "doctest"
+                | "crate-type"
+                | "bench"
+                | "doc"
+                | "proc-macro"
+                | "doc-scrape-examples"
         ) {
             return Err(unsupported_key(path, document, item, &format!("lib.{key}")));
         }
-        if matches!(key, "bench" | "doc") && item.as_bool().is_none() {
+        if matches!(key, "bench" | "doc" | "doc-scrape-examples") && item.as_bool().is_none() {
             return Err(type_error(
                 path,
                 document.line_of_item(item),
@@ -3208,6 +3216,26 @@ codegen-units = 1
         assert_eq!(manifest.name, "hinted");
         assert!(manifest.dependencies.is_empty());
         assert!(manifest.features.is_empty());
+    }
+
+    #[test]
+    fn library_documentation_scraping_is_inert_for_builds() {
+        let root = Path::new("/dependency");
+        let path = root.join("Cargo.toml");
+        for value in ["true", "false", "\"invalid\""] {
+            let source = format!("{RED}\n[lib]\ndoc-scrape-examples = {value}\n");
+            let document = Document::parse(&path, "Cargo manifest", source).unwrap();
+            for mode in [ManifestMode::Root, ManifestMode::Dependency] {
+                let result = Manifest::parse_document(root, &path, &document, mode);
+                if value == "\"invalid\"" {
+                    assert!(result.unwrap_err().render().contains("a boolean"));
+                } else {
+                    let library = result.unwrap().library.unwrap();
+                    assert_eq!(library.path, root.join("src/lib.rs"));
+                    assert_eq!(library.crate_types, ["lib"]);
+                }
+            }
+        }
     }
 
     #[test]
