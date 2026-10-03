@@ -31,6 +31,10 @@ subsequent Lorry commands from entering the artifact tree while a child
 survives a killed parent.
 The native suite includes a Motor process-lifetime probe that kills Lorry
 during compilation and checks that its child is gone before recovery.
+The first native run found that Motor's child kill is asynchronous: the
+compiler was still active at the immediate check after Lorry exited.
+Milestone 2 remains open pending a recovery barrier and revised native probe;
+the proposed choice is documented in the details file.
 Published check units retain and replay compiler messages, keeping
 rust-analyzer flycheck diagnostics visible when those units are reused.
 

@@ -611,6 +611,35 @@ a new artifact database for this feature.
 
 ### Cancellation
 
+Native evidence on 2026-10-03: the controlled Motor fixture killed Lorry
+while its compiler wrapper was blocked. `Child::wait` returned for Lorry, but
+the wrapper's PID was still active at the immediate check. The kernel's
+`KProcessStats::process_dropped` posts child kills asynchronously and retains
+the parent process-stat node while descendants still exist. This explains
+why parent exit alone is not a safe point to discard staging or start another
+writer. The native gate stopped at this assertion; it has not proved eventual
+child termination or recovery yet. Linux's child-held file lease contract
+passed.
+
+The proposed Motor-only barrier keeps an atomic owner-PID record outside
+`target/lorry/`, written under the artifact lock before any writer child is
+spawned and removed before normal lock release. A later command that finds a
+record from a killed owner holds the artifact lock while checking the retained
+Motor process tree and waits until that owner's descendants are no longer
+active. It then cleans only Lorry-owned abandoned staging and continues.
+The native probe must block a compiler, kill Lorry, start the next Lorry
+immediately, and verify that publication waits for the compiler's exit and
+then recovers the edited result. The marker must distinguish stale records
+across PID reuse or reboot; unresolved identity or process-list errors must
+fail closed. This needs no change outside Lorry and adds no child process to
+ordinary builds.
+
+An alternative is a Lorry-owned supervisor for compiler and build-script
+children. It can hold a lease until each child exits, but requires another
+process boundary and handoff protocol for every build and has a larger
+performance and complexity cost. The choice between this and the process-tree
+barrier needs review before implementation.
+
 A released lock does not itself prove that a killed command's compiler
 or build-script children have stopped writing. Track child completion and
 staging ownership, and clean abandoned staging only when no live writer
