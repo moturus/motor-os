@@ -279,6 +279,10 @@ impl EventSink for AskSink {
                 eprint!("{text}");
                 std::io::stderr().flush()
             }
+            StreamEvent::Notice(text) => {
+                eprintln!("gears: {text}");
+                Ok(())
+            }
         }
     }
 }

@@ -289,6 +289,7 @@ impl Completion {
 pub enum StreamEvent {
     Text(String),
     Reasoning(String),
+    Notice(String),
 }
 
 #[cfg(test)]

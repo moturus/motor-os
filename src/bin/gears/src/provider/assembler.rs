@@ -192,6 +192,7 @@ mod tests {
             match event {
                 StreamEvent::Text(text) => self.content.push(text),
                 StreamEvent::Reasoning(text) => self.reasoning.push(text),
+                StreamEvent::Notice(_) => {}
             }
             Ok(())
         }

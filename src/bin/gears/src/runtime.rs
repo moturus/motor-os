@@ -1061,6 +1061,7 @@ impl EventSink for RuntimeSink<'_> {
         let event = match event {
             StreamEvent::Text(text) => Event::Text(text),
             StreamEvent::Reasoning(text) => Event::Reasoning(text),
+            StreamEvent::Notice(text) => Event::Notice(text),
         };
         self.observer.event(event).map_err(std::io::Error::other)
     }
