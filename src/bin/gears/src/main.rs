@@ -14,7 +14,7 @@ use gears::provider::{
     ApiKey, Endpoint, EventSink, KEY_ENV, Message, OpenAiCompat, Provider, Request, StreamEvent,
 };
 use gears::run_lock::DirectoryLock;
-use gears::runtime::Runtime;
+use gears::runtime::{ProviderFactory, Runtime};
 use gears::session::{Session, Store};
 
 fn main() -> ExitCode {
@@ -117,12 +117,22 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(
             std::io::stdout().is_terminal(),
         )
     })?;
-    let selected_provider = selected_provider(args, config)?;
-    let key = load_key(&selected_provider, key_from_env)?;
+    let store = Store::new(&workspace)?;
+    let mut session = open_session(&store, args)?;
+    let provider_name = args
+        .provider
+        .clone()
+        .or_else(|| session.provider())
+        .unwrap_or_else(|| config.default_provider.clone());
+    let selected_provider = config
+        .provider(&provider_name)
+        .ok_or_else(|| format!("unknown provider {provider_name:?}"))?;
+    let key = load_key(&selected_provider, key_from_env.clone())?;
     let provider: Arc<dyn Provider> =
         Arc::new(connect(config, &selected_provider, &key, args.verbosity)?);
-    let store = Store::new(&workspace)?;
-    let session = open_session(&store, args)?;
+    if session.provider().as_deref() != Some(&provider_name) {
+        session.set_provider(&provider_name)?;
+    }
     let model = args
         .model
         .clone()
@@ -132,6 +142,16 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(
         .or_else(|| config.models.first().cloned())
         .ok_or("no model selected; use --model or provider.model in the config")?;
     let mut runtime = Runtime::new(provider, store, session, config, model)?;
+    let factory_config = config.clone();
+    let verbosity = args.verbosity;
+    let factory: ProviderFactory = Arc::new(move |name| {
+        let selected = factory_config
+            .provider(name)
+            .ok_or_else(|| format!("unknown provider {name:?}"))?;
+        let key = load_key(&selected, key_from_env.clone())?;
+        Ok(Arc::new(connect(&factory_config, &selected, &key, verbosity)?) as Arc<dyn Provider>)
+    });
+    runtime.install_provider_factory(factory);
     let interactive = !one_shot;
     let result = match selected {
         gears::ui::select::Selected::Line => gears::ui::line::run(

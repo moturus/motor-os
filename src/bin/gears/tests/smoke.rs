@@ -194,6 +194,63 @@ fn one_shot_uses_the_selected_named_provider() {
 }
 
 #[test]
+fn continued_session_uses_its_recorded_provider() {
+    let root = fixture("continued-provider");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let response = || {
+        sse_response(&[
+            r#"{"choices":[{"index":0,"delta":{"content":"local answer"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+        ])
+    };
+    let local = MockServer::start(vec![response(), response()]).unwrap();
+    let remote = MockServer::start_one(sse_response(&[])).unwrap();
+    let config = root.join("gears.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "version = 1\ndefault_provider = 'remote'\ndefault_model = 'test/model'\n[net]\negress_allowlist = ['127.0.0.1']\nplain_http_allowlist = ['127.0.0.1']\n[providers.local]\nbase_url = '{}'\n[providers.remote]\nbase_url = '{}'\n",
+            local.url("/v1"),
+            remote.url("/v1")
+        ),
+    )
+    .unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_gears"));
+        command
+            .env("HOME", &root)
+            .env("OPENROUTER_API_KEY", "test-key")
+            .args(["--ui", "line", "--config"])
+            .arg(&config)
+            .arg("--workspace")
+            .arg(&workspace);
+        command
+    };
+    let first = command()
+        .args(["--provider", "local", "-p", "one"])
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = command()
+        .args(["--continue", "-p", "two"])
+        .output()
+        .unwrap();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(local.requests().len(), 2);
+    assert!(remote.requests().is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn unattended_sh_is_denied_and_the_turn_continues() {
     let root = fixture("deny");
     let workspace = root.join("workspace");
