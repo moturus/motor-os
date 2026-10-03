@@ -8,6 +8,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::ToolDirectory;
+use crate::process::{self, Cancellation, Stream};
+use crate::provider::KEY_ENV;
 use crate::state::StateRoot;
 
 #[derive(Debug, Clone)]
@@ -89,6 +91,72 @@ impl Registry {
 }
 
 impl Tool {
+    pub fn execute(
+        &self,
+        arguments: &str,
+        workspace: &Path,
+        session_id: &str,
+        session_path: Option<&Path>,
+        cancellation: &Cancellation,
+        observer: &mut dyn FnMut(Stream, &str),
+    ) -> Result<process::Output, process::RunError> {
+        let values: Value = serde_json::from_str(arguments).map_err(|error| process::RunError {
+            detail: format!("invalid arguments for {}: {error}", self.name),
+            started: false,
+        })?;
+        let mut command = self
+            .process
+            .expand_arguments(&values, &self.parameters)
+            .map_err(|detail| process::RunError {
+                detail,
+                started: false,
+            })?;
+        let program = command.remove(0);
+        let program = if let Some(relative) = program.strip_prefix("./") {
+            self.directory.join(relative)
+        } else if program == "gears-batteries" {
+            let executable = std::env::current_exe().map_err(|error| process::RunError {
+                detail: format!("cannot locate Gears executable: {error}"),
+                started: false,
+            })?;
+            executable.with_file_name("gears-batteries")
+        } else {
+            PathBuf::from(program)
+        };
+        let mut env = vec![
+            (
+                "GEARS_TOOL_DIR".to_string(),
+                self.directory.display().to_string(),
+            ),
+            ("GEARS_TOOL_NAME".to_string(), self.name.clone()),
+            (
+                "GEARS_WORKSPACE".to_string(),
+                workspace.display().to_string(),
+            ),
+            ("GEARS_SESSION_ID".to_string(), session_id.to_string()),
+        ];
+        if let Some(path) = session_path {
+            env.push(("GEARS_SESSION_PATH".to_string(), path.display().to_string()));
+        }
+        process::run(
+            &process::Request {
+                program: program.display().to_string(),
+                args: command,
+                cwd: workspace.to_path_buf(),
+                stdin: self
+                    .process
+                    .stdin_arguments
+                    .then(|| arguments.as_bytes().to_vec()),
+                timeout: self.process.timeout,
+                max_output_bytes: self.process.max_output_bytes,
+                env,
+                remove_env: vec![KEY_ENV.to_string()],
+            },
+            cancellation,
+            observer,
+        )
+    }
+
     fn load(directory: &Path, enabled_by_default: bool) -> Result<Self, String> {
         let raw: RawManifest = toml::from_str(&read_file(directory, "tool.toml")?)
             .map_err(|error| format!("{}/tool.toml: {error}", directory.display()))?;
@@ -757,6 +825,52 @@ mod tests {
             .unwrap();
         assert_eq!(before, ["--release"]);
         assert!(after.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mapped_tool_runs_with_one_argument_containing_spaces() {
+        let schema = serde_json::json!({
+            "type": "object", "required": ["text"],
+            "properties": {"text": {"type": "string"}}
+        });
+        let raw: RawProcess = toml::from_str(
+            r#"
+            [command]
+            common = ["/usr/bin/printf", "%s"]
+            [arguments]
+            after_double_dash = ["text"]
+            [arguments.text]
+            type = "string"
+        "#,
+        )
+        .unwrap();
+        let directory = std::env::temp_dir();
+        let tool = Tool {
+            name: "print".to_string(),
+            description: "Print text".to_string(),
+            parameters: schema.clone(),
+            prompt: None,
+            display: None,
+            read_only: true,
+            directory: directory.clone(),
+            enabled_by_default: true,
+            process: ProcessTool::parse(raw, &directory, &schema).unwrap(),
+        };
+        let workspace = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let output = tool
+            .execute(
+                r#"{"text":"two words"}"#,
+                &workspace,
+                "session-test",
+                None,
+                &Cancellation::new(),
+                &mut |_, _| {},
+            )
+            .unwrap();
+        assert_eq!(output.stdout, "two words");
+        assert!(output.success());
+        assert!(!output.timed_out && !output.cancelled);
     }
 
     #[test]
