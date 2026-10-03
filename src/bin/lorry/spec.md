@@ -1020,6 +1020,12 @@ the build even when the child later fails. Child stdout remains plain text.
 `test --no-run` emits harness artifact paths with `profile.test = true`
 without adding human path lines to the Cargo stream.
 
+Programs started by `run` and ordinary test harnesses receive `CARGO`,
+`CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH`, and the selected package's
+`CARGO_PKG_*` values. Integration harnesses also receive `CARGO_BIN_EXE_*`
+for the built programs. `run` preserves the caller's working directory;
+harnesses use their package root. Test bundles retain their launcher rules.
+
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected
 library when present. Its hashed executable is installed at the selected

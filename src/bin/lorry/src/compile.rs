@@ -741,9 +741,26 @@ fn rustc_environment(
     crate_name: &str,
     dependency_directories: &[DependencyDirectory],
 ) -> Result<BTreeMap<String, OsString>> {
+    let mut values = package_environment(cargo, manifest);
+    value(&mut values, "CARGO_CRATE_NAME", crate_name);
+    let dynamic = std::env::join_paths(
+        dependency_directories
+            .iter()
+            .filter(|directory| directory.compile_kind == CompileKind::Host)
+            .map(|directory| &directory.path),
+    )
+    .map_err(|error| {
+        Error::failure(format!(
+            "failed to construct rustc dynamic-library search path: {error}"
+        ))
+    })?;
+    value(&mut values, dynamic_library_path_variable(), dynamic);
+    Ok(values)
+}
+
+pub(crate) fn package_environment(cargo: &Path, manifest: &Manifest) -> BTreeMap<String, OsString> {
     let mut values = BTreeMap::new();
     value(&mut values, "CARGO", cargo.as_os_str());
-    value(&mut values, "CARGO_CRATE_NAME", crate_name);
     value(&mut values, "CARGO_MANIFEST_DIR", manifest.root.as_os_str());
     value(
         &mut values,
@@ -786,19 +803,7 @@ fn rustc_environment(
         version.patch.to_string(),
     );
     value(&mut values, "CARGO_PKG_VERSION_PRE", &version.pre);
-    let dynamic = std::env::join_paths(
-        dependency_directories
-            .iter()
-            .filter(|directory| directory.compile_kind == CompileKind::Host)
-            .map(|directory| &directory.path),
-    )
-    .map_err(|error| {
-        Error::failure(format!(
-            "failed to construct rustc dynamic-library search path: {error}"
-        ))
-    })?;
-    value(&mut values, dynamic_library_path_variable(), dynamic);
-    Ok(values)
+    values
 }
 
 pub(crate) fn lint_arguments(manifest: &Manifest) -> Vec<OsString> {

@@ -113,6 +113,70 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
 [ ! -e "$WORK/project/target/lorry/debug/app" ]
 [ -x "$WORK/project/target/lorry/debug/tool" ]
 
+# Runtime metadata comes from the selected member, while run keeps its caller.
+cat >"$WORK/project/app/src/main.rs" <<'EOF'
+fn environment() {
+    assert_eq!(std::env::var_os("CARGO").unwrap(), std::env::var_os("LORRY_EXPECT_CARGO").unwrap());
+    for (name, expected) in [
+        ("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR")),
+        ("CARGO_MANIFEST_PATH", env!("CARGO_MANIFEST_PATH")),
+        ("CARGO_PKG_NAME", env!("CARGO_PKG_NAME")),
+        ("CARGO_PKG_VERSION", env!("CARGO_PKG_VERSION")),
+        ("CARGO_PKG_VERSION_MAJOR", env!("CARGO_PKG_VERSION_MAJOR")),
+        ("CARGO_PKG_VERSION_MINOR", env!("CARGO_PKG_VERSION_MINOR")),
+        ("CARGO_PKG_VERSION_PATCH", env!("CARGO_PKG_VERSION_PATCH")),
+        ("CARGO_PKG_VERSION_PRE", env!("CARGO_PKG_VERSION_PRE")),
+        ("CARGO_PKG_AUTHORS", env!("CARGO_PKG_AUTHORS")),
+        ("CARGO_PKG_DESCRIPTION", env!("CARGO_PKG_DESCRIPTION")),
+        ("CARGO_PKG_HOMEPAGE", env!("CARGO_PKG_HOMEPAGE")),
+        ("CARGO_PKG_LICENSE", env!("CARGO_PKG_LICENSE")),
+        ("CARGO_PKG_LICENSE_FILE", env!("CARGO_PKG_LICENSE_FILE")),
+        ("CARGO_PKG_README", env!("CARGO_PKG_README")),
+        ("CARGO_PKG_REPOSITORY", env!("CARGO_PKG_REPOSITORY")),
+        ("CARGO_PKG_RUST_VERSION", env!("CARGO_PKG_RUST_VERSION")),
+    ] {
+        assert_eq!(std::env::var(name).unwrap(), expected, "{name}");
+    }
+}
+
+fn main() {
+    if std::env::args().any(|arg| arg == "--environment") {
+        environment();
+        assert_eq!(std::env::current_dir().unwrap(), std::path::Path::new(&std::env::var_os("LORRY_EXPECT_CWD").unwrap()));
+    }
+    println!("app");
+}
+
+#[test]
+fn harness_environment() {
+    environment();
+    assert_eq!(std::env::current_dir().unwrap(), std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+}
+EOF
+mkdir -p "$WORK/project/app/tests"
+cat >"$WORK/project/app/tests/environment.rs" <<'EOF'
+#[test]
+fn integration_environment() {
+    assert_eq!(std::env::current_dir().unwrap(), std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert_eq!(std::env::var("CARGO_MANIFEST_PATH").unwrap(), env!("CARGO_MANIFEST_PATH"));
+    assert_eq!(std::env::var("CARGO_BIN_EXE_app").unwrap(), env!("CARGO_BIN_EXE_app"));
+    assert_eq!(std::env::var_os("CARGO").unwrap(), std::env::var_os("LORRY_EXPECT_CARGO").unwrap());
+}
+EOF
+export LORRY_EXPECT_CARGO="$LORRY"
+(
+    cd "$WORK/project"
+    export LORRY_EXPECT_CWD="$PWD"
+    [ "$(CARGO_PKG_NAME=stale "$LORRY" run -p app -- --environment)" = app ]
+    [ "$(CARGO_PKG_NAME=stale "$LORRY" run -p app -- --environment)" = app ]
+    "$LORRY" test -p app -- --quiet
+)
+(
+    cd "$WORK/project/app"
+    export LORRY_EXPECT_CWD="$PWD"
+    [ "$("$LORRY" run -- --environment)" = app ]
+)
+
 # Cargo rejects force-warn in a manifest, in both supported lint forms.
 cp "$WORK/project/app/Cargo.toml" "$WORK/app-baseline.toml"
 for declaration in 'unused = "force-warn"' \

@@ -144,6 +144,7 @@ pub fn run_child(
     program: &OsStr,
     arguments: &[OsString],
     current_dir: &Path,
+    environment: &BTreeMap<String, OsString>,
     verbose: bool,
 ) -> Result<i32> {
     if verbose {
@@ -151,6 +152,7 @@ pub fn run_child(
     }
     let status = Command::new(program)
         .args(arguments)
+        .envs(environment)
         .current_dir(current_dir)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

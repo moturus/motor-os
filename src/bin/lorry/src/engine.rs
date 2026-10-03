@@ -225,7 +225,8 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 let status = run_artifact(
                     artifact,
                     &options.arguments,
-                    &manifest.root,
+                    &current,
+                    &crate::compile::package_environment(&cargo, &manifest),
                     physical_target.as_deref(),
                     &target_options,
                     cli.verbosity,
@@ -399,7 +400,8 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             let status = run_artifact(
                 artifact,
                 &options.arguments,
-                &manifest.root,
+                &current,
+                &crate::compile::package_environment(&cargo, &manifest),
                 physical_target.as_deref(),
                 &target_options,
                 cli.verbosity,
@@ -459,16 +461,22 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     bundle,
                     &options.arguments,
                     &manifest.root,
+                    &BTreeMap::new(),
                     physical_target.as_deref(),
                     &target_options,
                     cli.verbosity,
                 );
+            }
+            let mut environment = crate::compile::package_environment(&cargo, &manifest);
+            for (name, path) in &artifacts.binaries {
+                environment.insert(format!("CARGO_BIN_EXE_{name}"), path.as_os_str().to_owned());
             }
             for harness in &artifacts.harnesses {
                 let status = run_artifact(
                     harness,
                     &options.arguments,
                     &manifest.root,
+                    &environment,
                     physical_target.as_deref(),
                     &target_options,
                     cli.verbosity,
@@ -2336,7 +2344,8 @@ pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits
 fn run_artifact(
     artifact: &Path,
     arguments: &[String],
-    package_root: &Path,
+    current_dir: &Path,
+    environment: &BTreeMap<String, OsString>,
     physical_target: Option<&str>,
     target_options: &TargetOptions,
     verbosity: Verbosity,
@@ -2361,7 +2370,8 @@ fn run_artifact(
     process::run_child(
         program,
         &child_arguments,
-        package_root,
+        current_dir,
+        environment,
         verbosity == Verbosity::Verbose,
     )
 }
