@@ -2636,6 +2636,14 @@ All twelve planner tests and strict Clippy pass in
 larger than the preferred size because its linked cycle/script/program graph
 needs the full paired oracle fixture.
 
+Integration compiler environments now look up program paths by owning package
+identity. A focused regression puts the same program name and an extra foreign
+program in another package's map, verifies the owner's path and absence of the
+foreign variable, and rejects a missing owner map. The first compile caught a
+private-field access in the new assertion, preserved in
+`/tmp/lorry-m8-package-program-env-unit.log`; the corrected test and strict Clippy
+pass in `/tmp/lorry-m8-package-program-env-{unit-fixed,clippy}.log`.
+
 Member target-edge wiring now shares one helper for script outputs, ordinary
 and development Rust dependencies, and the owning library. Ordinary binaries
 use it with development inputs disabled; the following harness patches reuse

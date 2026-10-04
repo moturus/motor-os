@@ -1580,7 +1580,20 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         manifests.insert(library.package.clone(), manifest.clone());
         let binary_path = fixture.0.join("output/root");
-        let binary_paths = BTreeMap::from([("root".to_owned(), binary_path.clone())]);
+        let other_package = graph.packages.keys().next().unwrap().clone();
+        let binary_paths = BTreeMap::from([
+            (
+                library.package.clone(),
+                BTreeMap::from([("root".to_owned(), binary_path.clone())]),
+            ),
+            (
+                other_package.clone(),
+                BTreeMap::from([
+                    ("root".to_owned(), fixture.0.join("other/root")),
+                    ("foreign".to_owned(), fixture.0.join("other/foreign")),
+                ]),
+            ),
+        ]);
         let temp_dir = fixture.0.join("output/tmp");
         let command_options = CommandOptions {
             cargo: Path::new("/cargo"),
@@ -1608,7 +1621,18 @@ mod tests {
                 .any(|argument| argument == "--test")
         );
         assert_eq!(invocation.environment["CARGO_BIN_EXE_root"], binary_path);
+        assert!(!invocation.environment.contains_key("CARGO_BIN_EXE_foreign"));
         assert_eq!(invocation.environment["CARGO_TARGET_TMPDIR"], temp_dir);
+        let missing_package =
+            BTreeMap::from([(other_package.clone(), binary_paths[&other_package].clone())]);
+        let missing_options = CommandOptions {
+            integration_binaries: Some(&missing_package),
+            ..command_options
+        };
+        let error =
+            dependency_rustc_invocation(&focused, &manifests, integration, &missing_options)
+                .unwrap_err();
+        assert!(error.to_string().contains("no program environment"));
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let output = Command::new(cargo)
             .args([

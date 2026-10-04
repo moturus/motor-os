@@ -1235,7 +1235,7 @@ fn build_inner(
         options.selects_tests() && !build.manifest.integration_tests.is_empty()
     });
     let integration_binaries = (selected_integration || check_integration).then(|| {
-        build
+        let binaries = build
             .manifest
             .binaries
             .iter()
@@ -1252,7 +1252,8 @@ fn build_inner(
                     },
                 )
             })
-            .collect::<BTreeMap<_, _>>()
+            .collect::<BTreeMap<_, _>>();
+        BTreeMap::from([(selected_root.package.clone(), binaries)])
     });
     let integration_temp_dir = (selected_integration || check_integration).then(|| {
         if check_integration {

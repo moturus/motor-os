@@ -62,7 +62,7 @@ pub struct Options<'a> {
     pub physical_target: Option<&'a str>,
     pub host_linker: Option<&'a Path>,
     pub target_linker: Option<&'a Path>,
-    pub integration_binaries: Option<&'a BTreeMap<String, PathBuf>>,
+    pub integration_binaries: Option<&'a BTreeMap<PackageKey, BTreeMap<String, PathBuf>>>,
     pub integration_temp_dir: Option<&'a Path>,
     pub release: bool,
     pub quiet: bool,

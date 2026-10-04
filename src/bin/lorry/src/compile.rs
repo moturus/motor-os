@@ -22,7 +22,7 @@ pub struct CommandOptions<'a> {
     pub physical_target: Option<&'a str>,
     pub host_linker: Option<&'a Path>,
     pub target_linker: Option<&'a Path>,
-    pub integration_binaries: Option<&'a BTreeMap<String, PathBuf>>,
+    pub integration_binaries: Option<&'a BTreeMap<PackageKey, BTreeMap<String, PathBuf>>>,
     pub integration_temp_dir: Option<&'a Path>,
     pub verbose: bool,
 }
@@ -479,6 +479,7 @@ pub fn dependency_rustc_invocation_with_build_output(
     if key.kind == UnitKind::IntegrationHarness {
         let binaries = options
             .integration_binaries
+            .and_then(|packages| packages.get(&key.package))
             .ok_or_else(|| Error::failure("integration harness has no program environment"))?;
         for binary in &manifest.binaries {
             let path = binaries.get(&binary.name).ok_or_else(|| {
