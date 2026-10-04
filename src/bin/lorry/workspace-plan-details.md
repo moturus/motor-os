@@ -1403,6 +1403,18 @@ remains 164, and no policy limit, timeout, or external source was changed.
 Temporary policy diagnostics were removed. Cargo file-list comparison and
 strict Clippy passed in `/tmp/lorry-m5-direct-walker-{unit,clippy}.log`.
 
+The next full run failed in 31 seconds in the executable-link unit test
+(`/tmp/lorry-m5-full-direct-walker.log`). Its `/bin/true` fixture was copied
+in the parallel test process. A concurrent fork can inherit the copy's
+writable descriptor, leaving the supposedly completed source inode busy.
+The targeted reproducer in `/tmp/lorry-m5-executable-fixture-diagnosis/`
+gets `ETXTBSY` while a stopped child holds that descriptor; the same hard link
+executes after that child releases it. Both executable-link tests now create
+their completed source in an isolated helper process. Publication, inode,
+mode, symlink, and held-child execution assertions are unchanged. Fourteen
+focused atomic tests passed in `/tmp/lorry-m5-executable-fixture-tests.log`.
+This is a test-only correction; no retry or product publication change.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,

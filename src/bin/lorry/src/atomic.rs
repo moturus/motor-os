@@ -700,6 +700,33 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn completed_executable_fixture_child() {
+        let Some(path) = std::env::var_os("LORRY_TEST_COMPLETED_EXECUTABLE") else {
+            return;
+        };
+        fs::copy("/bin/true", path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn completed_executable(path: &Path) {
+        // Other parallel tests can fork and inherit a fixture writer. Create
+        // the completed source in a child whose descriptors cannot leak there.
+        assert!(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "atomic::tests::completed_executable_fixture_child"
+                ])
+                .env("LORRY_TEST_COMPLETED_EXECUTABLE", path)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn linked_executable_runs_while_a_fork_child_is_held_before_exec() {
         struct HeldChild(libc::pid_t);
         impl Drop for HeldChild {
@@ -715,7 +742,7 @@ mod tests {
         let root = temp_root("inherited-writer");
         let source = root.join("completed");
         let destination = root.join("program");
-        fs::copy("/bin/true", &source).unwrap();
+        completed_executable(&source);
         let staging = AtomicFile::from_executable(&source, &destination).unwrap();
         // Sandbox and child-lease pre-exec hooks use this same fork window.
         let child = unsafe { libc::fork() };
@@ -748,7 +775,7 @@ mod tests {
         let root = temp_root("executable-link");
         let source = root.join("completed");
         let destination = root.join("program");
-        fs::copy("/bin/true", &source).unwrap();
+        completed_executable(&source);
         fs::write(&destination, b"old").unwrap();
         {
             let staging = AtomicFile::from_executable(&source, &destination).unwrap();
