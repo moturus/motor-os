@@ -14,6 +14,7 @@ const DEFAULT_RECENT_TAIL: u64 = 20_000;
 pub struct HookConfig {
     pub name: String,
     pub command: Vec<String>,
+    pub events: Option<Vec<String>>,
     pub timeout: Duration,
     pub max_output_bytes: usize,
 }
@@ -168,6 +169,7 @@ struct RawContext {
 struct RawHook {
     name: String,
     command: Vec<String>,
+    events: Option<Vec<String>>,
     timeout_seconds: Option<u64>,
     max_output_bytes: Option<usize>,
 }
@@ -393,6 +395,17 @@ impl Config {
             if hook.command.is_empty() || hook.command[0].is_empty() {
                 return Err(format!("hook {:?} has no command", hook.name));
             }
+            if let Some(events) = &hook.events {
+                let mut names = std::collections::HashSet::new();
+                for event in events {
+                    if !crate::hooks::EVENTS.contains(&event.as_str()) || !names.insert(event) {
+                        return Err(format!(
+                            "hook {:?}: invalid or duplicate event {event:?}",
+                            hook.name
+                        ));
+                    }
+                }
+            }
             let timeout = bounded_seconds(
                 "hooks.timeout_seconds",
                 hook.timeout_seconds.unwrap_or(30),
@@ -409,6 +422,7 @@ impl Config {
             hooks.push(HookConfig {
                 name: hook.name,
                 command: hook.command,
+                events: hook.events,
                 timeout,
                 max_output_bytes,
             });
@@ -717,6 +731,30 @@ command = ["two"]
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn hook_event_filters_are_explicit_and_validated() {
+        let all = serde_json::to_string(crate::hooks::EVENTS).unwrap();
+        assert!(
+            Config::parse(&format!(
+                "version = 1\n[[hooks]]\nname = 'policy'\ncommand = ['/hook']\nevents = {all}"
+            ))
+            .is_ok()
+        );
+        let config = Config::parse("version = 1\n[[hooks]]\nname = 'policy'\ncommand = ['/hook']\nevents = ['permission', 'tool_result']").unwrap();
+        assert_eq!(
+            config.hooks[0].events.as_deref().unwrap(),
+            ["permission", "tool_result"]
+        );
+        for events in ["['typo']", "['permission', 'permission']"] {
+            assert!(Config::parse(&format!("version = 1\n[[hooks]]\nname = 'policy'\ncommand = ['/hook']\nevents = {events}")).is_err());
+        }
+        let empty = Config::parse(
+            "version = 1\n[[hooks]]\nname = 'policy'\ncommand = ['/hook']\nevents = []",
+        )
+        .unwrap();
+        assert_eq!(empty.hooks[0].events, Some(Vec::new()));
     }
 
     #[test]

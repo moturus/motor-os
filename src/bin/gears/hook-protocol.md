@@ -6,6 +6,11 @@ object to stdin, closes stdin, and reads one bounded JSON object from stdout.
 Stderr is shown as a diagnostic. Hooks inherit the user's authority and the
 selected workspace, but never inherit the provider credential.
 
+A hook configuration may select `events = [...]`. Omission receives all events;
+an empty list receives none. Unknown or duplicate event names are rejected.
+Unsubscribed events do not start a process, including `initialize`; hooks that
+register tools must subscribe to both `initialize` and `tool_execute`.
+
 Every event has this envelope:
 
     {

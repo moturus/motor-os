@@ -13,6 +13,26 @@ use crate::provider::{Message, ToolCall, ToolSpec};
 use crate::session::{HookState, Session};
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const EVENTS: &[&str] = &[
+    "initialize",
+    "session_start",
+    "session_end",
+    "entry",
+    "turn_start",
+    "input",
+    "context",
+    "permission",
+    "tool_execute",
+    "tool_result",
+    "before_stop",
+    "turn_end",
+    "before_compact",
+    "after_compact",
+    "model_change",
+    "provider_change",
+    "command",
+    "answer",
+];
 
 #[derive(Serialize)]
 struct Event<'a> {
@@ -270,6 +290,7 @@ impl Manager {
             "kind": "hook",
             "owner": config.name,
             "command": config.command,
+            "events": config.events,
             "timeout_ms": config.timeout.as_millis(),
             "max_output_bytes": config.max_output_bytes,
             "spec": spec,
@@ -397,6 +418,14 @@ impl Manager {
         notice: &mut dyn FnMut(String),
     ) -> Result<Response, String> {
         let hook = &self.hooks[index];
+        if hook
+            .config
+            .events
+            .as_ref()
+            .is_some_and(|events| !events.iter().any(|event| event == event_name))
+        {
+            return Ok(Response::default());
+        }
         let event = Event {
             protocol_version: PROTOCOL_VERSION,
             event: event_name,
@@ -547,6 +576,7 @@ mod tests {
         HookConfig {
             name: name.to_string(),
             command: vec!["sh".to_string(), "-c".to_string(), script.to_string()],
+            events: None,
             timeout,
             max_output_bytes: 4096,
         }
@@ -753,5 +783,68 @@ esac"#
             );
             assert!(notices.iter().any(|notice| notice.contains("denying")));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_subscribed_events_start_the_hook() {
+        let (workspace, mut session) = fixture("event-filter");
+        let log = workspace.join("events");
+        let script = format!(
+            "cat >> '{}'; printf '\\n' >> '{}'; printf '{{\"decision\":\"allow\"}}'",
+            log.display(),
+            log.display()
+        );
+        let mut config = hook("policy", &script, std::time::Duration::from_secs(2));
+        config.events = Some(vec!["permission".into()]);
+        let manager = Manager::initialize(
+            vec![config],
+            workspace.clone(),
+            &mut session,
+            &Cancellation::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(!log.exists());
+        manager
+            .transform_input(
+                "unchanged".into(),
+                &mut session,
+                &Cancellation::new(),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(!log.exists());
+        assert_eq!(
+            manager.permission(
+                &ToolCall::new("c1", "sh", "{}"),
+                &mut session,
+                &Cancellation::new(),
+                &mut |_| {}
+            ),
+            Decision::Allow
+        );
+        let events = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(events.lines().count(), 1);
+        assert!(events.contains("\"event\":\"permission\""));
+        let mut config = hook("disabled", "exit 1", std::time::Duration::from_secs(2));
+        config.events = Some(Vec::new());
+        let manager = Manager::initialize(
+            vec![config],
+            workspace,
+            &mut session,
+            &Cancellation::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            manager.permission(
+                &ToolCall::new("c2", "sh", "{}"),
+                &mut session,
+                &Cancellation::new(),
+                &mut |_| {}
+            ),
+            Decision::Ask
+        );
     }
 }

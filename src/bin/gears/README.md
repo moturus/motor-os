@@ -82,8 +82,13 @@ Hooks are listed in execution order:
     [[hooks]]
     name = "project_policy"
     command = ["/absolute/path/to/hook", "--json"]
+    events = ["permission", "tool_result"]
     timeout_seconds = 30
     max_output_bytes = 1048576
+
+Omitting `events` receives every event. An explicit list starts the hook only
+for those events; `events = []` disables its invocations. Include `initialize`
+to register prompt fragments or tools, and `tool_execute` to execute its tools.
 
 Configured hooks are trusted code and run with the user's authority. There is
 no directory scan, shell interpolation, hot reload, or in-process extension

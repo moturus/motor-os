@@ -1626,6 +1626,7 @@ fn saved_denial_prevents_a_permission_hook_from_allowing_the_call() {
             enabled: true,
         }],
         hooks: vec![HookConfig {
+            events: None,
             name: "fixture".into(),
             command: vec!["sh".into(), hook.display().to_string()],
             timeout: Duration::from_secs(2),
@@ -1673,6 +1674,7 @@ fn hook_confirm_asks_even_after_a_saved_allowance() {
             enabled: true,
         }],
         hooks: vec![HookConfig {
+            events: None,
             name: "fixture".into(),
             command: vec!["sh".into(), hook.display().to_string()],
             timeout: Duration::from_secs(2),
@@ -1726,6 +1728,7 @@ esac
     .unwrap();
     let mut config = Config::default();
     config.hooks.push(HookConfig {
+        events: None,
         name: "fixture".to_string(),
         // A parallel spawn can briefly inherit the script's writable fd.
         // Let sh read it without executing that inode (ETXTBSY on Linux).
@@ -1779,6 +1782,7 @@ esac
     .unwrap();
     let mut config = Config::default();
     config.hooks.push(HookConfig {
+        events: None,
         name: "fixture".to_string(),
         command: vec!["sh".to_string(), hook.display().to_string()],
         timeout: Duration::from_secs(2),
@@ -1830,6 +1834,7 @@ esac
     .unwrap();
     let mut config = Config::default();
     config.hooks.push(HookConfig {
+        events: None,
         name: "fixture".to_string(),
         command: vec!["sh".to_string(), hook.display().to_string()],
         timeout: Duration::from_secs(2),
@@ -2320,6 +2325,7 @@ fn lifecycle_hooks_run_after_a_cancelled_turn() {
     .unwrap();
     let mut config = Config::default();
     config.hooks.push(HookConfig {
+        events: None,
         name: "log".to_string(),
         command: vec!["sh".to_string(), hook.display().to_string()],
         timeout: Duration::from_secs(2),
@@ -2408,6 +2414,7 @@ fn cancellation_keeps_the_tool_result_when_a_result_hook_cannot_run() {
     std::fs::write(&hook, "#!/bin/sh\ncat >/dev/null\nprintf '{}'\n").unwrap();
     let mut config = Config::default();
     config.hooks.push(HookConfig {
+        events: None,
         name: "fixture".to_string(),
         command: vec!["sh".to_string(), hook.display().to_string()],
         timeout: Duration::from_secs(2),
@@ -2504,6 +2511,7 @@ fn a_failed_result_hook_preserves_the_completed_call() {
     .unwrap();
     let mut config = Config::default();
     config.hooks.push(HookConfig {
+        events: None,
         name: "fixture".to_string(),
         command: vec!["sh".to_string(), hook.display().to_string()],
         timeout: Duration::from_secs(2),
@@ -2595,6 +2603,7 @@ fn changed_hook_manifest_is_noticed_on_resume() {
 
     let mut config = Config::default();
     config.hooks.push(HookConfig {
+        events: None,
         name: "new_hook".to_string(),
         command: vec![
             "sh".to_string(),
