@@ -5,37 +5,12 @@ mod support;
 
 use std::sync::Arc;
 
-use gears::provider::{Completion, EventSink, Provider, ProviderError, Request};
-use gears::runtime::{Approval, Approver, Permission, Runtime};
+use gears::provider::{Message, Role};
+use gears::runtime::{Event, Runtime};
 use gears::session::Store;
 
-struct Initialize;
-impl Provider for Initialize {
-    fn complete(
-        &self,
-        request: &Request,
-        _: &mut dyn EventSink,
-    ) -> Result<Completion, ProviderError> {
-        assert!(request.tools.iter().any(|tool| tool.name == "todo"));
-        assert!(
-            request
-                .system
-                .iter()
-                .any(|text| text.contains("Fixture instructions:"))
-        );
-        Ok(Completion {
-            content: "initialized".into(),
-            ..Completion::default()
-        })
-    }
-}
-
-struct NoTools;
-impl Approver for NoTools {
-    fn approve(&mut self, _: &Permission) -> Approval {
-        panic!("initialization must not request a tool");
-    }
-}
+#[path = "workflow-smoke/scenario.rs"]
+mod scenario;
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
@@ -46,15 +21,27 @@ fn run() -> Result<(), String> {
     let store = Store::with_root(&fixture.workspace, fixture.state.clone())?;
     let session = store.create(false, None)?;
     let group = session.path().unwrap().parent().unwrap().to_path_buf();
-    let sessions = vec![session.id().to_string()];
+    let mut sessions = vec![session.id().to_string()];
+    let provider = Arc::new(scenario::Scripted::new(&fixture.label));
     let mut runtime = Runtime::new(
-        Arc::new(Initialize),
+        provider.clone(),
         store,
         session,
         &fixture.config,
         "fixture/model".into(),
     )?;
-    runtime.turn(fixture.label.clone(), &mut NoTools, &mut |_| Ok(()))?;
+    eprintln!(
+        "batteries workflow workspace: {}",
+        fixture.workspace.display()
+    );
+    let mut approvals = scenario::Approvals::default();
+    let mut observer = |event| {
+        if let Event::Notice(text) = event {
+            return Err(format!("unexpected workflow notice: {text}"));
+        }
+        Ok(())
+    };
+    runtime.turn(fixture.label.clone(), &mut approvals, &mut observer)?;
     let state = runtime
         .session()
         .hook_state(&fixture.hook)
@@ -65,11 +52,111 @@ fn run() -> Result<(), String> {
             .ok_or("missing prompt snapshot")?
             .to_string(),
     ];
-    assert_eq!(state["turn_number"], 1);
-    assert!(!fixture.workspace.join("checked.rmeta").exists());
+    assert_eq!(state["last_check"]["current"], true);
+    assert_eq!(state["last_check"]["receipt"]["passed"], true);
+    assert!(fixture.workspace.join("checked.rmeta").is_file());
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("notes/a file*")).unwrap(),
+        "literal fixture\n"
+    );
+    assert!(
+        approvals
+            .0
+            .iter()
+            .find(|permission| permission.tool == "check")
+            .unwrap()
+            .detail
+            .contains(&compiler)
+    );
+    let context = gears_batteries::paths::ToolContext::new(
+        fixture.workspace.clone(),
+        fixture.state.clone(),
+        runtime.session().id().into(),
+        runtime.session().path(),
+    )?;
+    let journal = std::fs::read_to_string(context.data_file("turns.jsonl")?)
+        .map_err(|error| error.to_string())?;
+    let recorded: gears_batteries::turns::Turn = serde_json::from_str(journal.trim_end()).unwrap();
+    assert_eq!(
+        (
+            recorded.tool_calls,
+            recorded.execution_errors,
+            recorded.checks.len()
+        ),
+        (7, 0, 1)
+    );
+    assert_eq!(recorded.checks[0]["passed"], true);
+    assert!(
+        recorded
+            .files_written
+            .contains(std::path::Path::new("src/lib.rs"))
+    );
+    runtime.turn("update task list".into(), &mut approvals, &mut observer)?;
+    let selected = runtime
+        .session()
+        .entries()
+        .iter()
+        .find(|entry| {
+            entry.kind == "message"
+                && serde_json::from_value::<Message>(entry.data.clone()).is_ok_and(|message| {
+                    message.role == Role::User && message.text_content() == "update task list"
+                })
+        })
+        .unwrap()
+        .id
+        .clone();
+    assert_eq!(
+        runtime.session().hook_state(&fixture.hook).unwrap()["tasks"]["items"][0]["status"],
+        "completed"
+    );
+    runtime.fork_at(&selected)?;
+    sessions.push(runtime.session().id().to_string());
+    assert_eq!(
+        runtime.session().hook_state(&fixture.hook).unwrap()["tasks"]["items"][0]["status"],
+        "pending"
+    );
+    runtime.new_session(false, None)?;
+    sessions.push(runtime.session().id().to_string());
+    let mut notices = 0;
+    let mut reminder_observer = |event| {
+        if let Event::Notice(text) = event {
+            if text
+                != "before_stop: The workspace changed and no current passing check exists. Run the declared check before finishing; checks provide development evidence, not task acceptance."
+            {
+                return Err(format!("unexpected workflow notice: {text}"));
+            }
+            notices += 1;
+        }
+        Ok(())
+    };
+    runtime.turn(
+        "exercise missing check reminders".into(),
+        &mut approvals,
+        &mut reminder_observer,
+    )?;
+    assert_eq!(notices, 3);
+    assert_eq!(
+        runtime.session().hook_state(&fixture.hook).unwrap()["check_reminders"],
+        3
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 16);
+    let reminders = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .filter(|message| {
+            message
+                .text_content()
+                .starts_with("The workspace changed and no current passing check exists.")
+        })
+        .count();
+    assert_eq!(reminders, 3);
+    assert_eq!(approvals.0.len(), 4);
     drop(runtime);
     fixture.cleanup(&group, &sessions, &snapshots)?;
-    println!("gears batteries initialization ALL PASS");
+    println!("gears batteries workflow ALL PASS");
     Ok(())
 }
 
