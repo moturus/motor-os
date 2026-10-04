@@ -174,6 +174,15 @@ if ! grep -F "limit of 1 (set in \`$TEST_HOME/.config/lorry/lorry.toml\`)" \
     cat "$WORK/limited.err" >&2
     fail "package-limit rejection omitted its cause, setting, or source"
 fi
+cp "$TEST_HOME/.config/lorry/lorry.toml" "$WORK/limit-config-before"
+"$LORRY" metadata --format-version 1 --locked --max-packages 2 \
+    --manifest-path "$LIMITED/app/Cargo.toml" >"$WORK/limit-override.json"
+cmp "$TEST_HOME/.config/lorry/lorry.toml" "$WORK/limit-config-before"
+if "$LORRY" metadata --format-version 1 --locked --max-packages 1 \
+    --manifest-path "$LIMITED/app/Cargo.toml" >"$WORK/limit-override.out" 2>"$WORK/limit-override.err"; then
+    fail "metadata accepted a graph above the one-run package limit"
+fi
+grep -F 'limit of 1 (set by --max-packages)' "$WORK/limit-override.err" >/dev/null
 limited_metadata 2 || {
     cat "$WORK/limited.err" >&2
     fail "the package limit counted the root package"

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use semver::Version;
 
 use crate::config::{
-    NativeToolRole, Policy, PolicyAction, PolicyDefault, PolicyLimits, PolicyRule,
+    LimitSource, NativeToolRole, Policy, PolicyAction, PolicyDefault, PolicyLimits, PolicyRule,
 };
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
@@ -21,7 +21,7 @@ use crate::source_tree::{DEFAULT_LIMITS, Exclusions, Tree};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageLimit {
     pub max: u64,
-    source: Option<PathBuf>,
+    source: LimitSource,
     members: BTreeSet<PathBuf>,
 }
 
@@ -38,7 +38,7 @@ impl PackageLimit {
     pub fn with_max(max: u64) -> Self {
         Self {
             max,
-            source: None,
+            source: LimitSource::Default,
             members: BTreeSet::new(),
         }
     }
@@ -66,8 +66,9 @@ impl PackageLimit {
 
     pub fn error(&self) -> Error {
         let origin = match &self.source {
-            Some(path) => format!("set in `{}`", path.display()),
-            None => "Lorry's default".to_owned(),
+            LimitSource::File(path) => format!("set in `{}`", path.display()),
+            LimitSource::CommandLine => "set by --max-packages".to_owned(),
+            LimitSource::Default => "Lorry's default".to_owned(),
         };
         let user = if cfg!(target_os = "motor") {
             "/user/cfg/lorry.toml"
@@ -81,7 +82,7 @@ impl PackageLimit {
         ))
         .with_help(format!(
             "raise `max-packages` in the `[policy.limits]` table of `{user}` \
-             or of the project's `lorry.toml`"
+             or of the project's `lorry.toml`, or pass `--max-packages N` for this run"
         ))
     }
 }
@@ -1172,7 +1173,7 @@ mod tests {
             .into();
         let limits = PolicyLimits {
             max_packages: 1,
-            max_packages_source: Some(Path::new("/user/cfg/lorry.toml").to_owned()),
+            max_packages_source: LimitSource::File(Path::new("/user/cfg/lorry.toml").to_owned()),
             ..PolicyLimits::default()
         };
         let limit = PackageLimit::new(&limits, &manifest);

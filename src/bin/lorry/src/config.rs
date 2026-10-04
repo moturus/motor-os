@@ -175,8 +175,7 @@ impl Default for Policy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyLimits {
     pub max_packages: u64,
-    /// The `lorry.toml` that set `max-packages`; `None` is Lorry's default.
-    pub max_packages_source: Option<PathBuf>,
+    pub max_packages_source: LimitSource,
     pub max_depth: u64,
     pub max_package_bytes: u64,
     pub max_extracted_package_bytes: u64,
@@ -187,11 +186,18 @@ pub struct PolicyLimits {
     pub build_script_output_bytes: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LimitSource {
+    Default,
+    File(PathBuf),
+    CommandLine,
+}
+
 impl Default for PolicyLimits {
     fn default() -> Self {
         Self {
             max_packages: 64,
-            max_packages_source: None,
+            max_packages_source: LimitSource::Default,
             max_depth: 16,
             max_package_bytes: 16 * 1024 * 1024,
             max_extracted_package_bytes: 128 * 1024 * 1024,
@@ -242,6 +248,32 @@ enum LayerKind {
 }
 
 impl Config {
+    pub(crate) fn apply_max_packages(&mut self, requested: Option<u64>) -> Result<()> {
+        let Some(max) = requested else {
+            return Ok(());
+        };
+        if max == 0 {
+            return Err(Error::usage(
+                "--max-packages must be positive",
+                "supply a positive package limit",
+            ));
+        }
+        let key = "policy.limits.max-packages";
+        if let Some(constraint) = self.constraints.iter().find(|constraint| {
+            key == constraint.key || key.starts_with(&format!("{}.", constraint.key))
+        }) {
+            return Err(Error::failure(format!(
+                "--max-packages attempts to override locked `{}` from `{}`",
+                constraint.key,
+                constraint.provenance.display()
+            ))
+            .with_help("remove --max-packages; the trusted system constraint takes precedence"));
+        }
+        self.policy.limits.max_packages = max;
+        self.policy.limits.max_packages_source = LimitSource::CommandLine;
+        Ok(())
+    }
+
     pub fn load(current: &Path, manifest: &crate::manifest::Manifest) -> Result<Self> {
         Self::load_workspace(
             current,
@@ -903,7 +935,7 @@ fn merge_policy_limits(
         match key {
             "max-packages" => {
                 limits.max_packages = value;
-                limits.max_packages_source = Some(path.to_owned());
+                limits.max_packages_source = LimitSource::File(path.to_owned());
             }
             "max-depth" => limits.max_depth = value,
             "max-package-bytes" => limits.max_package_bytes = value,
@@ -2357,8 +2389,8 @@ locked = [
         assert_eq!(config.policy.rules.len(), 1);
         assert_eq!(config.constraints.len(), 2);
         assert_eq!(
-            config.policy.limits.max_packages_source.as_deref(),
-            Some(config_path.as_path())
+            config.policy.limits.max_packages_source,
+            LimitSource::File(config_path.clone())
         );
         assert_eq!(
             config
@@ -2450,6 +2482,31 @@ locked = [
             config.incompatible_rust_versions,
             Some(IncompatibleRustVersions::Allow)
         );
+    }
+
+    #[test]
+    fn package_limit_cli_override_preserves_other_limits_and_obeys_locked_prefixes() {
+        let mut config = Config::default();
+        let mut expected = config.policy.limits.clone();
+        expected.max_packages = 384;
+        expected.max_packages_source = LimitSource::CommandLine;
+        config.apply_max_packages(Some(384)).unwrap();
+        assert_eq!(config.policy.limits, expected);
+        assert!(config.apply_max_packages(Some(0)).is_err());
+        for key in ["policy", "policy.limits", "policy.limits.max-packages"] {
+            config.constraints = vec![Constraint {
+                key: key.to_owned(),
+                provenance: PathBuf::from("/trusted/lorry.toml"),
+            }];
+            let error = config.apply_max_packages(Some(400)).unwrap_err();
+            assert!(error.to_string().contains(key));
+            assert!(error.to_string().contains("/trusted/lorry.toml"));
+            assert_eq!(config.policy.limits, expected);
+            config.apply_max_packages(None).unwrap();
+        }
+        config.constraints[0].key = "policy.limits.max-depth".to_owned();
+        config.apply_max_packages(Some(128)).unwrap();
+        assert_eq!(config.policy.limits.max_packages, 128);
     }
 
     #[test]

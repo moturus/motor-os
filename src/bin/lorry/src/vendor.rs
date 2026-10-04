@@ -67,7 +67,8 @@ fn execute_reconcile(
         false,
     )?;
     Manifest::report_warnings([&manifest], cli.verbosity);
-    let config = Config::load(current, &manifest)?;
+    let mut config = Config::load(current, &manifest)?;
+    config.apply_max_packages(cli.max_packages)?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     let lock = ProjectVendorLock::acquire(&manifest.workspace_root)?;
     if cli.verbosity == Verbosity::Verbose {

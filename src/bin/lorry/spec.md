@@ -198,6 +198,11 @@ acquisition and lock-file changes, so the flags preserve their existing
 constraints. They do not apply to `vendor` or its admission workflow.
 `metadata` defaults to format version 1 and warns when `--format-version`
 is omitted, except in quiet mode, as Cargo does.
+`--max-packages N` sets the positive outside-package resolution bound for one
+run. It does not change other resource limits or any configuration file, and
+trusted system constraints on `policy`, `policy.limits`, or the package limit
+reject the override. Limit failures identify whether the value came from a
+configuration file, this CLI option, or the default.
 
 `locate-project` defaults to JSON and accepts plain output. With no explicit
 manifest, it finds the nearest `Cargo.toml` in the working directory or its

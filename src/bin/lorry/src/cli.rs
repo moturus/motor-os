@@ -30,6 +30,7 @@ pub struct Cli {
     pub verbosity: Verbosity,
     pub use_cargo_registry: bool,
     pub lorry_messages: bool,
+    pub max_packages: Option<u64>,
     pub selection: PackageSelection,
     pub features: FeatureSelection,
     pub manifest_path: Option<String>,
@@ -373,6 +374,7 @@ impl Cli {
             verbosity,
             use_cargo_registry,
             lorry_messages: matches.get_flag("lorry-messages"),
+            max_packages: matches.get_one::<u64>("max-packages").copied(),
             selection,
             features,
             manifest_path,
@@ -392,6 +394,13 @@ fn command_line() -> ClapCommand {
                 .long("lorry-messages")
                 .global(true)
                 .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("max-packages")
+                .long("max-packages")
+                .global(true)
+                .value_name("N")
+                .value_parser(clap::value_parser!(u64).range(1..)),
         )
         .arg(
             Arg::new("quiet")
@@ -1696,6 +1705,26 @@ mod tests {
             }
         );
         assert!(parse(&["--use-cargo-registry", "new", "example"]).is_err());
+    }
+
+    #[test]
+    fn parses_positive_one_run_package_limits_before_or_after_the_command() {
+        assert_eq!(
+            parse(&["--max-packages", "384", "metadata"])
+                .unwrap()
+                .max_packages,
+            Some(384)
+        );
+        assert_eq!(
+            parse(&["vendor", "--max-packages=128"])
+                .unwrap()
+                .max_packages,
+            Some(128)
+        );
+        assert_eq!(parse(&["build"]).unwrap().max_packages, None);
+        for limit in ["0", "-1", "words", "18446744073709551616"] {
+            assert!(parse(&["build", "--max-packages", limit]).is_err());
+        }
     }
 
     #[test]

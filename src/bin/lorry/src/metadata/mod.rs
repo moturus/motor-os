@@ -34,7 +34,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     if options.no_deps {
         return write_document(&graph::no_dependencies(&workspace)?);
     }
-    let config = Config::load_workspace(
+    let mut config = Config::load_workspace(
         &current,
         &workspace.root,
         workspace
@@ -42,6 +42,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
             .iter()
             .map(|member| member.root.as_path()),
     )?;
+    config.apply_max_packages(cli.max_packages)?;
     if workspace.packages.is_empty() {
         let prepared = dependency::workspace::PreparedSources {
             resolution: Resolution {

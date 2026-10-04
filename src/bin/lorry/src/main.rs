@@ -210,6 +210,7 @@ fn print_help(topic: Option<&str>) {
              -q, --quiet                 Suppress progress output\n  \
              -v, --verbose               Show commands, configuration, and timings\n  \
                  --color <WHEN>          auto, always, or never\n  \
+                 --max-packages <N>      Set this run's outside-package limit\n  \
                  --use-cargo-registry    Use Cargo's verified offline registry cache\n\n\
              Commands:\n  \
              build                       Build the package\n  \
