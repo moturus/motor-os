@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gears::config::{Config, ContextConfig, HookConfig, ToolDirectory};
+use gears::config::{AfterTurnConfig, Config, ContextConfig, HookConfig, ToolDirectory};
 use gears::mock::{MockServer, Script, sse_response};
 use gears::net::EgressPolicy;
 use gears::net::host_curl::HostCurl;
@@ -234,6 +234,122 @@ fn compaction_reports_its_usage_as_a_numeric_event() {
 struct Fixture {
     root: PathBuf,
     workspace: PathBuf,
+}
+
+fn after_turn_config(script: &str, argument: &std::path::Path) -> AfterTurnConfig {
+    AfterTurnConfig {
+        command: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            script.into(),
+            "review".into(),
+            argument.display().to_string(),
+        ],
+        timeout: Duration::from_secs(5),
+        max_output_bytes: 4096,
+    }
+}
+
+#[test]
+fn after_turn_requires_an_interactive_completed_saved_turn_and_runs_after_hooks() {
+    let fixture = Fixture::new("after-turn-order");
+    let marker = fixture.root.join("hook finished");
+    let config = Config {
+        config_path: Some(fixture.root.join("selected config.toml")),
+        after_turn: Some(after_turn_config(
+            "test -f \"$1\" || exit 7; printf '%s\\n' \"$GEARS_WORKSPACE\" \"$GEARS_SESSION_PATH\" \"$GEARS_SESSION_ID\" \"$GEARS_CONFIG_PATH\" \"${OPENROUTER_API_KEY-unset}\"",
+            &marker,
+        )),
+        hooks: vec![HookConfig {
+            name: "end".into(),
+            events: Some(vec!["turn_end".into()]),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "cat >/dev/null; touch \"$1\"; printf '{}'".into(),
+                "end".into(),
+                marker.display().to_string(),
+            ],
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 4096,
+        }],
+        ..Config::default()
+    };
+    let mut runtime = fixture.runtime(
+        Scripted::new(vec![
+            answer("one"),
+            answer("two"),
+            Err(ProviderError::Protocol("broken".into())),
+            answer("ephemeral"),
+        ]),
+        &config,
+    );
+    let mut ignore = |_: Event| Ok(());
+    runtime
+        .turn("one".into(), &mut FixedApproval(false), &mut ignore)
+        .unwrap();
+    assert!(
+        !runtime
+            .take_startup_notices()
+            .iter()
+            .any(|n| n.contains("after-turn"))
+    );
+    std::fs::remove_file(&marker).unwrap();
+    runtime.set_interactive(true).unwrap();
+    runtime
+        .turn("two".into(), &mut FixedApproval(false), &mut ignore)
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let notice = loop {
+        if let Some(notice) = runtime
+            .take_startup_notices()
+            .into_iter()
+            .find(|n| n.contains("after-turn"))
+        {
+            break notice;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "review did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(notice.contains("output:"), "{notice}");
+    for value in [
+        fixture.workspace.display().to_string(),
+        runtime.session().path().unwrap().display().to_string(),
+        runtime.session().id().to_string(),
+        config.config_path.unwrap().display().to_string(),
+        "unset".into(),
+    ] {
+        assert!(notice.contains(&value), "{value}: {notice}");
+    }
+    assert!(
+        runtime
+            .turn("error".into(), &mut FixedApproval(false), &mut ignore)
+            .is_err()
+    );
+    assert!(
+        !runtime
+            .take_startup_notices()
+            .iter()
+            .any(|n| n.contains("after-turn"))
+    );
+    runtime.new_session(true, None).unwrap();
+    let mut notices = Vec::new();
+    runtime
+        .turn(
+            "ephemeral".into(),
+            &mut FixedApproval(false),
+            &mut |event| {
+                if let Event::Notice(text) = event {
+                    notices.push(text);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(notices.iter().any(|n| n.contains("no saved path")));
 }
 
 #[test]

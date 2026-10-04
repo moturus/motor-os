@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::config::{Config, ContextConfig};
+use crate::config::{AfterTurnConfig, Config, ContextConfig};
 use crate::hooks::{Decision, Manager as Hooks, ToolResult};
 use crate::permissions::{Grant, Grants};
 use crate::process::{Cancellation, Stream};
@@ -151,6 +151,10 @@ pub struct Runtime {
     cancellation: Cancellation,
     usage: UsageMeter,
     startup_notices: Vec<String>,
+    after_turn_command: Option<AfterTurnConfig>,
+    config_path: Option<PathBuf>,
+    after_turn: crate::after_turn::Manager,
+    interactive: bool,
 }
 
 impl Runtime {
@@ -262,6 +266,10 @@ impl Runtime {
             cancellation,
             usage,
             startup_notices,
+            after_turn_command: config.after_turn.clone(),
+            config_path: config.config_path.clone(),
+            after_turn: crate::after_turn::Manager::default(),
+            interactive: false,
         })
     }
 
@@ -346,7 +354,7 @@ impl Runtime {
     }
 
     pub fn revoke_permission(&mut self, name: &str, global_scope: bool) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         if global_scope {
             let mut grants = Grants::load(&self.tool_state_directory)?;
             let before = grants.by_identity.len();
@@ -399,7 +407,7 @@ impl Runtime {
         state: ToolState,
         global_scope: bool,
     ) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         if !self.tools.tools().iter().any(|tool| tool.name == name) {
             return Err(format!("unknown directory tool {name:?}"));
         }
@@ -487,7 +495,77 @@ impl Runtime {
     }
 
     pub fn take_startup_notices(&mut self) -> Vec<String> {
+        match self.after_turn.poll() {
+            Ok(notices) => self.startup_notices.extend(notices),
+            Err(error) => self.startup_notices.push(error),
+        }
         std::mem::take(&mut self.startup_notices)
+    }
+
+    /// Interfaces opt in explicitly; library and one-shot runs are unattended.
+    pub fn set_interactive(&mut self, interactive: bool) -> Result<(), String> {
+        self.prepare_write()?;
+        self.interactive = interactive;
+        Ok(())
+    }
+
+    fn prepare_write(&mut self) -> Result<(), String> {
+        self.startup_notices.extend(self.after_turn.stop()?);
+        crate::process::ensure_cleanup()
+    }
+
+    fn start_after_turn(&mut self, observer: &mut dyn Observer) -> Result<(), String> {
+        if !self.interactive {
+            return Ok(());
+        }
+        let Some(config) = &self.after_turn_command else {
+            return Ok(());
+        };
+        let Some(path) = self.session.path() else {
+            return observer.event(Event::Notice(
+                "after-turn command skipped: this session has no saved path".into(),
+            ));
+        };
+        let result = (|| {
+            let program = config.command.first().ok_or("command must not be empty")?;
+            let program = if program == "gears-batteries" {
+                std::env::current_exe()
+                    .map_err(|error| format!("cannot locate gears-batteries: {error}"))?
+                    .with_file_name("gears-batteries")
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                program.clone()
+            };
+            let mut env = vec![
+                (
+                    "GEARS_WORKSPACE".into(),
+                    self.store.workspace().display().to_string(),
+                ),
+                ("GEARS_SESSION_ID".into(), self.session.id().to_string()),
+                ("GEARS_SESSION_PATH".into(), path.display().to_string()),
+            ];
+            let mut remove_env = vec![crate::provider::KEY_ENV.to_string()];
+            if let Some(path) = &self.config_path {
+                env.push(("GEARS_CONFIG_PATH".into(), path.display().to_string()));
+            } else {
+                remove_env.push("GEARS_CONFIG_PATH".into());
+            }
+            self.after_turn.start(crate::process::Request {
+                program,
+                args: config.command[1..].to_vec(),
+                cwd: self.store.workspace().to_path_buf(),
+                stdin: None,
+                timeout: config.timeout,
+                max_output_bytes: config.max_output_bytes,
+                env,
+                remove_env,
+            })
+        })();
+        if let Err(error) = result {
+            observer.event(Event::Notice(format!("after-turn command failed: {error}")))?;
+        }
+        crate::process::ensure_cleanup()
     }
 
     pub fn model(&self) -> &str {
@@ -526,7 +604,8 @@ impl Runtime {
         approver: &mut dyn Approver,
         observer: &mut dyn Observer,
     ) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
+        emit_notices(observer, self.take_startup_notices())?;
         self.cancellation.reset();
         let mut notices = Vec::new();
         let input = self.hooks.transform_input(
@@ -582,7 +661,7 @@ impl Runtime {
             })
         });
         match result {
-            Ok(()) => end_result,
+            Ok(()) => end_result.and_then(|()| self.start_after_turn(observer)),
             Err(error) => {
                 let _ = end_result;
                 Err(error)
@@ -723,7 +802,7 @@ impl Runtime {
         focus: Option<String>,
         observer: &mut dyn Observer,
     ) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         self.cancellation.reset();
         if self.maybe_compact(true, focus, observer)? {
             Ok(())
@@ -733,7 +812,7 @@ impl Runtime {
     }
 
     pub fn set_model(&mut self, model: String, observer: &mut dyn Observer) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         if model.trim().is_empty() {
             return Err("model id must not be empty".to_string());
         }
@@ -755,7 +834,7 @@ impl Runtime {
     }
 
     pub fn set_provider(&mut self, name: &str, observer: &mut dyn Observer) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         if name == self.provider_name {
             return Ok(());
         }
@@ -782,20 +861,20 @@ impl Runtime {
         observer.event(Event::Notice(format!("provider: {name}")))
     }
 
-    pub fn save_default_selection(&self) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+    pub fn save_default_selection(&mut self) -> Result<(), String> {
+        self.prepare_write()?;
         crate::provider_choice::ProviderChoice::new(&self.provider_name, &self.model)?
             .save_default()
     }
 
     pub fn set_name(&mut self, name: &str) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         self.session.set_name(name)?;
         Ok(())
     }
 
     pub fn set_label(&mut self, entry_id: &str, label: Option<&str>) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         self.session.set_label(entry_id, label)?;
         Ok(())
     }
@@ -809,20 +888,20 @@ impl Runtime {
     }
 
     pub fn select_entry(&mut self, id: &str) -> Result<Option<String>, String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         let draft = self.session.select(id)?;
         self.refresh_tools(&Overrides::load(&self.tool_state_directory)?)?;
         Ok(draft)
     }
 
     pub fn new_session(&mut self, ephemeral: bool, name: Option<&str>) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         let session = self.store.create(ephemeral, name)?;
         self.install_session(session, "new")
     }
 
     pub fn resume(&mut self, selector: &str) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         self.cancellation.reset();
         if self.session.id() == selector {
             return self.refresh_hooks("resume");
@@ -832,20 +911,24 @@ impl Runtime {
     }
 
     pub fn clone_session(&mut self) -> Result<(), String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         let session = self.store.clone_active(&self.session)?;
         self.install_session(session, "clone")
     }
 
     pub fn fork_at(&mut self, entry_id: &str) -> Result<String, String> {
-        crate::process::ensure_cleanup()?;
+        self.prepare_write()?;
         let (session, draft) = self.store.fork_at_user(&self.session, entry_id)?;
         self.install_session(session, "fork")?;
         Ok(draft)
     }
 
     pub fn close(&mut self) -> Vec<String> {
-        let mut notices = Vec::new();
+        if let Err(error) = self.prepare_write() {
+            self.startup_notices.push(error);
+            return std::mem::take(&mut self.startup_notices);
+        }
+        let mut notices = self.take_startup_notices();
         self.hooks.notify(
             "session_end",
             serde_json::json!({"session_id": self.session.id()}),
@@ -1582,6 +1665,15 @@ fn apply_tool_states(
         tools.set_enabled(&name, enabled)?;
     }
     Ok(notices)
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // Join while the session lock is still held.
+        if let Err(error) = self.after_turn.stop() {
+            crate::trace::log(crate::trace::Level::Error, &error);
+        }
+    }
 }
 
 fn effective_prompt(workspace: &std::path::Path, tools: &Registry, hooks: &Hooks) -> Effective {
