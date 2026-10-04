@@ -1212,6 +1212,16 @@ and paired metadata/build contracts passed in
 
 ### Workspace and manifest loading
 
+Member profiles, patches, replacements, and conflicting explicit resolvers
+now warn and use root settings. Source descriptions and builds share root
+resolver computation; virtual roots default to resolver 1 with the Cargo
+edition warning. Nested workspace roots remain rejected. Focused manifest
+tests (23), strict Clippy, and paired build/metadata contracts passed in
+`/tmp/lorry-m5-workspace-settings-unit.log`,
+`/tmp/lorry-m5-workspace-settings-clippy.log`,
+`/tmp/lorry-m5-workspace-settings-build-contract.log`, and
+`/tmp/lorry-m5-workspace-settings-metadata-contract.log`.
+
 Lorry currently has three workspace-table readers: builds, source metadata,
 and path/Git dependency loading. Replace their workspace-table handling with
 one implementation. Retain descriptive loading and build-capable loading:

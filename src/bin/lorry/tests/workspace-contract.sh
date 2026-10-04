@@ -66,6 +66,13 @@ for package in app tool; do
     printf 'fn main() { println!("%s"); }\n' "$package" \
         >"$WORK/project/$package/src/main.rs"
 done
+cat >>"$WORK/project/app/Cargo.toml" <<'EOF'
+resolver = "1"
+[profile.dev]
+opt-level = 3
+[profile.release]
+debug = true
+EOF
 printf '%s\n' \
     '[dependencies]' \
     'shared.workspace = true' >>"$WORK/project/tool/Cargo.toml"
@@ -103,6 +110,8 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
     "$LORRY" review -p app >/dev/null
     "$LORRY" -v build -j2 -p app 2>"$WORK/app-build.stderr"
     grep -F 'panic=abort' "$WORK/app-build.stderr" >/dev/null
+    [ "$(grep -Fc 'profiles for the non root package will be ignored' "$WORK/app-build.stderr")" -eq 1 ]
+    [ "$(grep -Fc 'resolver for the non root package will be ignored' "$WORK/app-build.stderr")" -eq 1 ]
     [ "$("$LORRY" run --jobs=default -p app)" = app ]
     "$LORRY" test -p app -- --quiet
     "$LORRY" build --jobs=-1 -p app

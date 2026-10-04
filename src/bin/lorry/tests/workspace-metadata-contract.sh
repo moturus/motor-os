@@ -352,3 +352,32 @@ for invalid in missing optional; do
     sed -i 's/missing.workspace = true/shared.workspace = true/' "$INHERIT/app/Cargo.toml"
 done
 echo "PASS: Cargo dependency inheritance, additive features, and edition-specific defaults"
+cp "$WORK/dependencies.valid" "$INHERIT/Cargo.toml"
+cp "$INHERIT/app/Cargo.toml" "$WORK/member.valid"
+for setting in patch replace; do
+    cp "$WORK/member.valid" "$INHERIT/app/Cargo.toml"
+    if [ "$setting" = patch ]; then
+        printf '\n[patch.crates-io]\nshared = { path = "../shared" }\n' >>"$INHERIT/app/Cargo.toml"
+    else
+        printf '\n[replace]\n"shared:0.1.0" = { path = "../shared" }\n' >>"$INHERIT/app/Cargo.toml"
+    fi
+    agrees_with_cargo "$INHERIT/Cargo.toml" "ignored-$setting"
+    source_metadata "$INHERIT/Cargo.toml" >"$WORK/ignored.json" 2>"$WORK/ignored.err"
+    [ "$(grep -Fc "$setting for the non root package will be ignored" "$WORK/ignored.err")" -eq 1 ]
+done
+cp "$WORK/member.valid" "$INHERIT/app/Cargo.toml"
+sed -i '/resolver = "2"/d' "$INHERIT/Cargo.toml"
+source_metadata "$INHERIT/Cargo.toml" >"$WORK/resolver.json" 2>"$WORK/resolver.err"
+[ "$(grep -Fc 'virtual workspace defaulting to `resolver = "1"`' "$WORK/resolver.err")" -eq 1 ]
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" metadata --no-deps --offline --format-version 1 \
+    --manifest-path "$INHERIT/Cargo.toml" >"$WORK/resolver.cargo.json" 2>"$WORK/resolver.cargo.err"
+grep -F 'virtual workspace defaulting to `resolver = "1"`' "$WORK/resolver.cargo.err" >/dev/null
+echo "PASS: ignored member settings and virtual workspace resolver warnings"
+printf '\n[workspace]\n' >>"$INHERIT/app/Cargo.toml"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    if "$builder" metadata --no-deps --offline --format-version 1 \
+        --manifest-path "$INHERIT/Cargo.toml" >"$WORK/nested.json" 2>"$WORK/nested.err"; then
+        echo "workspace-metadata: accepted multiple workspace roots" >&2
+        exit 1
+    fi
+done

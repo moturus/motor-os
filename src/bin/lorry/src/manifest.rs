@@ -489,7 +489,8 @@ impl Manifest {
         mode: ManifestMode,
         inherited: Option<&InheritedPackage>,
     ) -> Result<Self> {
-        validate_manifest_tables(path, document, mode)?;
+        let member = inherited.is_some_and(|workspace| workspace.path != path);
+        validate_manifest_tables(path, document, mode, member)?;
         let package_item = document.root().get("package").ok_or_else(|| {
             Error::failure(format!(
                 "manifest `{}` is missing required table `[package]`",
@@ -591,7 +592,7 @@ impl Manifest {
             &mut unsupported_target_dev_dependencies,
         )?;
         let features = parse_features(path, document)?;
-        let patches = if mode == ManifestMode::Root {
+        let patches = if mode == ManifestMode::Root && !member {
             parse_patches(path, document, root)?
         } else {
             Vec::new()
@@ -600,7 +601,7 @@ impl Manifest {
         let rust_lints = parse_lint_namespace(lint_table.as_ref(), mode, "rust")?;
         let clippy_lints = parse_lint_namespace(lint_table.as_ref(), mode, "clippy")?;
         let rustdoc_lints = parse_lint_namespace(lint_table.as_ref(), mode, "rustdoc")?;
-        let (dev, release) = if mode == ManifestMode::Root {
+        let (dev, release) = if mode == ManifestMode::Root && !member {
             parse_profiles(path, document)?
         } else {
             (DevProfile::default(), ReleaseProfile::default())
@@ -699,7 +700,7 @@ impl Workspace {
                 path.display()
             ))
         })?;
-        let table = require_table(&path, &document, item, "workspace")?;
+        require_table(&path, &document, item, "workspace")?;
 
         if !document.root().contains_key("package") {
             for (key, item) in document.root().iter() {
@@ -713,24 +714,7 @@ impl Workspace {
                 }
             }
         }
-        let resolver = if let Some(item) = table.get("resolver") {
-            parse_resolver(&path, &document, Some(item), Edition::E2015, 1)?
-        } else if let Some(package) = document.root().get("package") {
-            let package = require_table(&path, &document, package, "package")?;
-            let inherited = dependency_workspace_package(root)?;
-            let edition = parse_edition(
-                &path,
-                &document,
-                package.get("edition"),
-                1,
-                inherited
-                    .as_ref()
-                    .and_then(|values| values.edition.as_deref()),
-            )?;
-            parse_resolver(&path, &document, package.get("resolver"), edition, 1)?
-        } else {
-            Resolver::V1
-        };
+        let resolver = workspace_resolver(root, &path, &document)?;
 
         let packages = membership.load_members()?;
         let defaults = membership.defaults(current, packages.keys())?;
@@ -780,33 +764,6 @@ impl Workspace {
     }
 
     fn apply(&self, manifest: &mut Manifest) -> Result<()> {
-        if manifest.root != self.root {
-            let document = Document::load(&manifest.path, "Cargo workspace member manifest")?;
-            for key in ["workspace", "profile", "patch"] {
-                if let Some(item) = document.root().get(key) {
-                    return Err(Error::at(
-                        &manifest.path,
-                        document.line_of_item(item),
-                        format!("workspace member cannot define `{key}`"),
-                        "move workspace-wide settings to the workspace root",
-                    ));
-                }
-            }
-            let package = require_table(
-                &manifest.path,
-                &document,
-                document.root().get("package").unwrap(),
-                "package",
-            )?;
-            if let Some(item) = package.get("resolver") {
-                return Err(Error::at(
-                    &manifest.path,
-                    document.line_of_item(item),
-                    "workspace member cannot define package.resolver",
-                    "set workspace.resolver at the workspace root",
-                ));
-            }
-        }
         manifest.workspace_root.clone_from(&self.root);
         manifest.workspace_members.clone_from(&self.members);
         manifest.dev.clone_from(&self.dev);
@@ -912,45 +869,78 @@ fn dependency_workspace_package(root: &Path) -> Result<Option<InheritedPackage>>
     }))
 }
 
-fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode) -> Result<()> {
+fn workspace_resolver(root: &Path, path: &Path, document: &Document) -> Result<Resolver> {
+    let workspace = require_table(
+        path,
+        document,
+        document.root().get("workspace").unwrap(),
+        "workspace",
+    )?;
+    if let Some(item) = workspace.get("resolver") {
+        return parse_resolver(path, document, Some(item), Edition::E2015, 1);
+    }
+    let Some(item) = document.root().get("package") else {
+        return Ok(Resolver::V1);
+    };
+    let package = require_table(path, document, item, "package")?;
+    let inherited = dependency_workspace_package(root)?;
+    let edition = parse_edition(
+        path,
+        document,
+        package.get("edition"),
+        1,
+        inherited
+            .as_ref()
+            .and_then(|values| values.edition.as_deref()),
+    )?;
+    parse_resolver(path, document, package.get("resolver"), edition, 1)
+}
+
+fn validate_manifest_tables(
+    path: &Path,
+    document: &Document,
+    mode: ManifestMode,
+    member: bool,
+) -> Result<()> {
     for (key, item) in document.root().iter() {
-        let supported = matches!(
-            (mode, key),
-            (
-                ManifestMode::Root,
-                "package"
-                    | "dependencies"
-                    | "target"
-                    | "features"
-                    | "patch"
-                    | "profile"
-                    | "lib"
-                    | "bin"
-                    | "lints"
-                    | "workspace"
-            ) | (
-                // Source descriptions accept every table that a dependency may
-                // use, which includes every table of a root package.
-                ManifestMode::Dependency | ManifestMode::Source,
-                "package"
-                    | "dependencies"
-                    | "build-dependencies"
-                    | "dev-dependencies"
-                    | "target"
-                    | "features"
-                    | "profile"
-                    | "lib"
-                    | "bin"
-                    | "example"
-                    | "test"
-                    | "bench"
-                    | "lints"
-                    | "hints"
-                    | "badges"
-                    | "workspace"
-                    | "patch"
-            )
-        );
+        let supported = (member && key == "replace")
+            || matches!(
+                (mode, key),
+                (
+                    ManifestMode::Root,
+                    "package"
+                        | "dependencies"
+                        | "target"
+                        | "features"
+                        | "patch"
+                        | "profile"
+                        | "lib"
+                        | "bin"
+                        | "lints"
+                        | "workspace"
+                ) | (
+                    // Source descriptions accept every table that a dependency may
+                    // use, which includes every table of a root package.
+                    ManifestMode::Dependency | ManifestMode::Source,
+                    "package"
+                        | "dependencies"
+                        | "build-dependencies"
+                        | "dev-dependencies"
+                        | "target"
+                        | "features"
+                        | "profile"
+                        | "lib"
+                        | "bin"
+                        | "example"
+                        | "test"
+                        | "bench"
+                        | "lints"
+                        | "hints"
+                        | "badges"
+                        | "workspace"
+                        | "patch"
+                )
+            );
         if !supported {
             return Err(Error::at(
                 path,

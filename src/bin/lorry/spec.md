@@ -290,6 +290,10 @@ until multi-package execution is implemented. Manifest discovery searches
 the working directory and its parents. `--manifest-path` establishes the
 workspace independently of `-p`, which may select any member. Workspace-wide
 execution remains deferred.
+Member profiles, patches, and replacements are ignored with Cargo-style
+warnings. An explicit conflicting member resolver also warns. A virtual
+workspace without a resolver uses version 1 and warns when a member's edition
+implies a newer default. Root replacements and package.workspace are rejected.
 Members and default-members accept component globs `*`, `?`, and `[...]`,
 including negated character classes. `**` and paths outside the root are
 rejected. Matching files are ignored; matching directories need manifests,

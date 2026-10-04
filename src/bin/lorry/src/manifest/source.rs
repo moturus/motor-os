@@ -170,7 +170,80 @@ impl WorkspaceRoot {
             }
             packages.insert(directory, package);
         }
+        self.apply_settings(&mut packages)?;
         Ok(packages)
+    }
+
+    fn apply_settings(&self, packages: &mut BTreeMap<PathBuf, Manifest>) -> Result<()> {
+        let path = self.root.join(MANIFEST_NAME);
+        let document = Document::load(&path, "Cargo workspace manifest")?;
+        let resolver = super::workspace_resolver(&self.root, &path, &document)?;
+        let workspace = document
+            .root()
+            .get("workspace")
+            .and_then(|item| item.as_table())
+            .unwrap();
+        let latest = packages
+            .values()
+            .map(|package| match package.edition {
+                super::Edition::E2021 => 2021,
+                super::Edition::E2024 => 2024,
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        let default_warning = if !self.package && !workspace.contains_key("resolver") && latest != 0
+        {
+            Some(format!(
+                "virtual workspace defaulting to `resolver = \"1\"` despite one or more workspace members \
+                 being on edition {latest} which implies `resolver = \"{}\"`; specify workspace.resolver \
+                 at `{}` to select the intended resolver",
+                if latest == 2024 { 3 } else { 2 },
+                path.display(),
+            ))
+        } else {
+            None
+        };
+        for package in packages.values_mut() {
+            if package.root != self.root {
+                let member = Document::load(&package.path, "Cargo workspace member manifest")?;
+                let mut ignored = Vec::new();
+                if member.root().contains_key("profile") {
+                    ignored.push("profiles");
+                }
+                for key in ["patch", "replace"] {
+                    if member
+                        .root()
+                        .get(key)
+                        .and_then(|item| item.as_table())
+                        .is_some_and(|table| !table.is_empty())
+                    {
+                        ignored.push(key);
+                    }
+                }
+                if member
+                    .root()
+                    .get("package")
+                    .and_then(|item| item.as_table())
+                    .is_some_and(|table| table.contains_key("resolver"))
+                    && package.resolver != resolver
+                {
+                    ignored.push("resolver");
+                }
+                for setting in ignored {
+                    package.warnings.push(format!(
+                        "{setting} for the non root package will be ignored, specify {setting} at the workspace root:\n\
+                         package:   {}\nworkspace: {}",
+                        package.path.display(), path.display(),
+                    ));
+                }
+            }
+            if let Some(warning) = &default_warning {
+                package.warnings.push(warning.clone());
+            }
+            package.resolver = resolver;
+        }
+        Ok(())
     }
 
     pub fn defaults<'a>(
@@ -340,6 +413,12 @@ pub(super) fn nearest_workspace(directory: &Path) -> Result<Option<WorkspaceRoot
 fn load_package(directory: &Path, root: &Path) -> Result<Manifest> {
     let path = directory.join(MANIFEST_NAME);
     let document = Document::load(&path, "Cargo source manifest")?;
+    if directory != root && document.root().contains_key("workspace") {
+        return Err(Error::failure(format!(
+            "workspace member `{}` defines another workspace root",
+            path.display()
+        )));
+    }
     let inherited = dependency_workspace_package(directory)?;
     let mut manifest = Manifest::parse_document_with_inheritance(
         directory,
