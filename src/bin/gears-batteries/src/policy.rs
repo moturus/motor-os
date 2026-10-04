@@ -60,7 +60,7 @@ pub fn decide(event: &Event, context: &ToolContext) -> Result<Decision, String> 
                 },
             )
         }
-        "ls" | "head" | "tail" | "cat" | "wc" | "find"
+        "ls" | "head" | "tail" | "cat" | "wc" | "find" | "rg"
             if event.payload["tool"]["read_only"] == true =>
         {
             let path = context.resolve(
@@ -74,6 +74,29 @@ pub fn decide(event: &Event, context: &ToolContext) -> Result<Decision, String> 
             } else {
                 Decision::Ask
             })
+        }
+        "diff" if event.payload["tool"]["read_only"] == true => {
+            let mut inside = true;
+            for field in ["left", "right"] {
+                let path = context.resolve(
+                    arguments[field].as_str().ok_or("diff has no file path")?,
+                    false,
+                )?;
+                inside &= path.starts_with(&context.workspace);
+            }
+            Ok(if inside {
+                Decision::Allow
+            } else {
+                Decision::Ask
+            })
+        }
+        "gix"
+            if matches!(
+                arguments["action"].as_str(),
+                Some("push" | "checkout" | "restore")
+            ) =>
+        {
+            Ok(Decision::Confirm)
         }
         "write_file" | "patch" => {
             context.resolve(
@@ -187,6 +210,28 @@ mod tests {
         let mut read = event(&context, "cat", json!({"path": "file"}));
         read.payload["tool"] = json!({"read_only": true});
         assert_eq!(decide(&read, &context).unwrap(), Decision::Allow);
+        read.payload["tool_call"] = json!(ToolCall::new(
+            "c2",
+            "diff",
+            json!({"left": "file", "right": "other"}).to_string()
+        ));
+        assert_eq!(decide(&read, &context).unwrap(), Decision::Allow);
+        read.payload["tool_call"] = json!(ToolCall::new(
+            "c3",
+            "diff",
+            json!({"left": "file", "right": "../outside"}).to_string()
+        ));
+        assert_eq!(decide(&read, &context).unwrap(), Decision::Ask);
+        read.payload["tool_call"] = json!(ToolCall::new(
+            "c4",
+            "rg",
+            json!({"path": "file", "pattern": "text"}).to_string()
+        ));
+        assert_eq!(decide(&read, &context).unwrap(), Decision::Allow);
+        assert_eq!(
+            decide(&event(&context, "gix", json!({"action": "push"})), &context).unwrap(),
+            Decision::Confirm
+        );
         let directory = context.state.directory(Path::new("shell")).unwrap();
         std::fs::write(
             directory.join("cwd"),
