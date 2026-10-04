@@ -19,17 +19,39 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
+fn usage() -> io::Error {
+    invalid("expected one of --ssh-password PWD, --ssh-key PUBLIC_KEY_FILE, --ssh-server-key KEY_FILE, or --ssl-keys DIR, and -i IMAGE")
+}
+
+/// Parses `(OPTION VALUE)` pairs in any order: exactly one credential option and one `-i`.
 fn parse<'a>(args: &'a [&'a str]) -> io::Result<(Input<'a>, &'a Path)> {
-    match args {
-        ["ssh-password", password, image] => {
-            credentials::validate_password(password)?;
-            Ok((Input::Password(password), Path::new(image)))
+    let mut input = None;
+    let mut image = None;
+    for pair in args.chunks(2) {
+        let [option, value] = pair else {
+            return Err(usage());
+        };
+        let parsed = match *option {
+            "-i" => {
+                if image.replace(Path::new(*value)).is_some() {
+                    return Err(usage());
+                }
+                continue;
+            }
+            "--ssh-password" => {
+                credentials::validate_password(value)?;
+                Input::Password(value)
+            }
+            "--ssh-key" => Input::LoginKey(Path::new(*value)),
+            "--ssh-server-key" => Input::HostKey(Path::new(*value)),
+            "--ssl-keys" => Input::Tls(Path::new(*value)),
+            _ => return Err(usage()),
+        };
+        if input.replace(parsed).is_some() {
+            return Err(usage());
         }
-        ["ssh-key", key, image] => Ok((Input::LoginKey(Path::new(key)), Path::new(image))),
-        ["ssh-server-key", key, image] => Ok((Input::HostKey(Path::new(key)), Path::new(image))),
-        ["ssl", "keys", directory, image] => Ok((Input::Tls(Path::new(directory)), Path::new(image))),
-        _ => Err(invalid("expected ssh-password PWD IMAGE, ssh-key PUBLIC_KEY_FILE IMAGE, ssh-server-key KEY_FILE IMAGE, or ssl keys DIR IMAGE")),
     }
+    input.zip(image).ok_or_else(usage)
 }
 
 pub(super) fn run(args: &[OsString]) -> io::Result<()> {
@@ -52,29 +74,34 @@ mod tests {
     #[test]
     fn parses_exact_commands_without_echoing_arguments() {
         for (args, kind) in [
-            (vec!["ssh-password", " /not/a/file 雪 ", "image path"], 0),
-            (vec!["ssh-key", "key path.pub", "image path"], 1),
-            (vec!["ssh-server-key", "key path", "image path"], 2),
-            (vec!["ssl", "keys", "cert directory", "image path"], 3),
+            (
+                vec!["--ssh-password", " /not/a/file 雪 ", "-i", "image path"],
+                0,
+            ),
+            (vec!["--ssh-password", "-i", "-i", "image path"], 0),
+            (vec!["--ssh-key", "key path.pub", "-i", "image path"], 1),
+            (vec!["-i", "image path", "--ssh-server-key", "key path"], 2),
+            (vec!["--ssl-keys", "cert directory", "-i", "image path"], 3),
         ] {
             let (input, image) = parse(&args).unwrap();
             assert_eq!(image, Path::new("image path"));
+            let value = args[args.iter().position(|arg| arg.starts_with("--")).unwrap() + 1];
             assert_eq!(
                 match input {
-                    Input::Password(value) => {
-                        assert_eq!(value, args[1]);
+                    Input::Password(password) => {
+                        assert_eq!(password, value);
                         0
                     }
                     Input::LoginKey(path) => {
-                        assert_eq!(path, Path::new(args[1]));
+                        assert_eq!(path, Path::new(value));
                         1
                     }
                     Input::HostKey(path) => {
-                        assert_eq!(path, Path::new(args[1]));
+                        assert_eq!(path, Path::new(value));
                         2
                     }
                     Input::Tls(path) => {
-                        assert_eq!(path, Path::new(args[2]));
+                        assert_eq!(path, Path::new(value));
                         3
                     }
                 },
@@ -84,10 +111,21 @@ mod tests {
         for args in [
             vec![],
             vec!["secret"],
-            vec!["ssh-password", "secret"],
-            vec!["ssh-password", "secret", "image", "extra"],
-            vec!["ssl", "secret", "image"],
-            vec!["ssl", "key", "secret", "image"],
+            vec!["--ssh-password", "secret"],
+            vec!["--ssh-password", "secret", "-i"],
+            vec!["--ssh-password", "secret", "-i", "image", "extra"],
+            vec!["--ssh-password", "secret", "-i", "image", "-i", "image"],
+            vec![
+                "--ssh-password",
+                "secret",
+                "--ssh-key",
+                "secret",
+                "-i",
+                "image",
+            ],
+            vec!["--ssl", "secret", "-i", "image"],
+            vec!["ssh-password", "secret", "image"],
+            vec!["ssl", "keys", "secret", "image"],
         ] {
             let error = parse(&args).err().unwrap().to_string();
             assert!(!error.contains("secret"));
@@ -103,7 +141,9 @@ mod tests {
             "\u{feff}secret",
             "sec\u{feff}ret",
         ] {
-            let error = parse(&["ssh-password", password, "image"]).err().unwrap();
+            let error = parse(&["--ssh-password", password, "-i", "image"])
+                .err()
+                .unwrap();
             assert!(!error.to_string().contains("secret"));
         }
     }

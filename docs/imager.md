@@ -11,10 +11,10 @@ imager <REPO ROOT> debug|release <CONFIG YAML>
 imager <REPO ROOT> debug|release <CONFIG YAML> --raw-output <FILENAME>
 imager chmod <MODE> <IMAGE> <GUEST PATH>
 imager resize -i <INPUT IMAGE> -o <OUTPUT IMAGE> --size <SIZE>
-imager set ssh-password <PASSWORD> <IMAGE>
-imager set ssh-key <PUBLIC KEY FILE> <IMAGE>
-imager set ssh-server-key <PRIVATE KEY FILE> <IMAGE>
-imager set ssl keys <DIRECTORY> <IMAGE>
+imager set --ssh-password <PASSWORD> -i <IMAGE>
+imager set --ssh-key <PUBLIC KEY FILE> -i <IMAGE>
+imager set --ssh-server-key <PRIVATE KEY FILE> -i <IMAGE>
+imager set --ssl-keys <DIRECTORY> -i <IMAGE>
 ```
 
 Examples below use `imager` for the host executable. Every image target in
@@ -202,7 +202,7 @@ the caller supplies artifacts that the guest services can use.
 ### Set the login password
 
 ```sh
-imager set ssh-password 'your-new-password' image.qcow2
+imager set --ssh-password 'your-new-password' -i image.qcow2
 ```
 
 The password is one literal argument for the existing `motor` account.
@@ -218,7 +218,7 @@ The plaintext password is not stored in the image.
 ### Set the login public key
 
 ```sh
-imager set ssh-key /path/to/id_ed25519.pub image.qcow2
+imager set --ssh-key /path/to/id_ed25519.pub -i image.qcow2
 ```
 
 Reads one UTF-8 public-key line, strips its final LF/CRLF line ending if
@@ -230,7 +230,7 @@ login key stays on the client.
 ### Set the SSH server private key
 
 ```sh
-imager set ssh-server-key /path/to/ssh_host_ed25519_key image.qcow2
+imager set --ssh-server-key /path/to/ssh_host_ed25519_key -i image.qcow2
 ```
 
 Reads the private-key file as UTF-8 and replaces `host_key` in `sshd.toml`.
@@ -242,7 +242,7 @@ host identity when connecting again.
 ### Set the TLS certificate and private key
 
 ```sh
-imager set ssl keys /path/to/tls image.qcow2
+imager set --ssl-keys /path/to/tls -i image.qcow2
 ```
 
 | Host input | Guest destination |

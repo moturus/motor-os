@@ -615,10 +615,10 @@ Motor OS image builder usage:
     imager $MOTORH debug|release <config.yaml> --raw-output <image.img>
     imager chmod MODE VM_IMAGE FILE_PATH
     imager resize -i INPUT_IMG -o OUTPUT_IMG --size X[M|G]
-    imager set ssh-password <PWD> <IMG FILE>
-    imager set ssh-key <PUBLIC KEY FILE> <IMG FILE>
-    imager set ssh-server-key <KEY FILE> <IMG FILE>
-    imager set ssl keys <DIR> <IMG FILE>
+    imager set --ssh-password <PWD> -i <IMG FILE>
+    imager set --ssh-key <PUBLIC KEY FILE> -i <IMG FILE>
+    imager set --ssh-server-key <KEY FILE> -i <IMG FILE>
+    imager set --ssl-keys <DIR> -i <IMG FILE>
 
 resize copies INPUT_IMG into a new OUTPUT_IMG (qcow2 or raw, by its .qcow2,
 .img or .raw suffix) whose data partition is X MB or GB large.
@@ -628,11 +628,11 @@ for the image copy and a raw intermediate; qcow2 snapshots are not preserved.
 No other process may modify the image while set runs. Guest permissions and
 the host image's permission mode are preserved. This is not secure erasure
 of old credentials from filesystem blocks, snapshots, or backups.
-ssh-password sets motor's password from one literal argument (no CR/LF/BOM).
+--ssh-password sets motor's password from one literal argument (no CR/LF/BOM).
 The password may appear in shell history and process arguments.
-ssh-key reads motor's OpenSSH public login key from a file.
-ssh-server-key reads an unencrypted OpenSSH private host key from a file.
-ssl keys reads ssl-cert.pem and ssl-key.pem from DIR, preserving the CA store.
+--ssh-key reads motor's OpenSSH public login key from a file.
+--ssh-server-key reads an unencrypted OpenSSH private host key from a file.
+--ssl-keys reads ssl-cert.pem and ssl-key.pem from DIR, preserving the CA store.
 Key and certificate contents are copied without cryptographic validation.
 Each command replaces only its selected credentials.
 "

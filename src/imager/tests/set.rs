@@ -56,7 +56,7 @@ fn all_commands_preserve_other_credentials_permissions_and_boot_data() {
             let before = fs::read(fixture.raw()).unwrap();
             let mut expected = source.to_owned();
             let password = " /not/a/file 'quoted' 雪 ";
-            fixture.succeeds(&["ssh-password", password]);
+            fixture.succeeds(&["--ssh-password", password]);
             let actual = config(&fixture.raw());
             assert!(authenticates(&actual, password));
             assert!(!authenticates(&actual, "vroomvroom"));
@@ -74,7 +74,7 @@ fn all_commands_preserve_other_credentials_permissions_and_boot_data() {
             let public_file = fixture.root.join("login key.pub");
             let public_bytes = format!("{LOGIN_KEY}\r\n");
             fs::write(&public_file, &public_bytes).unwrap();
-            fixture.succeeds(&["ssh-key", public_file.to_str().unwrap()]);
+            fixture.succeeds(&["--ssh-key", public_file.to_str().unwrap()]);
             assert_eq!(fs::read(&public_file).unwrap(), public_bytes.as_bytes());
             expected =
                 replace_fixture_field(&expected, "authorized_key", &format!("\"{LOGIN_KEY}\""));
@@ -82,7 +82,7 @@ fn all_commands_preserve_other_credentials_permissions_and_boot_data() {
 
             let host_file = fixture.root.join("host key");
             fs::write(&host_file, HOST_KEY).unwrap();
-            fixture.succeeds(&["ssh-server-key", host_file.to_str().unwrap()]);
+            fixture.succeeds(&["--ssh-server-key", host_file.to_str().unwrap()]);
             expected = replace_fixture_field(
                 &expected,
                 "host_key",
@@ -95,7 +95,7 @@ fn all_commands_preserve_other_credentials_permissions_and_boot_data() {
             fs::write(fixture.root.join("ssl-cert.pem"), NEW_CERT).unwrap();
             fs::write(fixture.root.join("ssl-key.pem"), NEW_KEY).unwrap();
             fs::write(fixture.root.join("ca-certificates.crt"), b"do not import").unwrap();
-            fixture.succeeds(&["ssl", "keys", fixture.root.to_str().unwrap()]);
+            fixture.succeeds(&["--ssl-keys", fixture.root.to_str().unwrap()]);
             let raw = fixture.raw();
             assert_eq!(config(&raw), expected);
             assert_eq!(
@@ -136,9 +136,9 @@ fn repeated_password_updates_use_fresh_salts_and_preserve_custom_config() {
         fs.set_all_permissions_image_admin(Role::System, id, sealed)
             .await
     });
-    fixture.succeeds(&["ssh-password", "new password"]);
+    fixture.succeeds(&["--ssh-password", "new password"]);
     let first = config(&fixture.raw());
-    fixture.succeeds(&["ssh-password", "new password"]);
+    fixture.succeeds(&["--ssh-password", "new password"]);
     let second = config(&fixture.raw());
     assert_ne!(field(&first, "salt"), field(&second, "salt"));
     assert!(authenticates(&second, "new password"));
@@ -151,24 +151,24 @@ fn invalid_credentials_and_config_leave_original_images_unchanged() {
     for qcow2 in [false, true] {
         let fixture = Fixture::new(qcow2, BASE);
         for password in ["", "secret\n", "\rsecret", "secret\u{feff}"] {
-            let output = fixture.fails_unchanged(&["ssh-password", password]);
+            let output = fixture.fails_unchanged(&["--ssh-password", password]);
             assert!(!String::from_utf8_lossy(&output.stderr).contains("secret"));
         }
         let key_file = fixture.root.join("key input");
-        fixture.fails_unchanged(&["ssh-key", key_file.to_str().unwrap()]);
+        fixture.fails_unchanged(&["--ssh-key", key_file.to_str().unwrap()]);
         for content in [String::new(), format!("{LOGIN_KEY}\n{LOGIN_KEY}\n")] {
             fs::write(&key_file, content).unwrap();
-            fixture.fails_unchanged(&["ssh-key", key_file.to_str().unwrap()]);
+            fixture.fails_unchanged(&["--ssh-key", key_file.to_str().unwrap()]);
         }
         fs::write(&key_file, [0xff]).unwrap();
-        fixture.fails_unchanged(&["ssh-server-key", key_file.to_str().unwrap()]);
-        fixture.fails_unchanged(&["ssh-key", fixture.root.to_str().unwrap()]);
+        fixture.fails_unchanged(&["--ssh-server-key", key_file.to_str().unwrap()]);
+        fixture.fails_unchanged(&["--ssh-key", fixture.root.to_str().unwrap()]);
 
-        fixture.fails_unchanged(&["ssl", "keys", fixture.root.to_str().unwrap()]);
+        fixture.fails_unchanged(&["--ssl-keys", fixture.root.to_str().unwrap()]);
         fs::write(fixture.root.join("ssl-cert.pem"), NEW_CERT).unwrap();
-        fixture.fails_unchanged(&["ssl", "keys", fixture.root.to_str().unwrap()]);
+        fixture.fails_unchanged(&["--ssl-keys", fixture.root.to_str().unwrap()]);
         fs::write(fixture.root.join("ssl-key.pem"), b"").unwrap();
-        fixture.fails_unchanged(&["ssl", "keys", fixture.root.to_str().unwrap()]);
+        fixture.fails_unchanged(&["--ssl-keys", fixture.root.to_str().unwrap()]);
     }
     for source in [
         "private-secret invalid TOML",
@@ -176,7 +176,7 @@ fn invalid_credentials_and_config_leave_original_images_unchanged() {
         "version = 1\n[users]",
     ] {
         let fixture = Fixture::new(false, source);
-        let output = fixture.fails_unchanged(&["ssh-password", "new-password"]);
+        let output = fixture.fails_unchanged(&["--ssh-password", "new-password"]);
         assert!(!String::from_utf8_lossy(&output.stderr).contains("private-secret"));
     }
 }
@@ -191,7 +191,7 @@ fn out_of_space_during_second_tls_write_does_not_publish_first_write() {
         let mut key = NEW_KEY.to_vec();
         key.resize(1024 * 1024, b'\n');
         fs::write(fixture.root.join("ssl-key.pem"), &key).unwrap();
-        let output = fixture.fails_unchanged(&["ssl", "keys", fixture.root.to_str().unwrap()]);
+        let output = fixture.fails_unchanged(&["--ssl-keys", fixture.root.to_str().unwrap()]);
         let storage_full = std::io::Error::from(std::io::ErrorKind::StorageFull).to_string();
         assert!(String::from_utf8_lossy(&output.stderr).contains(&storage_full));
         let raw = fixture.raw();
@@ -215,10 +215,10 @@ fn shorter_tls_replacements_truncate_old_contents() {
     long_key.resize(19000, b'\n');
     fs::write(fixture.root.join("ssl-cert.pem"), long_cert).unwrap();
     fs::write(fixture.root.join("ssl-key.pem"), long_key).unwrap();
-    fixture.succeeds(&["ssl", "keys", fixture.root.to_str().unwrap()]);
+    fixture.succeeds(&["--ssl-keys", fixture.root.to_str().unwrap()]);
     fs::write(fixture.root.join("ssl-cert.pem"), NEW_CERT).unwrap();
     fs::write(fixture.root.join("ssl-key.pem"), NEW_KEY).unwrap();
-    fixture.succeeds(&["ssl", "keys", fixture.root.to_str().unwrap()]);
+    fixture.succeeds(&["--ssl-keys", fixture.root.to_str().unwrap()]);
     assert_eq!(read(&fixture.raw(), CERT).0, NEW_CERT);
     assert_eq!(read(&fixture.raw(), CERT).1, cert_permissions);
     assert_eq!(read(&fixture.raw(), KEY).0, NEW_KEY);
@@ -253,7 +253,7 @@ fn invalid_destinations_and_secret_permissions_are_rejected() {
             }
             Ok(())
         });
-        fixture.fails_unchanged(&["ssh-password", "new-password"]);
+        fixture.fails_unchanged(&["--ssh-password", "new-password"]);
     }
 }
 
@@ -287,14 +287,14 @@ fn malformed_images_and_symlink_targets_are_rejected() {
             _ => unreachable!(),
         }
         mbr.write_into(&mut file).unwrap();
-        fixture.fails_unchanged(&["ssh-password", "new-password"]);
+        fixture.fails_unchanged(&["--ssh-password", "new-password"]);
     }
     let fixture = Fixture::new(false, BASE);
     let original = fs::read(&fixture.image).unwrap();
     let alias = fixture.root.join("alias.raw");
     std::os::unix::fs::symlink(&fixture.image, &alias).unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_imager"))
-        .args(["set", "ssh-password", "new-password"])
+        .args(["set", "--ssh-password", "new-password", "-i"])
         .arg(alias)
         .output()
         .unwrap();
@@ -308,14 +308,14 @@ fn copies_key_and_tls_inputs_without_crypto_validation() {
     let fixture = Fixture::new(false, BASE);
     let path = fixture.root.join("key input");
     fs::write(&path, "opaque login key").unwrap();
-    fixture.succeeds(&["ssh-key", path.to_str().unwrap()]);
+    fixture.succeeds(&["--ssh-key", path.to_str().unwrap()]);
     assert!(config(&fixture.raw()).contains("authorized_key = \"opaque login key\""));
     fs::write(&path, "opaque private key").unwrap();
-    fixture.succeeds(&["ssh-server-key", path.to_str().unwrap()]);
+    fixture.succeeds(&["--ssh-server-key", path.to_str().unwrap()]);
     assert!(config(&fixture.raw()).contains("host_key = \"opaque private key\""));
     fs::write(fixture.root.join("ssl-cert.pem"), b"opaque certificate").unwrap();
     fs::write(fixture.root.join("ssl-key.pem"), b"opaque TLS key").unwrap();
-    fixture.succeeds(&["ssl", "keys", fixture.root.to_str().unwrap()]);
+    fixture.succeeds(&["--ssl-keys", fixture.root.to_str().unwrap()]);
     assert_eq!(read(&fixture.raw(), CERT).0, b"opaque certificate");
     assert_eq!(read(&fixture.raw(), KEY).0, b"opaque TLS key");
 }

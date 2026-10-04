@@ -456,10 +456,10 @@ credentials. It operates on image files while the VM is stopped.</p>
 imager &lt;REPO ROOT&gt; debug|release &lt;CONFIG YAML&gt; --raw-output &lt;FILENAME&gt;
 imager chmod &lt;MODE&gt; &lt;IMAGE&gt; &lt;GUEST PATH&gt;
 imager resize -i &lt;INPUT IMAGE&gt; -o &lt;OUTPUT IMAGE&gt; --size &lt;SIZE&gt;
-imager set ssh-password &lt;PASSWORD&gt; &lt;IMAGE&gt;
-imager set ssh-key &lt;PUBLIC KEY FILE&gt; &lt;IMAGE&gt;
-imager set ssh-server-key &lt;PRIVATE KEY FILE&gt; &lt;IMAGE&gt;
-imager set ssl keys &lt;DIRECTORY&gt; &lt;IMAGE&gt;</code></pre>
+imager set --ssh-password &lt;PASSWORD&gt; -i &lt;IMAGE&gt;
+imager set --ssh-key &lt;PUBLIC KEY FILE&gt; -i &lt;IMAGE&gt;
+imager set --ssh-server-key &lt;PRIVATE KEY FILE&gt; -i &lt;IMAGE&gt;
+imager set --ssl-keys &lt;DIRECTORY&gt; -i &lt;IMAGE&gt;</code></pre>
 
 <p>Examples below use <code>imager</code> for the host executable. Every image target in the
 Makefile installs a statically linked copy as <code>vm_images/PROFILE/tools/imager</code>, whose
@@ -648,7 +648,7 @@ that the guest services can use.</p>
 
 <h3 id="set-the-login-password">Set the login password</h3>
 
-<pre><code>imager set ssh-password &#x27;your-new-password&#x27; image.qcow2</code></pre>
+<pre><code>imager set --ssh-password &#x27;your-new-password&#x27; -i image.qcow2</code></pre>
 
 <p>The password is one literal argument for the existing <code>motor</code> account. It must be
 nonempty, at most 1 MiB, and contain no CR, LF, or U+FEFF byte-order mark. Spaces and other Unicode
@@ -662,7 +662,7 @@ plaintext password is not stored in the image.</p>
 
 <h3 id="set-the-login-public-key">Set the login public key</h3>
 
-<pre><code>imager set ssh-key /path/to/id_ed25519.pub image.qcow2</code></pre>
+<pre><code>imager set --ssh-key /path/to/id_ed25519.pub -i image.qcow2</code></pre>
 
 <p>Reads one UTF-8 public-key line, strips its final LF/CRLF line ending if present, and replaces
 <code>users.motor.authorized_key</code>. An optional key comment is retained. Multiple lines are
@@ -671,7 +671,7 @@ rejected. The field contains a single key; the command does not append to an
 
 <h3 id="set-the-ssh-server-private-key">Set the SSH server private key</h3>
 
-<pre><code>imager set ssh-server-key /path/to/ssh_host_ed25519_key image.qcow2</code></pre>
+<pre><code>imager set --ssh-server-key /path/to/ssh_host_ed25519_key -i image.qcow2</code></pre>
 
 <p>Reads the private-key file as UTF-8 and replaces <code>host_key</code> in <code>sshd.toml</code>.
 Supply an unencrypted OpenSSH private key that russhd can load. No separate public-key file is
@@ -680,7 +680,7 @@ verify and trust the replacement host identity when connecting again.</p>
 
 <h3 id="set-the-tls-certificate-and-private-key">Set the TLS certificate and private key</h3>
 
-<pre><code>imager set ssl keys /path/to/tls image.qcow2</code></pre>
+<pre><code>imager set --ssl-keys /path/to/tls -i image.qcow2</code></pre>
 
 <div class="table-wrap">
 <table>
