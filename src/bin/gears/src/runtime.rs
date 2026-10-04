@@ -705,8 +705,15 @@ impl Runtime {
         if model.trim().is_empty() {
             return Err("model id must not be empty".to_string());
         }
-        self.model = model.clone();
+        self.cancellation.reset();
+        let prepared = self.prepare_hook_setup("model_change", &self.provider_name.clone(), &model);
+        emit_notices(observer, self.take_startup_notices())?;
+        let (hooks, prompt) = prepared?;
         let entry = self.session.set_model(&model)?;
+        self.session.append_runtime_identity(&prompt.identity())?;
+        self.model = model.clone();
+        self.hooks = hooks;
+        self.prompt = prompt;
         self.notify(
             "model_change",
             serde_json::json!({"id": entry, "model": model}),
@@ -724,9 +731,16 @@ impl Runtime {
             .as_ref()
             .ok_or("provider switching is not configured")?;
         let provider = factory(name)?;
+        self.cancellation.reset();
+        let prepared = self.prepare_hook_setup("provider_change", name, &self.model.clone());
+        emit_notices(observer, self.take_startup_notices())?;
+        let (hooks, prompt) = prepared?;
         let entry = self.session.set_provider(name)?;
+        self.session.append_runtime_identity(&prompt.identity())?;
         self.provider = provider;
         self.provider_name = name.to_string();
+        self.hooks = hooks;
+        self.prompt = prompt;
         self.notify(
             "provider_change",
             serde_json::json!({"id": entry, "provider": name}),
@@ -770,6 +784,7 @@ impl Runtime {
     }
 
     pub fn resume(&mut self, selector: &str) -> Result<(), String> {
+        self.cancellation.reset();
         if self.session.id() == selector {
             return self.refresh_hooks("resume");
         }
@@ -801,21 +816,35 @@ impl Runtime {
     }
 
     fn refresh_hooks(&mut self, reason: &str) -> Result<(), String> {
-        self.cancellation.reset();
+        let (hooks, prompt) =
+            self.prepare_hook_setup(reason, &self.provider_name.clone(), &self.model.clone())?;
+        self.session.append_runtime_identity(&prompt.identity())?;
+        self.hooks = hooks;
+        self.prompt = prompt;
+        Ok(())
+    }
+
+    fn prepare_hook_setup(
+        &mut self,
+        reason: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<(Hooks, Effective), String> {
         let reserved = self
             .tools
             .tools()
             .iter()
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
-        let hooks = self.hooks.setup_again(&reserved,
-            serde_json::json!({"reason": reason, "provider": self.provider_name, "model": self.model}),
-            &mut self.session, &self.cancellation, &mut |notice| self.startup_notices.push(notice))?;
+        let hooks = self.hooks.setup_again(
+            &reserved,
+            serde_json::json!({"reason": reason, "provider": provider, "model": model}),
+            &mut self.session,
+            &self.cancellation,
+            &mut |notice| self.startup_notices.push(notice),
+        )?;
         let prompt = effective_prompt(self.store.workspace(), &self.tools, &hooks);
-        self.session.append_runtime_identity(&prompt.identity())?;
-        self.hooks = hooks;
-        self.prompt = prompt;
-        Ok(())
+        Ok((hooks, prompt))
     }
 
     fn install_session(&mut self, mut session: Session, reason: &str) -> Result<(), String> {
@@ -1373,6 +1402,9 @@ impl Runtime {
             serde_json::to_value(&entry).expect("compaction serializes"),
             observer,
         )?;
+        let refreshed = self.refresh_hooks("compaction");
+        emit_notices(observer, self.take_startup_notices())?;
+        refreshed?;
         observer.event(Event::Notice("context compacted".to_string()))?;
         Ok(true)
     }

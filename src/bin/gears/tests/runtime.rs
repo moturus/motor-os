@@ -2591,6 +2591,103 @@ fn session_changes_repeat_setup_and_replace_prompt_fragments() {
 }
 
 #[test]
+fn selection_changes_and_compaction_repeat_setup_with_current_metadata() {
+    let fixture = Fixture::new("selection-setup");
+    let log = fixture.root.join("setups.jsonl");
+    let response = fixture.root.join("response.json");
+    std::fs::write(&response, r#"{"prompt_fragments":["setup original"]}"#).unwrap();
+    let config = Config {
+        hooks: vec![HookConfig {
+            name: "setup".into(),
+            events: Some(vec!["initialize".into()]),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!(
+                    "cat >> '{}'; printf '\\n' >> '{}'; cat '{}'",
+                    log.display(),
+                    log.display(),
+                    response.display()
+                ),
+            ],
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 4096,
+        }],
+        context: ContextConfig {
+            window_tokens: 10_000,
+            output_reserve_tokens: 2_000,
+            recent_tail_tokens: 50,
+        },
+        ..Config::default()
+    };
+    let remote = Scripted::new(vec![
+        answer(&"a".repeat(300)),
+        answer(&"b".repeat(300)),
+        answer("compact summary"),
+        answer("after compact"),
+    ]);
+    let mut runtime = fixture.runtime(Scripted::new(Vec::new()), &config);
+    let next = remote.clone();
+    runtime.install_provider_factory(Arc::new(move |_| Ok(next.clone() as Arc<dyn Provider>)));
+    std::fs::write(&response, r#"{"prompt_fragments":["setup selected"]}"#).unwrap();
+    runtime
+        .set_model("test/next".into(), &mut |_| Ok(()))
+        .unwrap();
+    runtime.set_provider("remote", &mut |_| Ok(())).unwrap();
+    for prompt in ["one", "two"] {
+        runtime
+            .turn(prompt.into(), &mut UnexpectedApproval, &mut |_| Ok(()))
+            .unwrap();
+    }
+    std::fs::write(&response, r#"{"prompt_fragments":["setup compacted"]}"#).unwrap();
+    runtime.compact(None, &mut |_| Ok(())).unwrap();
+    runtime
+        .turn("three".into(), &mut UnexpectedApproval, &mut |_| Ok(()))
+        .unwrap();
+    let events = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event["payload"]["reason"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["startup", "model_change", "provider_change", "compaction"]
+    );
+    assert_eq!(events[1]["payload"]["provider"], "default");
+    assert_eq!(events[1]["payload"]["model"], "test/next");
+    for event in &events[2..] {
+        assert_eq!(event["payload"]["provider"], "remote");
+        assert_eq!(event["payload"]["model"], "test/next");
+    }
+    let requests = remote.requests.lock().unwrap();
+    assert!(
+        requests[3]
+            .system
+            .iter()
+            .any(|text| text.contains("setup compacted"))
+    );
+    assert!(
+        !requests[3]
+            .system
+            .iter()
+            .any(|text| text.contains("setup selected"))
+    );
+    drop(requests);
+    std::fs::write(&response, "invalid").unwrap();
+    assert!(
+        runtime
+            .set_model("test/failing".into(), &mut |_| Ok(()))
+            .is_err()
+    );
+    assert_eq!(runtime.model(), "test/next");
+    assert!(runtime.set_provider("other", &mut |_| Ok(())).is_err());
+    assert_eq!(runtime.provider_name(), "remote");
+}
+
+#[test]
 fn a_failed_before_stop_hook_is_reported_without_repeating_the_answer() {
     let fixture = Fixture::new("before-stop-failure");
     let config = Config {

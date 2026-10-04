@@ -12,7 +12,8 @@ Unsubscribed events do not start a process, including `initialize`; hooks that
 register tools must subscribe to both `initialize` and `tool_execute`.
 
 `initialize` carries `reason`, `provider`, and `model`. Setup runs at startup
-and again after new, resumed, forked, or cloned sessions. Its prompt fragments
+and again after new, resumed, forked, or cloned sessions, model/provider changes,
+and compaction. Its prompt fragments
 and tool registrations replace the previous setup's registrations. Failed
 setup leaves the active session and its registrations usable.
 
