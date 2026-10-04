@@ -444,7 +444,7 @@ pub(super) fn load_package(directory: &Path, root: &Path) -> Result<Manifest> {
         ManifestMode::Source,
         inherited.as_ref(),
     )?;
-    resolve_target_defaults(&mut manifest)?;
+    resolve_target_defaults(&mut manifest, false)?;
     manifest.workspace_root = root.to_owned();
     Ok(manifest)
 }

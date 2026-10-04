@@ -142,7 +142,9 @@ pub(super) fn parse(
                 return Err(Error::failure(format!("duplicate {kind} target `{name}`")));
             }
             let inferred = discovered.get(&name).map(|target| target.path.clone());
-            let source = match optional_string(path, document, table, kind, "path")? {
+            let explicit_path = optional_string(path, document, table, kind, "path")?;
+            let has_explicit_path = explicit_path.is_some();
+            let source = match explicit_path {
                 Some(relative) => {
                     validate_relative_path(
                         path,
@@ -154,7 +156,7 @@ pub(super) fn parse(
                 }
                 None => inferred.unwrap_or_else(|| root.join(directory).join(format!("{name}.rs"))),
             };
-            if !source.is_file() {
+            if !has_explicit_path && !source.is_file() {
                 return Err(Error::failure(format!(
                     "{kind} source `{}` does not exist",
                     source.display()

@@ -451,7 +451,7 @@ impl Manifest {
         manifest.root = root;
         manifest.workspace_root = lock_root.to_owned();
         manifest.path = manifest.root.join(MANIFEST_NAME);
-        resolve_target_defaults(&mut manifest)?;
+        resolve_target_defaults(&mut manifest, true)?;
         if manifest.library.is_none() && manifest.binaries.is_empty() {
             return Err(Error::failure(
                 "selected package has only example or bench targets; compiling these targets is not yet supported",
@@ -506,7 +506,7 @@ impl Manifest {
         )?;
         manifest.root = root;
         manifest.path = manifest.root.join(MANIFEST_NAME);
-        resolve_target_defaults(&mut manifest)?;
+        resolve_target_defaults(&mut manifest, true)?;
         Ok(manifest)
     }
 
@@ -1659,8 +1659,9 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
     Ok(binaries)
 }
 
-fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
-    if let Some(library) = &manifest.library
+fn resolve_target_defaults(manifest: &mut Manifest, check_sources: bool) -> Result<()> {
+    if check_sources
+        && let Some(library) = &manifest.library
         && !library.path.is_file()
     {
         return Err(Error::failure(format!(
@@ -1669,7 +1670,7 @@ fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
         )));
     }
     for binary in &manifest.binaries {
-        if !binary.path.is_file() {
+        if check_sources && !binary.path.is_file() {
             return Err(Error::failure(format!(
                 "binary target `{}` does not exist",
                 binary.path.display()
@@ -1677,7 +1678,7 @@ fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
         }
     }
     for test in &manifest.integration_tests {
-        if !test.path.is_file() {
+        if check_sources && manifest.editable && !test.path.is_file() {
             return Err(Error::failure(format!(
                 "integration-test target `{}` does not exist",
                 test.path.display()
@@ -4028,6 +4029,78 @@ members = ["ignored-member"]
 
         fs::write(root.join("tests/a_b.rs"), "").unwrap();
         assert!(Manifest::load(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_metadata_describes_missing_explicit_target_files_like_cargo() {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("lorry-missing-targets-{}-{id}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname=\"demo\"\nversion=\"1.0.0\"\nedition=\"2021\"\n[workspace]\n\
+            [lib]\npath=\"missing/lib.rs\"\n\
+            [[bin]]\nname=\"program\"\npath=\"missing/main.rs\"\n\
+            [[test]]\nname=\"integration\"\npath=\"missing/test.rs\"\n\
+            [[example]]\nname=\"sample\"\npath=\"missing/example.rs\"\n\
+            [[bench]]\nname=\"benchmark\"\npath=\"missing/bench.rs\"\n",
+        )
+        .unwrap();
+        let cargo = std::process::Command::new(env!("CARGO"))
+            .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
+            .env("CARGO_HOME", root.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            cargo.status.success(),
+            "{}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+        let cargo: serde_json::Value = serde_json::from_slice(&cargo.stdout).unwrap();
+        let manifest = Manifest::load_source_dependency(&root).unwrap();
+        let targets = cargo["packages"][0]["targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 5);
+        let mut paths = vec![manifest.library.as_ref().unwrap().path.clone()];
+        paths.extend(manifest.binaries.iter().map(|target| target.path.clone()));
+        paths.extend(
+            manifest
+                .integration_tests
+                .iter()
+                .map(|target| target.path.clone()),
+        );
+        paths.extend(
+            manifest
+                .described_targets
+                .iter()
+                .map(|target| target.path.clone()),
+        );
+        for path in paths {
+            assert!(
+                targets
+                    .iter()
+                    .any(|target| target["src_path"].as_str() == path.to_str())
+            );
+        }
+        // Compilation still diagnoses its missing library input.
+        assert!(
+            Manifest::load_path_dependency(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("library target")
+        );
+        fs::write(root.join("lib.rs"), "").unwrap();
+        let text = fs::read_to_string(root.join("Cargo.toml"))
+            .unwrap()
+            .replace("missing/lib.rs", "lib.rs");
+        fs::write(root.join("Cargo.toml"), text).unwrap();
+        let dependency = Manifest::load_path_dependency(&root).unwrap();
+        assert_eq!(dependency.integration_tests.len(), 1);
+        assert_eq!(dependency.described_targets.len(), 2);
         fs::remove_dir_all(root).unwrap();
     }
 
