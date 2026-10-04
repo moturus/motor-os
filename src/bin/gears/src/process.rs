@@ -3,12 +3,27 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub use crate::cancellation::Cancellation;
 
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
+static CLEANUP_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// A failed cleanup leaves ownership uncertain. Closing the current turn's
+/// history is allowed, but no later work may start in this process.
+pub fn ensure_cleanup() -> Result<(), String> {
+    if CLEANUP_FAILED.load(Ordering::SeqCst) {
+        Err(
+            "previous child process-tree cleanup could not be confirmed; further work is blocked"
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stream {
@@ -107,6 +122,10 @@ pub fn run(
     cancellation: &Cancellation,
     observer: &mut dyn FnMut(Stream, &str),
 ) -> Result<Output, RunError> {
+    ensure_cleanup().map_err(|detail| RunError {
+        detail,
+        started: false,
+    })?;
     let mut command = Command::new(&request.program);
     command
         .args(&request.args)
@@ -159,7 +178,9 @@ pub fn run(
             Ok(None) => {}
             Err(error) => {
                 let cleaned = crate::platform::kill_tree(&child);
-                let _ = child.wait();
+                if child.wait().is_err() || !cleaned {
+                    CLEANUP_FAILED.store(true, Ordering::SeqCst);
+                }
                 return Err(RunError {
                     detail: format!(
                         "cannot wait for {}: {error}; process-tree cleanup {}",
@@ -182,7 +203,10 @@ pub fn run(
         if was_cancelled || timed_out {
             let cleanup_complete = crate::platform::kill_tree(&child);
             let status = child.wait().map_err(|error| RunError {
-                detail: format!("cannot reap {}: {error}", request.program),
+                detail: {
+                    CLEANUP_FAILED.store(true, Ordering::SeqCst);
+                    format!("cannot reap {}: {error}", request.program)
+                },
                 started: true,
             })?;
             if !cleanup_complete {
@@ -214,6 +238,9 @@ pub fn run(
     }
     if readers.iter().flatten().any(|reader| !reader.is_finished()) {
         cleanup_complete = false;
+    }
+    if !cleanup_complete {
+        CLEANUP_FAILED.store(true, Ordering::SeqCst);
     }
     if let Some(input) = input {
         let result = input.join().map_err(|_| RunError {

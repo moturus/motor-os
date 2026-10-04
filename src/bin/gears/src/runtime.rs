@@ -189,6 +189,7 @@ impl Runtime {
         mut tools: Registry,
         tool_state_directory: PathBuf,
     ) -> Result<Self, String> {
+        crate::process::ensure_cleanup()?;
         let cancellation = Cancellation::new();
         let previous_identity = session.latest_runtime_identity();
         let mut startup_notices = Vec::new();
@@ -341,6 +342,7 @@ impl Runtime {
     }
 
     pub fn revoke_permission(&mut self, name: &str, global_scope: bool) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         if global_scope {
             let mut grants = Grants::load(&self.tool_state_directory)?;
             let before = grants.by_identity.len();
@@ -393,6 +395,7 @@ impl Runtime {
         state: ToolState,
         global_scope: bool,
     ) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         if !self.tools.tools().iter().any(|tool| tool.name == name) {
             return Err(format!("unknown directory tool {name:?}"));
         }
@@ -519,6 +522,7 @@ impl Runtime {
         approver: &mut dyn Approver,
         observer: &mut dyn Observer,
     ) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         self.cancellation.reset();
         let mut notices = Vec::new();
         let input = self.hooks.transform_input(
@@ -705,6 +709,7 @@ impl Runtime {
         focus: Option<String>,
         observer: &mut dyn Observer,
     ) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         self.cancellation.reset();
         if self.maybe_compact(true, focus, observer)? {
             Ok(())
@@ -714,6 +719,7 @@ impl Runtime {
     }
 
     pub fn set_model(&mut self, model: String, observer: &mut dyn Observer) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         if model.trim().is_empty() {
             return Err("model id must not be empty".to_string());
         }
@@ -735,6 +741,7 @@ impl Runtime {
     }
 
     pub fn set_provider(&mut self, name: &str, observer: &mut dyn Observer) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         if name == self.provider_name {
             return Ok(());
         }
@@ -762,16 +769,19 @@ impl Runtime {
     }
 
     pub fn save_default_selection(&self) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         crate::provider_choice::ProviderChoice::new(&self.provider_name, &self.model)?
             .save_default()
     }
 
     pub fn set_name(&mut self, name: &str) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         self.session.set_name(name)?;
         Ok(())
     }
 
     pub fn set_label(&mut self, entry_id: &str, label: Option<&str>) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         self.session.set_label(entry_id, label)?;
         Ok(())
     }
@@ -785,17 +795,20 @@ impl Runtime {
     }
 
     pub fn select_entry(&mut self, id: &str) -> Result<Option<String>, String> {
+        crate::process::ensure_cleanup()?;
         let draft = self.session.select(id)?;
         self.refresh_tools(&Overrides::load(&self.tool_state_directory)?)?;
         Ok(draft)
     }
 
     pub fn new_session(&mut self, ephemeral: bool, name: Option<&str>) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         let session = self.store.create(ephemeral, name)?;
         self.install_session(session, "new")
     }
 
     pub fn resume(&mut self, selector: &str) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         self.cancellation.reset();
         if self.session.id() == selector {
             return self.refresh_hooks("resume");
@@ -805,11 +818,13 @@ impl Runtime {
     }
 
     pub fn clone_session(&mut self) -> Result<(), String> {
+        crate::process::ensure_cleanup()?;
         let session = self.store.clone_active(&self.session)?;
         self.install_session(session, "clone")
     }
 
     pub fn fork_at(&mut self, entry_id: &str) -> Result<String, String> {
+        crate::process::ensure_cleanup()?;
         let (session, draft) = self.store.fork_at_user(&self.session, entry_id)?;
         self.install_session(session, "fork")?;
         Ok(draft)
@@ -1162,7 +1177,11 @@ impl Runtime {
             is_error: result.is_error,
             outcome,
         });
-        match post_error.or(notification.err()).or(end.err()) {
+        match post_error
+            .or_else(|| crate::process::ensure_cleanup().err())
+            .or(notification.err())
+            .or(end.err())
+        {
             Some(error) => Err(error),
             None => Ok(()),
         }
