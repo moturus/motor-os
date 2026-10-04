@@ -2727,6 +2727,14 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Library and binary benchmark flags now retain Cargo's default of `true`,
+independently of their test flags. Explicit benchmark and documentation booleans
+are accepted, and malformed values fail with a type diagnostic. Shared
+`check --all-targets` includes benchmark-only library/binary harnesses without
+changing ordinary test selection. The parser regression, paired native/Motor
+workspace contract (including `test = false, bench = true` targets), and strict
+Clippy pass in `/tmp/lorry-m8-benchmark-flags-{unit,contract,clippy}.log`.
+
 The shared planner now has workspace harness graphs with selected dev edges,
 resolved feature unions, script outputs, and separate ordinary-program/test
 panic contexts. Ordinary libraries never receive dev edges, allowing a test's

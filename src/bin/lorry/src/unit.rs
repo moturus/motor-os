@@ -378,12 +378,13 @@ pub(crate) fn workspace_check_units(
         }
     };
     if selection.harnesses || selection.integrations {
-        let mut tests = workspace_test_units(
+        let mut tests = workspace_harness_units(
             resolution,
             manifests,
             selected,
             options,
             selection.integration_name,
+            selection.harnesses,
         )?;
         for unit in tests.units.values_mut() {
             unit.dependencies
@@ -854,6 +855,24 @@ pub(crate) fn workspace_test_units(
     options: &PlanOptions<'_>,
     integration_name: Option<&str>,
 ) -> Result<UnitGraph> {
+    workspace_harness_units(
+        resolution,
+        manifests,
+        selected,
+        options,
+        integration_name,
+        false,
+    )
+}
+
+fn workspace_harness_units(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    options: &PlanOptions<'_>,
+    integration_name: Option<&str>,
+    bench_harnesses: bool,
+) -> Result<UnitGraph> {
     let panic_abort = options.panic_abort;
     if let Some(name) = integration_name
         && !selected.iter().any(|package| {
@@ -883,12 +902,16 @@ pub(crate) fn workspace_test_units(
         let library = manifest
             .library
             .iter()
-            .filter(|target| integration_name.is_none() && target.test)
+            .filter(|target| {
+                integration_name.is_none() && (target.test || (bench_harnesses && target.bench))
+            })
             .map(|target| (UnitKind::LibraryHarness, &target.name, None));
         let binaries = manifest
             .binaries
             .iter()
-            .filter(|target| integration_name.is_none() && target.test)
+            .filter(|target| {
+                integration_name.is_none() && (target.test || (bench_harnesses && target.bench))
+            })
             .map(|target| {
                 (
                     UnitKind::BinaryHarness,

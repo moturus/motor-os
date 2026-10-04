@@ -181,6 +181,7 @@ pub struct LibraryTarget {
     pub proc_macro: bool,
     pub crate_types: Vec<String>,
     pub test: bool,
+    pub bench: bool,
     pub doctest: bool,
     pub doc: bool,
     pub harness: bool,
@@ -209,6 +210,7 @@ pub struct BinaryTarget {
     pub name: String,
     pub path: PathBuf,
     pub test: bool,
+    pub bench: bool,
     pub doc: bool,
     pub harness: bool,
     pub required_features: Option<Vec<String>>,
@@ -647,7 +649,7 @@ impl Manifest {
 
         let links = optional_string(path, document, package, "package", "links")?;
         let build_script = parse_build_script(path, document, package, root)?;
-        let library = parse_library(path, document, root, &name, mode)?;
+        let library = parse_library(path, document, root, &name)?;
         let mut warnings = Vec::new();
         let binaries = if matches!(mode, ManifestMode::Root | ManifestMode::Source) {
             parse_binaries(
@@ -660,7 +662,6 @@ impl Manifest {
                     edition,
                     has_library: library.is_some(),
                 },
-                mode,
                 &mut warnings,
             )?
         } else {
@@ -1345,7 +1346,6 @@ fn parse_library(
     document: &Document,
     root: &Path,
     package_name: &str,
-    mode: ManifestMode,
 ) -> Result<Option<LibraryTarget>> {
     let Some(item) = document.root().get("lib") else {
         if document
@@ -1364,6 +1364,7 @@ fn parse_library(
             proc_macro: false,
             crate_types: vec!["lib".to_owned()],
             test: true,
+            bench: true,
             doctest: true,
             doc: true,
             harness: true,
@@ -1401,21 +1402,6 @@ fn parse_library(
                 "lib.proc-macro",
                 "a boolean",
             ));
-        }
-    }
-    if mode == ManifestMode::Root {
-        for key in ["bench", "doc"] {
-            if table
-                .get(key)
-                .is_some_and(|item| item.as_bool() != Some(false))
-            {
-                return Err(Error::at(
-                    path,
-                    item_line(document, table, key),
-                    format!("`lib.{key}` must be false in Stage 2 root packages"),
-                    "disable the unsupported library target mode",
-                ));
-            }
         }
     }
     let declared_crate_types = table
@@ -1475,6 +1461,7 @@ fn parse_library(
         proc_macro,
         crate_types,
         test: optional_bool(path, document, table, "lib", "test")?.unwrap_or(true),
+        bench: optional_bool(path, document, table, "lib", "bench")?.unwrap_or(true),
         doctest: optional_bool(path, document, table, "lib", "doctest")?.unwrap_or(true)
             && doctestable,
         doc: optional_bool(path, document, table, "lib", "doc")?.unwrap_or(true),
@@ -1494,7 +1481,6 @@ fn parse_binaries(
     root: &Path,
     package: &Table,
     defaults: BinaryPackage<'_>,
-    mode: ManifestMode,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<BinaryTarget>> {
     let discovered = discover_binaries(root, defaults.name)?;
@@ -1530,17 +1516,6 @@ fn parse_binaries(
                     "name" | "path" | "test" | "bench" | "doc" | "harness" | "required-features"
                 ) {
                     return Err(unsupported_key(path, document, item, &format!("bin.{key}")));
-                }
-                if mode == ManifestMode::Root
-                    && matches!(key, "bench" | "doc")
-                    && item.as_bool() != Some(false)
-                {
-                    return Err(Error::at(
-                        path,
-                        document.line_of_item(item),
-                        format!("`bin.{key}` must be false in Stage 2"),
-                        "benches and binary documentation targets are deferred",
-                    ));
                 }
             }
             let name = optional_string(path, document, table, "bin", "name")?
@@ -1581,6 +1556,7 @@ fn parse_binaries(
                 name,
                 path: source,
                 test: optional_bool(path, document, table, "bin", "test")?.unwrap_or(true),
+                bench: optional_bool(path, document, table, "bin", "bench")?.unwrap_or(true),
                 doc: optional_bool(path, document, table, "bin", "doc")?.unwrap_or(true),
                 harness: optional_bool(path, document, table, "bin", "harness")?.unwrap_or(true),
                 required_features: optional_string_array(
@@ -1648,6 +1624,7 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
                 name: package_name.to_owned(),
                 path: main,
                 test: true,
+                bench: true,
                 doc: true,
                 harness: true,
                 required_features: None,
@@ -1716,6 +1693,7 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
                     name: name.clone(),
                     path: source,
                     test: true,
+                    bench: true,
                     doc: true,
                     harness: true,
                     required_features: None,
@@ -3582,6 +3560,37 @@ codegen-units = 1
                     assert_eq!(library.path, root.join("src/lib.rs"));
                     assert_eq!(library.crate_types, ["lib"]);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn library_and_binary_benchmark_flags_are_independent_of_tests() {
+        for flags in [
+            "",
+            "test = false\nbench = true\ndoc = true\n",
+            "bench = false\n",
+        ] {
+            let manifest = parsed(&format!(
+                "{RED}\n[lib]\n{flags}\n[[bin]]\nname = \"runner\"\npath = \"src/main.rs\"\n{flags}"
+            ))
+            .unwrap();
+            let library = manifest.library.unwrap();
+            let binary = &manifest.binaries[0];
+            assert_eq!(library.bench, !flags.contains("bench = false"));
+            assert_eq!(binary.bench, library.bench);
+            assert_eq!(library.test, !flags.contains("test = false"));
+            assert_eq!(binary.test, library.test);
+            assert!(library.doc && binary.doc);
+        }
+        for section in [
+            "[lib]",
+            "[[bin]]\nname = \"runner\"\npath = \"src/main.rs\"",
+        ] {
+            for key in ["bench", "doc"] {
+                let error =
+                    parsed(&format!("{RED}\n{section}\n{key} = \"invalid\"\n")).unwrap_err();
+                assert!(error.render().contains("a boolean"));
             }
         }
     }

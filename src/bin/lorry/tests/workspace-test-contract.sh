@@ -135,6 +135,13 @@ const TMP_PATH: &[u8] = env!("CARGO_TARGET_TMPDIR").as_bytes();
 const _: () = assert!(TMP_PATH[TMP_PATH.len() - 3] == b't' && TMP_PATH[TMP_PATH.len() - 1] == b'p');
 EOF
 done
+cp alpha/Cargo.toml "$WORK/alpha-manifest.toml"
+python3 - <<'PY'
+from pathlib import Path
+path = Path('alpha/Cargo.toml')
+path.write_text(path.read_text().replace('[lib]\n', '[lib]\ntest = false\nbench = true\ndoc = true\n')
+                .replace('[[bin]]\n', '[[bin]]\ntest = false\nbench = true\ndoc = true\n'))
+PY
 for platform in native motor; do
     target=()
     if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); fi
@@ -148,6 +155,7 @@ for platform in native motor; do
     done
 done
 for member in alpha zeta; do cp "$WORK/$member-integration.rs" "$member/tests/integration.rs"; done
+cp "$WORK/alpha-manifest.toml" alpha/Cargo.toml
 for arguments in workspace named features; do
     selection=(--workspace)
     if [ "$arguments" = named ]; then selection=(-p zeta -p alpha --test integration); fi
