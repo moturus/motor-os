@@ -20,11 +20,13 @@ SSH=(ssh -F /dev/null -p 2222 -o IdentitiesOnly=yes -o BatchMode=yes
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts"
   -i "$WD/test.key" motor@192.168.4.2)
 MOCK_PID=""
+PERMISSIONS_ISOLATED=0
 
 cleanup() {
   local status=$?
   trap - EXIT
   set +e
+  if [ "$PERMISSIONS_ISOLATED" = 1 ]; then restore_permissions; fi
   if [ -n "$MOCK_PID" ]; then
     kill "$MOCK_PID" 2>/dev/null
     wait "$MOCK_PID" 2>/dev/null
@@ -45,8 +47,9 @@ fail() { echo "$CASE: $*" >&2; exit 1; }
 # The mock serves one request and exits; the timeout bounds a client that
 # never connects.
 start_mock() {
+  local scenario="${1:-streamed-text}"
   timeout 60s "$MOCK" --addr 192.168.4.1:0 --plain --allow-non-loopback \
-    --scenario streamed-text --expect-model test/model \
+    --scenario "$scenario" --expect-model test/model \
     >"$WORK/$CASE.mock.log" 2>"$WORK/$CASE.mock-stderr.log" &
   MOCK_PID=$!
   local ready="" _
@@ -56,7 +59,7 @@ start_mock() {
     kill -0 "$MOCK_PID" 2>/dev/null || fail "mock provider exited before becoming ready"
     sleep 0.1
   done
-  [[ "$ready" =~ ^GEARS_MOCK_READY\ base_url=http://192\.168\.4\.1:([0-9]+)/v1\ scenario=streamed-text$ ]] \
+  [[ "$ready" =~ ^GEARS_MOCK_READY\ base_url=http://192\.168\.4\.1:([0-9]+)/v1\ scenario=$scenario$ ]] \
     || fail "mock provider did not report a host HTTP endpoint: '$ready'"
   MOCK_PORT="${BASH_REMATCH[1]}"
   BASE_URL="http://192.168.4.1:$MOCK_PORT/v1"
@@ -70,6 +73,12 @@ finish_mock() {
   grep -qx 'GEARS_MOCK_DONE requests_complete' "$WORK/$CASE.mock.log" \
     || fail "mock provider did not complete the scenario"
 }
+
+# The installed configuration and manifests are the same files tested on Linux.
+CASE=shipped-tools
+vm_ssh "OPENROUTER_API_KEY=fixture-child-key /devtools/tests/gears/gears-tool-smoke /user/cfg/gears" \
+  >"$WORK/tools.stdout.log" 2>"$WORK/tools.stderr.log"
+grep -qx 'gears shipped tools ALL PASS' "$WORK/tools.stdout.log"
 
 vm_ssh "/system/bin/mkdir $GUEST_DIR"
 
@@ -107,6 +116,54 @@ vm_ssh "/system/bin/rush -c 'unset OPENROUTER_API_KEY; /devtools/bin/gears --con
   >"$WORK/gears.stdout.log" 2>"$WORK/gears.stderr.log"
 [ "$(cat "$WORK/gears.stdout.log")" = "hello from the mock" ]
 finish_mock
+
+# Exercise every line-UI choice and its next-call behavior on the guest.
+# Preserve existing global state, including on a failed case.
+restore_permissions() {
+  vm_ssh "if [ -f /user/cfg/gears/permissions.toml ]; then /system/bin/rm /user/cfg/gears/permissions.toml; fi; if [ -f $GUEST_DIR/permissions.original ]; then /system/bin/mv $GUEST_DIR/permissions.original /user/cfg/gears/permissions.toml; fi"
+  PERMISSIONS_ISOLATED=0
+}
+vm_ssh "if [ -f /user/cfg/gears/permissions.toml ]; then /system/bin/mv /user/cfg/gears/permissions.toml $GUEST_DIR/permissions.original; fi"
+PERMISSIONS_ISOLATED=1
+for choice in y n s g S G; do
+  CASE="approval-$choice"
+  start_mock sh-round-twice
+  cat >"$WORK/approval.toml" <<EOT
+version = 1
+[provider]
+base_url = "$BASE_URL"
+model = "test/model"
+key_file = "$GUEST_DIR/local.key"
+[net]
+egress_allowlist = ["192.168.4.1"]
+plain_http_allowlist = ["192.168.4.1"]
+[[tools]]
+directory = "/user/cfg/gears/tools/sh"
+enabled = true
+EOT
+  vm_ssh "/system/bin/rush -c 'cat >$GUEST_DIR/approval.toml'" <"$WORK/approval.toml"
+  {
+    printf 'first\n%s\nsecond\n' "$choice"
+    case "$choice" in y|n) printf 'y\n' ;; esac
+    printf '/permissions\n/quit\n'
+  } | vm_ssh "/system/bin/rush -c 'unset OPENROUTER_API_KEY; /devtools/bin/gears --ui line --ephemeral --config $GUEST_DIR/approval.toml --workspace $GUEST_DIR'" \
+    >"$WORK/$CASE.stdout.log" 2>"$WORK/$CASE.stderr.log"
+  finish_mock
+  expected_prompts=1
+  case "$choice" in y|n) expected_prompts=2 ;; esac
+  [ "$(grep -c 'Allow sh in' "$WORK/$CASE.stderr.log")" = "$expected_prompts" ] || fail "wrong approval prompt count"
+  expected_runs=2
+  case "$choice" in n) expected_runs=1 ;; S|G) expected_runs=0 ;; esac
+  [ "$(grep -c 'tool sh done>' "$WORK/$CASE.stderr.log" || true)" = "$expected_runs" ] || fail "wrong execution count"
+  case "$choice" in
+    s) grep -Fq 'sh: session allow' "$WORK/$CASE.stderr.log" ;;
+    g) grep -Fq 'sh: global allow' "$WORK/$CASE.stderr.log" ;;
+    S) grep -Fq 'sh: session deny' "$WORK/$CASE.stderr.log" ;;
+    G) grep -Fq 'sh: global deny' "$WORK/$CASE.stderr.log" ;;
+  esac
+  vm_ssh "if [ -f /user/cfg/gears/permissions.toml ]; then /system/bin/rm /user/cfg/gears/permissions.toml; fi"
+done
+restore_permissions
 
 vm_ssh "/system/bin/rm -r $GUEST_DIR"
 echo "test-gears-http-vm.sh ALL PASS"

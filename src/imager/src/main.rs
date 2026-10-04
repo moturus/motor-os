@@ -1060,11 +1060,13 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/devtools/tests/gears"));
-        assert_eq!(config.source_dirs.len(), 3);
+        assert_eq!(config.source_dirs.len(), 5);
         for (source, destination) in [
             ("src/bin/red", "/devtools/src/motor-os/bin/red"),
             ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
             ("src/bin/gears", "/devtools/src/motor-os/bin/gears"),
+            ("src/bin/gears/tools", "/user/cfg/gears/tools"),
+            ("src/bin/gears/config", "/user/cfg/gears"),
         ] {
             assert!(config
                 .source_dirs

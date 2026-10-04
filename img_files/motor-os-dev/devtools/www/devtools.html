@@ -516,15 +516,18 @@ an interrupted operation, and the limits, is on the <a href="gix.html">gix</a> p
 <h2>Gears</h2>
 <p>Gears is a small, extensible agent harness for working with a language model from
 the terminal, on Linux and on Motor OS. Its core owns provider streaming, one agent loop,
-cancellation, sessions, a full-screen and a line-mode UI, command hooks, and one
-built-in tool, <code>sh</code>, which runs a command through <code>/system/bin/rush -c</code>
-in the selected workspace. It does not prescribe a coding workflow.</p>
+cancellation, sessions, a full-screen and a line-mode UI, command hooks, and optional
+directory-backed tools. The developer image ships shell and common-command manifests
+under <code>/user/cfg/gears/tools/</code>, initially disabled. Use <code>/tools</code> and
+<code>/tool enable NAME</code> to select them. It does not prescribe a coding workflow.</p>
 <pre><code>gears --model provider/model
 gears -p "answer once" --model provider/model</code></pre>
-<p>Configuration is <code>/user/cfg/gears.toml</code>: an OpenAI-compatible
+<p>Configuration is <code>/user/cfg/gears/gears.toml</code>: an OpenAI-compatible
 <code>base_url</code> (OpenRouter by default), the model, a key file, an optional egress
-allowlist, timeouts, and context-window limits. Permission hooks run before every tool
-call; any deny wins, then any allow, otherwise an attended session asks. The
+allowlist, timeouts, and context-window limits. Every tool call checks saved session/global grants, then permission hooks. Saved
+denials and hook denials refuse the call; a hook may require fresh confirmation.
+Interactive users can allow or deny once, for the session, or globally. Unattended
+calls use hook policy and honor saved denials. The
 <code>sh</code> tool is not a sandbox: an approved command has the same filesystem authority
 as Gears. Sessions are append-only JSONL trees under <code>/user/cfg/gears/sessions/</code>,
 with <code>--continue</code>, <code>--resume</code>, <code>--fork</code>, and in-session

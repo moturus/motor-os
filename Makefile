@@ -221,8 +221,9 @@ rnetbench:
 gears:
 	mkdir -p $(BIN_DIR)
 	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" \
-		$(DO_BUILD)
+		$(DO_BUILD) --bins --examples
 	strip -o "$(BIN_DIR)/gears" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears"
+	strip -o "$(BIN_DIR)/gears-tool-smoke" "$(OBJ_DIR)/gears/$(SUB_DIR)/examples/tool-smoke"
 
 gears-mock-provider:
 	mkdir -p $(BIN_DIR)
