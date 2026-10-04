@@ -1663,6 +1663,14 @@ reader to the existing unlocked loading path.
 The final focused manifest run passed all 23 tests in
 `/tmp/lorry-m6-lock-reader-manifest-final.log`.
 
+Complete workspace validation now checks ordinary member nodes and all
+dependency identities, checksums, and exact edges against the existing lock.
+It shares the existing single-root validator, with no synthetic root edge
+comparison. Five Cargo lock-oracle tests and five existing offline-validation
+tests passed in `/tmp/lorry-m6-workspace-lock-{validation,legacy-validation}.log`.
+The oracle checks formats 1 through 4, stale member edges, missing nodes,
+and unchanged lock bytes after validation failures.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

@@ -6,7 +6,7 @@ use semver::Version;
 
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
-use crate::manifest::{LockedPackage, Manifest};
+use crate::manifest::{LockedPackage, Lockfile, Manifest};
 use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedSource};
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
@@ -38,7 +38,29 @@ fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -
                 manifest.name, manifest.version.original
             ))
         })?;
-    let source_kinds = resolution
+    let source_kinds = source_kinds(resolution);
+    validate_edges(
+        "root package",
+        &resolution.root_edges,
+        &root.dependencies,
+        &lock.packages,
+        &source_kinds,
+        edge_mode,
+    )?;
+
+    validate_packages(lock, resolution, &source_kinds, edge_mode)
+}
+
+/// Workspace roots are ordinary packages; no synthetic root edges are locked.
+pub(crate) fn validate_workspace_resolution(
+    lock: &Lockfile,
+    resolution: &Resolution,
+) -> Result<()> {
+    validate_packages(lock, resolution, &source_kinds(resolution), EdgeMode::Exact)
+}
+
+fn source_kinds(resolution: &Resolution) -> BTreeMap<PackageKey, Option<String>> {
+    resolution
         .packages
         .iter()
         .map(|package| {
@@ -51,16 +73,15 @@ fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -
                 },
             )
         })
-        .collect::<BTreeMap<_, _>>();
-    validate_edges(
-        "root package",
-        &resolution.root_edges,
-        &root.dependencies,
-        &lock.packages,
-        &source_kinds,
-        edge_mode,
-    )?;
+        .collect()
+}
 
+fn validate_packages(
+    lock: &Lockfile,
+    resolution: &Resolution,
+    source_kinds: &BTreeMap<PackageKey, Option<String>>,
+    edge_mode: EdgeMode,
+) -> Result<()> {
     let mut selected = BTreeSet::new();
     for package in &resolution.packages {
         if !selected.insert(package.key.clone()) {
@@ -91,7 +112,7 @@ fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -
             &package.lock_edges,
             &locked.dependencies,
             &lock.packages,
-            &source_kinds,
+            source_kinds,
             edge_mode,
         )?;
     }

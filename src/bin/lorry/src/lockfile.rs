@@ -607,6 +607,27 @@ mod tests {
             render_workspace(&resolution, Format::for_workspace(&workspace).unwrap()).unwrap(),
             fs::read(fixture.0.join("Cargo.lock")).unwrap()
         );
+        let lock = crate::manifest::Lockfile::load(&fixture.0.join("Cargo.lock")).unwrap();
+        crate::offline::validate_workspace_resolution(&lock, &resolution).unwrap();
+        let original = fs::read(fixture.0.join("Cargo.lock")).unwrap();
+        let mut stale = lock.clone();
+        stale
+            .packages
+            .iter_mut()
+            .find(|package| package.name == "a")
+            .unwrap()
+            .dependencies
+            .clear();
+        assert!(
+            crate::offline::validate_workspace_resolution(&stale, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("dependency edges disagree")
+        );
+        let mut missing = lock.clone();
+        missing.packages.retain(|package| package.name != "b");
+        assert!(crate::offline::validate_workspace_resolution(&missing, &resolution).is_err());
+        assert_eq!(fs::read(fixture.0.join("Cargo.lock")).unwrap(), original);
         let source = fs::read_to_string(fixture.0.join("a/Cargo.toml")).unwrap();
         for (rust, format) in [
             ("1.83", Format::V4),
@@ -642,13 +663,9 @@ mod tests {
                 fs::read(fixture.0.join("Cargo.lock")).unwrap(),
                 "rust-version {rust}"
             );
-            assert_eq!(
-                crate::manifest::Lockfile::load(&fixture.0.join("Cargo.lock"))
-                    .unwrap()
-                    .packages
-                    .len(),
-                3
-            );
+            let lock = crate::manifest::Lockfile::load(&fixture.0.join("Cargo.lock")).unwrap();
+            assert_eq!(lock.packages.len(), 3);
+            crate::offline::validate_workspace_resolution(&lock, &resolution).unwrap();
         }
     }
 
