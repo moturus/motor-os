@@ -18,6 +18,8 @@ approval policy. Automatic reading approval covers the workspace only.
 Symbolic links are refused. File tools cannot access the Gears directory;
 reading the current session's saved tool results is the sole exception.
 Those results cannot be rewritten through these tools.
+Searches whose root contains the Gears directory are refused; select a
+narrower directory to keep private Gears state out of recursive searches.
 
 Reading records track byte ranges and the full file's hash. `read_file`
 refuses binary and invalid UTF-8 data. The returned next offset avoids

@@ -1,0 +1,1 @@
+{"type":"object","properties":{"pattern":{"type":"string","description":"Literal regular expression, supplied after -e."},"path":{"type":"string","description":"File or directory path; defaults to the selected workspace."}},"required":["pattern"],"additionalProperties":false}
