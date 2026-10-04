@@ -141,7 +141,7 @@ mod tests {
         let options = Options {
             resolver: crate::manifest::Resolver::V2,
             incompatible_rust_versions: None,
-            rust_version: Version::parse("1.85.0").unwrap(),
+            rust_versions: vec![Version::parse("1.85.0").unwrap()],
             package_limit: crate::policy::PackageLimit::with_max(16),
             max_depth: 8,
         };

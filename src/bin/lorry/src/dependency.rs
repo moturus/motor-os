@@ -432,7 +432,7 @@ pub fn resolver_options(
     Ok(Options {
         resolver: manifest.resolver,
         incompatible_rust_versions: config.incompatible_rust_versions,
-        rust_version,
+        rust_versions: vec![rust_version],
         package_limit: crate::policy::PackageLimit::new(&config.policy.limits, manifest),
         max_depth: config.policy.limits.max_depth,
     })
@@ -1126,7 +1126,7 @@ mod tests {
         Options {
             resolver: manifest.resolver,
             incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
-            rust_version: Version::parse("1.98.0").unwrap(),
+            rust_versions: vec![Version::parse("1.98.0").unwrap()],
             package_limit: crate::policy::PackageLimit::with_max(64),
             max_depth: 16,
         }

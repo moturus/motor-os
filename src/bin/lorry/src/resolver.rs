@@ -663,7 +663,7 @@ impl LockedPreference {
 pub struct Options {
     pub resolver: ResolverVersion,
     pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
-    pub rust_version: Version,
+    pub rust_versions: Vec<Version>,
     pub package_limit: PackageLimit,
     pub max_depth: u64,
 }
@@ -1847,8 +1847,8 @@ fn candidates(
                 && left_locked == 0
                 && right_locked == 0
             {
-                let left_compatible = rust_compatible(left, &options.rust_version);
-                let right_compatible = rust_compatible(right, &options.rust_version);
+                let left_compatible = rust_compatibility_count(left, &options.rust_versions);
+                let right_compatible = rust_compatibility_count(right, &options.rust_versions);
                 right_compatible
                     .cmp(&left_compatible)
                     .then_with(|| right.version.cmp(&left.version))
@@ -1896,11 +1896,20 @@ fn lock_rank(record: &Candidate, locked: &[LockedPreference]) -> u8 {
         .into()
 }
 
-fn rust_compatible(record: &Candidate, rust_version: &Version) -> bool {
-    record
-        .rust_version
-        .as_ref()
-        .is_none_or(|required| required.version <= *rust_version)
+fn rust_compatibility_count(record: &Candidate, rust_versions: &[Version]) -> usize {
+    let Some(required) = &record.rust_version else {
+        return rust_versions.len();
+    };
+    let requirement = VersionReq::parse(&format!("^{}", required.original));
+    rust_versions
+        .iter()
+        .filter(|version| {
+            let stable = Version::new(version.major, version.minor, version.patch);
+            requirement
+                .as_ref()
+                .is_ok_and(|required| required.matches(&stable))
+        })
+        .count()
 }
 
 fn validate_locked_checksums(catalog: &Catalog, locked: &[LockedPreference]) -> Result<()> {
@@ -2382,7 +2391,7 @@ mod tests {
         Options {
             resolver,
             incompatible_rust_versions: None,
-            rust_version: Version::parse("1.70.0").unwrap(),
+            rust_versions: vec![Version::parse("1.70.0").unwrap()],
             package_limit: PackageLimit::with_max(64),
             max_depth: 16,
         }
@@ -2763,6 +2772,93 @@ mod tests {
             selected(&allow, "demo"),
             [&Version::parse("1.2.0").unwrap()]
         );
+    }
+
+    #[test]
+    fn workspace_rust_versions_rank_compatibility_counts_before_versions() {
+        let fixture = LocalFixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"3\"\n",
+        )
+        .unwrap();
+        for (name, rust) in [("a", "1.70"), ("b", "1.80")] {
+            fixture.package(name, &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\nrust-version = \"{rust}\"\n[dependencies]\ndemo = \"1\"\n"));
+        }
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let mut catalog = Catalog::default();
+        for (version, rust) in [("1.1.0", "1.75"), ("1.2.0", "1.85")] {
+            catalog
+                .insert(record(
+                    "demo",
+                    version,
+                    "[]",
+                    "{}",
+                    &format!(",\"rust_version\":\"{rust}\""),
+                ))
+                .unwrap();
+        }
+        let mut limits = options(ResolverVersion::V3);
+        // A declared workspace MSRV replaces the newer compiler fallback.
+        limits.rust_versions = vec![Version::parse("1.99.0-dev").unwrap()];
+        let solve = |catalog: &mut Catalog, locked: &[LockedPreference]| {
+            resolve_complete_workspace(&workspace, catalog, &limits, locked, &mut |_, _, _| Ok(()))
+                .unwrap()
+        };
+        assert_eq!(
+            selected(&solve(&mut catalog, &[]), "demo")[0].to_string(),
+            "1.1.0"
+        );
+        catalog
+            .insert(record(
+                "demo",
+                "1.0.0",
+                "[]",
+                "{}",
+                ",\"rust_version\":\"1.65\"",
+            ))
+            .unwrap();
+        assert_eq!(
+            selected(&solve(&mut catalog, &[]), "demo")[0].to_string(),
+            "1.0.0"
+        );
+        let preferred = record("demo", "1.2.0", "[]", "{}", ",\"rust_version\":\"1.85\"");
+        let locked = [LockedPreference {
+            name: preferred.name,
+            version: preferred.version,
+            checksum: Some(preferred.checksum),
+        }];
+        assert_eq!(
+            selected(&solve(&mut catalog, &locked), "demo")[0].to_string(),
+            "1.2.0"
+        );
+    }
+
+    #[test]
+    fn workspace_without_msrv_uses_the_stable_compiler_release_as_fallback() {
+        let fixture = LocalFixture::new();
+        fixture.package("", "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\nresolver = \"3\"\n[dependencies]\ndemo = \"1\"\n");
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let mut catalog = Catalog::default();
+        for (version, rust) in [("1.1.0", "1.69"), ("1.2.0", "1.70")] {
+            catalog
+                .insert(record(
+                    "demo",
+                    version,
+                    "[]",
+                    "{}",
+                    &format!(",\"rust_version\":\"{rust}\""),
+                ))
+                .unwrap();
+        }
+        let mut limits = options(ResolverVersion::V3);
+        limits.rust_versions = vec![Version::parse("1.70.0-dev").unwrap()];
+        let resolution =
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(selected(&resolution, "demo")[0].to_string(), "1.2.0");
     }
 
     #[test]
@@ -3416,7 +3512,7 @@ mod tests {
             &Options {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: None,
-                rust_version: Version::parse("1.98.0").unwrap(),
+                rust_versions: vec![Version::parse("1.98.0").unwrap()],
                 package_limit: PackageLimit::with_max(16),
                 max_depth: 8,
             },
@@ -3583,7 +3679,7 @@ mod tests {
         let options = Options {
             resolver: manifest.resolver,
             incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
-            rust_version: Version::parse("1.98.0").unwrap(),
+            rust_versions: vec![Version::parse("1.98.0").unwrap()],
             package_limit: PackageLimit::with_max(64),
             max_depth: 16,
         };
@@ -3701,7 +3797,7 @@ mod tests {
             &Options {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: None,
-                rust_version: Version::parse("1.98.0").unwrap(),
+                rust_versions: vec![Version::parse("1.98.0").unwrap()],
                 package_limit: PackageLimit::with_max(64),
                 max_depth: 16,
             },
@@ -3762,7 +3858,7 @@ mod tests {
             &Options {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: None,
-                rust_version: Version::parse("1.98.0").unwrap(),
+                rust_versions: vec![Version::parse("1.98.0").unwrap()],
                 package_limit: PackageLimit::with_max(64),
                 max_depth: 16,
             },

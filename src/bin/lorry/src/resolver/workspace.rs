@@ -17,6 +17,18 @@ pub(crate) fn resolve_complete_workspace(
         .map(|member| (member.name.clone(), member.root.clone()))
         .collect();
     let mut options = options.clone();
+    let declared_rust_versions = workspace
+        .packages
+        .iter()
+        .filter(|member| !member.metadata.rust_version.is_empty())
+        .map(|member| {
+            parse_local_rust_version(&member.name, &member.metadata.rust_version)
+                .map(|version| version.version)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !declared_rust_versions.is_empty() {
+        options.rust_versions = declared_rust_versions;
+    }
     options.package_limit = options
         .package_limit
         .with_members(catalog.workspace_members.values().cloned());

@@ -1619,6 +1619,16 @@ Twenty-nine resolver tests passed in `/tmp/lorry-m6-multi-root-unit.log`;
 strict Clippy passed in `/tmp/lorry-m6-multi-root-clippy-fixed.log` after
 correcting the new API's unused import.
 
+Complete workspace resolution now ranks unlocked versions by the number of
+declared member Rust versions they support, matching pinned Cargo's
+`version_prefs.rs`. Declared versions replace the compiler fallback; without
+any declarations, compiler prerelease identifiers are ignored for MSRV
+comparison. Existing locked versions remain preferred. Thirty-one resolver
+tests and strict Clippy passed in
+`/tmp/lorry-m6-msrv-{unit-callers-fixed,clippy-fixed}.log`. Initial compile
+failures identified option constructors missed during the API migration;
+all constructors are now migrated.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

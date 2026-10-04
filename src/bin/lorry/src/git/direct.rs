@@ -854,7 +854,7 @@ mod tests {
         let options = crate::resolver::Options {
             resolver: crate::manifest::Resolver::V2,
             incompatible_rust_versions: None,
-            rust_version: semver::Version::parse("1.85.0").unwrap(),
+            rust_versions: vec![semver::Version::parse("1.85.0").unwrap()],
             package_limit: crate::policy::PackageLimit::with_max(16),
             max_depth: 8,
         };
