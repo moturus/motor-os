@@ -36,6 +36,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
             cli.package.as_deref(),
         )?;
         warn_default_format(cli, options);
+        Manifest::report_warnings(&workspace.packages, cli.verbosity);
         return write_document(&graph::no_dependencies(&workspace)?);
     }
     let manifest = Manifest::load_selected_or_manifest_path(
@@ -45,6 +46,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         true,
     )?;
     warn_default_format(cli, options);
+    Manifest::report_warnings([&manifest], cli.verbosity);
     let mut config = Config::load(&current, &manifest)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     crate::engine::check_rust_version(&manifest, &toolchain)?;

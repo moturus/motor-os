@@ -30,6 +30,7 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
         true,
     )?;
     let mut config = Config::load(&current, &manifest)?;
+    Manifest::report_warnings([&manifest], cli.verbosity);
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     crate::engine::check_rust_version(&manifest, &toolchain)?;
     let physical_target = config.selected_target(options.target.as_deref())?;

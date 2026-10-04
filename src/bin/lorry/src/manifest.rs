@@ -28,6 +28,7 @@ pub struct Manifest {
     /// Workspace members by name, with their canonical directories.
     pub workspace_members: BTreeMap<String, PathBuf>,
     pub path: PathBuf,
+    pub warnings: Vec<String>,
     pub name: String,
     pub crate_name: String,
     pub version: Version,
@@ -253,6 +254,22 @@ pub struct LockedPackage {
 }
 
 impl Manifest {
+    pub fn report_warnings<'a>(
+        manifests: impl IntoIterator<Item = &'a Self>,
+        verbosity: crate::cli::Verbosity,
+    ) {
+        if verbosity == crate::cli::Verbosity::Quiet {
+            return;
+        }
+        let warnings = manifests
+            .into_iter()
+            .flat_map(|manifest| &manifest.warnings)
+            .collect::<BTreeSet<_>>();
+        for warning in warnings {
+            eprintln!("warning: {warning}");
+        }
+    }
+
     pub fn panic_abort(&self, release: bool) -> bool {
         if release {
             self.release.panic_abort
@@ -522,15 +539,19 @@ impl Manifest {
             Vec::new()
         };
         let mut dependencies = Vec::new();
-        let fields = DependencyFields {
+        let mut warnings = Vec::new();
+        let mut fields = DependencyFields {
             path,
             document,
             root,
+            inherited,
+            edition,
+            warnings: &mut warnings,
         };
         if let Some(item) = document.root().get("dependencies") {
             let table = require_table(path, document, item, "dependencies")?;
             parse_dependency_table(
-                &fields,
+                &mut fields,
                 table,
                 None,
                 DependencyKind::Normal,
@@ -542,7 +563,7 @@ impl Manifest {
         {
             let table = require_table(path, document, item, "build-dependencies")?;
             parse_dependency_table(
-                &fields,
+                &mut fields,
                 table,
                 None,
                 DependencyKind::Build,
@@ -554,11 +575,17 @@ impl Manifest {
             && let Some(item) = document.root().get("dev-dependencies")
         {
             let table = require_table(path, document, item, "dev-dependencies")?;
-            parse_dependency_table(&fields, table, None, DependencyKind::Dev, &mut dependencies)?;
+            parse_dependency_table(
+                &mut fields,
+                table,
+                None,
+                DependencyKind::Dev,
+                &mut dependencies,
+            )?;
         }
         let mut unsupported_target_dev_dependencies = Vec::new();
         parse_target_dependencies(
-            &fields,
+            &mut fields,
             mode,
             &mut dependencies,
             &mut unsupported_target_dev_dependencies,
@@ -584,6 +611,7 @@ impl Manifest {
             workspace_root: root.to_path_buf(),
             workspace_members: std::iter::once((name.clone(), root.to_path_buf())).collect(),
             path: path.to_path_buf(),
+            warnings,
             crate_name: name.replace('-', "_"),
             name,
             version,
@@ -657,6 +685,7 @@ struct Workspace {
     release: ReleaseProfile,
     resolver: Resolver,
     patches: Vec<Patch>,
+    warnings: Vec<String>,
 }
 
 impl Workspace {
@@ -705,6 +734,10 @@ impl Workspace {
 
         let packages = membership.load_members()?;
         let defaults = membership.defaults(current, packages.keys())?;
+        let warnings = packages
+            .values()
+            .flat_map(|package| package.warnings.clone())
+            .collect();
         let members = packages
             .into_iter()
             .map(|(directory, manifest)| (manifest.name, directory))
@@ -718,6 +751,7 @@ impl Workspace {
             release,
             resolver,
             patches: parse_patches(&path, &document, root)?,
+            warnings,
         })
     }
 
@@ -779,6 +813,7 @@ impl Workspace {
         manifest.release.clone_from(&self.release);
         manifest.resolver = self.resolver;
         manifest.patches.clone_from(&self.patches);
+        manifest.warnings.extend(self.warnings.iter().cloned());
         Ok(())
     }
 }
@@ -1632,10 +1667,13 @@ struct DependencyFields<'a> {
     path: &'a Path,
     document: &'a Document,
     root: &'a Path,
+    inherited: Option<&'a InheritedPackage>,
+    edition: Edition,
+    warnings: &'a mut Vec<String>,
 }
 
 fn parse_dependency_table(
-    fields: &DependencyFields<'_>,
+    fields: &mut DependencyFields<'_>,
     table: &Table,
     target: Option<&str>,
     kind: DependencyKind,
@@ -1649,17 +1687,15 @@ fn parse_dependency_table(
 }
 
 fn parse_dependency(
-    fields: &DependencyFields<'_>,
+    fields: &mut DependencyFields<'_>,
     alias: &str,
     item: &Item,
     target: Option<&str>,
     kind: DependencyKind,
 ) -> Result<Dependency> {
-    let DependencyFields {
-        path,
-        document,
-        root,
-    } = *fields;
+    let path = fields.path;
+    let document = fields.document;
+    let root = fields.root;
     if let Some(requirement) = item.as_str() {
         return Ok(Dependency {
             alias: alias.to_owned(),
@@ -1687,6 +1723,9 @@ fn parse_dependency(
             ));
         }
     };
+    if lookup.get("workspace").is_some() {
+        return inheritance::dependency(fields, alias, &lookup, line, target, kind);
+    }
     const ALLOWED: &[&str] = &[
         "version",
         "path",
@@ -1897,7 +1936,7 @@ fn validate_git_revision(path: &Path, line: usize, value: &str) -> Result<()> {
 }
 
 fn parse_target_dependencies(
-    fields: &DependencyFields<'_>,
+    fields: &mut DependencyFields<'_>,
     mode: ManifestMode,
     output: &mut Vec<Dependency>,
     unsupported_target_dev_dependencies: &mut Vec<UnsupportedTargetDevDependency>,

@@ -105,6 +105,7 @@ impl WorkspaceRoot {
     pub fn parse(root: &Path, path: &Path, document: &Document) -> Result<Self> {
         let item = document.root().get("workspace").unwrap();
         let table = require_table(path, document, item, "workspace")?;
+        super::inheritance::validate_dependencies(path, document, table)?;
         let paths = |key: &str| {
             table
                 .get(key)

@@ -28,6 +28,7 @@ pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = Manifest::load_for_vendor_selected(&current, cli.package.as_deref())?;
+    Manifest::report_warnings([&manifest], cli.verbosity);
     let config = Config::load(&current, &manifest)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let target = toolchain.target_info(Some(&options.target))?;

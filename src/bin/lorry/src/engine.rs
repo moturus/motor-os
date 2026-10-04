@@ -59,6 +59,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         Command::Check(options) => load_check_manifest(&current, options, cli.package.as_deref())?,
         _ => Manifest::load_selected(&current, cli.package.as_deref())?,
     };
+    Manifest::report_warnings([&manifest], cli.verbosity);
     // Compiling the selected package without its build script would quietly
     // produce a different crate, so reject it before any other work.
     if let Some(script) = &manifest.build_script {

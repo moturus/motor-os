@@ -300,6 +300,11 @@ when the member sets `workspace = true`: authors, categories, description,
 documentation, edition, exclude, homepage, include, keywords, license,
 license-file, publish, readme, repository, rust-version, and version.
 Inherited readme and license-file paths are normalized relative to the member.
+Workspace dependencies inherit sources relative to the workspace root and
+add member features. Only member declarations may make them optional. Edition
+2024 members may override inherited default-features; older editions warn
+and ignore false unless the workspace already disabled defaults. Manifest
+warnings are collected and reported once, outside compiler JSON output.
 Readme discovery and boolean forms match Cargo; an explicit false suppresses
 discovery, and inheriting a disabled workspace readme is an error. Metadata
 preserves publish's boolean/array meaning. Include/exclude arrays are retained

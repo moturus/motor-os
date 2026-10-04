@@ -34,6 +34,8 @@ printf '%s\n' \
     'version = "0.1.0"' \
     'edition = "2024"' \
     'rust-version = "1.85.0"' \
+    '[workspace.dependencies]' \
+    'shared = { path = "shared" }' \
     '' \
     '[profile.dev]' \
     'panic = "abort"' >"$WORK/project/Cargo.toml"
@@ -66,7 +68,7 @@ for package in app tool; do
 done
 printf '%s\n' \
     '[dependencies]' \
-    'shared = { path = "../shared" }' >>"$WORK/project/tool/Cargo.toml"
+    'shared.workspace = true' >>"$WORK/project/tool/Cargo.toml"
 printf 'fn main() { println!("{}", shared::VALUE); }\n' \
     >"$WORK/project/tool/src/main.rs"
 printf '%s\n' \

@@ -2,9 +2,140 @@ use std::path::{Component, Path, PathBuf};
 
 use toml_edit::{Item, Table, Value};
 
-use super::{InheritedPackage, require_table, string_array, type_error};
+use super::{
+    Dependency, DependencyFields, DependencyTable, Edition, InheritedPackage, lookup_bool,
+    node_string_array, parse_dependency, require_table, string_array, type_error,
+};
 use crate::diagnostic::{Error, Result};
+use crate::sparse::DependencyKind;
 use crate::toml::Document;
+
+pub(super) fn validate_dependencies(
+    path: &Path,
+    document: &Document,
+    workspace: &Table,
+) -> Result<()> {
+    let Some(item) = workspace.get("dependencies") else {
+        return Ok(());
+    };
+    let dependencies = require_table(path, document, item, "workspace.dependencies")?;
+    for (alias, item) in dependencies.iter() {
+        let lookup = match item {
+            Item::Table(table) => Some(DependencyTable::Regular(table)),
+            Item::Value(Value::InlineTable(table)) => Some(DependencyTable::Inline(table)),
+            _ => None,
+        };
+        if let Some(lookup) = lookup
+            && lookup_bool(path, document, &lookup, alias, "optional")? == Some(true)
+        {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("workspace dependency `{alias}` cannot be optional"),
+                "set optional = true on the member's inherited dependency instead",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn dependency(
+    fields: &mut DependencyFields<'_>,
+    alias: &str,
+    member: &DependencyTable<'_>,
+    line: usize,
+    target: Option<&str>,
+    kind: DependencyKind,
+) -> Result<Dependency> {
+    let path = fields.path;
+    let document = fields.document;
+    if lookup_bool(path, document, member, alias, "workspace")? != Some(true) {
+        return Err(Error::at(
+            path,
+            line,
+            "dependency.workspace must be true",
+            "remove workspace = false or inherit with workspace = true",
+        ));
+    }
+    for (key, value) in member.entries() {
+        if !matches!(
+            key,
+            "workspace" | "features" | "optional" | "default-features"
+        ) {
+            return Err(Error::at(
+                path,
+                value.line(document),
+                format!("unsupported inherited dependency key `{key}`"),
+                "define dependency sources at the workspace root",
+            ));
+        }
+    }
+    let inherited = fields.inherited.ok_or_else(|| {
+        Error::failure(format!(
+            "dependency `{alias}` inherits from a missing workspace"
+        ))
+    })?;
+    let item = inherited
+        .document
+        .root()
+        .get("workspace")
+        .and_then(Item::as_table)
+        .and_then(|table| table.get("dependencies"))
+        .and_then(Item::as_table)
+        .and_then(|table| table.get(alias))
+        .ok_or_else(|| {
+            Error::at(
+                path,
+                line,
+                format!("inherited workspace.dependencies.{alias} is not defined"),
+                "define the dependency at the workspace root",
+            )
+        })?;
+    let mut dependency = parse_dependency(
+        &mut DependencyFields {
+            path: &inherited.path,
+            document: &inherited.document,
+            root: inherited.path.parent().unwrap(),
+            inherited: None,
+            edition: fields.edition,
+            warnings: fields.warnings,
+        },
+        alias,
+        item,
+        target,
+        kind,
+    )?;
+    // Edition 2024 permits disabling inherited defaults. Older editions keep
+    // the workspace defaults and report Cargo's compatibility warning.
+    if let Some(defaults) = lookup_bool(path, document, member, alias, "default-features")? {
+        if fields.edition != Edition::E2024 && !defaults && dependency.default_features {
+            let specified = match item {
+                Item::Table(table) => table.contains_key("default-features"),
+                Item::Value(Value::InlineTable(table)) => table.contains_key("default-features"),
+                _ => false,
+            };
+            fields.warnings.push(format!(
+                "{}: `default-features` is ignored for {alias}, since `default-features` was {} \
+                 for `workspace.dependencies.{alias}`; overriding workspace `default-features` \
+                 to false requires Rust 1.99+ and the 2024 edition",
+                path.display(),
+                if specified { "true" } else { "not specified" },
+            ));
+        } else {
+            dependency.default_features = defaults;
+        }
+    }
+    dependency.optional = lookup_bool(path, document, member, alias, "optional")?.unwrap_or(false);
+    if let Some(value) = member.get("features") {
+        dependency.features.extend(node_string_array(
+            path,
+            document,
+            value,
+            &format!("dependencies.{alias}.features"),
+        )?);
+    }
+    Ok(dependency)
+}
 
 pub(super) struct PackageFields<'a> {
     path: &'a Path,

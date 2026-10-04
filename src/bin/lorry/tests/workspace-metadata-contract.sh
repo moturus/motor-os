@@ -282,3 +282,73 @@ mkdir "$WORK/empty-virtual"
 printf '[workspace]\n' >"$WORK/empty-virtual/Cargo.toml"
 agrees_with_cargo "$WORK/empty-virtual/Cargo.toml" empty-virtual
 echo "PASS: Cargo member globs, exclusions, file matches, and empty workspaces"
+
+INHERIT="$WORK/dependencies"
+package "$INHERIT/app"
+package "$INHERIT/shared"
+cat >>"$INHERIT/shared/Cargo.toml" <<'EOF'
+[features]
+default = ["default-on"]
+default-on = []
+base = []
+extra = []
+EOF
+for defaults in unspecified true false; do
+    cat >"$INHERIT/Cargo.toml" <<'EOF'
+[workspace]
+members = ["app"]
+resolver = "2"
+[workspace.dependencies]
+renamed = { package = "shared", path = "shared", features = ["base"] }
+[workspace.dependencies.shared]
+path = "shared"
+features = ["base"]
+EOF
+    if [ "$defaults" != unspecified ]; then
+        printf 'default-features = %s\n' "$defaults" >>"$INHERIT/Cargo.toml"
+    fi
+    for edition in 2021 2024; do
+        cat >"$INHERIT/app/Cargo.toml" <<EOF
+[package]
+name = "app"
+version = "0.1.0"
+edition = "$edition"
+[dependencies]
+shared = { workspace = true, features = ["extra"], default-features = false }
+renamed = { workspace = true, optional = true }
+[build-dependencies]
+shared.workspace = true
+[dev-dependencies]
+shared = { workspace = true, default-features = true }
+[target.'cfg(unix)'.dependencies]
+shared.workspace = true
+EOF
+        agrees_with_cargo "$INHERIT/Cargo.toml" "dependencies-$defaults-$edition"
+        source_metadata "$INHERIT/Cargo.toml" >"$WORK/inherited.json" 2>"$WORK/inherited.err"
+        if [ "$edition" = 2021 ] && [ "$defaults" != false ]; then
+            [ "$(grep -Fc 'default-features` is ignored for shared' "$WORK/inherited.err")" -eq 1 ]
+            source_metadata "$INHERIT/Cargo.toml" --quiet >"$WORK/quiet.json" 2>"$WORK/quiet.err"
+            [ ! -s "$WORK/quiet.err" ]
+        else
+            [ ! -s "$WORK/inherited.err" ]
+        fi
+    done
+done
+cp "$INHERIT/Cargo.toml" "$WORK/dependencies.valid"
+for invalid in missing optional; do
+    cp "$WORK/dependencies.valid" "$INHERIT/Cargo.toml"
+    if [ "$invalid" = missing ]; then
+        sed -i 's/shared.workspace = true/missing.workspace = true/' "$INHERIT/app/Cargo.toml"
+    else
+        printf '\n[workspace.dependencies.unused]\nversion = "1"\noptional = true\n' >>"$INHERIT/Cargo.toml"
+    fi
+    for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+        if "$builder" metadata --no-deps --offline --format-version 1 \
+            --manifest-path "$INHERIT/Cargo.toml" >"$WORK/dependency-invalid.json" 2>"$WORK/dependency-invalid.err"; then
+            echo "workspace-metadata: accepted an invalid inherited dependency" >&2
+            exit 1
+        fi
+    done
+    sed -i 's/missing.workspace = true/shared.workspace = true/' "$INHERIT/app/Cargo.toml"
+done
+echo "PASS: Cargo dependency inheritance, additive features, and edition-specific defaults"

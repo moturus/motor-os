@@ -1197,6 +1197,19 @@ path combined with another member's package selection.
 inheritance rules. One member can be built or checked from the workspace
 root. The shared model is ready for multi-member execution.
 
+Workspace dependency inheritance now rebases paths from the root, preserves
+renames, adds member features, and permits optionality only in members.
+The pinned Cargo 1.99 default-feature policy is covered for editions 2021
+and 2024 with unspecified, enabled, and disabled workspace defaults.
+Collected manifest warnings are deduplicated at command reporting, and quiet
+mode suppresses them. Missing inherited dependencies and even unused optional
+workspace dependencies fail. The 23 focused manifest tests, strict Clippy,
+and paired metadata/build contracts passed in
+`/tmp/lorry-m5-inherited-dependencies-unit.log`,
+`/tmp/lorry-m5-inherited-dependencies-clippy.log`,
+`/tmp/lorry-m5-inherited-dependencies-metadata-contract.log`, and
+`/tmp/lorry-m5-inherited-dependencies-build-contract.log`.
+
 ### Workspace and manifest loading
 
 Lorry currently has three workspace-table readers: builds, source metadata,
