@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const MAX_EVENT_BYTES: usize = 1024 * 1024;
+const MAX_EVENT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub struct Event {
@@ -55,7 +55,7 @@ pub fn read_event(reader: impl Read) -> Result<Event, String> {
         .read_to_end(&mut bytes)
         .map_err(|error| format!("cannot read hook event: {error}"))?;
     if bytes.len() > MAX_EVENT_BYTES {
-        return Err("hook event exceeds 1 MiB".into());
+        return Err("hook event exceeds 2 MiB".into());
     }
     let event: Event =
         serde_json::from_slice(&bytes).map_err(|error| format!("invalid hook event: {error}"))?;

@@ -36,6 +36,20 @@ struct WriteFile {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SessionSearch {
+    query: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "search_limit")]
+    limit: usize,
+}
+
+fn search_limit() -> usize {
+    10
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchFiles {
     pattern: String,
     #[serde(default = "search_root")]
@@ -56,6 +70,16 @@ pub fn run(name: &str, reader: impl Read, context: &ToolContext) -> Result<Value
         return Err("tool arguments exceed 1 MiB".into());
     }
     match name {
+        "session_search" => {
+            let arguments: SessionSearch = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("invalid session_search arguments: {error}"))?;
+            crate::session_search::search(
+                context,
+                &arguments.query,
+                arguments.offset,
+                arguments.limit,
+            )
+        }
         "check" => {
             let _: Empty = serde_json::from_slice(&bytes)
                 .map_err(|error| format!("invalid check arguments: {error}"))?;

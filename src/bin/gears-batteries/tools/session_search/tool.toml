@@ -1,0 +1,15 @@
+version = 1
+kind = "process"
+name = "session_search"
+description = "Search saved session text across every branch and workspace. Hits retain session and entry IDs, identify off-branch results and mark external text as untrusted."
+parameters = "parameters.json"
+read_only = true
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 262144
+output = "stdout"
+stdin = "arguments"
+
+[process.command]
+common = ["gears-batteries", "tool", "session_search"]

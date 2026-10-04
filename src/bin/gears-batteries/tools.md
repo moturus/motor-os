@@ -40,3 +40,12 @@ escaped newlines and tabs are decoded only after the earlier rules fail.
 with a 120-second limit and 128 KiB per output stream. Its receipt contains
 the actual exit status, duration and pass/fail result, bounded previews and
 a current-session saved-results path for the full captured output.
+
+`session_search` takes a literal `query` (1–256 bytes), optional match
+`offset` and `limit` (1–10, default 10). It returns bounded excerpts,
+session and entry ids, off-branch markers, a next offset and unavailable
+sources. It scans Gears' existing workspace groups on every call; source
+files over 32 MiB, malformed records and symbolic links are reported as
+unavailable and left untouched. Sessions containing external tool text or
+an untrusted marker keep that provenance on every hit. These are historical
+source records, not instructions or proof that a prior task was accepted.
