@@ -21,6 +21,8 @@ use crate::resolver::{
 };
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::Toolchain;
+pub(crate) mod workspace;
+
 use crate::unit::{
     CheckTargetSelection, CompilationPlan, PlanOptions, ProfileContext, SourceRemap, UnitGraph,
     add_selected_binaries, add_selected_harnesses, add_selected_integration_harnesses,
@@ -820,6 +822,28 @@ fn prepare_verified_resolution(
 ) -> Result<PreparedGraph> {
     offline::validate_selected_resolution(manifest, &resolution)?;
     let preflight = policy::preflight(&config.policy, &resolution)?;
+    let packages =
+        prepare_resolution_packages(&resolution, config, source, staging_parent, direct)?;
+    let evidence = packages
+        .iter()
+        .map(|(key, package)| (key.clone(), package.evidence.clone()))
+        .collect();
+    let admission = policy::inspect(&preflight, &resolution, &evidence)?;
+    Ok(PreparedGraph {
+        resolution,
+        admission,
+        packages,
+        cargo_registry_mode: matches!(source, RegistrySource::Cargo(_)),
+    })
+}
+
+fn prepare_resolution_packages(
+    resolution: &Resolution,
+    config: &Config,
+    source: RegistrySource<'_>,
+    staging_parent: &Path,
+    direct: &crate::git::DirectCatalog,
+) -> Result<BTreeMap<PackageKey, PreparedPackage>> {
     let git = resolution
         .packages
         .iter()
@@ -872,17 +896,7 @@ fn prepare_verified_resolution(
             },
         );
     }
-    let evidence = packages
-        .iter()
-        .map(|(key, package)| (key.clone(), package.evidence.clone()))
-        .collect();
-    let admission = policy::inspect(&preflight, &resolution, &evidence)?;
-    Ok(PreparedGraph {
-        resolution,
-        admission,
-        packages,
-        cargo_registry_mode: matches!(source, RegistrySource::Cargo(_)),
-    })
+    Ok(packages)
 }
 
 fn registry_package_evidence(
@@ -1102,10 +1116,10 @@ mod tests {
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
-    struct Fixture(PathBuf);
+    pub(super) struct Fixture(pub(super) PathBuf);
 
     impl Fixture {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
             let path =
                 std::env::temp_dir().join(format!("lorry-dependency-{}-{id}", std::process::id()));
@@ -1122,7 +1136,7 @@ mod tests {
         }
     }
 
-    fn options(manifest: &Manifest) -> Options {
+    pub(super) fn options(manifest: &Manifest) -> Options {
         Options {
             resolver: manifest.resolver,
             incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
