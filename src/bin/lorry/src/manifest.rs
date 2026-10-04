@@ -187,6 +187,10 @@ pub struct BinaryTarget {
 pub struct IntegrationTestTarget {
     pub name: String,
     pub path: PathBuf,
+    pub required_features: Option<Vec<String>>,
+    pub test: bool,
+    pub doc: bool,
+    pub harness: bool,
 }
 
 #[allow(dead_code)]
@@ -1757,6 +1761,17 @@ fn parse_dependency_integration_tests(
                 IntegrationTestTarget {
                     name,
                     path: target_path,
+                    required_features: optional_string_array(
+                        path,
+                        document,
+                        table,
+                        "test",
+                        "required-features",
+                    )?,
+                    test: optional_bool(path, document, table, "test", "test")?.unwrap_or(true),
+                    doc: optional_bool(path, document, table, "test", "doc")?.unwrap_or(false),
+                    harness: optional_bool(path, document, table, "test", "harness")?
+                        .unwrap_or(true),
                 },
             );
         }
@@ -1812,7 +1827,7 @@ fn discover_integration_tests(root: &Path) -> Result<Vec<IntegrationTestTarget>>
                 directory.display()
             ))
         })?;
-        let path = entry.path();
+        let mut path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
             Error::failure(format!(
                 "failed to inspect integration-test entry `{}`: {error}",
@@ -1825,25 +1840,47 @@ fn discover_integration_tests(root: &Path) -> Result<Vec<IntegrationTestTarget>>
                 path.display()
             )));
         }
-        if metadata.is_dir() || path.extension().is_none_or(|extension| extension != "rs") {
+        let name_path = path.clone();
+        if metadata.is_dir() {
+            path = path.join("main.rs");
+            if !path.is_file() {
+                continue;
+            }
+            if fs::symlink_metadata(&path)
+                .map_err(|error| {
+                    Error::failure(format!(
+                        "failed to inspect integration-test source: {error}"
+                    ))
+                })?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(Error::failure(format!(
+                    "integration-test entry `{}` is a symbolic link",
+                    path.display()
+                )));
+            }
+        } else if path.extension().is_none_or(|extension| extension != "rs") {
             continue;
-        }
-        if !metadata.is_file() {
+        } else if !metadata.is_file() {
             return Err(Error::failure(format!(
                 "integration-test entry `{}` is not a regular file",
                 path.display()
             )));
         }
-        let name = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                Error::failure(format!(
-                    "integration-test filename `{}` is not valid UTF-8",
-                    path.display()
-                ))
-            })?
-            .to_owned();
+        let name = if metadata.is_dir() {
+            name_path.file_name()
+        } else {
+            name_path.file_stem()
+        }
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            Error::failure(format!(
+                "integration-test filename `{}` is not valid UTF-8",
+                path.display()
+            ))
+        })?
+        .to_owned();
         validate_package_name(&root.join(MANIFEST_NAME), 1, &name)?;
         let crate_name = name.replace('-', "_");
         if !crate_names.insert(crate_name.clone()) {
@@ -1851,7 +1888,14 @@ fn discover_integration_tests(root: &Path) -> Result<Vec<IntegrationTestTarget>>
                 "integration-test target `{name}` has duplicate crate name `{crate_name}`"
             )));
         }
-        targets.push(IntegrationTestTarget { name, path });
+        targets.push(IntegrationTestTarget {
+            name,
+            path,
+            required_features: None,
+            test: true,
+            doc: false,
+            harness: true,
+        });
     }
     targets.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(targets)
@@ -4044,7 +4088,7 @@ members = ["ignored-member"]
             "[package]\nname=\"demo\"\nversion=\"1.0.0\"\nedition=\"2021\"\n[workspace]\n\
             [lib]\npath=\"missing/lib.rs\"\n\
             [[bin]]\nname=\"program\"\npath=\"missing/main.rs\"\n\
-            [[test]]\nname=\"integration\"\npath=\"missing/test.rs\"\n\
+            [[test]]\nname=\"integration\"\npath=\"missing/test.rs\"\nrequired-features=[\"extra\"]\ntest=false\ndoc=true\nharness=false\n\
             [[example]]\nname=\"sample\"\npath=\"missing/example.rs\"\n\
             [[bench]]\nname=\"benchmark\"\npath=\"missing/bench.rs\"\n",
         )
@@ -4065,6 +4109,19 @@ members = ["ignored-member"]
         let manifest = Manifest::load_source_dependency(&root).unwrap();
         let targets = cargo["packages"][0]["targets"].as_array().unwrap();
         assert_eq!(targets.len(), 5);
+        let test = &manifest.integration_tests[0];
+        assert_eq!(test.required_features.as_ref().unwrap(), &["extra"]);
+        assert!(!test.test && test.doc && !test.harness);
+        let cargo_test = targets
+            .iter()
+            .find(|target| target["name"] == "integration")
+            .unwrap();
+        assert_eq!(
+            cargo_test["required-features"],
+            serde_json::json!(["extra"])
+        );
+        assert_eq!(cargo_test["test"], test.test);
+        assert_eq!(cargo_test["doc"], test.doc);
         let mut paths = vec![manifest.library.as_ref().unwrap().path.clone()];
         paths.extend(manifest.binaries.iter().map(|target| target.path.clone()));
         paths.extend(
@@ -4122,10 +4179,13 @@ members = ["ignored-member"]
         .unwrap();
         fs::write(root.join("src/lib.rs"), "").unwrap();
         fs::write(root.join("tests/auto_test.rs"), "").unwrap();
+        fs::create_dir_all(root.join("tests/directory-test")).unwrap();
+        fs::write(root.join("tests/directory-test/main.rs"), "").unwrap();
 
         let manifest = Manifest::load_path_dependency(&root).unwrap();
-        assert_eq!(manifest.integration_tests.len(), 1);
+        assert_eq!(manifest.integration_tests.len(), 2);
         assert_eq!(manifest.integration_tests[0].name, "auto-test");
+        assert_eq!(manifest.integration_tests[1].name, "directory-test");
         fs::remove_dir_all(root).unwrap();
     }
 
