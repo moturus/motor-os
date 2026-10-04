@@ -363,6 +363,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
+                    members: None,
                     global_cache_root: &global_cache_root,
                     config: &config,
                     toolchain: &toolchain,
@@ -395,6 +396,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 target_root: Some(&target_root),
                 child_lease_fd: artifact_lock.child_lease_fd(),
                 manifest: &manifest,
+                members: None,
                 global_cache_root: &global_cache_root,
                 config: &config,
                 toolchain: &toolchain,
@@ -427,6 +429,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
+                    members: None,
                     global_cache_root: &global_cache_root,
                     config: &config,
                     toolchain: &toolchain,
@@ -479,6 +482,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
+                    members: None,
                     global_cache_root: &global_cache_root,
                     config: &config,
                     toolchain: &toolchain,
@@ -556,6 +560,8 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
 
 struct Build<'a> {
     manifest: &'a Manifest,
+    /// Selected workspace roots; legacy single-package callers use `None`.
+    members: Option<&'a [Manifest]>,
     target_root: Option<&'a Path>,
     child_lease_fd: Option<i32>,
     global_cache_root: &'a Path,
@@ -948,6 +954,12 @@ fn build_inner(
         .map(|(key, package)| (key.clone(), package.manifest.clone()))
         .collect::<BTreeMap<_, _>>();
     let selected_root = selected_library_key(build.manifest)?;
+    let selected_packages = build
+        .members
+        .unwrap_or_else(|| std::slice::from_ref(build.manifest))
+        .iter()
+        .map(|manifest| selected_library_key(manifest).map(|key| key.package))
+        .collect::<Result<Vec<_>>>()?;
     let selected_library = build
         .manifest
         .library
@@ -1121,7 +1133,7 @@ fn build_inner(
         child_lease_fd: build.child_lease_fd,
         workspace_root: &build.manifest.workspace_root,
         workspace_members: &build.manifest.workspace_members,
-        selected_packages: std::slice::from_ref(&selected_root.package),
+        selected_packages: &selected_packages,
         toolchain: build.toolchain,
         host: build.host,
         target: build.target,
@@ -1310,9 +1322,9 @@ fn build_inner(
             .as_ref()
             .ok_or_else(|| Error::failure("build has no normal compilation plan"))?;
         compile_root_targets(
-            &build,
+            build.manifest,
             &destination,
-            &selected_root.package,
+            &selected_packages,
             normal_plan,
             normal_outputs,
             normal_library.as_ref(),
@@ -2339,9 +2351,9 @@ impl CheckOptions {
 }
 
 fn compile_root_targets(
-    build: &Build<'_>,
+    manifest: &Manifest,
     staging: &Path,
-    selected: &PackageKey,
+    selected: &[PackageKey],
     plan: &CompilationPlan,
     outputs: &executor::Outputs,
     library: Option<&RootLibraryArtifact>,
@@ -2351,7 +2363,7 @@ fn compile_root_targets(
     for key in plan
         .order
         .iter()
-        .filter(|key| key.package == *selected && key.kind == UnitKind::Binary)
+        .filter(|key| selected.contains(&key.package) && key.kind == UnitKind::Binary)
     {
         let name = key
             .target
@@ -2367,7 +2379,7 @@ fn compile_root_targets(
             )));
         };
         let primary = staging.join(name);
-        install_primary(executable, &primary, selected)?;
+        install_primary(executable, &primary, &key.package)?;
         binary_dep_info.push(dep_info.clone());
         binaries.insert(name.clone(), primary);
     }
@@ -2390,7 +2402,7 @@ fn compile_root_targets(
     let library = library.ok_or_else(|| {
         Error::failure(format!(
             "package `{}` has no supported root target",
-            build.manifest.name
+            manifest.name
         ))
     })?;
     Ok(StagedArtifacts {
@@ -2863,6 +2875,66 @@ mod tests {
     }
 
     #[test]
+    fn selected_workspace_binaries_publish_with_their_own_package_owners() {
+        let fixture = Fixture::new();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let first = selected_library_key(&manifest).unwrap().package;
+        let second = PackageKey {
+            name: "second".to_owned(),
+            source: crate::resolver::PackageSourceKey::Path(fixture.0.join("second")),
+            ..first.clone()
+        };
+        let unselected = PackageKey {
+            name: "unselected".to_owned(),
+            source: crate::resolver::PackageSourceKey::Path(fixture.0.join("unselected")),
+            ..first.clone()
+        };
+        let destination = fixture.0.join("published");
+        fs::create_dir(&destination).unwrap();
+        let mut plan = CompilationPlan {
+            units: BTreeMap::new(),
+            order: Vec::new(),
+        };
+        let mut outputs = executor::Outputs::default();
+        for package in [&first, &second, &unselected] {
+            let executable = fixture.0.join(format!("{}-executable", package.name));
+            fs::write(&executable, &package.name).unwrap();
+            let key = UnitKey {
+                package: package.clone(),
+                kind: UnitKind::Binary,
+                target: Some(package.name.clone()),
+                ..selected_library_key(&manifest).unwrap()
+            };
+            outputs.artifacts.insert(
+                key.clone(),
+                crate::compile::RustcOutput::Binary {
+                    executable,
+                    dep_info: fixture.0.join(format!("{}.d", package.name)),
+                },
+            );
+            plan.order.push(key);
+        }
+        let published = compile_root_targets(
+            &manifest,
+            &destination,
+            &[first.clone(), second.clone()],
+            &plan,
+            &outputs,
+            None,
+        )
+        .unwrap();
+        assert_eq!(published.binaries.len(), 2);
+        assert_eq!(published.dep_info.len(), 2);
+        for package in [&first, &second] {
+            let binary = &published.binaries[&package.name];
+            assert_eq!(fs::read_to_string(binary).unwrap(), package.name);
+            assert!(crate::artifact_owner::matches_primary(binary, package));
+            assert!(!crate::artifact_owner::matches_primary(binary, &unselected));
+        }
+        assert!(!destination.join(&unselected.name).exists());
+    }
+
+    #[test]
     fn legacy_layout_reset_is_scoped_and_runs_once() {
         let fixture = Fixture::new();
         let root = fixture.0.join("target/lorry");
@@ -3084,6 +3156,7 @@ mod tests {
                 target_root: None,
                 child_lease_fd: None,
                 manifest: &manifest,
+                members: None,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
                 toolchain: &toolchain,
@@ -3209,6 +3282,7 @@ mod tests {
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
+            members: None,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
@@ -3259,6 +3333,7 @@ mod tests {
                 target_root: None,
                 child_lease_fd: None,
                 manifest: &manifest,
+                members: None,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
                 toolchain: &toolchain,
@@ -3320,6 +3395,7 @@ mod tests {
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
+            members: None,
             global_cache_root: &manifest.workspace_root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
@@ -3364,6 +3440,7 @@ mod tests {
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
+            members: None,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
@@ -3432,6 +3509,7 @@ mod tests {
                 target_root: None,
                 child_lease_fd: None,
                 manifest: &manifest,
+                members: None,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
                 toolchain: &toolchain,
@@ -3517,6 +3595,7 @@ mod tests {
                     target_root: None,
                     child_lease_fd: None,
                     manifest: &manifest,
+                    members: None,
                     global_cache_root: &manifest.root.join("global-cache"),
                     config: &config,
                     toolchain: &toolchain,
@@ -3669,6 +3748,7 @@ mod tests {
                 target_root: None,
                 child_lease_fd: None,
                 manifest: &manifest,
+                members: None,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
                 toolchain: &toolchain,
@@ -3754,6 +3834,7 @@ mod tests {
                 target_root: None,
                 child_lease_fd: None,
                 manifest: &manifest,
+                members: None,
                 global_cache_root: &manifest.root.join("global-cache"),
                 config: &config,
                 toolchain: &toolchain,
@@ -3896,6 +3977,7 @@ mod tests {
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
+            members: None,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
@@ -3939,6 +4021,7 @@ mod tests {
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
+            members: None,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,
@@ -4016,6 +4099,7 @@ mod tests {
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
+            members: None,
             global_cache_root: &manifest.root.join("global-cache"),
             config: &config,
             toolchain: &toolchain,

@@ -2274,6 +2274,12 @@ with and without its library. Seven workspace tests, the manifest-equivalence
 test, and strict Clippy pass in
 `/tmp/lorry-m7-selected-target-{preparation-tests,manifest-tests,preparation-clippy}.log`.
 
+The execution context can now carry several selected compiler manifests. It
+passes every selected package identity to compiler primary-package and cache
+roles, and publishes each selected binary with its actual package owner. The
+publication regression covers two selected roots and one unselected package;
+only selected binaries are installed, with distinct ownership records.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 
