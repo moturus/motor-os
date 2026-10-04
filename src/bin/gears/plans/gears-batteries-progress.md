@@ -8,7 +8,7 @@ All Gears defects found during implementation are in scope.
 
 The phase 0 companion documents and the phase 1–4 implementations are in
 place. Phase 5.1, the new batteries crate and its build, packaging and test
-integration, is undergoing validation. The remaining phase 5 features, the
+integration, passes the release developer-image gate. The remaining phase 5 features, the
 sysbox track and phases 6–12 are not implemented.
 
 The phase 3 manual checklist is not marked complete. Automated host tests
@@ -75,8 +75,12 @@ shipped-tools gate.
 The release developer-image gate passed after phase 3 packaging
 (`0d4a98c2`), with Gears code through `c0266402`. Its log is
 `/tmp/gears-phase3-dev-release-compatible.log`. Later phase 4 code is not
-covered by that earlier image result. A new release developer-image gate
-is running for phase 5.1; record its outcome before committing packaging.
+covered by that earlier image result. The phase 5.1 release developer-image
+gate now passes with Gears through `b0e8eaeb` and the initial batteries
+protocol skeleton, including both installed component tests and native
+source builds. Its log is `/tmp/gears-batteries-scaffold-dev-release.log`.
+Later batteries features need their own validation; that image result
+does not cover code prepared after the packaging snapshot.
 
 The atomic lock-publication race remains recorded separately in
 `docs/plans/future-work.md`, as requested. Do not hide diagnostic failures

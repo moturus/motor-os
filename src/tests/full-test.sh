@@ -296,6 +296,7 @@ fi
 
 # Gears must exercise the same curl implementation installed in Motor OS.
 bash "$WD/test-gears-http.sh" "${profile_args[@]}"
+bash "$WD/test-gears-batteries.sh" "${profile_args[@]}"
 
 # sys-init's dependency-free config parser is host-tested separately from its
 # Motor-only process-management binary.
@@ -764,6 +765,7 @@ test_ssh_client_host
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   bash "$WD/test-gears-http-vm.sh" "${profile_args[@]}"
+  bash "$WD/test-gears-batteries-vm.sh" "${profile_args[@]}"
 fi
 
 echo "-- Strobe I/O regressions --"

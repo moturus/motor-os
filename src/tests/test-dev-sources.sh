@@ -175,7 +175,7 @@ start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
   "${runner_args[@]}"
 
 echo "-- Developer source trees --"
-for package in red gears lorry; do
+for package in red gears gears-batteries lorry; do
   vm_ssh "[ -f /devtools/src/motor-os/bin/$package/Cargo.toml ]" ||
     fail "developer image is missing /devtools/src/motor-os/bin/$package/Cargo.toml"
   vm_ssh "[ ! -d /devtools/src/motor-os/bin/$package/target ]" ||
@@ -274,7 +274,7 @@ vm_ssh "/devtools/bin/rustc $DEV_TMP/temp-contract.rs -o $DEV_TMP/temp-contract"
 
 # Build trees are scratch. Remove each one after its boundary check so later
 # independent builds retain enough room for their own outputs.
-for package in red gears; do
+for package in red gears gears-batteries; do
   vm_ssh "cd /devtools/src/motor-os/bin/$package && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||
     fail "developer image cannot vendor /devtools/src/motor-os/bin/$package"
   vm_ssh "cd /devtools/src/motor-os/bin/$package && /devtools/bin/lorry build" ||
