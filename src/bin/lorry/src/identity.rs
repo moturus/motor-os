@@ -348,6 +348,7 @@ fn manifest_profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
 
 fn manifest_strip(strip: ManifestStrip) -> CargoStrip<'static> {
     match strip {
+        ManifestStrip::Default => CargoStrip::Named("debuginfo"),
         ManifestStrip::None => CargoStrip::None,
         ManifestStrip::Debuginfo => CargoStrip::Named("debuginfo"),
         ManifestStrip::Symbols => CargoStrip::Named("symbols"),

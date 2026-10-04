@@ -2478,6 +2478,16 @@ audit records. Target-specific forms still fail explicitly. Protocol, compiler
 ordering, cache invalidation, paired member-script byte/JSON contracts, and
 strict Clippy pass in `/tmp/lorry-m8-link-arg-{protocol,compiler,cache,contract,clippy}.log`.
 
+Selected-macro release comparisons exposed a preexisting profile defect:
+Lorry treated an omitted release `strip` as explicit `false`, while Cargo
+automatically strips debug information when no unit needs it. Omission now
+has its own manifest value; explicit `false`/`"none"` retain their behavior.
+The paired offline release-profile contract compares default, false, none,
+debuginfo, and symbols settings on Linux and cross-Motor, including executable
+bytes and Cargo JSON. It and strict Clippy pass in
+`/tmp/lorry-m8-release-strip-{contract,clippy}.log`. Original macro failures
+and command/ELF diagnosis remain in `/tmp/lorry-m8-selected-macro-release-*`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only

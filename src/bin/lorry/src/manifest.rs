@@ -133,6 +133,7 @@ pub enum Lto {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Strip {
+    Default,
     None,
     Debuginfo,
     Symbols,
@@ -156,7 +157,7 @@ impl Default for ReleaseProfile {
         Self {
             panic_abort: false,
             lto: Lto::Default,
-            strip: Strip::None,
+            strip: Strip::Default,
             codegen_units: None,
         }
     }
@@ -2641,7 +2642,7 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
         }
     };
     let strip = match table.get("strip") {
-        None => Strip::None,
+        None => Strip::Default,
         Some(item) if item.as_bool() == Some(false) => Strip::None,
         Some(item) if item.as_bool() == Some(true) => Strip::Symbols,
         Some(item) if item.as_str() == Some("none") => Strip::None,
