@@ -209,12 +209,21 @@ pub(crate) fn resolve_complete_workspace(
     locked: &[LockedPreference],
     loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
+    let edges = workspace
+        .packages
+        .first()
+        .and_then(|member| member.lock.as_ref())
+        .map(locked::Edges::preferences)
+        .transpose()?;
     resolve_workspace_complete(
         workspace,
         catalog,
         options,
         locked,
-        Scope::WorkspaceComplete { locked: None },
+        Scope::WorkspaceComplete {
+            locked: edges.as_ref(),
+            exact: false,
+        },
         loader,
     )
 }
@@ -234,6 +243,7 @@ pub(crate) fn resolve_locked_workspace(
         &LockedPreference::from_lockfile(Some(lock))?,
         Scope::WorkspaceComplete {
             locked: Some(&edges),
+            exact: true,
         },
         loader,
     )

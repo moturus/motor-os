@@ -997,6 +997,7 @@ enum Scope<'a> {
     Complete,
     WorkspaceComplete {
         locked: Option<&'a locked::Edges>,
+        exact: bool,
     },
     Selected(TargetSelection<'a>),
     WorkspaceSelected {
@@ -1018,12 +1019,26 @@ impl<'a> Scope<'a> {
             (
                 Self::WorkspaceComplete {
                     locked: Some(edges),
+                    exact: true,
                 },
                 Some(parent),
             ) => edges.dependencies(parent).map(Some),
             _ => Ok(None),
         }
     }
+    fn dependency_preferences(self, event: &Event) -> Option<&'a BTreeSet<locked::Identity>> {
+        match (self, &event.parent) {
+            (
+                Self::WorkspaceComplete {
+                    locked: Some(edges),
+                    exact: false,
+                },
+                Some(parent),
+            ) => edges.get(parent),
+            _ => None,
+        }
+    }
+
     fn matches(self, compile_kind: CompileKind, selector: Option<&str>) -> Result<bool> {
         let Some(selector) = selector else {
             return Ok(true);
@@ -2644,8 +2659,11 @@ mod tests {
             String::from_utf8_lossy(&metadata.stderr)
         );
         assert_eq!(fs::read(root.join("Cargo.lock")).unwrap(), original);
-        let source = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        let mut source = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
         let lock = Lockfile::load(&root.join("Cargo.lock")).unwrap();
+        for member in &mut source.packages {
+            member.lock = Some(lock.clone());
+        }
         let mut catalog = Catalog::default();
         for directory in ["one", "two"] {
             let path = fixture.0.join(directory);
@@ -2673,6 +2691,35 @@ mod tests {
             .find(|package| package.key.name == "b")
             .unwrap();
         assert_eq!(b.lock_edges[0].package.version, Version::new(2, 0, 0));
+        let ordinary = resolve_complete_workspace(
+            &source,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &LockedPreference::from_lockfile(Some(&lock)).unwrap(),
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        crate::offline::validate_workspace_resolution(&lock, &ordinary).unwrap();
+        // A changed requirement may legitimately require a new parent edge.
+        fs::write(root.join("b/Cargo.toml"), "[package]\nname=\"b\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[dependencies]\ndemo=\"1\"\n").unwrap();
+        let mut changed = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        for member in &mut changed.packages {
+            member.lock = Some(lock.clone());
+        }
+        let repaired = resolve_complete_workspace(
+            &changed,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let b = repaired
+            .packages
+            .iter()
+            .find(|package| package.key.name == "b")
+            .unwrap();
+        assert_eq!(b.lock_edges[0].package.version, Version::new(1, 0, 0));
     }
 
     fn cargo_unit_features(output: &[u8]) -> BTreeMap<String, BTreeSet<String>> {

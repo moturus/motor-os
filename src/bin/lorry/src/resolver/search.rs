@@ -10,6 +10,8 @@ struct Frame {
     queue: VecDeque<Event>,
     event: Option<Event>,
     choices: VecDeque<Choice>,
+    fallback: VecDeque<Choice>,
+    preferred: Option<BTreeSet<locked::Identity>>,
     candidates_loaded: bool,
     locked_package: Option<PackageKey>,
     allowed: Option<BTreeSet<locked::Identity>>,
@@ -23,6 +25,8 @@ impl Frame {
             queue,
             event: None,
             choices: VecDeque::new(),
+            fallback: VecDeque::new(),
+            preferred: None,
             candidates_loaded: false,
             locked_package: None,
             allowed: None,
@@ -44,6 +48,23 @@ impl Frame {
             };
             let locked_package = scope.locked_package(&event)?;
             self.allowed = scope.locked_dependencies(&event)?.cloned();
+            self.preferred = scope.dependency_preferences(&event).cloned();
+            let forced = locked
+                .iter()
+                .filter(|preference| {
+                    preference.name == event.dependency.package && preference.checksum.is_none()
+                })
+                .map(|preference| {
+                    locked::Identity::from_key(&PackageKey {
+                        name: preference.name.clone(),
+                        version: preference.version.clone(),
+                        source: PackageSourceKey::CratesIo,
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            if !forced.is_empty() && event.dependency.source == RequirementSource::CratesIo {
+                self.preferred = Some(forced);
+            }
             if event.dependency.source == RequirementSource::CratesIo {
                 loader(
                     &event.dependency.package,
@@ -61,21 +82,28 @@ impl Frame {
                     event.dependency.package, options.max_depth
                 )));
             }
-            self.choices.extend(
-                self.state
-                    .nodes
-                    .iter()
-                    .filter(|(key, node)| {
-                        key.name == event.dependency.package
-                            && event.dependency.matches_version(&key.version)
-                            && source_matches(&node.record.source, &event.dependency.source)
-                            && locked_package.is_none_or(|locked| locked == *key)
-                            && self.allowed.as_ref().is_none_or(|allowed| {
-                                allowed.contains(&locked::Identity::from_key(key))
-                            })
-                    })
-                    .map(|(key, _)| Choice::Selected(key.clone())),
-            );
+            let reused = self
+                .state
+                .nodes
+                .iter()
+                .filter(|(key, node)| {
+                    key.name == event.dependency.package
+                        && event.dependency.matches_version(&key.version)
+                        && source_matches(&node.record.source, &event.dependency.source)
+                        && locked_package.is_none_or(|locked| locked == *key)
+                        && self.allowed.as_ref().is_none_or(|allowed| {
+                            allowed.contains(&locked::Identity::from_key(key))
+                        })
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in reused {
+                if self.is_preferred(&key) {
+                    self.choices.push_back(Choice::Selected(key));
+                } else {
+                    self.fallback.push_back(Choice::Selected(key));
+                }
+            }
             self.locked_package = locked_package.cloned();
             self.event = Some(event);
         }
@@ -84,27 +112,36 @@ impl Frame {
             if self.choices.is_empty() && !self.candidates_loaded {
                 // A failed existing selection may load more versions through
                 // its children. Query fresh candidates only after that failure.
-                self.choices.extend(
-                    candidates(catalog, event, options, locked)
-                        .into_iter()
-                        .filter_map(|record| {
-                            let key = PackageKey {
-                                name: record.name.clone(),
-                                version: record.version.clone(),
-                                source: record.source.key(),
-                            };
-                            self.locked_package
-                                .as_ref()
-                                .is_none_or(|locked| locked == &key)
-                                .then_some((key, record))
-                                .filter(|(key, _)| {
-                                    self.allowed.as_ref().is_none_or(|allowed| {
-                                        allowed.contains(&locked::Identity::from_key(key))
-                                    })
+                let fresh = candidates(catalog, event, options, locked)
+                    .into_iter()
+                    .filter_map(|record| {
+                        let key = PackageKey {
+                            name: record.name.clone(),
+                            version: record.version.clone(),
+                            source: record.source.key(),
+                        };
+                        self.locked_package
+                            .as_ref()
+                            .is_none_or(|locked| locked == &key)
+                            .then_some((key, record))
+                            .filter(|(key, _)| {
+                                self.allowed.as_ref().is_none_or(|allowed| {
+                                    allowed.contains(&locked::Identity::from_key(key))
                                 })
-                                .map(|(key, record)| Choice::New(key, Arc::new(record)))
-                        }),
-                );
+                            })
+                            .map(|(key, record)| Choice::New(key, Arc::new(record)))
+                    })
+                    .collect::<Vec<_>>();
+                let (preferred, fallback): (Vec<_>, Vec<_>) =
+                    fresh.into_iter().partition(|choice| {
+                        let Choice::New(key, _) = choice else {
+                            unreachable!()
+                        };
+                        self.is_preferred(key)
+                    });
+                self.choices.extend(preferred);
+                self.choices.append(&mut self.fallback);
+                self.choices.extend(fallback);
                 self.candidates_loaded = true;
             }
             let Some(choice) = self.choices.pop_front() else {
@@ -176,6 +213,12 @@ impl Frame {
         }))
     }
 
+    fn is_preferred(&self, key: &PackageKey) -> bool {
+        self.preferred
+            .as_ref()
+            .is_none_or(|preferred| preferred.contains(&locked::Identity::from_key(key)))
+    }
+
     fn conflicts(&self, record: &Candidate) -> bool {
         let event = self.event.as_ref().unwrap();
         self.state.nodes.iter().any(|(key, node)| {
@@ -195,10 +238,13 @@ impl Frame {
         {
             return true;
         }
-        self.choices.iter().any(|choice| match choice {
-            Choice::Selected(_) => true,
-            Choice::New(_, record) => !self.conflicts(record),
-        })
+        self.choices
+            .iter()
+            .chain(&self.fallback)
+            .any(|choice| match choice {
+                Choice::Selected(_) => true,
+                Choice::New(_, record) => !self.conflicts(record),
+            })
     }
 }
 
