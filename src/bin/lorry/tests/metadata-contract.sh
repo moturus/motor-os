@@ -100,10 +100,25 @@ export HOME="$TEST_HOME"
     --manifest-path "$PROJECT/Cargo.toml" >"$WORK/no-deps.json"
 [ ! -e "$WORK/cache/sources" ]
 "$LORRY" metadata --format-version 1 --filter-platform x86_64-unknown-linux-gnu \
-    --locked --manifest-path "$PROJECT/Cargo.toml" >"$WORK/lorry.json"
+    --locked --offline --frozen --manifest-path "$PROJECT/Cargo.toml" >"$WORK/lorry.json"
 "$LORRY" metadata --format-version 1 --filter-platform x86_64-unknown-linux-gnu \
     --locked --manifest-path "$PROJECT/Cargo.toml" >"$WORK/lorry-again.json"
 cmp "$WORK/lorry.json" "$WORK/lorry-again.json"
+cp "$PROJECT/Cargo.lock" "$WORK/lock-before"
+"$LORRY" metadata --offline --frozen --locked --no-deps \
+    --manifest-path "$PROJECT/Cargo.toml" >"$WORK/default.json" 2>"$WORK/default.err"
+cmp "$WORK/no-deps.json" "$WORK/default.json"
+cmp "$WORK/lock-before" "$PROJECT/Cargo.lock"
+"$LORRY_TEST_CARGO" metadata --offline --frozen --locked --no-deps \
+    --manifest-path "$PROJECT/Cargo.toml" >"$WORK/cargo-default.json" \
+    2>"$WORK/cargo-default.err"
+cmp "$WORK/default.err" "$WORK/cargo-default.err"
+grep -F 'please specify `--format-version` flag explicitly' "$WORK/default.err" >/dev/null
+"$LORRY" metadata -q --no-deps --frozen \
+    --manifest-path "$PROJECT/Cargo.toml" >"$WORK/default-quiet.json" \
+    2>"$WORK/default-quiet.err"
+cmp "$WORK/no-deps.json" "$WORK/default-quiet.json"
+[ ! -s "$WORK/default-quiet.err" ] || fail "quiet metadata emitted the format warning"
 "$LORRY_TEST_CARGO" metadata --format-version 1 \
     --filter-platform x86_64-unknown-linux-gnu --locked \
     --manifest-path "$PROJECT/Cargo.toml" >"$WORK/cargo.json"

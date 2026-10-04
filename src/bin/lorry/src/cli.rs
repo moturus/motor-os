@@ -80,6 +80,7 @@ pub struct MetadataOptions {
     pub manifest_path: Option<String>,
     pub no_deps: bool,
     pub filter_platform: Option<String>,
+    pub format_version_explicit: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -397,8 +398,7 @@ fn metadata_command() -> ClapCommand {
         .arg(
             Arg::new("format-version")
                 .long("format-version")
-                .value_parser(PossibleValuesParser::new(["1"]))
-                .required(true),
+                .value_parser(PossibleValuesParser::new(["1"])),
         )
         .arg(
             Arg::new("no-deps")
@@ -413,7 +413,12 @@ fn metadata_command() -> ClapCommand {
                 .action(ArgAction::Set)
                 .value_parser(NonEmptyStringValueParser::new()),
         )
-        .arg(Arg::new("locked").long("locked").action(ArgAction::SetTrue))
+        .args(locked_offline_arguments())
+}
+
+fn locked_offline_arguments() -> [Arg; 3] {
+    // These commands already forbid acquisition and lock-file changes.
+    ["locked", "offline", "frozen"].map(|name| Arg::new(name).long(name).action(ArgAction::SetTrue))
 }
 
 fn check_command() -> ClapCommand {
@@ -422,6 +427,7 @@ fn check_command() -> ClapCommand {
         .dont_delimit_trailing_values(true)
         .arg(package_argument())
         .arg(manifest_path_argument())
+        .args(locked_offline_arguments())
         .arg(
             Arg::new("target-dir")
                 .long("target-dir")
@@ -509,6 +515,7 @@ fn tree_command() -> ClapCommand {
         .dont_delimit_trailing_values(true)
         .arg(package_argument())
         .arg(manifest_path_argument())
+        .args(locked_offline_arguments())
         .arg(
             Arg::new("target")
                 .long("target")
@@ -573,6 +580,7 @@ fn build_command(name: &'static str) -> ClapCommand {
     ClapCommand::new(name)
         .disable_help_flag(true)
         .args_override_self(false)
+        .args(locked_offline_arguments())
         .arg(
             Arg::new("release")
                 .long("release")
@@ -719,6 +727,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             manifest_path: options.get_one::<String>("manifest-path").cloned(),
             no_deps: options.get_flag("no-deps"),
             filter_platform: options.get_one::<String>("filter-platform").cloned(),
+            format_version_explicit: options.contains_id("format-version"),
         })),
         Some(("new", options)) => Ok(Command::New {
             path: options
@@ -1046,6 +1055,7 @@ mod tests {
                 manifest_path: Some("/project/Cargo.toml".to_owned()),
                 no_deps: true,
                 filter_platform: Some("x86_64-unknown-motor".to_owned()),
+                format_version_explicit: true,
             })
         );
 
@@ -1164,8 +1174,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_cargo_form_options() {
         for input in [
-            &["metadata"][..],
-            &["metadata", "--format-version", "2"],
+            &["metadata", "--format-version", "2"][..],
             &["metadata", "--format-version", "1", "--features", "x"],
             &["check", "--message-format=short"],
             &["check", "--example", "demo"],
@@ -1349,6 +1358,41 @@ mod tests {
         ] {
             assert!(parse(input).unwrap_err().is_usage(), "{input:?}");
         }
+    }
+
+    #[test]
+    fn accepts_locked_offline_flags_without_changing_offline_commands() {
+        for command in ["build", "check", "run", "test", "clean", "metadata", "tree"] {
+            let ordinary = parse(&[command]).unwrap();
+            for flag in ["--locked", "--offline", "--frozen"] {
+                assert_eq!(parse(&[command, flag]).unwrap(), ordinary);
+            }
+            assert_eq!(
+                parse(&[command, "--locked", "--offline", "--frozen"]).unwrap(),
+                ordinary
+            );
+        }
+        for command in ["vendor", "review", "new", "cache"] {
+            for flag in ["--locked", "--offline", "--frozen"] {
+                assert!(parse(&[command, flag]).unwrap_err().is_usage());
+            }
+        }
+        let Command::Run(run) = parse(&["run", "--offline", "--", "--frozen"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected run");
+        };
+        assert_eq!(run.arguments, ["--frozen"]);
+    }
+
+    #[test]
+    fn defaults_metadata_to_version_one_without_marking_it_explicit() {
+        let Command::Metadata(default) = parse(&["metadata"]).unwrap().command else {
+            panic!("expected metadata");
+        };
+        assert!(!default.format_version_explicit);
+        assert!(parse(&["metadata", "--format-version=2"]).is_err());
     }
 
     #[test]

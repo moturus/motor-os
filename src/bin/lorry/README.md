@@ -185,8 +185,8 @@ succeeds when the cache is already absent.
 ## Inspect and check
 
 ```text
-lorry metadata --format-version 1 [--manifest-path PATH] [--no-deps]
-               [--filter-platform TRIPLE] [--locked]
+lorry metadata [--format-version 1] [--manifest-path PATH] [--no-deps]
+               [--filter-platform TRIPLE] [--locked|--offline|--frozen]
 lorry tree [--manifest-path PATH] [--target TRIPLE]
 lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH]
             [--target-dir DIRECTORY] [--target TRIPLE]
@@ -196,7 +196,13 @@ lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH]
             [--message-format json|json-diagnostic-rendered-ansi]
 ```
 
-`metadata` emits the Cargo metadata version-1 schema. `--no-deps` describes
+`build`, `check`, `run`, `test`, `clean`, `metadata`, and `tree` accept
+`--locked`, `--offline`, and `--frozen`; those commands already run offline
+and preserve Cargo.lock. Acquisition and admission remain part of `vendor`.
+
+`metadata` emits the Cargo metadata version-1 schema. Omitting
+`--format-version` selects version 1 and warns, as Cargo does; `-q` suppresses
+that warning. `--no-deps` describes
 source targets and declared dependencies without requiring Cargo.lock,
 compiler discovery, or dependency preparation. In a workspace it describes
 all members, including when invoked with a member manifest; `-p` selects one

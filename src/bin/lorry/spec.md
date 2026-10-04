@@ -149,6 +149,13 @@ Global options are `--quiet|-q`, `--verbose|-v`,
 `--use-cargo-registry` for `build`, `run`, and `test`. Long value options
 accept both `--name value` and `--name=value`.
 
+`build`, `check`, `run`, `test`, `clean`, `metadata`, and `tree` accept
+`--locked`, `--offline`, and `--frozen`. Those commands already prohibit
+acquisition and lock-file changes, so the flags preserve their existing
+constraints. They do not apply to `vendor` or its admission workflow.
+`metadata` defaults to format version 1 and warns when `--format-version`
+is omitted, except in quiet mode, as Cargo does.
+
 Normal build output reports every dependency unit, build script, and root
 target when that operation starts. Quiet mode suppresses those progress lines.
 Verbose mode retains them and additionally reports commands, configuration,

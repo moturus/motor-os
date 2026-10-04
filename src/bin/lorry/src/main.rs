@@ -145,7 +145,7 @@ fn print_help(topic: Option<&str>) {
             "Check a package without linking\n\nUsage: lorry [+toolchain] [GLOBAL] check [-p NAME|PACKAGE_ID] [--manifest-path PATH] [--target-dir DIRECTORY] [--target TRIPLE] [--workspace] [-q|--quiet] [--keep-going] [--all-targets|--lib|--bins|--bin NAME|--test NAME|--examples] [--message-format FORMAT]"
         ),
         Some("metadata") => println!(
-            "Describe a package graph\n\nUsage: lorry [+toolchain] [GLOBAL] metadata [-p NAME] --format-version 1 [--manifest-path PATH] [--no-deps] [--filter-platform TRIPLE] [--locked]"
+            "Describe a package graph\n\nUsage: lorry [+toolchain] [GLOBAL] metadata [-p NAME] [--format-version 1] [--manifest-path PATH] [--no-deps] [--filter-platform TRIPLE] [--locked|--offline|--frozen]"
         ),
         Some("new") => {
             println!("Create a binary package\n\nUsage: lorry [+toolchain] [GLOBAL] new PATH")

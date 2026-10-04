@@ -35,6 +35,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
             options.manifest_path.as_deref().map(std::path::Path::new),
             cli.package.as_deref(),
         )?;
+        warn_default_format(cli, options);
         return write_document(&graph::no_dependencies(&workspace)?);
     }
     let manifest = Manifest::load_selected_or_manifest_path(
@@ -43,6 +44,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         cli.package.as_deref(),
         true,
     )?;
+    warn_default_format(cli, options);
     let mut config = Config::load(&manifest.root)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
     crate::engine::check_rust_version(&manifest, &toolchain)?;
@@ -163,6 +165,14 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     let cache_root = config.cache_directory()?;
     let roots = publish_sources(&cache_root, &config, &prepared)?;
     write_document(&graph::resolved(&manifest, &prepared, &plan, &roots)?)
+}
+
+fn warn_default_format(cli: &Cli, options: &MetadataOptions) {
+    if !options.format_version_explicit && cli.verbosity != Verbosity::Quiet {
+        eprintln!(
+            "warning: please specify `--format-version` flag explicitly to avoid compatibility problems"
+        );
+    }
 }
 
 pub(crate) fn publish_sources(
