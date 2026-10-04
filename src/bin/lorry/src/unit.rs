@@ -36,6 +36,7 @@ pub enum UnitKind {
 pub enum ProfileContext {
     Normal,
     Test,
+    Selected,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -101,6 +102,7 @@ pub struct Unit {
 pub struct UnitGraph {
     pub units: BTreeMap<UnitKey, Unit>,
     pub order: Vec<UnitKey>,
+    pub selected_packages: BTreeSet<PackageKey>,
 }
 
 impl UnitGraph {
@@ -126,6 +128,7 @@ impl UnitGraph {
     }
 
     pub fn merge(&mut self, other: Self) -> Result<()> {
+        self.selected_packages.extend(other.selected_packages);
         for (key, unit) in other.units {
             if let Some(existing) = self.units.get(&key) {
                 if existing != &unit {
@@ -376,6 +379,7 @@ pub fn selected_check_units(
         UnitGraph {
             units: BTreeMap::new(),
             order: Vec::new(),
+            selected_packages: BTreeSet::new(),
         }
     };
     if selection.harnesses || selection.integrations {
@@ -574,7 +578,11 @@ fn dependency_units_with_selected(
     }
 
     let order = topological_order(&units)?;
-    Ok(UnitGraph { units, order })
+    Ok(UnitGraph {
+        units,
+        order,
+        selected_packages: BTreeSet::new(),
+    })
 }
 
 /// Member roots retain the resolver's feature unions even when a selected
@@ -586,8 +594,10 @@ pub(crate) fn workspace_units(
     check: bool,
     binaries: bool,
     binary_name: Option<&str>,
+    release: bool,
 ) -> Result<UnitGraph> {
     let mut graph = dependency_units_with_selected(resolution, manifests, selected)?;
+    graph.selected_packages.extend(selected.iter().cloned());
     for key in selected {
         let package = resolution
             .packages
@@ -595,12 +605,6 @@ pub(crate) fn workspace_units(
             .find(|package| &package.key == key)
             .ok_or_else(|| Error::failure("selected member is absent from the unit resolution"))?;
         let manifest = &manifests[key];
-        if library_unit_kind(manifest) == UnitKind::ProcMacro {
-            return Err(Error::failure(format!(
-                "selected member `{}` requires build-time code; workspace execution of member build-time code is not yet supported",
-                key.name
-            )));
-        }
         if !binaries {
             continue;
         }
@@ -662,15 +666,47 @@ pub(crate) fn workspace_units(
                     &binary,
                     unit_key(
                         package,
-                        UnitKind::Library,
-                        CompileKind::Target,
-                        &features_for(package, CompileKind::Target),
+                        library_unit_kind(manifest),
+                        if library.proc_macro {
+                            CompileKind::Host
+                        } else {
+                            CompileKind::Target
+                        },
+                        &features_for(
+                            package,
+                            if library.proc_macro {
+                                CompileKind::Host
+                            } else {
+                                CompileKind::Target
+                            },
+                        ),
                     ),
                     UnitEdgeKind::RustDependency,
                     Some(library.name.clone()),
                 )?;
             }
         }
+    }
+    if release {
+        let macros = graph
+            .units
+            .keys()
+            .filter(|key| selected.contains(&key.package) && key.kind == UnitKind::ProcMacro)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in macros {
+            let mut root = graph.units[&key].clone();
+            root.key.profile = ProfileContext::Selected;
+            graph.units.insert(root.key.clone(), root);
+            if !graph
+                .units
+                .values()
+                .any(|unit| unit.dependencies.iter().any(|edge| edge.unit == key))
+            {
+                graph.units.remove(&key);
+            }
+        }
+        graph.order = topological_order(&graph.units)?;
     }
     if check {
         graph = graph.rekey(|mut key| {
@@ -682,6 +718,83 @@ pub(crate) fn workspace_units(
             }
             key
         })?;
+        let mut checks = BTreeSet::new();
+        let mut pending = graph
+            .units
+            .keys()
+            .filter(|key| {
+                selected.contains(&key.package)
+                    && key.kind == UnitKind::ProcMacro
+                    && (!release || key.profile == ProfileContext::Selected)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        while let Some(key) = pending.pop() {
+            if !checks.insert(key.clone()) {
+                continue;
+            }
+            pending.extend(
+                graph.units[&key]
+                    .dependencies
+                    .iter()
+                    .filter(|edge| {
+                        edge.kind == UnitEdgeKind::RustDependency
+                            && edge.unit.kind == UnitKind::Library
+                    })
+                    .map(|edge| edge.unit.clone()),
+            );
+        }
+        for key in graph
+            .order
+            .clone()
+            .iter()
+            .filter(|key| checks.contains(*key))
+        {
+            let mut unit = graph.units[key].clone();
+            unit.key.mode = UnitMode::Check;
+            unit.dependencies = unit
+                .dependencies
+                .into_iter()
+                .map(|mut edge| {
+                    if checks.contains(&edge.unit) {
+                        edge.unit.mode = UnitMode::Check;
+                    }
+                    edge
+                })
+                .collect();
+            graph.units.insert(unit.key.clone(), unit);
+        }
+        let mut reachable = BTreeSet::new();
+        let mut pending = graph
+            .units
+            .keys()
+            .filter(|key| {
+                selected.contains(&key.package)
+                    && match key.kind {
+                        UnitKind::Library | UnitKind::Binary => {
+                            key.compile_kind == CompileKind::Target
+                        }
+                        UnitKind::ProcMacro => {
+                            key.mode == UnitMode::Check
+                                && (!release || key.profile == ProfileContext::Selected)
+                        }
+                        _ => false,
+                    }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        while let Some(key) = pending.pop() {
+            if reachable.insert(key.clone()) {
+                pending.extend(
+                    graph.units[&key]
+                        .dependencies
+                        .iter()
+                        .map(|edge| edge.unit.clone()),
+                );
+            }
+        }
+        graph.units.retain(|key, _| reachable.contains(key));
+        graph.order = topological_order(&graph.units)?;
     } else {
         graph.order = topological_order(&graph.units)?;
     }
@@ -1169,7 +1282,19 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
         local,
         key.profile == ProfileContext::Test,
     );
-    let for_host = key.uses_host_profile();
+    let selected_macro = key.kind == UnitKind::ProcMacro
+        && graph.selected_packages.contains(&key.package)
+        && (key.profile == ProfileContext::Selected
+            || (!options.release
+                && (key.mode == UnitMode::Check
+                    || !graph.units.contains_key(&UnitKey {
+                        mode: UnitMode::Check,
+                        ..key.clone()
+                    }))));
+    let for_host = key.uses_host_profile() && !selected_macro;
+    if selected_macro {
+        profile.panic = CargoPanicStrategy::Unwind;
+    }
     if for_host {
         profile.opt_level = "0";
         profile.codegen_units = None;
@@ -1183,6 +1308,7 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
             key.clone()
         };
         if profile.debuginfo != CargoDebugInfo::None
+            && options.logical_target.is_none()
             && !shared_native_library(graph, &sharing_key, options.logical_target)
         {
             profile.debuginfo = CargoDebugInfo::None;
@@ -2229,6 +2355,7 @@ mod tests {
                     command == "check",
                     true,
                     None,
+                    false,
                 )
                 .unwrap();
                 let plan = plan_dependency_units(
@@ -2398,6 +2525,7 @@ mod tests {
                 command == "check",
                 true,
                 None,
+                false,
             )
             .unwrap();
             let node = |key: &UnitKey| {

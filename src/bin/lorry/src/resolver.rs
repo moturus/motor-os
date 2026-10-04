@@ -1541,6 +1541,12 @@ fn fulfill(
             .get(key)
             .is_some_and(|node| node.record.proc_macro)
     {
+        if event.parent.is_none() && matches!(scope, Scope::WorkspaceSelected { .. }) {
+            // Cargo also activates a selected macro's normal feature context.
+            // Only its host unit is reachable, but shared target dependencies
+            // retain features introduced by this additional activation.
+            activate(state, queue, key, &event, options, scope)?;
+        }
         event.compile_kind = CompileKind::Host;
         event.context = normalize_scope_context(options.resolver, scope, FeatureContext::Host);
     }

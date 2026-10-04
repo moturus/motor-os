@@ -53,6 +53,9 @@ fn main() {
             "differential-workspace-messages" => {
                 compare_messages(Path::new(lorry), Path::new(cargo), true, false, false)
             }
+            "differential-workspace-check-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, true, false)
+            }
             _ => panic!("unknown comparison command `{command}`"),
         }
         return;

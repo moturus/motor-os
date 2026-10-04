@@ -190,6 +190,9 @@ native-tool grants, path-script caller allowlists, and read-only workspace
 script inputs are implemented. Ordinary build, check, and Clippy now execute
 selected members' scripts and host build-dependencies. Focused Cargo contracts
 cover executable bytes, JSON, primary-package variables, and caller isolation.
+Selected procedural-macro members now build and check too, including separate
+root/dependency profiles and check metadata. Native and cross-Motor debug and
+release comparisons cover their artifacts and consumers.
 
 ## Goal
 

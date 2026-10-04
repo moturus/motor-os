@@ -508,8 +508,8 @@ compilation. Descriptive commands accept these manifests without execution.
 Lorry rejects explicit `[[test]]`, examples, benches,
 custom crate types, `harness`, `required-features`, `autotests`, unsupported
 profile keys, artifact dependencies, alternative
-registries, non-crates.io patches, selecting a
-procedural-macro package as the root, and CLI feature-selection flags for run/test.
+registries, non-crates.io patches, and
+CLI feature-selection flags for run/test.
 Build, run, and test reject an unmaterialized crates.io Git patch and direct
 the user to `lorry vendor`; they never fetch or modify it themselves.
 Documentation tests are not run because native Motor has no `rustdoc`; the

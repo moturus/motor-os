@@ -1409,14 +1409,6 @@ fn parse_library(
         ));
     }
     let proc_macro = optional_bool(path, document, table, "lib", "proc-macro")?.unwrap_or(false);
-    if mode == ManifestMode::Root && proc_macro {
-        return Err(Error::at(
-            path,
-            document.line_of_item(table.get("proc-macro").unwrap()),
-            "selecting a procedural-macro package as the root is not supported",
-            "use procedural-macro crates as dependencies of an ordinary root package",
-        ));
-    }
     if proc_macro && table.contains_key("crate-type") {
         return Err(Error::at(
             path,
@@ -4385,13 +4377,12 @@ members = ["ignored-member"]
         let root = Path::new("/dependency");
         let path = root.join("Cargo.toml");
         let source = format!("{RED}\n[lib]\nproc-macro = true\n");
-        let document = Document::parse(&path, "Cargo manifest", source).unwrap();
+        let document = Document::parse(&path, "Cargo manifest", source.clone()).unwrap();
         let manifest =
             Manifest::parse_document(root, &path, &document, ManifestMode::Dependency).unwrap();
         assert!(manifest.library.unwrap().proc_macro);
 
-        let error = parsed(&format!("{RED}\n[lib]\nproc-macro = true\n")).unwrap_err();
-        assert!(error.to_string().contains("as the root"), "{error}");
+        assert!(parsed(&source).unwrap().library.unwrap().proc_macro);
     }
 
     #[test]

@@ -2488,6 +2488,23 @@ bytes and Cargo JSON. It and strict Clippy pass in
 `/tmp/lorry-m8-release-strip-{contract,clippy}.log`. Original macro failures
 and command/ELF diagnosis remain in `/tmp/lorry-m8-selected-macro-release-*`.
 
+Selected macro members now run through the shared ordinary build/check graph.
+Cargo's double feature activation is retained: selecting a macro also activates
+its normal dependency context. Check plans contain separate selected metadata
+and consumer executable units, pruning unused host units. Release plans retain
+separate root and dependency profiles when their effective settings differ.
+The planner now records selected package identities, and explicit-target builds
+retain Cargo's host debug information. This execution patch is somewhat larger
+than the preferred size because the paired Cargo fixture covers those linked
+feature/profile/unit rules together. Native/cross debug build/check and release
+build comparisons pass for default, workspace, and macro-only selections,
+including all macro bytes and consumer bytes. Planner tests, member-script
+regressions, and strict Clippy also pass in
+`/tmp/lorry-m8-selected-macro-{release-units-contract,final-unit-tests,script-regression,clippy}.log`.
+Original failures and targeted source, graph, compiler-command, and ELF diagnosis
+remain in `/tmp/lorry-m8-selected-macro-*`; fixture diagnosis copies are retained
+under `/tmp/lorry-member-macro-contract-{V9K0YA,TIi4wM,lT4ku6}`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only

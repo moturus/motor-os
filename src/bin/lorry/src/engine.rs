@@ -64,7 +64,13 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let shared = ordinary
         && (selected.len() > 1
             || cli.features != crate::cli::FeatureSelection::default()
-            || selected.iter().any(|member| member.build_script.is_some()));
+            || selected.iter().any(|member| {
+                member.build_script.is_some()
+                    || member
+                        .library
+                        .as_ref()
+                        .is_some_and(|library| library.proc_macro)
+            }));
     if !ordinary {
         cli.features.require_default()?;
     }
@@ -1413,11 +1419,16 @@ fn build_inner(
     };
     let test_harnesses = test_result.as_deref().unwrap_or(&[]);
     let workspace_library = build.members.and_then(|_| {
-        normal.as_ref()?.0.order.iter().find(|key| {
-            selected_packages.contains(&key.package)
-                && key.kind == UnitKind::Library
-                && key.compile_kind == crate::resolver::CompileKind::Target
-        })
+        normal
+            .as_ref()?
+            .0
+            .order
+            .iter()
+            .filter(|key| {
+                selected_packages.contains(&key.package)
+                    && matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
+            })
+            .max_by_key(|key| key.profile == crate::unit::ProfileContext::Selected)
     });
     let normal_library = match (
         normal.as_ref(),
@@ -2520,15 +2531,20 @@ struct RootLibraryArtifact {
 }
 
 fn planned_root_library(outputs: &executor::Outputs, key: &UnitKey) -> Result<RootLibraryArtifact> {
-    let Some(crate::compile::RustcOutput::Library { rlib, dep_info, .. }) =
-        outputs.artifacts.get(key)
-    else {
-        return Err(Error::failure(
-            "selected library produced no library artifact",
-        ));
+    let (extern_path, dep_info) = match outputs.artifacts.get(key) {
+        Some(crate::compile::RustcOutput::Library { rlib, dep_info, .. }) => (rlib, dep_info),
+        Some(crate::compile::RustcOutput::ProcMacro {
+            dynamic_library,
+            dep_info,
+        }) => (dynamic_library, dep_info),
+        _ => {
+            return Err(Error::failure(
+                "selected library produced no library artifact",
+            ));
+        }
     };
     Ok(RootLibraryArtifact {
-        extern_path: rlib.clone(),
+        extern_path: extern_path.clone(),
         dep_info: dep_info.clone(),
     })
 }

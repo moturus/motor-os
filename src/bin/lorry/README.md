@@ -65,8 +65,7 @@ Ordinary build, check, and Clippy run selected members' build scripts and
 build-dependencies through the shared graph, with named path execution grants.
 Scripts receive private output directories and package-specific `caller-env`
 allowlists; editable members can read the workspace without writing it.
-Run and test still reject selected packages with build scripts. Alternative registries, selecting a
-procedural-macro package as the root, root dev
+Run and test still reject selected packages with build scripts. Alternative registries, root dev
 dependencies selected for the build target, examples, benches, explicit test
 targets, and CLI feature selection for run and test are not supported. Build,
 check, Clippy, metadata, tree, and vendor support CLI feature selection. Ordinary
@@ -627,8 +626,10 @@ crate and its dependency closure for the compiler host, keeps resolver-2/3
 host features separate from target features, and passes the resulting host
 artifact to rustc. Linux rustc uses its ordinary dynamic-library artifact.
 Motor rustc uses a static PIE executable and exchanges the existing private
-proc-macro bridge messages with it over framed stdin/stdout. Selecting a
-procedural-macro crate itself as the root package remains unsupported.
+proc-macro bridge messages with it over framed stdin/stdout. Ordinary build,
+check, and Clippy also support selecting macro members. Selected macro features
+activate both Cargo contexts, and selected check metadata remains separate from
+the executable macro needed by consumers.
 
 Procedural macros execute dependency code inside rustc and therefore require
 an explicit matching policy rule:
