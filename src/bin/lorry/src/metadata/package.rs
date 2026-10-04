@@ -112,6 +112,7 @@ pub(super) fn map(
         publish: manifest.metadata.publish.clone(),
         default_run: manifest.default_run.clone(),
         rust_version: nonempty(&manifest.metadata.rust_version),
+        hints: manifest.metadata.hints.clone(),
     })
 }
 

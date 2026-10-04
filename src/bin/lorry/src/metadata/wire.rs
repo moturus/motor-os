@@ -73,6 +73,7 @@ pub struct Package {
     pub publish: Option<Vec<String>>,
     pub default_run: Option<String>,
     pub rust_version: Option<String>,
+    pub hints: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -145,32 +146,43 @@ serialize_wire_struct!(DepKindInfo, "DepKindInfo", 2,
     "kind" => kind,
     "target" => target,
 );
-serialize_wire_struct!(Package, "Package", 24,
-    "name" => name,
-    "version" => version,
-    "authors" => authors,
-    "id" => id,
-    "source" => source,
-    "description" => description,
-    "dependencies" => dependencies,
-    "license" => license,
-    "license_file" => license_file,
-    "targets" => targets,
-    "features" => features,
-    "manifest_path" => manifest_path,
-    "categories" => categories,
-    "keywords" => keywords,
-    "readme" => readme,
-    "repository" => repository,
-    "homepage" => homepage,
-    "documentation" => documentation,
-    "edition" => edition,
-    "metadata" => metadata,
-    "links" => links,
-    "publish" => publish,
-    "default_run" => default_run,
-    "rust_version" => rust_version,
-);
+impl Serialize for Package {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut value =
+            serializer.serialize_struct("Package", 24 + usize::from(self.hints.is_some()))?;
+        value.serialize_field("name", &self.name)?;
+        value.serialize_field("version", &self.version)?;
+        value.serialize_field("authors", &self.authors)?;
+        value.serialize_field("id", &self.id)?;
+        value.serialize_field("source", &self.source)?;
+        value.serialize_field("description", &self.description)?;
+        value.serialize_field("dependencies", &self.dependencies)?;
+        value.serialize_field("license", &self.license)?;
+        value.serialize_field("license_file", &self.license_file)?;
+        value.serialize_field("targets", &self.targets)?;
+        value.serialize_field("features", &self.features)?;
+        value.serialize_field("manifest_path", &self.manifest_path)?;
+        value.serialize_field("categories", &self.categories)?;
+        value.serialize_field("keywords", &self.keywords)?;
+        value.serialize_field("readme", &self.readme)?;
+        value.serialize_field("repository", &self.repository)?;
+        value.serialize_field("homepage", &self.homepage)?;
+        value.serialize_field("documentation", &self.documentation)?;
+        value.serialize_field("edition", &self.edition)?;
+        value.serialize_field("metadata", &self.metadata)?;
+        value.serialize_field("links", &self.links)?;
+        value.serialize_field("publish", &self.publish)?;
+        value.serialize_field("default_run", &self.default_run)?;
+        value.serialize_field("rust_version", &self.rust_version)?;
+        if let Some(hints) = &self.hints {
+            value.serialize_field("hints", hints)?;
+        }
+        value.end()
+    }
+}
 impl Serialize for Dependency {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -293,6 +305,7 @@ mod tests {
             links: Some("native-app".into()),
             publish: None,
             default_run: Some("app".into()),
+            hints: None,
             rust_version: Some("1.85".into()),
         }
     }
@@ -332,6 +345,7 @@ mod tests {
             links: None,
             publish: None,
             default_run: None,
+            hints: None,
             rust_version: None,
         }
     }

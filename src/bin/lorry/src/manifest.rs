@@ -105,6 +105,7 @@ pub struct Version {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PackageMetadata {
     pub custom: serde_json::Value,
+    pub hints: Option<serde_json::Value>,
     pub authors: Vec<String>,
     pub keywords: Vec<String>,
     pub categories: Vec<String>,
@@ -1173,6 +1174,10 @@ fn parse_package_metadata(
 ) -> Result<PackageMetadata> {
     let fields = inheritance::PackageFields::new(path, document, package, inherited);
     Ok(PackageMetadata {
+        hints: document.root().get("hints").map(|item| {
+            let table = require_table(path, document, item, "hints")?;
+            Ok::<_, Error>(serde_json::json!({"mostly-unused": table.get("mostly-unused").map(crate::toml::json).unwrap_or_default()}))
+        }).transpose()?,
         custom: package
             .get("metadata")
             .map(crate::toml::json)
