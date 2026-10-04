@@ -766,25 +766,25 @@ impl Runtime {
 
     pub fn new_session(&mut self, ephemeral: bool, name: Option<&str>) -> Result<(), String> {
         let session = self.store.create(ephemeral, name)?;
-        self.install_session(session)
+        self.install_session(session, "new")
     }
 
     pub fn resume(&mut self, selector: &str) -> Result<(), String> {
         if self.session.id() == selector {
-            return Ok(());
+            return self.refresh_hooks("resume");
         }
         let session = self.store.open(selector)?;
-        self.install_session(session)
+        self.install_session(session, "resume")
     }
 
     pub fn clone_session(&mut self) -> Result<(), String> {
         let session = self.store.clone_active(&self.session)?;
-        self.install_session(session)
+        self.install_session(session, "clone")
     }
 
     pub fn fork_at(&mut self, entry_id: &str) -> Result<String, String> {
         let (session, draft) = self.store.fork_at_user(&self.session, entry_id)?;
-        self.install_session(session)?;
+        self.install_session(session, "fork")?;
         Ok(draft)
     }
 
@@ -800,7 +800,26 @@ impl Runtime {
         notices
     }
 
-    fn install_session(&mut self, mut session: Session) -> Result<(), String> {
+    fn refresh_hooks(&mut self, reason: &str) -> Result<(), String> {
+        self.cancellation.reset();
+        let reserved = self
+            .tools
+            .tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let hooks = self.hooks.setup_again(&reserved,
+            serde_json::json!({"reason": reason, "provider": self.provider_name, "model": self.model}),
+            &mut self.session, &self.cancellation, &mut |notice| self.startup_notices.push(notice))?;
+        let prompt = effective_prompt(self.store.workspace(), &self.tools, &hooks);
+        self.session.append_runtime_identity(&prompt.identity())?;
+        self.hooks = hooks;
+        self.prompt = prompt;
+        Ok(())
+    }
+
+    fn install_session(&mut self, mut session: Session, reason: &str) -> Result<(), String> {
+        self.cancellation.reset();
         let provider_name = session
             .provider()
             .unwrap_or_else(|| self.provider_name.clone());
@@ -822,20 +841,30 @@ impl Runtime {
                 session.recovered_entries()
             ));
         }
-        self.hooks.notify(
-            "session_end",
-            serde_json::json!({"session_id": self.session.id()}),
-            &mut self.session,
-            &self.cancellation,
-            &mut |notice| self.startup_notices.push(notice),
-        );
+        let mut tools = self.tools.clone();
         self.startup_notices.extend(apply_tool_states(
-            &mut self.tools,
+            &mut tools,
             &Overrides::load(&self.tool_state_directory)?,
             &session,
         )?);
-        self.prompt = effective_prompt(self.store.workspace(), &self.tools, &self.hooks);
-        let identity = self.prompt.identity();
+        let model = session.model().unwrap_or_else(|| self.model.clone());
+        if session.model().is_none() {
+            session.set_model(&model)?;
+        }
+        let reserved = tools
+            .tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let hooks = self.hooks.setup_again(
+            &reserved,
+            serde_json::json!({"reason": reason, "provider": provider_name, "model": model}),
+            &mut session,
+            &self.cancellation,
+            &mut |notice| self.startup_notices.push(notice),
+        )?;
+        let prompt = effective_prompt(self.store.workspace(), &tools, &hooks);
+        let identity = prompt.identity();
         if session
             .latest_runtime_identity()
             .as_ref()
@@ -847,16 +876,22 @@ impl Runtime {
             );
         }
         session.append_runtime_identity(&identity)?;
-        if let Some(model) = session.model() {
-            self.model = model;
-        } else {
-            session.set_model(&self.model)?;
-        }
+        self.hooks.notify(
+            "session_end",
+            serde_json::json!({"session_id": self.session.id()}),
+            &mut self.session,
+            &self.cancellation,
+            &mut |notice| self.startup_notices.push(notice),
+        );
         if let Some(provider) = provider {
             self.provider = provider;
             self.provider_name = provider_name;
         }
         self.session = session;
+        self.model = model;
+        self.tools = tools;
+        self.hooks = hooks;
+        self.prompt = prompt;
         self.usage = self.session.usage();
         self.hooks.notify(
             "session_start",

@@ -2496,6 +2496,101 @@ fn hook_setup_receives_startup_provider_and_model() {
 }
 
 #[test]
+fn session_changes_repeat_setup_and_replace_prompt_fragments() {
+    let fixture = Fixture::new("session-setup");
+    let log = fixture.root.join("setups.jsonl");
+    let response = fixture.root.join("response.json");
+    std::fs::write(&response, r#"{"prompt_fragments":["setup prompt one"]}"#).unwrap();
+    let config = Config {
+        hooks: vec![HookConfig {
+            name: "setup".into(),
+            events: Some(vec!["initialize".into()]),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!(
+                    "cat >> '{}'; printf '\\n' >> '{}'; cat '{}'",
+                    log.display(),
+                    log.display(),
+                    response.display()
+                ),
+            ],
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 4096,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![answer("new answer"), answer("still usable")]);
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    let original = runtime.session().id().to_string();
+    std::fs::write(&response, r#"{"prompt_fragments":["setup prompt two"]}"#).unwrap();
+    runtime.new_session(false, None).unwrap();
+    runtime
+        .turn("hello".into(), &mut UnexpectedApproval, &mut |_| Ok(()))
+        .unwrap();
+    runtime.clone_session().unwrap();
+    let user = runtime
+        .session()
+        .entries()
+        .iter()
+        .find(|entry| entry.kind == "message" && entry.data["role"] == "user")
+        .unwrap()
+        .id
+        .clone();
+    runtime.fork_at(&user).unwrap();
+    runtime.resume(&original).unwrap();
+    runtime.resume(&original).unwrap();
+    let events = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event["payload"]["reason"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["startup", "new", "clone", "fork", "resume", "resume"]
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event["payload"]["model"] == "test/model"
+                && event["payload"]["provider"] == "default")
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert!(
+        requests[0]
+            .system
+            .iter()
+            .any(|text| text.contains("setup prompt two"))
+    );
+    assert!(
+        !requests[0]
+            .system
+            .iter()
+            .any(|text| text.contains("setup prompt one"))
+    );
+    drop(requests);
+    std::fs::write(&response, "invalid").unwrap();
+    assert!(runtime.new_session(false, None).is_err());
+    assert_eq!(runtime.session().id(), original);
+    runtime
+        .turn(
+            "after failed setup".into(),
+            &mut UnexpectedApproval,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+    assert!(
+        provider.requests.lock().unwrap()[1]
+            .system
+            .iter()
+            .any(|text| text.contains("setup prompt two"))
+    );
+}
+
+#[test]
 fn a_failed_before_stop_hook_is_reported_without_repeating_the_answer() {
     let fixture = Fixture::new("before-stop-failure");
     let config = Config {
