@@ -385,7 +385,8 @@ legacy paths. Hidden binary files are not inferred. Source target paths are
 normalized without resolving symbolic links, as Cargo presents them.
 Lorry discovers top-level `tests/*.rs` integration
 crates automatically.
-`lib.doc-scrape-examples` accepts a boolean as inert documentation metadata;
+`doc-scrape-examples` accepts a boolean on libraries, examples, and benches
+as inert documentation metadata;
 it does not change build, check, or test units.
 The inert `[badges]` table is accepted in selected packages too.
 Dependency manifests may describe up to 1,024 integration-test targets;

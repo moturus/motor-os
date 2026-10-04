@@ -1415,6 +1415,15 @@ mode, symlink, and held-child execution assertions are unchanged. Fourteen
 focused atomic tests passed in `/tmp/lorry-m5-executable-fixture-tests.log`.
 This is a test-only correction; no retry or product publication change.
 
+The following gate passed its 381 Rust tests, three own-message tests, all
+host contracts, and Cargo byte identity, then failed while inspecting Clap's
+examples (`/tmp/lorry-m5-full-executable-fixture-fixed.log`, 268 seconds).
+Clap's cached manifest and Cargo's target configurator confirm that
+`example.doc-scrape-examples` is an inert boolean for the supported commands.
+The shared auxiliary-target reader now accepts and validates it just like
+the existing library flag. The paired metadata contract passed in
+`/tmp/lorry-m5-example-scrape-contract.log`, including a nonboolean rejection.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,

@@ -94,6 +94,7 @@ edition = "2021"
 required-features = ["extra"]
 test = true
 doc = true
+doc-scrape-examples = true
 [[bench]]
 name = "custom"
 path = "benches/speed.rs"
@@ -228,6 +229,16 @@ for edition in 2015 2024; do
 done
 sed '/^\[package\]$/a autoexamples = false\nautobenches = false' "$WORK/target.baseline" >"$PROJECT/app/Cargo.toml"
 agrees_with_cargo "$PROJECT/Cargo.toml" targets-explicit-only
+cp "$WORK/target.baseline" "$PROJECT/app/Cargo.toml"
+sed 's/doc-scrape-examples = true/doc-scrape-examples = "true"/' \
+    "$WORK/target.baseline" >"$PROJECT/app/Cargo.toml"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    if "$builder" metadata --no-deps --offline --format-version 1 \
+        --manifest-path "$PROJECT/Cargo.toml" >"$WORK/invalid-scrape.json" 2>"$WORK/invalid-scrape.err"; then
+        echo "workspace-metadata: accepted a nonboolean example doc-scrape-examples" >&2
+        exit 1
+    fi
+done
 cp "$WORK/target.baseline" "$PROJECT/app/Cargo.toml"
 (
     cd "$PROJECT/app/src"

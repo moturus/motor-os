@@ -120,6 +120,7 @@ pub(super) fn parse(
                         | "path"
                         | "test"
                         | "doc"
+                        | "doc-scrape-examples"
                         | "bench"
                         | "doctest"
                         | "harness"
@@ -159,7 +160,7 @@ pub(super) fn parse(
                     source.display()
                 )));
             }
-            for flag in ["bench", "doctest"] {
+            for flag in ["bench", "doctest", "doc-scrape-examples"] {
                 optional_bool(path, document, table, kind, flag)?;
             }
             let crate_types = optional_string_array(path, document, table, kind, "crate-type")?
