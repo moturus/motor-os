@@ -339,24 +339,27 @@ impl Manager {
         }) {
             return Err("answer is not one of the hook's choices".into());
         }
+        let cancelled = cancellation.cancelled();
         let lifecycle = Cancellation::new();
-        let token = if cancellation.cancelled() {
-            &lifecycle
-        } else {
-            cancellation
-        };
-        self.invoke(
-            pending.owner,
-            "answer",
-            serde_json::json!({
-                "id": pending.question.id, "answer": answer, "attended": attended,
-                "cancelled": cancellation.cancelled(),
-            }),
-            session,
-            token,
-            notice,
-        )
-        .map(|_| ())
+        let interrupted = cancelled && crate::platform::take_interrupt();
+        let token = if cancelled { &lifecycle } else { cancellation };
+        let result = self
+            .invoke(
+                pending.owner,
+                "answer",
+                serde_json::json!({
+                    "id": pending.question.id, "answer": answer, "attended": attended,
+                    "cancelled": cancelled,
+                }),
+                session,
+                token,
+                notice,
+            )
+            .map(|_| ());
+        if interrupted {
+            crate::platform::note_interrupt();
+        }
+        result
     }
 
     pub fn command(

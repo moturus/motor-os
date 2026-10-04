@@ -46,7 +46,7 @@ pub fn take_interrupt() -> bool {
     INTERRUPTED.swap(false, Ordering::SeqCst)
 }
 
-// The tests for the three above are in `tests/interrupt.rs`, which is a
+// Interrupt lifecycle tests are in `tests/hook_interrupt.rs`, which is a
 // process of its own. Nothing that sets or takes this flag can be tested
 // beside the agent tests: they take it too, at every safe point in a turn, and
 // whichever got there first made the other fail.
