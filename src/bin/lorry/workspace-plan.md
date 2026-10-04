@@ -60,10 +60,14 @@ test share Cargo JSON reporting and approved format combinations. Run and
 test finish the build stream before starting children; `test --no-run`
 reports harness executables. Programs and harnesses receive Cargo package
 metadata, run preserves its caller's directory, and global presentation
-options work after command names. These patches passed focused contracts.
+options work after command names. Offline commands now accept `--locked`,
+`--offline`, and `--frozen`; metadata defaults to version 1 with Cargo's
+warning. Compiler commands accept Cargo's positive, relative negative, and
+`default` job counts, and build scripts receive the effective `NUM_JOBS`.
+These patches passed focused CLI, metadata, workspace, and script contracts.
 Warning replay, real diagnostic paths, dynamic library search paths, Lorry's
-own error messages, the remaining Cargo option forms, documentation, and
-the full milestone gate remain. The own-message option name is under review.
+own error messages, `test NAME`, locate-project forms, documentation, and the
+full milestone gate remain. The own-message option name is under review.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

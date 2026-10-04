@@ -888,6 +888,14 @@ change. It lands in milestone 6, with the workspace review that it
 describes.
 
 The option has no name yet. One candidate is `--lorry-messages`.
+The proposed interface puts newline-delimited Lorry JSON messages on stderr,
+while stdout retains the selected command's output, including Cargo JSON.
+For example, `lorry build --message-format=json --lorry-messages` would
+report compiler and artifact events on stdout and Lorry's own failures on
+stderr. `-q` suppresses human progress. The new option changes message
+presentation; it does not replace Cargo's format option. The alternative
+spelling `--lorry-message-format=json` makes the format explicit. Both
+spellings remain proposals pending the owner's preference.
 
 ### Cargo options that scripts expect
 
