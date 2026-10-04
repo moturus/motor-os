@@ -290,8 +290,10 @@ until multi-package execution is implemented. A member-directory invocation
 may search ancestors for its workspace.
 General upward package discovery, `--manifest-path`, workspace-wide commands,
 member globs and members outside the root are unsupported.
-All manifest modes inherit `version`, `edition`, and `rust-version` from
-`workspace.package` when the member sets `workspace = true`. Remaining
+All manifest modes inherit `version`, `edition`, `rust-version`, authors,
+keywords, categories, description, homepage, documentation, repository, and
+license from `workspace.package` when the member sets `workspace = true`.
+Inherited type errors identify the workspace value's source line. Remaining
 package fields, dependency and lint inheritance follow in subsequent patches.
 `new` and `cache clean` do not inspect
 a current package.

@@ -10,6 +10,7 @@ use crate::sparse::DependencyKind;
 use crate::toml::Document;
 use crate::toolchain::TargetInfo;
 
+mod inheritance;
 mod source;
 pub(crate) use source::SourceWorkspace;
 
@@ -470,6 +471,7 @@ impl Manifest {
         Self::parse_document(root, path, &document, ManifestMode::Dependency)
     }
 
+    #[cfg(test)]
     fn parse_document(
         root: &Path,
         path: &Path,
@@ -847,11 +849,12 @@ enum ManifestMode {
     Source,
 }
 
-#[derive(Default)]
 struct InheritedPackage {
     version: Option<String>,
     edition: Option<String>,
     rust_version: Option<String>,
+    path: PathBuf,
+    document: Document,
 }
 
 fn dependency_workspace_package(root: &Path) -> Result<Option<InheritedPackage>> {
@@ -867,7 +870,7 @@ fn dependency_workspace_package(root: &Path) -> Result<Option<InheritedPackage>>
         "workspace",
     )?;
     let Some(item) = table.get("package") else {
-        return Ok(Some(InheritedPackage::default()));
+        return Ok(None);
     };
     let package = require_table(&path, &document, item, "workspace.package")?;
     Ok(Some(InheritedPackage {
@@ -880,6 +883,8 @@ fn dependency_workspace_package(root: &Path) -> Result<Option<InheritedPackage>>
             "workspace.package",
             "rust-version",
         )?,
+        path,
+        document,
     }))
 }
 
@@ -1023,7 +1028,7 @@ fn validate_package_keys(
             ));
         }
     }
-    for key in ["authors", "keywords", "categories", "include", "exclude"] {
+    for key in ["include", "exclude"] {
         if let Some(item) = package.get(key) {
             string_array(path, document, item, &format!("package.{key}"))?;
         }
@@ -1050,23 +1055,16 @@ fn parse_package_metadata(
     package: &Table,
     inherited: Option<&InheritedPackage>,
 ) -> Result<PackageMetadata> {
+    let fields = inheritance::PackageFields::new(path, document, package, inherited);
     Ok(PackageMetadata {
-        authors: optional_string_array(path, document, package, "package", "authors")?
-            .unwrap_or_default(),
-        keywords: optional_string_array(path, document, package, "package", "keywords")?
-            .unwrap_or_default(),
-        categories: optional_string_array(path, document, package, "package", "categories")?
-            .unwrap_or_default(),
-        description: optional_string(path, document, package, "package", "description")?
-            .unwrap_or_default(),
-        homepage: optional_string(path, document, package, "package", "homepage")?
-            .unwrap_or_default(),
-        documentation: optional_string(path, document, package, "package", "documentation")?
-            .unwrap_or_default(),
-        repository: optional_string(path, document, package, "package", "repository")?
-            .unwrap_or_default(),
-        license: optional_string(path, document, package, "package", "license")?
-            .unwrap_or_default(),
+        authors: fields.array("authors")?.unwrap_or_default(),
+        keywords: fields.array("keywords")?.unwrap_or_default(),
+        categories: fields.array("categories")?.unwrap_or_default(),
+        description: fields.string("description")?.unwrap_or_default(),
+        homepage: fields.string("homepage")?.unwrap_or_default(),
+        documentation: fields.string("documentation")?.unwrap_or_default(),
+        repository: fields.string("repository")?.unwrap_or_default(),
+        license: fields.string("license")?.unwrap_or_default(),
         license_file: optional_string(path, document, package, "package", "license-file")?
             .unwrap_or_default(),
         readme: optional_string_or_false(path, document, package, "package", "readme")?

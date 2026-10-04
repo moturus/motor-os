@@ -158,4 +158,35 @@ done
 agrees_with_cargo "$WORK/dot/Cargo.toml" inherited-listed
 agrees_with_cargo "$WORK/empty/inner/Cargo.toml" inherited-implicit
 
+for root in "$WORK/dot" "$WORK/empty"; do
+    cat >>"$root/Cargo.toml" <<'EOF'
+authors = ["Motor OS"]
+keywords = ["workspace"]
+categories = ["development-tools"]
+description = "inherited package description"
+homepage = "https://example.test"
+documentation = "https://example.test/docs"
+repository = "https://example.test/repo"
+license = "MIT"
+EOF
+    for package in "$root" "$root/inner" "$root/listed"; do
+        for field in authors keywords categories description homepage documentation repository license; do
+            sed -i "/^name = /a $field.workspace = true" "$package/Cargo.toml"
+        done
+    done
+done
+agrees_with_cargo "$WORK/dot/Cargo.toml" inherited-metadata-listed
+agrees_with_cargo "$WORK/empty/inner/Cargo.toml" inherited-metadata-implicit
+# Bad inherited values must name the workspace declaration's original line.
+sed -i 's/authors = \["Motor OS"\]/authors = false/' "$WORK/empty/Cargo.toml"
+if source_metadata "$WORK/empty/inner/Cargo.toml" >"$WORK/bad-inheritance.json" 2>"$WORK/bad-inheritance.err"; then
+    echo "workspace-metadata: accepted a non-array inherited authors field" >&2
+    exit 1
+fi
+line="$(awk '/^authors = false/ { print NR }' "$WORK/empty/Cargo.toml")"
+grep -Fx "  --> $WORK/empty/Cargo.toml:$line" "$WORK/bad-inheritance.err" >/dev/null || {
+    cat "$WORK/bad-inheritance.err" >&2
+    exit 1
+}
+
 echo "PASS: unprepared workspace source metadata agrees with Cargo"
