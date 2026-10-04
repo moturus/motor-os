@@ -11,9 +11,22 @@ use serde_json::{Value, json};
 use crate::{Event, paths::ToolContext};
 
 pub fn permission(event: &Event) -> Value {
-    let decision = ToolContext::for_event(event).and_then(|context| decide(event, &context));
+    let decision = ToolContext::for_event(event).and_then(|context| {
+        if event.payload["tool_call"]["name"] == "check" {
+            let call: ToolCall = serde_json::from_value(event.payload["tool_call"].clone())
+                .map_err(|error| error.to_string())?;
+            let arguments: Value =
+                serde_json::from_str(&call.arguments).map_err(|error| error.to_string())?;
+            if arguments != json!({}) {
+                return Err("check takes an empty argument object".into());
+            }
+            crate::check_approval::prepare(event, &context)
+        } else {
+            decide(event, &context).map(|decision| json!({"decision": decision}))
+        }
+    });
     match decision {
-        Ok(decision) => json!({"decision": decision}),
+        Ok(response) => response,
         Err(error) => {
             json!({"decision": "deny", "notice": format!("approval policy denied the call: {error}")})
         }
