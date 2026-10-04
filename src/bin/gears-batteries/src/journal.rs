@@ -1,7 +1,10 @@
 //! Durable derived JSON lines; only an unfinished final line is discarded.
 
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::path::Path;
+
+use gears::state::StateRoot;
 
 use serde::Serialize;
 
@@ -10,12 +13,20 @@ use crate::paths::ToolContext;
 const MAX_LINE: usize = 1024 * 1024;
 
 pub fn append(context: &ToolContext, name: &str, value: &impl Serialize) -> Result<(), String> {
+    append_at(&context.state, &context.data_file(name)?, value)
+}
+
+/// Append to a checked state path, shared by turn records and decision history.
+pub fn append_at(root: &StateRoot, path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let relative = path
+        .strip_prefix(root.path())
+        .map_err(|_| "journal is outside its state root")?;
+    let path = root.file(relative)?;
     let mut bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
     if bytes.len() > MAX_LINE {
         return Err("journal record exceeds 1 MiB".into());
     }
     bytes.push(b'\n');
-    let path = context.data_file(name)?;
     let mut options = OpenOptions::new();
     options.read(true).append(true).create(true);
     #[cfg(unix)]
@@ -28,6 +39,50 @@ pub fn append(context: &ToolContext, name: &str, value: &impl Serialize) -> Resu
     file.write_all(&bytes)
         .and_then(|()| file.sync_data())
         .map_err(|error| error.to_string())
+}
+
+/// Visit completed records without loading the entire history into memory.
+/// An incomplete final line is ignored; completed malformed records are errors.
+pub fn visit(
+    root: &StateRoot,
+    relative: &Path,
+    mut record: impl FnMut(serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    let Some(path) = root.existing_file(relative)? else {
+        return Ok(());
+    };
+    let file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut number = 0;
+    loop {
+        line.clear();
+        let count = reader
+            .by_ref()
+            .take(MAX_LINE as u64 + 2)
+            .read_until(b'\n', &mut line)
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            return Ok(());
+        }
+        number += 1;
+        if count > MAX_LINE + 1 {
+            return Err(format!(
+                "{}:{number}: journal record exceeds 1 MiB",
+                path.display()
+            ));
+        }
+        if line.last() != Some(&b'\n') {
+            return Ok(());
+        }
+        let value = serde_json::from_slice(&line).map_err(|error| {
+            format!(
+                "{}:{number}: invalid journal record: {error}",
+                path.display()
+            )
+        })?;
+        record(value)?;
+    }
 }
 
 fn repair_tail(file: &mut std::fs::File) -> std::io::Result<()> {
@@ -113,5 +168,53 @@ mod tests {
         append(&context, "turns.jsonl", &json!({"version": 1})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"version\":1}\n");
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn reading_history_ignores_only_the_unfinished_tail_and_never_mutates_it() {
+        let path =
+            std::env::temp_dir().join(format!("batteries-journal-read-{}", std::process::id()));
+        let root = StateRoot::new(path.clone()).unwrap();
+        let relative = Path::new("batteries/changes.jsonl");
+        let file = root.file(relative).unwrap();
+        let original = b"{\"version\":1,\"decision\":\"deny\"}\n{\"partial\":";
+        std::fs::write(&file, original).unwrap();
+        let mut records = Vec::new();
+        visit(&root, relative, |value| {
+            records.push(value);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(records, [json!({"version": 1, "decision": "deny"})]);
+        assert_eq!(std::fs::read(&file).unwrap(), original);
+        append_at(&root, &file, &json!({"version": 1, "decision": "approve"})).unwrap();
+        records.clear();
+        visit(&root, relative, |value| {
+            records.push(value);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1]["decision"], "approve");
+        std::fs::write(&file, b"{broken}\n{\"tail\":").unwrap();
+        assert!(
+            visit(&root, relative, |_| Ok(()))
+                .unwrap_err()
+                .contains("invalid journal record")
+        );
+        std::fs::write(&file, vec![b'x'; MAX_LINE + 2]).unwrap();
+        assert!(
+            visit(&root, relative, |_| Ok(()))
+                .unwrap_err()
+                .contains("exceeds")
+        );
+        assert!(visit(&root, Path::new("../escape"), |_| Ok(())).is_err());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&file).unwrap();
+            std::os::unix::fs::symlink(path.join("outside"), &file).unwrap();
+            assert!(visit(&root, relative, |_| Ok(())).is_err());
+            assert!(append_at(&root, &file, &json!({})).is_err());
+        }
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

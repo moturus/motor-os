@@ -9,8 +9,10 @@ All Gears defects found during implementation are in scope.
 The phase 0 companion documents and the phase 1–4 implementations are in
 place. Phase 5.1–5.6 are implemented. The real-binary workflow passes on
 Linux and Motor OS, and the updated release developer-image gate passes.
-The sysbox track and phases 6–12 are not implemented. The next design
-decision is the phase 5 user-run local/OpenRouter trials.
+The user reports that native OpenRouter use works and has requested
+continuation, clearing the phase 5 decision point. A local-model result has
+not been reported. Phase 6 is underway; the sysbox track and phases 7–12
+are not implemented.
 
 The phase 3 manual checklist is not marked complete. Automated host tests
 cover the runtime and both UIs; native gates cover shipped tools, literal
@@ -211,8 +213,14 @@ with retries, longer timeouts or weaker assertions.
 
 ## Next steps
 
-Stop at the phase 5 decision point for user-run local/OpenRouter sessions:
-continue, change course or stop. Use the opt-in configuration and choose the
-models, budgets and tasks for those sessions. Automated mock tests establish
-behavior, not real-model usefulness. Keep the outstanding native interactive
-checklist visible; do not mark it complete from component tests alone.
+Continue phase 6 memory and skills in small patches. The first foundation
+shares the durable journal writer with decision history and adds a bounded
+reader that ignores only an incomplete final line, reports corrupt completed
+records and leaves history unchanged. The batteries component gate passes
+(`/tmp/gears-batteries-phase6-journal-gate.log`), including its real-binary
+workflow; host/Motor Clippy with warnings denied and formatting pass. The
+new regressions run transitively in `full-test.sh` through that gate.
+
+Automated mock tests establish behavior, not real-model usefulness. Keep the
+outstanding native interactive checklist visible; do not mark it complete
+from component tests alone.
