@@ -37,16 +37,20 @@ pub fn approve(
         }
         None => {
             let report = next.render()?;
-            writeln!(
-                output,
-                "The previous admission commitment was {previous_sha256}.\n\
-                 The visible dependency inputs no longer reconstruct that review, so no semantic diff is available.\n\
-                 Complete candidate review document:"
-            )
-            .and_then(|()| output.write_all(&report))
-            .map_err(|error| {
-                Error::failure(format!("failed to write dependency change review: {error}"))
-            })?;
+            let heading = if previous_sha256 == "none" {
+                "Initial dependency admission review:".to_owned()
+            } else {
+                format!(
+                    "The previous admission commitment was {previous_sha256}.\n\
+                     The visible dependency inputs no longer reconstruct that review, so no semantic diff is available.\n\
+                     Complete candidate review document:"
+                )
+            };
+            writeln!(output, "{heading}")
+                .and_then(|()| output.write_all(&report))
+                .map_err(|error| {
+                    Error::failure(format!("failed to write dependency change review: {error}"))
+                })?;
         }
     }
     confirm(mode, terminal, input, output)
@@ -338,6 +342,139 @@ fn write_difference_line(
 mod tests {
     use super::*;
     use crate::admission_state::RegistrySource;
+
+    #[test]
+    fn json_reports_changed_execution_and_native_tool_grants() {
+        use crate::admission_state::{
+            Capability, Context, ContextRegistry, LockedRegistry, UnitKind,
+        };
+        use crate::config::NativeToolRole;
+        let checksum = "1".repeat(64);
+        let mut previous = Review {
+            scope: Some(crate::admission_state::ReviewScope::default()),
+            resolver_version: 2,
+            contexts: vec![Context {
+                host: "host".to_owned(),
+                target: "target".to_owned(),
+            }],
+            locked_registry: vec![LockedRegistry {
+                name: "helper".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: checksum.clone(),
+                dependencies: vec![],
+            }],
+            context_registry: vec![ContextRegistry {
+                host: "host".to_owned(),
+                target: "target".to_owned(),
+                name: "helper".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: checksum.clone(),
+                compile_kinds: vec![UnitKind::Host],
+                host_features: vec![],
+                target_features: vec![],
+            }],
+            registry_sources: vec![RegistrySource {
+                name: "helper".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: checksum.clone(),
+                license: "MIT".to_owned(),
+                source_tree_sha256: "2".repeat(64),
+                build_script: true,
+                proc_macro: true,
+            }],
+            ..Review::default()
+        };
+        previous
+            .complete(vec![Capability {
+                package: "helper".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: checksum.clone(),
+                build_script: true,
+                proc_macro: false,
+                native_tools: vec![NativeToolRole::CCompiler],
+            }])
+            .unwrap();
+        let mut next = previous.clone();
+        let key = crate::resolver::PackageKey {
+            name: "helper".to_owned(),
+            version: semver::Version::new(1, 0, 0),
+            source: crate::resolver::PackageSourceKey::CratesIo,
+        };
+        let package = crate::resolver::ResolvedPackage {
+            key: key.clone(),
+            source: crate::resolver::ResolvedSource::CratesIo {
+                checksum: crate::hash::decode_hex(&checksum).unwrap(),
+            },
+            local_manifest: None,
+            feature_sets: BTreeMap::new(),
+            compile_kinds: Default::default(),
+            host_features: Default::default(),
+            target_features: Default::default(),
+            edges: vec![],
+            lock_edges: vec![],
+        };
+        let evidence = crate::policy::PackageEvidence {
+            license: "MIT".to_owned(),
+            build_script: true,
+            proc_macro: true,
+            newly_acquired: false,
+            archive_bytes: Some(1),
+            extracted_bytes: 1,
+            file_count: 1,
+            source_tree_sha256: [2; 32],
+        };
+        next.complete(
+            crate::admission_state::capabilities_from(
+                &crate::resolver::Resolution {
+                    root_edges: vec![],
+                    packages: vec![package],
+                },
+                &BTreeMap::from([(key.clone(), evidence)]),
+                &crate::policy::Admission {
+                    packages: BTreeMap::from([(
+                        key,
+                        crate::policy::PackageAdmission {
+                            matching_allow_rules: vec![],
+                            native_tools: [NativeToolRole::CCompiler, NativeToolRole::Archiver]
+                                .into(),
+                        },
+                    )]),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        approve_json(
+            Some(&previous),
+            Some(&previous.commitment().unwrap()),
+            &next,
+            Mode::AcceptAll,
+            false,
+            &mut "".as_bytes(),
+            &mut output,
+        )
+        .unwrap();
+        let message: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(message["added"], serde_json::json!([]));
+        assert_eq!(message["removed"], serde_json::json!([]));
+        assert_eq!(message["capabilities_removed"][0]["proc_macro"], false);
+        assert_eq!(
+            message["capabilities_removed"][0]["native_tools"],
+            serde_json::json!(["c-compiler"])
+        );
+        assert_eq!(message["capabilities_added"][0]["proc_macro"], true);
+        assert_eq!(
+            message["capabilities_added"][0]["native_tools"],
+            serde_json::json!(["archiver", "c-compiler"])
+        );
+        assert_eq!(message["capabilities_added"][0]["checksum"], checksum);
+        assert_eq!(
+            message["review"],
+            String::from_utf8(next.render().unwrap()).unwrap()
+        );
+        assert_eq!(String::from_utf8(output).unwrap().lines().count(), 1);
+    }
 
     #[test]
     fn json_review_is_one_message_and_nonterminal_confirmation_never_reads() {

@@ -199,6 +199,14 @@ or interrupted), `text`, nullable `file`, `line`, and `help`, and `exit_code`
 Cargo JSON and command output remain on stdout. The option also applies to
 parse errors, stops at child arguments after `--`, and does not suppress
 progress; pair it with `-q` when only machine-readable errors are wanted.
+For vendor, the option suppresses human progress and emits
+`reason: "lorry-vendor-change"` with the previous commitment and its
+availability, added/removed source evidence, added/removed capabilities, and
+the complete candidate canonical review as a TOML string. Source items include
+exact identities, checksums where applicable, tree hashes, licenses, and
+build-time code flags; capability items include native-tool roles. Roles use
+the canonical alphabetical order. Human and JSON modes use the same approval
+rules, including nonterminal rejection and explicit `--accept-all`.
 
 `build`, `check`, `run`, `test`, `clean`, `metadata`, and `tree` accept
 `--locked`, `--offline`, and `--frozen`. Those commands already prohibit
@@ -653,6 +661,11 @@ format versions or keys are hard errors.
 ### Workspace migration
 
 A successful workspace review writes one root record with review format 4.
+Plain vendor retains the stored normalized member/feature scope and prints it
+in human mode. Any package or feature selector replaces that scope as a whole;
+operational options do not reset it. Unused member declarations preserve the
+commitment when the resolved outside packages, contexts, features, and grants
+are unchanged.
 Old per-member records require explicit review with workspace-root
 `vendor --locked`; their presence never supplies workspace approval.
 Before confirmation, vendor names the selected members' records that the

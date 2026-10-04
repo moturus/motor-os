@@ -186,6 +186,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     let scope = review_scope(cli, &workspace, previous.as_ref())?;
     let migration = migration::Records::collect(&workspace, &scope)?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
+    progress.report(scope.description())?;
     let mut manifest = workspace.packages[0].clone();
     let refreshes = if options.locked {
         vec![]

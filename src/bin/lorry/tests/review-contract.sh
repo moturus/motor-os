@@ -129,6 +129,10 @@ fi
 [ "$(sha256sum "$PROJECT/Cargo.toml")" = "$manifest_hash" ]
 [ "$(sha256sum "$PROJECT/Cargo.lock")" = "$lock_hash" ]
 [ "$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")" != "$state_hash" ]
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor </dev/null) \
+    >"$WORK/retained.stdout" 2>"$WORK/retained.stderr"
+grep -F 'Review scope: all workspace members; default features; features: automated-change' \
+    "$WORK/retained.stderr" >/dev/null
 
 echo "== Proving review is read-only and committed =="
 before="$(find "$PROJECT" "$REPOSITORY" -printf '%y %p %s %T@\n' | sort | sha256sum)"

@@ -37,11 +37,15 @@ pub fn capabilities_from(
         if !package_evidence.build_script && !package_evidence.proc_macro {
             continue;
         }
-        let native_tools = admission
+        let mut native_tools = admission
             .packages
             .get(&package.key)
             .map(|admission| admission.native_tools.iter().copied().collect::<Vec<_>>())
             .unwrap_or_default();
+        native_tools.sort_by_key(|role| match role {
+            NativeToolRole::Archiver => "archiver",
+            NativeToolRole::CCompiler => "c-compiler",
+        });
         capabilities.push(Capability {
             package: package.key.name.clone(),
             version: package.key.version.to_string(),
@@ -164,6 +168,27 @@ mod review {
     }
 
     impl ReviewScope {
+        pub(crate) fn description(&self) -> String {
+            let packages = if self.packages.is_empty() {
+                "all workspace members".to_owned()
+            } else {
+                self.packages.join(", ")
+            };
+            let defaults = if self.no_default_features {
+                "no default features"
+            } else {
+                "default features"
+            };
+            let features = if self.all_features {
+                "all features".to_owned()
+            } else if self.features.is_empty() {
+                "no additional feature requests".to_owned()
+            } else {
+                format!("features: {}", self.features.join(", "))
+            };
+            format!("Review scope: {packages}; {defaults}; {features}")
+        }
+
         fn validate(&self) -> Result<()> {
             limit(self.packages.len(), 64, "reviewed members")?;
             limit(
