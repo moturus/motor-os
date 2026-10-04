@@ -203,3 +203,36 @@ grep -F 'direct dependency' "$WORK/direct.err" >/dev/null
 cmp Cargo.lock "$WORK/after-upgrade.lock"
 cmp .lorry/dependencies-v2.toml "$WORK/upgraded.admission"
 echo 'PASS: transitive workspace upgrade matches Cargo and protects every member declaration'
+
+# A valid Cargo patch can describe targets Lorry does not yet compile.
+mkdir -p patched/src
+sed -i 's/outside = { path/aardvark = { package = "outside", path/; s/cfg-if = { version = "1.0", optional = true }/zulu = { package = "cfg-if", version = "1.0" }/' shared/Cargo.toml
+cat >patched/Cargo.toml <<'TOML'
+[package]
+name = "cfg-if"
+version = "1.0.4"
+edition = "2021"
+[lib]
+crate-type = ["staticlib"]
+[dev-dependencies]
+second = { path = "../second" }
+TOML
+echo 'compile_error!("metadata must never compile patched sources");' >patched/src/lib.rs
+cat >>Cargo.toml <<'TOML'
+[patch.crates-io]
+cfg-if = { path = "patched" }
+TOML
+"$LORRY_TEST_CARGO" generate-lockfile --offline
+cp Cargo.lock "$WORK/patched.lock"
+"$LORRY" -q metadata --format-version 1 >"$WORK/lorry-patched.json"
+"$LORRY_TEST_CARGO" metadata --offline --format-version 1 >"$WORK/cargo-patched.json"
+python3 - "$WORK/lorry-patched.json" "$WORK/cargo-patched.json" <<'PYCODE'
+import difflib, json, sys
+actual, expected = [json.load(open(path)) for path in sys.argv[1:]]
+assert actual == expected, ''.join(difflib.unified_diff(
+    json.dumps(expected, sort_keys=True, indent=2).splitlines(True),
+    json.dumps(actual, sort_keys=True, indent=2).splitlines(True),
+    fromfile='Cargo', tofile='Lorry'))
+PYCODE
+cmp Cargo.lock "$WORK/patched.lock"
+echo 'PASS: patched source metadata matches Cargo without compiler target restrictions'

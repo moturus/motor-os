@@ -184,6 +184,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
             acquisition.repositories(),
             true,
             Some(&direct),
+            true,
         )?;
         let mut locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
         if let Some(forced) = &forced {
@@ -452,6 +453,7 @@ fn resolve_locked(
         acquisition.repositories(),
         false,
         Some(direct),
+        true,
     )?;
     catalog.use_fetch_hint();
     let complete = resolve_complete_workspace(

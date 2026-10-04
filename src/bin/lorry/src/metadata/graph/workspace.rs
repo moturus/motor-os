@@ -60,8 +60,12 @@ pub(crate) fn resolved(
             &ids,
         )?);
     }
-    packages.sort_by(|left, right| left.id.cmp(&right.id));
-    nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    let order = ids
+        .iter()
+        .map(|(key, id)| Ok((id.clone(), package_order(key)?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    packages.sort_by(|left, right| order[&left.id].cmp(&order[&right.id]));
+    nodes.sort_by(|left, right| order[&left.id].cmp(&order[&right.id]));
     let members = workspace
         .packages
         .iter()

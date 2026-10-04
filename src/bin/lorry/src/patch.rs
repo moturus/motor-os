@@ -9,9 +9,17 @@ use crate::resolver::Catalog;
 use crate::source_tree::{DEFAULT_LIMITS, Exclusions, Tree};
 
 pub fn configure(manifest: &Manifest, catalog: &mut Catalog) -> Result<()> {
+    configure_mode(manifest, catalog, false)
+}
+
+pub(crate) fn configure_sources(manifest: &Manifest, catalog: &mut Catalog) -> Result<()> {
+    configure_mode(manifest, catalog, true)
+}
+
+fn configure_mode(manifest: &Manifest, catalog: &mut Catalog, describe: bool) -> Result<()> {
     for patch in &manifest.patches {
         match &patch.source {
-            PatchSource::Path(path) => load_local_patch(manifest, patch, path, catalog)?,
+            PatchSource::Path(path) => load_local_patch(manifest, patch, path, catalog, describe)?,
             PatchSource::Git(_) => {}
         }
     }
@@ -23,6 +31,7 @@ fn load_local_patch(
     patch: &Patch,
     path: &Path,
     catalog: &mut Catalog,
+    describe: bool,
 ) -> Result<()> {
     let physical_root = fs::canonicalize(path).map_err(|error| {
         Error::failure(format!(
@@ -31,7 +40,11 @@ fn load_local_patch(
             path.display()
         ))
     })?;
-    let mut manifest = Manifest::load_path_dependency(&physical_root)?;
+    let mut manifest = if describe {
+        Manifest::load_source_dependency(&physical_root)?
+    } else {
+        Manifest::load_path_dependency(&physical_root)?
+    };
     manifest.editable = workspace
         .workspace_members
         .values()

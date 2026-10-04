@@ -71,9 +71,19 @@ pub(super) fn map(
             presented_root.display()
         ))
     })?;
-    let dependencies = manifest
-        .dependencies
-        .iter()
+    let mut declarations = manifest.dependencies.iter().collect::<Vec<_>>();
+    declarations.sort_by_key(|dependency| {
+        let kind = match (dependency.target.is_some(), dependency.kind) {
+            (_, crate::sparse::DependencyKind::Normal) => 0,
+            (false, crate::sparse::DependencyKind::Dev)
+            | (true, crate::sparse::DependencyKind::Build) => 1,
+            (false, crate::sparse::DependencyKind::Build)
+            | (true, crate::sparse::DependencyKind::Dev) => 2,
+        };
+        (&dependency.target, kind, &dependency.alias)
+    });
+    let dependencies = declarations
+        .into_iter()
         .map(|dependency| map_dependency(dependency, dependency_roots))
         .collect::<Result<Vec<_>>>()?;
 

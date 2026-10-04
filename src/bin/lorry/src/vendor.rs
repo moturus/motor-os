@@ -307,7 +307,14 @@ fn prepare_networked_with_approval(
         .transpose()?
         .flatten();
     let forced = forced.map(upgrade::Selection::as_resolver_input);
-    let base_catalog = prepare_catalog(manifest, config, &repositories, forced.is_some(), direct)?;
+    let base_catalog = prepare_catalog(
+        manifest,
+        config,
+        &repositories,
+        forced.is_some(),
+        direct,
+        false,
+    )?;
     let mut known_proc_macros = previous
         .map(|previous| {
             dependency::capability_registry_proc_macros(manifest, &previous.capabilities)
@@ -631,7 +638,14 @@ fn prepare_with_loader(
     loader: &mut dyn FnMut(&str, &semver::VersionReq, &mut Catalog) -> Result<()>,
     after_complete: &dyn Fn(&Resolution) -> Result<()>,
 ) -> Result<PreparedContexts> {
-    let catalog = prepare_catalog(manifest, config, repositories, forced.is_some(), None)?;
+    let catalog = prepare_catalog(
+        manifest,
+        config,
+        repositories,
+        forced.is_some(),
+        None,
+        false,
+    )?;
     prepare_with_catalog(
         manifest,
         config,
@@ -651,6 +665,7 @@ fn prepare_catalog(
     repositories: &RepositorySet,
     allow_unlocked: bool,
     direct: Option<&crate::git::DirectCatalog>,
+    describe: bool,
 ) -> Result<Catalog> {
     let mut catalog = if manifest.lock.is_some() {
         Catalog::from_locked_repository(manifest, repositories)?
@@ -660,7 +675,11 @@ fn prepare_catalog(
     if allow_unlocked {
         catalog.allow_unlocked_registry_candidates();
     }
-    patch::configure(manifest, &mut catalog)?;
+    if describe {
+        patch::configure_sources(manifest, &mut catalog)?;
+    } else {
+        patch::configure(manifest, &mut catalog)?;
+    }
     if let Some(direct) = direct {
         direct.configure(&mut catalog)?;
     } else {

@@ -115,6 +115,11 @@ Targets follow Cargo's library, binary, example, test, bench, and build-script
 ordering.
 Cargo registry description loading verifies the same archives, markers, and
 source trees as compilation loading, without imposing build-target restrictions.
+This includes local crates.io patches: source description retains their dev
+declarations and crate types without first loading a compiler manifest.
+Resolved packages and nodes follow Cargo's package identity ordering; described
+dependencies follow its table, platform, kind, and alias ordering. Node edges
+are ordered by destination identity rather than by dependency alias.
 Source-only workspace preparation retains registry target descriptions and
 development declarations through evidence inspection and publication.
 Locked Git descriptions retain those same fields and bind internal development

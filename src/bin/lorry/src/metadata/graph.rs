@@ -71,8 +71,8 @@ fn map_node(
     ids: &BTreeMap<PackageKey, String>,
 ) -> Result<wire::Node> {
     let mut aliases = BTreeMap::<String, (String, String)>::new();
-    let mut dependencies = BTreeSet::new();
-    let mut grouped = BTreeMap::<(String, String), BTreeSet<(u8, Option<String>)>>::new();
+    let mut grouped =
+        BTreeMap::<(PackageOrder, String, String), BTreeSet<(u8, Option<String>)>>::new();
     for edge in edges {
         let dependency = manifest
             .dependencies
@@ -105,15 +105,14 @@ fn map_node(
                 edge.alias
             )));
         }
-        dependencies.insert(package_id.clone());
         grouped
-            .entry((name, package_id.clone()))
+            .entry((package_order(&edge.package)?, name, package_id.clone()))
             .or_default()
             .insert((kind_order(edge.kind), dependency.target.clone()));
     }
-    let deps = grouped
+    let deps: Vec<wire::NodeDep> = grouped
         .into_iter()
-        .map(|((name, pkg), kinds)| wire::NodeDep {
+        .map(|((_, name, pkg), kinds)| wire::NodeDep {
             name,
             pkg,
             dep_kinds: kinds
@@ -132,10 +131,51 @@ fn map_node(
         .collect();
     Ok(wire::Node {
         id: id.to_owned(),
+        dependencies: deps
+            .iter()
+            .map(|dep: &wire::NodeDep| dep.pkg.clone())
+            .collect(),
         deps,
-        dependencies: dependencies.into_iter().collect(),
         features: features.into_iter().collect(),
     })
+}
+
+// Cargo orders PackageId by name, semantic version, source kind, and URL.
+type PackageOrder = (String, semver::Version, u8, u8, String, String);
+
+fn package_order(key: &PackageKey) -> Result<PackageOrder> {
+    use crate::manifest::GitSelector;
+    use crate::resolver::PackageSourceKey;
+    let (kind, reference, value, source) = match &key.source {
+        PackageSourceKey::CratesIo => (1, 0, String::new(), String::new()),
+        PackageSourceKey::Path(root) => {
+            let id = package::path_package_id(root, &key.name, &key.version.to_string())?;
+            (
+                0,
+                0,
+                String::new(),
+                id.split('#').next().unwrap().to_owned(),
+            )
+        }
+        PackageSourceKey::Git(source) => {
+            let locked = crate::git::parse_locked_source(source)?;
+            let (reference, value) = match locked.selector {
+                GitSelector::Tag(value) => (0, value),
+                GitSelector::Branch(value) => (1, value),
+                GitSelector::Revision(value) => (2, value),
+                GitSelector::Head => (3, String::new()),
+            };
+            (2, reference, value, locked.url)
+        }
+    };
+    Ok((
+        key.name.clone(),
+        key.version.clone(),
+        kind,
+        reference,
+        value,
+        source,
+    ))
 }
 
 fn kind_order(kind: DependencyKind) -> u8 {

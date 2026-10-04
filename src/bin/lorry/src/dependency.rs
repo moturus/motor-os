@@ -399,7 +399,13 @@ pub fn prepare_locked_source(
     if matches!(source.registry, RegistrySource::Lorry(_))
         && CompactState::load(&manifest.workspace_root)?.is_none()
     {
-        let catalog = locked_catalog(manifest, config, source.registry, Some(source.direct))?;
+        let catalog = locked_catalog(
+            manifest,
+            config,
+            source.registry,
+            Some(source.direct),
+            false,
+        )?;
         let resolution = resolve_selected(
             manifest,
             &catalog,
@@ -573,6 +579,7 @@ fn locked_catalog(
     config: &Config,
     source: RegistrySource<'_>,
     direct: Option<&crate::git::DirectCatalog>,
+    describe: bool,
 ) -> Result<Catalog> {
     let mut catalog = match source {
         RegistrySource::Lorry(repositories) => {
@@ -587,7 +594,11 @@ fn locked_catalog(
         }
         RegistrySource::Cargo(registry) => Catalog::from_locked_cargo_registry(manifest, registry)?,
     };
-    patch::configure(manifest, &mut catalog)?;
+    if describe {
+        patch::configure_sources(manifest, &mut catalog)?;
+    } else {
+        patch::configure(manifest, &mut catalog)?;
+    }
     if let Some(direct) = direct {
         direct.configure(&mut catalog)?;
     } else {
@@ -666,7 +677,7 @@ pub fn reconstruct_review(
         .as_ref()
         .ok_or_else(|| Error::failure("compact dependency admission requires Cargo.lock"))?;
     let mut review = Review::from_graph(manifest, lock, contexts.to_vec())?;
-    let mut catalog = locked_catalog(manifest, inputs.config, inputs.source, inputs.direct)?;
+    let mut catalog = locked_catalog(manifest, inputs.config, inputs.source, inputs.direct, false)?;
     for key in capability_registry_proc_macros(manifest, &capabilities)? {
         catalog.annotate_proc_macro(&key, true)?;
     }
@@ -1032,7 +1043,7 @@ fn prepare_locked_with(
     staging_parent: &Path,
     direct: Option<&crate::git::DirectCatalog>,
 ) -> Result<PreparedGraph> {
-    let mut catalog = locked_catalog(manifest, config, source, direct)?;
+    let mut catalog = locked_catalog(manifest, config, source, direct, false)?;
     let locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
     let mut packages = BTreeMap::new();
     let (resolution, preflight) = loop {
