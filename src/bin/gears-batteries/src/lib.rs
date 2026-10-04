@@ -2,6 +2,7 @@
 
 pub mod file_read;
 pub mod file_record;
+pub mod file_write;
 pub mod instructions;
 pub mod paths;
 pub mod search;

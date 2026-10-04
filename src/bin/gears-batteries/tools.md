@@ -26,3 +26,8 @@ refuses binary and invalid UTF-8 data. The returned next offset avoids
 splitting a UTF-8 character and can continue within a very long line.
 Read and write records contain paths relative to the selected workspace;
 per-session data remains under `batteries/sessions/SESSION/`.
+
+Tool argument JSON is limited to 1 MiB. Atomic replacements preserve Unix
+permission bits (excluding setuid, setgid and sticky bits) or the caller's
+Motor OS access; other native roles keep creation defaults. A write receipt
+reports the actual mutation even if saving its bookkeeping later fails.

@@ -1,0 +1,15 @@
+version = 1
+kind = "process"
+name = "write_file"
+description = "Atomically write UTF-8 text. Read every page of an existing file first; preserve its BOM, Windows lines and access."
+parameters = "parameters.json"
+read_only = false
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 262144
+output = "stdout"
+stdin = "arguments"
+
+[process.command]
+common = ["gears-batteries", "tool", "write_file"]

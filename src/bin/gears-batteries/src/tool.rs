@@ -17,6 +17,13 @@ struct ReadFile {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WriteFile {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchFiles {
     pattern: String,
     #[serde(default = "search_root")]
@@ -37,6 +44,11 @@ pub fn run(name: &str, reader: impl Read, context: &ToolContext) -> Result<Value
         return Err("tool arguments exceed 1 MiB".into());
     }
     match name {
+        "write_file" => {
+            let arguments: WriteFile = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("invalid write_file arguments: {error}"))?;
+            crate::file_write::write(context, &arguments.path, &arguments.content)
+        }
         "search_files" => {
             let arguments: SearchFiles = serde_json::from_slice(&bytes)
                 .map_err(|error| format!("invalid search_files arguments: {error}"))?;
