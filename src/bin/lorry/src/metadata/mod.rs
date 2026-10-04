@@ -31,9 +31,6 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     )?;
     warn_default_format(cli, options);
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
-    if options.no_deps {
-        return write_document(&graph::no_dependencies(&workspace)?);
-    }
     let mut config = Config::load_workspace(
         &current,
         &workspace.root,
@@ -43,20 +40,25 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
             .map(|member| member.root.as_path()),
     )?;
     config.apply_max_packages(cli.max_packages)?;
+    let target_directory = package::path_utf8(
+        &config.target_directory(&current, &workspace.root, None),
+        "metadata target directory",
+    )?;
+    let set_target_directory = |document: &mut wire::Metadata| {
+        document.target_directory.clone_from(&target_directory);
+        document
+            .build_directory
+            .clone_from(&document.target_directory);
+    };
+    if options.no_deps {
+        let mut document = graph::no_dependencies(&workspace)?;
+        set_target_directory(&mut document);
+        return write_document(&document);
+    }
     if workspace.packages.is_empty() {
-        let prepared = dependency::workspace::PreparedSources {
-            resolution: Resolution {
-                root_edges: Vec::new(),
-                packages: Vec::new(),
-            },
-            packages: BTreeMap::new(),
-        };
-        return write_document(&graph::workspace::resolved(
-            &workspace,
-            &prepared,
-            &BTreeMap::new(),
-            None,
-        )?);
+        return Err(Error::failure(
+            "the manifest is virtual, and the workspace contains no package",
+        ));
     }
     workspace.load_locked_context().map_err(|error| {
         error.with_help(
@@ -140,11 +142,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     )?;
     let mut document =
         graph::workspace::resolved(&workspace, &prepared, &roots, platform.as_ref())?;
-    let target_directory = config.target_directory(&current, &workspace.root, None);
-    document.target_directory = package::path_utf8(&target_directory, "metadata target directory")?;
-    document
-        .build_directory
-        .clone_from(&document.target_directory);
+    set_target_directory(&mut document);
     write_document(&document)
 }
 

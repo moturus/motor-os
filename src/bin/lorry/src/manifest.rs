@@ -2650,23 +2650,23 @@ fn parse_lock_document(
         .get("metadata")
         .map(|item| require_table(path, document, item, "metadata"))
         .transpose()?;
-    let package_item = document.root().get("package").ok_or_else(|| {
-        Error::failure(format!(
-            "lockfile `{}` contains no package records",
-            path.display()
-        ))
-    })?;
-    let tables = package_item.as_array_of_tables().ok_or_else(|| {
-        type_error(
-            path,
-            document.line_of_item(package_item),
-            "package",
-            "an array of tables",
-        )
-    })?;
+    let tables = document
+        .root()
+        .get("package")
+        .map(|package_item| {
+            package_item.as_array_of_tables().ok_or_else(|| {
+                type_error(
+                    path,
+                    document.line_of_item(package_item),
+                    "package",
+                    "an array of tables",
+                )
+            })
+        })
+        .transpose()?;
     let mut packages = Vec::new();
     let mut identities = BTreeSet::new();
-    for table in tables.iter() {
+    for table in tables.into_iter().flat_map(|tables| tables.iter()) {
         for (key, item) in table.iter() {
             if !matches!(
                 key,

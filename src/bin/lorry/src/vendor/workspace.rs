@@ -18,9 +18,6 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
     let mut workspace =
         SourceWorkspace::load(&current, cli.manifest_path.as_deref().map(Path::new))?;
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
-    workspace.load_locked_context().map_err(|error| {
-        error.with_help("provide a usable Cargo.lock with `lorry vendor`, then run `lorry fetch`")
-    })?;
     let mut config = Config::load_workspace(
         &current,
         &workspace.root,
@@ -30,6 +27,9 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
             .map(|package| package.root.as_path()),
     )?;
     config.apply_max_packages(cli.max_packages)?;
+    workspace.load_locked_context().map_err(|error| {
+        error.with_help("provide a usable Cargo.lock with `lorry vendor`, then run `lorry fetch`")
+    })?;
     if workspace.packages.is_empty() {
         return Ok(0);
     }

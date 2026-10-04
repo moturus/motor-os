@@ -177,7 +177,7 @@ resolved_agrees_with_cargo resolved-member "$RESOLVED/app/Cargo.toml" --features
 echo "PASS: resolved workspace metadata matches Cargo features and platforms without admission"
 printf '[dev-dependencies]\nnested = { path = "nested" }\n' >>"$PROJECT/tools/helper/Cargo.toml"
 
-# No compiler, configuration, lockfile, or admission is needed to describe
+# No compiler, lockfile, or admission is needed to describe
 # source targets. This also proves the command cannot fetch dependencies.
 source_metadata() {
     local manifest="$1"
@@ -507,6 +507,44 @@ mkdir "$WORK/empty-virtual"
 printf '[workspace]\n' >"$WORK/empty-virtual/Cargo.toml"
 printf '[workspace.metadata]\nempty = true\n' >>"$WORK/empty-virtual/Cargo.toml"
 agrees_with_cargo "$WORK/empty-virtual/Cargo.toml" empty-virtual
+mkdir "$WORK/empty-virtual/.cargo"
+printf '[build]\ntarget-dir = "configured"\n' >"$WORK/empty-virtual/.cargo/config.toml"
+for root in "$RESOLVED" "$WORK/empty-virtual"; do
+    mkdir -p "$root/.cargo"
+    printf '[build]\ntarget-dir = "configured"\n' >"$root/.cargo/config.toml"
+    for setting in configured environment; do
+        (
+            cd "$root"
+            if [ "$setting" = environment ]; then export CARGO_TARGET_DIR=env-output; fi
+            HOME="$WORK/home" RUSTC="$WORK/absent-rustc" "$LORRY" metadata \
+                --no-deps --offline --format-version 1 >"$WORK/target.lorry.json"
+            RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" metadata \
+                --no-deps --offline --format-version 1 >"$WORK/target.cargo.json"
+            python3 - "$WORK/target.lorry.json" "$WORK/target.cargo.json" <<'PY'
+import json, sys
+actual, expected = (json.load(open(path)) for path in sys.argv[1:])
+assert actual == expected, (actual, expected)
+PY
+        )
+    done
+    [ ! -e "$root/configured" ]
+    [ ! -e "$root/env-output" ]
+done
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    if (cd "$WORK/empty-virtual"; HOME="$WORK/home" RUSTC="$LORRY_TEST_RUSTC" \
+        "$builder" metadata --offline) >"$WORK/empty.out" 2>"$WORK/empty.err"; then
+        echo "workspace-metadata: $builder accepted resolved empty-workspace metadata" >&2
+        exit 1
+    fi
+    grep -F 'contains no package' "$WORK/empty.err" >/dev/null
+done
+(cd "$WORK/empty-virtual"; HOME="$WORK/home" RUSTC="$LORRY_TEST_RUSTC" \
+    "$LORRY_TEST_CARGO" fetch --offline)
+cp "$WORK/empty-virtual/Cargo.lock" "$WORK/empty.lock"
+(cd "$WORK/empty-virtual"; HOME="$WORK/home" RUSTC="$WORK/absent-rustc" \
+    "$LORRY" fetch --offline)
+cmp "$WORK/empty.lock" "$WORK/empty-virtual/Cargo.lock"
+[ ! -e "$WORK/empty-virtual/.lorry" ]
 echo "PASS: Cargo member globs, exclusions, file matches, and empty workspaces"
 
 INHERIT="$WORK/dependencies"

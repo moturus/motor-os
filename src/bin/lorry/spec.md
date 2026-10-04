@@ -372,7 +372,11 @@ Members and default-members accept component globs `*`, `?`, and `[...]`,
 including negated character classes. `**` and paths outside the root are
 rejected. Matching files are ignored; matching directories need manifests,
 and unmatched patterns fail. Explicit paths override exclusion, while glob
-matches do not. Source metadata can describe an empty virtual workspace.
+matches do not. Source metadata can describe an empty virtual workspace;
+resolved metadata rejects one with no packages. All metadata forms report
+the configured target directory, including `CARGO_TARGET_DIR`, without
+creating it or invoking a compiler for `--no-deps`. `fetch` accepts Cargo's
+existing empty lockfile and preserves its bytes.
 All manifest modes inherit Cargo's 16 package fields from `workspace.package`
 when the member sets `workspace = true`: authors, categories, description,
 documentation, edition, exclude, homepage, include, keywords, license,
