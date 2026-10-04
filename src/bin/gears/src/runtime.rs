@@ -45,6 +45,7 @@ pub enum Event {
     },
     Permission(Permission),
     Notice(String),
+    Hint(Option<String>),
     Usage {
         request: Usage,
         total: UsageMeter,
@@ -155,6 +156,7 @@ pub struct Runtime {
     config_path: Option<PathBuf>,
     after_turn: crate::after_turn::Manager,
     interactive: bool,
+    hint: Option<String>,
 }
 
 impl Runtime {
@@ -250,6 +252,7 @@ impl Runtime {
             &mut |notice| startup_notices.push(notice),
         );
         let usage = session.usage();
+        let hint = hooks.take_hint().flatten();
         Ok(Self {
             provider,
             provider_name,
@@ -270,6 +273,7 @@ impl Runtime {
             config_path: config.config_path.clone(),
             after_turn: crate::after_turn::Manager::default(),
             interactive: false,
+            hint,
         })
     }
 
@@ -495,6 +499,9 @@ impl Runtime {
     }
 
     pub fn take_startup_notices(&mut self) -> Vec<String> {
+        if let Some(hint) = self.hooks.take_hint() {
+            self.hint = hint;
+        }
         match self.after_turn.poll() {
             Ok(notices) => self.startup_notices.extend(notices),
             Err(error) => self.startup_notices.push(error),
@@ -508,6 +515,18 @@ impl Runtime {
 
     pub fn hook_commands(&self) -> &[crate::hooks::CommandSpec] {
         self.hooks.commands()
+    }
+
+    pub fn hint(&self) -> Option<&str> {
+        self.hint.as_deref()
+    }
+
+    fn emit_hook_hint(&mut self, observer: &mut dyn Observer) -> Result<(), String> {
+        if let Some(hint) = self.hooks.take_hint() {
+            self.hint = hint.clone();
+            observer.event(Event::Hint(hint))?;
+        }
+        Ok(())
     }
 
     pub fn hook_command(
@@ -528,6 +547,7 @@ impl Runtime {
             &mut |notice| notices.push(notice),
         );
         emit_notices(observer, notices)?;
+        self.emit_hook_hint(observer)?;
         result?;
         self.start_after_turn(observer)
     }
@@ -1609,7 +1629,8 @@ impl Runtime {
             &self.cancellation,
             &mut |notice| notices.push(notice),
         );
-        emit_notices(observer, notices)
+        emit_notices(observer, notices)?;
+        self.emit_hook_hint(observer)
     }
 }
 

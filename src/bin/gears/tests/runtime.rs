@@ -251,6 +251,42 @@ fn after_turn_config(script: &str, argument: &std::path::Path) -> AfterTurnConfi
 }
 
 #[test]
+fn hook_hints_follow_setup_turn_end_and_command_responses() {
+    let fixture = Fixture::new("hook-hints");
+    let config = Config {
+        hooks: vec![HookConfig {
+            name: "hint".into(),
+            events: Some(vec!["initialize".into(), "turn_end".into(), "command".into()]),
+            command: vec!["/bin/sh".into(), "-c".into(),
+                "event=$(cat); case \"$event\" in *'\"event\":\"initialize\"'*) printf '{\"hint\":\"Ready\",\"commands\":[{\"name\":\"clear-hint\",\"help\":\"Clear hint\"}]}' ;; *'\"event\":\"turn_end\"'*) printf '{\"hint\":\"Review pending\"}' ;; *) printf '{\"hint\":\"\"}' ;; esac".into()],
+            timeout: Duration::from_secs(2), max_output_bytes: 4096,
+        }],
+        ..Config::default()
+    };
+    let mut runtime = fixture.runtime(Scripted::new(vec![answer("done")]), &config);
+    assert_eq!(runtime.hint(), Some("Ready"));
+    let mut hints = Vec::new();
+    let mut observer = |event| {
+        if let Event::Hint(hint) = event {
+            hints.push(hint);
+        }
+        Ok(())
+    };
+    runtime
+        .turn("work".into(), &mut FixedApproval(false), &mut observer)
+        .unwrap();
+    assert_eq!(runtime.hint(), Some("Review pending"));
+    runtime
+        .hook_command("clear-hint", "", &mut observer)
+        .unwrap();
+    assert_eq!(runtime.hint(), None);
+    assert_eq!(hints, [Some("Review pending".into()), None]);
+    runtime.new_session(false, None).unwrap();
+    runtime.take_startup_notices();
+    assert_eq!(runtime.hint(), Some("Ready"));
+}
+
+#[test]
 fn hook_commands_dispatch_to_the_owner_without_a_model_turn_then_start_after_turn() {
     let fixture = Fixture::new("hook-command");
     let log = fixture.root.join("command.json");

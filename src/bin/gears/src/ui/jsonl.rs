@@ -23,6 +23,9 @@ pub fn run(runtime: &mut Runtime, prompt: String, writer: impl Write) -> Result<
             "session_format_version": runtime.session().format_version(),
         }))?;
         runtime.set_interactive(false)?;
+        if let Some(hint) = runtime.hint() {
+            output.event(Event::Hint(Some(hint.to_string())))?;
+        }
         for notice in runtime.take_startup_notices() {
             output.event(Event::Notice(notice))?;
         }
@@ -123,6 +126,7 @@ impl<W: Write> Observer for Renderer<W> {
                 "detail": permission.detail, "workspace": permission.workspace,
             }),
             Event::Notice(text) => json!({"type": "notice", "text": text}),
+            Event::Hint(hint) => json!({"type": "hint", "text": hint}),
             Event::Usage { request, total } => {
                 self.usage.add(&request);
                 json!({"type": "usage", "request": request, "total": usage_value(&total)})

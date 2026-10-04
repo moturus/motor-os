@@ -94,6 +94,10 @@ Configured hooks are trusted code and run with the user's authority. There is
 no directory scan, shell interpolation, hot reload, or in-process extension
 runtime. See [hook-protocol.md](hook-protocol.md) for the version-1 protocol.
 
+Hooks can register slash commands with help text. Their one-line hints appear
+in the TUI status line and after turns or hook commands in the line UI. An
+empty hint clears the current text; JSONL exposes updates as `hint` records.
+
 An optional command runs in the background after a completed interactive turn,
 after its `turn_end` hooks:
 

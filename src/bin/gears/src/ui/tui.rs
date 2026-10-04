@@ -150,6 +150,7 @@ struct App {
     editor: Editor,
     scroll: usize,
     status: String,
+    hint: Option<String>,
     model: String,
     session: SessionSummary,
     approval: Option<Permission>,
@@ -234,6 +235,7 @@ impl App {
             editor: Editor::new(),
             scroll: 0,
             status: "idle".to_string(),
+            hint: runtime.hint().map(str::to_string),
             model: runtime.model().to_string(),
             session: runtime.summary(),
             approval: None,
@@ -279,6 +281,7 @@ impl App {
             }
             Event::Permission(_) => self.status = "checking permission".to_string(),
             Event::Notice(text) => self.push(Kind::Notice, text, false),
+            Event::Hint(hint) => self.hint = hint,
             Event::Usage { total, .. } => self.status = total.summary(),
             Event::ModelChanged(model) => self.model = model,
             Event::SessionChanged(session) => self.session = session,
@@ -418,6 +421,7 @@ impl App {
     fn refresh(&mut self, runtime: &Runtime) {
         self.model = runtime.model().to_string();
         self.session = runtime.summary();
+        self.hint = runtime.hint().map(str::to_string);
     }
 
     fn render(&mut self) -> Result<(), String> {
@@ -513,8 +517,11 @@ impl App {
             target.push(Color::White, line, width);
         }
         let status = single_line(&format!(
-            "gears | {} | {} | {}{}",
+            "gears | {}{} | {} | {}{}",
             self.status,
+            self.hint
+                .as_ref()
+                .map_or(String::new(), |hint| format!(" | {hint}")),
             self.model,
             self.session.name.as_deref().unwrap_or(&self.session.id),
             if self.session.ephemeral {
@@ -1101,6 +1108,7 @@ fn show_runtime_notices(runtime: &mut Runtime, app: &mut App) {
     for notice in runtime.take_startup_notices() {
         app.push(Kind::Notice, notice, false);
     }
+    app.hint = runtime.hint().map(str::to_string);
 }
 
 struct AppObserver<'a>(&'a mut App);
@@ -1292,6 +1300,7 @@ mod tests {
             editor: Editor::new(),
             scroll: 0,
             status: "working".to_string(),
+            hint: None,
             model: "test/model".to_string(),
             session: SessionSummary {
                 id: "test-session".to_string(),
@@ -1366,6 +1375,27 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn hook_hint_remains_visible_when_the_turn_ends_and_can_be_cleared() {
+        let mut app = app();
+        app.apply(Event::Hint(Some("Review pending".into())));
+        app.apply(Event::TurnEnd {
+            status: "completed",
+            tool_rounds: 0,
+            last_entry_id: None,
+        });
+        let status = |app: &App| {
+            app.frame(80, 24).lines[23]
+                .0
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>()
+        };
+        assert!(status(&app).contains("idle | Review pending"));
+        app.apply(Event::Hint(None));
+        assert!(!status(&app).contains("Review pending"));
     }
 
     #[test]

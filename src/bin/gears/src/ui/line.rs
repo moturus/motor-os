@@ -18,7 +18,10 @@ pub fn run(
 ) -> Result<(), String> {
     runtime.set_interactive(interactive)?;
     let mut input = Input::new()?;
-    let mut renderer = Renderer::default();
+    let mut renderer = Renderer {
+        hint: runtime.hint().map(str::to_string),
+        ..Renderer::default()
+    };
     for notice in runtime.take_startup_notices() {
         renderer.event(Event::Notice(notice))?;
     }
@@ -231,6 +234,7 @@ fn command(
         "" => Ok(Command::Continue),
         other => {
             runtime.hook_command(other, argument, renderer)?;
+            renderer.finish_turn();
             Ok(Command::Continue)
         }
     }
@@ -240,6 +244,7 @@ fn show_runtime_notices(runtime: &mut Runtime, renderer: &mut Renderer) -> Resul
     for notice in runtime.take_startup_notices() {
         renderer.event(Event::Notice(notice))?;
     }
+    renderer.hint = runtime.hint().map(str::to_string);
     Ok(())
 }
 
@@ -347,9 +352,17 @@ fn choose_named(
 #[derive(Default)]
 struct Renderer {
     streaming: bool,
+    hint: Option<String>,
 }
 
 impl Renderer {
+    fn finish_turn(&mut self) {
+        self.finish_stream();
+        if let Some(hint) = &self.hint {
+            eprintln!("gears: {hint}");
+        }
+    }
+
     fn finish_stream(&mut self) {
         if self.streaming {
             println!();
@@ -393,7 +406,9 @@ impl Observer for Renderer {
                 self.finish_stream();
                 eprintln!("gears: {notice}");
             }
-            Event::Usage { .. } | Event::TurnEnd { .. } => {}
+            Event::Hint(hint) => self.hint = hint,
+            Event::Usage { .. } => {}
+            Event::TurnEnd { .. } => self.finish_turn(),
             Event::ModelChanged(model) => eprintln!("model: {model}"),
             Event::SessionChanged(_) => {}
         }
