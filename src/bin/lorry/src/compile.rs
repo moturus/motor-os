@@ -40,6 +40,7 @@ pub enum RustcOutput {
     Library {
         rlib: PathBuf,
         rmeta: PathBuf,
+        archive: Option<PathBuf>,
         dep_info: PathBuf,
     },
     Binary {
@@ -101,7 +102,12 @@ impl RustcInvocation {
                 rlib,
                 rmeta,
                 dep_info,
-            } => vec![rlib, rmeta, dep_info],
+                archive,
+            } => {
+                let mut paths = vec![rlib, rmeta, dep_info];
+                paths.extend(archive.iter_mut());
+                paths
+            }
             RustcOutput::Binary {
                 executable,
                 dep_info,
@@ -728,6 +734,7 @@ fn expected_output(
         UnitKind::Library => RustcOutput::Library {
             rlib: output_dir.join(format!("lib{stem}.rlib")),
             rmeta: output_dir.join(format!("lib{stem}.rmeta")),
+            archive: None,
             dep_info: output_dir.join(format!("{stem}.d")),
         },
         UnitKind::Binary

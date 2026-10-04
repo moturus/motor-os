@@ -400,6 +400,13 @@ impl BuildCache {
         let Some(entry) = self.verified_or_quarantine(key)? else {
             return Ok(None);
         };
+        if archive_path(output).is_some()
+            && !fs::symlink_metadata(entry.payload.join("library.a"))
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
+            self.quarantine(&self.entry_path(key), key)?;
+            return Ok(None);
+        }
         if let Some(inputs) = selected {
             let dep_info = entry.payload.join("library.d");
             let recorded = entry.payload.join("external-inputs.sha256");
@@ -414,6 +421,9 @@ impl BuildCache {
         copy_new_file(&entry.payload.join("library.rlib"), rlib)?;
         if rmeta != rlib {
             copy_new_file(&entry.payload.join("library.rmeta"), rmeta)?;
+        }
+        if let Some(archive) = archive_path(output) {
+            copy_new_file(&entry.payload.join("library.a"), archive)?;
         }
         if selected.is_some() {
             copy_new_file(&entry.payload.join("library.d"), dep_info_path(output)?)?;
@@ -511,8 +521,7 @@ impl BuildCache {
                     return Ok(());
                 }
                 let wanted = payload_manifest(
-                    rlib,
-                    rmeta,
+                    output,
                     dep_info,
                     external_inputs.as_ref(),
                     build_script,
@@ -542,6 +551,9 @@ impl BuildCache {
         })?;
         copy_synced_file(rlib, &payload.join("library.rlib"))?;
         copy_synced_file(rmeta, &payload.join("library.rmeta"))?;
+        if let Some(archive) = archive_path(output) {
+            copy_synced_file(archive, &payload.join("library.a"))?;
+        }
         write_synced(&payload.join(PUBLISHED_STDOUT), diagnostics.0)?;
         write_synced(&payload.join(PUBLISHED_STDERR), diagnostics.1)?;
         if let Some(dep_info) = dep_info {
@@ -1100,6 +1112,13 @@ fn directive_digest(
     }
 }
 
+fn archive_path(output: &RustcOutput) -> Option<&Path> {
+    match output {
+        RustcOutput::Library { archive, .. } => archive.as_deref(),
+        _ => None,
+    }
+}
+
 fn library_paths(output: &RustcOutput) -> Result<(&Path, &Path)> {
     match output {
         RustcOutput::Library { rlib, rmeta, .. } => Ok((rlib, rmeta)),
@@ -1153,8 +1172,10 @@ fn published_fingerprint(
             rlib,
             rmeta,
             dep_info,
+            archive,
         } => {
             let mut files = vec![rlib.as_path()];
+            files.extend(archive.iter().map(PathBuf::as_path));
             if rmeta != rlib {
                 files.push(rmeta);
             }
@@ -1282,14 +1303,14 @@ fn canonical_document(path: &Path, context: &str) -> Result<Value> {
 }
 
 fn payload_manifest(
-    rlib: &Path,
-    rmeta: &Path,
+    output: &RustcOutput,
     dep_info: Option<&Path>,
     external_inputs: Option<&[u8; 32]>,
     build_script: Option<&BuildScriptInput<'_>>,
     diagnostics: (&[u8], &[u8]),
     limits: TreeLimits,
 ) -> Result<Vec<u8>> {
+    let (rlib, rmeta) = library_paths(output)?;
     let parent = std::env::temp_dir().join(format!(
         ".lorry-cache-payload-{}-{}",
         std::process::id(),
@@ -1312,6 +1333,9 @@ fn payload_manifest(
     })?;
     copy_synced_file(rlib, &payload.join("library.rlib"))?;
     copy_synced_file(rmeta, &payload.join("library.rmeta"))?;
+    if let Some(archive) = archive_path(output) {
+        copy_synced_file(archive, &payload.join("library.a"))?;
+    }
     write_synced(&payload.join(PUBLISHED_STDOUT), diagnostics.0)?;
     write_synced(&payload.join(PUBLISHED_STDERR), diagnostics.1)?;
     if let Some(dep_info) = dep_info {
@@ -1729,6 +1753,7 @@ mod tests {
         RustcOutput::Library {
             rlib: root.join("library.rlib"),
             rmeta: root.join("library.rmeta"),
+            archive: None,
             dep_info: root.join("library.d"),
         }
     }
@@ -1763,6 +1788,80 @@ mod tests {
     }
 
     #[test]
+    fn archive_outputs_restore_and_participate_in_unit_freshness() {
+        for validation in [ValidationMode::Trusted, ValidationMode::Strict] {
+            let fixture = Fixture::new();
+            let cache = BuildCache::for_test_with_validation(&fixture.0.join("cache"), validation);
+            let key = CacheKey([27; 32]);
+            let mut built = output(&fixture.0.join("built/deps"), b"library");
+            let archive = fixture.0.join("built/deps/library.a");
+            fs::write(&archive, b"archive").unwrap();
+            let RustcOutput::Library { archive: extra, .. } = &mut built else {
+                unreachable!()
+            };
+            *extra = Some(archive);
+            cache.store(key, &built, None, None, (b"", b"")).unwrap();
+            let target = fixture.0.join("restored/deps");
+            fs::create_dir_all(&target).unwrap();
+            let restored = RustcOutput::Library {
+                rlib: target.join("library.rlib"),
+                rmeta: target.join("library.rmeta"),
+                archive: Some(target.join("library.a")),
+                dep_info: target.join("library.d"),
+            };
+            assert!(cache.restore(key, &restored, None).unwrap().is_some());
+            assert_eq!(
+                fs::read(archive_path(&restored).unwrap()).unwrap(),
+                b"archive"
+            );
+            let package = crate::resolver::PackageKey {
+                name: "library".into(),
+                version: "1.0.0".parse().unwrap(),
+                source: crate::resolver::PackageSourceKey::Path(fixture.0.join("source")),
+            };
+            cache
+                .record_published(key, &restored, None, &package, None)
+                .unwrap();
+            assert!(
+                cache
+                    .published_fresh(key, &restored, None, &package, false)
+                    .unwrap()
+            );
+            fs::remove_file(archive_path(&restored).unwrap()).unwrap();
+            assert!(
+                !cache
+                    .published_fresh(key, &restored, None, &package, false)
+                    .unwrap()
+            );
+            fs::remove_file(cache.entry_path(key).join("payload/library.a")).unwrap();
+            assert!(cache.restore(key, &restored, None).unwrap().is_none());
+            assert!(!cache.entry_path(key).exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_archive_restore_rejects_payload_symlinks() {
+        let fixture = Fixture::new();
+        let cache =
+            BuildCache::for_test_with_validation(&fixture.0.join("cache"), ValidationMode::Trusted);
+        let key = CacheKey([28; 32]);
+        let mut built = output(&fixture.0.join("built"), b"library");
+        let archive = fixture.0.join("built/library.a");
+        fs::write(&archive, b"archive").unwrap();
+        let RustcOutput::Library { archive: extra, .. } = &mut built else {
+            unreachable!()
+        };
+        *extra = Some(archive.clone());
+        cache.store(key, &built, None, None, (b"", b"")).unwrap();
+        let cached = cache.entry_path(key).join("payload/library.a");
+        fs::remove_file(&cached).unwrap();
+        std::os::unix::fs::symlink(archive, cached).unwrap();
+        assert!(cache.restore(key, &built, None).unwrap().is_none());
+        assert!(!cache.entry_path(key).exists());
+    }
+
+    #[test]
     fn stores_restores_and_verifies_library_payloads() {
         let fixture = Fixture::new();
         let cache = BuildCache::for_test(&fixture.0.join("cache"));
@@ -1785,6 +1884,7 @@ mod tests {
         let restored = RustcOutput::Library {
             rlib: restored_root.join("restored.rlib"),
             rmeta: restored_root.join("restored.rmeta"),
+            archive: None,
             dep_info: restored_root.join("restored.d"),
         };
         let (stdout, stderr) = cache.restore(key, &restored, None).unwrap().unwrap();
@@ -1821,6 +1921,7 @@ mod tests {
         let restored = RustcOutput::Library {
             rlib: restored_root.join("library.rlib"),
             rmeta: restored_root.join("library.rmeta"),
+            archive: None,
             dep_info: restored_root.join("library.d"),
         };
         assert!(
@@ -1867,6 +1968,7 @@ mod tests {
         let restored = RustcOutput::Library {
             rlib: restored_root.join("library.rlib"),
             rmeta: restored_root.join("library.rmeta"),
+            archive: None,
             dep_info: restored_root.join("library.d"),
         };
         assert!(
@@ -2114,6 +2216,7 @@ mod tests {
         let restore = RustcOutput::Library {
             rlib: fixture.0.join("miss.rlib"),
             rmeta: fixture.0.join("miss.rmeta"),
+            archive: None,
             dep_info: fixture.0.join("miss.d"),
         };
         assert!(!cache.restore(key, &restore, None).unwrap().is_some());
@@ -2139,6 +2242,7 @@ mod tests {
         let restored = RustcOutput::Library {
             rlib: fixture.0.join("restored.rlib"),
             rmeta: fixture.0.join("restored.rmeta"),
+            archive: None,
             dep_info: fixture.0.join("restored.d"),
         };
         assert!(cache.restore(key, &restored, None).unwrap().is_some());
@@ -2194,6 +2298,7 @@ mod tests {
         let restore = RustcOutput::Library {
             rlib: fixture.0.join("miss.rlib"),
             rmeta: fixture.0.join("miss.rmeta"),
+            archive: None,
             dep_info: fixture.0.join("miss.d"),
         };
         assert!(!cache.restore(key, &restore, None).unwrap().is_some());

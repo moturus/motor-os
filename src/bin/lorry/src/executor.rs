@@ -987,7 +987,12 @@ fn verify_outputs(output: &RustcOutput) -> Result<()> {
             rlib,
             rmeta,
             dep_info,
-        } => vec![rlib, rmeta, dep_info],
+            archive,
+        } => {
+            let mut paths = vec![rlib, rmeta, dep_info];
+            paths.extend(archive.iter());
+            paths
+        }
         RustcOutput::Binary {
             executable,
             dep_info,

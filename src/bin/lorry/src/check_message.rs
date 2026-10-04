@@ -298,10 +298,20 @@ impl EventReporter for Reporter {
         let package = self.package(&key.package)?;
         let target = package.dependency_target(key.kind, key.target.as_deref())?;
         let (filenames, executable) = match output {
-            RustcOutput::Library { rlib, rmeta, .. } => (
-                vec![self.published_path(rlib)?, self.published_path(rmeta)?],
-                None,
-            ),
+            RustcOutput::Library {
+                rlib,
+                rmeta,
+                archive,
+                ..
+            } => {
+                let mut paths = vec![self.published_path(rlib)?, self.published_path(rmeta)?];
+                if let Some(archive) = archive {
+                    paths.push(self.published_path(archive)?);
+                }
+                paths.sort();
+                paths.dedup();
+                (paths, None)
+            }
             RustcOutput::ProcMacro {
                 dynamic_library, ..
             } => (vec![self.published_path(dynamic_library)?], None),

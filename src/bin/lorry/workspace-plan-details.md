@@ -2528,6 +2528,14 @@ That original reference failure is retained in
 Final program/harness byte and JSON comparison, compiler oracle, and strict
 Clippy pass in `/tmp/lorry-m8-explicit-rlib-{byte-contract,compiler-test,clippy}.log`.
 
+Library outputs can now carry an additional archive through atomic staging,
+verification, cache payloads/restoration, published-unit freshness, and Cargo
+artifact reporting. This foundation does not yet enable `staticlib` manifests.
+Regressions cover both validation modes, missing archives before any restore
+writes, and trusted-cache payload symlinks. All eighteen cache tests, the
+compiler command oracle, and strict Clippy pass in
+`/tmp/lorry-m8-archive-cache-foundation-{regression-tests,compiler,clippy}.log`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only
