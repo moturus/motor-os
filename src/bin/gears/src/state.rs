@@ -82,6 +82,20 @@ impl StateRoot {
 
     /// Replace one Gears-owned file without exposing a partially written value.
     pub fn replace_file(&self, relative: &Path, bytes: &[u8]) -> Result<(), String> {
+        self.replace(relative, bytes, false)
+    }
+
+    /// Replace a workspace file, preserving Unix permission bits or the
+    /// caller's Motor OS access. Other native roles retain creation defaults.
+    pub fn replace_file_preserving_access(
+        &self,
+        relative: &Path,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        self.replace(relative, bytes, true)
+    }
+
+    fn replace(&self, relative: &Path, bytes: &[u8], preserve_access: bool) -> Result<(), String> {
         let destination = self.file(relative)?;
         let parent = destination.parent().expect("state files have a parent");
         let temp = parent.join(format!(
@@ -103,6 +117,11 @@ impl StateRoot {
             file.write_all(bytes)
                 .and_then(|()| file.sync_data())
                 .map_err(|error| format!("{}: {error}", temp.display()))?;
+            if preserve_access {
+                preserve_permissions(&destination, &temp)?;
+                file.sync_all()
+                    .map_err(|error| format!("{}: {error}", temp.display()))?;
+            }
             std::fs::rename(&temp, &destination)
                 .map_err(|error| format!("{}: {error}", destination.display()))
         })();
@@ -118,6 +137,39 @@ impl StateRoot {
             return Ok(0);
         };
         cleanup_temporary_files(&root)
+    }
+}
+
+fn preserve_permissions(source: &Path, temporary: &Path) -> Result<(), String> {
+    let metadata = match std::fs::metadata(source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("{}: {error}", source.display())),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Replacing contents does not preserve setuid, setgid or sticky bits.
+        let mode = metadata.permissions().mode() & 0o777;
+        std::fs::set_permissions(temporary, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("{}: {error}", temporary.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        use moto_rt::fs::{PERM_EXEC, PERM_READ};
+        let source = source.to_str().ok_or("file path is not UTF-8")?;
+        let temporary = temporary.to_str().ok_or("temporary path is not UTF-8")?;
+        let mode = moto_rt::fs::stat(source)
+            .map_err(|error| format!("{source}: {error:?}"))?
+            .perm;
+        // Native editable executables finalize rw- -> r-x -> rwx. Set access
+        // only after the bytes are durable, before publishing the replacement.
+        if mode & PERM_EXEC != 0 {
+            moto_rt::fs::set_perm(temporary, PERM_READ | PERM_EXEC)
+                .map_err(|error| format!("{temporary}: {error:?}"))?;
+        }
+        moto_rt::fs::set_perm(temporary, mode).map_err(|error| format!("{temporary}: {error:?}"))
     }
 }
 

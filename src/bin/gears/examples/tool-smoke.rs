@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 
 #[path = "tool-smoke/directory_lock.rs"]
 mod directory_lock;
+#[path = "tool-smoke/file_access.rs"]
+mod file_access;
 #[path = "tool-smoke/owned_work.rs"]
 mod owned_work;
 
@@ -37,6 +39,7 @@ fn main() -> Result<(), String> {
         .unwrap_or(gears);
     owned_work::smoke(&gears, &directory.join("tools/sh"))?;
     directory_lock::smoke(&gears)?;
+    file_access::smoke()?;
     println!("gears shipped tools ALL PASS");
     Ok(())
 }
@@ -259,4 +262,9 @@ fn nested_work_stops_on_cancellation_and_nested_timeouts() {
 #[test]
 fn another_gears_cannot_replace_a_live_directory_lock() {
     directory_lock::smoke(Path::new(env!("CARGO_BIN_EXE_gears"))).unwrap();
+}
+
+#[test]
+fn atomic_workspace_replacement_keeps_executable_access() {
+    file_access::smoke().unwrap();
 }
