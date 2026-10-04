@@ -1,7 +1,8 @@
 //! Versioned command-hook protocol and ordered composition.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -69,6 +70,8 @@ struct Response {
     context: Option<Message>,
     notice: Option<String>,
     message: Option<String>,
+    question: Option<Question>,
+    hint: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +113,31 @@ pub struct CommandSpec {
     pub help: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    pub id: String,
+    pub text: String,
+    pub choices: Vec<Choice>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub value: String,
+    pub label: String,
+}
+
+pub struct PendingQuestion {
+    owner: usize,
+    pub hook: String,
+    pub question: Question,
+}
+
+#[derive(Default)]
+struct Feedback {
+    questions: VecDeque<PendingQuestion>,
+    hint: Option<Option<String>>,
+}
+
 struct Hook {
     config: HookConfig,
 }
@@ -122,6 +150,7 @@ pub struct Manager {
     tools: Vec<ToolSpec>,
     commands: Vec<CommandSpec>,
     command_owner: HashMap<String, usize>,
+    feedback: Mutex<Feedback>,
 }
 
 impl Manager {
@@ -175,6 +204,7 @@ impl Manager {
             tools: Vec::new(),
             commands: Vec::new(),
             command_owner: HashMap::new(),
+            feedback: Mutex::new(Feedback::default()),
         };
         let mut names = HashSet::new();
         names.extend(reserved_names.iter().cloned());
@@ -263,6 +293,66 @@ impl Manager {
 
     pub fn commands(&self) -> &[CommandSpec] {
         &self.commands
+    }
+
+    pub fn take_question(&self) -> Option<PendingQuestion> {
+        self.feedback.lock().unwrap().questions.pop_front()
+    }
+
+    pub fn take_hint(&self) -> Option<Option<String>> {
+        self.feedback.lock().unwrap().hint.take()
+    }
+
+    pub fn discard_questions(&self) {
+        self.feedback.lock().unwrap().questions.clear();
+    }
+
+    pub fn answer(
+        &self,
+        pending: &PendingQuestion,
+        answer: Option<&str>,
+        attended: bool,
+        session: &mut Session,
+        cancellation: &Cancellation,
+        notice: &mut dyn FnMut(String),
+    ) -> Result<(), String> {
+        if self
+            .hooks
+            .get(pending.owner)
+            .is_none_or(|hook| hook.config.name != pending.hook)
+        {
+            return Err("question does not belong to this hook manager".into());
+        }
+        if answer.is_some() && (!attended || cancellation.cancelled()) {
+            return Err("unattended or cancelled questions cannot have an answer".into());
+        }
+        if answer.is_some_and(|value| {
+            !pending
+                .question
+                .choices
+                .iter()
+                .any(|choice| choice.value == value)
+        }) {
+            return Err("answer is not one of the hook's choices".into());
+        }
+        let lifecycle = Cancellation::new();
+        let token = if cancellation.cancelled() {
+            &lifecycle
+        } else {
+            cancellation
+        };
+        self.invoke(
+            pending.owner,
+            "answer",
+            serde_json::json!({
+                "id": pending.question.id, "answer": answer, "attended": attended,
+                "cancelled": cancellation.cancelled(),
+            }),
+            session,
+            token,
+            notice,
+        )
+        .map(|_| ())
     }
 
     pub fn command(
@@ -635,6 +725,25 @@ impl Manager {
         if response.protocol_version.unwrap_or(PROTOCOL_VERSION) != PROTOCOL_VERSION {
             return Err("hook returned an incompatible protocol_version".to_string());
         }
+        if let Some(question) = &response.question {
+            validate_question(question)?;
+            if hook
+                .config
+                .events
+                .as_ref()
+                .is_some_and(|events| !events.iter().any(|event| event == "answer"))
+            {
+                return Err("hook asks a question but does not subscribe to answer".into());
+            }
+            if self.feedback.lock().unwrap().questions.len() >= 16 {
+                return Err("hook questions exceed the pending limit (16)".into());
+            }
+        }
+        if let Some(hint) = &response.hint
+            && (hint.len() > 256 || hint.chars().any(char::is_control))
+        {
+            return Err("hook hint must be one line of at most 256 bytes".into());
+        }
         if let Some(message) = response.notice.as_deref() {
             notice(format!("hook {}: {message}", hook.config.name));
         }
@@ -648,6 +757,17 @@ impl Manager {
                     .unwrap_or(Value::Null),
                 context: response.context.clone(),
             })?;
+        }
+        let mut feedback = self.feedback.lock().unwrap();
+        if let Some(question) = response.question.clone() {
+            feedback.questions.push_back(PendingQuestion {
+                owner: index,
+                hook: hook.config.name.clone(),
+                question,
+            });
+        }
+        if let Some(hint) = &response.hint {
+            feedback.hint = Some((!hint.is_empty()).then(|| hint.clone()));
         }
         Ok(response)
     }
@@ -690,11 +810,35 @@ fn validate_command(command: &CommandSpec) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_question(question: &Question) -> Result<(), String> {
+    let line = |text: &str, max| {
+        !text.trim().is_empty() && text.len() <= max && !text.chars().any(char::is_control)
+    };
+    let mut values = HashSet::new();
+    if !line(&question.id, 64)
+        || !line(&question.text, 1024)
+        || !(2..=6).contains(&question.choices.len())
+        || question.choices.iter().any(|choice| {
+            !line(&choice.value, 64) || !line(&choice.label, 256) || !values.insert(&choice.value)
+        })
+    {
+        return Err("hook question needs an id, text and 2–6 distinct labeled choices".into());
+    }
+    Ok(())
+}
+
 fn validate_result_fields(event: &str, value: &Value) -> Result<(), String> {
     let object = value
         .as_object()
         .ok_or("hook result must be a JSON object")?;
-    let mut allowed = HashSet::from(["protocol_version", "state", "context", "notice"]);
+    let mut allowed = HashSet::from([
+        "protocol_version",
+        "state",
+        "context",
+        "notice",
+        "question",
+        "hint",
+    ]);
     match event {
         "initialize" => allowed.extend(["prompt_fragments", "tools", "commands"]),
         "input" => {
@@ -767,6 +911,143 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn question_bounds_and_values_are_checked() {
+        let question = Question {
+            id: "publish".into(),
+            text: "Publish?".into(),
+            choices: vec![
+                Choice {
+                    value: "yes".into(),
+                    label: "Publish".into(),
+                },
+                Choice {
+                    value: "no".into(),
+                    label: "Discard".into(),
+                },
+            ],
+        };
+        validate_question(&question).unwrap();
+        let mut invalid = question.clone();
+        invalid.choices[1].value = "yes".into();
+        assert!(validate_question(&invalid).is_err());
+        invalid = question.clone();
+        invalid.text = "x".repeat(1025);
+        assert!(validate_question(&invalid).is_err());
+        invalid = question.clone();
+        invalid.choices.truncate(1);
+        assert!(validate_question(&invalid).is_err());
+        invalid = question;
+        invalid.choices[0].label = "two\nlines".into();
+        assert!(validate_question(&invalid).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn questions_route_answers_and_hints_without_accepting_unknown_values() {
+        let (workspace, mut session) = fixture("question-answer");
+        let log = workspace.join("answer.json");
+        let config = HookConfig {
+            name: "owner".into(), events: Some(vec!["initialize".into(), "answer".into()]),
+            command: vec!["/bin/sh".into(), "-c".into(),
+                "event=$(cat); case \"$event\" in *'\"event\":\"initialize\"'*) printf '{\"hint\":\"Pending proposal\",\"question\":{\"id\":\"q1\",\"text\":\"Publish?\",\"choices\":[{\"value\":\"yes\",\"label\":\"Publish\"},{\"value\":\"no\",\"label\":\"Discard\"}]}}' ;; *) printf '%s' \"$event\" > \"$1\"; printf '{\"hint\":\"\",\"state\":{\"answered\":true}}' ;; esac".into(),
+                "owner".into(), log.display().to_string()],
+            timeout: std::time::Duration::from_secs(2), max_output_bytes: 4096,
+        };
+        let cancellation = Cancellation::new();
+        let manager = Manager::initialize(
+            vec![config.clone()],
+            workspace.clone(),
+            &mut session,
+            &cancellation,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(manager.take_hint(), Some(Some("Pending proposal".into())));
+        assert_eq!(manager.take_hint(), None);
+        let pending = manager.take_question().unwrap();
+        assert_eq!(pending.hook, "owner");
+        assert!(manager.take_question().is_none());
+        assert!(
+            manager
+                .answer(
+                    &pending,
+                    Some("unknown"),
+                    true,
+                    &mut session,
+                    &cancellation,
+                    &mut |_| {}
+                )
+                .is_err()
+        );
+        assert!(!log.exists());
+        assert!(
+            manager
+                .answer(
+                    &pending,
+                    Some("yes"),
+                    false,
+                    &mut session,
+                    &cancellation,
+                    &mut |_| {}
+                )
+                .is_err()
+        );
+        for (value, attended, cancelled) in [
+            (Some("yes"), true, false),
+            (None, false, false),
+            (None, true, true),
+        ] {
+            if cancelled {
+                cancellation.cancel();
+                assert!(
+                    manager
+                        .answer(
+                            &pending,
+                            Some("yes"),
+                            true,
+                            &mut session,
+                            &cancellation,
+                            &mut |_| {}
+                        )
+                        .is_err()
+                );
+            }
+            manager
+                .answer(
+                    &pending,
+                    value,
+                    attended,
+                    &mut session,
+                    &cancellation,
+                    &mut |_| {},
+                )
+                .unwrap();
+            let event: Value =
+                serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+            assert_eq!(event["event"], "answer");
+            assert_eq!(event["payload"]["id"], "q1");
+            assert_eq!(event["payload"]["answer"], serde_json::json!(value));
+            assert_eq!(event["payload"]["attended"], attended);
+            assert_eq!(event["payload"]["cancelled"], cancelled);
+        }
+        assert_eq!(manager.take_hint(), Some(None));
+        assert_eq!(session.hook_state("owner").unwrap()["answered"], true);
+        let mut unsubscribed = config;
+        unsubscribed.events = Some(vec!["initialize".into()]);
+        assert!(
+            Manager::initialize(
+                vec![unsubscribed],
+                workspace.clone(),
+                &mut session,
+                &Cancellation::new(),
+                &mut |_| {}
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(workspace.parent().unwrap()).unwrap();
     }
 
     #[cfg(unix)]

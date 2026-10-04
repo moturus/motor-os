@@ -42,6 +42,23 @@ when it is 1. The common optional fields are state, context, and notice.
 State replaces that hook's latest namespaced state. Context is a normalized
 Gears message that is also added to model context.
 
+Common fields also include `hint` and `question`. A hint is one line of at
+most 256 bytes; an empty string clears it. Later hints replace earlier ones.
+A question has this shape:
+
+    {"id":"publish-1","text":"Publish this proposal?","choices":[
+      {"value":"publish","label":"Publish"},
+      {"value":"discard","label":"Discard"}]}
+
+The id and choice values are nonempty lines of at most 64 bytes, the question
+text at most 1024 bytes, and labels at most 256 bytes. There must be 2–6 choices
+with distinct values. A questioning hook must subscribe to `answer`.
+The owning hook receives `{"id":"publish-1","answer":"publish","attended":true,"cancelled":false}`.
+A skipped or unattended question has a null answer; unattended runs never read
+input. Questions are queued in hook order, with at most 16 pending. Answers
+may ask another question, subject to the runtime's per-interaction bound.
+Question answers do not replace Gears' tool permission decisions.
+
 Event-specific result fields are:
 
 | Event | Result fields |
