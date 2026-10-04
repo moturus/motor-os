@@ -63,7 +63,7 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
     };
     let mut acquisition = Acquisition::for_sources(&config, manifest, progress)?;
     let resolver_options = dependency::resolver_options(manifest, &config, &toolchain)?;
-    let (complete, catalog) = resolve_locked(
+    let (complete, mut catalog) = resolve_locked(
         &workspace,
         &config,
         &direct,
@@ -74,14 +74,56 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
     if !options.offline {
         acquisition.stage_resolution_inputs(&complete)?;
     }
-    let selected = acquisition_resolution(
-        &workspace,
-        &complete,
-        &catalog,
-        &resolver_options,
-        host.as_ref(),
-        &targets,
-    )?;
+    let mut inspected = BTreeSet::new();
+    let selected =
+        loop {
+            let selected = acquisition_resolution(
+                &workspace,
+                &complete,
+                &catalog,
+                &resolver_options,
+                host.as_ref(),
+                &targets,
+            )?;
+            if targets.is_empty() {
+                break selected;
+            }
+            let refined =
+                discover_proc_macros(&selected, &mut catalog, &mut inspected, &mut |package| {
+                    let mut package = package.clone();
+                    package.edges.clear();
+                    let context =
+                        package.feature_sets.keys().next().cloned().ok_or_else(|| {
+                            Error::failure("selected source has no feature context")
+                        })?;
+                    let compile_kind = *package
+                        .compile_kinds
+                        .first()
+                        .ok_or_else(|| Error::failure("selected source has no compilation kind"))?;
+                    let single = Resolution {
+                        root_edges: vec![resolver::ResolvedEdge {
+                            dependency_index: 0,
+                            alias: package.key.name.clone(),
+                            kind: crate::sparse::DependencyKind::Normal,
+                            target: None,
+                            parent_compile_kind: None,
+                            compile_kind,
+                            context,
+                            package: package.key.clone(),
+                        }],
+                        packages: vec![package.clone()],
+                    };
+                    if !options.offline {
+                        acquisition.stage_selected(&single)?;
+                    }
+                    let evidence = acquisition.evidence(&single, Some(&direct))?;
+                    policy::inspect_sources(&config.policy, &single, &evidence)?;
+                    Ok(evidence[&package.key].proc_macro)
+                })?;
+            if !refined {
+                break selected;
+            }
+        };
     if !options.offline {
         acquisition.stage_selected(&selected)?;
     }
@@ -479,6 +521,43 @@ fn resolve_locked(
     crate::offline::validate_workspace_resolution(lock, &complete)?;
     policy::preflight_sources(&config.policy, &complete)?;
     Ok((complete, catalog))
+}
+
+fn discover_proc_macros(
+    selected: &Resolution,
+    catalog: &mut Catalog,
+    inspected: &mut BTreeSet<PackageKey>,
+    inspect: &mut dyn FnMut(&ResolvedPackage) -> Result<bool>,
+) -> Result<bool> {
+    let packages = selected
+        .packages
+        .iter()
+        .map(|package| (&package.key, package))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = selected
+        .root_edges
+        .iter()
+        .map(|edge| edge.package.clone())
+        .collect::<std::collections::VecDeque<_>>();
+    let mut visited = BTreeSet::new();
+    while let Some(key) = pending.pop_front() {
+        if !visited.insert(key.clone()) {
+            continue;
+        }
+        let package = packages
+            .get(&key)
+            .ok_or_else(|| Error::failure("fetch traversal references an unresolved package"))?;
+        if key.source == PackageSourceKey::CratesIo
+            && inspected.insert(key.clone())
+            && catalog.annotate_proc_macro(&key, inspect(package)?)?
+        {
+            // Re-project before visiting children: a newly discovered macro's
+            // target dependencies must not be downloaded in the wrong context.
+            return Ok(true);
+        }
+        pending.extend(package.edges.iter().map(|edge| edge.package.clone()));
+    }
+    Ok(false)
 }
 
 fn acquisition_resolution(

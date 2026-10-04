@@ -189,3 +189,81 @@ cmp Cargo.lock "$WORK/original.lock"
 cmp .lorry/dependencies-v2.toml "$WORK/original.admission"
 cmp "$WORK/requests" "$WORK/requests.before"
 echo 'PASS: hermetic workspace fetch preserves lock and admission without executing code'
+
+# A fresh registry macro must use host cfg before choosing any child archive.
+PROC_PROJECT="$WORK/proc-project"
+mkdir -p "$PROC_PROJECT/src" "$PROC_PROJECT/macro/src"
+cat >"$PROC_PROJECT/Cargo.toml" <<'TOML'
+[package]
+name = "proc-root"
+version = "1.0.0"
+edition = "2021"
+[dependencies]
+macro-fixture = { path = "macro" }
+TOML
+cat >"$PROC_PROJECT/macro/Cargo.toml" <<'TOML'
+[package]
+name = "macro-fixture"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+[lib]
+proc-macro = true
+[target.'cfg(target_os = "linux")'.dependencies]
+cfg-if = "=1.0.4"
+[target.'cfg(target_os = "windows")'.dependencies]
+equivalent = "=1.0.2"
+TOML
+for source in "$PROC_PROJECT/src/lib.rs" "$PROC_PROJECT/macro/src/lib.rs"; do
+    echo 'compile_error!("fetch must not compile root or procedural macro code");' >"$source"
+done
+"$LORRY_TEST_CARGO" generate-lockfile --offline --manifest-path "$PROC_PROJECT/Cargo.toml"
+cp -a "$WORK/crates-io" "$WORK/macro-crates-io"
+python3 - "$PROC_PROJECT" "$WORK/macro-crates-io" <<'PY'
+import hashlib, io, json, pathlib, sys, tarfile
+project, fixture = map(pathlib.Path, sys.argv[1:])
+archive = fixture / 'archives/macro-fixture/macro-fixture-1.0.0.crate'
+archive.parent.mkdir(parents=True)
+with tarfile.open(archive, 'w:gz', format=tarfile.USTAR_FORMAT) as tar:
+    for name in ['Cargo.toml', 'src/lib.rs']:
+        data = (project / 'macro' / name).read_bytes()
+        entry = tarfile.TarInfo('macro-fixture-1.0.0/' + name)
+        entry.size, entry.mode = len(data), 0o644
+        tar.addfile(entry, io.BytesIO(data))
+checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+index = fixture / 'index/ma/cr/macro-fixture'
+index.parent.mkdir(parents=True)
+deps = [dict(name=name, req=version, features=[], optional=False, default_features=True,
+             target=f'cfg(target_os = "{platform}")', kind='normal', registry=None)
+        for name, version, platform in [('cfg-if', '=1.0.4', 'linux'), ('equivalent', '=1.0.2', 'windows')]]
+index.write_text(json.dumps(dict(name='macro-fixture', vers='1.0.0', cksum=checksum,
+                                deps=deps, features={}, yanked=False)) + '\n')
+lock = project / 'Cargo.lock'
+lock.write_text(lock.read_text().replace('name = "macro-fixture"\nversion = "1.0.0"\n',
+    'name = "macro-fixture"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "' + checksum + '"\n'))
+manifest = project / 'Cargo.toml'
+manifest.write_text(manifest.read_text().replace('{ path = "macro" }', '"=1.0.0"'))
+PY
+cat >"$WORK/macro-curl" <<EOF_CURL
+#!/bin/sh
+printf '%s\n' "\$@" >> "$WORK/macro-requests"
+exec "$WORK/macro-crates-io/curl" "\$@"
+EOF_CURL
+chmod 0700 "$WORK/macro-curl"
+sed -i "s|$WORK/curl|$WORK/macro-curl|; s|$WORK/repository|$WORK/macro-repository|" \
+    "$HOME/.config/lorry/lorry.toml"
+cd "$PROC_PROJECT"
+cp Cargo.lock "$WORK/macro-original.lock"
+"$LORRY" -q fetch --target x86_64-pc-windows-gnu >"$WORK/macro-fetch.out" 2>"$WORK/macro-fetch.err"
+grep -F 'https://static.crates.io/crates/macro-fixture/' "$WORK/macro-requests" >/dev/null
+grep -F 'https://static.crates.io/crates/cfg-if/' "$WORK/macro-requests" >/dev/null
+if grep -F 'https://static.crates.io/crates/equivalent/' "$WORK/macro-requests"; then
+    echo 'targeted fetch downloaded target dependencies of a host procedural macro' >&2
+    exit 1
+fi
+cp "$WORK/macro-requests" "$WORK/macro-requests.before"
+"$LORRY" -q fetch --offline --target x86_64-pc-windows-gnu >"$WORK/macro-offline.out" 2>"$WORK/macro-offline.err"
+cmp "$WORK/macro-requests" "$WORK/macro-requests.before"
+cmp Cargo.lock "$WORK/macro-original.lock"
+test ! -e .lorry/dependencies-v2.toml
+echo 'PASS: targeted registry macro fetch acquires host dependencies without executing code'

@@ -582,6 +582,10 @@ host-independent logical paths without changing their physical storage:
 no source remapping, including for path dependencies. The root package is not
 remapped.
 
+Targeted fetch inspects a registry package's source description before following
+its dependencies. Discovery of a procedural macro recomputes its host context
+before choosing child archives; neither inspection nor acquisition runs code.
+
 Locked acquisition retains digest-protected sparse resolution inputs for the
 complete lock independently of downloaded source objects. This lets an offline
 selected build or tree use a targeted fetch without downloading inactive
