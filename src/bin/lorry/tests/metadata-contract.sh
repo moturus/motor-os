@@ -95,10 +95,10 @@ printf 'pub fn answer() -> u8 { 42 }\n' >"$DEPENDENCY/src/lib.rs"
 export RUSTC="$LORRY_TEST_RUSTC"
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 export HOME="$TEST_HOME"
-(
-    cd "$PROJECT"
-    "$LORRY" vendor --accept-all
-)
+# Source metadata must ignore execution admission, even for a member script.
+# Retain an invalid record as evidence that metadata never reconstructs it.
+mkdir -p "$PROJECT/.lorry" "$PROJECT/target"
+printf 'not an admission record\n' >"$PROJECT/.lorry/dependencies-v2.toml"
 "$LORRY" metadata --format-version 1 --no-deps \
     --manifest-path "$PROJECT/Cargo.toml" >"$WORK/no-deps.json"
 [ ! -e "$WORK/cache/sources" ]
