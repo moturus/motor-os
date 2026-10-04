@@ -940,11 +940,39 @@ pub fn add_selected_integration_harnesses(
         .transpose()?
         .map(|key| key.with_profile(ProfileContext::Test, panic_abort));
     let mut harnesses = Vec::new();
+    let features = selected_root_features(manifest)?;
     for target in manifest
         .integration_tests
         .iter()
         .filter(|target| selected_name.is_none_or(|name| name == target.name))
+        .filter(|target| !program_artifacts || selected_name.is_some() || target.test)
     {
+        let missing = target
+            .required_features
+            .iter()
+            .flatten()
+            .filter(|feature| !features.contains(*feature))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            if selected_name.is_some() {
+                return Err(Error::failure(format!(
+                    "target `{}` in package `{}` requires the features: {}",
+                    target.name,
+                    manifest.name,
+                    missing
+                        .iter()
+                        .map(|feature| format!("`{feature}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .with_help(format!(
+                    "enable the required features: {}",
+                    missing.join(",")
+                )));
+            }
+            continue;
+        }
         let mut key =
             selected_library_key(manifest)?.with_profile(ProfileContext::Test, panic_abort);
         key.kind = UnitKind::IntegrationHarness;

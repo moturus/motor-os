@@ -503,8 +503,6 @@ impl Manifest {
                 "selected package has only example or bench targets; compiling these targets is not yet supported",
             ));
         }
-        manifest.integration_tests = discover_integration_tests(&manifest.root)?;
-
         let lock_path = lock_root.join(LOCK_NAME);
         if !lock_path.is_file() {
             if require_current_lock {
@@ -655,11 +653,8 @@ impl Manifest {
         } else {
             Vec::new()
         };
-        let integration_tests = if matches!(mode, ManifestMode::Dependency | ManifestMode::Source) {
-            parse_dependency_integration_tests(path, document, root, package)?
-        } else {
-            Vec::new()
-        };
+        let integration_tests =
+            parse_integration_tests(path, document, root, package, edition, mode)?;
         let mut described_targets = targets::parse(
             root,
             path,
@@ -1072,6 +1067,7 @@ fn validate_manifest_tables(
                         | "profile"
                         | "lib"
                         | "bin"
+                        | "test"
                         | "example"
                         | "bench"
                         | "badges"
@@ -1141,6 +1137,7 @@ fn validate_package_keys(
         "default-run",
         "autolib",
         "autobins",
+        "autotests",
         "autoexamples",
         "autobenches",
         "metadata",
@@ -1166,7 +1163,13 @@ fn validate_package_keys(
             ));
         }
     }
-    for key in ["autolib", "autobins", "autoexamples", "autobenches"] {
+    for key in [
+        "autolib",
+        "autobins",
+        "autotests",
+        "autoexamples",
+        "autobenches",
+    ] {
         if let Some(item) = package.get(key)
             && item.as_bool().is_none()
         {
@@ -1764,19 +1767,26 @@ fn resolve_target_defaults(manifest: &mut Manifest, check_sources: bool) -> Resu
     Ok(())
 }
 
-fn parse_dependency_integration_tests(
+fn parse_integration_tests(
     path: &Path,
     document: &Document,
     root: &Path,
     package: &Table,
+    edition: Edition,
+    mode: ManifestMode,
 ) -> Result<Vec<IntegrationTestTarget>> {
-    let mut targets = if package.get("autotests").and_then(Item::as_bool) == Some(false) {
-        BTreeMap::new()
+    let discovered = discover_integration_tests(root)?
+        .into_iter()
+        .map(|target| (target.name.clone(), target))
+        .collect::<BTreeMap<_, _>>();
+    let automatic = package
+        .get("autotests")
+        .and_then(Item::as_bool)
+        .unwrap_or(edition != Edition::E2015 || !document.root().contains_key("test"));
+    let mut targets = if automatic {
+        discovered.clone()
     } else {
-        discover_integration_tests(root)?
-            .into_iter()
-            .map(|target| (target.name.clone(), target))
-            .collect()
+        BTreeMap::new()
     };
     if let Some(item) = document.root().get("test") {
         let mut explicit_names = BTreeSet::new();
@@ -1789,10 +1799,37 @@ fn parse_dependency_integration_tests(
             )
         })?;
         for table in tables {
+            for (key, item) in table.iter() {
+                if mode == ManifestMode::Root
+                    && !matches!(
+                        key,
+                        "name" | "path" | "test" | "doc" | "harness" | "required-features"
+                    )
+                {
+                    return Err(unsupported_key(
+                        path,
+                        document,
+                        item,
+                        &format!("test.{key}"),
+                    ));
+                }
+            }
             let name = required_string(path, document, table, "test", "name")?;
             validate_package_name(path, document.line_of_table(table), &name)?;
-            let relative = optional_string(path, document, table, "test", "path")?
-                .unwrap_or_else(|| format!("tests/{name}.rs"));
+            let relative =
+                optional_string(path, document, table, "test", "path")?.unwrap_or_else(|| {
+                    discovered.get(&name).map_or_else(
+                        || format!("tests/{name}.rs"),
+                        |target| {
+                            target
+                                .path
+                                .strip_prefix(root)
+                                .unwrap()
+                                .to_string_lossy()
+                                .into_owned()
+                        },
+                    )
+                });
             validate_relative_path(path, document.line_of_table(table), "test.path", &relative)?;
             let crate_name = name.replace('-', "_");
             if !explicit_names.insert(crate_name.clone()) {
@@ -4289,7 +4326,7 @@ members = ["ignored-member"]
         fs::create_dir_all(root.join("tests")).unwrap();
         fs::write(
             root.join("Cargo.toml"),
-            "[package]\nname = \"dependency\"\nversion = \"1.0.0\"\n\n\
+            "[package]\nname = \"dependency\"\nversion = \"1.0.0\"\nautotests = true\n\n\
              [[test]]\nname = \"auto-test\"\npath = \"tests/auto_test.rs\"\n",
         )
         .unwrap();

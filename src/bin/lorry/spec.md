@@ -514,8 +514,14 @@ On Motor, declared dynamic types retain their Cargo identities while rustc
 warns and drops unsupported outputs. Builds fail if no usable type remains;
 metadata-only checks can still succeed. Linux dynamic execution is unsupported.
 
-Lorry rejects explicit `[[test]]`, examples, benches,
-`harness`, `required-features`, `autotests`, unsupported
+Explicit `[[test]]` tables, `autotests`, and integration-test `harness = false`
+are supported. Test discovery follows the edition defaults, explicit targets
+replace inferred names/paths, and unavailable required features skip implicit
+tests or reject named selections. Harness-free tests use Cargo's `test` cfg
+and run at the package root with the Cargo package environment.
+
+Lorry rejects examples, benches, library/binary `harness`,
+binary `required-features`, unsupported
 profile keys, artifact dependencies, alternative
 registries, non-crates.io patches, and
 CLI feature-selection flags for run/test.

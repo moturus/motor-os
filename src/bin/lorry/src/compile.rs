@@ -370,7 +370,19 @@ pub fn dependency_rustc_invocation_with_build_output(
         key.kind,
         UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness
     ) {
-        push(&mut arguments, "--test");
+        let harness = key.kind != UnitKind::IntegrationHarness
+            || manifest
+                .integration_tests
+                .iter()
+                .find(|target| Some(target.name.as_str()) == key.target.as_deref())
+                .unwrap()
+                .harness;
+        if harness {
+            push(&mut arguments, "--test");
+        } else {
+            push(&mut arguments, "--cfg");
+            push(&mut arguments, "test");
+        }
     } else if key.kind == UnitKind::Library {
         for crate_type in &manifest.library.as_ref().unwrap().crate_types {
             push(&mut arguments, "--crate-type");

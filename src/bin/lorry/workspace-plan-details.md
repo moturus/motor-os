@@ -2564,6 +2564,23 @@ contract pass in `/tmp/lorry-m8-motor-crate-types-{first-contract,static-regress
 The Cargo source/output probe is preserved in
 `/tmp/lorry-m8-motor-dynamic-cargo-rustc-probe.log`.
 
+Explicit integration tests, `autotests`, and harness-free tests now execute
+through the existing single-package graph. Discovery respects Cargo's edition
+defaults and inferred directory targets. Required features skip implicit tests
+and reject unavailable named selections; `test = false` skips default execution
+while preserving named selection. Native/cross executable bytes and artifact
+JSON, named checks, and runtime package environment pass in
+`/tmp/lorry-m8-explicit-tests-canonical-json-contract.log`.
+The first comparison had an order-sensitive dictionary sort in the new fixture;
+every compared artifact already agreed. A focused older manifest fixture
+omitted its edition while expecting automatic discovery beside explicit tests.
+It now sets `autotests = true` to test its intended normalized override case.
+All twenty-five manifest tests, the existing integration execution regression,
+and strict Clippy pass in
+`/tmp/lorry-m8-explicit-tests-{manifest-corrected,engine,clippy}.log`.
+Original failure logs and the diagnostic fixture are preserved under
+`/tmp/lorry-m8-explicit-tests-*` and `/tmp/lorry-explicit-tests-MS6kLR`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only
