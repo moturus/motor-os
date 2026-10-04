@@ -113,6 +113,8 @@ Outside path packages retain their development declarations and all described
 targets in metadata, without activating development edges for resolution.
 Targets follow Cargo's library, binary, example, test, bench, and build-script
 ordering.
+Cargo registry description loading verifies the same archives, markers, and
+source trees as compilation loading, without imposing build-target restrictions.
 
 Debug builds must reproduce Cargo-equivalent compilation semantics but need
 not be byte-identical across hosts because paths and debug information can

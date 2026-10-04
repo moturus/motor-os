@@ -386,9 +386,18 @@ impl Catalog {
                     }
                     object.index
                 }
-                LockedRegistrySource::Cargo(registry) => registry
-                    .load(&dependency.package, &package.version, &package.checksum)?
-                    .record()?,
+                LockedRegistrySource::Cargo(registry) => {
+                    let package = if self.descriptive_sources {
+                        registry.load_description(
+                            &dependency.package,
+                            &package.version,
+                            &package.checksum,
+                        )?
+                    } else {
+                        registry.load(&dependency.package, &package.version, &package.checksum)?
+                    };
+                    package.record()?
+                }
             };
             self.insert(record)?;
             available = true;

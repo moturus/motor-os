@@ -108,6 +108,25 @@ impl CargoRegistry {
     }
 
     pub fn load(&self, name: &str, version: &Version, checksum: &str) -> Result<Package> {
+        self.load_package(name, version, checksum, false)
+    }
+
+    pub(crate) fn load_description(
+        &self,
+        name: &str,
+        version: &Version,
+        checksum: &str,
+    ) -> Result<Package> {
+        self.load_package(name, version, checksum, true)
+    }
+
+    fn load_package(
+        &self,
+        name: &str,
+        version: &Version,
+        checksum: &str,
+        describe: bool,
+    ) -> Result<Package> {
         let checksum = decode_hex::<32>(checksum).map_err(|error| {
             Error::failure(format!(
                 "Cargo.lock checksum for `{name} {version}` is invalid: {error}"
@@ -167,7 +186,11 @@ impl CargoRegistry {
         };
 
         verify_marker(&source.join(".cargo-ok"))?;
-        let manifest = Manifest::load_path_dependency(&source)?;
+        let manifest = if describe {
+            Manifest::load_source_dependency(&source)?
+        } else {
+            Manifest::load_path_dependency(&source)?
+        };
         let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
             Error::failure(format!(
                 "Cargo registry manifest has invalid version `{} {}`: {error}",
@@ -670,6 +693,73 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn describes_verified_cargo_sources_without_build_target_restrictions() {
+        let fixture = Fixture::new();
+        let (source, archive, _) = fixture.package("description-registry");
+        let manifest = "[package]\nname = \"demo\"\nversion = \"1.2.3\"\nedition = \"2021\"\nlicense = \"MIT\"\n\
+            [lib]\ncrate-type = [\"staticlib\"]\n\
+            [dev-dependencies]\nhelper = \"1\"\n";
+        fs::write(source.join("Cargo.toml"), manifest).unwrap();
+        fs::write(source.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(source.join("examples")).unwrap();
+        fs::write(source.join("examples/demo.rs"), "fn main() {}\n").unwrap();
+        write_crate(
+            &archive,
+            &[
+                ("demo-1.2.3/Cargo.toml", manifest.as_bytes().to_vec()),
+                (
+                    "demo-1.2.3/src/lib.rs",
+                    fs::read(source.join("src/lib.rs")).unwrap(),
+                ),
+                (
+                    "demo-1.2.3/src/main.rs",
+                    fs::read(source.join("src/main.rs")).unwrap(),
+                ),
+                (
+                    "demo-1.2.3/examples/demo.rs",
+                    fs::read(source.join("examples/demo.rs")).unwrap(),
+                ),
+            ],
+        );
+        let checksum = hex(&crate::hash::sha256_file(&archive).unwrap());
+        let registry = fixture.registry();
+        let version = Version::parse("1.2.3").unwrap();
+        assert!(registry.load("demo", &version, &checksum).is_err());
+        let described = registry
+            .load_description("demo", &version, &checksum)
+            .unwrap();
+        assert!(!described.manifest.editable);
+        assert_eq!(described.manifest.binaries.len(), 1);
+        assert_eq!(described.manifest.described_targets.len(), 1);
+        assert_eq!(
+            described.manifest.dependencies[0].kind,
+            crate::sparse::DependencyKind::Dev
+        );
+        assert_eq!(
+            described.manifest.library.as_ref().unwrap().crate_types,
+            ["staticlib"]
+        );
+        assert_eq!(
+            described.evidence.source_tree_sha256,
+            Tree::scan(
+                &source,
+                crate::source_tree::DEFAULT_LIMITS,
+                Exclusions::CargoRegistryMarker
+            )
+            .unwrap()
+            .sha256
+        );
+        fs::write(source.join("examples/demo.rs"), "fn changed() {}\n").unwrap();
+        assert!(
+            registry
+                .load_description("demo", &version, &checksum)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
     }
 
     #[test]
