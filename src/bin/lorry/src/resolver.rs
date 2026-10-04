@@ -20,6 +20,8 @@ use crate::source_tree::{DEFAULT_LIMITS as DEFAULT_TREE_LIMITS, Exclusions, Tree
 use crate::sparse::{Dependency, DependencyKind, Record, RustVersion};
 use crate::toolchain::CfgSet;
 
+mod search;
+use search::solve;
 pub(crate) mod workspace;
 #[cfg(test)]
 use workspace::resolve_complete_workspace;
@@ -1492,159 +1494,6 @@ impl Failure {
     }
 }
 
-fn solve(
-    state: State,
-    mut queue: VecDeque<Event>,
-    catalog: &mut Catalog,
-    options: &Options,
-    locked: &[LockedPreference],
-    scope: Scope<'_>,
-    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
-) -> std::result::Result<State, Failure> {
-    let Some(mut event) = queue.pop_front() else {
-        return Ok(state);
-    };
-    let locked_package = scope.locked_package(&event)?;
-    if event.dependency.source == RequirementSource::CratesIo {
-        loader(
-            &event.dependency.package,
-            &event.dependency.requirement,
-            catalog,
-        )
-        .map_err(|error| Failure::from_error(error, true))?;
-    }
-    catalog
-        .prepare(&mut event.dependency)
-        .map_err(|error| Failure::from_error(error, false))?;
-    if event.depth > options.max_depth {
-        return Err(Failure::new(format!(
-            "`{}` exceeds dependency depth {}",
-            event.dependency.package, options.max_depth
-        )));
-    }
-    let matching_selected = state
-        .nodes
-        .iter()
-        .filter(|(key, node)| {
-            key.name == event.dependency.package
-                && event.dependency.matches_version(&key.version)
-                && source_matches(&node.record.source, &event.dependency.source)
-                && locked_package.is_none_or(|locked| locked == *key)
-        })
-        .map(|(key, _)| key.clone())
-        .collect::<Vec<_>>();
-    let mut last_failure = None;
-    for key in matching_selected {
-        let mut candidate_state = state.clone();
-        let mut candidate_queue = queue.clone();
-        match fulfill(
-            &mut candidate_state,
-            &mut candidate_queue,
-            &event,
-            &key,
-            options,
-            scope,
-        )
-        .and_then(|()| {
-            solve(
-                candidate_state,
-                candidate_queue,
-                catalog,
-                options,
-                locked,
-                scope,
-                loader,
-            )
-        }) {
-            Ok(state) => return Ok(state),
-            Err(failure) if failure.fatal => return Err(failure),
-            Err(failure) => last_failure = Some(failure),
-        }
-    }
-
-    let candidates = candidates(catalog, &event, options, locked);
-    for record in candidates {
-        let key = PackageKey {
-            name: record.name.clone(),
-            version: record.version.clone(),
-            source: record.source.key(),
-        };
-        if locked_package.is_some_and(|locked| locked != &key) {
-            continue;
-        }
-        if state.nodes.iter().any(|(key, node)| {
-            key.name == record.name
-                && source_matches(&node.record.source, &event.dependency.source)
-                && semver_compatible(&key.version, &record.version)
-        }) {
-            if last_failure.is_none() {
-                last_failure = Some(Failure::new(format!(
-                    "compatible requirements for `{}` cannot be unified",
-                    record.name
-                )));
-            }
-            continue;
-        }
-        let limit = &options.package_limit;
-        if limit.counts(&key)
-            && state.nodes.keys().filter(|node| limit.counts(node)).count() as u64 >= limit.max
-        {
-            return Err(Failure::package_limit());
-        }
-        let mut candidate_state = state.clone();
-        if let Some(links) = &record.links {
-            if let Some(existing) = candidate_state.links.get(links) {
-                last_failure = Some(Failure::new(format!(
-                    "packages `{}` and `{}` both link native library `{links}`",
-                    existing.name, key.name
-                )));
-                continue;
-            }
-            candidate_state.links.insert(links.clone(), key.clone());
-        }
-        candidate_state.nodes.insert(
-            key.clone(),
-            Node {
-                record: Arc::new(record),
-                activations: BTreeMap::new(),
-                compile_kinds: BTreeSet::new(),
-                edges: BTreeMap::new(),
-            },
-        );
-        let mut candidate_queue = queue.clone();
-        match fulfill(
-            &mut candidate_state,
-            &mut candidate_queue,
-            &event,
-            &key,
-            options,
-            scope,
-        )
-        .and_then(|()| {
-            solve(
-                candidate_state,
-                candidate_queue,
-                catalog,
-                options,
-                locked,
-                scope,
-                loader,
-            )
-        }) {
-            Ok(state) => return Ok(state),
-            Err(failure) if failure.fatal => return Err(failure),
-            Err(failure) => last_failure = Some(failure),
-        }
-    }
-
-    Err(last_failure.unwrap_or_else(|| {
-        Failure::new(format!(
-            "no version of `{}` matches `{}`",
-            event.dependency.package, event.dependency.requirement
-        ))
-    }))
-}
-
 fn fulfill(
     state: &mut State,
     queue: &mut VecDeque<Event>,
@@ -2331,6 +2180,103 @@ mod tests {
             assert!(package.edges.is_empty());
             assert!(resolution.root_edges.is_empty());
         }
+    }
+
+    #[test]
+    fn wide_shallow_graph_does_not_grow_the_process_stack() {
+        let declarations = (0..320)
+            .map(|index| format!("parent{index} = \"1\"\n"))
+            .collect::<String>();
+        let manifest = manifest(&declarations, "", "2");
+        let mut catalog = Catalog::default();
+        for index in 0..320 {
+            catalog
+                .insert(record(
+                    &format!("parent{index}"),
+                    "1.0.0",
+                    &format!("[{}]", dependency("shared", "1")),
+                    "{}",
+                    "",
+                ))
+                .unwrap();
+        }
+        catalog
+            .insert(record("shared", "1.0.0", "[]", "{}", ""))
+            .unwrap();
+        let mut limits = options(ResolverVersion::V2);
+        limits.package_limit = PackageLimit::with_max(384);
+        limits.max_depth = 2;
+        let graph =
+            resolve_dynamic(&manifest, &mut catalog, &limits, &[], &mut |_, _, _| Ok(())).unwrap();
+        assert_eq!(graph.packages.len(), 321);
+        assert_eq!(graph.root_edges.len(), 320);
+        assert_eq!(
+            graph
+                .packages
+                .iter()
+                .filter(|package| package.key.name == "shared")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_reuse_considers_candidates_loaded_by_its_children() {
+        let manifest = manifest("a = \"*\"\nb = \"1\"", "", "2");
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record(
+                "a",
+                "1.0.0",
+                &format!("[{}]", dependency_with("d", "d", "1", &[], true, "normal")),
+                r#"{"extra":["dep:d"]}"#,
+                "",
+            ))
+            .unwrap();
+        catalog
+            .insert(record(
+                "b",
+                "1.0.0",
+                &format!(
+                    "[{}]",
+                    dependency_with("a", "a", "*", &["extra"], false, "normal")
+                ),
+                "{}",
+                "",
+            ))
+            .unwrap();
+        catalog
+            .insert(record(
+                "d",
+                "1.0.0",
+                &format!(
+                    "[{},{}]",
+                    dependency("a", ">=2"),
+                    dependency("missing", "1")
+                ),
+                "{}",
+                "",
+            ))
+            .unwrap();
+        let graph = resolve_dynamic(
+            &manifest,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |name, requirement, catalog| {
+                if name == "a" && !catalog.contains_crates_io_candidate(name, requirement) {
+                    catalog.insert(record("a", "2.0.0", "[]", r#"{"extra":[]}"#, ""))?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(graph.packages.len(), 3);
+        assert_eq!(
+            selected(&graph, "a"),
+            [&Version::new(1, 0, 0), &Version::new(2, 0, 0)]
+        );
+        assert!(graph.packages.iter().all(|package| package.key.name != "d"));
     }
 
     struct LocalFixture(PathBuf);

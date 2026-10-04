@@ -551,6 +551,9 @@ location to which its settings should move. System constraints still apply.
   separate and enable development requests when needed. Platform-specific
   build dependencies are evaluated against the host.
 - Resolution creates the complete all-target Cargo-compatible lock graph.
+  Search stores queued-edge continuation and backtracking state on the heap;
+  a wide graph cannot exhaust the process stack within the dependency-depth
+  limit. Forced choices do not retain unnecessary backtracking frames.
   Acquisition includes only the default-feature closure selected by the union
   of `[vendor].targets` and, by default, the current host.
 - Default vendor targets are `x86_64-unknown-linux-musl` and
