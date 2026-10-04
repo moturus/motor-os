@@ -177,11 +177,18 @@ pub fn command_failure(status: std::process::ExitStatus, message: impl Into<Stri
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum ChildKind {
+    Program,
+    Test,
+}
+
 pub fn run_child(
     program: &OsStr,
     arguments: &[OsString],
     current_dir: &Path,
     environment: &BTreeMap<String, OsString>,
+    kind: ChildKind,
     verbose: bool,
 ) -> Result<i32> {
     if verbose {
@@ -201,7 +208,10 @@ pub fn run_child(
                 Path::new(program).display()
             ))
         })?;
-    Ok(exit_status_code(status))
+    Ok(match kind {
+        ChildKind::Program => exit_status_code(status),
+        ChildKind::Test => status.code().unwrap_or(101),
+    })
 }
 
 pub fn exit_status_code(status: std::process::ExitStatus) -> i32 {

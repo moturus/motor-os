@@ -304,7 +304,8 @@ root compilation, freshness validation, and artifact publication.
   binaries by name, and integration tests by name. Ordinary tests accept the
   shared workspace/package/feature selectors and dev-dependencies. Each harness
   runs at its package root with its owning script's output environment. A
-  failing harness's exit code is propagated, as in Cargo. Arguments after `--`
+  failing harness's exit code is propagated, as in Cargo; termination without
+  an exit code returns 101. Arguments after `--`
   go to every executed harness. No enabled harnesses is a successful build.
 - `test --no-fail-fast` runs every selected target after runtime failures,
   reports the failed targets, and returns 101 if any failed. Compilation still

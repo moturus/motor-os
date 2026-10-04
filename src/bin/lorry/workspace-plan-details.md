@@ -2636,6 +2636,14 @@ All twelve planner tests and strict Clippy pass in
 larger than the preferred size because its linked cycle/script/program graph
 needs the full paired oracle fixture.
 
+The paired aborted-harness case exposed Lorry's use of program/shell signal
+status for tests: it returned 134 where Cargo returned 101. The original is
+`/tmp/lorry-m8-test-signal-original-contract.log`, with retained fixture
+`/tmp/lorry-workspace-test-4T1xMa`. Child execution now distinguishes programs
+from tests; test termination without an exit code returns 101, and program
+status handling is preserved. The complete focused workspace contract and
+strict Clippy pass in `/tmp/lorry-m8-test-signal-{fixed-contract,clippy}.log`.
+
 `test --no-fail-fast` now runs every selected target after runtime failures,
 reports failed executables, and returns Cargo's aggregate status 101. Default
 testing retains the failing process's status. The hidden rejected `--keep-going`

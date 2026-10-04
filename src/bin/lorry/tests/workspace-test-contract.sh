@@ -80,6 +80,9 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/assert-runtime.rs"));
 fn main() {
     #[cfg(test)] {
         assert_runtime("binary");
+        if std::env::var_os("TEST_ABORT").is_some() && env!("CARGO_PKG_NAME") == "alpha" {
+            std::process::abort();
+        }
         if std::env::var_os("TEST_FAIL").is_some() && env!("CARGO_PKG_NAME") == "alpha" {
             std::process::exit(7);
         }
@@ -144,6 +147,15 @@ for policy in default all; do
     cmp "$WORK/lorry-failure.out" "$WORK/cargo-failure.out"
     if [ "$policy" = all ]; then rg -F '1 test targets failed:' "$WORK/lorry-failure.err" >/dev/null; fi
 done
+set +e
+env HOME="$WORK/home" TEST_ABORT=1 "$LORRY" test --workspace >"$WORK/lorry-signal.out" 2>"$WORK/lorry-signal.err"
+lorry_status=$?
+TEST_ABORT=1 "$LORRY_TEST_CARGO" test --workspace --offline >"$WORK/cargo-signal.out" 2>"$WORK/cargo-signal.err"
+cargo_status=$?
+set -e
+printf 'Signal failure exit statuses: lorry=%s cargo=%s\n' "$lorry_status" "$cargo_status"
+[ "$cargo_status" = 101 ] && [ "$lorry_status" = "$cargo_status" ]
+cmp "$WORK/lorry-signal.out" "$WORK/cargo-signal.out"
 printf '\ncompile_error!("later target failed");\n' >>zeta/tests/integration.rs
 for compiler in lorry cargo; do
     command=(env HOME="$WORK/home" "$LORRY")

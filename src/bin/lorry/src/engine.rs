@@ -414,16 +414,19 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 let status = run_artifact(
                     artifact,
                     &options.arguments,
-                    &current,
-                    &crate::compile::runtime_environment(
-                        &cargo,
-                        &manifest,
-                        &artifacts.library_paths,
-                        None,
-                    )?,
                     physical_target.as_deref(),
                     &target_options,
-                    cli.verbosity,
+                    &RuntimeOptions {
+                        current_dir: &current,
+                        environment: &crate::compile::runtime_environment(
+                            &cargo,
+                            &manifest,
+                            &artifacts.library_paths,
+                            None,
+                        )?,
+                        kind: process::ChildKind::Program,
+                        verbosity: cli.verbosity,
+                    },
                 )?;
                 crate::trace::event("program exited");
                 Ok(status)
@@ -546,16 +549,19 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             let status = run_artifact(
                 artifact,
                 &options.arguments,
-                &current,
-                &crate::compile::runtime_environment(
-                    &cargo,
-                    &manifest,
-                    &artifacts.library_paths,
-                    None,
-                )?,
                 physical_target.as_deref(),
                 &target_options,
-                cli.verbosity,
+                &RuntimeOptions {
+                    current_dir: &current,
+                    environment: &crate::compile::runtime_environment(
+                        &cargo,
+                        &manifest,
+                        &artifacts.library_paths,
+                        None,
+                    )?,
+                    kind: process::ChildKind::Program,
+                    verbosity: cli.verbosity,
+                },
             )?;
             crate::trace::event("program exited");
             Ok(status)
@@ -657,11 +663,14 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     let result = run_artifact(
                         &harness.executable,
                         &options.arguments,
-                        &member.root,
-                        &harness.environment,
                         physical_target.as_deref(),
                         &target_options,
-                        cli.verbosity,
+                        &RuntimeOptions {
+                            current_dir: &member.root,
+                            environment: &harness.environment,
+                            kind: process::ChildKind::Test,
+                            verbosity: cli.verbosity,
+                        },
                     );
                     let status = match result {
                         Ok(status) => status,
@@ -3117,14 +3126,19 @@ pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits
     })
 }
 
+struct RuntimeOptions<'a> {
+    current_dir: &'a Path,
+    environment: &'a BTreeMap<String, OsString>,
+    kind: process::ChildKind,
+    verbosity: Verbosity,
+}
+
 fn run_artifact(
     artifact: &Path,
     arguments: &[String],
-    current_dir: &Path,
-    environment: &BTreeMap<String, OsString>,
     physical_target: Option<&str>,
     target_options: &TargetOptions,
-    verbosity: Verbosity,
+    options: &RuntimeOptions<'_>,
 ) -> Result<i32> {
     let mut child_arguments: Vec<OsString> = Vec::new();
     let program: &OsStr;
@@ -3146,9 +3160,10 @@ fn run_artifact(
     process::run_child(
         program,
         &child_arguments,
-        current_dir,
-        environment,
-        verbosity == Verbosity::Verbose,
+        options.current_dir,
+        options.environment,
+        options.kind,
+        options.verbosity == Verbosity::Verbose,
     )
 }
 
@@ -4912,11 +4927,14 @@ mod tests {
             run_artifact(
                 &bundle,
                 &["--list".to_owned()],
-                &fixture.0,
-                &BTreeMap::new(),
                 Some("cross-target"),
                 &runner_options,
-                Verbosity::Quiet,
+                &RuntimeOptions {
+                    current_dir: &fixture.0,
+                    environment: &BTreeMap::new(),
+                    kind: process::ChildKind::Test,
+                    verbosity: Verbosity::Quiet,
+                },
             )
             .unwrap(),
             0
