@@ -20,6 +20,33 @@ pub(crate) struct SourceWorkspace {
 }
 
 impl SourceWorkspace {
+    // Source-only discovery leaves the lock and execution settings untouched.
+    // Dependency operations explicitly opt into the shared root context.
+    #[allow(dead_code)] // Used by the shared dependency commands introduced next.
+    pub(crate) fn load_locked_context(&mut self) -> Result<()> {
+        let path = self.root.join(MANIFEST_NAME);
+        let document = Document::load(&path, "Cargo workspace manifest")?;
+        let patches = super::parse_patches(&path, &document, &self.root)?;
+        let (dev, release, profile_errors) = super::parse_profiles(&path, &document)?;
+        let lock_path = self.root.join(super::LOCK_NAME);
+        let lock = super::Lockfile::load(&lock_path)?;
+        let members = self
+            .packages
+            .iter()
+            .map(|package| (package.name.clone(), package.root.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for package in &mut self.packages {
+            package.workspace_root.clone_from(&self.root);
+            package.workspace_members.clone_from(&members);
+            package.patches.clone_from(&patches);
+            package.dev.clone_from(&dev);
+            package.release.clone_from(&release);
+            package.profile_errors.clone_from(&profile_errors);
+            package.lock = Some(lock.clone());
+        }
+        Ok(())
+    }
+
     // Editor discovery describes source targets before dependency preparation.
     // It must neither inspect nor repair Cargo.lock or admission state.
     pub fn load(current: &Path, manifest_path: Option<&Path>) -> Result<Self> {

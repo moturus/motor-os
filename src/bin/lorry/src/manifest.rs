@@ -3557,7 +3557,8 @@ unsafe_code = { level = "forbid", priority = 1 }
             root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"app\", \"shared\"]\nresolver = \"2\"\n\
              [profile.dev]\npanic = \"abort\"\n\
-             [profile.release]\nlto = \"thin\"\ncodegen-units = 2\n",
+             [profile.release]\nlto = \"thin\"\ncodegen-units = 2\n\
+             [patch.crates-io]\nshared = { path = \"shared\" }\n",
         )
         .unwrap();
         fs::write(
@@ -3642,7 +3643,23 @@ unsafe_code = { level = "forbid", priority = 1 }
                 .to_string()
                 .contains("did not match")
         );
-        let workspace = SourceWorkspace::load(&root, None).unwrap();
+        let mut workspace = SourceWorkspace::load(&root, None).unwrap();
+        assert!(
+            workspace
+                .packages
+                .iter()
+                .all(|member| member.lock.is_none())
+        );
+        workspace.load_locked_context().unwrap();
+        for member in &workspace.packages {
+            assert_eq!(member.workspace_root, root);
+            assert_eq!(member.workspace_members, from_root.workspace_members);
+            assert_eq!(member.lock, from_root.lock);
+            assert_eq!(member.dev, from_root.dev);
+            assert_eq!(member.release, from_root.release);
+            assert_eq!(member.patches, from_root.patches);
+            assert_eq!(member.patches.len(), 1);
+        }
         let selection = PackageSelection {
             packages: vec!["app".to_owned(), "app@0.1".to_owned(), "sha*".to_owned()],
             ..PackageSelection::default()
