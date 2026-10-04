@@ -1337,6 +1337,15 @@ cold Cargo for this content oracle. The unchanged-build probe now establishes
 the same build selection before its warm assertion, and its inverted grep
 checks are explicit failures instead of relying on shell errexit.
 
+The remaining discovery audit reproduced an automatic-library bug: source
+metadata included `src/lib.rs` despite `autolib = false`, while Cargo
+reported only the binary (`/tmp/lorry-m5-autolib-{original,cargo}.json`).
+The reader now honors that flag in all modes, while an explicit `[lib]`
+remains enabled. Root manifests accept and validate the flag too. The paired
+workspace metadata contract passed in `/tmp/lorry-m5-autolib-contract.log`;
+it also builds a package whose disabled library contains `compile_error!`,
+and both tools reject a nonboolean flag.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,

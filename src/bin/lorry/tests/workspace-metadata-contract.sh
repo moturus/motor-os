@@ -161,6 +161,27 @@ cp "$WORK/target.baseline" "$PROJECT/app/Cargo.toml"
 )
 sha256sum "${source_files[@]}" >"$WORK/sources.after"
 cmp "$WORK/sources.before" "$WORK/sources.after"
+package "$WORK/automatic-library"
+printf '\nautolib = false\n' >>"$WORK/automatic-library/Cargo.toml"
+printf 'compile_error!("disabled automatic library compiled");\n' >"$WORK/automatic-library/src/lib.rs"
+printf 'fn main() {}\n' >"$WORK/automatic-library/src/main.rs"
+agrees_with_cargo "$WORK/automatic-library/Cargo.toml" disabled-library
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" generate-lockfile --offline \
+    --manifest-path "$WORK/automatic-library/Cargo.toml"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    HOME="$WORK/home" RUSTC="$LORRY_TEST_RUSTC" "$builder" build --offline \
+        --manifest-path "$WORK/automatic-library/Cargo.toml"
+done
+# An explicit library remains enabled even when automatic discovery is off.
+printf '\n[lib]\n' >>"$WORK/automatic-library/Cargo.toml"
+agrees_with_cargo "$WORK/automatic-library/Cargo.toml" explicit-library
+sed 's/autolib = false/autolib = "false"/' "$WORK/automatic-library/Cargo.toml" \
+    >"$WORK/invalid-autolib.toml"
+cp "$WORK/invalid-autolib.toml" "$WORK/automatic-library/Cargo.toml"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    if "$builder" metadata --no-deps --manifest-path "$WORK/automatic-library/Cargo.toml" \
+        2>"$WORK/invalid-autolib.err"; then exit 1; fi
+done
 for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
     if "$builder" metadata --manifest-path "$PROJECT/Cargo.toml" --no-deps -p app \
         >"$WORK/selected.json" 2>"$WORK/selected.err"; then

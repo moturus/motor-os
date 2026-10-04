@@ -1049,6 +1049,7 @@ fn validate_package_keys(
         "include",
         "exclude",
         "default-run",
+        "autolib",
         "autobins",
         "autoexamples",
         "autobenches",
@@ -1075,7 +1076,7 @@ fn validate_package_keys(
             ));
         }
     }
-    for key in ["autobins", "autoexamples", "autobenches"] {
+    for key in ["autolib", "autobins", "autoexamples", "autobenches"] {
         if let Some(item) = package.get(key)
             && item.as_bool().is_none()
         {
@@ -1243,6 +1244,16 @@ fn parse_library(
     mode: ManifestMode,
 ) -> Result<Option<LibraryTarget>> {
     let Some(item) = document.root().get("lib") else {
+        if document
+            .root()
+            .get("package")
+            .and_then(Item::as_table)
+            .and_then(|package| package.get("autolib"))
+            .and_then(Item::as_bool)
+            == Some(false)
+        {
+            return Ok(None);
+        }
         return Ok(root.join("src/lib.rs").is_file().then(|| LibraryTarget {
             name: package_name.replace('-', "_"),
             path: root.join("src/lib.rs"),
