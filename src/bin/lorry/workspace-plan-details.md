@@ -1904,6 +1904,24 @@ compilation on the warm shortcut. Original evidence is
 workspace contract passes in
 `/tmp/lorry-m6-workspace-scope-and-freshness-fixed.log`.
 
+The next full gate passed the host contracts and reached native self-build
+preparation, then rejected complete dependency depth 20 against limit 16.
+Original evidence is `/tmp/lorry-m6-full-workspace-contract-fixed.log` and
+`target/lorry/native-self-tests/self-20261004T161438Z-67860/summary.txt`.
+The unchanged Cargo.lock independently confirms the 20-edge source path:
+`lorry -> gix -> gix-worktree -> gix-index -> gix-traverse -> gix-revwalk ->
+gix-object -> gix-actor -> gix-date -> jiff -> jiff-static -> jiff-core ->
+defmt -> defmt-macros -> defmt-parser -> thiserror -> thiserror-impl -> syn ->
+quote -> proc-macro2 -> unicode-ident`.
+Its identities are saved in `/tmp/lorry-m6-depth-complete-lock-path.json`.
+The current offline Cargo build unit graph instead has maximum package depth
+16, with the inactive defmt branch absent; evidence is
+`/tmp/lorry-m6-depth-current-cargo-unit-graph.{json,log}`. This is a real
+complete-graph bound failure, not transient networking or a depth-calculation
+error. No retry or raised limit was used. Guidance is requested on whether
+`max-depth` should retain its reviewed/build scope or also constrain complete
+lock resolution. M6 remains incomplete, and no depth-policy change is applied.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.
