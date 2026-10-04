@@ -65,9 +65,18 @@ options work after command names. Offline commands now accept `--locked`,
 warning. Compiler commands accept Cargo's positive, relative negative, and
 `default` job counts, and build scripts receive the effective `NUM_JOBS`.
 These patches passed focused CLI, metadata, workspace, and script contracts.
-Warning replay, real diagnostic paths, dynamic library search paths, Lorry's
-own error messages, `test NAME`, locate-project forms, documentation, and the
-full milestone gate remain. The own-message option name is under review.
+The owner approved `--lorry-messages`; its usage, failure, and interrupted
+error records are emitted on stderr, separately from Cargo JSON stdout.
+`test NAME` and the default/plain locate-project forms are implemented.
+Published units and library-cache restores replay warnings, and completed
+profiles replay Cargo events without starting compilers or build scripts.
+Diagnostic paths are translated back to physical sources, and programs and
+harnesses receive Cargo runtime library search paths. The paired Cargo
+contracts cover cold and fresh build/check/test streams and failed builds.
+They found and fixed the build-script artifact's `executable` field; Cargo
+reports null there. Check comparisons explicitly account for the plan's
+deferred metadata-only dependency checking. Focused contracts pass. The
+full milestone gate remains before milestone 3 can be marked complete.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

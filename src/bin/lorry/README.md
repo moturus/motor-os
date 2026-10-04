@@ -122,8 +122,8 @@ unless one exact `--bin` is selected. `run` selects `--bin`, then
 
 `run` returns the program's status. Ordinary tests build separate library,
 binary, and integration-test harnesses, then run them in order and stop at the
-first failure. Positional `NAME` filters test names in each harness; `--test
-NAME` selects one integration-test target. `--no-run` prints
+first failure. Positional `NAME` filters test names in each harness;
+`--test NAME` selects one integration-test target. `--no-run` prints
 the built harness paths.
 
 Normal builds report dependency verification and preparation, then each
@@ -189,7 +189,7 @@ not force immutable dependencies to be recompiled. `lorry cache clean` may be
 run outside a package and removes the configured global Lorry cache. It
 succeeds when the cache is already absent.
 
-## Inspect and check
+## Tools and agents
 
 For tools and agents, `--lorry-messages` emits Lorry's own errors as one JSON
 object per line on stderr. Each `lorry-error` object carries `kind`, `text`,
@@ -197,11 +197,35 @@ object per line on stderr. Each `lorry-error` object carries `kind`, `text`,
 failures 101, and interrupted operations 130. Pair the option with `-q` to
 suppress human progress. Cargo events selected with `--message-format=json`
 stay on stdout; programs and test harnesses keep their ordinary output.
+For an unattended build, use `lorry -q build --locked --offline
+--message-format=json --lorry-messages`. The compile commands never prompt or
+download; dependency acquisition and review are explicit `vendor` operations.
+The separate streams let an agent read Cargo events on stdout and Lorry
+errors on stderr. Successful commands need not emit an own-message event.
+
+Build, check, run, and test accept `json`, `json-diagnostic-rendered-ansi`, and
+their comma-separated combination. Each stream ends with one `build-finished`
+event. On run and test it describes compilation, before the child starts;
+the child's exit status remains the command's result. Use `test --no-run` when
+stdout must contain only Cargo events. Fresh units and completed build profiles
+replay their warnings and report artifacts with `fresh: true`. Diagnostic
+spans and rendered locations refer to actual source files, including the
+persistent source views used for immutable dependencies.
+
+Programs and ordinary harnesses receive Cargo package variables and a library
+search path containing the target profile, its artifact directories, native
+search directories below that profile, and the target's standard library.
+Inherited library search paths are preserved. Test bundles retain their
+separate execution rules.
+
+## Inspect and check
 
 ```text
 lorry metadata [--format-version 1] [--manifest-path PATH] [--no-deps]
                [--filter-platform TRIPLE] [--locked|--offline|--frozen]
 lorry tree [--manifest-path PATH] [--target TRIPLE]
+lorry locate-project [--workspace] [--manifest-path PATH]
+                     [--message-format json|plain]
 lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH]
             [--target-dir DIRECTORY] [--target TRIPLE]
             [--workspace] [-q|--quiet] [--keep-going]
@@ -230,6 +254,12 @@ Source metadata reads only workspace membership: `members` (which may list
 accepted. Build-only tables, such as profiles and patches, are ignored.
 Workspace inheritance, member globs, and example and bench targets are not
 supported yet.
+
+`locate-project` emits `{"root":"/absolute/path/Cargo.toml"}`, or the path
+alone with `--message-format plain`. The manifest must currently be in the
+working directory or supplied with `--manifest-path`. Both with and without
+`--workspace`, a selected member still locates itself; workspace-root lookup
+and parent-directory discovery arrive in later workspace milestones.
 
 Without `--no-deps`, the command verifies and resolves the selected package's
 admitted graph and publishes stable content-addressed source views needed by

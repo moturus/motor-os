@@ -123,10 +123,20 @@ lorry [+toolchain] [GLOBAL] build  [-p NAME] [--bin NAME]
                                   [--release|-r] [--target TRIPLE]
                                   [--target-dir DIRECTORY] [--strict-validation]
 lorry [+toolchain] [GLOBAL] cache clean
+lorry [+toolchain] [GLOBAL] check  [-p NAME|PACKAGE_ID] [--manifest-path PATH]
+                                  [--target-dir DIRECTORY] [--target TRIPLE]
+                                  [--workspace] [--keep-going]
+                                  [--all-targets|--lib|--bins|--bin NAME|--test NAME|--examples]
+                                  [--message-format FORMAT] [--release|-r]
 lorry [+toolchain] [GLOBAL] clean  [-p NAME]
                                   [--release|-r] [--target TRIPLE]
                                   [--target-dir DIRECTORY]
 lorry [+toolchain] [GLOBAL] new PATH
+lorry [+toolchain] [GLOBAL] locate-project [--workspace] [--manifest-path PATH]
+                                          [--message-format json|plain]
+lorry [+toolchain] [GLOBAL] metadata [-p NAME] [--format-version 1]
+                                    [--manifest-path PATH] [--no-deps]
+                                    [--filter-platform TRIPLE]
 lorry [+toolchain] [GLOBAL] review [-p NAME]
 lorry [+toolchain] [GLOBAL] run    [-p NAME] [--bin NAME]
                                   [--release|-r] [--target TRIPLE]
@@ -138,6 +148,10 @@ lorry [+toolchain] [GLOBAL] test   [NAME] [-p NAME]
                                   [--no-run] [--bundle]
                                   [-- ARGS...]
 lorry [+toolchain] [GLOBAL] vendor [-p NAME] [--accept-all]
+lorry [+toolchain] [GLOBAL] tree   [-p NAME] [--manifest-path PATH] [--target TRIPLE]
+lorry [+toolchain] [GLOBAL] rustc -Z unstable-options --print cfg --target TRIPLE -- -O
+lorry [+toolchain] [GLOBAL] rustc -Z unstable-options --print target-spec-json
+                                --target TRIPLE -- -Z unstable-options
 lorry [+toolchain] [GLOBAL] vendor [-p NAME] upgrade PACKAGE[@OLD_VERSION] --to VERSION
 lorry --help|-h
 lorry --version|-V
@@ -146,7 +160,8 @@ lorry help [COMMAND]
 
 Global options are `--quiet|-q`, `--verbose|-v`,
 `--color auto|always|never`, and the offline local-Cargo-cache option
-`--use-cargo-registry` for `build`, `run`, and `test`. Long value options
+`--use-cargo-registry` for `build`, `check`, `run`, `test`, resolved `metadata`,
+and `tree`. Long value options
 accept both `--name value` and `--name=value`.
 
 The global `--lorry-messages` option emits Lorry errors as newline-delimited
@@ -163,6 +178,14 @@ acquisition and lock-file changes, so the flags preserve their existing
 constraints. They do not apply to `vendor` or its admission workflow.
 `metadata` defaults to format version 1 and warns when `--format-version`
 is omitted, except in quiet mode, as Cargo does.
+
+`locate-project` defaults to JSON and accepts plain output. With no explicit
+manifest, it currently reads `Cargo.toml` in the working directory. Parent
+discovery waits for milestone 5. A member still locates itself even with
+`--workspace`; workspace-root answers wait for milestone 9.
+The two `rustc` query forms above are read-only compatibility queries; other
+`cargo rustc` forms are rejected. Build, check, run, and test share the message
+formats described below, and accept their options after the command name.
 
 `build`, `check`, `run`, and `test` accept `-j N` and `--jobs N`.
 A positive count sets compiler concurrency, a negative count subtracts from
@@ -1048,10 +1071,21 @@ compilation, before starting programs or harnesses. Its success describes
 the build even when the child later fails. Child stdout remains plain text.
 `test --no-run` emits harness artifact paths with `profile.test = true`
 without adding human path lines to the Cargo stream.
+All published compiler units and restored library cache entries retain and
+replay their diagnostics. Completed profiles retain the Cargo event stream,
+so unchanged ordinary build and run commands report fresh artifacts and
+warnings without starting build scripts or compilers. Paths in nested
+diagnostic spans and rendered locations are translated back to physical
+sources; immutable sources have persistent content-addressed views.
 
 Programs started by `run` and ordinary test harnesses receive `CARGO`,
 `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH`, and the selected package's
-`CARGO_PKG_*` values. Integration harnesses also receive `CARGO_BIN_EXE_*`
+`CARGO_PKG_*` values. Runtime library search paths contain native search
+directories below the target profile, the profile and artifact directories,
+and the compiler's target library directory. Inherited paths remain intact,
+with Cargo's rule for avoiding a repeated prefix. Completed profiles retain
+these paths, so warm runs need no additional compiler query.
+Integration harnesses also receive `CARGO_BIN_EXE_*`
 for the built programs. `run` preserves the caller's working directory;
 harnesses use their package root. Test bundles retain their launcher rules.
 The global `-q`/`--quiet`, `-v`/`--verbose`, and `--color` options also
