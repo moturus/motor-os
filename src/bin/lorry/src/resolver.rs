@@ -26,6 +26,7 @@ use workspace::resolve_complete_workspace;
 
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
+    fetch_hint: bool,
     records: BTreeMap<String, Vec<Candidate>>,
     paths: BTreeMap<PathBuf, PackageKey>,
     locked_repository: Option<LockedRepository>,
@@ -35,6 +36,9 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub(crate) fn use_fetch_hint(&mut self) {
+        self.fetch_hint = true;
+    }
     pub fn from_locked_repository(
         manifest: &Manifest,
         repositories: &RepositorySet,
@@ -399,6 +403,10 @@ impl Catalog {
             .collect::<Vec<_>>()
             .join(", ");
         let (location, action) = match source {
+            LockedRegistrySource::Lorry(_) if self.fetch_hint => (
+                "the configured Lorry repositories",
+                "; run `lorry fetch` to acquire the missing locked package",
+            ),
             LockedRegistrySource::Lorry(_) => (
                 "the configured Lorry repositories",
                 "; run `lorry vendor [--accept-all]` to acquire the missing package",

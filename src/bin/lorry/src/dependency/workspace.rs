@@ -26,6 +26,7 @@ pub(crate) fn resolve_locked(
         .as_ref()
         .ok_or_else(|| Error::failure("workspace dependency preparation requires Cargo.lock"))?;
     let mut catalog = locked_catalog(context, config, source, Some(direct))?;
+    catalog.use_fetch_hint();
     let complete = resolve_complete_workspace(
         workspace,
         &mut catalog,

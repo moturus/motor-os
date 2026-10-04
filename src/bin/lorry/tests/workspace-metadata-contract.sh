@@ -113,6 +113,68 @@ for directory in "$PROJECT/tools/helper" "$PROJECT/tools/helper/nested" \
     "$PROJECT/tools/excluded" "$WORK/outside"; do
     package "$directory"
 done
+
+# Resolved metadata describes every member without admission or compilation.
+RESOLVED="$WORK/resolved"
+mkdir -p "$RESOLVED/.cargo"
+cat >"$RESOLVED/Cargo.toml" <<'EOF'
+[workspace]
+members = ["app", "shared"]
+exclude = ["windows-only"]
+default-members = ["app"]
+resolver = "2"
+EOF
+for member in app shared windows-only; do
+    package "$RESOLVED/$member"
+done
+cat >>"$RESOLVED/app/Cargo.toml" <<'EOF'
+[dependencies]
+shared = { path = "../shared" }
+[dev-dependencies]
+shared = { path = "../shared", features = ["dev"] }
+[target.'cfg(windows)'.dependencies]
+shared = { path = "../shared", features = ["windows"] }
+windows-only = { path = "../windows-only" }
+[features]
+default = ["shared/base"]
+extra = ["shared/extra"]
+EOF
+cat >>"$RESOLVED/shared/Cargo.toml" <<'EOF'
+[features]
+base = []
+extra = []
+dev = []
+windows = []
+EOF
+printf 'compile_error!("metadata must never compile this build script");\n' \
+    >"$RESOLVED/shared/build.rs"
+printf '[build]\ntarget = "x86_64-pc-windows-msvc"\n' >"$RESOLVED/.cargo/config.toml"
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" generate-lockfile --offline \
+    --manifest-path "$RESOLVED/Cargo.toml"
+cp "$RESOLVED/Cargo.lock" "$WORK/resolved-lock-before"
+resolved_agrees_with_cargo() {
+    local name="$1" manifest="$2"
+    shift 2
+    (cd "$RESOLVED"; HOME="$WORK/home" RUSTC="$LORRY_TEST_RUSTC" "$LORRY" metadata \
+        --locked --offline --format-version 1 --manifest-path "$manifest" "$@") \
+        >"$WORK/$name.lorry.json"
+    (cd "$RESOLVED"; RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" metadata \
+        --locked --offline --format-version 1 --manifest-path "$manifest" "$@") \
+        >"$WORK/$name.cargo.json"
+    RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" run --quiet --locked --offline \
+        --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- \
+        compare "$WORK/$name.lorry.json" "$WORK/$name.cargo.json"
+    cmp "$RESOLVED/Cargo.lock" "$WORK/resolved-lock-before"
+    [ ! -e "$RESOLVED/.lorry" ]
+    [ ! -e "$RESOLVED/target" ]
+}
+resolved_agrees_with_cargo resolved-default "$RESOLVED/Cargo.toml"
+resolved_agrees_with_cargo resolved-feature "$RESOLVED/Cargo.toml" --features app/extra
+resolved_agrees_with_cargo resolved-all "$RESOLVED/Cargo.toml" --all-features --no-default-features
+resolved_agrees_with_cargo resolved-linux "$RESOLVED/Cargo.toml" \
+    --filter-platform x86_64-unknown-linux-gnu
+resolved_agrees_with_cargo resolved-member "$RESOLVED/app/Cargo.toml" --features extra
+echo "PASS: resolved workspace metadata matches Cargo features and platforms without admission"
 printf '[dev-dependencies]\nnested = { path = "nested" }\n' >>"$PROJECT/tools/helper/Cargo.toml"
 
 # No compiler, configuration, lockfile, or admission is needed to describe

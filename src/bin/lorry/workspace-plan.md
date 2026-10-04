@@ -149,8 +149,12 @@ Milestone 6 is in progress. The resolver can solve every member together,
 including optional, development, and platform edges, then project selected
 features without changing the chosen dependency identities. Workspace MSRV
 ranking, Cargo lock formats, and exact lock validation have focused tests;
-offline Cargo locks match across the format thresholds. Command integration,
-exact resolved metadata, fetch, and workspace admission remain to be done.
+offline Cargo locks match across the format thresholds. Resolved metadata now
+uses the shared graph without execution admission, resolves CLI features across
+members, and filters package reachability without narrowing feature lists.
+Focused offline command contracts match Cargo and preserve the lock, admission,
+and output state. Fetch, workspace admission, and remaining source-description
+coverage are still in progress; the full milestone gate has not run yet.
 
 ## Goal
 

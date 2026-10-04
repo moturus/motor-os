@@ -330,6 +330,7 @@ impl Manifest {
         Self::load_project(root, &PackageSelection::single(package), false)
     }
 
+    #[cfg(test)]
     pub fn load_selected_or_manifest_path(
         root: &Path,
         manifest_path: Option<&Path>,

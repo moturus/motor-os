@@ -3,7 +3,6 @@ use crate::dependency::workspace::PreparedSources;
 use crate::resolver::Resolution;
 use crate::toolchain::TargetInfo;
 
-#[allow(dead_code)] // Wired into the metadata command in the next patch.
 pub(crate) fn resolved(
     workspace: &SourceWorkspace,
     prepared: &PreparedSources,

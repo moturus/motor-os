@@ -42,6 +42,7 @@ pub(super) fn no_dependencies(workspace: &SourceWorkspace) -> Result<wire::Metad
     )
 }
 
+#[allow(dead_code)] // Removed after the workspace command integration is verified.
 pub(crate) fn resolved(
     manifest: &Manifest,
     prepared: &PreparedGraph,

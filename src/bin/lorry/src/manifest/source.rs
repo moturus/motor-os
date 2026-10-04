@@ -22,7 +22,6 @@ pub(crate) struct SourceWorkspace {
 impl SourceWorkspace {
     // Source-only discovery leaves the lock and execution settings untouched.
     // Dependency operations explicitly opt into the shared root context.
-    #[allow(dead_code)] // Used by the shared dependency commands introduced next.
     pub(crate) fn load_locked_context(&mut self) -> Result<()> {
         let path = self.root.join(MANIFEST_NAME);
         let document = Document::load(&path, "Cargo workspace manifest")?;

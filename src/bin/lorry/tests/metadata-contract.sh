@@ -102,11 +102,16 @@ export HOME="$TEST_HOME"
 "$LORRY" metadata --format-version 1 --no-deps \
     --manifest-path "$PROJECT/Cargo.toml" >"$WORK/no-deps.json"
 [ ! -e "$WORK/cache/sources" ]
+mv "$PROJECT/.lorry" "$WORK/admission-backup"
+cp -R "$PROJECT/target" "$WORK/target-before"
 "$LORRY" metadata --format-version 1 --filter-platform x86_64-unknown-linux-gnu \
     --locked --offline --frozen --manifest-path "$PROJECT/Cargo.toml" >"$WORK/lorry.json"
 "$LORRY" metadata --format-version 1 --filter-platform x86_64-unknown-linux-gnu \
     --locked --manifest-path "$PROJECT/Cargo.toml" >"$WORK/lorry-again.json"
 cmp "$WORK/lorry.json" "$WORK/lorry-again.json"
+[ ! -e "$PROJECT/.lorry" ] || fail "metadata created admission state"
+diff -r "$WORK/target-before" "$PROJECT/target" || fail "metadata changed compilation outputs"
+mv "$WORK/admission-backup" "$PROJECT/.lorry"
 cp "$PROJECT/Cargo.lock" "$WORK/lock-before"
 "$LORRY" metadata --offline --frozen --locked --no-deps \
     --manifest-path "$PROJECT/Cargo.toml" >"$WORK/default.json" 2>"$WORK/default.err"
@@ -178,13 +183,13 @@ cp "$WORK/config.backup" "$TEST_HOME/.config/lorry/lorry.toml"
 cp -R "$PROJECT" "$WORK/unsupported-target"
 sed -i '/^\[lib\]$/a crate-type = ["cdylib"]' \
     "$WORK/unsupported-target/Cargo.toml"
-if "$LORRY" metadata --format-version 1 \
+"$LORRY" metadata --format-version 1 \
     --manifest-path "$WORK/unsupported-target/Cargo.toml" \
-    >"$WORK/unsupported.out" 2>"$WORK/unsupported.err"; then
-    fail "resolved metadata accepted an unsupported custom target"
-fi
-grep -F 'custom library crate types are not supported' \
-    "$WORK/unsupported.err" >/dev/null ||
-    fail "custom-target rejection omitted its cause"
+    >"$WORK/unsupported.out" 2>"$WORK/unsupported.err"
+"$LORRY_TEST_CARGO" metadata --offline --format-version 1 \
+    --manifest-path "$WORK/unsupported-target/Cargo.toml" >"$WORK/unsupported-cargo.json"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \
+    compare "$WORK/unsupported.out" "$WORK/unsupported-cargo.json"
 
 echo "PASS: metadata is deterministic and matches Cargo for a complete path graph"
