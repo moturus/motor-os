@@ -300,11 +300,16 @@ root compilation, freshness validation, and artifact publication.
   It accepts no command-specific arguments and rejects
   `--use-cargo-registry`.
 - `test` builds all selected harnesses before running them in Cargo-compatible
-  fail-fast target order. Arguments after `--` go to every executed harness.
+  fail-fast target order: packages by name, then each package's library,
+  binaries by name, and integration tests by name. Ordinary tests accept the
+  shared workspace/package/feature selectors and dev-dependencies. Each harness
+  runs at its package root with its owning script's output environment. A
+  failing harness's exit code is propagated, as in Cargo. Arguments after `--`
+  go to every executed harness. No enabled harnesses is a successful build.
 - `test NAME` passes the name filter to each harness before arguments after
   `--`. As with Cargo, `--no-run` accepts those arguments without running a harness.
-- `test --test NAME` selects one discovered integration test and its required
-  library/program graph.
+- `test --test NAME` selects matching integration tests across selected
+  packages and their required library/program graph.
 - Ordinary `test --no-run` builds separate harnesses and prints deterministic
   paths. `test --bundle --no-run` builds one bundle and prints its path.
 - Cross-target run/test uses the configured runner as an argument vector,

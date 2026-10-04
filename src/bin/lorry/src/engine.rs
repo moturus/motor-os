@@ -61,21 +61,23 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         &cli.selection,
     )?;
     let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
-    let shared = ordinary
-        && (selected.len() > 1
-            || cli.features != crate::cli::FeatureSelection::default()
-            || selected.iter().any(|member| {
-                member.build_script.is_some()
-                    || member
-                        .binaries
-                        .iter()
-                        .any(|binary| binary.required_features.is_some())
-                    || member
-                        .library
-                        .as_ref()
-                        .is_some_and(|library| library.requires_upstream_objects())
-            }));
-    if !ordinary {
+    let shared_tests = matches!(&cli.command, Command::Test(options) if !options.bundle);
+    let shared = shared_tests
+        || ordinary
+            && (selected.len() > 1
+                || cli.features != crate::cli::FeatureSelection::default()
+                || selected.iter().any(|member| {
+                    member.build_script.is_some()
+                        || member
+                            .binaries
+                            .iter()
+                            .any(|binary| binary.required_features.is_some())
+                        || member
+                            .library
+                            .as_ref()
+                            .is_some_and(|library| library.requires_upstream_objects())
+                }));
+    if !ordinary && !shared_tests {
         cli.features.require_default()?;
     }
     if selected.len() != 1 && !shared {
@@ -237,7 +239,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
-    if matches!(&cli.command, Command::Test(_))
+    if (!shared_tests && matches!(&cli.command, Command::Test(_)))
         || matches!(&cli.command, Command::Check(options) if options.all_targets || options.test.is_some() || options.examples)
     {
         for manifest in &selected {
@@ -344,7 +346,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 &workspace,
                 &selected.iter().map(|member| member.root.clone()).collect(),
                 &cli.features,
-                false,
+                matches!(&cli.command, Command::Test(_)),
             )
         })
         .transpose()?;
@@ -562,12 +564,12 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             if cli.verbosity != Verbosity::Quiet {
                 eprintln!("note: documentation tests are not supported");
             }
-            let artifacts = build_reported(
+            let outcome = build_inner(
                 Build {
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
-                    members: None,
+                    members: shared.then_some(selected.as_slice()),
                     global_cache_root: &global_cache_root,
                     config: &config,
                     toolchain: &toolchain,
@@ -592,54 +594,77 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     ordinary_freshness_base,
                     binary_selection: None,
                 },
+                None,
                 options.build.message_format,
             )?;
+            let members = match outcome {
+                BuildOutcome::Tests(members) => members,
+                BuildOutcome::Artifacts(artifacts) => {
+                    let mut environment = crate::compile::runtime_environment(
+                        &cargo,
+                        &manifest,
+                        &artifacts.library_paths,
+                        None,
+                    )?;
+                    for (name, path) in &artifacts.binaries {
+                        environment
+                            .insert(format!("CARGO_BIN_EXE_{name}"), path.as_os_str().to_owned());
+                    }
+                    vec![MemberTestArtifacts {
+                        root: manifest.root.clone(),
+                        harnesses: artifacts
+                            .harnesses
+                            .into_iter()
+                            .map(|executable| TestExecutable {
+                                executable,
+                                environment: environment.clone(),
+                            })
+                            .collect(),
+                        bundle: artifacts.bundle.map(|executable| TestExecutable {
+                            executable,
+                            environment: BTreeMap::new(),
+                        }),
+                    }]
+                }
+                _ => unreachable!("test build returned no test artifacts"),
+            };
             report_build_completion(cli, reported)?;
             if options.no_run {
-                if options.build.message_format != MessageFormat::Human {
-                    return Ok(0);
-                } else if let Some(bundle) = &artifacts.bundle {
-                    println!("{}", bundle.display());
-                } else {
-                    for harness in &artifacts.harnesses {
-                        println!("{}", harness.display());
+                if options.build.message_format == MessageFormat::Human {
+                    for member in &members {
+                        if let Some(bundle) = &member.bundle {
+                            println!("{}", bundle.executable.display());
+                        } else {
+                            for harness in &member.harnesses {
+                                println!("{}", harness.executable.display());
+                            }
+                        }
                     }
                 }
                 return Ok(0);
             }
             drop(artifact_lock);
-            if let Some(bundle) = &artifacts.bundle {
-                return run_artifact(
-                    bundle,
-                    &options.arguments,
-                    &manifest.root,
-                    &BTreeMap::new(),
-                    physical_target.as_deref(),
-                    &target_options,
-                    cli.verbosity,
-                );
-            }
-            let mut environment = crate::compile::runtime_environment(
-                &cargo,
-                &manifest,
-                &artifacts.library_paths,
-                None,
-            )?;
-            for (name, path) in &artifacts.binaries {
-                environment.insert(format!("CARGO_BIN_EXE_{name}"), path.as_os_str().to_owned());
-            }
-            for harness in &artifacts.harnesses {
-                let status = run_artifact(
-                    harness,
-                    &options.arguments,
-                    &manifest.root,
-                    &environment,
-                    physical_target.as_deref(),
-                    &target_options,
-                    cli.verbosity,
-                )?;
-                if status != 0 {
-                    return Ok(status);
+            for member in &members {
+                let executables = member
+                    .bundle
+                    .as_ref()
+                    .map_or_else(|| member.harnesses.as_slice(), std::slice::from_ref);
+                for harness in executables {
+                    if cli.verbosity != Verbosity::Quiet {
+                        eprintln!("Running {}", harness.executable.display());
+                    }
+                    let status = run_artifact(
+                        &harness.executable,
+                        &options.arguments,
+                        &member.root,
+                        &harness.environment,
+                        physical_target.as_deref(),
+                        &target_options,
+                        cli.verbosity,
+                    )?;
+                    if status != 0 {
+                        return Ok(status);
+                    }
                 }
             }
             Ok(0)
@@ -694,6 +719,17 @@ struct BuildArtifacts {
     bundle: Option<PathBuf>,
     messages: Vec<serde_json::Value>,
     library_paths: Vec<PathBuf>,
+}
+
+struct TestExecutable {
+    executable: PathBuf,
+    environment: BTreeMap<String, OsString>,
+}
+
+struct MemberTestArtifacts {
+    root: PathBuf,
+    harnesses: Vec<TestExecutable>,
+    bundle: Option<TestExecutable>,
 }
 
 struct IncrementalRoots {
@@ -921,6 +957,7 @@ fn unknown_binary(manifest: &Manifest, name: &str) -> Error {
 
 enum BuildOutcome {
     Artifacts(BuildArtifacts),
+    Tests(Vec<MemberTestArtifacts>),
     Check(i32),
     NoTargets,
 }
@@ -937,6 +974,7 @@ fn build_reported(build: Build<'_>, format: MessageFormat) -> Result<BuildArtifa
         BuildOutcome::NoTargets => Err(Error::failure(
             "selected package has no enabled executable or test targets",
         )),
+        BuildOutcome::Tests(_) => unreachable!("ordinary build returned workspace tests"),
     }
 }
 
@@ -950,6 +988,7 @@ fn check(build: Build<'_>, target_root: &Path, options: &CheckOptions) -> Result
         BuildOutcome::Check(code) => Ok(code),
         BuildOutcome::Artifacts(_) => unreachable!("check returned ordinary build artifacts"),
         BuildOutcome::NoTargets => unreachable!("check returned an ordinary no-target build"),
+        BuildOutcome::Tests(_) => unreachable!("check returned workspace tests"),
     }
 }
 
@@ -960,10 +999,15 @@ fn build_inner(
 ) -> Result<BuildOutcome> {
     if let Some(name) = build.test_name
         && !build
-            .manifest
-            .integration_tests
+            .members
+            .unwrap_or_else(|| std::slice::from_ref(build.manifest))
             .iter()
-            .any(|target| target.name == name)
+            .any(|member| {
+                member
+                    .integration_tests
+                    .iter()
+                    .any(|target| target.name == name)
+            })
     {
         return Err(unknown_integration_test(build.manifest, name));
     }
@@ -1239,32 +1283,45 @@ fn build_inner(
     } else {
         None
     };
-    let selected_integration =
-        build.test && (build.test_name.is_some() || !build.manifest.integration_tests.is_empty());
+    let selected_integration = build.test
+        && (build.test_name.is_some()
+            || build
+                .members
+                .unwrap_or_else(|| std::slice::from_ref(build.manifest))
+                .iter()
+                .any(|member| !member.integration_tests.is_empty()));
     let check_integration = check.is_some_and(|(_, options)| {
         options.selects_tests() && !build.manifest.integration_tests.is_empty()
     });
-    let integration_binaries = (selected_integration || check_integration).then(|| {
-        let binaries = build
-            .manifest
-            .binaries
-            .iter()
-            .map(|binary| {
-                (
-                    binary.name.clone(),
-                    if check_integration {
-                        destination.join(&binary.name)
-                    } else {
-                        bundle_layout.as_ref().map_or_else(
-                            || destination.join(&binary.name),
-                            |layout| layout.program(&binary.name),
-                        )
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        BTreeMap::from([(selected_root.package.clone(), binaries)])
-    });
+    let integration_binaries = (selected_integration || check_integration)
+        .then(|| {
+            build
+                .members
+                .unwrap_or_else(|| std::slice::from_ref(build.manifest))
+                .iter()
+                .map(|member| {
+                    let binaries = member
+                        .binaries
+                        .iter()
+                        .map(|binary| {
+                            (
+                                binary.name.clone(),
+                                if check_integration {
+                                    destination.join(&binary.name)
+                                } else {
+                                    bundle_layout.as_ref().map_or_else(
+                                        || destination.join(&binary.name),
+                                        |layout| layout.program(&binary.name),
+                                    )
+                                },
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    Ok((selected_library_key(member)?.package, binaries))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()
+        })
+        .transpose()?;
     let integration_temp_dirs = (selected_integration || check_integration).then(|| {
         let directory = if check_integration {
             destination.clone()
@@ -1274,7 +1331,11 @@ fn build_inner(
                 bundle::Layout::temporary_directory,
             )
         };
-        BTreeMap::from([(selected_root.package.clone(), directory)])
+        selected_packages
+            .iter()
+            .cloned()
+            .map(|package| (package, directory.clone()))
+            .collect::<BTreeMap<_, _>>()
     });
     if let Some(directories) = &integration_temp_dirs
         && !check_integration
@@ -1365,6 +1426,80 @@ fn build_inner(
             eprintln!("Finished `check` profile");
         }
         return Ok(BuildOutcome::Check(0));
+    }
+    if build.test
+        && let Some(members) = build.members
+    {
+        let plan = prepared.workspace_test_plan(
+            &PlanOptions {
+                workspace_root: &build.manifest.workspace_root,
+                release: build.release,
+                test_profile: false,
+                panic_abort: build.manifest.panic_abort(build.release),
+                dev_profile: &build.manifest.dev,
+                release_profile: &build.manifest.release,
+                rustc: build.toolchain,
+                logical_target: build.logical_target,
+                rustflags: build.rustflags,
+            },
+            &selected_packages,
+            build.test_name,
+        )?;
+        let outputs = executor::execute(&plan, &manifests, &executor_options)?;
+        if build.validation.is_strict() {
+            prepared.revalidate_cargo_registry_sources(source_limits)?;
+        }
+        let library_paths =
+            runtime_library_paths(&build, &destination, &message_reporter.messages())?;
+        let mut members = members.iter().collect::<Vec<_>>();
+        members.sort_by_key(|member| &member.name);
+        let mut tests = Vec::new();
+        for member in members {
+            let package = selected_library_key(member)?.package;
+            let targets = collect_test_targets(&package, &destination, &plan, &outputs)?;
+            let mut harnesses = Vec::new();
+            for harness in targets.harnesses {
+                let script = plan.units[&harness.key]
+                    .unit
+                    .dependencies
+                    .iter()
+                    .find(|edge| edge.kind == crate::unit::UnitEdgeKind::BuildScriptOutput)
+                    .and_then(|edge| outputs.build_scripts.get(&edge.unit));
+                let output = script.map(|script| crate::compile::BuildOutput {
+                    output: &script.output,
+                    out_dir: &script.out_dir,
+                });
+                let mut environment = crate::compile::runtime_environment(
+                    &cargo,
+                    member,
+                    &library_paths,
+                    output.as_ref(),
+                )?;
+                if harness.key.kind == UnitKind::IntegrationHarness
+                    && let Some(programs) = integration_binaries
+                        .as_ref()
+                        .and_then(|packages| packages.get(&package))
+                {
+                    for (name, path) in programs {
+                        environment
+                            .insert(format!("CARGO_BIN_EXE_{name}"), path.as_os_str().to_owned());
+                    }
+                }
+                harnesses.push(TestExecutable {
+                    executable: harness.executable,
+                    environment,
+                });
+            }
+            tests.push(MemberTestArtifacts {
+                root: member.root.clone(),
+                harnesses,
+                bundle: None,
+            });
+        }
+        if build.verbosity != Verbosity::Quiet {
+            eprintln!("Finished `test` profile");
+        }
+        return Ok(BuildOutcome::Tests(tests));
     }
     invalidate_fresh_profile(&destination, &build.manifest.root)?;
     let needs_normal_plan =
@@ -2785,9 +2920,14 @@ fn compile_test_targets(
     })
 }
 
+struct CollectedHarness {
+    key: UnitKey,
+    executable: PathBuf,
+}
+
 struct CollectedTestTargets {
     programs: BTreeMap<String, PathBuf>,
-    harnesses: Vec<PathBuf>,
+    harnesses: Vec<CollectedHarness>,
 }
 
 fn collect_test_targets(
@@ -2840,7 +2980,10 @@ fn collect_test_targets(
                         "selected test harness produced no executable",
                     ));
                 };
-                harnesses.push(executable.clone());
+                harnesses.push(CollectedHarness {
+                    key: key.clone(),
+                    executable: executable.clone(),
+                });
             }
             _ => {}
         }
@@ -2863,6 +3006,10 @@ fn compile_planned_test_targets(
         programs,
         harnesses,
     } = collect_test_targets(&selected, staging, plan, outputs)?;
+    let harnesses = harnesses
+        .into_iter()
+        .map(|harness| harness.executable)
+        .collect::<Vec<_>>();
     let first_harness = harnesses.first().cloned().ok_or_else(|| {
         Error::failure(format!(
             "package `{}` has no enabled test targets",

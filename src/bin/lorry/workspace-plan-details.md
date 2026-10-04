@@ -2636,6 +2636,27 @@ All twelve planner tests and strict Clippy pass in
 larger than the preferred size because its linked cycle/script/program graph
 needs the full paired oracle fixture.
 
+Ordinary `test` now prepares the shared workspace resolution with development
+edges and CLI features, executes one harness/program DAG, then runs every
+selected package's harnesses in Cargo order. Each harness uses its own package
+root, metadata, and directly linked script's `OUT_DIR`/`rustc-env`; integration
+program variables are limited to that package. Named selection works across
+members, and an empty harness selection succeeds. Bundle commands retain their
+existing path until the following bundle patch.
+
+The new offline native/cross contract covers a legal dev cycle, selected member
+scripts, generated files, package cwd/environment, named tests, CLI features,
+and Cargo artifact messages. Its first comparison selected an oracle mode that
+rejects scripts, preserved in `/tmp/lorry-m8-workspace-test-first-contract.log`
+and `/tmp/lorry-workspace-test-aPfE7K`. The correct script-aware oracle passes in
+`/tmp/lorry-m8-workspace-test-correct-schema-contract.log`; strict Clippy and the
+existing explicit/harness-free contracts pass in
+`/tmp/lorry-m8-workspace-test-{execution-clippy,explicit-regression,harness-free-regression}.log`.
+The pinned Cargo test runner propagates a harness's own exit code by default;
+101 applies to aggregate `--no-fail-fast` failure, correcting the earlier
+assumption. This patch exceeds the preferred size to connect the complete
+admission/preparation/execution/runtime boundary with its paired contract.
+
 Integration temporary-directory lookup now uses the same package identity
 as program lookup; the focused regression gives another package a different
 temporary path. Runtime environment construction accepts an owning script's
