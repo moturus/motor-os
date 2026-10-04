@@ -204,8 +204,15 @@ toolchain_validate_rustup_link() {
 		resolved="$($rustup which "$binary" --toolchain "$MOTOR_RUSTUP_TOOLCHAIN" 2>/dev/null)" ||
 			toolchain_die "rustup cannot resolve $binary from $MOTOR_RUSTUP_TOOLCHAIN" || return
 		[ -x "$resolved" ] || toolchain_die "rustup resolved missing $binary: $resolved" || return
-		[ "$(readlink -f "$resolved")" = "$(readlink -f "$prefix/bin/$binary")" ] ||
-			toolchain_die "rustup resolved $binary outside the keyed prefix" || return
+		if [ "$(readlink -f "$resolved")" != "$(readlink -f "$prefix/bin/$binary")" ]; then
+			toolchain_die "rustup resolved $binary outside the keyed prefix:
+  expected binary directory: $(readlink -f "$prefix/bin")
+  rustup resolved binary directory: $(dirname "$(readlink -f "$resolved")")
+  To unregister the existing rustup registration, run:
+    $(printf '%q toolchain uninstall %q' "$rustup" "$MOTOR_RUSTUP_TOOLCHAIN")
+  Then rerun src/build-motor-os.sh."
+			return 1
+		fi
 	done
 	[ "$($rustup run "$MOTOR_RUSTUP_TOOLCHAIN" rustc -vV)" = \
 		"$VALIDATED_RUSTC_VERBOSE" ] ||
