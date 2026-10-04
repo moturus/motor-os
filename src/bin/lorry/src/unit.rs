@@ -614,6 +614,16 @@ pub(crate) fn workspace_units(
             .iter()
             .filter(|target| binary_name.is_none_or(|name| name == target.name))
         {
+            if !target_enabled(
+                resolution,
+                manifest,
+                &features_for(package, CompileKind::Target),
+                &target.name,
+                target.required_features.as_deref(),
+                binary_name.is_some(),
+            )? {
+                continue;
+            }
             let mut binary = unit_key(
                 package,
                 UnitKind::Binary,
@@ -765,41 +775,96 @@ pub(crate) fn workspace_units(
                 .collect();
             graph.units.insert(unit.key.clone(), unit);
         }
-        let mut reachable = BTreeSet::new();
-        let mut pending = graph
-            .units
-            .keys()
-            .filter(|key| {
-                selected.contains(&key.package)
-                    && match key.kind {
-                        UnitKind::Library | UnitKind::Binary => {
-                            key.compile_kind == CompileKind::Target
-                        }
-                        UnitKind::ProcMacro => {
-                            key.mode == UnitMode::Check
-                                && (!release || key.profile == ProfileContext::Selected)
-                        }
-                        _ => false,
-                    }
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        while let Some(key) = pending.pop() {
-            if reachable.insert(key.clone()) {
-                pending.extend(
-                    graph.units[&key]
-                        .dependencies
-                        .iter()
-                        .map(|edge| edge.unit.clone()),
-                );
-            }
-        }
-        graph.units.retain(|key, _| reachable.contains(key));
-        graph.order = topological_order(&graph.units)?;
-    } else {
-        graph.order = topological_order(&graph.units)?;
     }
+    let mut reachable = BTreeSet::new();
+    let mut pending = graph
+        .units
+        .keys()
+        .filter(|key| {
+            selected.contains(&key.package)
+                && match key.kind {
+                    UnitKind::Library | UnitKind::Binary => key.compile_kind == CompileKind::Target,
+                    UnitKind::ProcMacro => {
+                        key.mode
+                            == if check {
+                                UnitMode::Check
+                            } else {
+                                UnitMode::Build
+                            }
+                            && (!release || key.profile == ProfileContext::Selected)
+                    }
+                    _ => false,
+                }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    while let Some(key) = pending.pop() {
+        if reachable.insert(key.clone()) {
+            pending.extend(
+                graph.units[&key]
+                    .dependencies
+                    .iter()
+                    .map(|edge| edge.unit.clone()),
+            );
+        }
+    }
+    graph.units.retain(|key, _| reachable.contains(key));
+    graph.order = topological_order(&graph.units)?;
     Ok(graph)
+}
+
+fn target_enabled(
+    resolution: &Resolution,
+    manifest: &Manifest,
+    features: &BTreeSet<String>,
+    name: &str,
+    required: Option<&[String]>,
+    explicit: bool,
+) -> Result<bool> {
+    let Some(required) = required else {
+        return Ok(true);
+    };
+    let package = selected_library_key(manifest)?.package;
+    let edges = resolution
+        .packages
+        .iter()
+        .find(|candidate| candidate.key == package)
+        .map_or(resolution.root_edges.as_slice(), |package| {
+            package.edges.as_slice()
+        });
+    let mut enabled = features.clone();
+    for edge in edges {
+        if let Some(child) = resolution
+            .packages
+            .iter()
+            .find(|child| child.key == edge.package)
+        {
+            enabled.extend(
+                features_for(child, edge.compile_kind)
+                    .iter()
+                    .map(|feature| format!("{}/{feature}", edge.alias)),
+            );
+        }
+    }
+    if required.iter().all(|feature| enabled.contains(feature)) {
+        return Ok(true);
+    }
+    if explicit {
+        return Err(Error::failure(format!(
+            "target `{name}` in package `{}` requires the features: {}",
+            manifest.name,
+            required
+                .iter()
+                .map(|feature| format!("`{feature}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+        .with_help(format!(
+            "enable the required features: {}",
+            required.join(",")
+        )));
+    }
+    Ok(false)
 }
 
 pub fn add_selected_library(
@@ -863,6 +928,16 @@ pub fn add_selected_binaries(
         .filter(|target| selected_name.is_none_or(|name| name == target.name))
     {
         let mut key = selected_library_key(manifest)?;
+        if !target_enabled(
+            resolution,
+            manifest,
+            &key.features,
+            &target.name,
+            target.required_features.as_deref(),
+            selected_name.is_some(),
+        )? {
+            continue;
+        }
         key.kind = UnitKind::Binary;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
@@ -905,6 +980,16 @@ pub fn add_selected_harnesses(
     }
     for target in manifest.binaries.iter().filter(|target| target.test) {
         let mut key = selected_library_key(manifest)?;
+        if !target_enabled(
+            resolution,
+            manifest,
+            &key.features,
+            &target.name,
+            target.required_features.as_deref(),
+            false,
+        )? {
+            continue;
+        }
         key.kind = UnitKind::BinaryHarness;
         key.mode = UnitMode::Test;
         key.target = Some(target.name.clone());
@@ -948,30 +1033,14 @@ pub fn add_selected_integration_harnesses(
         .filter(|target| selected_name.is_none_or(|name| name == target.name))
         .filter(|target| !program_artifacts || selected_name.is_some() || target.test)
     {
-        let missing = target
-            .required_features
-            .iter()
-            .flatten()
-            .filter(|feature| !features.contains(*feature))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            if selected_name.is_some() {
-                return Err(Error::failure(format!(
-                    "target `{}` in package `{}` requires the features: {}",
-                    target.name,
-                    manifest.name,
-                    missing
-                        .iter()
-                        .map(|feature| format!("`{feature}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-                .with_help(format!(
-                    "enable the required features: {}",
-                    missing.join(",")
-                )));
-            }
+        if !target_enabled(
+            resolution,
+            manifest,
+            &features,
+            &target.name,
+            target.required_features.as_deref(),
+            selected_name.is_some(),
+        )? {
             continue;
         }
         let mut key =

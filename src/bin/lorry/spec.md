@@ -528,9 +528,13 @@ are supported. Test discovery follows the edition defaults, explicit targets
 replace inferred names/paths, and unavailable required features skip implicit
 tests or reject named selections. Harness-free tests use Cargo's `test` cfg
 and run at the package root with the Cargo package environment.
+Binaries also support `required-features`: implicit build/check/test selections
+skip unavailable targets, and named selections report the complete required
+feature list. Dependency-qualified requirements use the resolved dependency
+features. A build with every implicit target disabled succeeds without compiler
+units or artifact messages.
 
-Lorry rejects examples, benches, library/binary `harness`,
-binary `required-features`, unsupported
+Lorry rejects examples, benches, unsupported
 profile keys, artifact dependencies, alternative
 registries, non-crates.io patches, and
 CLI feature-selection flags for run/test.

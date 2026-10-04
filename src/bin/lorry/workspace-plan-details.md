@@ -2620,6 +2620,17 @@ Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contra
 
 ### Member build-time code
 
+Binary `required-features` now filters shared build/check targets and ordinary
+test harnesses. A common predicate also handles dependency-qualified requirements
+for integration tests. Named errors list every declared requirement, including
+already enabled ones, as Cargo does. Ordinary shared plans prune unused inputs;
+when no implicit target remains, build succeeds with only `build-finished`.
+The paired native/cross artifact, executable-byte, partial-requirement error,
+and empty-build contract passes on its first run in
+`/tmp/lorry-m8-required-binaries-first-contract.log`. All eleven planner tests,
+strict Clippy, and the existing selected-macro contract pass in
+`/tmp/lorry-m8-required-binaries-{unit,clippy,macro-regression}.log`.
+
 New-package creation now discovers the containing workspace through the shared
 reader, following canonical parent paths and honoring exclusions. Workspace
 packages omit their unused local lock and receive member-addition guidance;

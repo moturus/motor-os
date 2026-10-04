@@ -67,6 +67,10 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             || selected.iter().any(|member| {
                 member.build_script.is_some()
                     || member
+                        .binaries
+                        .iter()
+                        .any(|binary| binary.required_features.is_some())
+                    || member
                         .library
                         .as_ref()
                         .is_some_and(|library| library.requires_upstream_objects())
@@ -425,7 +429,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
 
     match &cli.command {
         Command::Build(options) => {
-            build_reported(
+            build_inner(
                 Build {
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
@@ -455,6 +459,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     ordinary_freshness_base,
                     binary_selection,
                 },
+                None,
                 options.message_format,
             )?;
             Ok(0)
@@ -903,6 +908,7 @@ fn unknown_binary(manifest: &Manifest, name: &str) -> Error {
 enum BuildOutcome {
     Artifacts(BuildArtifacts),
     Check(i32),
+    NoTargets,
 }
 
 #[cfg(test)]
@@ -914,6 +920,9 @@ fn build_reported(build: Build<'_>, format: MessageFormat) -> Result<BuildArtifa
     match build_inner(build, None, format)? {
         BuildOutcome::Artifacts(artifacts) => Ok(artifacts),
         BuildOutcome::Check(_) => unreachable!("ordinary build returned a check result"),
+        BuildOutcome::NoTargets => Err(Error::failure(
+            "selected package has no enabled executable or test targets",
+        )),
     }
 }
 
@@ -926,6 +935,7 @@ fn check(build: Build<'_>, target_root: &Path, options: &CheckOptions) -> Result
     match build_inner(build, Some((target_root, options)), options.message_format)? {
         BuildOutcome::Check(code) => Ok(code),
         BuildOutcome::Artifacts(_) => unreachable!("check returned ordinary build artifacts"),
+        BuildOutcome::NoTargets => unreachable!("check returned an ordinary no-target build"),
     }
 }
 
@@ -1377,6 +1387,15 @@ fn build_inner(
             }
         }
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
+        if plan.units.is_empty() && !build.test {
+            if build.verbosity != Verbosity::Quiet {
+                eprintln!(
+                    "Finished `{}` profile",
+                    if build.release { "release" } else { "dev" }
+                );
+            }
+            return Ok(BuildOutcome::NoTargets);
+        }
         crate::trace::event(format_args!(
             "executed {} normal dependency units",
             plan.units.len()

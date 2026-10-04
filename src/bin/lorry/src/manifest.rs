@@ -1538,9 +1538,10 @@ fn parse_binaries(
         }
         for table in tables.iter() {
             for (key, item) in table.iter() {
-                if !matches!(key, "name" | "path" | "test" | "bench" | "doc" | "harness")
-                    && !(mode == ManifestMode::Source && key == "required-features")
-                {
+                if !matches!(
+                    key,
+                    "name" | "path" | "test" | "bench" | "doc" | "harness" | "required-features"
+                ) {
                     return Err(unsupported_key(path, document, item, &format!("bin.{key}")));
                 }
                 if mode == ManifestMode::Root
