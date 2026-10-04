@@ -4035,7 +4035,7 @@ members = ["ignored-member"]
     }
 
     #[test]
-    fn discovers_sorted_direct_integration_test_targets() {
+    fn discovers_sorted_integration_test_targets() {
         let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "lorry-integration-targets-{}-{id}",
@@ -4067,7 +4067,7 @@ members = ["ignored-member"]
                 .iter()
                 .map(|target| target.name.as_str())
                 .collect::<Vec<_>>(),
-            ["a-b", "z"]
+            ["a-b", "nested", "z"]
         );
         assert_eq!(
             manifest.integration_tests[0].path,

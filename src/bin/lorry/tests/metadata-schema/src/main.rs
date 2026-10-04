@@ -350,11 +350,12 @@ fn normalize_projection(document: &mut Value) {
     if let Some(resolve) = document["resolve"].as_object_mut() {
         for node in resolve["nodes"].as_array_mut().unwrap() {
             sort_array(&mut node["dependencies"]);
-            sort_array(&mut node["deps"]);
             sort_array(&mut node["features"]);
             for dependency in node["deps"].as_array_mut().unwrap() {
                 sort_array(&mut dependency["dep_kinds"]);
             }
+            // Normalize nested sets before using their JSON as an outer key.
+            sort_array(&mut node["deps"]);
         }
         resolve["nodes"]
             .as_array_mut()
