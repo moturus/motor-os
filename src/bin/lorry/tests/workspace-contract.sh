@@ -149,6 +149,36 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
 [ ! -e "$WORK/project/target/lorry/debug/app" ]
 [ -x "$WORK/project/target/lorry/debug/tool" ]
 
+# Unused profiles may contain valid Cargo settings that Lorry cannot yet
+# compile. Those settings must fail when their profile becomes effective.
+cp "$WORK/project/Cargo.toml" "$WORK/profiles.baseline"
+cat >>"$WORK/project/Cargo.toml" <<'EOF'
+[profile.release]
+opt-level = 3
+[profile.custom]
+inherits = "release"
+debug = true
+EOF
+(
+    cd "$WORK/project"
+    "$LORRY" check -p tool
+    "$LORRY_TEST_CARGO" check -p tool --offline
+    if "$LORRY" build -p tool --release 2>"$WORK/profile.err"; then exit 1; fi
+    grep -F 'unsupported selected profile key `profile.release.opt-level`' "$WORK/profile.err" >/dev/null
+    sed '/^\[profile.dev\]$/a opt-level = 3' "$WORK/profiles.baseline" >Cargo.toml
+    "$LORRY" build -p tool --release
+    "$LORRY_TEST_CARGO" build -p tool --release --offline
+    if "$LORRY" check -p tool 2>"$WORK/profile.err"; then exit 1; fi
+    grep -F 'unsupported selected profile key `profile.dev.opt-level`' "$WORK/profile.err" >/dev/null
+    cp "$WORK/profiles.baseline" Cargo.toml
+    printf '\n[profile.test]\nopt-level = 3\n' >>Cargo.toml
+    "$LORRY" build -p tool
+    "$LORRY_TEST_CARGO" test -p tool --no-run --offline
+    if "$LORRY" test -p tool --no-run 2>"$WORK/profile.err"; then exit 1; fi
+    grep -F 'unsupported selected profile key `profile.test.opt-level`' "$WORK/profile.err" >/dev/null
+)
+cp "$WORK/profiles.baseline" "$WORK/project/Cargo.toml"
+
 # Runtime metadata comes from the selected member, while run keeps its caller.
 cat >"$WORK/project/app/src/main.rs" <<'EOF'
 fn environment() {

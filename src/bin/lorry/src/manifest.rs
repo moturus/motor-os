@@ -37,6 +37,7 @@ pub struct Manifest {
     pub default_run: Option<String>,
     pub dev: DevProfile,
     pub release: ReleaseProfile,
+    profile_errors: BTreeMap<String, Error>,
     #[allow(dead_code)]
     pub resolver: Resolver,
     pub links: Option<String>,
@@ -275,6 +276,22 @@ impl Manifest {
             self.release.panic_abort
         } else {
             self.dev.panic_abort
+        }
+    }
+
+    pub fn require_profile(&self, release: bool, test: bool) -> Result<()> {
+        if !release
+            && test
+            && let Some(error) = self.profile_errors.get("test")
+        {
+            return Err(error.clone());
+        }
+        match self
+            .profile_errors
+            .get(if release { "release" } else { "dev" })
+        {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
         }
     }
 
@@ -601,10 +618,14 @@ impl Manifest {
         let rust_lints = parse_lint_namespace(lint_table.as_ref(), mode, "rust")?;
         let clippy_lints = parse_lint_namespace(lint_table.as_ref(), mode, "clippy")?;
         let rustdoc_lints = parse_lint_namespace(lint_table.as_ref(), mode, "rustdoc")?;
-        let (dev, release) = if mode == ManifestMode::Root && !member {
+        let (dev, release, profile_errors) = if mode == ManifestMode::Root && !member {
             parse_profiles(path, document)?
         } else {
-            (DevProfile::default(), ReleaseProfile::default())
+            (
+                DevProfile::default(),
+                ReleaseProfile::default(),
+                BTreeMap::new(),
+            )
         };
 
         Ok(Self {
@@ -621,6 +642,7 @@ impl Manifest {
             default_run: optional_string(path, document, package, "package", "default-run")?,
             dev,
             release,
+            profile_errors,
             resolver,
             links,
             build_script,
@@ -684,6 +706,7 @@ struct Workspace {
     defaults: Vec<PathBuf>,
     dev: DevProfile,
     release: ReleaseProfile,
+    profile_errors: BTreeMap<String, Error>,
     resolver: Resolver,
     patches: Vec<Patch>,
     warnings: Vec<String>,
@@ -726,13 +749,14 @@ impl Workspace {
             .into_iter()
             .map(|(directory, manifest)| (manifest.name, directory))
             .collect();
-        let (dev, release) = parse_profiles(&path, &document)?;
+        let (dev, release, profile_errors) = parse_profiles(&path, &document)?;
         Ok(Self {
             root: root.to_owned(),
             members,
             defaults,
             dev,
             release,
+            profile_errors,
             resolver,
             patches: parse_patches(&path, &document, root)?,
             warnings,
@@ -768,6 +792,7 @@ impl Workspace {
         manifest.workspace_members.clone_from(&self.members);
         manifest.dev.clone_from(&self.dev);
         manifest.release.clone_from(&self.release);
+        manifest.profile_errors.clone_from(&self.profile_errors);
         manifest.resolver = self.resolver;
         manifest.patches.clone_from(&self.patches);
         manifest.warnings.extend(self.warnings.iter().cloned());
@@ -2276,20 +2301,19 @@ fn parse_lint_namespace(
     Ok(result)
 }
 
-fn parse_profiles(path: &Path, document: &Document) -> Result<(DevProfile, ReleaseProfile)> {
+type ParsedProfiles = (DevProfile, ReleaseProfile, BTreeMap<String, Error>);
+
+fn parse_profiles(path: &Path, document: &Document) -> Result<ParsedProfiles> {
     let Some(item) = document.root().get("profile") else {
-        return Ok((DevProfile::default(), ReleaseProfile::default()));
+        return Ok((
+            DevProfile::default(),
+            ReleaseProfile::default(),
+            BTreeMap::new(),
+        ));
     };
     let profiles = require_table(path, document, item, "profile")?;
     for (key, item) in profiles.iter() {
-        if !matches!(key, "dev" | "release") {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("custom profile `profile.{key}` is not supported in Stage 2"),
-                "use only supported dev and release profile keys",
-            ));
-        }
+        require_table(path, document, item, &format!("profile.{key}"))?;
     }
     let dev = match profiles.get("dev") {
         Some(dev) => parse_dev(
@@ -2307,36 +2331,39 @@ fn parse_profiles(path: &Path, document: &Document) -> Result<(DevProfile, Relea
         )?,
         None => ReleaseProfile::default(),
     };
-    Ok((dev, release))
+    let mut errors = BTreeMap::new();
+    for (name, allowed) in [
+        ("dev", &["panic"][..]),
+        ("release", &["panic", "lto", "strip", "codegen-units"][..]),
+        ("test", &[][..]),
+    ] {
+        if let Some(table) = profiles.get(name).and_then(Item::as_table)
+            && let Some((key, item)) = table.iter().find(|(key, _)| !allowed.contains(key))
+        {
+            errors.insert(
+                name.to_owned(),
+                Error::at(
+                    path,
+                    document.line_of_item(item),
+                    format!("unsupported selected profile key `profile.{name}.{key}`"),
+                    format!(
+                        "the selected {name} profile supports {}",
+                        allowed.join(", ")
+                    ),
+                ),
+            );
+        }
+    }
+    Ok((dev, release, errors))
 }
 
 fn parse_dev(path: &Path, document: &Document, table: &Table) -> Result<DevProfile> {
-    for (key, item) in table.iter() {
-        if key != "panic" {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("unsupported dev profile key `profile.dev.{key}`"),
-                "the dev profile supports only panic",
-            ));
-        }
-    }
     Ok(DevProfile {
         panic_abort: parse_panic_abort(path, document, table, "profile.dev")?,
     })
 }
 
 fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<ReleaseProfile> {
-    for (key, item) in table.iter() {
-        if !matches!(key, "panic" | "lto" | "strip" | "codegen-units") {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("unsupported Stage-2 release profile key `profile.release.{key}`"),
-                "Stage 2 supports only panic, lto, strip, and codegen-units",
-            ));
-        }
-    }
     let panic_abort = parse_panic_abort(path, document, table, "profile.release")?;
     let lto = match table.get("lto") {
         None => Lto::Default,

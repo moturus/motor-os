@@ -149,6 +149,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         ),
         _ => unreachable!("non-build command passed to engine"),
     };
+    manifest.require_profile(release, matches!(cli.command, Command::Test(_)))?;
     let binary_selection = match &cli.command {
         Command::Build(options) => validate_binary_selection(&manifest, options.bin.as_deref())?,
         Command::Check(_) | Command::Run(_) | Command::Test(_) => None,

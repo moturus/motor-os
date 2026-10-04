@@ -1212,6 +1212,15 @@ and paired metadata/build contracts passed in
 
 ### Workspace and manifest loading
 
+Unused custom/dev/release/test profiles are now read without rejecting
+settings that cannot affect the command. Unsupported selected profile keys
+still fail before compilation, including explicit test-profile overrides;
+known values retain validation. The 23 focused manifest tests, strict
+Clippy, and paired Cargo build/check/no-run contract passed in
+`/tmp/lorry-m5-unused-profiles-unit.log`,
+`/tmp/lorry-m5-unused-profiles-clippy.log`, and
+`/tmp/lorry-m5-unused-profiles-contract.log`.
+
 Member profiles, patches, replacements, and conflicting explicit resolvers
 now warn and use root settings. Source descriptions and builds share root
 resolver computation; virtual roots default to resolver 1 with the Cargo
