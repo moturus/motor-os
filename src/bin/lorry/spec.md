@@ -290,11 +290,16 @@ until multi-package execution is implemented. A member-directory invocation
 may search ancestors for its workspace.
 General upward package discovery, `--manifest-path`, workspace-wide commands,
 member globs and members outside the root are unsupported.
-All manifest modes inherit `version`, `edition`, `rust-version`, authors,
-keywords, categories, description, homepage, documentation, repository, and
-license from `workspace.package` when the member sets `workspace = true`.
-Inherited type errors identify the workspace value's source line. Remaining
-package fields, dependency and lint inheritance follow in subsequent patches.
+All manifest modes inherit Cargo's 16 package fields from `workspace.package`
+when the member sets `workspace = true`: authors, categories, description,
+documentation, edition, exclude, homepage, include, keywords, license,
+license-file, publish, readme, repository, rust-version, and version.
+Inherited readme and license-file paths are normalized relative to the member.
+Readme discovery and boolean forms match Cargo; an explicit false suppresses
+discovery, and inheriting a disabled workspace readme is an error. Metadata
+preserves publish's boolean/array meaning. Include/exclude arrays are retained
+for member file selection. Inherited type errors identify the workspace
+value's source line. Dependency and lint inheritance follow in later patches.
 `new` and `cache clean` do not inspect
 a current package.
 

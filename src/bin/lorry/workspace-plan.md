@@ -122,6 +122,9 @@ Milestone 5 is in progress. Builds and source metadata now share membership
 discovery and default-member rules. Implicit path members receive Clippy
 coverage. Focused Cargo contracts prove implicit membership, duplicate-name
 rejection, exclusions, singleton defaults, and package-limit accounting.
+The shared discovery also serves path/Git dependency inheritance. All 16
+package fields inherit, with rebased file paths and Cargo's readme and publish
+rules. Focused metadata comparisons and strict Clippy validation passed.
 
 ## Goal
 

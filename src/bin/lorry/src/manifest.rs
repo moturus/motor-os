@@ -104,6 +104,9 @@ pub struct PackageMetadata {
     pub license_file: String,
     pub readme: String,
     pub rust_version: String,
+    pub publish: Option<Vec<String>>,
+    pub include: Option<Vec<String>>,
+    pub exclude: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -522,15 +525,7 @@ impl Manifest {
             edition,
             document.line_of_table(package),
         )?;
-        let mut metadata = parse_package_metadata(path, document, package, inherited)?;
-        if metadata.readme.is_empty() {
-            for candidate in ["README.md", "README.txt", "README"] {
-                if root.join(candidate).is_file() {
-                    metadata.readme = candidate.to_owned();
-                    break;
-                }
-            }
-        }
+        let metadata = parse_package_metadata(root, path, document, package, inherited)?;
 
         let links = optional_string(path, document, package, "package", "links")?;
         let build_script = parse_build_script(path, document, package, root)?;
@@ -869,20 +864,20 @@ fn dependency_workspace_package(root: &Path) -> Result<Option<InheritedPackage>>
         document.root().get("workspace").unwrap(),
         "workspace",
     )?;
-    let Some(item) = table.get("package") else {
-        return Ok(None);
+    let package = table
+        .get("package")
+        .map(|item| require_table(&path, &document, item, "workspace.package"))
+        .transpose()?;
+    let field = |key| {
+        package
+            .map(|package| optional_string(&path, &document, package, "workspace.package", key))
+            .transpose()
+            .map(Option::flatten)
     };
-    let package = require_table(&path, &document, item, "workspace.package")?;
     Ok(Some(InheritedPackage {
-        version: optional_string(&path, &document, package, "workspace.package", "version")?,
-        edition: optional_string(&path, &document, package, "workspace.package", "edition")?,
-        rust_version: optional_string(
-            &path,
-            &document,
-            package,
-            "workspace.package",
-            "rust-version",
-        )?,
+        version: field("version")?,
+        edition: field("edition")?,
+        rust_version: field("rust-version")?,
         path,
         document,
     }))
@@ -1028,28 +1023,11 @@ fn validate_package_keys(
             ));
         }
     }
-    for key in ["include", "exclude"] {
-        if let Some(item) = package.get(key) {
-            string_array(path, document, item, &format!("package.{key}"))?;
-        }
-    }
-    if let Some(item) = package.get("publish") {
-        if item.as_bool().is_none() && item.as_array().is_none() {
-            return Err(type_error(
-                path,
-                document.line_of_item(item),
-                "package.publish",
-                "a boolean or string array",
-            ));
-        }
-        if item.as_array().is_some() {
-            string_array(path, document, item, "package.publish")?;
-        }
-    }
     Ok(())
 }
 
 fn parse_package_metadata(
+    root: &Path,
     path: &Path,
     document: &Document,
     package: &Table,
@@ -1065,10 +1043,8 @@ fn parse_package_metadata(
         documentation: fields.string("documentation")?.unwrap_or_default(),
         repository: fields.string("repository")?.unwrap_or_default(),
         license: fields.string("license")?.unwrap_or_default(),
-        license_file: optional_string(path, document, package, "package", "license-file")?
-            .unwrap_or_default(),
-        readme: optional_string_or_false(path, document, package, "package", "readme")?
-            .unwrap_or_default(),
+        license_file: fields.file("license-file", root)?,
+        readme: fields.readme(root)?,
         rust_version: optional_package_string(
             path,
             document,
@@ -1077,6 +1053,9 @@ fn parse_package_metadata(
             inherited.and_then(|values| values.rust_version.as_deref()),
         )?
         .unwrap_or_default(),
+        publish: fields.publish()?,
+        include: fields.array("include")?,
+        exclude: fields.array("exclude")?,
     })
 }
 
@@ -2766,27 +2745,6 @@ fn optional_bool(
                 document.line_of_item(item),
                 &format!("{table_name}.{key}"),
                 "a boolean",
-            )
-        }),
-    }
-}
-
-fn optional_string_or_false(
-    path: &Path,
-    document: &Document,
-    table: &Table,
-    table_name: &str,
-    key: &str,
-) -> Result<Option<String>> {
-    match table.get(key) {
-        None => Ok(None),
-        Some(item) if item.as_bool() == Some(false) => Ok(None),
-        Some(item) => item.as_str().map(str::to_owned).map(Some).ok_or_else(|| {
-            type_error(
-                path,
-                document.line_of_item(item),
-                &format!("{table_name}.{key}"),
-                "a string or false",
             )
         }),
     }

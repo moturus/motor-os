@@ -177,6 +177,48 @@ EOF
 done
 agrees_with_cargo "$WORK/dot/Cargo.toml" inherited-metadata-listed
 agrees_with_cargo "$WORK/empty/inner/Cargo.toml" inherited-metadata-implicit
+for root in "$WORK/dot" "$WORK/empty"; do
+    mkdir -p "$root/docs"
+    printf 'workspace README\n' >"$root/README.txt"
+    printf 'license\n' >"$root/LICENSE"
+    printf 'member README\n' >"$root/inner/README.md"
+    cat >>"$root/Cargo.toml" <<'EOF'
+license-file = "./docs/../LICENSE"
+readme = "README.txt"
+publish = false
+include = ["src/**"]
+exclude = ["ignored"]
+EOF
+    for package in "$root" "$root/inner" "$root/listed"; do
+        for field in license-file readme publish include exclude; do
+            sed -i "/^name = /a $field.workspace = true" "$package/Cargo.toml"
+        done
+    done
+done
+agrees_with_cargo "$WORK/dot/Cargo.toml" inherited-all-fields
+agrees_with_cargo "$WORK/empty/inner/Cargo.toml" inherited-paths-implicit
+# Cargo rejects inheriting a disabled workspace readme. When the workspace
+# omits readme, inheritance discovers its default file, not the member's.
+sed -i 's/readme = "README.txt"/readme = false/' "$WORK/dot/Cargo.toml"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    if "$builder" metadata --no-deps --offline --format-version 1 \
+        --manifest-path "$WORK/dot/Cargo.toml" >"$WORK/disabled.json" 2>"$WORK/disabled.err"; then
+        echo "workspace-metadata: accepted inheriting a disabled workspace readme" >&2
+        exit 1
+    fi
+    grep -F 'workspace.package.readme' "$WORK/disabled.err" >/dev/null
+done
+sed -i '/^readme = /d' "$WORK/dot/Cargo.toml"
+agrees_with_cargo "$WORK/dot/Cargo.toml" inherited-default-readme
+# Explicit false must suppress an existing README; true selects README.md.
+sed -i 's/readme.workspace = true/readme = false/' "$WORK/dot/inner/Cargo.toml"
+agrees_with_cargo "$WORK/dot/inner/Cargo.toml" readme-false
+sed -i 's/readme = false/readme = true/' "$WORK/dot/inner/Cargo.toml"
+agrees_with_cargo "$WORK/dot/inner/Cargo.toml" readme-true
+sed -i 's/publish = false/publish = true/' "$WORK/dot/Cargo.toml"
+agrees_with_cargo "$WORK/dot/Cargo.toml" publish-true
+sed -i 's/publish = true/publish = ["crates-io"]/' "$WORK/dot/Cargo.toml"
+agrees_with_cargo "$WORK/dot/Cargo.toml" publish-array
 # Bad inherited values must name the workspace declaration's original line.
 sed -i 's/authors = \["Motor OS"\]/authors = false/' "$WORK/empty/Cargo.toml"
 if source_metadata "$WORK/empty/inner/Cargo.toml" >"$WORK/bad-inheritance.json" 2>"$WORK/bad-inheritance.err"; then

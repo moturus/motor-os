@@ -99,7 +99,7 @@ pub(super) fn map(
         edition: edition(manifest.edition).to_owned(),
         metadata: serde_json::Value::Null,
         links: manifest.links.clone(),
-        publish: None,
+        publish: manifest.metadata.publish.clone(),
         default_run: manifest.default_run.clone(),
         rust_version: nonempty(&manifest.metadata.rust_version),
     })

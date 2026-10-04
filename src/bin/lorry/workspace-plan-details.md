@@ -1136,6 +1136,27 @@ are removed; the package-limit assertions are unchanged. Original logs are
 `/tmp/lorry-m5-membership-contract.log` and
 `/tmp/lorry-m5-membership-contract-fixed.log`.
 
+Commits `60344a1e`, `05a3c00b`, and `e703746e` establish common discovery,
+inherited package identity, and metadata fields with original-source type
+diagnostics. The remaining package fields are now implemented too. Focused
+manifest tests (23) and paired Cargo contracts passed in
+`/tmp/lorry-m5-inherited-identity-contract.log`,
+`/tmp/lorry-m5-inherited-source-contract.log`,
+`/tmp/lorry-m5-inherited-metadata-contract-fixed.log`, and
+`/tmp/lorry-m5-inherited-all-fields-contract.log`. Strict Clippy passed in
+`/tmp/lorry-m5-inherited-all-fields-clippy.log`. An intermediate new
+source-location assertion expected an extra trailing colon; its diagnosis
+confirmed the correct workspace line, and the exact-line assertion was fixed.
+
+Readme work exposed a preexisting Lorry defect: explicit `readme = false`
+still discovered an existing README.md. The unchanged-binary reproducer in
+`/tmp/lorry-m5-readme-false` produced that path in Lorry metadata and null in
+Cargo metadata; the paired JSON outputs are beside it. Parsing now preserves
+the boolean's meaning instead of treating false as an absent field. The
+contract proves explicit false/true, inherited paths and default discovery,
+Cargo's rejection of inheriting false, and all publish forms. Include/exclude
+arrays are retained for the member-file work.
+
 **Result.** Every command uses the same workspace membership and manifest
 inheritance rules. One member can be built or checked from the workspace
 root. The shared model is ready for multi-member execution.
