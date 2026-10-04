@@ -94,7 +94,7 @@ expect_failure() {
 echo "== Creating deterministic local dependency state =="
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all >/dev/null)
 
-echo "== Applying an unrelated candidate only with explicit automation approval =="
+echo "== Preserving admission for unused member declarations =="
 cat >>"$PROJECT/Cargo.toml" <<'EOF'
 
 [features]
@@ -103,23 +103,32 @@ EOF
 manifest_hash="$(sha256sum "$PROJECT/Cargo.toml")"
 lock_hash="$(sha256sum "$PROJECT/Cargo.lock")"
 state_hash="$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")"
-if (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor </dev/null) \
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor </dev/null) \
+    >"$WORK/unused.stdout" 2>"$WORK/unused.stderr"
+[ "$(sha256sum "$PROJECT/Cargo.toml")" = "$manifest_hash" ]
+[ "$(sha256sum "$PROJECT/Cargo.lock")" = "$lock_hash" ]
+[ "$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")" = "$state_hash" ]
+
+echo "== Approving an explicit change to the reviewed feature scope =="
+if (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --features automated-change </dev/null) \
     >"$WORK/unapproved.stdout" 2>"$WORK/unapproved.stderr"; then
-    echo "review-contract: non-interactive vendor approved an unrelated change" >&2
+    echo "review-contract: non-interactive vendor approved a scope change" >&2
     exit 1
 fi
 grep -F 'no interactive terminal is available' "$WORK/unapproved.stderr" >/dev/null
 [ "$(sha256sum "$PROJECT/Cargo.toml")" = "$manifest_hash" ]
 [ "$(sha256sum "$PROJECT/Cargo.lock")" = "$lock_hash" ]
 [ "$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")" = "$state_hash" ]
-(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all </dev/null) \
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --features automated-change --accept-all </dev/null) \
     >"$WORK/automated.stdout" 2>"$WORK/automated.stderr"
 grep -F 'automated-change' "$WORK/automated.stderr" >/dev/null
 if grep -F '[y/N]' "$WORK/automated.stderr" >/dev/null; then
-    echo "review-contract: --accept-all prompted for an unrelated change" >&2
+    echo "review-contract: --accept-all prompted for a scope change" >&2
     exit 1
 fi
 [ "$(sha256sum "$PROJECT/Cargo.toml")" = "$manifest_hash" ]
+[ "$(sha256sum "$PROJECT/Cargo.lock")" = "$lock_hash" ]
+[ "$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")" != "$state_hash" ]
 
 echo "== Proving review is read-only and committed =="
 before="$(find "$PROJECT" "$REPOSITORY" -printf '%y %p %s %T@\n' | sort | sha256sum)"
@@ -139,6 +148,6 @@ expect_failure cargo-registry 'cannot be combined with `review`' \
     --use-cargo-registry review
 sed -i 's/^review-sha256 = ".*"/review-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"/' \
     "$PROJECT/.lorry/dependencies-v2.toml"
-expect_failure stale-commitment "dependency state commitment does not match" review
+expect_failure stale-commitment "workspace admission commitment does not match" review
 
 echo "PASS: offline review contract"
