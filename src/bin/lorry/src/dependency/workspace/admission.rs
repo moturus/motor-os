@@ -11,6 +11,7 @@ pub(crate) struct Reconstructed {
     pub workspace: SourceWorkspace,
     pub complete: Resolution,
     pub catalog: Catalog,
+    pub scopes: Vec<Resolution>,
 }
 
 pub(crate) fn reconstruct(
@@ -111,6 +112,7 @@ pub(crate) fn reconstruct(
         workspace,
         complete,
         catalog,
+        scopes: resolutions,
     })
 }
 
@@ -151,6 +153,31 @@ pub(crate) fn verify(
                 target_cfg: &target.cfg,
             },
         )?;
+        let reviewed = &reconstructed.scopes[compact
+            .contexts
+            .iter()
+            .position(|candidate| candidate == context)
+            .unwrap()];
+        for member in selected.packages.iter().filter(|package| {
+            package
+                .local_manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.editable)
+        }) {
+            let Some(admitted) = reviewed
+                .packages
+                .iter()
+                .find(|package| package.key == member.key)
+            else {
+                return Err(uncovered(&member.key.name));
+            };
+            if !member.compile_kinds.is_subset(&admitted.compile_kinds)
+                || !member.target_features.is_subset(&admitted.target_features)
+                || !member.host_features.is_subset(&admitted.host_features)
+            {
+                return Err(uncovered(&member.key.name));
+            }
+        }
         cover(&reconstructed.review, context, &selected)?;
         Some(legacy_dependency_graph(selected, &inputs.manifest.root)?)
     } else {
@@ -382,9 +409,27 @@ mod tests {
         assert_eq!(reconstruct(&inputs, &compact).unwrap().review, candidate);
         assert!(!fixture.0.join("target").exists());
         assert!(!fixture.0.join(".lorry").exists());
+        // Even a path-only member must stay within the reviewed feature scope.
+        fs::write(fixture.0.join("Cargo.toml"), "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\ndefault = [\"unused\"]\nunused = []\n").unwrap();
+        let mut narrow = compact.clone();
+        narrow.scope.as_mut().unwrap().no_default_features = true;
+        let mut narrowed_review = candidate.clone();
+        narrowed_review.scope = narrow.scope.clone();
+        narrow.review_sha256 = narrowed_review.commitment().unwrap();
+        let build_inputs = ReviewInputs {
+            prepare_context: Some(compact.contexts[0].clone()),
+            ..inputs
+        };
+        assert!(
+            verify(&build_inputs, &narrow)
+                .err()
+                .unwrap()
+                .render()
+                .contains("does not cover")
+        );
         compact.review_sha256 = "00".repeat(32);
         assert!(
-            reconstruct(&inputs, &compact)
+            reconstruct(&build_inputs, &compact)
                 .err()
                 .unwrap()
                 .render()

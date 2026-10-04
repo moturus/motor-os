@@ -212,8 +212,24 @@ pub(crate) fn vendor_locked(cli: &Cli, options: &VendorOptions) -> Result<i32> {
         let mut output = io::stderr().lock();
         let baseline = previous
             .as_ref()
-            .filter(|previous| previous.review_sha256 == commitment)
-            .map(|_| &candidate);
+            .filter(|previous| previous.scope.is_some())
+            .and_then(|previous| {
+                dependency::workspace::admission::reconstruct(
+                    &dependency::ReviewInputs {
+                        manifest,
+                        config: &config,
+                        source: dependency::RegistrySource::Lorry(acquisition.repositories()),
+                        toolchain: &toolchain,
+                        options: &resolver_options,
+                        staging_parent: &env::temp_dir(),
+                        direct: Some(&direct),
+                        prepare_context: None,
+                    },
+                    previous,
+                )
+                .ok()
+            })
+            .map(|reconstructed| reconstructed.review);
         let mode = if options.accept_all {
             change_review::Mode::AcceptAll
         } else {
@@ -221,7 +237,7 @@ pub(crate) fn vendor_locked(cli: &Cli, options: &VendorOptions) -> Result<i32> {
         };
         if cli.lorry_messages {
             change_review::approve_json(
-                baseline,
+                baseline.as_ref(),
                 previous.as_ref().map(|state| state.review_sha256.as_str()),
                 &candidate,
                 mode,
@@ -231,7 +247,7 @@ pub(crate) fn vendor_locked(cli: &Cli, options: &VendorOptions) -> Result<i32> {
             )?;
         } else {
             change_review::approve(
-                baseline,
+                baseline.as_ref(),
                 previous
                     .as_ref()
                     .map_or("none", |state| state.review_sha256.as_str()),

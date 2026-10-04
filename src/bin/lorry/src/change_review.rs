@@ -169,6 +169,14 @@ fn write_review_difference(
     previous: &Review,
     next: &Review,
 ) -> Result<()> {
+    if previous.scope != next.scope {
+        writeln!(
+            output,
+            "  - review scope: {:?}\n  + review scope: {:?}",
+            previous.scope, next.scope
+        )
+        .map_err(|error| Error::failure(format!("failed to write review scope: {error}")))?;
+    }
     write_difference(
         output,
         "direct requirement",

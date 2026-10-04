@@ -111,6 +111,23 @@ if "$LORRY" -q build -p app >"$WORK/unadmitted.out" 2>"$WORK/unadmitted.err"; th
 fi
 grep -F 'requires' "$WORK/unadmitted.err" >/dev/null
 cp "$WORK/original.admission" .lorry/dependencies-v2.toml
+"$LORRY" -q --lorry-messages vendor --locked --offline -p app --no-default-features --accept-all >"$WORK/narrow.out" 2>"$WORK/narrow.json"
+python3 - "$WORK/narrow.json" <<'PY'
+import json, sys
+message = json.load(open(sys.argv[1]))
+assert message['previous_review_available'] is True
+assert message['added'] == []
+assert [package['name'] for package in message['removed']] == ['cfg-if']
+PY
+if "$LORRY" -q build -p app >"$WORK/uncovered.out" 2>"$WORK/uncovered.err"; then
+    echo 'cached build escaped its no-default-features review scope' >&2
+    exit 1
+fi
+grep -F 'does not cover' "$WORK/uncovered.err" >/dev/null
+"$LORRY" -q --lorry-messages vendor --locked --offline >"$WORK/retained.out" 2>"$WORK/retained.err"
+test ! -s "$WORK/retained.err"
+"$LORRY" -q vendor --locked --offline --workspace --all-features --accept-all >"$WORK/reset.out" 2>"$WORK/reset.err"
+cmp .lorry/dependencies-v2.toml "$WORK/original.admission"
 cat >>app/Cargo.toml <<'EOF'
 [dependencies.semver]
 version = "=1.0.27"
