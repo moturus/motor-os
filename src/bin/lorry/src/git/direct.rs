@@ -146,7 +146,17 @@ pub(crate) fn load_locked_dependencies(
     manifest: &Manifest,
     policy: &PolicyLimits,
 ) -> Result<DirectCatalog> {
-    if !has_git_dependency(manifest) {
+    let locked_git = manifest
+        .lock
+        .iter()
+        .flat_map(|lock| &lock.packages)
+        .any(|package| {
+            package
+                .source
+                .as_deref()
+                .is_some_and(|source| source.starts_with("git+"))
+        });
+    if !has_git_dependency(manifest) && !locked_git {
         return Ok(DirectCatalog::default());
     }
     let mut objects = BTreeMap::new();
@@ -787,6 +797,30 @@ mod tests {
             .expect("tampered object must fail");
         assert!(error.to_string().contains("changed after approval"));
         fs::remove_dir_all(workspace).expect("test root is removed");
+    }
+
+    #[test]
+    fn loads_locked_git_sources_even_when_the_context_member_has_no_git_declaration() {
+        let workspace = root("other-member-git");
+        let mut manifest = Manifest::parse_dependency(
+            &workspace,
+            &workspace.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        manifest = manifest
+            .with_lock_source(format!(
+                "version = 4\n[[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\
+             [[package]]\nname = \"other-member-dependency\"\nversion = \"1.0.0\"\nsource = {:?}\n",
+                locked().cargo_source
+            ))
+            .unwrap();
+        assert!(manifest.dependencies.is_empty());
+        let error = load_locked_dependencies(&manifest, &PolicyLimits::default())
+            .err()
+            .expect("the shared lock requires the other member's Git source");
+        assert!(error.to_string().contains("Git source is not materialized"));
+        fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
