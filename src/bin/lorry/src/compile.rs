@@ -1346,6 +1346,7 @@ mod tests {
                 release: true,
                 test_profile: false,
                 panic_abort: true,
+                dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile {
                     panic_abort: true,
                     lto: Lto::Fat,
@@ -1685,6 +1686,7 @@ mod tests {
                 release: true,
                 test_profile: false,
                 panic_abort: true,
+                dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile {
                     panic_abort: true,
                     lto: Lto::Fat,
@@ -1840,6 +1842,7 @@ mod tests {
                 release: false,
                 test_profile: false,
                 panic_abort: false,
+                dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile::default(),
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),

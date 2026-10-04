@@ -2601,6 +2601,16 @@ clean-script mode retains those original requirements for existing tests.
 Original failures, compiler command diagnosis, and the retained fixture are in
 `/tmp/lorry-m8-release-settings-*` and `/tmp/lorry-release-profile-contract-Xv6EeU`.
 
+Dev `debug` and `opt-level` now use the common planner's root profile, including
+all dependencies, host-tool reduction, build-script variables, and automatic
+stripping when debug information is disabled. The paired native/cross contract
+adds limited/full/off dev settings and passes in
+`/tmp/lorry-m8-dev-settings-first-contract.log`.
+Reading Cargo's schema parser also found that numeric strings must be rejected
+for both keys; the shared parsers and matrix now preserve that distinction.
+The expanded dev/release value matrix, all eleven planner tests, and strict
+Clippy pass in `/tmp/lorry-m8-dev-settings-{parser-complete,unit,clippy}.log`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only

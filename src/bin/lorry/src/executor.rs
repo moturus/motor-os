@@ -1438,6 +1438,7 @@ mod tests {
                 release: false,
                 test_profile: false,
                 panic_abort: false,
+                dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile::default(),
                 rustc: &toolchain,
                 logical_target: None,

@@ -378,6 +378,7 @@ mod tests {
                     release: false,
                     test_profile: false,
                     panic_abort: false,
+                    dev_profile: &workspace.packages[0].dev,
                     release_profile: &workspace.packages[0].release,
                     rustc: &toolchain,
                     logical_target: None,

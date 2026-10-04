@@ -63,12 +63,20 @@ printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s
 cd "$WORK/project"
 cp "$WORK/manifest.toml" Cargo.toml
 "$LORRY_TEST_CARGO" generate-lockfile --offline
-for strip in default false none debuginfo symbols debug-limited debug-full debug-lines debug-off dev-abort; do
+for strip in default false none debuginfo symbols debug-limited debug-full debug-lines debug-off dev-abort dev-limited dev-full dev-off; do
     cp "$WORK/manifest.toml" Cargo.toml
     mode=(--release)
     if [ "$strip" = dev-abort ]; then
         mode=()
         printf '\n[profile.dev]\npanic = "abort"\n' >>Cargo.toml
+    elif [[ "$strip" == dev-* ]]; then
+        mode=()
+        case "$strip" in
+            dev-limited) debug=1; opt=1 ;;
+            dev-full) debug=true; opt=0 ;;
+            dev-off) debug=false; opt='"z"' ;;
+        esac
+        printf '\n[profile.dev]\ndebug = %s\nopt-level = %s\n' "$debug" "$opt" >>Cargo.toml
     elif [[ "$strip" == debug-* ]]; then
         case "$strip" in
             debug-limited) debug=1; opt=1 ;;
@@ -85,7 +93,7 @@ for strip in default false none debuginfo symbols debug-limited debug-full debug
     for platform in native motor; do
         target=()
         profile=release
-        if [ "$strip" = dev-abort ]; then profile=debug; fi
+        if [[ "$strip" == dev-* ]]; then profile=debug; fi
         if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); profile=x86_64-unknown-motor/$profile; fi
         env HOME="$WORK/home" "$LORRY" build "${mode[@]}" --workspace -j1 "${target[@]}" \
             --message-format=json >"$WORK/lorry-$strip-$platform.json"

@@ -11,7 +11,7 @@ use crate::identity::{
     CargoProfileLto, CargoSource, CargoStrip, CargoTargetKind, CargoUnitIdentityInput,
     CargoUnitLto, Identity, RootTargetKind, cargo_unit_identity, root_lto,
 };
-use crate::manifest::{Lto as ManifestLto, Manifest, ReleaseProfile};
+use crate::manifest::{DevProfile, Lto as ManifestLto, Manifest, ReleaseProfile};
 use crate::resolver::{
     CompileKind, FeatureContext, PackageKey, PackageSourceKey, Resolution, ResolvedEdge,
     ResolvedPackage, selected_root_features,
@@ -335,6 +335,7 @@ pub struct PlanOptions<'a> {
     pub release: bool,
     pub test_profile: bool,
     pub panic_abort: bool,
+    pub dev_profile: &'a DevProfile,
     pub release_profile: &'a ReleaseProfile,
     pub rustc: &'a Toolchain,
     /// `None` is a native Linux build. Native Motor passes its normalized
@@ -1326,6 +1327,7 @@ fn unit_settings(
     let mut profile = base_profile(
         options.release,
         options.release_profile,
+        options.dev_profile,
         options.panic_abort,
         local,
         key.profile == ProfileContext::Test,
@@ -1410,6 +1412,7 @@ fn unit_settings(
 fn base_profile(
     release: bool,
     configured: &ReleaseProfile,
+    dev: &DevProfile,
     panic_abort: bool,
     local: bool,
     test_profile: bool,
@@ -1435,10 +1438,10 @@ fn base_profile(
         }
     } else {
         UnitProfile {
-            opt_level: "0",
+            opt_level: dev.opt_level,
             lto: CargoProfileLto::Bool(false),
             codegen_units: None,
-            debuginfo: CargoDebugInfo::Full,
+            debuginfo: dev.debug.unwrap_or(CargoDebugInfo::Full),
             debug_assertions: true,
             overflow_checks: true,
             incremental: local,
@@ -1447,7 +1450,10 @@ fn base_profile(
             } else {
                 CargoPanicStrategy::Unwind
             },
-            strip: CargoStrip::None,
+            strip: crate::identity::manifest_strip(
+                crate::manifest::Strip::Default,
+                dev.debug.unwrap_or(CargoDebugInfo::Full),
+            ),
         }
     }
 }
@@ -1488,6 +1494,7 @@ fn shared_native_library(
             == base_profile(
                 options.release,
                 options.release_profile,
+                options.dev_profile,
                 options.panic_abort,
                 matches!(key.package.source, PackageSourceKey::Path(_)),
                 key.profile == ProfileContext::Test,
@@ -1974,6 +1981,7 @@ mod tests {
                 release: true,
                 test_profile: false,
                 panic_abort: false,
+                dev_profile: &root.dev,
                 release_profile: &root.release,
                 rustc: &toolchain(),
                 logical_target: None,
@@ -2003,6 +2011,7 @@ mod tests {
             release: true,
             test_profile: false,
             panic_abort: true,
+            dev_profile: &root.dev,
             release_profile: &root.release,
             rustc: &toolchain(),
             logical_target: None,
@@ -2176,6 +2185,7 @@ mod tests {
                 release: false,
                 test_profile: false,
                 panic_abort: false,
+                dev_profile: &root.dev,
                 release_profile: &root.release,
                 rustc: &toolchain(),
                 logical_target: None,
@@ -2440,6 +2450,7 @@ mod tests {
                         release: false,
                         test_profile: false,
                         panic_abort: false,
+                        dev_profile: &workspace.packages[0].dev,
                         release_profile: &workspace.packages[0].release,
                         rustc: &toolchain(),
                         logical_target: None,
@@ -2795,6 +2806,7 @@ mod tests {
                 release: true,
                 test_profile: false,
                 panic_abort: true,
+                dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &release_profile,
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
@@ -2862,6 +2874,7 @@ mod tests {
                 release: false,
                 test_profile: false,
                 panic_abort: true,
+                dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile::default(),
                 rustc: &toolchain(),
                 logical_target: None,
@@ -3099,6 +3112,7 @@ mod tests {
                 release: true,
                 test_profile: false,
                 panic_abort: true,
+                dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile {
                     panic_abort: true,
                     lto: ManifestLto::Fat,

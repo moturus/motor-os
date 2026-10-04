@@ -103,8 +103,8 @@ require exactly one member. Members share the root lockfile, resolver, profiles,
 and target ownership. Membership, package/dependency/lint inheritance, and
 component globs follow the rules below. External members remain unsupported.
 
-The dev profile accepts `panic = "unwind"` or `panic = "abort"`. The release
-profile additionally accepts `debug`, `opt-level`, and Lorry's documented
+The dev and release profiles accept `panic = "unwind"` or `panic = "abort"`,
+`debug`, and `opt-level`. The release profile also accepts Lorry's documented
 `lto`, `strip`, and `codegen-units` keys. A panic strategy applies to ordinary root and target
 dependency crates; Cargo-compatible test, build-script, and procedural-macro
 units continue to unwind.

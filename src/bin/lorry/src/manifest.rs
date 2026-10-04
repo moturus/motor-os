@@ -140,9 +140,21 @@ pub enum Strip {
     Symbols,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DevProfile {
     pub panic_abort: bool,
+    pub opt_level: &'static str,
+    pub debug: Option<CargoDebugInfo>,
+}
+
+impl Default for DevProfile {
+    fn default() -> Self {
+        Self {
+            panic_abort: false,
+            opt_level: "0",
+            debug: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2653,7 +2665,7 @@ fn parse_profiles(path: &Path, document: &Document) -> Result<ParsedProfiles> {
     };
     let mut errors = BTreeMap::new();
     for (name, allowed) in [
-        ("dev", &["panic"][..]),
+        ("dev", &["panic", "debug", "opt-level"][..]),
         (
             "release",
             &[
@@ -2690,6 +2702,8 @@ fn parse_profiles(path: &Path, document: &Document) -> Result<ParsedProfiles> {
 fn parse_dev(path: &Path, document: &Document, table: &Table) -> Result<DevProfile> {
     Ok(DevProfile {
         panic_abort: parse_panic_abort(path, document, table, "profile.dev")?,
+        opt_level: parse_opt_level(path, document, table, "profile.dev", "0")?,
+        debug: parse_profile_debug(path, document, table, "profile.dev")?,
     })
 }
 
@@ -2764,7 +2778,11 @@ fn parse_opt_level(
     let text = item
         .as_integer()
         .map(|value| value.to_string())
-        .or_else(|| item.as_str().map(str::to_owned));
+        .or_else(|| {
+            item.as_str()
+                .filter(|value| matches!(*value, "s" | "z"))
+                .map(str::to_owned)
+        });
     match text.as_deref() {
         Some("0") => Ok("0"),
         Some("1") => Ok("1"),
@@ -2792,13 +2810,20 @@ fn parse_profile_debug(
     };
     let text = item
         .as_bool()
-        .map(|value| if value { "2" } else { "0" }.to_owned())
-        .or_else(|| item.as_integer().map(|value| value.to_string()))
-        .or_else(|| item.as_str().map(str::to_owned));
-    let value = match text.as_deref() {
-        Some("0" | "none") => CargoDebugInfo::None,
-        Some("1" | "limited") => CargoDebugInfo::Limited,
-        Some("2" | "full") => CargoDebugInfo::Full,
+        .map(|value| if value { "full" } else { "none" })
+        .or_else(|| {
+            item.as_integer().and_then(|value| match value {
+                0 => Some("none"),
+                1 => Some("limited"),
+                2 => Some("full"),
+                _ => None,
+            })
+        })
+        .or_else(|| item.as_str());
+    let value = match text {
+        Some("none") => CargoDebugInfo::None,
+        Some("limited") => CargoDebugInfo::Limited,
+        Some("full") => CargoDebugInfo::Full,
         Some("line-tables-only") => CargoDebugInfo::LineTablesOnly,
         Some("line-directives-only") => CargoDebugInfo::LineDirectivesOnly,
         _ => {
@@ -4027,43 +4052,57 @@ unsafe_code = { level = "forbid", priority = 1 }
     }
 
     #[test]
-    fn release_debug_and_optimization_accept_cargo_values() {
+    fn profiles_debug_and_optimization_accept_cargo_values() {
         let path = Path::new("/profile/Cargo.toml");
-        let source = |debug: &str, opt: &str| {
-            format!(
-                "[package]\nname=\"profile\"\nversion=\"1.0.0\"\n[profile.release]\ndebug={debug}\nopt-level={opt}\n"
-            )
-        };
-        for (debug, expected) in [
-            ("false", CargoDebugInfo::None),
-            ("true", CargoDebugInfo::Full),
-            ("0", CargoDebugInfo::None),
-            ("1", CargoDebugInfo::Limited),
-            ("2", CargoDebugInfo::Full),
-            ("\"none\"", CargoDebugInfo::None),
-            ("\"limited\"", CargoDebugInfo::Limited),
-            ("\"full\"", CargoDebugInfo::Full),
-            ("\"line-tables-only\"", CargoDebugInfo::LineTablesOnly),
-            (
-                "\"line-directives-only\"",
-                CargoDebugInfo::LineDirectivesOnly,
-            ),
-        ] {
-            for opt in ["0", "1", "2", "3", "\"s\"", "\"z\""] {
-                let manifest =
-                    Manifest::parse(path.parent().unwrap(), path, &source(debug, opt)).unwrap();
-                manifest.require_profile(true, false).unwrap();
-                assert_eq!(manifest.release.debug, Some(expected));
-                assert_eq!(manifest.release.opt_level, opt.trim_matches('"'));
+        for profile in ["dev", "release"] {
+            let source = |debug: &str, opt: &str| {
+                format!(
+                    "[package]\nname=\"profile\"\nversion=\"1.0.0\"\n[profile.{profile}]\ndebug={debug}\nopt-level={opt}\n"
+                )
+            };
+            for (debug, expected) in [
+                ("false", CargoDebugInfo::None),
+                ("true", CargoDebugInfo::Full),
+                ("0", CargoDebugInfo::None),
+                ("1", CargoDebugInfo::Limited),
+                ("2", CargoDebugInfo::Full),
+                ("\"none\"", CargoDebugInfo::None),
+                ("\"limited\"", CargoDebugInfo::Limited),
+                ("\"full\"", CargoDebugInfo::Full),
+                ("\"line-tables-only\"", CargoDebugInfo::LineTablesOnly),
+                (
+                    "\"line-directives-only\"",
+                    CargoDebugInfo::LineDirectivesOnly,
+                ),
+            ] {
+                for opt in ["0", "1", "2", "3", "\"s\"", "\"z\""] {
+                    let manifest =
+                        Manifest::parse(path.parent().unwrap(), path, &source(debug, opt)).unwrap();
+                    manifest
+                        .require_profile(profile == "release", false)
+                        .unwrap();
+                    let (debug, optimization) = if profile == "release" {
+                        (manifest.release.debug, manifest.release.opt_level)
+                    } else {
+                        (manifest.dev.debug, manifest.dev.opt_level)
+                    };
+                    assert_eq!(debug, Some(expected));
+                    assert_eq!(optimization, opt.trim_matches('"'));
+                }
             }
-        }
-        for invalid in ["-1", "4", "false", "\"fast\"", "[]"] {
-            assert!(
-                Manifest::parse(path.parent().unwrap(), path, &source("false", invalid)).is_err()
-            );
-        }
-        for invalid in ["-1", "3", "\"debug\"", "[]"] {
-            assert!(Manifest::parse(path.parent().unwrap(), path, &source(invalid, "3")).is_err());
+            for invalid in [
+                "-1", "4", "false", "\"fast\"", "\"0\"", "\"1\"", "\"2\"", "\"3\"", "[]",
+            ] {
+                assert!(
+                    Manifest::parse(path.parent().unwrap(), path, &source("false", invalid))
+                        .is_err()
+                );
+            }
+            for invalid in ["-1", "3", "\"debug\"", "\"0\"", "\"1\"", "\"2\"", "[]"] {
+                assert!(
+                    Manifest::parse(path.parent().unwrap(), path, &source(invalid, "3")).is_err()
+                );
+            }
         }
     }
 
