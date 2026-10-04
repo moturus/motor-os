@@ -267,6 +267,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -275,6 +285,12 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
 ]
+
+[[package]]
+name = "fnv"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
@@ -309,24 +325,31 @@ version = "0.86.0"
 source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
 dependencies = [
  "gix-actor",
+ "gix-attributes",
+ "gix-command",
  "gix-commitgraph",
  "gix-config",
  "gix-credentials",
  "gix-date",
  "gix-diff",
+ "gix-dir",
  "gix-discover",
  "gix-error",
  "gix-features",
+ "gix-filter",
  "gix-fs",
  "gix-glob",
  "gix-hash",
  "gix-hashtable",
+ "gix-ignore",
+ "gix-index",
  "gix-lock",
  "gix-negotiate",
  "gix-object",
  "gix-odb",
  "gix-pack",
  "gix-path",
+ "gix-pathspec",
  "gix-prompt",
  "gix-protocol",
  "gix-ref",
@@ -335,6 +358,7 @@ dependencies = [
  "gix-revwalk",
  "gix-sec",
  "gix-shallow",
+ "gix-submodule",
  "gix-tempfile",
  "gix-trace",
  "gix-transport",
@@ -342,6 +366,7 @@ dependencies = [
  "gix-url",
  "gix-utils",
  "gix-validate",
+ "gix-worktree",
  "gix-worktree-stream",
  "gix-zlib",
  "nonempty",
@@ -373,6 +398,14 @@ dependencies = [
  "smallvec",
  "thiserror",
  "unicode-bom",
+]
+
+[[package]]
+name = "gix-bitmap"
+version = "0.3.3"
+source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
+dependencies = [
+ "gix-error",
 ]
 
 [[package]]
@@ -476,6 +509,25 @@ dependencies = [
  "bstr",
  "gix-hash",
  "gix-object",
+ "thiserror",
+]
+
+[[package]]
+name = "gix-dir"
+version = "0.28.0"
+source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
+dependencies = [
+ "bstr",
+ "gix-discover",
+ "gix-fs",
+ "gix-ignore",
+ "gix-index",
+ "gix-object",
+ "gix-path",
+ "gix-pathspec",
+ "gix-trace",
+ "gix-utils",
+ "gix-worktree",
  "thiserror",
 ]
 
@@ -585,6 +637,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-ignore"
+version = "0.22.0"
+source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
+dependencies = [
+ "bstr",
+ "gix-glob",
+ "gix-path",
+ "gix-trace",
+ "unicode-bom",
+]
+
+[[package]]
+name = "gix-index"
+version = "0.54.0"
+source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
+dependencies = [
+ "bitflags 2.13.1",
+ "bstr",
+ "filetime",
+ "fnv",
+ "gix-bitmap",
+ "gix-features",
+ "gix-fs",
+ "gix-hash",
+ "gix-lock",
+ "gix-motor-filetime",
+ "gix-object",
+ "gix-traverse",
+ "gix-utils",
+ "gix-validate",
+ "hashbrown 0.17.1",
+ "itoa",
+ "libc",
+ "memmap2",
+ "moto-rt",
+ "rustix",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
 name = "gix-lock"
 version = "24.0.0"
 source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
@@ -593,6 +686,11 @@ dependencies = [
  "gix-utils",
  "thiserror",
 ]
+
+[[package]]
+name = "gix-motor-filetime"
+version = "0.1.0"
+source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
 
 [[package]]
 name = "gix-motor-tempfile"
@@ -692,6 +790,20 @@ dependencies = [
  "bstr",
  "gix-trace",
  "gix-validate",
+ "thiserror",
+]
+
+[[package]]
+name = "gix-pathspec"
+version = "0.19.0"
+source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
+dependencies = [
+ "bitflags 2.13.1",
+ "bstr",
+ "gix-attributes",
+ "gix-config-value",
+ "gix-glob",
+ "gix-path",
  "thiserror",
 ]
 
@@ -827,6 +939,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-submodule"
+version = "0.33.0"
+source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
+dependencies = [
+ "bstr",
+ "gix-config",
+ "gix-path",
+ "gix-pathspec",
+ "gix-refspec",
+ "gix-url",
+ "thiserror",
+]
+
+[[package]]
 name = "gix-tempfile"
 version = "24.0.0"
 source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
@@ -910,6 +1036,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-worktree"
+version = "0.55.0"
+source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
+dependencies = [
+ "bstr",
+ "gix-attributes",
+ "gix-fs",
+ "gix-glob",
+ "gix-hash",
+ "gix-ignore",
+ "gix-index",
+ "gix-object",
+ "gix-path",
+ "gix-validate",
+]
+
+[[package]]
 name = "gix-worktree-stream"
 version = "0.35.0"
 source = "git+https://github.com/moturus/gitoxide.git?branch=gix-moturus-cli#d839f4c9c5c03ef194a1d7359cbc128d431bfb09"
@@ -960,6 +1103,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "heapless"

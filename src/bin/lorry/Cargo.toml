@@ -17,6 +17,7 @@ flate2 = { version = "=1.1.9", default-features = false, features = [
 ] }
 gix = { git = "https://github.com/moturus/gitoxide.git", branch = "gix-moturus-cli", default-features = false, features = [
     "blocking-network-client",
+    "dirwalk",
     "sha1",
 ] }
 gix-features = { git = "https://github.com/moturus/gitoxide.git", branch = "gix-moturus-cli", default-features = false, features = [
