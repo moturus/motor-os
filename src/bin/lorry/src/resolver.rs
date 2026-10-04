@@ -2032,7 +2032,7 @@ fn same_semver_identity(left: &Version, right: &Version) -> bool {
         && left.pre == right.pre
 }
 
-fn parse_local_rust_version(package: &str, value: &str) -> Result<RustVersion> {
+pub(crate) fn parse_local_rust_version(package: &str, value: &str) -> Result<RustVersion> {
     if value.is_empty() || value.starts_with('v') || value.contains(['-', '+']) {
         return Err(Error::failure(format!(
             "local package `{package}` has invalid `rust-version` `{value}`"

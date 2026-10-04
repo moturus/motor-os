@@ -1643,6 +1643,15 @@ retain it. The original rejection is preserved in
 while rejecting a wrong branch, a wrong explicit commit, and ambiguity.
 Five offline-validation tests passed in `/tmp/lorry-m6-git-reference-fixed.log`.
 
+Workspace lock-format selection now uses the earliest declared member Rust
+version, with Cargo's thresholds for formats 1 through 4. Legacy output uses
+Cargo's checksum metadata and dependency-reference encoding, including Git
+selector encoding and omission of commits from dependency references.
+Five lockfile tests passed in `/tmp/lorry-m6-lock-formats-unit.log`, including
+actual offline Cargo lock comparisons at all six threshold boundaries.
+Strict Clippy passed in `/tmp/lorry-m6-lock-formats-clippy.log`.
+Reading legacy formats follows next, before command integration.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.
