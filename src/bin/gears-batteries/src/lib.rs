@@ -1,5 +1,6 @@
 //! Optional coding workflows using Gears' command-hook protocol.
 
+pub mod file_patch;
 pub mod file_read;
 pub mod file_record;
 pub mod file_write;

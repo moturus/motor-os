@@ -17,6 +17,14 @@ struct ReadFile {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Patch {
+    path: String,
+    old_text: String,
+    new_text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WriteFile {
     path: String,
     content: String,
@@ -44,6 +52,16 @@ pub fn run(name: &str, reader: impl Read, context: &ToolContext) -> Result<Value
         return Err("tool arguments exceed 1 MiB".into());
     }
     match name {
+        "patch" => {
+            let arguments: Patch = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("invalid patch arguments: {error}"))?;
+            crate::file_patch::patch(
+                context,
+                &arguments.path,
+                &arguments.old_text,
+                &arguments.new_text,
+            )
+        }
         "write_file" => {
             let arguments: WriteFile = serde_json::from_slice(&bytes)
                 .map_err(|error| format!("invalid write_file arguments: {error}"))?;

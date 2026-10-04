@@ -31,3 +31,7 @@ Tool argument JSON is limited to 1 MiB. Atomic replacements preserve Unix
 permission bits (excluding setuid, setgid and sticky bits) or the caller's
 Motor OS access; other native roles keep creation defaults. A write receipt
 reports the actual mutation even if saving its bookkeeping later fails.
+
+`patch` accepts files up to 4 MiB and returns at most 30 KB of diff, with
+an explicit truncation flag. Its matches normalize CRLF and LF line endings;
+escaped newlines and tabs are decoded only after the earlier rules fail.

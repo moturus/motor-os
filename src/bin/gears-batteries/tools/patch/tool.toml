@@ -1,0 +1,15 @@
+version = 1
+kind = "process"
+name = "patch"
+description = "Replace one unique text block in a completely read UTF-8 file, reindent it and return a diff. Ambiguous matches fail."
+parameters = "parameters.json"
+read_only = false
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 262144
+output = "stdout"
+stdin = "arguments"
+
+[process.command]
+common = ["gears-batteries", "tool", "patch"]
