@@ -599,6 +599,9 @@ verified source descriptions. It accepts feature selection, remains offline,
 and does not require or reconstruct admission. Explicit source vetoes and
 resource limits apply; tree neither compiles package code nor needs build-time
 execution grants.
+Path-root allowlists constrain outside path packages. Editable members are
+recognized by their canonical workspace membership, including selected roots;
+explicit named denies still apply to those members.
 
 ## Portable dependency admission state
 

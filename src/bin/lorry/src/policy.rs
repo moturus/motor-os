@@ -759,7 +759,11 @@ fn check_path_root(policy: &Policy, package: &ResolvedPackage) -> Result<()> {
     let ResolvedSource::Path { physical_root, .. } = &package.source else {
         return Ok(());
     };
-    if policy.path_roots.is_empty()
+    if package
+        .local_manifest
+        .as_ref()
+        .is_some_and(|manifest| manifest.editable)
+        || policy.path_roots.is_empty()
         || policy
             .path_roots
             .iter()
@@ -1216,6 +1220,39 @@ mod tests {
             edges: Vec::new(),
             lock_edges: Vec::new(),
         }
+    }
+
+    #[test]
+    fn path_root_allowlists_cover_outside_paths_while_member_vetoes_still_apply() {
+        let mut member = path_package(Path::new("/ws/member"), false, false);
+        member.local_manifest.as_mut().unwrap().editable = true;
+        let outside = path_package(Path::new("/allowed/outside"), false, false);
+        let unowned = path_package(Path::new("/ws/unowned"), false, false);
+        let mut policy = Policy {
+            default: PolicyDefault::Deny,
+            path_roots: vec![Path::new("/allowed").to_owned()],
+            limits: PolicyLimits::default(),
+            rules: BTreeMap::new(),
+        };
+        let resolution = make_resolution(vec![member.clone(), outside]);
+        preflight_sources(&policy, &resolution).unwrap();
+        preflight_workspace(&policy, &resolution).unwrap();
+        assert!(
+            preflight_sources(&policy, &make_resolution(vec![unowned]))
+                .unwrap_err()
+                .render()
+                .contains("path-roots")
+        );
+        let mut deny = rule(PolicyAction::Deny, None, None);
+        deny.name = Some(member.key.name.clone());
+        deny.source = Some("path".into());
+        policy.rules.insert("member-veto".into(), deny);
+        assert!(
+            preflight_sources(&policy, &make_resolution(vec![member]))
+                .unwrap_err()
+                .render()
+                .contains("member-veto")
+        );
     }
 
     #[test]
