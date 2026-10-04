@@ -660,12 +660,26 @@ After the held child exited, that executable launched successfully. This
 demonstrates the descriptor-inheritance window used by Linux sandbox and
 child-lease pre-exec hooks. The diagnostic was removed; its source patch and
 logs remain under `/tmp/lorry-m2-inherited-writer-*`, with the parallel trace
-under `/tmp/lorry-m2-writers.*`. The proposed fix atomically hard-links the
-completed compiler output on Linux instead of opening a new executable for
-writing. The owner is reviewing the consequence that primary and unit paths
-share one file; Motor retains independent copies. Milestone validation remains
-pending this fix. The Lorry-local `AGENTS.md` explicitly puts existing Lorry
-issues in scope, so independent milestone-3 patches have continued.
+under `/tmp/lorry-m2-writers.*`. The owner approved Cargo's policy. Commit
+`1d47c873` atomically hard-links the completed compiler output on Linux
+instead of opening a new executable for writing, with Cargo's copy fallback
+when linking is unavailable. Primary and unit paths share one inode and its
+permissions; Motor retains independent copies. A permanent Linux regression
+holds a fork child before exec and successfully launches the published file
+before releasing that child. It would reproduce `ETXTBSY` with the previous
+copy implementation. Additional coverage checks atomic replacement, dropped
+staging cleanup, preserved permissions, and symlink rejection.
+
+Milestone 2 is complete. The final `tests/test-all.sh --warm` gate passed in
+566 seconds on 2026-10-03: 362 Rust tests passed, the 10 ignored request-contract
+tests ran in their dedicated curl driver, all host contracts passed, native
+online vendoring succeeded without retries, Cargo byte-identity fixtures
+passed, and cross/native Lorry self-builds were byte-identical on Motor.
+Motor cancellation, held-child recovery, and abandoned-staging checks passed.
+The full log is `/tmp/lorry-m2-hardlink-full.log`; native evidence is retained
+below `target/lorry/native-self-tests/`. No temporary diagnosis remains in
+the source. The Lorry-local `AGENTS.md` explicitly puts existing Lorry issues
+in scope, so independent milestone-3 patches have continued.
 
 ### Native performance checkpoint, 2026-10-03
 

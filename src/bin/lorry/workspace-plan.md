@@ -8,7 +8,7 @@ library, binaries, test harnesses, integration tests, and check targets use
 one unit planner and executor. Cargo build, test, and check unit graphs and
 byte identity are covered. The complete Lorry suite passed in 556 seconds
 on 2026-10-02, including native Motor self-build and identity checks.
-Milestone 2 is in progress. An artifact lock now serializes builds and clean
+Milestone 2 is complete. An artifact lock now serializes builds and clean
 for one target directory, Cargo's target-directory precedence is supported,
 unsupported build-setting environment variables fail explicitly, and selected
 libraries use the verified local unit cache with dep-info. Selected-library
@@ -17,7 +17,8 @@ retargets. Compiler units publish into the final profile after validation,
 and build scripts use a stable published `OUT_DIR`. Successful units survive
 a later failure. Published compiler units reuse their validated artifacts in
 place. Published unit directories and cache entries now record package
-ownership. Build-script result reuse and cancellation recovery remain.
+ownership. Unchanged ordinary build and run commands reuse a validated
+completed profile without starting build scripts or compilers.
 Completed-profile freshness records are scoped by package path so members
 can coexist in the shared profile. Top-level executables also carry owner
 sidecars. Members now use the shared profile, and `clean -p` removes only the
@@ -33,20 +34,24 @@ On Motor, an owner-PID record and retained process-tree query make the next
 command wait for interrupted children before touching artifacts. The native
 probe kills Lorry during compilation, checks recovery after its child exits,
 verifies a controlled live child holds the barrier, and checks abandoned
-staging removal. The complete Lorry suite passed in 564 seconds on
+staging removal. The complete Lorry suite passed in 566 seconds on
 2026-10-03, including online native vendoring and Motor self-build. An earlier
 parallel Rust-test run intermittently failed to execute a just-published
 workspace-member binary with `ETXTBSY`. A deterministic reproducer now shows
 that a forked child inherits the writable staging descriptor and keeps the
-published executable busy after the parent closes its descriptor. A proposed
-Linux fix uses atomic hard-link publication, as Cargo does; the owner is
-reviewing the shared-file semantics. The Lorry-local `AGENTS.md` makes
-preexisting Lorry issues part of this work.
+published executable busy after the parent closes its descriptor. The owner
+approved Cargo's policy, and Linux executable publication now stages an
+atomic hard link, with a copy fallback when linking is unavailable. Motor
+retains independent copies. The regression launches the executable while
+the fork child is still held before exec. The full suite passed with 362
+Rust tests and 10 intentionally ignored contract tests; the latter run in
+their dedicated drivers. The Lorry-local `AGENTS.md` makes preexisting Lorry
+issues part of this work.
 The milestone-2 native measurements are recorded: cold `sysbox check` took
 22.623 seconds, warm check 1.424 seconds, and resolved metadata 1.411 seconds.
 They exposed and led to fixes for inert `lib.doc-scrape-examples` metadata
-and sparse-index/manifest dependency-order mismatches. Full milestone
-validation must run again after the executable-publication fix.
+and sparse-index/manifest dependency-order mismatches. The final milestone
+gate covers both fixes and executable publication.
 Published check units retain and replay compiler messages, keeping
 rust-analyzer flycheck diagnostics visible when those units are reused.
 
