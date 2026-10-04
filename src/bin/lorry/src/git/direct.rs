@@ -458,7 +458,7 @@ fn load_object(workspace: &Path, locked: &LockedSource, policy: &PolicyLimits) -
             "Git source is not materialized\n  source: `{}`\n  reason: {error}",
             locked.cargo_source
         ))
-        .with_help("run `lorry vendor [--accept-all]` to materialize the locked Git source")
+        .with_help("run `lorry fetch` to materialize the locked Git source")
     })?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(Error::failure(format!(
@@ -875,7 +875,7 @@ mod tests {
         assert!(error.starts_with("error: Git source is not materialized\n"));
         assert!(error.contains(&format!("  source: `{}`\n", locked.cargo_source)));
         assert!(error.contains("  reason: "));
-        assert!(error.contains("\nhelp: run `lorry vendor [--accept-all]`"));
+        assert!(error.contains("\nhelp: run `lorry fetch`"));
         fs::remove_dir_all(workspace).expect("test root is removed");
     }
 

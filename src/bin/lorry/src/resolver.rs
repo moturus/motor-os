@@ -257,7 +257,7 @@ impl Catalog {
                     return Ok(());
                 }
                 return Err(Error::failure(format!(
-                    "locked Git dependency `{}` from `{}` is unavailable; run `lorry vendor [--accept-all]`",
+                    "locked Git dependency `{}` from `{}` is unavailable; run `lorry fetch`",
                     dependency.package, git.url
                 )));
             }
