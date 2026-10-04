@@ -9,6 +9,7 @@ pub mod patch_match;
 pub mod paths;
 pub mod search;
 pub mod snapshot;
+pub mod todo;
 pub mod tool;
 
 use std::io::Read;
@@ -56,12 +57,23 @@ pub fn read_event(reader: impl Read) -> Result<Event, String> {
     Ok(event)
 }
 
+pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
+    match event.session.state.as_ref() {
+        None | Some(Value::Null) => Ok(json!({})),
+        Some(Value::Object(_)) => Ok(event.session.state.clone().unwrap()),
+        _ => Err("batteries hook state must be an object".into()),
+    }
+}
+
 pub fn hook(event: Event) -> Result<Value, String> {
+    if event.event == "tool_execute" {
+        return todo::execute(&event);
+    }
     if event.event == "initialize" {
         let result = default_root().and_then(gears::state::StateRoot::new);
         return Ok(match result {
             Ok(root) => initialize_at(&event, &root),
-            Err(error) => initialization_notice(error),
+            Err(error) => with_tools(initialization_notice(error)),
         });
     }
     // Until a policy is installed, this optional hook grants no authority.
@@ -73,7 +85,12 @@ pub fn hook(event: Event) -> Result<Value, String> {
 }
 
 pub fn initialize_at(event: &Event, root: &gears::state::StateRoot) -> Value {
-    snapshot::initialize(event, root).unwrap_or_else(initialization_notice)
+    with_tools(snapshot::initialize(event, root).unwrap_or_else(initialization_notice))
+}
+
+fn with_tools(mut response: Value) -> Value {
+    response["tools"] = json!([todo::specification()]);
+    response
 }
 
 fn initialization_notice(error: String) -> Value {
