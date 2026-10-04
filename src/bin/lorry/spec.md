@@ -119,6 +119,7 @@ Source-only workspace preparation retains registry target descriptions and
 development declarations through evidence inspection and publication.
 Locked Git descriptions retain those same fields and bind internal development
 paths to the verified locked Git source, without moving branch references.
+Dependency JSON omits `path` for registry and Git sources, matching Cargo.
 
 Debug builds must reproduce Cargo-equivalent compilation semantics but need
 not be byte-identical across hosts because paths and debug information can

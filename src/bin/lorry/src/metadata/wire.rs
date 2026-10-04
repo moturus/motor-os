@@ -171,19 +171,30 @@ serialize_wire_struct!(Package, "Package", 24,
     "default_run" => default_run,
     "rust_version" => rust_version,
 );
-serialize_wire_struct!(Dependency, "Dependency", 11,
-    "name" => name,
-    "source" => source,
-    "req" => req,
-    "kind" => kind,
-    "optional" => optional,
-    "uses_default_features" => uses_default_features,
-    "features" => features,
-    "target" => target,
-    "rename" => rename,
-    "registry" => registry,
-    "path" => path,
-);
+impl Serialize for Dependency {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut value =
+            serializer.serialize_struct("Dependency", 10 + usize::from(self.path.is_some()))?;
+        value.serialize_field("name", &self.name)?;
+        value.serialize_field("source", &self.source)?;
+        value.serialize_field("req", &self.req)?;
+        value.serialize_field("kind", &self.kind)?;
+        value.serialize_field("optional", &self.optional)?;
+        value.serialize_field("uses_default_features", &self.uses_default_features)?;
+        value.serialize_field("features", &self.features)?;
+        value.serialize_field("target", &self.target)?;
+        value.serialize_field("rename", &self.rename)?;
+        value.serialize_field("registry", &self.registry)?;
+        if let Some(path) = &self.path {
+            value.serialize_field("path", path)?;
+        }
+        value.end()
+    }
+}
+
 impl Serialize for Target {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -387,6 +398,23 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&*target).unwrap()["required-features"],
             serde_json::json!(["extra"])
+        );
+    }
+
+    #[test]
+    fn dependency_paths_are_only_serialized_for_path_sources() {
+        let mut document = fixture(false);
+        let dependency = &mut document.packages[0].dependencies[0];
+        assert!(
+            serde_json::to_value(&*dependency)
+                .unwrap()
+                .get("path")
+                .is_none()
+        );
+        dependency.path = Some("/workspace/dependency".to_owned());
+        assert_eq!(
+            serde_json::to_value(&*dependency).unwrap()["path"],
+            "/workspace/dependency"
         );
     }
 

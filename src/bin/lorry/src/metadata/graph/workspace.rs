@@ -176,6 +176,7 @@ mod tests {
             "[package]\nname = \"windows-only\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
              [lib]\ncrate-type = [\"staticlib\"]\n\
              [dev-dependencies]\nshared = { path = \"../shared\", features = [\"dev\"] }\n\
+             unprepared-registry = \"987654321\"\n\
              [[test]]\nname = \"integration\"\npath = \"src/integration.rs\"\n",
         )
         .unwrap();
