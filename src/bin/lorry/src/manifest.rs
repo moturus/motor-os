@@ -397,6 +397,7 @@ impl Manifest {
         )
     }
 
+    #[cfg(test)]
     pub fn load_selection(
         root: &Path,
         manifest_path: Option<&Path>,

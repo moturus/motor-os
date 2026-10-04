@@ -14,38 +14,63 @@ pub fn execute(
 ) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = crate::manifest::Manifest::load_selection(
+    let workspace = crate::manifest::SourceWorkspace::load(&current, manifest_path.map(Path::new))?;
+    let package_selected =
+        (selection.workspace && !workspace.packages.is_empty()) || !selection.packages.is_empty();
+    let selected = if package_selected {
+        selection
+            .select(
+                workspace
+                    .packages
+                    .iter()
+                    .map(|member| (member.name.as_str(), &member.version, member.root.as_path())),
+                workspace.default_members.iter().map(|root| root.as_path()),
+            )?
+            .0
+    } else {
+        Vec::new()
+    };
+    crate::manifest::Manifest::report_warnings(&workspace.packages, verbosity);
+    let config = Config::load_workspace(
         &current,
-        manifest_path.map(Path::new),
-        selection,
-        true,
+        &workspace.root,
+        workspace
+            .packages
+            .iter()
+            .map(|member| member.root.as_path()),
     )?;
-    crate::manifest::Manifest::report_warnings([&manifest], verbosity);
-    let config = Config::load(&current, &manifest)?;
     let target_directory = config.target_directory(
         &current,
-        &manifest.workspace_root,
+        &workspace.root,
         options.build.target_dir.as_deref(),
     );
     let _artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
-    let artifact_root = super::engine::artifact_root_in(&manifest, &target_directory);
+    let artifact_root = target_directory.join("lorry");
 
     let target = if options.build.release || options.build.target.is_some() {
         config.selected_target(options.build.target.as_deref())?
     } else {
         None
     };
-    let package_selected = selection.workspace || !selection.packages.is_empty();
     if (package_selected || options.build.release || target.is_some()) && artifact_root.exists() {
         crate::engine::migrate_artifact_layout(&artifact_root)?;
     }
-    let removed = clean_manifest_artifacts(
-        &manifest,
-        &target_directory,
-        options.build.release,
-        target.as_deref(),
-        package_selected,
-    )?;
+    let mut removed = false;
+    if package_selected {
+        for manifest in &workspace.packages {
+            if selected.contains(&manifest.root) {
+                removed |= clean_manifest_artifacts(
+                    manifest,
+                    &target_directory,
+                    options.build.release,
+                    target.as_deref(),
+                    true,
+                )?;
+            }
+        }
+    } else {
+        removed = clean_artifacts_root(&artifact_root, options.build.release, target.as_deref())?;
+    }
     if verbosity != Verbosity::Quiet {
         if removed {
             eprintln!("Removed Lorry artifacts from `{}`", artifact_root.display());

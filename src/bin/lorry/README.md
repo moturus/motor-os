@@ -185,12 +185,15 @@ Lorry creates the configured directory when a build first needs it. Project
 `lorry.toml` files cannot redirect the global cache.
 
 ```text
-lorry clean [--release|-r] [--target TRIPLE]
+lorry clean [-p NAME ... | --workspace] [--release|-r] [--target TRIPLE]
 lorry cache clean
 ```
 
-Project `clean` removes only selected state below `target/lorry`, so it does
-not force immutable dependencies to be recompiled. `lorry cache clean` may be
+Project `clean` removes selected state below `target/lorry`. Repeated package
+selectors and `--workspace` remove only those packages' owned artifacts;
+an unselected clean removes the shared Lorry artifact tree. It needs no lockfile
+or compilable targets and leaves immutable global dependencies cached.
+`lorry cache clean` may be
 run outside a package and removes the configured global Lorry cache. It
 succeeds when the cache is already absent.
 

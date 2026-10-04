@@ -2620,6 +2620,20 @@ Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contra
 
 ### Member build-time code
 
+Clean now reads the shared source workspace, accepts repeated `-p` and
+`--workspace`, and applies the existing owner checks to every selected member.
+Unselected clean also works at multi-member and empty roots without a lockfile
+or compiler-capable targets. The paired contract proves custom directories,
+preserved nonmember dependencies and release outputs, explicit release clean,
+and unselected member/root behavior. Its first Cargo run rejected a directory
+previously initialized by Lorry because Cargo had not created `CACHEDIR.TAG`;
+the corrected oracle gives each builder its own custom directory. The original
+is `/tmp/lorry-m8-workspace-clean-first-contract.log`. The final contract and all
+nine cleanup tests pass in `/tmp/lorry-m8-workspace-clean-{isolated-contract,unit}.log`.
+Strict Clippy initially found the old single-selection loader was now unused
+outside tests; it is test-only, and validation passes in
+`/tmp/lorry-m8-workspace-clean-no-dead-loader-clippy.log`.
+
 The existing workspace contract still expected dev/release `opt-level` to be
 unsupported after that capability landed. Its first run fails at the obsolete
 release assertion in `/tmp/lorry-m8-workspace-stale-profiles-original.log`.

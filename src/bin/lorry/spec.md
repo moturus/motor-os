@@ -348,6 +348,9 @@ file package IDs, and member-name patterns. An unmatched selector fails;
 ordinary build, check, and Clippy execute all matching members together. Repeated `-p` options are combined and deduplicated.
 Build, check, Clippy, test, and tree accept `--workspace` and repeated
 `--exclude`; clean accepts `--workspace`. Exclusions require `--workspace`.
+Clean supports repeated package selections through source-only discovery and
+removes their owned units, programs, and local cache entries. Unselected clean
+removes the shared artifact tree, including at an empty workspace root.
 Cargo's workspace precedence applies: without exclusions `-p` is validated
 but all members are selected; with exclusions `-p` is ignored. Unmatched
 exclusions warn, except in quiet mode. Empty selections fail explicitly.
