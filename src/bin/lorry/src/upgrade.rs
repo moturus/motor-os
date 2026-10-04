@@ -16,8 +16,17 @@ impl Selection {
     }
 }
 
+#[cfg(test)]
 pub fn transitive_selection(
     manifest: &Manifest,
+    selector: &str,
+    version: &str,
+) -> Result<Selection> {
+    workspace_selection(std::slice::from_ref(manifest), selector, version)
+}
+
+pub fn workspace_selection(
+    members: &[Manifest],
     selector: &str,
     version: &str,
 ) -> Result<Selection> {
@@ -28,7 +37,12 @@ pub fn transitive_selection(
         )
     })?;
     let (name, old_version) = parse_selector(selector)?;
-    reject_direct(manifest, name)?;
+    for member in members {
+        reject_direct(member, name)?;
+    }
+    let manifest = members
+        .first()
+        .ok_or_else(|| Error::failure("workspace has no packages to upgrade"))?;
     let lock = manifest.lock.as_ref().ok_or_else(|| {
         Error::failure(format!(
             "transitive upgrade package `{name}` requires Cargo.lock"

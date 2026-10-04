@@ -112,8 +112,25 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     if workspace.packages.is_empty() {
         return Ok(0);
     }
-    let _lock = ProjectVendorLock::acquire(&workspace.root)?;
+    let lock = ProjectVendorLock::acquire(&workspace.root)?;
+    if cli.verbosity == Verbosity::Verbose {
+        eprintln!("Locked {}", lock.path().display());
+    }
     let previous = CompactState::load(&workspace.root)?;
+    let forced = match &options.mode {
+        VendorMode::Sync => None,
+        VendorMode::Upgrade(upgrade) => Some(upgrade::workspace_selection(
+            &workspace.packages,
+            &upgrade.package,
+            &upgrade.version,
+        )?),
+    };
+    if forced.is_some() && previous.is_none() {
+        return Err(
+            Error::failure("dependency upgrade requires generated Lorry dependency state")
+                .with_help("run `lorry vendor [--accept-all]` to create workspace admission"),
+        );
+    }
     let scope = review_scope(cli, &workspace, previous.as_ref())?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     let mut manifest = workspace.packages[0].clone();
@@ -167,13 +184,36 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
             true,
             Some(&direct),
         )?;
+        let mut locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
+        if let Some(forced) = &forced {
+            let (name, old, version) = forced.as_resolver_input();
+            let requirement = semver::VersionReq::parse(&format!("={version}"))
+                .map_err(|error| Error::failure(format!("invalid upgrade requirement: {error}")))?;
+            // A compatible cached version otherwise keeps the lazy loader
+            // from discovering the explicitly requested replacement.
+            acquisition.load_sparse(name, &requirement, &mut catalog)?;
+            LockedPreference::force_version(&mut locked, name, old, version.clone());
+        }
         let complete = resolve_complete_workspace(
             &workspace,
             &mut catalog,
             &resolver_options,
-            &LockedPreference::from_lockfile(manifest.lock.as_ref())?,
+            &locked,
             &mut |name, requirement, catalog| acquisition.load_sparse(name, requirement, catalog),
         )?;
+        if let Some(forced) = &forced {
+            let (name, _, version) = forced.as_resolver_input();
+            if !complete.packages.iter().any(|package| {
+                package.key.source == PackageSourceKey::CratesIo
+                    && package.key.name == name
+                    && package.key.version == *version
+            }) {
+                return Err(Error::failure(format!(
+                    "requested upgrade `{name} {version}` is not present in the resolved graph"
+                ))
+                .with_help("the requested version must satisfy every dependency requirement"));
+            }
+        }
         policy::preflight_sources(&config.policy, &complete)?;
         let default_format = lockfile::Format::for_workspace(&workspace)?;
         let format = manifest
@@ -255,10 +295,11 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
             && previous.contexts == recorded
             && previous.capabilities == capabilities
     });
-    if !unchanged {
+    if !unchanged || direct.materialized_sources().next().is_some() {
         let stdin = io::stdin();
         let mut output = io::stderr().lock();
         if !cli.lorry_messages {
+            write_git_review(&refreshes, &direct, previous.is_none(), &mut output)?;
             let added = selected
                 .packages
                 .iter()
@@ -295,8 +336,10 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
             .map(|reconstructed| reconstructed.review);
         let mode = if options.accept_all {
             change_review::Mode::AcceptAll
-        } else {
+        } else if options.locked || direct.materialized_sources().next().is_some() {
             change_review::Mode::Forced
+        } else {
+            change_review::Mode::Change
         };
         if cli.lorry_messages {
             change_review::approve_json(

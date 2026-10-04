@@ -103,22 +103,10 @@ impl DirectCatalog {
         self.sources.values()
     }
 
+    #[cfg(test)]
     pub(crate) fn has_sources(&self) -> bool {
         !self.sources.is_empty()
     }
-}
-
-pub(crate) fn materialize_locked_dependencies(
-    manifest: &Manifest,
-    network: &NetworkConfig,
-    policy: &PolicyLimits,
-    verbose: bool,
-    progress: Progress,
-) -> Result<DirectCatalog> {
-    if !has_git_dependency(manifest) {
-        return Ok(DirectCatalog::default());
-    }
-    materialize_locked_catalog(manifest, network, policy, verbose, progress, false)
 }
 
 pub(crate) fn materialize_locked_sources(

@@ -6,7 +6,16 @@ LORRY="$(realpath "${1:?usage: workspace-admission-contract.sh LORRY}")"
 source "$SCRIPT_DIR/current-toolchain.sh"
 lorry_load_current_toolchain
 WORK="$(mktemp -d /tmp/lorry-workspace-admission-XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+cleanup() {
+    local status="$?"
+    if [ "$status" -ne 0 ]; then
+        for log in "$WORK"/*.err "$WORK"/transitive.json "$WORK"/upgrade.json; do
+            [ ! -f "$log" ] || cat "$log" >&2
+        done
+    fi
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export RUSTC="$LORRY_TEST_RUSTC"
@@ -40,6 +49,8 @@ outside = { path = "../outside", optional = true }
 EOF
 cat >"$HOME/.config/lorry/lorry.toml" <<EOF
 config-version = 1
+[repositories]
+user = "$WORK/repository"
 [network]
 curl = "$WORK/no-network-curl"
 [cache]
@@ -92,3 +103,45 @@ cmp Cargo.lock "$WORK/reconciled.lock"
 test ! -e app/.lorry/dependencies-v2.toml
 test ! -e shared/.lorry/dependencies-v2.toml
 echo 'PASS: ordinary workspace vendor matches Cargo locks and excludes members from package caps'
+cat >>outside/Cargo.toml <<'TOML'
+[dependencies]
+cfg-if = "=1.0.3"
+TOML
+sed -i 's/path = "..\/outside", optional = true/path = "..\/outside"/' shared/Cargo.toml
+"$LORRY_TEST_CARGO" generate-lockfile --offline
+cp Cargo.lock "$WORK/before-upgrade.lock"
+sed -i 's/"=1.0.3"/"1.0"/' outside/Cargo.toml
+"$LORRY_TEST_CARGO" update --offline -p cfg-if --precise 1.0.4
+cp Cargo.lock "$WORK/after-upgrade.lock"
+"$RUSTC" --edition=2024 -D warnings -O "$SCRIPT_DIR/helpers/cache-curl.rs" -o "$WORK/cache-curl"
+"$WORK/cache-curl" prepare "$CARGO_HOME" "$WORK/crates-io" \
+    "$WORK/before-upgrade.lock" "$WORK/after-upgrade.lock"
+sed -i "s|$WORK/no-network-curl|$WORK/crates-io/curl|; s/max-packages = 1/max-packages = 8/" \
+    "$HOME/.config/lorry/lorry.toml"
+cp "$WORK/before-upgrade.lock" Cargo.lock
+"$LORRY" -q --lorry-messages vendor --accept-all >"$WORK/transitive.out" 2>"$WORK/transitive.json"
+cmp Cargo.lock "$WORK/before-upgrade.lock"
+"$LORRY" -q --lorry-messages vendor --accept-all upgrade cfg-if --to 1.0.4 \
+    >"$WORK/upgrade.out" 2>"$WORK/upgrade.json"
+cmp Cargo.lock "$WORK/after-upgrade.lock"
+grep -F 'review-format-version = 4' .lorry/dependencies-v2.toml >/dev/null
+python3 - "$WORK/upgrade.json" <<'PY'
+import json, sys
+message = json.load(open(sys.argv[1]))
+assert message['reason'] == 'lorry-vendor-change'
+assert [(p['name'], p['version']) for p in message['added']] == [('cfg-if', '1.0.4')]
+assert [(p['name'], p['version']) for p in message['removed']] == [('cfg-if', '1.0.3')]
+PY
+cat >>shared/Cargo.toml <<'TOML'
+cfg-if = { version = "1.0", optional = true }
+TOML
+cp .lorry/dependencies-v2.toml "$WORK/upgraded.admission"
+if "$LORRY" -q --lorry-messages vendor --accept-all upgrade cfg-if --to 1.0.4 \
+    >"$WORK/direct.out" 2>"$WORK/direct.err"; then
+    echo 'upgrade accepted a dependency declared directly by a non-anchor member' >&2
+    exit 1
+fi
+grep -F 'direct dependency' "$WORK/direct.err" >/dev/null
+cmp Cargo.lock "$WORK/after-upgrade.lock"
+cmp .lorry/dependencies-v2.toml "$WORK/upgraded.admission"
+echo 'PASS: transitive workspace upgrade matches Cargo and protects every member declaration'

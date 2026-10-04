@@ -1,27 +1,35 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, IsTerminal, Write};
+#[cfg(test)]
+use std::io::BufRead;
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use semver::Version;
 
-use crate::admission_state::{self, CompactState, Context, Review};
+#[cfg(test)]
+use crate::admission_state::Review;
+use crate::admission_state::{self, CompactState, Context};
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
-use crate::atomic::{AtomicDirectory, AtomicFile};
+#[cfg(test)]
+use crate::atomic::AtomicDirectory;
+use crate::atomic::AtomicFile;
 use crate::change_review;
 use crate::cli::{Cli, VendorMode, VendorOptions, Verbosity};
-use crate::config::{Config, PolicyAction, PolicyLimits, PolicyRule};
+use crate::config::{Config, PolicyLimits};
+#[cfg(test)]
+use crate::config::{PolicyAction, PolicyRule};
 use crate::curl::{Client, archive_url, sparse_url};
 use crate::dependency;
 use crate::diagnostic::{Error, Result};
-use crate::engine;
 use crate::hash::hex;
 use crate::lockfile;
 use crate::manifest::Manifest;
 use crate::patch;
 use crate::policy::{self, PackageEvidence};
 use crate::progress::Progress;
+#[cfg(test)]
 use crate::prompt;
 use crate::redirect::TrustPolicy;
 use crate::repository::{RepositorySet, RepositoryTransaction, RepositoryWriter};
@@ -53,100 +61,7 @@ pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
             "use `lorry vendor --locked --offline`",
         ));
     }
-    if matches!(options.mode, VendorMode::Sync) {
-        return workspace::vendor_workspace(cli, options);
-    }
-    cli.features.require_default()?;
-    if cli.use_cargo_registry {
-        return Err(Error::usage(
-            "`--use-cargo-registry` cannot be combined with `vendor`",
-            "remove `--use-cargo-registry`; vendoring uses only Lorry repositories",
-        ));
-    }
-    let current = env::current_dir()
-        .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    match &options.mode {
-        VendorMode::Sync => execute_reconcile(cli, &current, options.accept_all, None),
-        VendorMode::Upgrade(upgrade) => {
-            let (package, version) = (&upgrade.package, &upgrade.version);
-            execute_reconcile(cli, &current, options.accept_all, Some((package, version)))
-        }
-    }
-}
-
-fn execute_reconcile(
-    cli: &Cli,
-    current: &Path,
-    accept_all: bool,
-    requested: Option<(&str, &str)>,
-) -> Result<i32> {
-    let manifest = Manifest::load_selection(
-        current,
-        cli.manifest_path.as_deref().map(Path::new),
-        &cli.selection,
-        false,
-    )?;
-    Manifest::report_warnings([&manifest], cli.verbosity);
-    let mut config = Config::load(current, &manifest)?;
-    config.apply_max_packages(cli.max_packages)?;
-    let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
-    let lock = ProjectVendorLock::acquire(&manifest.workspace_root)?;
-    if cli.verbosity == Verbosity::Verbose {
-        eprintln!("Locked {}", lock.path().display());
-    }
-    let refreshes = crate::git::resolve_patch_refreshes(
-        &manifest,
-        &config.network,
-        &config.policy.limits,
-        cli.verbosity == Verbosity::Verbose,
-    )?;
-    let candidate_manifest = apply_patch_refreshes(&manifest, &refreshes)?;
-    let direct = crate::git::materialize_locked_dependencies(
-        &candidate_manifest,
-        &config.network,
-        &config.policy.limits,
-        cli.verbosity == Verbosity::Verbose,
-        progress,
-    )?;
-    let previous = CompactState::load(&manifest.root)?;
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
-    engine::check_rust_version(&manifest, &toolchain)?;
-    let host = toolchain.target_info(None)?;
-    let contexts = vendor_contexts(&toolchain, &config, &host, previous.as_ref())?;
-
-    let forced = requested
-        .map(|(package, version)| upgrade::transitive_selection(&manifest, package, version))
-        .transpose()?;
-    if forced.is_some() && previous.is_none() {
-        return Err(
-            Error::failure("dependency upgrade requires generated Lorry dependency state")
-                .with_help(
-                    "run `lorry vendor [--accept-all]` once to create `.lorry/dependencies-v2.toml`",
-                ),
-        );
-    }
-    let changed = prepare_networked(
-        &candidate_manifest,
-        &manifest,
-        &config,
-        &toolchain,
-        &contexts,
-        forced.as_ref(),
-        previous.as_ref(),
-        Some(&direct),
-        &refreshes,
-        accept_all,
-        progress,
-        cli.lorry_messages,
-    )?;
-
-    if cli.verbosity != Verbosity::Quiet {
-        eprintln!(
-            "{} Cargo.lock",
-            if changed { "Updated" } else { "Verified" }
-        );
-    }
-    Ok(0)
+    workspace::vendor_workspace(cli, options)
 }
 
 fn apply_patch_refreshes(
@@ -316,6 +231,7 @@ fn test_contexts(host: &TargetInfo, targets: &[TargetInfo]) -> Vec<VendorContext
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn prepare_networked(
     manifest: &Manifest,
     committed_manifest: &Manifest,
@@ -351,6 +267,7 @@ fn prepare_networked(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn prepare_networked_with_approval(
     manifest: &Manifest,
     committed_manifest: &Manifest,
@@ -552,6 +469,7 @@ fn prepare_networked_with_approval(
     Ok(changed)
 }
 
+#[cfg(test)]
 fn try_reconstruct_committed_review(
     manifest: &Manifest,
     config: &Config,
@@ -582,6 +500,7 @@ fn try_reconstruct_committed_review(
     .ok())
 }
 
+#[cfg(test)]
 fn recorded_contexts(contexts: &[VendorContext]) -> Vec<Context> {
     contexts
         .iter()
@@ -590,6 +509,7 @@ fn recorded_contexts(contexts: &[VendorContext]) -> Vec<Context> {
         .collect()
 }
 
+#[cfg(test)]
 fn context_resolution<'a>(
     per_context: &'a [(Context, Resolution)],
     context: &Context,
@@ -608,6 +528,7 @@ fn context_resolution<'a>(
 
 /// Builds the candidate canonical review from the staged lockfile, the
 /// recorded per-context resolutions, and staged/verified evidence.
+#[cfg(test)]
 fn candidate_review(
     manifest: &Manifest,
     lock: &[u8],
@@ -640,6 +561,7 @@ fn candidate_review(
     Ok((candidate, capabilities))
 }
 
+#[cfg(test)]
 fn add_change_review_rules(
     policy: &mut crate::config::Policy,
     previous: &CompactState,
@@ -692,6 +614,7 @@ fn add_change_review_rules(
 
 /// The rendered candidate lockfile, the per-context resolutions, and their
 /// merged selection.
+#[cfg(test)]
 type PreparedContexts = (Vec<u8>, Vec<(Context, Resolution)>, Resolution);
 
 #[cfg(test)]
@@ -746,6 +669,7 @@ fn prepare_catalog(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn prepare_with_catalog(
     manifest: &Manifest,
     config: &Config,
@@ -1215,6 +1139,7 @@ impl<'a> Acquisition<'a> {
     }
 }
 
+#[cfg(test)]
 fn approve_new_packages(
     resolution: &Resolution,
     evidence: &BTreeMap<PackageKey, PackageEvidence>,
