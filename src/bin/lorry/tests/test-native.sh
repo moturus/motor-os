@@ -165,7 +165,9 @@ prepare_workspace_identity() {
         for selection in default packages all exclude; do
             workspace_selection "$selection"
             for command in build check; do
-                local -a profile_arguments=()
+                # Compare cold check sessions on both filesystems; Motor's
+                # expected incremental hard-link fallback differs from Linux.
+                local -a profile_arguments=(--target-dir "$fixture/check-target-$selection")
                 if [ "$command" = build ]; then profile_arguments=(--release); fi
                 HOME="$host_home" RUSTC="$rustc" "$WORK/lorry-seed" "$command" \
                     "${profile_arguments[@]}" "${WORKSPACE_ARGUMENTS[@]}" --target "$MOTOR_TARGET" \
@@ -189,7 +191,7 @@ run_workspace_identity() {
         workspace_selection "$selection"
         arguments="${WORKSPACE_ARGUMENTS[*]}"
         for command in build check; do
-            profile_arguments=""
+            profile_arguments="--target-dir $fixture/check-target-$selection"
             if [ "$command" = build ]; then profile_arguments="--release"; fi
             remote_command "cd $fixture && $REMOTE_ROOT/lorry-native $command $profile_arguments $arguments --target $MOTOR_TARGET --message-format=json > $REMOTE_ROOT/equivalence-workspace-$selection-$command.native"
             download_file "$REMOTE_ROOT/equivalence-workspace-$selection-$command.native" \

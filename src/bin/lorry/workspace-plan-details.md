@@ -2352,6 +2352,19 @@ are now retained with native evidence. Original gate:
 Diagnostic inputs and captures:
 `/tmp/lorry-m7-native-flags-diagnosis.path`.
 
+The flag-corrected gate passed default and repeated-selection cross/native
+binary and JSON identity, then failed at workspace check after 611 seconds.
+Every artifact event remained identical; native rustc emitted four additional
+incremental hard-link fallback warnings. The pinned Motor stdlib explicitly
+returns Unsupported from `sys/fs/motor.rs::link`, and rustc deliberately warns
+when copying an earlier incremental session in `rustc_incremental/persist/fs.rs`.
+This is an expected platform difference, not failed compilation. Each selection's
+check comparison now uses its own target directory, giving both hosts cold
+incremental state while still comparing every diagnostic exactly. Build unit
+reuse and native rebuild probes remain covered. Original gate:
+`/tmp/lorry-m7-full-workspace-flags-fixed.log`; preserved captures and binaries:
+`target/lorry/native-self-tests/self-20261004T183746Z-205364/`.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 
