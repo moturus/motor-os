@@ -2536,6 +2536,22 @@ writes, and trusted-cache payload symlinks. All eighteen cache tests, the
 compiler command oracle, and strict Clippy pass in
 `/tmp/lorry-m8-archive-cache-foundation-{regression-tests,compiler,clippy}.log`.
 
+Static-only and mixed `rlib`/`staticlib` libraries now execute through the
+shared graph. Linking requests upstream rlibs rather than metadata, mixed
+outputs omit unused standalone metadata, and archive outputs survive complete
+cache restoration. The first compiler failure exposed the metadata-only
+dependency assumption. The next assertion compared random rustc invocation
+suffixes embedded in archive member names: all 296 object payloads matched.
+The pinned compiler's `temp_path_ext_for_cgu` confirms that deliberate suffix.
+The contract now compares every archive member payload and normalizes only
+that suffix, retaining the existing intermediate-archive identity exception.
+Native/cross build/check JSON, final program bytes, archive object bytes, and
+cache restoration pass in `/tmp/lorry-m8-staticlib-archive-members-contract.log`.
+Cache tests, compiler tests, and strict Clippy pass in
+`/tmp/lorry-m8-staticlib-{cache,compiler,clippy}.log`.
+Original failures and preserved diagnostic fixtures remain under
+`/tmp/lorry-m8-staticlib-*` and `/tmp/lorry-static-library-{21kjqt,fcDuWC}`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only

@@ -2533,6 +2533,9 @@ struct RootLibraryArtifact {
 fn planned_root_library(outputs: &executor::Outputs, key: &UnitKey) -> Result<RootLibraryArtifact> {
     let (extern_path, dep_info) = match outputs.artifacts.get(key) {
         Some(crate::compile::RustcOutput::Library { rlib, dep_info, .. }) => (rlib, dep_info),
+        Some(crate::compile::RustcOutput::StaticLibrary { archive, dep_info }) => {
+            (archive, dep_info)
+        }
         Some(crate::compile::RustcOutput::ProcMacro {
             dynamic_library,
             dep_info,

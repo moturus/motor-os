@@ -1122,6 +1122,7 @@ fn archive_path(output: &RustcOutput) -> Option<&Path> {
 fn library_paths(output: &RustcOutput) -> Result<(&Path, &Path)> {
     match output {
         RustcOutput::Library { rlib, rmeta, .. } => Ok((rlib, rmeta)),
+        RustcOutput::StaticLibrary { archive, .. } => Ok((archive, archive)),
         RustcOutput::ProcMacro {
             dynamic_library, ..
         } => Ok((dynamic_library, dynamic_library)),
@@ -1136,6 +1137,7 @@ fn library_paths(output: &RustcOutput) -> Result<(&Path, &Path)> {
 fn dep_info_path(output: &RustcOutput) -> Result<&Path> {
     match output {
         RustcOutput::Library { dep_info, .. }
+        | RustcOutput::StaticLibrary { dep_info, .. }
         | RustcOutput::Binary { dep_info, .. }
         | RustcOutput::Metadata { dep_info, .. }
         | RustcOutput::ProcMacro { dep_info, .. }
@@ -1146,6 +1148,7 @@ fn dep_info_path(output: &RustcOutput) -> Result<&Path> {
 fn published_unit_directory(output: &RustcOutput) -> Result<&Path> {
     let primary = match output {
         RustcOutput::Library { rlib, .. } => rlib,
+        RustcOutput::StaticLibrary { archive, .. } => archive,
         RustcOutput::Binary { executable, .. } | RustcOutput::BuildScript { executable, .. } => {
             executable
         }
@@ -1186,6 +1189,10 @@ fn published_fingerprint(
         }
         RustcOutput::ProcMacro {
             dynamic_library,
+            dep_info,
+        }
+        | RustcOutput::StaticLibrary {
+            archive: dynamic_library,
             dep_info,
         } => {
             let mut files = vec![dynamic_library.as_path()];

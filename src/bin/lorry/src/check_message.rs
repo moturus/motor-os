@@ -315,6 +315,9 @@ impl EventReporter for Reporter {
             RustcOutput::ProcMacro {
                 dynamic_library, ..
             } => (vec![self.published_path(dynamic_library)?], None),
+            RustcOutput::StaticLibrary { archive, .. } => {
+                (vec![self.published_path(archive)?], None)
+            }
             RustcOutput::Binary { executable, .. } => (
                 vec![self.published_path(executable)?],
                 Some(self.published_path(executable)?),

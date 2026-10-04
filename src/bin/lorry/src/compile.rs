@@ -37,6 +37,10 @@ pub struct RustcInvocation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RustcOutput {
+    StaticLibrary {
+        archive: PathBuf,
+        dep_info: PathBuf,
+    },
     Library {
         rlib: PathBuf,
         rmeta: PathBuf,
@@ -71,6 +75,7 @@ impl RustcOutput {
     pub(crate) fn dep_info(&self) -> &Path {
         match self {
             Self::Library { dep_info, .. }
+            | Self::StaticLibrary { dep_info, .. }
             | Self::Binary { dep_info, .. }
             | Self::Metadata { dep_info, .. }
             | Self::ProcMacro { dep_info, .. }
@@ -118,6 +123,10 @@ impl RustcInvocation {
             }
             | RustcOutput::ProcMacro {
                 dynamic_library: executable,
+                dep_info,
+            }
+            | RustcOutput::StaticLibrary {
+                archive: executable,
                 dep_info,
             } => vec![executable, dep_info],
             RustcOutput::BuildScript {
@@ -208,7 +217,9 @@ pub fn dependency_rustc_invocation_with_build_output(
                 } else {
                     "lib"
                 },
-                if key.kind == UnitKind::ProcMacro {
+                if key.kind == UnitKind::ProcMacro
+                    || library.crate_types.iter().any(|kind| kind == "staticlib")
+                {
                     "dep-info,link"
                 } else {
                     "dep-info,metadata,link"
@@ -448,7 +459,7 @@ pub fn dependency_rustc_invocation_with_build_output(
         push(&mut arguments, "--verbose");
     }
 
-    let output = expected_output(key, crate_name, &planned.identity, &output_dir);
+    let output = expected_output(key, manifest, crate_name, &planned.identity, &output_dir);
     Ok(Some(RustcInvocation {
         arguments,
         environment,
@@ -626,6 +637,13 @@ fn dependency_arguments(
                 dependency.unit.package.name, dependency.unit.package.version
             ))
         })?;
+        if !child_library
+            .crate_types
+            .iter()
+            .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "dylib" | "proc-macro"))
+        {
+            continue;
+        }
         let alias = dependency
             .alias
             .as_deref()
@@ -635,8 +653,17 @@ fn dependency_arguments(
         let filename = if dependency.unit.kind == UnitKind::ProcMacro {
             proc_macro_filename(&stem)
         } else {
-            let extension = if planned.unit.key.kind == UnitKind::Library
-                || matches!(planned.unit.key.mode, UnitMode::Check | UnitMode::CheckTest)
+            let parent_links_objects = manifests[&planned.unit.key.package]
+                .library
+                .as_ref()
+                .is_some_and(|library| library.crate_types.iter().any(|kind| kind == "staticlib"));
+            let extension = if matches!(dependency.unit.mode, UnitMode::Check | UnitMode::CheckTest)
+                || ((matches!(planned.unit.key.mode, UnitMode::Check | UnitMode::CheckTest)
+                    || (planned.unit.key.kind == UnitKind::Library && !parent_links_objects))
+                    && !child_library
+                        .crate_types
+                        .iter()
+                        .any(|kind| kind == "staticlib"))
             {
                 "rmeta"
             } else {
@@ -719,6 +746,7 @@ pub(crate) fn unit_output_directory(
 
 fn expected_output(
     key: &UnitKey,
+    manifest: &Manifest,
     crate_name: &str,
     identity: &Identity,
     output_dir: &Path,
@@ -731,10 +759,37 @@ fn expected_output(
         };
     }
     match key.kind {
+        UnitKind::Library if manifest.library.as_ref().unwrap().crate_types == ["staticlib"] => {
+            RustcOutput::StaticLibrary {
+                archive: output_dir.join(format!("lib{stem}.a")),
+                dep_info: output_dir.join(format!("{stem}.d")),
+            }
+        }
         UnitKind::Library => RustcOutput::Library {
             rlib: output_dir.join(format!("lib{stem}.rlib")),
-            rmeta: output_dir.join(format!("lib{stem}.rmeta")),
-            archive: None,
+            rmeta: output_dir.join(format!(
+                "lib{stem}.{}",
+                if manifest
+                    .library
+                    .as_ref()
+                    .unwrap()
+                    .crate_types
+                    .iter()
+                    .any(|kind| kind == "staticlib")
+                {
+                    "rlib"
+                } else {
+                    "rmeta"
+                }
+            )),
+            archive: manifest
+                .library
+                .as_ref()
+                .unwrap()
+                .crate_types
+                .iter()
+                .any(|kind| kind == "staticlib")
+                .then(|| output_dir.join(format!("lib{stem}.a"))),
             dep_info: output_dir.join(format!("{stem}.d")),
         },
         UnitKind::Binary

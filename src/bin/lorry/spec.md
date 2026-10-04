@@ -505,8 +505,14 @@ library receives them when present; otherwise its other targets receive them.
 Run and test still reject a selected package with a build script before
 compilation. Descriptive commands accept these manifests without execution.
 
+Libraries support `lib`, `rlib`, `staticlib`, and mixed `rlib`/`staticlib`
+outputs. Static archives consume upstream object code and participate in
+staging, cache restoration, freshness, and artifact messages. Archive member
+object bytes agree with Cargo; rustc's random temporary object-name suffixes
+remain outside the final-executable byte-identity promise.
+
 Lorry rejects explicit `[[test]]`, examples, benches,
-custom crate types, `harness`, `required-features`, `autotests`, unsupported
+dynamic crate types, `harness`, `required-features`, `autotests`, unsupported
 profile keys, artifact dependencies, alternative
 registries, non-crates.io patches, and
 CLI feature-selection flags for run/test.

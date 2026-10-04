@@ -678,7 +678,9 @@ fn execute_unit(
                 let restorable = matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
                     && matches!(
                         &planned_invocation.output,
-                        RustcOutput::Library { .. } | RustcOutput::ProcMacro { .. }
+                        RustcOutput::Library { .. }
+                            | RustcOutput::StaticLibrary { .. }
+                            | RustcOutput::ProcMacro { .. }
                     );
                 let cache_key = caches
                     .map(|caches| {
@@ -947,6 +949,13 @@ fn cache_dependencies<'a>(
                 rmeta: metadata,
                 cache_key: outputs.cache_keys.get(&edge.unit).copied(),
             }),
+            Some(RustcOutput::StaticLibrary { archive, .. }) => Ok(DependencyInput {
+                key: &edge.unit,
+                alias: edge.alias.as_deref(),
+                rlib: archive,
+                rmeta: archive,
+                cache_key: outputs.cache_keys.get(&edge.unit).copied(),
+            }),
             _ => Err(Error::failure(format!(
                 "cache input dependency `{} {}` has no compiled library",
                 edge.unit.package.name, edge.unit.package.version
@@ -958,6 +967,7 @@ fn cache_dependencies<'a>(
 fn create_output_directories(output: &RustcOutput) -> Result<()> {
     let path = match output {
         RustcOutput::Library { rlib, .. } => rlib,
+        RustcOutput::StaticLibrary { archive, .. } => archive,
         RustcOutput::Binary { executable, .. } => executable,
         RustcOutput::Metadata { metadata, .. } => metadata,
         RustcOutput::ProcMacro {
@@ -1007,6 +1017,7 @@ fn verify_outputs(output: &RustcOutput) -> Result<()> {
             dynamic_library,
             dep_info,
         } => vec![dynamic_library, dep_info],
+        RustcOutput::StaticLibrary { archive, dep_info } => vec![archive, dep_info],
     };
     for path in expected {
         if !path.is_file() {
@@ -1031,6 +1042,7 @@ fn validate_dep_info(
     const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
     let dep_info = match output {
         RustcOutput::Library { dep_info, .. }
+        | RustcOutput::StaticLibrary { dep_info, .. }
         | RustcOutput::Binary { dep_info, .. }
         | RustcOutput::Metadata { dep_info, .. }
         | RustcOutput::ProcMacro { dep_info, .. }

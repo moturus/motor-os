@@ -1105,7 +1105,7 @@ pub fn plan_dependency_units_with_remaps(
         })?;
         validate_manifest_identity(&key.package, manifest)?;
 
-        let settings = unit_settings(graph, key, options);
+        let settings = unit_settings(graph, key, manifest, options);
         let profile = settings.profile.cargo_profile();
         let source_value;
         let source = match &key.package.source {
@@ -1288,7 +1288,12 @@ fn validate_manifest_identity(key: &PackageKey, manifest: &Manifest) -> Result<(
     Ok(())
 }
 
-fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) -> UnitSettings {
+fn unit_settings(
+    graph: &UnitGraph,
+    key: &UnitKey,
+    manifest: &Manifest,
+    options: &PlanOptions<'_>,
+) -> UnitSettings {
     let local = matches!(key.package.source, PackageSourceKey::Path(_));
     let mut profile = base_profile(
         options.release,
@@ -1353,7 +1358,24 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
             UnitMode::Check => CargoCompileMode::Check { test: false },
             UnitMode::CheckTest => CargoCompileMode::Check { test: true },
         },
-        lto: unit_lto(key, options.release, options.release_profile.lto),
+        lto: if key.kind == UnitKind::Library
+            && manifest
+                .library
+                .as_ref()
+                .unwrap()
+                .crate_types
+                .iter()
+                .any(|kind| kind == "staticlib")
+        {
+            root_lto(
+                options.release,
+                options.release_profile.lto,
+                RootTargetKind::Binary,
+                false,
+            )
+        } else {
+            unit_lto(key, options.release, options.release_profile.lto)
+        },
         logical_target,
         rustflags,
     }
