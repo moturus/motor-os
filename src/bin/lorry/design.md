@@ -33,6 +33,7 @@ objects do not become usable merely because they were downloaded.
   per-user dependency cache;
 - `review` reconstructs and verifies the committed canonical dependency
   review without mutating project or repository state;
+- `fetch` acquires exact locked sources without execution admission;
 - `vendor` resolves, acquires, verifies, reviews, and publishes dependency
   sources and generated dependency state; or
 - `engine` implements build, run, and test.
@@ -41,11 +42,10 @@ For build, run, and test, `engine` performs these operations in order:
 
 1. load and validate `Cargo.toml`, `Cargo.lock`, and generated admission state;
 2. merge Lorry and Cargo configuration and discover the compiler/target;
-3. for an ordinary non-test command, compare the completed root fingerprint
-   and return immediately when its parsed identity and mutable metadata match;
-4. on a miss or in strict mode, resolve the selected locked graph and verify it
-   offline;
-5. prepare source trees and perform the second policy pass with full evidence;
+3. reconstruct and verify the root admission scope and requested coverage;
+4. resolve the selected locked graph and verify source and policy evidence;
+5. for an ordinary non-test command, reuse a validated completed profile when
+   its parsed identity and mutable metadata match;
 6. create compilation units and their dependency order;
 7. compile or restore eligible library, procedural-macro, and build-script
    results from cache;
@@ -69,10 +69,11 @@ Cargo-compatibility family, and evaluates target `cfg` expressions.
 
 The build root is one selected package, with at most one library, a bounded
 deterministic set of discovered or explicit binaries, and discovered
-top-level integration tests. An explicit W1 workspace envelope may provide
-the shared lock, resolver, release profile, patches, and artifact parent while
-admission remains beside the selected member. Per-member profile directories
-allow independently selected packages to coexist. Root planning carries each
+integration tests in files or directories. Shared membership discovery supplies inheritance,
+defaults, and selectors. The workspace provides one lock, resolver, profiles,
+patches, artifact parent, and root admission record. Independently selected
+members coexist in the shared profile with per-package ownership. Root
+planning carries each
 binary name through identity, publication, freshness, test environments, and
 bundles. Dependency manifests are parsed through a wider but still explicit
 subset needed to compile the selected graph. Recognized metadata is inert;
@@ -86,12 +87,13 @@ them rather than silently building a different program. Dependency build
 scripts are fully planned and executed through the policy boundary described
 below.
 
-`Cargo.lock` version 4 is the canonical interoperability format. Builds accept
-present and current version 3 or 4 locks as read-only input. Vendoring may
-create or repair a lock and writes version 4 when it does so, but preserves an
-unchanged version 3 lock byte-for-byte. Lorry renders the complete all-target
-lock graph, then separately computes the union of closures selected for
-configured vendor targets.
+Lorry reads Cargo lock formats 1 through 4 without rewriting valid locked
+inputs. Ordinary vendoring preserves compatible parent dependency edges and
+retains the existing format when repair is needed. A fresh lock follows Cargo's
+member Rust-version thresholds. Complete resolution follows weak dependency
+feature references too; selected compilation can leave those optional edges
+inactive. Acquisition and admission project their feature/platform closures
+from the complete graph.
 
 Cargo compatibility is the explicit current Motor family (`1.99`), either
 inferred from a paired rustc or supplied by installation configuration. The
@@ -211,30 +213,39 @@ It records only:
 
 - the SHA-256 commitment to the canonical review document specified in
   `spec.md`;
+- the normalized workspace member/feature scope;
 - the reviewed `(host, target)` build contexts; and
 - the explicit build-script, procedural-macro, and native-tool capability
   grants.
 
-The canonical review document itself is reconstructed, never stored: its
-direct semantics come from Cargo.toml, its locked graph from Cargo.lock, its
-per-context selections from offline resolution, and its source evidence from
-verified repository objects. Path dependencies remain governed by their
+The canonical review document is reconstructed, never stored. Review format 4
+omits raw member declaration text. The complete locked graph comes from
+Cargo.lock, scoped per-context selections from offline resolution, and source
+evidence from verified repository objects. Unused member declarations therefore
+do not force readmission. Path dependencies remain governed by their
 source digests and configured policy rather than being copied into immutable
 dependency admission.
 
 At build time `engine.rs` requires the discovered host and selected target to
-be an exact reviewed context. An ordinary completed-profile record commits to
-the parsed compact state and all compilation identity, so a matching warm
-record safely reuses the admission already proved by the transaction that
-published it. After a miss, `dependency.rs` reconstructs the canonical
-document for every recorded context and compares its digest with the
-commitment. Only then does `admission_state.rs` translate reconstructed
+be an exact reviewed context. Before even completed-profile reuse,
+`dependency::workspace::admission` reconstructs the canonical document for
+every recorded context, verifies the digest and grants, and checks the
+requested graph's package/feature coverage. Only then does
+`admission_state.rs` translate reconstructed
 evidence and explicit capabilities into exact generated allow rules. Policy
 evaluation still considers every matching explicit deny, so a generated allow
 cannot override administrator policy, resource limits, integrity checks, or
 unavailable native-tool grants. Repository lookup during
 reconstruction is inspection, not admission: nothing compiles or enters a
 build cache until the commitment and policy both pass.
+
+Complete resolution uses every workspace member, optional/development edges,
+and platforms before selected feature projection. `fetch` acquires exact locked
+sources without approval, while vendor projects a review scope and publishes
+root approval last. Digest-protected sparse inputs are retained independently
+of source objects so a targeted fetch can support selected offline builds.
+They supply resolution information alone; source objects remain the integrity
+authority and neither metadata nor fetch grants execution capabilities.
 
 `RepositorySet` separates bounded object/schema/path parsing from content
 verification. Ordinary reads trust digests recorded by immutable publication;
