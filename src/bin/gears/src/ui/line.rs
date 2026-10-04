@@ -25,6 +25,15 @@ pub fn run(
     for notice in runtime.take_startup_notices() {
         renderer.event(Event::Notice(notice))?;
     }
+    if interactive && runtime.pending_hook_questions() {
+        run_operation(
+            runtime,
+            super::Operation::Questions,
+            true,
+            &mut input,
+            &mut renderer,
+        )?;
+    }
     if let Some(prompt) = initial {
         let result = run_turn(runtime, prompt, interactive, &mut input, &mut renderer);
         renderer.finish_stream();
@@ -49,6 +58,15 @@ pub fn run(
         }
         if line.starts_with('/') {
             let result = command(runtime, &line, models, providers, &mut input, &mut renderer);
+            if !matches!(&result, Ok(Command::Quit)) && runtime.pending_hook_questions() {
+                run_operation(
+                    runtime,
+                    super::Operation::Questions,
+                    true,
+                    &mut input,
+                    &mut renderer,
+                )?;
+            }
             show_runtime_notices(runtime, &mut renderer)?;
             match result {
                 Ok(Command::Continue) => continue,
@@ -233,7 +251,16 @@ fn command(
         }
         "" => Ok(Command::Continue),
         other => {
-            runtime.hook_command(other, argument, renderer)?;
+            run_operation(
+                runtime,
+                super::Operation::HookCommand {
+                    name: other.into(),
+                    argument: argument.into(),
+                },
+                true,
+                input,
+                renderer,
+            )?;
             renderer.finish_turn();
             Ok(Command::Continue)
         }
@@ -419,6 +446,7 @@ impl Observer for Renderer {
 enum TurnMessage {
     Event(Event),
     Permission(Permission, mpsc::Sender<Approval>),
+    Question(crate::hooks::Question, mpsc::Sender<Option<String>>),
     Done(Result<(), String>),
 }
 
@@ -442,6 +470,17 @@ struct ChannelApprover {
 impl Approver for ChannelApprover {
     fn attended(&self) -> bool {
         self.interactive
+    }
+
+    fn answer(&mut self, question: &crate::hooks::Question) -> Result<Option<String>, String> {
+        if !self.interactive {
+            return Ok(None);
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.sender
+            .send(TurnMessage::Question(question.clone(), sender))
+            .map_err(|_| "line UI closed".to_string())?;
+        receiver.recv().map_err(|_| "line UI closed".to_string())
     }
 
     fn approve(&mut self, request: &Permission) -> Approval {
@@ -468,6 +507,22 @@ fn run_turn(
     input: &mut Input,
     renderer: &mut Renderer,
 ) -> Result<(), String> {
+    run_operation(
+        runtime,
+        super::Operation::Turn(prompt),
+        interactive,
+        input,
+        renderer,
+    )
+}
+
+fn run_operation(
+    runtime: &mut Runtime,
+    operation: super::Operation,
+    interactive: bool,
+    input: &mut Input,
+    renderer: &mut Renderer,
+) -> Result<(), String> {
     let cancellation = runtime.cancellation();
     let (sender, receiver) = mpsc::channel();
     std::thread::scope(|scope| {
@@ -480,13 +535,28 @@ fn run_turn(
                 sender: worker_sender,
                 interactive,
             };
-            let result = runtime.turn(prompt, &mut approver, &mut observer);
+            let result = operation.run(runtime, &mut approver, &mut observer);
             let _ = sender.send(TurnMessage::Done(result));
         });
         loop {
             loop {
                 match receiver.try_recv() {
                     Ok(TurnMessage::Event(event)) => renderer.event(event)?,
+                    Ok(TurnMessage::Question(question, reply)) => {
+                        renderer.finish_stream();
+                        eprintln!("{}", question.text);
+                        for (index, choice) in question.choices.iter().enumerate() {
+                            eprintln!("  {}. {}", index + 1, choice.label);
+                        }
+                        let answer = loop {
+                            let text = input.read_line("answer [number or value, Enter skip]> ")?;
+                            match super::question_answer(&question, text.as_deref()) {
+                                Ok(answer) => break answer,
+                                Err(error) => eprintln!("gears: {error}"),
+                            }
+                        };
+                        let _ = reply.send(answer);
+                    }
                     Ok(TurnMessage::Permission(request, reply)) => {
                         renderer.finish_stream();
                         eprintln!(

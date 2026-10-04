@@ -4,8 +4,56 @@ pub mod select;
 pub mod tui;
 pub mod tui_editor;
 
-use crate::runtime::Runtime;
+use crate::runtime::{Approver, Observer, Runtime};
 use crate::session::ToolState;
+
+enum Operation {
+    Turn(String),
+    HookCommand { name: String, argument: String },
+    Questions,
+}
+
+impl Operation {
+    fn run(
+        self,
+        runtime: &mut Runtime,
+        approver: &mut dyn Approver,
+        observer: &mut dyn Observer,
+    ) -> Result<(), String> {
+        match self {
+            Self::Turn(prompt) => runtime.turn(prompt, approver, observer),
+            Self::HookCommand { name, argument } => {
+                runtime.hook_command_with_approver(&name, &argument, approver, observer)
+            }
+            Self::Questions => runtime.resolve_hook_questions(approver, observer),
+        }
+    }
+}
+
+fn question_answer(
+    question: &crate::hooks::Question,
+    answer: Option<&str>,
+) -> Result<Option<String>, String> {
+    let answer = answer.unwrap_or_default().trim();
+    if answer.is_empty() {
+        return Ok(None);
+    }
+    if let Some(choice) = question
+        .choices
+        .iter()
+        .find(|choice| choice.value == answer)
+    {
+        return Ok(Some(choice.value.clone()));
+    }
+    if let Ok(number) = answer.parse::<usize>()
+        && let Some(choice) = number
+            .checked_sub(1)
+            .and_then(|index| question.choices.get(index))
+    {
+        return Ok(Some(choice.value.clone()));
+    }
+    Err("choose a listed answer, or press Enter to skip".into())
+}
 
 pub(crate) fn help(runtime: &Runtime) -> String {
     let mut text = crate::cli::USAGE.to_string();

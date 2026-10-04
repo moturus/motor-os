@@ -36,6 +36,9 @@ pub fn run(
         for notice in runtime.take_startup_notices() {
             app.apply(Event::Notice(notice));
         }
+        if interactive && runtime.pending_hook_questions() {
+            run_operation(runtime, super::Operation::Questions, true, &mut app)?;
+        }
         if let Some(prompt) = initial {
             app.push(Kind::User, prompt.clone(), false);
             run_turn(runtime, prompt, interactive, &mut app)?;
@@ -60,6 +63,9 @@ pub fn run(
                 Action::Quit => app.quit = true,
                 Action::Submit(text) if text.starts_with('/') => {
                     let result = handle_command(runtime, &mut app, &text, models, providers);
+                    if !app.quit && runtime.pending_hook_questions() {
+                        run_operation(runtime, super::Operation::Questions, true, &mut app)?;
+                    }
                     show_runtime_notices(runtime, &mut app);
                     if let Err(error) = result {
                         app.push(Kind::Error, error, false);
@@ -644,12 +650,22 @@ fn paint_line<W: Write>(
 enum TurnMessage {
     Event(Event),
     Permission(Permission, mpsc::Sender<Approval>),
+    Question(crate::hooks::Question, mpsc::Sender<Option<String>>),
     Done(Result<(), String>),
 }
 
 fn run_turn(
     runtime: &mut Runtime,
     prompt: String,
+    interactive: bool,
+    app: &mut App,
+) -> Result<(), String> {
+    run_operation(runtime, super::Operation::Turn(prompt), interactive, app)
+}
+
+fn run_operation(
+    runtime: &mut Runtime,
+    operation: super::Operation,
     interactive: bool,
     app: &mut App,
 ) -> Result<(), String> {
@@ -668,7 +684,7 @@ fn run_turn(
                 sender: worker_sender,
                 interactive,
             };
-            let result = runtime.turn(prompt, &mut approver, &mut observer);
+            let result = operation.run(runtime, &mut approver, &mut observer);
             let _ = sender.send(TurnMessage::Done(result));
         });
         loop {
@@ -679,6 +695,17 @@ fn run_turn(
                         TurnMessage::Event(event) => {
                             app.apply(event);
                             dirty = true;
+                        }
+                        TurnMessage::Question(question, reply) => {
+                            app.push(Kind::Notice, question.text.clone(), false);
+                            let items = question
+                                .choices
+                                .iter()
+                                .map(|choice| choice.label.clone())
+                                .collect::<Vec<_>>();
+                            let answer = picker(app, &question.text, &items, Some(&cancellation))?
+                                .map(|index| question.choices[index].value.clone());
+                            let _ = reply.send(answer);
                         }
                         TurnMessage::Permission(permission, reply) => {
                             app.begin_approval(permission);
@@ -773,6 +800,9 @@ fn run_compact(runtime: &mut Runtime, focus: Option<String>, app: &mut App) -> R
                     Ok(TurnMessage::Permission(_, reply)) => {
                         let _ = reply.send(Approval::Deny);
                     }
+                    Ok(TurnMessage::Question(_, reply)) => {
+                        let _ = reply.send(None);
+                    }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
                         app.input_enabled = true;
@@ -864,6 +894,19 @@ impl Approver for ChannelApprover {
         self.interactive
     }
 
+    fn answer(&mut self, question: &crate::hooks::Question) -> Result<Option<String>, String> {
+        if !self.interactive {
+            return Ok(None);
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.sender
+            .send(TurnMessage::Question(question.clone(), sender))
+            .map_err(|_| "terminal UI closed".to_string())?;
+        receiver
+            .recv()
+            .map_err(|_| "terminal UI closed".to_string())
+    }
+
     fn approve(&mut self, request: &Permission) -> Approval {
         if !self.interactive {
             return Approval::Deny;
@@ -952,8 +995,8 @@ fn handle_command(
                         )
                     })
                     .collect::<Vec<_>>();
-                let selected =
-                    picker(app, "Resume session", &labels)?.ok_or("session selection cancelled")?;
+                let selected = picker(app, "Resume session", &labels, None)?
+                    .ok_or("session selection cancelled")?;
                 sessions[selected].id.clone()
             } else {
                 argument.to_string()
@@ -989,6 +1032,7 @@ fn handle_command(
                     app,
                     "Select branch (shell side effects are unchanged)",
                     &labels,
+                    None,
                 )?
                 .ok_or("tree selection cancelled")?;
                 tree[selected].id.clone()
@@ -1015,7 +1059,7 @@ fn handle_command(
                     .iter()
                     .map(|item| format!("{} {}", item.id, item.summary))
                     .collect::<Vec<_>>();
-                let selected = picker(app, "Fork from user message", &labels)?
+                let selected = picker(app, "Fork from user message", &labels, None)?
                     .ok_or("fork selection cancelled")?;
                 tree[selected].id.clone()
             } else {
@@ -1056,8 +1100,8 @@ fn handle_command(
                         choices.push(model.clone());
                     }
                 }
-                let selected =
-                    picker(app, "Select model", &choices)?.ok_or("model selection cancelled")?;
+                let selected = picker(app, "Select model", &choices, None)?
+                    .ok_or("model selection cancelled")?;
                 choices[selected].clone()
             } else {
                 argument.to_string()
@@ -1081,7 +1125,7 @@ fn handle_command(
                         choices.push(provider.clone());
                     }
                 }
-                let selected = picker(app, "Select provider", &choices)?
+                let selected = picker(app, "Select provider", &choices, None)?
                     .ok_or("provider selection cancelled")?;
                 choices[selected].clone()
             } else {
@@ -1098,7 +1142,15 @@ fn handle_command(
             }
         }
         "" => {}
-        other => runtime.hook_command(other, argument, &mut AppObserver(app))?,
+        other => run_operation(
+            runtime,
+            super::Operation::HookCommand {
+                name: other.into(),
+                argument: argument.into(),
+            },
+            true,
+            app,
+        )?,
     }
     app.refresh(runtime);
     Ok(())
@@ -1120,7 +1172,12 @@ impl Observer for AppObserver<'_> {
     }
 }
 
-fn picker(app: &mut App, title: &str, items: &[String]) -> Result<Option<usize>, String> {
+fn picker(
+    app: &mut App,
+    title: &str,
+    items: &[String],
+    cancellation: Option<&crate::process::Cancellation>,
+) -> Result<Option<usize>, String> {
     if items.is_empty() {
         return Err("nothing to select".to_string());
     }
@@ -1144,6 +1201,9 @@ fn picker(app: &mut App, title: &str, items: &[String]) -> Result<Option<usize>,
                     return Ok(None);
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(cancellation) = cancellation {
+                        cancellation.cancel();
+                    }
                     app.invalidate();
                     app.render()?;
                     return Ok(None);

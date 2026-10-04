@@ -47,6 +47,91 @@ fn gears(root: &Path, workspace: &Path, config: &Path) -> Command {
 }
 
 #[test]
+fn hook_questions_and_commands_work_in_line_ui_and_never_prompt_in_one_shots() {
+    for mode in ["interactive", "text", "jsonl"] {
+        let root = fixture(&format!("hook-question-{mode}"));
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let server = MockServer::start_one(sse_response(&[
+            r#"{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}"#,
+        ]))
+        .unwrap();
+        let config = config(&root, &server);
+        let log = root.join("answers.jsonl");
+        let hook = root.join("hook.sh");
+        let question = serde_json::json!({"id": "q1", "text": "Publish proposal?", "choices": [
+            {"value": "yes", "label": "Publish"}, {"value": "no", "label": "Discard"}]});
+        let initialize = serde_json::json!({"commands": [{"name": "review", "help": "Review this work"}], "question": question});
+        let ask = serde_json::json!({"question": question});
+        std::fs::write(&hook, format!("event=$(cat)\ncase \"$event\" in\n*'\"event\":\"initialize\"'*) printf '%s' '{initialize}' ;;\n*'\"event\":\"answer\"'*) printf '%s\\n' \"$event\" >> \"$1\"; printf '{{\"hint\":\"decision saved\"}}' ;;\n*) printf '%s' '{ask}' ;;\nesac\n")).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&config)
+            .unwrap();
+        writeln!(file, "\n[[hooks]]\nname = 'question'\ncommand = ['/bin/sh', '{}', '{}']\nevents = ['initialize', 'command', 'turn_end', 'answer']", hook.display(), log.display()).unwrap();
+        let output = if mode == "interactive" {
+            let mut child = gears(&root, &workspace, &config)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"2\n/help\n/review literal focus\nyes\nhello\n2\n/quit\n")
+                .unwrap();
+            child.wait_with_output().unwrap()
+        } else {
+            gears(&root, &workspace, &config)
+                .args(["-p", "hello", "--output", mode])
+                .output()
+                .unwrap()
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{mode}: {stderr}");
+        let answers = std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        if mode == "interactive" {
+            assert!(stderr.contains("/review - Review this work"), "{stderr}");
+            assert!(stderr.contains("1. Publish\n  2. Discard"), "{stderr}");
+            assert!(stderr.contains("decision saved"), "{stderr}");
+            assert_eq!(
+                answers
+                    .iter()
+                    .map(|event| event["payload"]["answer"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["no", "yes", "no"]
+            );
+        } else {
+            assert!(!stderr.contains("Publish proposal?"), "{stderr}");
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("answer [number"));
+            assert_eq!(answers.len(), 2);
+            assert!(
+                answers
+                    .iter()
+                    .all(|event| event["payload"]["answer"].is_null()
+                        && event["payload"]["attended"] == false)
+            );
+            if mode == "jsonl" {
+                let records = jsonl_records(&output.stdout);
+                assert!(
+                    records.iter().any(
+                        |record| record["type"] == "hint" && record["text"] == "decision saved"
+                    )
+                );
+            }
+        }
+        assert_eq!(server.requests().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn after_turn_line_ui_receives_paths_without_the_key_and_one_shots_skip_it() {
     for mode in ["interactive", "text", "jsonl"] {
         let root = fixture(&format!("after-turn-{mode}"));
