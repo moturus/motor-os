@@ -2772,20 +2772,36 @@ fn compile_test_targets(
     })
 }
 
-fn compile_planned_test_targets(
-    build: &Build<'_>,
-    staging: &Path,
+struct CollectedTestTargets {
+    programs: BTreeMap<String, PathBuf>,
+    harnesses: Vec<PathBuf>,
+}
+
+fn collect_test_targets(
+    selected: &PackageKey,
+    destination: &Path,
     plan: &CompilationPlan,
     outputs: &executor::Outputs,
-    output: &TestOutput<'_>,
-) -> Result<StagedArtifacts> {
-    let selected = selected_library_key(build.manifest)?.package;
+) -> Result<CollectedTestTargets> {
     let mut programs = BTreeMap::new();
     let mut harnesses = Vec::new();
-    for key in &plan.order {
-        if key.package != selected {
-            continue;
-        }
+    let mut keys = plan
+        .units
+        .keys()
+        .filter(|key| &key.package == selected)
+        .collect::<Vec<_>>();
+    keys.sort_by_key(|key| {
+        (
+            match key.kind {
+                UnitKind::LibraryHarness => 0,
+                UnitKind::BinaryHarness => 1,
+                UnitKind::IntegrationHarness => 2,
+                _ => 3,
+            },
+            &key.target,
+        )
+    });
+    for key in keys {
         match key.kind {
             UnitKind::Binary => {
                 let name = key
@@ -2799,8 +2815,8 @@ fn compile_planned_test_targets(
                         "selected program `{name}` produced no executable"
                     )));
                 };
-                let primary = staging.join(name);
-                install_primary(executable, &primary, &selected)?;
+                let primary = destination.join(name);
+                install_primary(executable, &primary, selected)?;
                 programs.insert(name.clone(), primary);
             }
             UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness => {
@@ -2816,6 +2832,24 @@ fn compile_planned_test_targets(
             _ => {}
         }
     }
+    Ok(CollectedTestTargets {
+        programs,
+        harnesses,
+    })
+}
+
+fn compile_planned_test_targets(
+    build: &Build<'_>,
+    staging: &Path,
+    plan: &CompilationPlan,
+    outputs: &executor::Outputs,
+    output: &TestOutput<'_>,
+) -> Result<StagedArtifacts> {
+    let selected = selected_library_key(build.manifest)?.package;
+    let CollectedTestTargets {
+        programs,
+        harnesses,
+    } = collect_test_targets(&selected, staging, plan, outputs)?;
     let first_harness = harnesses.first().cloned().ok_or_else(|| {
         Error::failure(format!(
             "package `{}` has no enabled test targets",
@@ -4368,6 +4402,32 @@ mod tests {
         let artifacts = build_once().unwrap();
         assert_eq!(artifacts.harnesses.len(), 6);
         assert_eq!(artifacts.binaries.len(), 3);
+        let targets = artifacts
+            .harnesses
+            .iter()
+            .map(|path| {
+                let message = artifacts
+                    .messages
+                    .iter()
+                    .find(|message| message["executable"].as_str() == path.to_str())
+                    .unwrap();
+                (
+                    message["target"]["kind"][0].as_str().unwrap(),
+                    message["target"]["name"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            [
+                ("lib", "root_bin"),
+                ("bin", "root-bin"),
+                ("bin", "tool"),
+                ("bin", "worker"),
+                ("test", "first"),
+                ("test", "second"),
+            ]
+        );
         let first_inodes = artifacts
             .harnesses
             .iter()

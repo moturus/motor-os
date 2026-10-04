@@ -2636,6 +2636,13 @@ All twelve planner tests and strict Clippy pass in
 larger than the preferred size because its linked cycle/script/program graph
 needs the full paired oracle fixture.
 
+Test artifact collection now takes an owning package identity, installs only
+that package's normal programs, and returns harnesses in Cargo's target order
+independently of DAG scheduling. The existing executable integration regression
+also asserts the reported library/binary/integration sequence and retains its
+unchanged-inode cache check. The regression and strict Clippy pass in
+`/tmp/lorry-m8-member-test-artifacts-{order,clippy}.log`.
+
 The shared harness graph now accepts named integration selections across
 members and includes explicitly named `test = false` targets. Preparation
 finishes those plans through the common identity/source-remap path. The legal

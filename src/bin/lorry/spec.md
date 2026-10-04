@@ -1356,6 +1356,9 @@ also scheduled on the dependency DAG and uses the project-local unit cache.
 The planner distinguishes library and binary `--test` harnesses from ordinary
 library and binary units, retaining their test-mode profiles and dependency
 edges.
+Artifact collection is scoped to one package and orders its harnesses by
+library, binary target name, and integration-test target name, independently
+of compiler scheduling order.
 Selected library and binary harnesses execute on that DAG during `test`.
 When selected integration tests need program binaries, the executor runs one
 mixed-profile DAG. It builds normal-profile programs and test-profile
