@@ -1,3 +1,4 @@
+pub mod jsonl;
 pub mod line;
 pub mod select;
 pub mod tui;

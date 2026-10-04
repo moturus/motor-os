@@ -470,6 +470,10 @@ impl Session {
         &self.header.id
     }
 
+    pub fn format_version(&self) -> u32 {
+        self.header.version
+    }
+
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
