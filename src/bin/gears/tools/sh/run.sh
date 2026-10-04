@@ -7,7 +7,7 @@ PATH=$GEARS_SH_FIXED_PATH
 export PATH
 if [ -f "$GEARS_SH_STATE/cwd" ]; then
     IFS= read -r GEARS_SH_SAVED_CWD < "$GEARS_SH_STATE/cwd" || exit 1
-    cd "$GEARS_SH_SAVED_CWD" 2>/dev/null || cd "$GEARS_WORKSPACE" || exit 1
+    cd "$GEARS_SH_SAVED_CWD" || cd "$GEARS_WORKSPACE" || exit 1
 fi
 
 eval "$1"
