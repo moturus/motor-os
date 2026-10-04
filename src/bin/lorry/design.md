@@ -341,6 +341,17 @@ units use stable target-specific rustc incremental directories below
 disposable compiler state. Release and immutable registry units omit
 incremental compilation.
 
+Clippy reuses the check planner and executor. Toolchain discovery verifies
+the sibling driver's embedded rustc and hashes the driver. Member unit keys
+include that identity and the encoded lint arguments; nonmember units keep
+plain rustc. Clippy uses separate profile and incremental directories.
+Configuration discovery fingerprints both candidate spellings at each
+searched directory, including their absence, so a newly created nearer file
+invalidates the lint result. Discovered configuration files and the workspace
+manifest may appear in member dep-info outside the package directory.
+On Motor the shipped sibling is a launcher; its identity also includes the
+native driver payload's hash.
+
 Ordinary tests remain separate Rust harnesses. `bundle.rs` creates one
 target-native self-extracting executable containing the selected harnesses and
 required package binary. The launcher verifies its payload table and extracts

@@ -89,7 +89,7 @@ it unchanged in JSON mode, and replays only stderr. The enhanced procedural
 macro contract proves cold output and fresh stderr-only replay. The original
 failure and diagnosis are retained in the milestone evidence below.
 
-Milestone 4 is in progress. Clippy manifest lints and sibling-driver
+Milestone 4 is complete. Clippy manifest lints and sibling-driver
 discovery are committed. The driver must embed the selected rustc, and its
 content hash binds member compiler caches. `clippy` now uses the check path,
 with separate outputs and incremental state. The paired Cargo contract covers
@@ -97,8 +97,22 @@ member dependencies and build scripts, external-package exclusion, fresh
 warnings, `--no-deps`, and denied trailing lint arguments. Configuration
 freshness also tracks parent-directory files and absent candidates. Cargo
 comparisons prove edits, nearer-file creation/removal, and a relative
-`CLIPPY_CONF_DIR` override. Native driver/image integration and the full
-milestone gate follow.
+`CLIPPY_CONF_DIR` override. A metadata lint also matches Cargo and reaches
+Lorry through `$CARGO`. The native driver compiled from the selected Rust
+sources, passed compiler-identity and ELF validation, and is staged in the
+new keyed assembly and release developer image. Its stripped size is
+131,375,832 bytes, compared with rustc's 119,030,776 bytes. The full debug
+gate passed with 0.9 minutes of preparation and 16.8 minutes of testing.
+The full release gate passed with 0.6 minutes of preparation and 9.6 minutes
+of testing. The release developer-image gate passed, including native Clippy
+human and JSON diagnostics, metadata linting, and denied-lint own messages.
+Its repository phase took 0.2 minutes of preparation and 12.8 minutes of
+testing; the complete Lorry suite passed in 516 seconds with 377 Rust tests
+and 3 own-message integration tests. Online vendoring needed no retries.
+The first developer gate exposed an ordering assumption in the failed-build
+contract. Diagnosis showed that Cargo stops before an independent warning
+unit when the other binary fails first. The committed test fix puts that
+warning in the failing binary's prerequisite and retains exact comparisons.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

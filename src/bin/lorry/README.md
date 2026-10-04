@@ -1,7 +1,7 @@
 # Lorry
 
 Lorry is Motor OS's small, strict Rust package builder. It creates, vendors,
-inspects, builds, checks, runs, and tests a deliberately limited
+inspects, builds, checks, lints, runs, and tests a deliberately limited
 Cargo-compatible package model on Linux and Motor OS. Unsupported Cargo
 behavior is rejected explicitly.
 
@@ -20,7 +20,7 @@ supported parts of Lorry and Cargo configuration, a rustc toolchain, and
 configured Lorry repositories. `lorry vendor` additionally uses the configured
 curl executable for sparse-registry and Git smart-HTTP traffic. With the
 explicit `--use-cargo-registry`
-option, build, check, run, test, metadata, and tree may instead verify and read
+option, build, check, clippy, run, test, metadata, and tree may instead verify and read
 an already populated local Cargo archive/source cache. Lorry records its
 evidence on first use and trusts that evidence during later ordinary builds.
 None of these operations invokes Cargo.
@@ -64,7 +64,7 @@ The supported dependency model includes renamed and optional dependencies,
 default and forwarded features, target-conditioned dependencies, dependency
 build scripts, procedural-macro dependencies, and root crates.io patches.
 Root build scripts and root build-dependencies are not operationally
-supported. `build`, `run`, `test`, and `check` reject a selected package
+supported. `build`, `run`, `test`, `check`, and `clippy` reject a selected package
 that has a build script, including a workspace member selected with `-p`. Alternative registries, selecting a
 procedural-macro package as the root, root dev
 dependencies selected for the build target, examples, benches, explicit test
@@ -203,7 +203,7 @@ download; dependency acquisition and review are explicit `vendor` operations.
 The separate streams let an agent read Cargo events on stdout and Lorry
 errors on stderr. Successful commands need not emit an own-message event.
 
-Build, check, run, and test accept `json`, `json-diagnostic-rendered-ansi`, and
+Build, check, clippy, run, and test accept `json`, `json-diagnostic-rendered-ansi`, and
 their comma-separated combination. Each stream ends with one `build-finished`
 event. On run and test it describes compilation, before the child starts;
 the child's exit status remains the command's result. Use `test --no-run` to
@@ -233,9 +233,10 @@ lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH]
             [--all-targets|--lib|--bins|--examples]
             [--bin NAME] [--test NAME]
             [--message-format json|json-diagnostic-rendered-ansi]
+lorry clippy [CHECK OPTIONS] [--no-deps] [-- LINT OPTIONS...]
 ```
 
-`build`, `check`, `run`, `test`, `clean`, `metadata`, and `tree` accept
+`build`, `check`, `clippy`, `run`, `test`, `clean`, `metadata`, and `tree` accept
 `--locked`, `--offline`, and `--frozen`; those commands already run offline
 and preserve Cargo.lock. Acquisition and admission remain part of `vendor`.
 
@@ -286,6 +287,21 @@ still checks all supported targets. For rust-analyzer's save checks, `-p`
 also accepts the exact Cargo package ID emitted by `metadata`, with an explicit
 `--manifest-path` selecting that same package. Mismatched IDs and unknown target
 names are rejected before compiler discovery.
+
+`clippy` uses the check planner with the selected rustc's sibling
+`clippy-driver`. The driver must embed that exact compiler. Member libraries,
+targets, and dependency build scripts are linted; packages outside the
+workspace use rustc. `--no-deps` limits linting to the selected package's
+primary targets. Trailing arguments, such as `-- -D clippy::needless_return`,
+go to Clippy. Manifest Rust and Clippy lint levels and priorities apply.
+`clippy --fix` is not supported.
+
+Clippy outputs and incremental state are separate from check's. Fresh units
+replay warnings. Configuration discovery follows the driver, including
+`.clippy.toml` or `clippy.toml` above the package and `CLIPPY_CONF_DIR`.
+Editing a configuration or creating a nearer one invalidates the affected
+units. On Motor, the development image supplies the matching driver through
+`/devtools/bin/clippy-driver`.
 
 ## Vendor dependencies
 

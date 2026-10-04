@@ -1075,6 +1075,9 @@ parents. Lorry preserves that environment setting and fingerprints searched
 candidates, including absent files, resolved symlink paths, and file contents.
 Member dependencies may read the discovered configuration above their package;
 those external inputs are validated on cache hits too.
+Member compiler freshness includes the driver's path and content hash. For
+the shipped Motor launcher, the hash also covers the native driver payload.
+Clippy lints that request `$CARGO metadata` invoke Lorry.
 
 `build` and `check` share the Cargo message writer. Both accept
 `--message-format json` and `json-diagnostic-rendered-ansi`, including the

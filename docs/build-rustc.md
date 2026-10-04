@@ -278,7 +278,8 @@ limitations, save recovery, and regression coverage.
 
 After LLVM, mlibc, compiler-rt, and libc++ are available in the keyed assembly
 sysroot, a second `x.py` invocation builds rustc for
-`x86_64-unknown-motor` from the same effective Rust and LLVM trees. The build
+`x86_64-unknown-motor` from the same effective Rust and LLVM trees, together
+with rustfmt and Clippy. The build
 verifies that this invocation leaves the installed host prefix byte-for-byte
 unchanged.
 
@@ -287,9 +288,11 @@ The development image packages these native Rust files:
 ```text
 /devtools/rust/bin/rustc
 /devtools/rust/bin/rustfmt
+/devtools/rust/bin/clippy-driver
 /devtools/rust/lib/rustlib/x86_64-unknown-motor/lib/*.rlib
 /devtools/bin/rustc          PATH launcher
 /devtools/bin/rustfmt        PATH launcher
+/devtools/bin/clippy-driver  PATH launcher
 /devtools/bin/cc             native linker driver supplied by the C toolchain
 ```
 
@@ -304,6 +307,14 @@ writable temporary directory:
 
 rustfmt discovers `rustfmt.toml` from the source path and its ancestors. A
 syntax error produces a diagnostic and does not replace the source file.
+
+The native Clippy driver is built by the same bootstrap invocation as rustc.
+The assembly validates its compiler identity and native ELF properties and
+records its content hash. `lorry clippy` checks that
+`clippy-driver --rustc -vV` matches the selected rustc, and binds cached member
+units to the driver's contents. Its PATH launcher sets `TMPDIR=/devtools/tmp`.
+Run `lorry clippy` in an admitted package to get human diagnostics, or add
+`--message-format=json` for Cargo-compatible messages.
 
 Inside the development VM:
 

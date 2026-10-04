@@ -1050,6 +1050,77 @@ already has `clippy-driver`. Patch 6 waits for patch 5.
 `clippy --fix` stays later work (decision 13). A rustfix dependency or
 other edit machinery needs its own design and dependency decision.
 
+### Progress and focused evidence
+
+The Linux implementation is committed in `70c0bf62`, `f50ce0cd`, `a544f655`,
+and `26581c1a`. Focused parser, CLI, discovery, cache, and configuration
+tests passed, along with strict Clippy validation. The offline paired
+contract covers member libraries and build scripts, external-package
+exclusion, fresh warnings, `--no-deps`, denied lint arguments, parent
+configuration discovery, edits and nearer-file creation/removal, and a
+relative `CLIPPY_CONF_DIR` override. Its metadata lint reaches Lorry via
+`$CARGO` and matches Cargo's diagnostics. Evidence is in
+`/tmp/lorry-m4-config-contract.log` and
+`/tmp/lorry-m4-metadata-lint-current-contract.log`. The first metadata-lint
+invocation used the stale milestone-3 release binary and failed before
+Clippy; its log is `/tmp/lorry-m4-metadata-lint-contract.log`. Checking the
+binary timestamps identified the setup error, and the current binary passed.
+
+The native recipe and assembly integrity contracts passed in
+`/tmp/lorry-m4-native-{recipe,assembly,resolution}-contract.log`. The native
+build completed in `/tmp/lorry-m4-native-build.log`. It adds Clippy to the
+same stage-2 bootstrap invocation as rustc and rustfmt, validates the
+compiler identity and ELF, and stages only the driver and its TMPDIR
+launcher. The native configuration schema is `motor-native-config-v6`;
+the Clippy recipe is `motor-native-clippy-v1`. Assembly
+`51adb8693d4efc14ba72ee560484b7335c2f19788966631cf13fb1225cca6155`
+records driver SHA-256
+`dd179b841119f9444e2c468b2d3aecd3275505305897d677e005ffb9b207935a`.
+The stripped driver is 131,375,832 bytes; rustc is 119,030,776 bytes.
+The Rust, mlibc, Helix, ripgrep, and sed source checkouts remain clean and
+at their original revisions; no source patches were authored outside Motor OS.
+The full debug gate passed in `/tmp/lorry-m4-full-debug.log`: 0.9 minutes
+of preparation and 16.8 minutes of testing. The full release gate passed in
+`/tmp/lorry-m4-full-release.log`: 0.6 minutes of preparation and 9.6 minutes
+of testing. The final release developer-image gate passed in
+`/tmp/lorry-m4-full-dev-release-fixed.log`: its repository phase took 0.2
+minutes of preparation and 12.8 minutes of testing. Its native tools, HTTP,
+and source-build phases also passed. The complete Lorry suite passed in 516
+seconds, with 377 Rust tests, 3 own-message integration tests, the dedicated
+contracts, and Cargo native/cross byte identity. Online host and Motor
+vendoring succeeded without retries.
+
+Native evidence is in
+`target/lorry/native-self-tests/self-20261004T044525Z-3859854/summary.txt`.
+The native gate took 224.339 seconds and proved self-build, cross/native
+identity, child recovery, matching Clippy/rustc identity, human and JSON
+lint diagnostics, a metadata lint through `$CARGO`, and denied lint exit 101
+with a separate own-message error. The existing analyzer and formatter
+image-size gates passed. Milestone 4 is complete.
+
+The first release developer-image run passed its repository, HTTP, and
+native source phases, then failed the Lorry suite after 146 seconds in
+the paired failed-build diagnostic comparison. The original log is
+`/tmp/lorry-m4-full-dev-release.log`. Lorry processed `first` and reported
+its deprecation warning before `second` failed. Cargo processed `second`
+first and never visited `first`, so its stream contained only the error.
+Recreating the original fixture path reproduced the exact mismatch; Cargo's
+job-queue debug log confirmed the missing dispatch. Evidence is in
+`/tmp/lorry-m4-failure-order-diagnosis.log` and the retained fixture
+`/tmp/lorry-check-contract-AMfPGV`.
+
+The pinned Cargo queue assigns the same cost to independent leaf units,
+breaks ties through its hash map, and stops dispatch after an error. One
+job therefore does not guarantee an order between the two binaries. The
+test incorrectly required diagnostics from an independent unit. Commit
+`f2aef013` moves the warning into the failing binary's library prerequisite
+and also compares a build selecting only the failing binary. The exact
+diagnostic comparison, warning/error requirements, exit status, and failed
+finish event are unchanged. The focused contract passed in
+`/tmp/lorry-m4-failure-order-fixed-contract.log`; temporary instrumentation
+was removed. The corrected full developer gate passed in
+`/tmp/lorry-m4-full-dev-release-fixed.log`.
+
 ## Milestone 5: workspace model and selection
 
 **Result.** Every command uses the same workspace membership and manifest

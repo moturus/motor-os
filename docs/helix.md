@@ -74,6 +74,11 @@ expansion in the analyzer is disabled. The client reports file changes.
 Lorry's compiler-side procedural-macro support is separate. General server
 configuration is documented in [build-rustc.md](build-rustc.md#native-motor-rust-analyzer).
 
+To use Clippy for save diagnostics, set rust-analyzer's `check.command` to
+`"clippy"` in the project's `.helix/languages.toml`. Lorry uses the native
+Clippy driver supplied by the development image and reports Cargo-compatible
+diagnostics. The shipped configuration continues to use `"check"`.
+
 The pinned integration can log a Lorry version-string warning and an
 unsupported `workspace/diagnostic/refresh` response from Helix. Push
 diagnostics and their clearing are covered by the native acceptance tests.
