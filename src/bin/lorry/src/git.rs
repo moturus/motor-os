@@ -8,7 +8,7 @@ mod refresh;
 
 pub(crate) use direct::{
     DirectCatalog, configure_direct, load_locked_dependencies, load_locked_sources,
-    materialize_locked_dependencies,
+    materialize_locked_dependencies, materialize_locked_sources,
 };
 pub(crate) use refresh::{PatchRefresh, resolve_patch_refreshes};
 

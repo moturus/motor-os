@@ -35,6 +35,8 @@ use crate::toolchain::{TargetInfo, Toolchain};
 use crate::upgrade;
 use crate::vendor_lock::ProjectVendorLock;
 
+pub(crate) mod workspace;
+
 pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
     cli.features.require_default()?;
     if cli.use_cargo_registry {
@@ -842,14 +844,12 @@ impl<'a> Acquisition<'a> {
         })
     }
 
-    #[allow(dead_code)] // Used by the workspace fetch command next.
     fn for_sources(config: &'a Config, manifest: &Manifest, progress: Progress) -> Result<Self> {
         let mut acquisition = Self::new(config, manifest, progress)?;
         acquisition.describe = true;
         Ok(acquisition)
     }
 
-    #[allow(dead_code)] // Locked acquisition also serves vendor --locked.
     fn load_locked_sparse(
         &mut self,
         manifest: &Manifest,

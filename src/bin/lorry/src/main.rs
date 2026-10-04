@@ -146,6 +146,7 @@ fn run(cli: Cli) -> Result<i32> {
             plain,
         } => compatibility::locate_project(manifest_path.as_deref(), *plain),
         Command::Metadata(options) => metadata::execute(&cli, options),
+        Command::Fetch(options) => vendor::workspace::fetch(&cli, options),
         Command::Tree(options) => tree::execute(&cli, options),
         Command::Review => review::execute(&cli),
         Command::Vendor(options) => vendor::execute(&cli, options),
@@ -175,6 +176,9 @@ fn print_help(topic: Option<&str>) {
         ),
         Some("metadata") => println!(
             "Describe a workspace graph\n\nUsage: lorry [+toolchain] [GLOBAL] metadata [--format-version 1] [--manifest-path PATH] [--no-deps] [--filter-platform TRIPLE] [--locked|--offline|--frozen]"
+        ),
+        Some("fetch") => println!(
+            "Acquire verified locked sources without build admission\n\nUsage: lorry [+toolchain] [GLOBAL] fetch [--manifest-path PATH] [--target TRIPLE]... [--locked] [--offline|--frozen]"
         ),
         Some("locate-project") => println!(
             "Locate a manifest\n\nUsage: lorry [+toolchain] [GLOBAL] locate-project [--workspace] [--manifest-path PATH] [--message-format json|plain]"
@@ -218,6 +222,7 @@ fn print_help(topic: Option<&str>) {
              check                       Check a package without linking\n  \
              clippy                      Lint a package with Clippy\n  \
              clean                       Remove generated Lorry artifacts\n  \
+             fetch                       Acquire verified locked sources\n  \
              locate-project              Locate a manifest\n  \
              metadata                    Describe a package graph\n  \
              new                         Create a binary package\n  \

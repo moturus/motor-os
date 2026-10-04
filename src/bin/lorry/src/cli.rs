@@ -43,6 +43,7 @@ pub enum Command {
     CacheClean,
     Check(CheckOptions),
     Clean(CleanOptions),
+    Fetch(FetchOptions),
     LocateProject {
         manifest_path: Option<String>,
         plain: bool,
@@ -123,6 +124,12 @@ pub struct MetadataOptions {
     pub no_deps: bool,
     pub filter_platform: Option<String>,
     pub format_version_explicit: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchOptions {
+    pub targets: Vec<String>,
+    pub offline: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -473,6 +480,13 @@ fn command_line() -> ClapCommand {
                 .arg(child_arguments()),
         )
         .subcommand(clean_command().dont_delimit_trailing_values(true))
+        .subcommand(
+            ClapCommand::new("fetch")
+                .disable_help_flag(true)
+                .arg(manifest_path_argument())
+                .args(locked_offline_arguments())
+                .arg(Arg::new("target").long("target").action(ArgAction::Append)),
+        )
         .subcommand(locate_project_command())
         .subcommand(metadata_command())
         .subcommand(
@@ -507,6 +521,7 @@ fn command_line() -> ClapCommand {
                             "check",
                             "clippy",
                             "clean",
+                            "fetch",
                             "locate-project",
                             "metadata",
                             "new",
@@ -926,6 +941,10 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
         })),
         Some(("clean", options)) => Ok(Command::Clean(CleanOptions {
             build: build_options(options, false),
+        })),
+        Some(("fetch", options)) => Ok(Command::Fetch(FetchOptions {
+            targets: values(options, "target"),
+            offline: options.get_flag("offline") || options.get_flag("frozen"),
         })),
         Some(("locate-project", options)) => Ok(Command::LocateProject {
             manifest_path: options.get_one::<String>("manifest-path").cloned(),
