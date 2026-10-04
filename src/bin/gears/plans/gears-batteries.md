@@ -1,9 +1,11 @@
 # Gears batteries: design and implementation plan
 
-Status: ready for implementation, revised 2026-10-02. Two questions wait
+Status: implementation in progress; design revised 2026-10-02. See the
+[implementation record](gears-batteries-progress.md) for completed patches
+and validation still outstanding. Two questions wait
 for later phases: question 7 is discussed when phase 8 is reached, and
 question 10 when phase 12 is. Tool confinement is deferred (see "Deferred:
-tool confinement"). No code accompanies this document.
+tool confinement").
 
 ## Purpose and scope
 
