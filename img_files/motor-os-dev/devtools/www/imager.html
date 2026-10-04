@@ -461,7 +461,9 @@ imager set ssh-key &lt;PUBLIC KEY FILE&gt; &lt;IMAGE&gt;
 imager set ssh-server-key &lt;PRIVATE KEY FILE&gt; &lt;IMAGE&gt;
 imager set ssl keys &lt;DIRECTORY&gt; &lt;IMAGE&gt;</code></pre>
 
-<p>Examples below use <code>imager</code> for the host executable. To invoke it through Cargo, use
+<p>Examples below use <code>imager</code> for the host executable. Every image target in the
+Makefile installs a statically linked copy as <code>vm_images/PROFILE/tools/imager</code>, whose
+editing commands need neither the Motor toolchain nor a checkout. To invoke it through Cargo, use
 the repository-selected toolchain, change to <code>src/imager</code>, and run <code>cargo run
 --release -- &lt;arguments&gt;</code>. That directory&#x27;s Cargo configuration supplies the
 required build flags. Cargo&#x27;s <code>--release</code> selects the host tool&#x27;s build
@@ -510,8 +512,8 @@ make dev.img BUILD=release</code></pre>
 
 <p>These produce <code>motor-os-base.img</code>, <code>motor-os.qcow2</code>,
 <code>motor-os.img</code> (the raw standard image), and <code>motor-os-dev.qcow2</code>,
-respectively. Later rebuilding an image replaces any customizations made directly to that output
-file.</p>
+respectively, and each installs the imager it ran as <code>tools/imager</code> beside them. Later
+rebuilding an image replaces any customizations made directly to that output file.</p>
 
 <h3 id="image-configuration">Image configuration</h3>
 

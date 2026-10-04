@@ -17,7 +17,9 @@ imager set ssh-server-key <PRIVATE KEY FILE> <IMAGE>
 imager set ssl keys <DIRECTORY> <IMAGE>
 ```
 
-Examples below use `imager` for the host executable. To invoke it through
+Examples below use `imager` for the host executable. Every image target in
+the Makefile installs a statically linked copy as `vm_images/PROFILE/tools/imager`,
+whose editing commands need neither the Motor toolchain nor a checkout. To invoke it through
 Cargo, use the repository-selected toolchain, change to `src/imager`, and
 run `cargo run --release -- <arguments>`. That directory's Cargo configuration
 supplies the required build flags. Cargo's `--release` selects the host tool's

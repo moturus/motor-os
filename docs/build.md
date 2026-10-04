@@ -52,8 +52,9 @@ How ordinary builds find the assembly is documented in
 
 ## Run Motor OS
 
-The release images are written beneath `vm_images/release`. To boot the
-standard image:
+The release images are written beneath `vm_images/release`, together with a
+statically linked [imager](imager.md) in `vm_images/release/tools/` for editing
+them on any x86-64 Linux host. To boot the standard image:
 
 ```sh
 cd vm_images/release
