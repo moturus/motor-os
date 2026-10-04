@@ -1,5 +1,7 @@
 //! Optional coding workflows using Gears' command-hook protocol.
 
+pub mod instructions;
+
 use std::io::Read;
 use std::path::PathBuf;
 
