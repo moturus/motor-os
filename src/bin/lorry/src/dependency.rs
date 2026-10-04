@@ -109,7 +109,7 @@ impl PreparedGraph {
             check,
             binaries,
             binary_name,
-            options.release,
+            options.release || options.dev_profile.opt_level != "0",
         )?;
         self.finish_plan(options, manifests, graph)
     }

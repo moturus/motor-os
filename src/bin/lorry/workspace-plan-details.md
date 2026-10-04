@@ -2704,6 +2704,27 @@ contracts, and strict Clippy pass in
 Example/bench execution and their remaining target-selection semantics still
 belong to the following milestone-8 patches.
 
+Macro compiler and script profile separation now also covers optimized dev
+profiles. Ordinary selected macro units are distinct from host dependency units
+when necessary, and common plan preparation splits the owning script contexts
+for build, check, and test. Equivalent script contexts remain shared. The prior
+test-only split is removed, along with incorrect debug reduction of optimized
+consumer script runs. Cargo source graphs for opt-level 2 (with default and
+limited debug info) are preserved in `/tmp/lorry-m8-macro-profile-probe-*.json`.
+
+The expanded native/explicit-target test/check oracle originally reproduces the
+consumer debug mismatch in
+`/tmp/lorry-m8-optimized-macro-script-original-oracle.log`. The first generalized
+split incorrectly separated equivalent unoptimized script contexts; that oracle
+failure is preserved in
+`/tmp/lorry-m8-optimized-macro-script-normalized-oracle.log`. Retaining Cargo's
+pre-reduction sharing resolves it. The expanded graph oracle, native/Motor
+optimized-dev and release app/macro/harness byte comparisons, JSON comparisons,
+host runtime/bundles, and strict Clippy pass in
+`/tmp/lorry-m8-optimized-macro-script-profile-sharing-oracle.log`,
+`/tmp/lorry-m8-optimized-macro-script-first-contract.log`, and
+`/tmp/lorry-m8-optimized-macro-script-clippy.log`.
+
 ### Member build-time code
 
 The shared planner now has workspace harness graphs with selected dev edges,

@@ -138,11 +138,37 @@ fn host_harness() {
     assert_eq!(std::fs::read_to_string(out.join("generated.rs")).unwrap(), "const SCRIPT_VALUE: &str = \"generated\";");
 }
 EOF
-for platform in native motor native-release motor-release; do
+for platform in native motor native-release motor-release native-opt motor-opt; do
+    if [ "$platform" = native-opt ]; then printf '\n[profile.dev]\nopt-level = 2\n' >>Cargo.toml; fi
     target=()
     release=()
     if [[ "$platform" = motor* ]]; then target=(--target x86_64-unknown-motor); fi
     if [[ "$platform" = *-release ]]; then release=(--release); fi
+    if [[ "$platform" = *-opt || "$platform" = *-release ]]; then
+        for command in build check; do
+            env HOME="$WORK/home" "$LORRY" "$command" --workspace "${target[@]}" "${release[@]}" --message-format=json >"$WORK/lorry-optimized.json"
+            "$LORRY_TEST_CARGO" "$command" --workspace "${target[@]}" "${release[@]}" --offline --message-format=json >"$WORK/cargo-optimized.json"
+            comparison=differential-script-clean-messages
+            if [ "$command" = check ]; then comparison=differential-script-clean-check-messages; fi
+            "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \
+                "$comparison" "$WORK/lorry-optimized.json" "$WORK/cargo-optimized.json"
+            if [ "$command" = build ]; then
+                profile=debug
+                if [[ "$platform" = motor* ]]; then profile=x86_64-unknown-motor/debug; fi
+                if [[ "$platform" = *-release ]]; then profile="${profile%debug}release"; fi
+                cmp "target/$profile/app" "target/lorry/$profile/app"
+                python3 - "$WORK/lorry-optimized.json" "$WORK/cargo-optimized.json" <<'PYMACRO'
+import json, pathlib, sys
+def macros(path):
+    return sorted(pathlib.Path(file).read_bytes() for line in open(path) for event in [json.loads(line)]
+                  if event['reason'] == 'compiler-artifact' and event['target']['kind'] == ['proc-macro']
+                  for file in event['filenames'])
+lorry, cargo = map(macros, sys.argv[1:])
+assert lorry and lorry == cargo
+PYMACRO
+            fi
+        done
+    fi
     for selection in macro all; do
         packages=(-p derive)
         if [ "$selection" = all ]; then packages=(--workspace); fi

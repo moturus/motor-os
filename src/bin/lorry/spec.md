@@ -1360,6 +1360,10 @@ Procedural-macro library harnesses compile for the host with host features,
 `prefer-dynamic`, and the `proc_macro` extern. Their scripts compile as host
 tools and run with Cargo's consumer profile; optimized macro harnesses and
 ordinary macro dependencies can require separate script executions.
+The common planner splits these script contexts for optimized dev profiles and
+release profiles, while retaining one execution for equivalent contexts. A
+selected macro's ordinary compiler unit also stays distinct from its host-tool
+dependency unit when their optimization settings differ.
 
 For `build`, the selected package's library is compiled on the same unit DAG
 and executor as its normal dependencies. Its dependency edges retain the

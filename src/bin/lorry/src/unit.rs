@@ -368,7 +368,7 @@ pub(crate) fn workspace_check_units(
             true,
             selection.binaries,
             selection.binary_name,
-            options.release,
+            options.release || options.dev_profile.opt_level != "0",
         )?
     } else {
         UnitGraph {
@@ -687,7 +687,7 @@ pub(crate) fn workspace_units(
     check: bool,
     binaries: bool,
     binary_name: Option<&str>,
-    release: bool,
+    separate_macros: bool,
 ) -> Result<UnitGraph> {
     let mut graph = dependency_units_with_selected(resolution, manifests, selected)?;
     graph.selected_packages.extend(selected.iter().cloned());
@@ -727,7 +727,7 @@ pub(crate) fn workspace_units(
             add_member_target_edges(&mut graph, resolution, manifests, &binary, false, true)?;
         }
     }
-    if release {
+    if separate_macros {
         let macros = graph
             .units
             .keys()
@@ -765,7 +765,7 @@ pub(crate) fn workspace_units(
             .filter(|key| {
                 selected.contains(&key.package)
                     && key.kind == UnitKind::ProcMacro
-                    && (!release || key.profile == ProfileContext::Selected)
+                    && (!separate_macros || key.profile == ProfileContext::Selected)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -819,7 +819,7 @@ pub(crate) fn workspace_units(
                             } else {
                                 UnitMode::Build
                             }
-                            && (!release || key.profile == ProfileContext::Selected)
+                            && (!separate_macros || key.profile == ProfileContext::Selected)
                     }
                     _ => false,
                 }
@@ -970,40 +970,6 @@ pub(crate) fn workspace_test_units(
         }
     }
     tests = tests.with_profile(ProfileContext::Test, panic_abort);
-    let root_opt = if options.release {
-        options.release_profile.opt_level
-    } else {
-        options.dev_profile.opt_level
-    };
-    if root_opt != "0" {
-        for root in roots.iter().filter(|key| {
-            key.kind == UnitKind::LibraryHarness && key.compile_kind == CompileKind::Host
-        }) {
-            let script = tests.units[root]
-                .dependencies
-                .iter()
-                .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
-                .map(|edge| edge.unit.clone());
-            if let Some(script) = script {
-                let mut run = tests.units[&script].clone();
-                run.key.profile = ProfileContext::Selected;
-                let selected = run.key.clone();
-                tests.units.insert(selected.clone(), run);
-                let harness = tests.units.get_mut(root).unwrap();
-                harness.dependencies = harness
-                    .dependencies
-                    .iter()
-                    .cloned()
-                    .map(|mut edge| {
-                        if edge.unit == script {
-                            edge.unit = selected.clone();
-                        }
-                        edge
-                    })
-                    .collect();
-            }
-        }
-    }
     // Normal programs keep their panic strategy; harnesses and their libraries unwind.
     // Keeping those graphs separate also permits legal dev cycles back to ordinary libraries.
     if programs.is_empty() {
@@ -1471,6 +1437,8 @@ pub fn plan_dependency_units_with_remaps(
     source_remaps: &BTreeMap<PackageKey, SourceRemap>,
     source_exclusions: &BTreeMap<PackageKey, Exclusions>,
 ) -> Result<CompilationPlan> {
+    let normalized = selected_macro_script_units(graph, manifests, options)?;
+    let graph = normalized.as_ref().unwrap_or(graph);
     if graph.units.values().any(|unit| {
         !unit
             .dependencies
@@ -1650,6 +1618,71 @@ pub fn plan_dependency_units_with_remaps(
     })
 }
 
+fn selected_macro_script_units(
+    graph: &UnitGraph,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    options: &PlanOptions<'_>,
+) -> Result<Option<UnitGraph>> {
+    let root_opt = if options.release {
+        options.release_profile.opt_level
+    } else {
+        options.dev_profile.opt_level
+    };
+    // Equal pre-reduction script profiles share Cargo's host debug adjustment.
+    if root_opt == "0" {
+        return Ok(None);
+    }
+    let mut normalized = None;
+    for parent in graph.units.values().filter(|unit| {
+        graph.selected_packages.contains(&unit.key.package)
+            && (unit.key.kind == UnitKind::ProcMacro
+                && unit.key.profile == ProfileContext::Selected
+                || unit.key.kind == UnitKind::LibraryHarness
+                    && unit.key.compile_kind == CompileKind::Host)
+    }) {
+        let Some(edge) = parent
+            .dependencies
+            .iter()
+            .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
+        else {
+            continue;
+        };
+        let mut run = graph.units[&edge.unit].clone();
+        run.key.profile = ProfileContext::Selected;
+        let manifest = &manifests[&parent.key.package];
+        if unit_settings(graph, &edge.unit, manifest, options)
+            == unit_settings(graph, &run.key, manifest, options)
+        {
+            continue;
+        }
+        let graph = normalized.get_or_insert_with(|| graph.clone());
+        let selected = run.key.clone();
+        graph.units.insert(selected.clone(), run);
+        let parent = graph.units.get_mut(&parent.key).unwrap();
+        parent.dependencies = parent
+            .dependencies
+            .iter()
+            .cloned()
+            .map(|mut dependency| {
+                if dependency.kind == UnitEdgeKind::BuildScriptOutput {
+                    dependency.unit = selected.clone();
+                }
+                dependency
+            })
+            .collect();
+    }
+    if let Some(graph) = &mut normalized {
+        let roots = graph
+            .units
+            .keys()
+            .filter(|key| key.kind != UnitKind::BuildScriptRun)
+            .cloned()
+            .collect();
+        retain_unit_roots(graph, roots)?;
+    }
+    Ok(normalized)
+}
+
 impl UnitProfile {
     fn cargo_profile(&self) -> CargoProfile<'_> {
         CargoProfile {
@@ -1729,6 +1762,11 @@ fn unit_settings(
             && (!test_graph || key.mode == UnitMode::Check)
             && (key.profile == ProfileContext::Selected
                 || (!options.release
+                    && !graph.units.keys().any(|other| {
+                        other.package == key.package
+                            && other.kind == UnitKind::ProcMacro
+                            && other.profile == ProfileContext::Selected
+                    })
                     && (key.mode == UnitMode::Check
                         || !graph.units.contains_key(&UnitKey {
                             mode: UnitMode::Check,
@@ -1782,12 +1820,6 @@ fn unit_settings(
         }
     }
     if key.kind == UnitKind::BuildScriptRun {
-        if key.profile == ProfileContext::Selected
-            && options.logical_target.is_none()
-            && macro_dependency
-        {
-            profile.debuginfo = CargoDebugInfo::None;
-        }
         profile = run_build_profile(&profile);
         // Cargo chooses automatic stripping before it reduces host debug information.
         profile.strip = run_strip;
@@ -3224,16 +3256,47 @@ mod tests {
             )
             .is_err()
         );
-        for (integration_name, logical_target, checking) in [
-            (None, None, false),
-            (None, Some("x86_64-unknown-linux-gnu"), false),
-            (Some("integration"), Some("x86_64-unknown-linux-gnu"), false),
-            (Some("disabled"), Some("x86_64-unknown-linux-gnu"), false),
-            (None, None, true),
-            (None, Some("x86_64-unknown-linux-gnu"), true),
-            (Some("integration"), Some("x86_64-unknown-linux-gnu"), true),
+        for (integration_name, logical_target, checking, opt_level) in [
+            (None, None, false, "0"),
+            (None, Some("x86_64-unknown-linux-gnu"), false, "0"),
+            (
+                Some("integration"),
+                Some("x86_64-unknown-linux-gnu"),
+                false,
+                "0",
+            ),
+            (
+                Some("disabled"),
+                Some("x86_64-unknown-linux-gnu"),
+                false,
+                "0",
+            ),
+            (None, None, true, "0"),
+            (None, Some("x86_64-unknown-linux-gnu"), true, "0"),
+            (
+                Some("integration"),
+                Some("x86_64-unknown-linux-gnu"),
+                true,
+                "0",
+            ),
+            (None, None, false, "2"),
+            (None, Some("x86_64-unknown-linux-gnu"), false, "2"),
+            (None, None, true, "2"),
+            (None, Some("x86_64-unknown-linux-gnu"), true, "2"),
         ] {
+            let original = fs::read_to_string(fixture.0.join("Cargo.toml")).unwrap();
+            let workspace_text = original.split("[profile.dev]").next().unwrap();
+            fs::write(
+                fixture.0.join("Cargo.toml"),
+                format!("{workspace_text}\n[profile.dev]\nopt-level = {opt_level}\n"),
+            )
+            .unwrap();
+            let dev_profile = crate::manifest::DevProfile {
+                opt_level,
+                ..crate::manifest::DevProfile::default()
+            };
             let options = PlanOptions {
+                dev_profile: &dev_profile,
                 logical_target,
                 ..options
             };
@@ -3311,6 +3374,7 @@ mod tests {
                         unit["target"]["name"].as_str().unwrap().to_owned(),
                         unit["mode"].as_str().unwrap().to_owned(),
                         unit["platform"].is_string(),
+                        unit["profile"]["opt_level"].as_str().unwrap().to_owned(),
                         unit["features"]
                             .as_array()
                             .unwrap()
@@ -3355,6 +3419,7 @@ mod tests {
                     }
                     .to_owned(),
                     key.compile_kind == CompileKind::Target && logical_target.is_some(),
+                    plan.units[key].settings.profile.opt_level.to_owned(),
                     key.features.iter().cloned().collect::<Vec<_>>(),
                 )
             };
