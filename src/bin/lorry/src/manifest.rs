@@ -3832,7 +3832,14 @@ members = ["ignored-member"]
                 && dependency.target.as_deref() == Some("cfg(target_os = \"linux\")")
                 && matches!(dependency.source, DependencySource::CratesIo)
         }));
-        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 154);
+        assert!(manifest.dependencies.iter().any(|dependency| {
+            dependency.package == "gix"
+                && dependency
+                    .features
+                    .iter()
+                    .any(|feature| feature == "dirwalk")
+        }));
+        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 164);
     }
 
     #[test]

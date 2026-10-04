@@ -1375,6 +1375,14 @@ badges rejection is corrected in the next focused patch.
 Selected packages now accept the inert badges table too. The paired
 build/metadata contract passed in `/tmp/lorry-m5-badges-contract.log`.
 
+The first full milestone gate failed in 40 seconds with 379 Rust tests
+passing and one stale assertion (`/tmp/lorry-m5-full.log`). Enabling gix's
+dirwalk feature added exactly ten locked packages in `71d110fb`, but the
+manifest test still expected 154 instead of 164. The test now checks the
+enabled feature and the exact new count. Its focused run passed in
+`/tmp/lorry-m5-lock-count-test.log`; no product behavior or assertion strength
+changed. The complete gate is rerun after this test-only correction.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,
