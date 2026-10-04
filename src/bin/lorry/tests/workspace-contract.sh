@@ -84,12 +84,12 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
     cd "$WORK/project"
     "$LORRY" vendor -p app --accept-all
     "$LORRY" review -p app >/dev/null
-    "$LORRY" -v build -p app 2>"$WORK/app-build.stderr"
+    "$LORRY" -v build -j2 -p app 2>"$WORK/app-build.stderr"
     grep -F 'panic=abort' "$WORK/app-build.stderr" >/dev/null
-    [ "$("$LORRY" run -p app)" = app ]
+    [ "$("$LORRY" run --jobs=default -p app)" = app ]
     "$LORRY" test -p app -- --quiet
-    "$LORRY" build -p app
-    "$LORRY" build -p tool 2>"$WORK/tool-build.stderr"
+    "$LORRY" build --jobs=-1 -p app
+    "$LORRY" build --jobs 1 -p tool 2>"$WORK/tool-build.stderr"
     grep -F 'Verifying dependency state' "$WORK/tool-build.stderr" >/dev/null
     grep -F 'Preparing dependency graph' "$WORK/tool-build.stderr" >/dev/null
     grep -F 'Compiling shared v0.1.0' "$WORK/tool-build.stderr" >/dev/null

@@ -175,6 +175,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     } else {
         None
     };
+    let jobs = compile_jobs(cli.jobs());
     let color = use_color(cli.color);
     crate::trace::event("resolved effective build configuration");
 
@@ -199,6 +200,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             release,
             use_cargo_registry: cli.use_cargo_registry,
             binary_selection,
+            jobs,
             cargo: &cargo,
         })
     })
@@ -320,6 +322,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     test_name: None,
                     color,
                     verbosity: cli.verbosity,
+                    jobs,
                     use_cargo_registry: cli.use_cargo_registry,
                     source: Some((source, &direct, verified_resolution)),
                     bundle: false,
@@ -351,6 +354,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 test_name: None,
                 color,
                 verbosity: cli.verbosity,
+                jobs,
                 use_cargo_registry: cli.use_cargo_registry,
                 source: Some((source, &direct, verified_resolution)),
                 bundle: false,
@@ -382,6 +386,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     test_name: None,
                     color,
                     verbosity: cli.verbosity,
+                    jobs,
                     use_cargo_registry: cli.use_cargo_registry,
                     source: Some((source, &direct, verified_resolution)),
                     bundle: false,
@@ -433,6 +438,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     test_name: options.test.as_deref(),
                     color,
                     verbosity: cli.verbosity,
+                    jobs,
                     use_cargo_registry: cli.use_cargo_registry,
                     source: Some((source, &direct, verified_resolution)),
                     bundle: options.bundle,
@@ -510,6 +516,7 @@ struct Build<'a> {
     test_name: Option<&'a str>,
     color: bool,
     verbosity: Verbosity,
+    jobs: usize,
     use_cargo_registry: bool,
     /// Dependency sources shared with admission verification so verified
     /// repository and direct-Git objects are not re-hashed during prepare.
@@ -1115,7 +1122,7 @@ fn build_inner(
         cache: Some(&cache),
         admission: &prepared.admission,
         native_tools: &build.config.native_tools,
-        jobs: compile_jobs(),
+        jobs: build.jobs,
         keep_going: check.is_some_and(|(_, options)| options.keep_going),
         reporter: message_reporter
             .as_ref()
@@ -1381,6 +1388,7 @@ struct TrustedFreshness<'a> {
     release: bool,
     use_cargo_registry: bool,
     binary_selection: Option<&'a str>,
+    jobs: usize,
     cargo: &'a Path,
 }
 
@@ -1401,6 +1409,7 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
     digest.debug("release", &inputs.release);
     digest.debug("cargo-registry", &inputs.use_cargo_registry);
     digest.debug("binary-selection", &inputs.binary_selection);
+    digest.debug("jobs", &inputs.jobs);
     digest.metadata("lorry", inputs.cargo)?;
     digest.metadata("rustc", &inputs.toolchain.rustc)?;
     for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
@@ -1455,6 +1464,7 @@ fn freshness_base(
     digest.debug("cargo-registry", &build.use_cargo_registry);
     digest.debug("bundle", &build.bundle);
     digest.debug("binary-selection", &build.binary_selection);
+    digest.debug("jobs", &build.jobs);
     if build.validation.is_strict() {
         digest.file("lorry", cargo)?;
         digest.file("rustc", &build.toolchain.rustc)?;
@@ -2039,18 +2049,20 @@ impl FreshDigest {
     }
 }
 
-/// Number of dependency units compiled concurrently: `LORRY_JOBS` when set to
-/// a positive integer, otherwise the available hardware parallelism.
-fn compile_jobs() -> usize {
+/// A CLI job count overrides `LORRY_JOBS`; an omitted setting retains the
+/// positive environment count or available hardware parallelism.
+fn compile_jobs(requested: Option<crate::cli::Jobs>) -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    if let Some(requested) = requested {
+        return requested.resolve(cpus);
+    }
     env::var("LORRY_JOBS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|jobs| *jobs >= 1)
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(std::num::NonZeroUsize::get)
-                .unwrap_or(1)
-        })
+        .unwrap_or(cpus)
 }
 
 struct RootLibraryArtifact {
@@ -2856,6 +2868,7 @@ mod tests {
                 test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
+                jobs: 1,
                 use_cargo_registry: false,
                 source: None,
                 bundle: false,
@@ -2980,6 +2993,7 @@ mod tests {
             test_name: None,
             color: false,
             verbosity: Verbosity::Quiet,
+            jobs: 1,
             use_cargo_registry: false,
             source: None,
             bundle: false,
@@ -3029,6 +3043,7 @@ mod tests {
                 test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
+                jobs: 1,
                 use_cargo_registry: false,
                 source: None,
                 bundle: false,
@@ -3089,6 +3104,7 @@ mod tests {
             test_name: None,
             color: false,
             verbosity: Verbosity::Quiet,
+            jobs: 1,
             use_cargo_registry: false,
             source: None,
             bundle: false,
@@ -3132,6 +3148,7 @@ mod tests {
             test_name: None,
             color: false,
             verbosity: Verbosity::Quiet,
+            jobs: 1,
             use_cargo_registry: false,
             source: None,
             bundle: false,
@@ -3199,6 +3216,7 @@ mod tests {
                 test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
+                jobs: 1,
                 use_cargo_registry: false,
                 source: None,
                 bundle: false,
@@ -3229,6 +3247,16 @@ mod tests {
     fn executes_an_admitted_dependency_build_script_from_the_engine() {
         let fixture = Fixture::new();
         fixture.add_build_script();
+        let script_path = fixture.0.join("local/build.rs");
+        let script = fs::read_to_string(&script_path).unwrap().replace(
+            "fn main() {",
+            r#"fn main() {
+                std::fs::write(
+                    std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("num-jobs"),
+                    std::env::var("NUM_JOBS").unwrap(),
+                ).unwrap();"#,
+        );
+        fs::write(script_path, script).unwrap();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
@@ -3251,7 +3279,7 @@ mod tests {
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
-        let build_once = || {
+        let build_once = |jobs| {
             build(Build {
                 target_root: None,
                 child_lease_fd: None,
@@ -3271,6 +3299,7 @@ mod tests {
                 test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
+                jobs,
                 use_cargo_registry: false,
                 source: None,
                 bundle: false,
@@ -3279,7 +3308,7 @@ mod tests {
                 binary_selection: None,
             })
         };
-        let artifact = build_once().unwrap();
+        let artifact = build_once(2).unwrap();
         let output = std::process::Command::new(only_binary(&artifact))
             .output()
             .unwrap();
@@ -3294,9 +3323,12 @@ mod tests {
                 .unwrap()
         };
         let out_dir = output_directory();
+        assert_eq!(fs::read_to_string(out_dir.join("num-jobs")).unwrap(), "2");
+        build_once(1).unwrap();
+        assert_eq!(fs::read_to_string(out_dir.join("num-jobs")).unwrap(), "1");
         let updated = script.replace("build-script-ok", "build-script-new");
         fs::write(fixture.0.join("local/build.rs"), &updated).unwrap();
-        let rebuilt = build_once().unwrap();
+        let rebuilt = build_once(1).unwrap();
         assert_eq!(output_directory(), out_dir);
         assert_eq!(
             std::process::Command::new(only_binary(&rebuilt))
@@ -3313,7 +3345,7 @@ mod tests {
                 "panic!(\"intentional failure\");",
             );
         fs::write(fixture.0.join("local/build.rs"), failed).unwrap();
-        assert!(build_once().is_err());
+        assert!(build_once(1).is_err());
         assert_eq!(output_directory(), out_dir);
         assert!(
             fs::read_to_string(out_dir.join("generated.rs"))
@@ -3332,7 +3364,7 @@ mod tests {
             updated.replace("build-script-new", "build-script-final"),
         )
         .unwrap();
-        let final_artifact = build_once().unwrap();
+        let final_artifact = build_once(1).unwrap();
         assert_eq!(output_directory(), out_dir);
         assert_eq!(
             std::process::Command::new(only_binary(&final_artifact))
@@ -3403,6 +3435,7 @@ mod tests {
                 test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
+                jobs: 1,
                 use_cargo_registry: false,
                 source: None,
                 bundle: false,
@@ -3487,6 +3520,7 @@ mod tests {
                 test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
+                jobs: 1,
                 use_cargo_registry: false,
                 source: None,
                 bundle: true,
@@ -3628,6 +3662,7 @@ mod tests {
             test_name: Some("second"),
             color: false,
             verbosity: Verbosity::Quiet,
+            jobs: 1,
             use_cargo_registry: false,
             source: None,
             bundle: false,
@@ -3670,6 +3705,7 @@ mod tests {
             test_name: Some("second"),
             color: false,
             verbosity: Verbosity::Quiet,
+            jobs: 1,
             use_cargo_registry: false,
             source: None,
             bundle: true,
@@ -3746,6 +3782,7 @@ mod tests {
             test_name: Some("missing"),
             color: false,
             verbosity: Verbosity::Quiet,
+            jobs: 1,
             use_cargo_registry: false,
             source: None,
             bundle: false,

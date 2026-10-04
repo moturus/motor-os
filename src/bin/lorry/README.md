@@ -144,8 +144,14 @@ never disabled.
 single target-native self-extracting executable. Bundle arguments are sent to
 every harness and all harness failures are aggregated.
 
-Build output is owned by Lorry and stored below `target/lorry`. Setting
-`CARGO_TARGET_DIR` or Cargo's `build.target-dir` is an error.
+Build output is owned by Lorry and stored below the chosen target directory's
+`lorry/` subtree. `--target-dir` takes precedence over `CARGO_TARGET_DIR`,
+then Cargo's `build.target-dir`, then the workspace's `target` directory.
+`build`, `check`, `run`, and `test` accept `-j N` or `--jobs N`.
+Positive counts set the worker limit; negative counts subtract from available
+CPUs, with at least one worker. `default` uses the available CPU count.
+An explicit option overrides `LORRY_JOBS`. Build scripts receive the effective
+count as `NUM_JOBS`, and changing it invalidates completed-profile reuse.
 Debug root crates and mutable path dependencies use persistent rustc state
 below `target/lorry/.incremental/<target-triple>/`; release and immutable
 registry units do not use incremental compilation.

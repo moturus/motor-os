@@ -156,6 +156,14 @@ constraints. They do not apply to `vendor` or its admission workflow.
 `metadata` defaults to format version 1 and warns when `--format-version`
 is omitted, except in quiet mode, as Cargo does.
 
+`build`, `check`, `run`, and `test` accept `-j N` and `--jobs N`.
+A positive count sets compiler concurrency, a negative count subtracts from
+available CPUs with a minimum of one, and `default` uses available CPUs.
+Zero and malformed counts are usage errors. An explicit option overrides
+`LORRY_JOBS`; otherwise the existing positive environment setting applies.
+Build scripts receive the effective count in `NUM_JOBS`. Completed-profile
+freshness includes that count, so changing it reruns scripts that may read it.
+
 Normal build output reports every dependency unit, build script, and root
 target when that operation starts. Quiet mode suppresses those progress lines.
 Verbose mode retains them and additionally reports commands, configuration,

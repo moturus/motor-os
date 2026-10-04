@@ -460,7 +460,7 @@ fn execute_unit(
                         out_dir: &out_dir,
                         temp_dir: &temp_dir,
                         release: options.release,
-                        num_jobs: 1,
+                        num_jobs: options.jobs,
                         primary_package: false,
                     },
                 )?;

@@ -68,6 +68,35 @@ pub struct BuildOptions {
     pub bin: Option<String>,
     pub validation: ValidationMode,
     pub message_format: MessageFormat,
+    pub jobs: Option<Jobs>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Jobs {
+    Default,
+    Number(i32),
+}
+
+impl Jobs {
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        if value == "default" {
+            return Ok(Self::Default);
+        }
+        match value.parse::<i32>() {
+            Ok(number) if number != 0 => Ok(Self::Number(number)),
+            _ => Err("jobs must be a nonzero integer or `default`".to_owned()),
+        }
+    }
+
+    pub fn resolve(self, cpus: usize) -> usize {
+        match self {
+            Self::Default => cpus,
+            Self::Number(number) if number < 0 => {
+                cpus.saturating_add_signed(number as isize).max(1)
+            }
+            Self::Number(number) => number as usize,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,6 +133,7 @@ pub struct CheckOptions {
     pub test: Option<String>,
     pub examples: bool,
     pub message_format: MessageFormat,
+    pub jobs: Option<Jobs>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -146,6 +176,16 @@ pub struct UpgradeOptions {
 }
 
 impl Cli {
+    pub fn jobs(&self) -> Option<Jobs> {
+        match &self.command {
+            Command::Build(options) => options.jobs,
+            Command::Check(options) => options.jobs,
+            Command::Run(options) => options.build.jobs,
+            Command::Test(options) => options.build.jobs,
+            _ => None,
+        }
+    }
+
     pub fn message_format(&self) -> MessageFormat {
         match &self.command {
             Command::Build(options) => options.message_format,
@@ -179,7 +219,14 @@ impl Cli {
         if let Some(value) = arguments
             .iter()
             .take_while(|value| value.as_str() != "--")
-            .find(|value| value.starts_with('+'))
+            .enumerate()
+            .find(|(index, value)| {
+                value.starts_with('+')
+                    && !(*index > 0
+                        && matches!(arguments[*index - 1].as_str(), "-j" | "--jobs")
+                        && value.parse::<i32>().is_ok())
+            })
+            .map(|(_, value)| value)
         {
             return Err(Error::usage(
                 format!("toolchain selector `{value}` is not first"),
@@ -428,6 +475,7 @@ fn check_command() -> ClapCommand {
         .arg(package_argument())
         .arg(manifest_path_argument())
         .args(locked_offline_arguments())
+        .arg(jobs_argument())
         .arg(
             Arg::new("target-dir")
                 .long("target-dir")
@@ -619,7 +667,7 @@ fn package_argument() -> Arg {
 }
 
 fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
-    let command = build_command(name).arg(
+    let command = build_command(name).arg(jobs_argument()).arg(
         Arg::new("strict-validation")
             .long("strict-validation")
             .action(ArgAction::SetTrue),
@@ -635,6 +683,16 @@ fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
     } else {
         command
     }
+}
+
+fn jobs_argument() -> Arg {
+    Arg::new("jobs")
+        .long("jobs")
+        .short('j')
+        .value_name("N")
+        .num_args(1)
+        .allow_hyphen_values(true)
+        .value_parser(Jobs::parse)
 }
 
 fn run_command() -> ClapCommand {
@@ -713,6 +771,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             test: options.get_one::<String>("test").cloned(),
             examples: options.get_flag("examples"),
             message_format: message_format(options),
+            jobs: options.get_one::<Jobs>("jobs").copied(),
         })),
         Some(("clean", options)) => Ok(Command::Clean(CleanOptions {
             build: build_options(options, false),
@@ -832,6 +891,7 @@ fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOption
         target_dir: matches.get_one::<String>("target-dir").cloned(),
         bin: matches.try_get_one::<String>("bin").ok().flatten().cloned(),
         message_format: message_format(matches),
+        jobs: matches.try_get_one::<Jobs>("jobs").ok().flatten().copied(),
         validation: if supports_validation && matches.get_flag("strict-validation") {
             ValidationMode::Strict
         } else {
@@ -915,6 +975,7 @@ mod tests {
                 bin: Some("server".to_owned()),
                 validation: ValidationMode::Strict,
                 message_format: MessageFormat::Human,
+                jobs: None,
             })
         );
     }
@@ -939,6 +1000,7 @@ mod tests {
                     bin: None,
                     validation: ValidationMode::Trusted,
                     message_format: MessageFormat::Human,
+                    jobs: None,
                 },
             })
         );
@@ -1105,6 +1167,7 @@ mod tests {
                 test: None,
                 examples: false,
                 message_format: MessageFormat::Json,
+                jobs: None,
             })
         );
 
@@ -1361,6 +1424,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_cargo_job_limits_for_every_compile_command() {
+        for command in ["build", "check", "run", "test"] {
+            assert_eq!(
+                parse(&[command, "-j2"]).unwrap().jobs(),
+                Some(Jobs::Number(2))
+            );
+            assert_eq!(
+                parse(&[command, "--jobs", "default"]).unwrap().jobs(),
+                Some(Jobs::Default)
+            );
+            assert_eq!(
+                parse(&[command, "--jobs=-1"]).unwrap().jobs(),
+                Some(Jobs::Number(-1))
+            );
+            assert_eq!(
+                parse(&[command, "-j", "-2"]).unwrap().jobs(),
+                Some(Jobs::Number(-2))
+            );
+            assert_eq!(
+                parse(&[command, "-j", "+2"]).unwrap().jobs(),
+                Some(Jobs::Number(2))
+            );
+            for value in ["0", "invalid", "1.5", "2147483648", ""] {
+                assert!(parse(&[command, "--jobs", value]).unwrap_err().is_usage());
+            }
+        }
+        assert!(parse(&["clean", "--jobs=2"]).is_err());
+        assert_eq!(Jobs::Default.resolve(8), 8);
+        assert_eq!(Jobs::Number(-1).resolve(8), 7);
+        assert_eq!(Jobs::Number(i32::MIN).resolve(8), 1);
+    }
+
+    #[test]
     fn accepts_locked_offline_flags_without_changing_offline_commands() {
         for command in ["build", "check", "run", "test", "clean", "metadata", "tree"] {
             let ordinary = parse(&[command]).unwrap();
@@ -1413,7 +1509,7 @@ mod tests {
             );
         }
 
-        let unknown = parse(&["build", "--jobs", "2"]).unwrap_err();
+        let unknown = parse(&["build", "--unknown-option"]).unwrap_err();
         assert!(unknown.render().starts_with("error: unknown option"));
         assert!(!unknown.render().contains("\nerror:"));
     }

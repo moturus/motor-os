@@ -82,7 +82,7 @@ pub struct EnvironmentOptions<'a> {
     pub out_dir: &'a Path,
     pub temp_dir: &'a Path,
     pub release: bool,
-    pub num_jobs: u32,
+    pub num_jobs: usize,
     pub primary_package: bool,
 }
 
