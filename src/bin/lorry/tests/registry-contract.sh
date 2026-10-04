@@ -86,6 +86,37 @@ object-hash = "sha256"
 EOF
 
 echo "== Vendoring one exact crates.io package =="
+# Exercise the same review in machine mode before the existing human contract.
+cp "$PROJECT/Cargo.lock" "$WORK/original.lock"
+if (cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
+    "$LORRY" -q --lorry-messages vendor) >"$WORK/declined.out" 2>"$WORK/declined.jsonl"; then
+    fail "machine review approved a fresh acquisition without confirmation"
+fi
+cmp "$PROJECT/Cargo.lock" "$WORK/original.lock"
+[ ! -e "$PROJECT/.lorry/dependencies-v2.toml" ] || fail "declined machine review wrote admission"
+(cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
+    "$LORRY" -q --lorry-messages vendor --accept-all) >"$WORK/machine.out" 2>"$WORK/machine.jsonl"
+[ ! -s "$WORK/machine.out" ] || fail "vendor wrote machine messages to stdout"
+python3 - "$WORK/machine.jsonl" "$WORK/declined.jsonl" <<'PY'
+import json, sys
+accepted = [json.loads(line) for line in open(sys.argv[1])]
+declined = [json.loads(line) for line in open(sys.argv[2])]
+assert len(accepted) == 1, accepted
+message = accepted[0]
+assert message['reason'] == 'lorry-vendor-change'
+assert len(message['added']) == 1
+assert message['added'][0]['name'] == 'cfg-if'
+assert message['added'][0]['checksum'] == '9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801'
+assert message['removed'] == []
+assert message['capabilities_added'] == []
+assert message['capabilities_removed'] == []
+assert len(declined) == 2, declined
+assert declined[0] == message
+assert declined[1]['reason'] == 'lorry-error'
+assert 'no interactive terminal' in declined[1]['text']
+PY
+rm -rf "$PROJECT/.lorry" "$REPOSITORY/objects/crates-io/sha256"
+mkdir "$REPOSITORY/objects/crates-io/sha256"
 (cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
     "$LORRY" vendor --accept-all) >"$WORK/fresh.log" 2>&1
 grep -F "New crates.io packages (1):" "$WORK/fresh.log" >/dev/null || {

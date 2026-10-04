@@ -119,6 +119,7 @@ fn execute_reconcile(
         &refreshes,
         accept_all,
         progress,
+        cli.lorry_messages,
     )?;
 
     if cli.verbosity != Verbosity::Quiet {
@@ -309,6 +310,7 @@ fn prepare_networked(
     refreshes: &[crate::git::PatchRefresh],
     accept_all: bool,
     progress: Progress,
+    messages: bool,
 ) -> Result<bool> {
     let stdin = io::stdin();
     prepare_networked_with_approval(
@@ -326,6 +328,7 @@ fn prepare_networked(
         &mut stdin.lock(),
         &mut io::stderr().lock(),
         progress,
+        messages,
     )
 }
 
@@ -345,6 +348,7 @@ fn prepare_networked_with_approval(
     input: &mut impl BufRead,
     output: &mut impl Write,
     progress: Progress,
+    messages: bool,
 ) -> Result<bool> {
     progress.report("Checking dependency repository state")?;
     let mut acquisition = Acquisition::new(config, manifest, progress)?;
@@ -459,7 +463,7 @@ fn prepare_networked_with_approval(
                 refresh.changed() || direct.was_materialized(&refresh.candidate.cargo_source)
             }) || direct.materialized_sources().next().is_some()
         });
-    if git_review {
+    if git_review && !messages {
         write_git_review(
             refreshes,
             direct.expect("Git review has a catalog"),
@@ -467,7 +471,27 @@ fn prepare_networked_with_approval(
             output,
         )?;
     }
-    if let Some(previous) = previous {
+    if messages {
+        if !unchanged || git_review {
+            change_review::approve_json(
+                committed.as_ref(),
+                previous.map(|previous| previous.review_sha256.as_str()),
+                &candidate,
+                if accept_all
+                    || (previous.is_none()
+                        && !git_review
+                        && !evidence.values().any(|package| package.newly_acquired))
+                {
+                    change_review::Mode::AcceptAll
+                } else {
+                    change_review::Mode::Forced
+                },
+                terminal,
+                input,
+                output,
+            )?;
+        }
+    } else if let Some(previous) = previous {
         if !unchanged || git_review {
             change_review::approve(
                 committed.as_ref(),
@@ -1580,6 +1604,7 @@ mod tests {
                 &[],
                 true,
                 Progress::new(false),
+                false,
             )
             .unwrap()
         );
@@ -1602,6 +1627,7 @@ mod tests {
                 &[],
                 true,
                 Progress::new(false),
+                false,
             )
             .unwrap()
         );
@@ -1646,6 +1672,7 @@ mod tests {
                 &[],
                 true,
                 Progress::new(false),
+                false,
             )
             .unwrap()
         );
@@ -1733,6 +1760,7 @@ mod tests {
             &mut "".as_bytes(),
             &mut initial_output,
             Progress::new(false),
+            false,
         )
         .unwrap();
         let previous = CompactState::load(&fixture.0).unwrap().unwrap();
@@ -1761,6 +1789,7 @@ mod tests {
             &mut "".as_bytes(),
             &mut Vec::new(),
             Progress::new(false),
+            false,
         )
         .unwrap_err();
         assert!(
@@ -1794,6 +1823,7 @@ mod tests {
                 &mut "yes\n".as_bytes(),
                 &mut output,
                 Progress::new(false),
+                false,
             )
             .unwrap()
         );
@@ -1831,6 +1861,7 @@ mod tests {
             &mut "".as_bytes(),
             &mut automated_output,
             Progress::new(false),
+            false,
         )
         .unwrap();
         let automated_output = String::from_utf8(automated_output).unwrap();
