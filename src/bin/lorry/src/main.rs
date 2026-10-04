@@ -29,6 +29,7 @@ mod identity;
 mod json;
 mod lockfile;
 mod manifest;
+mod member_source;
 mod metadata;
 mod native_tool;
 mod new_package;

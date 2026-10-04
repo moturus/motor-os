@@ -26,6 +26,8 @@ pub struct Catalog {
     paths: BTreeMap<PathBuf, PackageKey>,
     locked_repository: Option<LockedRepository>,
     proc_macros: BTreeSet<PackageKey>,
+    workspace_members: BTreeMap<String, PathBuf>,
+    workspace_root: PathBuf,
 }
 
 impl Catalog {
@@ -266,14 +268,28 @@ impl Catalog {
             return Ok(());
         }
 
-        let manifest = Manifest::load_path_dependency(&canonical)?;
+        let mut manifest = Manifest::load_path_dependency(&canonical)?;
+        manifest.editable = self
+            .workspace_members
+            .values()
+            .any(|member| *member == canonical);
+        if manifest.editable {
+            manifest.workspace_root.clone_from(&self.workspace_root);
+            manifest
+                .workspace_members
+                .clone_from(&self.workspace_members);
+        }
         let version = Version::parse(&manifest.version.original).map_err(|error| {
             Error::failure(format!(
                 "invalid local package version `{} {}`: {error}",
                 manifest.name, manifest.version.original
             ))
         })?;
-        let tree = Tree::scan(&canonical, DEFAULT_TREE_LIMITS, Exclusions::GitAndTarget)?;
+        let sha256 = if manifest.editable {
+            crate::member_source::snapshot(&manifest, true)?.sha256
+        } else {
+            Tree::scan(&canonical, DEFAULT_TREE_LIMITS, Exclusions::GitAndTarget)?.sha256
+        };
         let key = PackageKey {
             name: manifest.name.clone(),
             version: version.clone(),
@@ -282,8 +298,7 @@ impl Catalog {
         if self.paths.insert(canonical.clone(), key.clone()).is_some() {
             return Ok(());
         }
-        let candidate =
-            local_candidate(manifest, canonical.clone(), canonical, tree.sha256, false)?;
+        let candidate = local_candidate(manifest, canonical.clone(), canonical, sha256, false)?;
         debug_assert_eq!(candidate.version, version);
         let records = self.records.entry(candidate.name.clone()).or_default();
         records.push(candidate);
@@ -881,6 +896,10 @@ fn resolve_with_scope(
     scope: Scope<'_>,
     loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
+    catalog
+        .workspace_members
+        .clone_from(&manifest.workspace_members);
+    catalog.workspace_root.clone_from(&manifest.workspace_root);
     validate_locked_checksums(catalog, locked)?;
     let requirements = root_requirements(manifest, matches!(scope, Scope::Complete))?;
     let mut queue = VecDeque::new();

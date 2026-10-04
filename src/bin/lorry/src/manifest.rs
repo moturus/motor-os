@@ -28,6 +28,8 @@ const MAX_WORKSPACE_MEMBERS: usize = 64;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Manifest {
     pub root: PathBuf,
+    /// Selected packages and members may access editable source trees.
+    pub editable: bool,
     pub workspace_root: PathBuf,
     /// Workspace members by name, with their canonical directories.
     pub workspace_members: BTreeMap<String, PathBuf>,
@@ -665,6 +667,7 @@ impl Manifest {
         Ok(Self {
             root: root.to_path_buf(),
             workspace_root: root.to_path_buf(),
+            editable: mode != ManifestMode::Dependency,
             workspace_members: std::iter::once((name.clone(), root.to_path_buf())).collect(),
             path: path.to_path_buf(),
             warnings,

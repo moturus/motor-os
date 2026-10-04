@@ -1296,6 +1296,21 @@ package, and do not reject a symbolic link merely because it is a link
 the member's editable tree. Keep the existing dependency-source rules for
 nonmembers.
 
+The symbolic-link rejection was reproduced before the fix: Cargo succeeded,
+while Lorry rejected the shared member during resolution. The isolated logs
+are `/tmp/lorry-m5-member-links-original-isolated-fixed-toolchain.log` and
+`/tmp/lorry-m5-member-links-cargo-isolated.log`. Resolution and path evidence
+now use an editable file reader for members, leaving nonmember rules intact.
+The reader matches Cargo's package file list for plain trees, include rules,
+Git ignores, tracked files, and symlinks, and stops at nested packages. The
+existing Git dependency's walker feature is enabled with an offline lock
+update; no external source was edited. The shared reader and its integration
+form one larger patch because all source-verification callers must agree.
+The focused Cargo file-list test and strict Clippy passed in
+`/tmp/lorry-m5-member-reader-cargo-unit-final.log` and
+`/tmp/lorry-m5-member-reader-clippy.log`. Compiler cache/freshness integration
+is the next patch; this source-validation patch alone does not fix builds.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,

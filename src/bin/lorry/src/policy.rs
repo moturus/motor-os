@@ -246,7 +246,13 @@ pub fn inspect(
     for package in &resolution.packages {
         let evidence = &evidence[&package.key];
         check_evidence_identity(package, evidence)?;
-        check_package_limits(&preflight.policy, package, evidence)?;
+        if !package
+            .local_manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.editable)
+        {
+            check_package_limits(&preflight.policy, package, evidence)?;
+        }
         let source = source_kind(package);
         if source == SourceKind::CratesIo && evidence.newly_acquired {
             let archive_bytes = evidence.archive_bytes.ok_or_else(|| {
@@ -457,8 +463,14 @@ impl PackageEvidence {
                 package.key.name, package.key.version
             )));
         }
-        let tree = Tree::scan(physical_root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?;
-        if tree.sha256 != *source_tree_sha256 {
+        let (sha256, extracted_bytes, file_count) = if manifest.editable {
+            let snapshot = crate::member_source::snapshot(manifest, true)?;
+            (snapshot.sha256, snapshot.bytes, snapshot.files)
+        } else {
+            let tree = Tree::scan(physical_root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?;
+            (tree.sha256, tree.total_bytes, tree.file_count as u64)
+        };
+        if sha256 != *source_tree_sha256 {
             return Err(Error::failure(format!(
                 "path source for `{} {}` changed after resolution",
                 package.key.name, package.key.version
@@ -473,9 +485,9 @@ impl PackageEvidence {
                 .is_some_and(|library| library.proc_macro),
             newly_acquired: false,
             archive_bytes: None,
-            extracted_bytes: tree.total_bytes,
-            file_count: tree.file_count as u64,
-            source_tree_sha256: tree.sha256,
+            extracted_bytes,
+            file_count,
+            source_tree_sha256: sha256,
         })
     }
 
