@@ -112,6 +112,17 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         );
     }
     let compact_state = CompactState::load(&manifest.workspace_root)?;
+    if compact_state
+        .as_ref()
+        .is_some_and(|state| state.scope.is_none())
+        && (manifest.root != manifest.workspace_root || manifest.workspace_members.len() > 1)
+    {
+        return Err(
+            Error::failure("legacy admission does not cover a workspace").with_help(
+                "run workspace-root `lorry vendor --locked` to review and migrate admission",
+            ),
+        );
+    }
     let mut config = Config::load(&current, &manifest)?;
     config.apply_max_packages(cli.max_packages)?;
     let requested_target_directory = match &cli.command {

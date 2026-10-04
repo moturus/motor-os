@@ -111,6 +111,15 @@ source = open(sys.argv[1]).read().replace('review-format-version = 4', 'review-f
 source = re.sub(r'\[review-scope\].*?(?=\[\[context\]\])', '', source, flags=re.S)
 open(sys.argv[2], 'w').write(source)
 PYCODE
+cp .lorry/dependencies-v2.toml "$WORK/workspace.admission"
+cp "$WORK/member.admission" .lorry/dependencies-v2.toml
+if "$LORRY" -q --max-packages 2 build -p app >"$WORK/legacy-root.out" 2>"$WORK/legacy-root.err"; then
+    echo 'build accepted a legacy record as workspace admission' >&2
+    exit 1
+fi
+grep -F 'legacy admission does not cover a workspace' "$WORK/legacy-root.err" >/dev/null
+cmp .lorry/dependencies-v2.toml "$WORK/member.admission"
+cp "$WORK/workspace.admission" .lorry/dependencies-v2.toml
 for package in app shared outside; do
     cp "$WORK/member.admission" "$package/.lorry/dependencies-v2.toml"
 done

@@ -673,6 +673,8 @@ commitment when the resolved outside packages, contexts, features, and grants
 are unchanged.
 Old per-member records require explicit review with workspace-root
 `vendor --locked`; their presence never supplies workspace approval.
+Legacy records copied to a virtual or multi-member workspace root are also
+rejected for compilation until explicitly migrated.
 Before confirmation, vendor names the selected members' records that the
 new scope replaces. After publishing root approval, it removes those exact
 records and reports their paths. Unselected members, nonmembers, and unrelated
