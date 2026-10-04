@@ -52,6 +52,7 @@ WORK="$(mktemp -d)"
 ABANDONED_PID=""
 PROTECTED_PARENT="$TEST_TMP/sftp-protected-$$"
 PUBLIC_FILE="$TEST_TMP/sftp-public-$$"
+MODE_ROOT="$TEST_TMP/sftp-modes-$$"
 
 run_ssh() {
     ssh \
@@ -80,6 +81,10 @@ cleanup() {
         wait "$ABANDONED_PID" 2>/dev/null || true
     fi
     remove_permission_fixtures
+    for mode_parent in "$MODE_ROOT/mode-9" "$MODE_ROOT/mode-10"; do
+        run_ssh /system/bin/sysbox chmod rwxrwxr-x "$mode_parent" >/dev/null 2>&1 || true
+    done
+    run_ssh /system/bin/rm -r "$MODE_ROOT" >/dev/null 2>&1 || true
     run_ssh /system/bin/sysbox chmod rwxrwxr-x "$PROTECTED_PARENT" >/dev/null 2>&1 || true
     run_ssh /system/bin/rm -r "$PROTECTED_PARENT" >/dev/null 2>&1 || true
     run_ssh /system/bin/rm "$PUBLIC_FILE" >/dev/null 2>&1 || true
@@ -119,6 +124,14 @@ EOF
 }
 
 echo "== russhd SFTP test against $USER@$HOST:$PORT =="
+
+# Raw protocol requests cover clients that set the mode after OPEN, as well as
+# the usual OpenSSH creation hints exercised below. This uses only Rust std.
+(cd "$WD" && rustc --edition=2024 sftp-permissions.rs -o "$WORK/sftp-permissions") ||
+    fail "SFTP permission probe compilation failed"
+run_ssh /system/bin/mkdir "$MODE_ROOT" || fail "SFTP mode fixture creation failed"
+"$WORK/sftp-permissions" "$KEY" "$USER" "$HOST" "$PORT" "$MODE_ROOT" ||
+    fail "SFTP permission requests failed"
 
 # ---------------------------------------------------------------------------
 # 1. Directory listing: `ls -1` makes the client call realpath, opendir and
