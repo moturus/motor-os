@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::dependency::{self, RegistrySource, ReviewInputs};
 use crate::diagnostic::{Error, Result};
 use crate::engine;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, SourceWorkspace};
 use crate::repository::RepositorySet;
 use crate::toolchain::Toolchain;
 
@@ -16,23 +16,42 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     cli.features.require_default()?;
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = Manifest::load_selection(
+    let mut workspace = SourceWorkspace::load(
         &current,
         cli.manifest_path.as_deref().map(std::path::Path::new),
-        &cli.selection,
-        true,
     )?;
-    Manifest::report_warnings([&manifest], cli.verbosity);
-    let compact = CompactState::load(&manifest.root)?.ok_or_else(|| {
-        Error::failure("dependency review requires generated Lorry dependency state").with_help(
-            "run `lorry vendor [--accept-all]` once to create `.lorry/dependencies-v2.toml`",
+    cli.selection.select(
+        workspace
+            .packages
+            .iter()
+            .map(|member| (member.name.as_str(), &member.version, member.root.as_path())),
+        workspace.default_members.iter().map(|root| root.as_path()),
+    )?;
+    Manifest::report_warnings(&workspace.packages, cli.verbosity);
+    let compact = CompactState::load(&workspace.root)?.ok_or_else(|| {
+        Error::failure("dependency review requires workspace-root Lorry admission").with_help(
+            "run workspace-root `lorry vendor --locked` to review and migrate member records",
         )
     })?;
-    let mut config = Config::load(&current, &manifest)?;
+    if compact.scope.is_none() && (workspace.virtual_root || workspace.packages.len() != 1) {
+        return Err(Error::failure(
+            "legacy admission must be migrated to workspace review format 4",
+        )
+        .with_help("run workspace-root `lorry vendor --locked` to review the workspace"));
+    }
+    workspace.load_locked_context()?;
+    let manifest = &workspace.packages[0];
+    let mut config = Config::load_workspace(
+        &current,
+        &workspace.root,
+        workspace
+            .packages
+            .iter()
+            .map(|member| member.root.as_path()),
+    )?;
     config.apply_max_packages(cli.max_packages)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
-    engine::check_rust_version(&manifest, &toolchain)?;
-    let options = dependency::resolver_options(&manifest, &config, &toolchain)?;
+    let options = dependency::resolver_options(manifest, &config, &toolchain)?;
     let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-review")?;
     let repositories = RepositorySet::open(
         &config.repositories,
@@ -41,7 +60,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     )?;
     let review = dependency::verify_compact_admission(
         &ReviewInputs {
-            manifest: &manifest,
+            manifest,
             config: &config,
             source: RegistrySource::Lorry(&repositories),
             toolchain: &toolchain,

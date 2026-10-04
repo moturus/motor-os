@@ -154,6 +154,13 @@ mv shared/saved-lorry shared/.lorry
 test ! -e shared/.lorry/dependencies-v2.toml
 cmp outside/.lorry/dependencies-v2.toml "$WORK/member.admission"
 echo 'PASS: workspace review migrates only selected real member records after approval'
+"$LORRY" -q --max-packages 2 review >"$WORK/root-review.toml"
+(cd app && "$LORRY" -q --max-packages 2 review) >"$WORK/member-review.toml"
+"$LORRY" -q --max-packages 2 review -p shared >"$WORK/selected-review.toml"
+cmp "$WORK/root-review.toml" "$WORK/member-review.toml"
+cmp "$WORK/root-review.toml" "$WORK/selected-review.toml"
+grep -F 'review-format-version = 4' "$WORK/root-review.toml" >/dev/null
+
 cat >>outside/Cargo.toml <<'TOML'
 [dependencies]
 cfg-if = "=1.0.3"
