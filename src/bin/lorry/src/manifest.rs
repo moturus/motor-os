@@ -522,12 +522,15 @@ impl Manifest {
             Vec::new()
         };
         let mut dependencies = Vec::new();
+        let fields = DependencyFields {
+            path,
+            document,
+            root,
+        };
         if let Some(item) = document.root().get("dependencies") {
             let table = require_table(path, document, item, "dependencies")?;
             parse_dependency_table(
-                path,
-                document,
-                root,
+                &fields,
                 table,
                 None,
                 DependencyKind::Normal,
@@ -539,9 +542,7 @@ impl Manifest {
         {
             let table = require_table(path, document, item, "build-dependencies")?;
             parse_dependency_table(
-                path,
-                document,
-                root,
+                &fields,
                 table,
                 None,
                 DependencyKind::Build,
@@ -553,21 +554,11 @@ impl Manifest {
             && let Some(item) = document.root().get("dev-dependencies")
         {
             let table = require_table(path, document, item, "dev-dependencies")?;
-            parse_dependency_table(
-                path,
-                document,
-                root,
-                table,
-                None,
-                DependencyKind::Dev,
-                &mut dependencies,
-            )?;
+            parse_dependency_table(&fields, table, None, DependencyKind::Dev, &mut dependencies)?;
         }
         let mut unsupported_target_dev_dependencies = Vec::new();
         parse_target_dependencies(
-            path,
-            document,
-            root,
+            &fields,
             mode,
             &mut dependencies,
             &mut unsupported_target_dev_dependencies,
@@ -1637,33 +1628,38 @@ fn discover_integration_tests(root: &Path) -> Result<Vec<IntegrationTestTarget>>
     Ok(targets)
 }
 
+struct DependencyFields<'a> {
+    path: &'a Path,
+    document: &'a Document,
+    root: &'a Path,
+}
+
 fn parse_dependency_table(
-    path: &Path,
-    document: &Document,
-    root: &Path,
+    fields: &DependencyFields<'_>,
     table: &Table,
     target: Option<&str>,
     kind: DependencyKind,
     output: &mut Vec<Dependency>,
 ) -> Result<()> {
     for (alias, item) in table.iter() {
-        validate_package_name(path, document.line_of_item(item), alias)?;
-        output.push(parse_dependency(
-            path, document, root, alias, item, target, kind,
-        )?);
+        validate_package_name(fields.path, fields.document.line_of_item(item), alias)?;
+        output.push(parse_dependency(fields, alias, item, target, kind)?);
     }
     Ok(())
 }
 
 fn parse_dependency(
-    path: &Path,
-    document: &Document,
-    root: &Path,
+    fields: &DependencyFields<'_>,
     alias: &str,
     item: &Item,
     target: Option<&str>,
     kind: DependencyKind,
 ) -> Result<Dependency> {
+    let DependencyFields {
+        path,
+        document,
+        root,
+    } = *fields;
     if let Some(requirement) = item.as_str() {
         return Ok(Dependency {
             alias: alias.to_owned(),
@@ -1901,13 +1897,13 @@ fn validate_git_revision(path: &Path, line: usize, value: &str) -> Result<()> {
 }
 
 fn parse_target_dependencies(
-    path: &Path,
-    document: &Document,
-    root: &Path,
+    fields: &DependencyFields<'_>,
     mode: ManifestMode,
     output: &mut Vec<Dependency>,
     unsupported_target_dev_dependencies: &mut Vec<UnsupportedTargetDevDependency>,
 ) -> Result<()> {
+    let path = fields.path;
+    let document = fields.document;
     let Some(item) = document.root().get("target") else {
         return Ok(());
     };
@@ -1948,15 +1944,7 @@ fn parse_target_dependencies(
             let dependencies =
                 require_table(path, document, item, &format!("target.{selector}.{key}"))?;
             if let Some(kind) = kind {
-                parse_dependency_table(
-                    path,
-                    document,
-                    root,
-                    dependencies,
-                    Some(selector),
-                    kind,
-                    output,
-                )?;
+                parse_dependency_table(fields, dependencies, Some(selector), kind, output)?;
             }
         }
     }
