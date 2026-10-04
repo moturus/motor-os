@@ -20,7 +20,7 @@ Options:
   -c, --continue      Continue the most recent workspace session
   -r, --resume ID     Resume a session by path or partial id
   --session ID        Alias for --resume
-  --fork ID           Clone the active branch of a saved session
+  --fork ID           Clone a saved session; may combine with --ephemeral
   --ephemeral         Do not save the session
   -n, --name NAME     Name a new session
   -v, -vv, -vvv       Increase transport diagnostics
@@ -50,6 +50,7 @@ pub enum SessionStart {
     Continue,
     Resume(String),
     Fork(String),
+    ForkEphemeral(String),
     Ephemeral,
 }
 
@@ -175,6 +176,14 @@ impl Args {
     }
 
     fn set_session(&mut self, session: SessionStart) -> Result<(), String> {
+        match (&self.session, &session) {
+            (SessionStart::Fork(selector), SessionStart::Ephemeral)
+            | (SessionStart::Ephemeral, SessionStart::Fork(selector)) => {
+                self.session = SessionStart::ForkEphemeral(selector.clone());
+                return Ok(());
+            }
+            _ => {}
+        }
         if self.session != SessionStart::New {
             return Err("session options are mutually exclusive".to_string());
         }
@@ -216,6 +225,27 @@ mod tests {
             SessionStart::Resume("abc".to_string())
         );
         assert!(Args::parse(&["-c", "--ephemeral"]).is_err());
+    }
+
+    #[test]
+    fn ephemeral_forks_accept_either_option_order() {
+        for argv in [
+            vec!["--fork", "parent", "--ephemeral", "-p", "review"],
+            vec!["--ephemeral", "--fork=parent", "-p", "review"],
+            vec!["--no-session", "--fork", "parent", "-p", "review"],
+        ] {
+            let args = Args::parse(&argv).unwrap();
+            assert_eq!(args.session, SessionStart::ForkEphemeral("parent".into()));
+            assert_eq!(args.prompt.as_deref(), Some("review"));
+        }
+        for argv in [
+            vec!["--resume", "parent", "--ephemeral"],
+            vec!["--fork", "parent", "--ephemeral", "--ephemeral"],
+            vec!["--fork", "parent", "--ephemeral", "--fork", "other"],
+            vec!["ask", "review", "--fork", "parent", "--ephemeral"],
+        ] {
+            assert!(Args::parse(&argv).is_err(), "{argv:?}");
+        }
     }
 
     #[test]

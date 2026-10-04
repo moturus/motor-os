@@ -112,6 +112,8 @@ while the owning process writes. The immutable snapshot includes the usable
 complete prefix, omits unfinished records and tool rounds, and leaves the
 source file and writer lock untouched. `Store::clone_active_with_options`
 can copy that snapshot into a saved or ephemeral child session.
+The CLI accepts `--fork ID --ephemeral -p 'review this work'` to read a live
+parent's usable history and run a child without saving its conversation.
 
 Useful startup options are --continue, --resume ID, --session ID,
 --fork ID, --ephemeral, and --name NAME. Interactive commands include /new,

@@ -219,9 +219,12 @@ fn open_session(store: &Store, args: &Args) -> Result<Session, String> {
         SessionStart::Ephemeral => store.create(true, args.name.as_deref()),
         SessionStart::Continue => store.continue_recent(),
         SessionStart::Resume(selector) => store.open(selector),
-        SessionStart::Fork(selector) => {
-            let source = store.open(selector)?;
-            store.clone_active(&source)
+        SessionStart::Fork(selector) | SessionStart::ForkEphemeral(selector) => {
+            let source = store.read(selector)?;
+            store.clone_active_with_options(
+                &source,
+                matches!(args.session, SessionStart::ForkEphemeral(_)),
+            )
         }
     }
 }
@@ -336,4 +339,47 @@ fn diagnostic(message: &str) {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "gears: {message}");
     let _ = stderr.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_forks_read_a_live_parent_and_preserve_the_selected_storage_mode() {
+        let base = std::env::temp_dir().join(format!("gears-cli-fork-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        let store = Store::with_root(&base, base.join("state")).unwrap();
+        let mut parent = store.create(false, None).unwrap();
+        parent
+            .append_message(&Message::user("parent work"))
+            .unwrap();
+        let source = parent.path().unwrap();
+        let before = std::fs::read(source).unwrap();
+        let args = Args::parse(&["--fork", source.to_str().unwrap(), "--ephemeral"]).unwrap();
+        let mut child = open_session(&store, &args).unwrap();
+        assert!(child.is_ephemeral());
+        assert_eq!(
+            child.context_messages().unwrap(),
+            [Message::user("parent work")]
+        );
+        child.append_message(&Message::assistant("review")).unwrap();
+        assert_eq!(std::fs::read(source).unwrap(), before);
+        assert_eq!(store.list().unwrap().len(), 1);
+        let args = Args::parse(&["--fork", parent.id()]).unwrap();
+        let saved = open_session(&store, &args).unwrap();
+        assert!(!saved.is_ephemeral());
+        assert_eq!(
+            saved.context_messages().unwrap(),
+            [Message::user("parent work")]
+        );
+        assert_eq!(store.list().unwrap().len(), 2);
+        drop(saved);
+        drop(child);
+        parent
+            .append_message(&Message::assistant("parent done"))
+            .unwrap();
+        drop(parent);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }
