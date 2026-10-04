@@ -9,6 +9,7 @@ pub mod instructions;
 pub mod journal;
 pub mod patch_match;
 pub mod paths;
+pub mod policy;
 pub mod search;
 pub mod shell_words;
 pub mod snapshot;
@@ -87,9 +88,8 @@ pub fn hook(event: Event) -> Result<Value, String> {
             Err(error) => with_tools(initialization_notice(error)),
         });
     }
-    // Until a policy is installed, this optional hook grants no authority.
     Ok(if event.event == "permission" {
-        json!({"decision": "deny"})
+        policy::permission(&event)
     } else {
         json!({})
     })

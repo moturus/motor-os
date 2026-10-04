@@ -10,9 +10,22 @@ reused on resume, fork, provider changes and other setup, until compaction
 or a new session takes a fresh snapshot. A failed optional setup is reported
 and leaves the previous hook state unchanged.
 
-Tool permission requests are still refused. Coding tools are added in
-subsequent patches; the installed Gears configuration does not enable the
-batteries hook yet.
+The file tools read numbered pages, search with `rg`, and write or patch
+atomically after complete reads of the current file. The `todo` hook tool
+keeps tasks in branch-aware session state. Turn records keep saved entry
+ids, tool outcomes, failures, repeated calls, written paths, compactions
+and interruptions in `batteries/sessions/SESSION/turns.jsonl`. A partial
+record supports up to 512 tool calls; exceeding this limit reports that
+tracking is unavailable without granting or changing tool authority.
+
+The hook automatically allows workspace reads and its task list. Writes
+and ordinary commands use Gears' grants and prompts. Its short static
+command list refuses protected deletions and common fork bombs, including
+shell wrappers and saved shell directories. Commands that may publish or
+discard work require fresh confirmation. This prevents accidents and makes
+no confinement claim. A malformed policy request denies the call; optional
+recording and setup failures report notices and preserve their prior state.
+The installed Gears configuration does not enable the batteries hook yet.
 
 Run `src/tests/test-gears-batteries.sh` from the Motor OS repository root for
 the hermetic host gate. The release developer-image gate exercises the
