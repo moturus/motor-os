@@ -325,6 +325,11 @@ pub fn dependency_rustc_invocation_with_build_output(
         UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness
     ) {
         push(&mut arguments, "--test");
+    } else if key.kind == UnitKind::Library {
+        for crate_type in &manifest.library.as_ref().unwrap().crate_types {
+            push(&mut arguments, "--crate-type");
+            push(&mut arguments, crate_type);
+        }
     } else {
         push(&mut arguments, "--crate-type");
         push(&mut arguments, crate_type);

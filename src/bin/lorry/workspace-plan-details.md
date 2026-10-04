@@ -2515,6 +2515,19 @@ allowlists. Admission round-trip/commitment/control-variable tests, generated
 registry/Git policy projection, caller-only review diffs, configuration tests,
 and strict Clippy pass in `/tmp/lorry-m8-portable-caller-{admission,review,config,clippy}.log`.
 
+Explicit `rlib` now participates in Cargo target identity and rustc crate-type
+arguments, including library harnesses. Harness JSON lookup recognizes all
+library crate kinds rather than just `lib`. The paired contract covers `lib`
+and `rlib` for native/cross build, check, and single-member test-no-run, comparing
+program and harness bytes plus Cargo JSON. Its first run diagnosed the old
+`lib`-only reporter assumption. A redundant `lib` plus `rlib` test-only fixture
+requested duplicate archive paths and made Cargo's fingerprint code panic;
+the contract now uses each required type separately. No Cargo code changed.
+That original reference failure is retained in
+`/tmp/lorry-m8-explicit-rlib-harness-contract.log`.
+Final program/harness byte and JSON comparison, compiler oracle, and strict
+Clippy pass in `/tmp/lorry-m8-explicit-rlib-{byte-contract,compiler-test,clippy}.log`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only

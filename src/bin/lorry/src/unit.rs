@@ -1159,11 +1159,7 @@ pub fn plan_dependency_units_with_remaps(
                 })?;
                 (
                     library.name.as_str(),
-                    CargoTargetKind::Lib(vec![if key.kind == UnitKind::ProcMacro {
-                        CargoCrateType::ProcMacro
-                    } else {
-                        CargoCrateType::Lib
-                    }]),
+                    CargoTargetKind::Lib(library_crate_types(manifest)),
                 )
             }
             UnitKind::Binary => (
@@ -1177,7 +1173,7 @@ pub fn plan_dependency_units_with_remaps(
                     .as_deref()
                     .ok_or_else(|| Error::failure("selected harness unit has no target name"))?,
                 if key.kind == UnitKind::LibraryHarness {
-                    CargoTargetKind::Lib(vec![CargoCrateType::Lib])
+                    CargoTargetKind::Lib(library_crate_types(manifest))
                 } else {
                     CargoTargetKind::Bin
                 },
@@ -1255,6 +1251,25 @@ impl UnitProfile {
             rustflags: &[],
         }
     }
+}
+
+fn library_crate_types(manifest: &Manifest) -> Vec<CargoCrateType<'_>> {
+    manifest
+        .library
+        .as_ref()
+        .unwrap()
+        .crate_types
+        .iter()
+        .map(|kind| match kind.as_str() {
+            "lib" => CargoCrateType::Lib,
+            "rlib" => CargoCrateType::Rlib,
+            "staticlib" => CargoCrateType::Staticlib,
+            "dylib" => CargoCrateType::Dylib,
+            "cdylib" => CargoCrateType::Cdylib,
+            "proc-macro" => CargoCrateType::ProcMacro,
+            other => CargoCrateType::Other(other),
+        })
+        .collect()
 }
 
 fn validate_manifest_identity(key: &PackageKey, manifest: &Manifest) -> Result<()> {

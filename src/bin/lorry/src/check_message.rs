@@ -407,14 +407,22 @@ impl Package {
             .find(|target| {
                 name.is_none_or(|name| target.name == name)
                     && match kind {
-                        UnitKind::Library | UnitKind::ProcMacro => target
-                            .kind
-                            .iter()
-                            .all(|kind| kind != "bin" && kind != "test" && kind != "custom-build"),
+                        UnitKind::Library | UnitKind::ProcMacro | UnitKind::LibraryHarness => {
+                            target.kind.iter().any(|kind| {
+                                matches!(
+                                    kind.as_str(),
+                                    "lib"
+                                        | "rlib"
+                                        | "staticlib"
+                                        | "dylib"
+                                        | "cdylib"
+                                        | "proc-macro"
+                                )
+                            })
+                        }
                         UnitKind::Binary | UnitKind::BinaryHarness => {
                             target.kind.iter().any(|kind| kind == "bin")
                         }
-                        UnitKind::LibraryHarness => target.kind.iter().any(|kind| kind == "lib"),
                         UnitKind::IntegrationHarness => {
                             target.kind.iter().any(|kind| kind == "test")
                         }
