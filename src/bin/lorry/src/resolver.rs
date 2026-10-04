@@ -1248,6 +1248,7 @@ struct Event {
 #[derive(Clone, Debug, Default)]
 struct Activation {
     active: BTreeSet<String>,
+    requested_dependencies: BTreeSet<String>,
     enabled_optional: BTreeSet<String>,
     dependency_features: BTreeMap<String, BTreeSet<String>>,
     weak_dependencies: BTreeSet<usize>,
@@ -1684,23 +1685,23 @@ fn activate(
         activation.active.insert("default".to_owned());
     }
     for feature in &event.dependency.features {
-        if record.features.contains_key(feature)
-            || record
-                .dependencies
-                .iter()
-                .any(|dependency| dependency.optional && dependency.alias == *feature)
-        {
+        if event.parent.is_none() && feature.contains('/') {
+            activation.requested_dependencies.insert(feature.clone());
+        } else if defines_feature(&record, feature) {
             activation.active.insert(feature.clone());
         } else {
             return Err(Failure::new(format!(
                 "`{}` {} does not define requested feature `{feature}`",
-                record.name, record.version
+                record.name, record.version,
             )));
         }
     }
 
     let mut expanded = BTreeSet::new();
     let mut weak = Vec::new();
+    for reference in activation.requested_dependencies.clone() {
+        expand_feature_reference(&record, activation, &reference, &reference, &mut weak)?;
+    }
     while let Some(feature) = activation
         .active
         .iter()
@@ -1713,66 +1714,16 @@ fn activate(
             continue;
         };
         for reference in references {
-            if let Some(dependency) = reference.strip_prefix("dep:") {
-                if !record
-                    .dependencies
-                    .iter()
-                    .any(|candidate| candidate.optional && candidate.alias == dependency)
-                {
-                    return Err(Failure::new(format!(
-                        "`{}` {} feature `{feature}` references unknown optional dependency `{dependency}`",
-                        record.name, record.version
-                    )));
-                }
-                activation.enabled_optional.insert(dependency.to_owned());
-            } else if let Some((dependency, dependency_feature)) = reference.split_once('/') {
-                if let Some(dependency) = dependency.strip_suffix('?') {
-                    if !record
-                        .dependencies
-                        .iter()
-                        .any(|candidate| candidate.alias == dependency)
-                    {
-                        return Err(Failure::new(format!(
-                            "`{}` {} feature `{feature}` references unknown dependency `{dependency}`",
-                            record.name, record.version
-                        )));
-                    }
-                    weak.push((dependency.to_owned(), dependency_feature.to_owned()));
-                } else {
-                    if !record
-                        .dependencies
-                        .iter()
-                        .any(|candidate| candidate.alias == dependency)
-                    {
-                        return Err(Failure::new(format!(
-                            "`{}` {} feature `{feature}` references unknown dependency `{dependency}`",
-                            record.name, record.version
-                        )));
-                    }
-                    activation.enabled_optional.insert(dependency.to_owned());
-                    activation
-                        .dependency_features
-                        .entry(dependency.to_owned())
-                        .or_default()
-                        .insert(dependency_feature.to_owned());
-                }
-            } else if record.features.contains_key(reference)
-                || record
-                    .dependencies
-                    .iter()
-                    .any(|dependency| dependency.optional && dependency.alias == *reference)
-            {
-                activation.active.insert(reference.to_owned());
-            } else {
-                return Err(Failure::new(format!(
-                    "`{}` {} feature `{feature}` references unknown `{reference}`",
-                    record.name, record.version
-                )));
-            }
+            expand_feature_reference(&record, activation, reference, &feature, &mut weak)?;
         }
     }
     for (dependency, dependency_feature) in weak {
-        if activation.enabled_optional.contains(&dependency) {
+        if activation.enabled_optional.contains(&dependency)
+            || record
+                .dependencies
+                .iter()
+                .any(|candidate| candidate.alias == dependency && !candidate.optional)
+        {
             activation
                 .dependency_features
                 .entry(dependency)
@@ -1856,6 +1807,89 @@ fn activate(
             ancestors,
         });
     }
+    Ok(())
+}
+
+fn defines_feature(record: &Candidate, feature: &str) -> bool {
+    record.features.contains_key(feature)
+        || (record
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.optional && dependency.alias == feature)
+            && !record
+                .features
+                .values()
+                .flatten()
+                .any(|reference| reference.strip_prefix("dep:") == Some(feature)))
+}
+
+fn expand_feature_reference(
+    record: &Candidate,
+    activation: &mut Activation,
+    reference: &str,
+    feature: &str,
+    weak: &mut Vec<(String, String)>,
+) -> std::result::Result<(), Failure> {
+    if let Some(dependency) = reference.strip_prefix("dep:") {
+        if !record
+            .dependencies
+            .iter()
+            .any(|candidate| candidate.optional && candidate.alias == dependency)
+        {
+            return Err(Failure::new(format!(
+                "`{}` {} feature `{feature}` references unknown optional dependency `{dependency}`",
+                record.name, record.version
+            )));
+        }
+        activation.enabled_optional.insert(dependency.to_owned());
+    } else if let Some((dependency, dependency_feature)) = reference.split_once('/') {
+        if let Some(dependency) = dependency.strip_suffix('?') {
+            if !record
+                .dependencies
+                .iter()
+                .any(|candidate| candidate.alias == dependency)
+            {
+                return Err(Failure::new(format!(
+                    "`{}` {} feature `{feature}` references unknown dependency `{dependency}`",
+                    record.name, record.version
+                )));
+            }
+            weak.push((dependency.to_owned(), dependency_feature.to_owned()));
+        } else {
+            if !record
+                .dependencies
+                .iter()
+                .any(|candidate| candidate.alias == dependency)
+            {
+                return Err(Failure::new(format!(
+                    "`{}` {} feature `{feature}` references unknown dependency `{dependency}`",
+                    record.name, record.version
+                )));
+            }
+            activation.enabled_optional.insert(dependency.to_owned());
+            if record
+                .dependencies
+                .iter()
+                .any(|candidate| candidate.alias == dependency && candidate.optional)
+                && defines_feature(record, dependency)
+            {
+                activation.active.insert(dependency.to_owned());
+            }
+            activation
+                .dependency_features
+                .entry(dependency.to_owned())
+                .or_default()
+                .insert(dependency_feature.to_owned());
+        }
+    } else if defines_feature(record, reference) {
+        activation.active.insert(reference.to_owned());
+    } else {
+        return Err(Failure::new(format!(
+            "`{}` {} feature `{feature}` references unknown `{reference}`",
+            record.name, record.version
+        )));
+    }
+
     Ok(())
 }
 
@@ -2438,6 +2472,129 @@ mod tests {
             .to_string()
             .contains("dependency cycle")
         );
+    }
+
+    #[test]
+    fn qualified_and_weak_member_features_match_cargo_unit_features() {
+        let fixture = LocalFixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        let source = "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nrenamed = { package = \"b\", path = \"../b\", optional = true, default-features = false }\n[features]\nenable = [\"dep:renamed\"]\n";
+        fixture.package("a", source);
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\nextra = []\n");
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let selection = TargetSelection {
+            host_triple: "x86_64-unknown-linux-gnu",
+            host_cfg: &cfg,
+            target_triple: "x86_64-unknown-linux-gnu",
+            target_cfg: &cfg,
+        };
+        let limits = options(ResolverVersion::V2);
+        for (source, features, succeeds) in [
+            (source.to_owned(), "renamed?/extra", true),
+            (source.to_owned(), "renamed/extra", true),
+            (source.to_owned(), "enable,renamed?/extra", true),
+            (source.to_owned(), "renamed", false),
+            (
+                source.replace("[features]\nenable = [\"dep:renamed\"]\n", ""),
+                "renamed/extra",
+                true,
+            ),
+            (
+                source
+                    .replace(", optional = true", "")
+                    .replace("[features]\nenable = [\"dep:renamed\"]\n", ""),
+                "renamed?/extra",
+                true,
+            ),
+        ] {
+            fs::write(fixture.0.join("a/Cargo.toml"), source).unwrap();
+            let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+            let mut catalog = Catalog::default();
+            let complete = resolve_complete_workspace(
+                &workspace,
+                &mut catalog,
+                &limits,
+                &[],
+                &mut |_, _, _| Ok(()),
+            )
+            .unwrap();
+            let member = workspace::MemberRequest {
+                root: fixture.0.join("a"),
+                features: features.split(',').map(str::to_owned).collect(),
+                default_features: false,
+                dev: false,
+            };
+            let resolved = workspace::resolve_selected_workspace(
+                &complete,
+                &catalog,
+                &limits,
+                &[member],
+                selection,
+            );
+            let output = std::process::Command::new(env!("CARGO"))
+                .env(
+                    "RUSTC",
+                    Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+                )
+                .args([
+                    "build",
+                    "--offline",
+                    "-p",
+                    "a",
+                    "--no-default-features",
+                    "--features",
+                    features,
+                    "-Z",
+                    "unstable-options",
+                    "--unit-graph",
+                    "--manifest-path",
+                ])
+                .arg(fixture.0.join("Cargo.toml"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                succeeds,
+                "{features}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(resolved.is_ok(), succeeds, "{features}: {resolved:?}");
+            if !succeeds {
+                continue;
+            }
+            let graph: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let cargo_features = graph["units"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|unit| {
+                    let id = unit["pkg_id"].as_str().unwrap();
+                    let (source, fragment) = id.rsplit_once('#').unwrap();
+                    let name = fragment
+                        .split_once('@')
+                        .map_or_else(|| source.rsplit('/').next().unwrap(), |(name, _)| name)
+                        .to_owned();
+                    let features = unit["features"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|feature| feature.as_str().unwrap().to_owned())
+                        .collect::<BTreeSet<_>>();
+                    (name, features)
+                })
+                .collect::<BTreeMap<_, _>>();
+            let lorry_features = resolved
+                .unwrap()
+                .packages
+                .into_iter()
+                .map(|package| (package.key.name, package.target_features))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(lorry_features, cargo_features, "{features}");
+        }
     }
 
     fn checksum(version: &str) -> String {

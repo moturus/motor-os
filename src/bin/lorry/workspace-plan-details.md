@@ -1681,6 +1681,16 @@ resolver tests and strict Clippy passed in
 `/tmp/lorry-m6-selected-workspace-{yanked-unit,clippy-final}.log`.
 CLI routing and resolver-specific feature oracles follow before activation.
 
+Named features and root dependency-feature requests now share expansion.
+Weak requests remain deferred until an optional dependency is enabled;
+renamed dependencies and hidden implicit features follow Cargo's rules.
+The pinned Cargo unit-graph oracle covers six strong/weak/hidden/required
+dependency cases. Thirty-two resolver tests passed in
+`/tmp/lorry-m6-qualified-features-cargo-oracle-fixed.log`, and strict Clippy
+passed in `/tmp/lorry-m6-qualified-features-clippy-final.log`. The first
+oracle run exposed a test assumption about Cargo path IDs: Cargo omits a
+package name when it matches the directory. Both ID forms are now handled.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.
