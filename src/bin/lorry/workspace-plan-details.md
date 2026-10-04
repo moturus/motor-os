@@ -1346,6 +1346,16 @@ workspace metadata contract passed in `/tmp/lorry-m5-autolib-contract.log`;
 it also builds a package whose disabled library contains `compile_error!`,
 and both tools reject a nonboolean flag.
 
+The local corpus now contains 128 manifests. The first source-only scan
+matched Cargo for 111; the other 17 had the same binary-discovery defect.
+Helix, gix, and rush rename an inferred binary through an explicit source
+path, but Lorry retained both names. Original projections and failures remain
+in `/tmp/lorry-m5-corpus/`. Explicit names and paths now suppress inferred
+binaries without removing explicit targets that share a file. The paired
+metadata/run contract passed in `/tmp/lorry-m5-renamed-bins-contract.log`.
+The new scan matches all 128 projections, recorded in
+`/tmp/lorry-m5-corpus-source-scan-fixed.log` and `/tmp/lorry-m5-corpus-fixed/`.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,

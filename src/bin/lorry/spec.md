@@ -371,7 +371,9 @@ closures of unselected explicit members.
 
 A root package may contain at most one library and 64 binary targets. Lorry
 discovers `src/main.rs`, `src/bin/*.rs`, and `src/bin/*/main.rs`, merges exact
-explicit `[[bin]]` targets, and honors `package.autobins = false`. `[lib]` and
+explicit `[[bin]]` targets, and honors `package.autobins = false`.
+Explicit binary names and source paths suppress matching inferred binaries;
+several explicit binaries may still share a source file. `[lib]` and
 `[[bin]]` accept the Cargo-defaulted `name`, `path`, and `test` fields needed
 by the supported packages. Lorry discovers top-level `tests/*.rs` integration
 crates automatically.

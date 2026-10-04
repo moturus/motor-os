@@ -1389,6 +1389,7 @@ fn parse_binaries(
     };
     if let Some(item) = document.root().get("bin") {
         let mut explicit_names = BTreeSet::new();
+        let mut explicit_targets = Vec::new();
         let tables = item.as_array_of_tables().ok_or_else(|| {
             type_error(
                 path,
@@ -1452,8 +1453,22 @@ fn parse_binaries(
                     "give every `[[bin]]` target a distinct name",
                 ));
             }
-            binaries.insert(target.name.clone(), target);
+            explicit_targets.push(target);
         }
+        // Cargo suppresses inferred targets by either explicit name or path.
+        // Keep explicit targets distinct even when they share a source file.
+        let explicit_paths: BTreeSet<_> = explicit_targets
+            .iter()
+            .map(|target| target.path.clone())
+            .collect();
+        binaries.retain(|name, target| {
+            !explicit_names.contains(name) && !explicit_paths.contains(&target.path)
+        });
+        binaries.extend(
+            explicit_targets
+                .into_iter()
+                .map(|target| (target.name.clone(), target)),
+        );
     }
     if binaries.len() > MAX_BINARY_TARGETS {
         return Err(Error::failure(format!(

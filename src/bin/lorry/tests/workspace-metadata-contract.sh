@@ -132,6 +132,34 @@ agrees_with_cargo() {
         --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- \
         compare-projection "$WORK/$name.json" "$WORK/$name.cargo.json"
 }
+package "$WORK/renamed-binaries"
+rm "$WORK/renamed-binaries/src/lib.rs"
+printf 'fn main() { println!("renamed"); }\n' >"$WORK/renamed-binaries/src/main.rs"
+cat >>"$WORK/renamed-binaries/Cargo.toml" <<'EOF'
+[[bin]]
+name = "command"
+path = "src/main.rs"
+EOF
+agrees_with_cargo "$WORK/renamed-binaries/Cargo.toml" renamed-main
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" generate-lockfile --offline \
+    --manifest-path "$WORK/renamed-binaries/Cargo.toml"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    HOME="$WORK/home" RUSTC="$LORRY_TEST_RUSTC" "$builder" run --offline \
+        --manifest-path "$WORK/renamed-binaries/Cargo.toml" >"$WORK/renamed-run.out"
+    grep -Fx renamed "$WORK/renamed-run.out"
+done
+mkdir "$WORK/renamed-binaries/src/bin"
+printf 'fn main() {}\n' >"$WORK/renamed-binaries/src/bin/tool.rs"
+cat >>"$WORK/renamed-binaries/Cargo.toml" <<'EOF'
+[[bin]]
+name = "renamed-tool"
+path = "src/bin/tool.rs"
+[[bin]]
+name = "second-command"
+path = "src/main.rs"
+EOF
+agrees_with_cargo "$WORK/renamed-binaries/Cargo.toml" renamed-and-shared-paths
+echo "PASS: explicit binary names and paths suppress inferred targets"
 source_files=("$PROJECT/Cargo.toml" "$PROJECT/app/Cargo.toml" "$PROJECT/shared/Cargo.toml"
     "$PROJECT/app/src/main.rs" "$PROJECT/shared/src/lib.rs" "$PROJECT/tools/helper/Cargo.toml")
 sha256sum "${source_files[@]}" >"$WORK/sources.before"
