@@ -89,9 +89,8 @@ done
 located="$(cd "$WORK" && HOME="$HOME_DIR" "$LORRY" locate-project \
     --manifest-path "$MANIFEST" --message-format plain)"
 [ "$located" = "$MANIFEST" ] || fail "plain locate-project output is not the manifest path"
-if (cd "$PROJECT/src" && HOME="$HOME_DIR" "$LORRY" locate-project) >"$WORK/locate.err" 2>&1; then
-    fail "locate-project searched parent directories before workspace discovery is supported"
-fi
+located="$(cd "$PROJECT/src" && HOME="$HOME_DIR" "$LORRY" locate-project)"
+[ "$located" = "{\"root\":\"$MANIFEST\"}" ] || fail "subdirectory discovery did not locate its package"
 
 mkdir -p "$WORK/workspace/app/src"
 cat >"$WORK/workspace/Cargo.toml" <<'EOF'

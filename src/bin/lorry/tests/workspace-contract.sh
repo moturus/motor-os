@@ -148,7 +148,7 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
     "$LORRY" build --manifest-path "$manifest" -p app
     host="$("$RUSTC" -vV | sed -n 's/^host: //p')"
     "$LORRY" rustc -Z unstable-options --print cfg --target "$host" \
-        --manifest-path "$manifest" >"$WORK/query.lorry"
+        --manifest-path "$manifest" -- -O >"$WORK/query.lorry"
     "$RUSTC" --print cfg -O --target "$host" >"$WORK/query.rustc"
     cmp "$WORK/query.lorry" "$WORK/query.rustc"
 )

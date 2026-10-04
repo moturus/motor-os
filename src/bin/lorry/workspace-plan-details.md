@@ -1320,10 +1320,18 @@ Support `--manifest-path` on every command that reads a manifest.
 Every manifest-reading command now accepts the option, including build,
 run, test, clean, vendor/upgrade, review, and rustc configuration queries.
 Relative paths resolve against the supplied invocation directory. The
-23 manifest tests, 24 CLI tests, strict Clippy, and workspace contract passed
-in `/tmp/lorry-m5-all-manifest-paths-{unit,cli,clippy}.log` and
-`/tmp/lorry-m5-all-manifest-paths-contract.log`. The contract invokes these
-commands from outside the workspace and compares query output with rustc.
+23 manifest tests, 24 CLI tests, and strict Clippy passed in
+`/tmp/lorry-m5-all-manifest-paths-{unit,cli,clippy}.log`. The initial contract
+(`/tmp/lorry-m5-all-manifest-paths-contract.log`) failed because its new
+rustc query omitted the required trailing `-- -O`; all preceding manifest-path
+commands passed. Commit `a7c03cfb` was created before its nonzero exit was
+noticed. The fixture now uses the supported query form, and the failed
+contract's validation record is corrected here.
+The corrected workspace contract passed in
+`/tmp/lorry-m5-all-manifest-paths-contract-fixed.log`. A diagnostic run of
+the dedicated compatibility driver failed at its obsolete assertion that
+parent discovery was unsupported (`/tmp/lorry-m5-parent-compatibility-stale-contract.log`).
+That assertion now checks the approved parent-discovery result exactly.
 
 ### Package and feature selection
 
