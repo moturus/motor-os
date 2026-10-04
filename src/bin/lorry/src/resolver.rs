@@ -970,6 +970,8 @@ fn solve_request(
     .map_err(|failure| {
         if failure.package_limit {
             options.package_limit.error()
+        } else if let Some(error) = failure.diagnostic {
+            error.with_context("dependency resolution failed")
         } else {
             Error::failure(format!("dependency resolution failed: {}", failure.message))
         }
@@ -1436,6 +1438,7 @@ struct Failure {
     message: String,
     fatal: bool,
     package_limit: bool,
+    diagnostic: Option<Error>,
 }
 
 impl Failure {
@@ -1444,6 +1447,7 @@ impl Failure {
             message: message.into(),
             fatal: false,
             package_limit: false,
+            diagnostic: None,
         }
     }
 
@@ -1452,6 +1456,7 @@ impl Failure {
             message: message.into(),
             fatal: true,
             package_limit: false,
+            diagnostic: None,
         }
     }
 
@@ -1462,6 +1467,16 @@ impl Failure {
             message: String::new(),
             fatal: true,
             package_limit: true,
+            diagnostic: None,
+        }
+    }
+
+    fn from_error(error: Error, fatal: bool) -> Self {
+        Self {
+            message: error.to_string(),
+            fatal,
+            package_limit: false,
+            diagnostic: Some(error),
         }
     }
 }
@@ -1485,11 +1500,11 @@ fn solve(
             &event.dependency.requirement,
             catalog,
         )
-        .map_err(|error| Failure::fatal(error.to_string()))?;
+        .map_err(|error| Failure::from_error(error, true))?;
     }
     catalog
         .prepare(&mut event.dependency)
-        .map_err(|error| Failure::new(error.to_string()))?;
+        .map_err(|error| Failure::from_error(error, false))?;
     if event.depth > options.max_depth {
         return Err(Failure::new(format!(
             "`{}` exceeds dependency depth {}",
@@ -1953,10 +1968,7 @@ fn candidates(
         let left_locked = lock_rank(left, locked);
         let right_locked = lock_rank(right, locked);
         right_locked.cmp(&left_locked).then_with(|| {
-            if rust_policy == IncompatibleRustVersions::Fallback
-                && left_locked == 0
-                && right_locked == 0
-            {
+            if rust_policy == IncompatibleRustVersions::Fallback {
                 let left_compatible = rust_compatibility_count(left, &options.rust_versions);
                 let right_compatible = rust_compatibility_count(right, &options.rust_versions);
                 right_compatible
@@ -3526,6 +3538,59 @@ mod tests {
             })
             .unwrap();
         assert_eq!(selected(&resolution, "demo")[0].to_string(), "1.2.0");
+    }
+
+    #[test]
+    fn equal_lock_preferences_still_rank_msrv_compatibility() {
+        let root = manifest("demo = \"1\"\n", "", "3");
+        let mut catalog = Catalog::default();
+        let mut locked = Vec::new();
+        for (version, rust_version) in [("1.1.0", "1.60"), ("1.2.0", "1.85")] {
+            let candidate = record(
+                "demo",
+                version,
+                "[]",
+                "{}",
+                &format!(",\"rust_version\":\"{rust_version}\""),
+            );
+            locked.push(LockedPreference {
+                name: candidate.name.clone(),
+                version: candidate.version.clone(),
+                checksum: Some(candidate.checksum),
+            });
+            catalog.insert(candidate).unwrap();
+        }
+        let resolved = resolve(&root, &catalog, &options(ResolverVersion::V3), &locked).unwrap();
+        assert_eq!(
+            selected(&resolved, "demo"),
+            [&Version::parse("1.1.0").unwrap()]
+        );
+    }
+
+    #[test]
+    fn acquisition_errors_retain_help_locations_and_exit_codes() {
+        let root = manifest("demo = \"1\"\n", "", "3");
+        let error = resolve_with_scope(
+            &root,
+            &mut Catalog::default(),
+            &options(ResolverVersion::V2),
+            &[],
+            Scope::Complete,
+            &mut |_, _, _| {
+                Err(Error::at(
+                    std::path::Path::new("Cargo.lock"),
+                    7,
+                    "missing verified index",
+                    "run `lorry fetch`",
+                ))
+            },
+        )
+        .unwrap_err();
+        let message: serde_json::Value = serde_json::from_str(&error.render_json()).unwrap();
+        assert_eq!(message["file"], "Cargo.lock");
+        assert_eq!(message["line"], 7);
+        assert_eq!(message["help"], "run `lorry fetch`");
+        assert_eq!(message["exit_code"], 101);
     }
 
     #[test]

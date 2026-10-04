@@ -65,6 +65,11 @@ impl Error {
         self
     }
 
+    pub(crate) fn with_context(mut self, context: &str) -> Self {
+        self.message = format!("{context}: {}", self.message);
+        self
+    }
+
     #[cfg(test)]
     pub fn is_usage(&self) -> bool {
         self.kind == ErrorKind::Usage
