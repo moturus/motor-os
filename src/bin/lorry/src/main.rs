@@ -193,7 +193,7 @@ fn print_help(topic: Option<&str>) {
             "Build and run a package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [-p NAME] [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]"
         ),
         Some("test") => println!(
-            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [NAME] [-p NAME] [--release|-r] [--target TRIPLE] [--strict-validation] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
+            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [NAME] [-p NAME] [--release|-r] [--target TRIPLE] [--strict-validation] [--test NAME] [--no-run] [--no-fail-fast] [--bundle] [-- ARGS...]"
         ),
         Some("tree") => println!(
             "Display a package dependency tree\n\nUsage: lorry [+toolchain] [GLOBAL] tree [-p NAME] [--manifest-path PATH] [--target TRIPLE]"

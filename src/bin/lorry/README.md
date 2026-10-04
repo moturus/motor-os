@@ -97,7 +97,7 @@ lorry build [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation]
              [--keep-going]
 lorry run   [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]
 lorry test  [NAME] [--release|-r] [--target TRIPLE] [--strict-validation]
-            [--test NAME] [--no-run] [--bundle] [-- ARGS...]
+            [--test NAME] [--no-run] [--no-fail-fast] [--bundle] [-- ARGS...]
 ```
 
 Package commands accept Cargo names, package IDs, versions, and member-name
@@ -133,8 +133,11 @@ unless one exact `--bin` is selected. `run` selects `--bin`, then
 `run` returns the program's status. Ordinary tests build separate library,
 binary, and integration-test harnesses, then run them in order and stop at the
 first failure. Positional `NAME` filters test names in each harness;
-`--test NAME` selects one integration-test target. `--no-run` prints
-the built harness paths.
+`--test NAME` selects matching integration-test targets across the selected
+packages. `--no-run` prints the built harness paths. `--no-fail-fast` runs every
+target after runtime failures, reports failures, and returns 101. Default
+testing propagates the first failing harness's exit code. A compilation failure
+prevents all test execution; an empty enabled-test selection succeeds.
 
 Normal builds report dependency verification and preparation, then each
 dependency unit, build script, and root target when that work starts. `--quiet`

@@ -2636,6 +2636,19 @@ All twelve planner tests and strict Clippy pass in
 larger than the preferred size because its linked cycle/script/program graph
 needs the full paired oracle fixture.
 
+`test --no-fail-fast` now runs every selected target after runtime failures,
+reports failed executables, and returns Cargo's aggregate status 101. Default
+testing retains the failing process's status. The hidden rejected `--keep-going`
+form provides the specific `--no-fail-fast` guidance. Paired cases prove default
+exit 7, continued execution with exit 101, zero harness execution after a later
+compile failure, and an empty selection that compiles no unused library. The
+contract passes in `/tmp/lorry-m8-workspace-test-fail-fast-first-contract.log`.
+The first CLI assertion looked only at the message, omitting help; its attempted
+correction supplied an extra argument to `render`. Both test-only failures are
+preserved in `/tmp/lorry-m8-test-fail-fast-cli{,-fixed}.log`. The final focused
+test and strict Clippy pass in
+`/tmp/lorry-m8-test-fail-fast-{cli-final,clippy-final}.log`.
+
 Ordinary `test` now prepares the shared workspace resolution with development
 edges and CLI features, executes one harness/program DAG, then runs every
 selected package's harnesses in Cargo order. Each harness uses its own package

@@ -175,6 +175,7 @@ pub struct TestOptions {
     pub build: BuildOptions,
     pub test: Option<String>,
     pub no_run: bool,
+    pub no_fail_fast: bool,
     pub bundle: bool,
     pub arguments: Vec<String>,
 }
@@ -885,6 +886,17 @@ fn test_command() -> ClapCommand {
                 .action(ArgAction::Set),
         )
         .arg(Arg::new("no-run").long("no-run").action(ArgAction::SetTrue))
+        .arg(
+            Arg::new("no-fail-fast")
+                .long("no-fail-fast")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("keep-going")
+                .long("keep-going")
+                .hide(true)
+                .action(ArgAction::SetTrue),
+        )
         .arg(Arg::new("bundle").long("bundle").action(ArgAction::SetTrue))
         .arg(child_arguments())
 }
@@ -988,6 +1000,12 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             arguments: values(options, "arguments"),
         })),
         Some(("test", options)) => {
+            if options.get_flag("keep-going") {
+                return Err(Error::usage(
+                    "`test --keep-going` is not supported",
+                    "use `--no-fail-fast` to run all test targets after a failure",
+                ));
+            }
             let mut arguments = values(options, "arguments");
             if let Some(filter) = options.get_one::<String>("filter") {
                 arguments.insert(0, filter.clone());
@@ -996,6 +1014,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                 build: build_options(options, true),
                 test: options.get_one::<String>("test").cloned(),
                 no_run: options.get_flag("no-run"),
+                no_fail_fast: options.get_flag("no-fail-fast"),
                 bundle: options.get_flag("bundle"),
                 arguments,
             }))
@@ -1399,7 +1418,18 @@ mod tests {
             assert_eq!(options.test.as_deref(), Some("integration"));
             assert_eq!(options.arguments, ["matching", "--exact"]);
             assert_eq!(options.no_run, no_run);
+            assert!(!options.no_fail_fast);
         }
+        let Command::Test(options) = parse(&["test", "--no-run", "--no-fail-fast"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected test");
+        };
+        assert!(options.no_run && options.no_fail_fast);
+        let error = parse(&["test", "--keep-going"]).unwrap_err();
+        assert!(error.is_usage());
+        assert!(error.render().contains("--no-fail-fast"));
     }
 
     #[test]

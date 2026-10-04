@@ -178,7 +178,7 @@ lorry [+toolchain] [GLOBAL] test   [NAME] [-p NAME]
                                   [--release|-r] [--target TRIPLE]
                                   [--target-dir DIRECTORY]
                                   [--strict-validation] [--test NAME]
-                                  [--no-run] [--bundle]
+                                  [--no-run] [--no-fail-fast] [--bundle]
                                   [-- ARGS...]
 lorry [+toolchain] [GLOBAL] vendor [-p NAME] [--accept-all]
                                   [--locked] [--offline] [--workspace]
@@ -306,6 +306,10 @@ root compilation, freshness validation, and artifact publication.
   runs at its package root with its owning script's output environment. A
   failing harness's exit code is propagated, as in Cargo. Arguments after `--`
   go to every executed harness. No enabled harnesses is a successful build.
+- `test --no-fail-fast` runs every selected target after runtime failures,
+  reports the failed targets, and returns 101 if any failed. Compilation still
+  finishes successfully before any test executes. `test --keep-going` remains
+  an error with guidance to use `--no-fail-fast`.
 - `test NAME` passes the name filter to each harness before arguments after
   `--`. As with Cargo, `--no-run` accepts those arguments without running a harness.
 - `test --test NAME` selects matching integration tests across selected

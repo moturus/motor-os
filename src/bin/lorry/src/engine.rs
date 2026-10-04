@@ -644,6 +644,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 return Ok(0);
             }
             drop(artifact_lock);
+            let mut failures = Vec::new();
             for member in &members {
                 let executables = member
                     .bundle
@@ -653,7 +654,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     if cli.verbosity != Verbosity::Quiet {
                         eprintln!("Running {}", harness.executable.display());
                     }
-                    let status = run_artifact(
+                    let result = run_artifact(
                         &harness.executable,
                         &options.arguments,
                         &member.root,
@@ -661,13 +662,36 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                         physical_target.as_deref(),
                         &target_options,
                         cli.verbosity,
-                    )?;
+                    );
+                    let status = match result {
+                        Ok(status) => status,
+                        Err(error) if options.no_fail_fast => {
+                            eprintln!("{error}");
+                            101
+                        }
+                        Err(error) => return Err(error),
+                    };
                     if status != 0 {
-                        return Ok(status);
+                        eprintln!(
+                            "test target `{}` failed with status {status}",
+                            harness.executable.display()
+                        );
+                        if !options.no_fail_fast {
+                            return Ok(status);
+                        }
+                        failures.push(&harness.executable);
                     }
                 }
             }
-            Ok(0)
+            if failures.is_empty() {
+                Ok(0)
+            } else {
+                eprintln!("{} test targets failed:", failures.len());
+                for executable in failures {
+                    eprintln!("    {}", executable.display());
+                }
+                Ok(101)
+            }
         }
         _ => unreachable!(),
     }

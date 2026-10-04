@@ -78,7 +78,12 @@ EOF
 #[cfg(test)]
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/assert-runtime.rs"));
 fn main() {
-    #[cfg(test)] { assert_runtime("binary"); }
+    #[cfg(test)] {
+        assert_runtime("binary");
+        if std::env::var_os("TEST_FAIL").is_some() && env!("CARGO_PKG_NAME") == "alpha" {
+            std::process::exit(7);
+        }
+    }
     #[cfg(not(test))] { print!("{}", env!("CARGO_PKG_NAME")); }
 }
 EOF
@@ -125,4 +130,51 @@ for arguments in workspace named features; do
     "$LORRY_TEST_CARGO" test "${selection[@]}" --offline >"$WORK/cargo.out"
     cmp "$WORK/lorry.out" "$WORK/cargo.out"
 done
+for policy in default all; do
+    arguments=()
+    expected=7
+    if [ "$policy" = all ]; then arguments=(--no-fail-fast); expected=101; fi
+    set +e
+    env HOME="$WORK/home" TEST_FAIL=1 "$LORRY" test --workspace "${arguments[@]}" >"$WORK/lorry-failure.out" 2>"$WORK/lorry-failure.err"
+    lorry_status=$?
+    TEST_FAIL=1 "$LORRY_TEST_CARGO" test --workspace --offline "${arguments[@]}" >"$WORK/cargo-failure.out" 2>"$WORK/cargo-failure.err"
+    cargo_status=$?
+    set -e
+    [ "$lorry_status" = "$expected" ] && [ "$cargo_status" = "$expected" ]
+    cmp "$WORK/lorry-failure.out" "$WORK/cargo-failure.out"
+    if [ "$policy" = all ]; then rg -F '1 test targets failed:' "$WORK/lorry-failure.err" >/dev/null; fi
+done
+printf '\ncompile_error!("later target failed");\n' >>zeta/tests/integration.rs
+for compiler in lorry cargo; do
+    command=(env HOME="$WORK/home" "$LORRY")
+    if [ "$compiler" = cargo ]; then command=("$LORRY_TEST_CARGO"); fi
+    set +e
+    "${command[@]}" test --workspace --no-fail-fast --message-format=json >"$WORK/$compiler-build-failure.json" 2>"$WORK/$compiler-build-failure.err"
+    status=$?
+    set -e
+    [ "$status" = 101 ]
+    python3 - "$WORK/$compiler-build-failure.json" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1])]
+assert events[-1] == {'reason': 'build-finished', 'success': False}
+assert any(event['reason'] == 'compiler-message' and event['message']['level'] == 'error' for event in events)
+assert not any(event['reason'] == 'build-finished' and event['success'] for event in events)
+PY
+done
+mkdir -p "$WORK/empty/src"
+cat >"$WORK/empty/Cargo.toml" <<'EOF'
+[package]
+name = "empty"
+version = "1.0.0"
+edition = "2024"
+[lib]
+test = false
+doctest = false
+EOF
+printf 'compile_error!("unused library");\n' >"$WORK/empty/src/lib.rs"
+cd "$WORK/empty"
+"$LORRY_TEST_CARGO" generate-lockfile --offline
+env HOME="$WORK/home" "$LORRY" test --message-format=json >"$WORK/lorry-empty.json"
+"$LORRY_TEST_CARGO" test --offline --message-format=json >"$WORK/cargo-empty.json"
+cmp "$WORK/lorry-empty.json" "$WORK/cargo-empty.json"
 echo "PASS: workspace tests match Cargo target order, dev cycle, script environments, features, and native/cross artifacts"
