@@ -14,6 +14,7 @@ pub mod journal;
 pub mod memory_format;
 pub mod patch_match;
 pub mod paths;
+pub mod pending;
 pub mod policy;
 pub mod provenance;
 pub mod search;
