@@ -44,6 +44,10 @@ printf '%s\n' \
     '' \
     '[dependencies]' \
     'fixture-dependency = { path = "../dependency" }' \
+    '' \
+    '[lints.clippy]' \
+    'all = { level = "deny", priority = -1 }' \
+    'needless_return = "allow"' \
     >"$PROJECT/Cargo.toml"
 printf '%s\n' \
     '[package]' \

@@ -53,6 +53,7 @@ pub struct Manifest {
     pub patches: Vec<Patch>,
     #[allow(dead_code)]
     pub rust_lints: BTreeMap<String, Lint>,
+    pub clippy_lints: BTreeMap<String, Lint>,
     #[allow(dead_code)]
     pub lock: Option<Lockfile>,
     unsupported_target_dev_dependencies: Vec<UnsupportedTargetDevDependency>,
@@ -592,7 +593,8 @@ impl Manifest {
         } else {
             Vec::new()
         };
-        let rust_lints = parse_rust_lints(path, document, mode)?;
+        let rust_lints = parse_lint_namespace(path, document, mode, "rust")?;
+        let clippy_lints = parse_lint_namespace(path, document, mode, "clippy")?;
         let (dev, release) = if mode == ManifestMode::Root {
             parse_profiles(path, document)?
         } else {
@@ -622,6 +624,7 @@ impl Manifest {
             features,
             patches,
             rust_lints,
+            clippy_lints,
             lock: None,
             unsupported_target_dev_dependencies,
         })
@@ -2265,31 +2268,40 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
     Ok(result)
 }
 
-fn parse_rust_lints(
+fn parse_lint_namespace(
     path: &Path,
     document: &Document,
     mode: ManifestMode,
+    namespace: &str,
 ) -> Result<BTreeMap<String, Lint>> {
     let Some(item) = document.root().get("lints") else {
         return Ok(BTreeMap::new());
     };
     let lints = require_table(path, document, item, "lints")?;
     for (key, item) in lints.iter() {
-        if key != "rust" && mode == ManifestMode::Root {
+        if !matches!(key, "rust" | "clippy") && mode == ManifestMode::Root {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
                 format!("lint namespace `lints.{key}` is not supported in Stage 2"),
-                "configure Rust lints under `[lints.rust]`",
+                "configure lints under `[lints.rust]` or `[lints.clippy]`",
             ));
         }
     }
-    let Some(item) = lints.get("rust") else {
+    let Some(item) = lints.get(namespace) else {
         return Ok(BTreeMap::new());
     };
-    let rust = require_table(path, document, item, "lints.rust")?;
+    let table = require_table(path, document, item, &format!("lints.{namespace}"))?;
     let mut result = BTreeMap::new();
-    for (name, item) in rust.iter() {
+    for (name, item) in table.iter() {
+        if name.contains("::") {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("`lints.{namespace}.{name}` is not a valid lint name"),
+                "use an unqualified lint name in its namespace table",
+            ));
+        }
         let lint = if let Some(level) = item.as_str() {
             Lint {
                 level: validate_lint_level(path, document.line_of_item(item), level)?,
@@ -2303,7 +2315,9 @@ fn parse_rust_lints(
                 _ => unreachable!(),
             };
             for (key, value) in lookup.entries() {
-                if !matches!(key, "level" | "priority" | "check-cfg") {
+                if !matches!(key, "level" | "priority")
+                    && !(key == "check-cfg" && namespace == "rust")
+                {
                     return Err(Error::at(
                         path,
                         value.line(document),
@@ -2332,7 +2346,7 @@ fn parse_rust_lints(
                             type_error(
                                 path,
                                 value.line(document),
-                                &format!("lints.rust.{name}.priority"),
+                                &format!("lints.{namespace}.{name}.priority"),
                                 "an integer",
                             )
                         })
@@ -2347,11 +2361,11 @@ fn parse_rust_lints(
                             type_error(
                                 path,
                                 value.line(document),
-                                &format!("lints.rust.{name}.check-cfg"),
+                                &format!("lints.{namespace}.{name}.check-cfg"),
                                 "an array of strings",
                             )
                         })?,
-                        &format!("lints.rust.{name}.check-cfg"),
+                        &format!("lints.{namespace}.{name}.check-cfg"),
                     )?,
                     None => Vec::new(),
                 },
@@ -2360,7 +2374,7 @@ fn parse_rust_lints(
             return Err(type_error(
                 path,
                 document.line_of_item(item),
-                &format!("lints.rust.{name}"),
+                &format!("lints.{namespace}.{name}"),
                 "a level string or inline table",
             ));
         };
@@ -3297,6 +3311,31 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert_eq!(manifest.patches[0].package, "ring");
         assert!(matches!(manifest.patches[0].source, PatchSource::Path(_)));
         assert_eq!(manifest.rust_lints["unsafe_code"].priority, 1);
+    }
+
+    #[test]
+    fn parses_clippy_lints_for_roots_and_dependencies() {
+        let source = format!(
+            "{RED}\n[lints.clippy]\nall = {{ level = \"deny\", priority = -1 }}\n\
+             needless_return = \"allow\"\n"
+        );
+        let path = Path::new("/fixture/Cargo.toml");
+        let document = Document::parse(path, "Cargo manifest", source).unwrap();
+        for mode in [ManifestMode::Root, ManifestMode::Dependency] {
+            let manifest =
+                Manifest::parse_document(Path::new("/fixture"), path, &document, mode).unwrap();
+            assert_eq!(manifest.clippy_lints["all"].level, "deny");
+            assert_eq!(manifest.clippy_lints["all"].priority, -1);
+            assert_eq!(manifest.clippy_lints["needless_return"].level, "allow");
+        }
+        for configuration in [
+            "needless_return = \"force-warn\"",
+            "needless_return = { level = \"warn\", priority = \"first\" }",
+            "\"clippy::needless_return\" = \"warn\"",
+        ] {
+            let source = format!("{RED}\n[lints.clippy]\n{configuration}\n");
+            assert!(parsed(&source).is_err(), "accepted {configuration}");
+        }
     }
 
     #[test]

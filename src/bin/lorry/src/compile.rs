@@ -847,7 +847,14 @@ pub(crate) fn lint_arguments(manifest: &Manifest) -> Vec<OsString> {
     let mut lints = manifest
         .rust_lints
         .iter()
-        .map(|(name, lint)| {
+        .map(|(name, lint)| ("rust", name, lint))
+        .chain(
+            manifest
+                .clippy_lints
+                .iter()
+                .map(|(name, lint)| ("clippy", name, lint)),
+        )
+        .map(|(namespace, name, lint)| {
             let flag = match lint.level.as_str() {
                 "forbid" => "--forbid",
                 "deny" => "--deny",
@@ -855,10 +862,15 @@ pub(crate) fn lint_arguments(manifest: &Manifest) -> Vec<OsString> {
                 "allow" => "--allow",
                 _ => unreachable!("manifest lint level was validated"),
             };
-            (lint.priority, name.as_str(), format!("{flag}={name}"))
+            let option = if namespace == "rust" {
+                format!("{flag}={name}")
+            } else {
+                format!("{flag}={namespace}::{name}")
+            };
+            (lint.priority, std::cmp::Reverse(name.as_str()), option)
         })
         .collect::<Vec<_>>();
-    lints.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(left.1)));
+    lints.sort();
     let mut arguments = lints
         .into_iter()
         .map(|(_, _, argument)| OsString::from(argument))
@@ -1022,6 +1034,31 @@ mod tests {
             .iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn lint_priorities_apply_across_rust_and_clippy_namespaces() {
+        let manifest = Manifest::parse(
+            Path::new("/fixture"),
+            Path::new("/fixture/Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [lints.rust]\nwarnings = { level = \"deny\", priority = -1 }\n\
+             unused = \"warn\"\n\
+             [lints.clippy]\nall = { level = \"deny\", priority = -2 }\n\
+             unused = \"allow\"\nneedless_return = { level = \"allow\", priority = 1 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            lint_arguments(&manifest),
+            [
+                "--deny=clippy::all",
+                "--deny=warnings",
+                "--allow=clippy::unused",
+                "--warn=unused",
+                "--allow=clippy::needless_return",
+            ]
+            .map(OsString::from)
+        );
     }
 
     #[test]
