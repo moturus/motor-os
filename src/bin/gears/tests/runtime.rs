@@ -929,6 +929,78 @@ esac"#,
     assert_eq!(saved.text_content(), text);
 }
 
+#[test]
+fn hook_details_reach_the_permission_prompt_and_invalid_details_deny_the_call() {
+    struct Capture(Vec<String>);
+    impl Approver for Capture {
+        fn approve(&mut self, permission: &Permission) -> Approval {
+            self.0.push(permission.detail.clone());
+            Approval::Once
+        }
+    }
+    for (case, detail, valid) in [
+        (
+            "valid",
+            "declared check: [\"/bin/check\",\"a file*\"]".into(),
+            true,
+        ),
+        ("empty", String::new(), false),
+        ("large", "x".repeat(16385), false),
+    ] {
+        let fixture = Fixture::new(&format!("permission-detail-{case}"));
+        let response = fixture.root.join("response.json");
+        std::fs::write(
+            &response,
+            serde_json::json!({"decision": "confirm", "permission_detail": detail}).to_string(),
+        )
+        .unwrap();
+        let config = Config {
+            hooks: vec![HookConfig {
+                name: "policy".into(),
+                events: Some(vec!["permission".into()]),
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    format!("cat > /dev/null; cat '{}'", response.display()),
+                ],
+                timeout: Duration::from_secs(2),
+                max_output_bytes: 32 * 1024,
+            }],
+            ..Config::default()
+        };
+        let mut runtime = fixture.runtime(
+            Scripted::new(vec![
+                tool("sh", r#"{"command":"printf result"}"#),
+                answer("done"),
+            ]),
+            &config,
+        );
+        let mut approver = Capture(Vec::new());
+        let mut shown = Vec::new();
+        let mut outcome = None;
+        runtime
+            .turn("work".into(), &mut approver, &mut |event| {
+                match event {
+                    Event::Permission(permission) => shown.push(permission.detail),
+                    Event::ToolEnd {
+                        outcome: recorded, ..
+                    } => outcome = Some(recorded),
+                    _ => {}
+                }
+                Ok(())
+            })
+            .unwrap();
+        if valid {
+            assert_eq!(approver.0, shown);
+            assert!(shown[0].contains(&format!("policy: {detail}")));
+            assert_eq!(outcome, Some(ToolOutcome::Completed));
+        } else {
+            assert!(approver.0.is_empty());
+            assert_eq!(outcome, Some(ToolOutcome::NotStarted));
+        }
+    }
+}
+
 impl Fixture {
     fn new(name: &str) -> Self {
         let root =

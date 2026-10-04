@@ -82,7 +82,7 @@ Event-specific result fields are:
 | initialize | prompt_fragments, tools, commands |
 | input | input |
 | context | messages |
-| permission | decision: allow, deny, ask, or confirm |
+| permission | decision: allow, deny, ask, or confirm; permission_detail |
 | tool_execute | tool_result |
 | tool_result | tool_result |
 | before_compact | compaction |
@@ -91,6 +91,11 @@ Event-specific result fields are:
 
 A tool result is {"content":"text","is_error":false}. Registered tools use
 {"name":"tool_name","description":"...","parameters":{...JSON Schema...}}.
+Permission hooks may add `permission_detail` to the existing approval
+description. Gears labels each addition with its hook name and shows the
+same detail in the permission event and prompt. The combined additions
+are limited to 16 KiB; empty text, NULs or an oversized addition deny the
+call. The decision rules and saved-denial precedence are unchanged.
 Registered commands use `{"name":"review","help":"Review the last turn"}`.
 Names are 1–64 ASCII letters, digits, underscores or hyphens, without `/`;
 help is a nonempty line of at most 256 bytes. Built-in names and duplicate

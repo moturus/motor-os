@@ -1300,6 +1300,26 @@ impl Runtime {
                 return self.record_unstarted_calls(std::slice::from_ref(&call), &error, observer);
             }
         };
+        let mut notices = Vec::new();
+        let review = if saved_answer == Some(false) {
+            crate::hooks::PermissionReview {
+                decision: Decision::Deny,
+                details: Vec::new(),
+            }
+        } else {
+            self.hooks.permission_review(
+                &call,
+                self.tool_metadata(&call.name),
+                &mut self.session,
+                &self.cancellation,
+                &mut |notice| notices.push(notice),
+            )
+        };
+        let mut detail = detail;
+        for additional in review.details {
+            detail.push('\n');
+            detail.push_str(&additional);
+        }
         let permission = Permission {
             tool: call.name.clone(),
             detail: detail.clone(),
@@ -1313,18 +1333,6 @@ impl Runtime {
             )?;
             return Err(error);
         }
-        let mut notices = Vec::new();
-        let decision = if saved_answer == Some(false) {
-            Decision::Deny
-        } else {
-            self.hooks.permission_with_metadata(
-                &call,
-                self.tool_metadata(&call.name),
-                &mut self.session,
-                &self.cancellation,
-                &mut |notice| notices.push(notice),
-            )
-        };
         if let Err(error) = emit_notices(observer, notices) {
             self.record_unstarted_calls(
                 std::slice::from_ref(&call),
@@ -1337,7 +1345,7 @@ impl Runtime {
             self.record_unstarted_calls(std::slice::from_ref(&call), &error, observer)?;
             return Err(error);
         }
-        let allowed = match decision {
+        let allowed = match review.decision {
             Decision::Deny => false,
             Decision::Allow => true,
             Decision::Ask if saved_answer == Some(true) && approver.attended() => true,

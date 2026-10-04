@@ -64,6 +64,7 @@ struct Response {
     input: Option<String>,
     messages: Option<Vec<Message>>,
     decision: Option<Decision>,
+    permission_detail: Option<String>,
     tool_result: Option<ToolResult>,
     compaction: Option<CompactionAdvice>,
     state: Option<Value>,
@@ -81,6 +82,11 @@ pub enum Decision {
     Deny,
     Ask,
     Confirm,
+}
+
+pub struct PermissionReview {
+    pub decision: Decision,
+    pub details: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -453,7 +459,20 @@ impl Manager {
         cancellation: &Cancellation,
         notice: &mut dyn FnMut(String),
     ) -> Decision {
+        self.permission_review(call, metadata, session, cancellation, notice)
+            .decision
+    }
+
+    pub fn permission_review(
+        &self,
+        call: &ToolCall,
+        metadata: Value,
+        session: &mut Session,
+        cancellation: &Cancellation,
+        notice: &mut dyn FnMut(String),
+    ) -> PermissionReview {
         let mut result = Decision::Ask;
+        let mut details = Vec::new();
         for index in 0..self.hooks.len() {
             let response = self.invoke(
                 index,
@@ -464,7 +483,24 @@ impl Manager {
                 notice,
             );
             let decision = match response {
-                Ok(response) => response.decision.unwrap_or(Decision::Ask),
+                Ok(response) => {
+                    if let Some(detail) = response.permission_detail {
+                        let total = details.iter().map(String::len).sum::<usize>()
+                            + detail.len()
+                            + self.hooks[index].config.name.len()
+                            + 2;
+                        if detail.trim().is_empty() || total > 16 * 1024 || detail.contains('\0') {
+                            notice(format!(
+                                "permission hook {} returned invalid permission_detail; denying call",
+                                self.hooks[index].config.name
+                            ));
+                            result = Decision::Deny;
+                            continue;
+                        }
+                        details.push(format!("{}: {detail}", self.hooks[index].config.name));
+                    }
+                    response.decision.unwrap_or(Decision::Ask)
+                }
                 Err(error) => {
                     notice(format!(
                         "permission hook {} failed; denying call: {error}",
@@ -482,7 +518,10 @@ impl Manager {
                 (current, Decision::Ask) => current,
             };
         }
-        result
+        PermissionReview {
+            decision: result,
+            details,
+        }
     }
 
     pub fn owns_tool(&self, name: &str) -> bool {
@@ -867,6 +906,7 @@ fn validate_result_fields(event: &str, value: &Value) -> Result<(), String> {
         }
         "permission" => {
             allowed.insert("decision");
+            allowed.insert("permission_detail");
         }
         "tool_execute" | "tool_result" => {
             allowed.insert("tool_result");
