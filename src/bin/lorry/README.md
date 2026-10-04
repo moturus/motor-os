@@ -190,6 +190,13 @@ succeeds when the cache is already absent.
 
 ## Inspect and check
 
+For tools and agents, `--lorry-messages` emits Lorry's own errors as one JSON
+object per line on stderr. Each `lorry-error` object carries `kind`, `text`,
+`file` and `line` when known, `help`, and `exit_code`. Usage errors exit 1,
+failures 101, and interrupted operations 130. Pair the option with `-q` to
+suppress human progress. Cargo events selected with `--message-format=json`
+stay on stdout; programs and test harnesses keep their ordinary output.
+
 ```text
 lorry metadata [--format-version 1] [--manifest-path PATH] [--no-deps]
                [--filter-platform TRIPLE] [--locked|--offline|--frozen]

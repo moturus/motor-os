@@ -149,6 +149,14 @@ Global options are `--quiet|-q`, `--verbose|-v`,
 `--use-cargo-registry` for `build`, `run`, and `test`. Long value options
 accept both `--name value` and `--name=value`.
 
+The global `--lorry-messages` option emits Lorry errors as newline-delimited
+JSON on stderr. Objects have `reason: "lorry-error"`, `kind` (usage, failure,
+or interrupted), `text`, nullable `file`, `line`, and `help`, and `exit_code`
+(1, 101, or 130). Known locations remain separate from the message text.
+Cargo JSON and command output remain on stdout. The option also applies to
+parse errors, stops at child arguments after `--`, and does not suppress
+progress; pair it with `-q` when only machine-readable errors are wanted.
+
 `build`, `check`, `run`, `test`, `clean`, `metadata`, and `tree` accept
 `--locked`, `--offline`, and `--frozen`. Those commands already prohibit
 acquisition and lock-file changes, so the flags preserve their existing

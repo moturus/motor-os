@@ -68,10 +68,10 @@ fn main() {
         .spawn(command_main)
     {
         Ok(worker) => worker.join().unwrap_or(101),
-        Err(error) => {
-            eprintln!("error: failed to start lorry command thread: {error}");
-            101
-        }
+        Err(error) => report_error(
+            diagnostic::Error::failure(format!("failed to start lorry command thread: {error}")),
+            Cli::lorry_messages_requested(&std::env::args().skip(1).collect::<Vec<_>>()),
+        ),
     };
     #[cfg(not(target_os = "motor"))]
     let code = command_main();
@@ -81,20 +81,34 @@ fn main() {
 }
 
 fn command_main() -> i32 {
-    match run(std::env::args().skip(1)) {
-        Ok(code) => code,
-        Err(error) => {
-            eprint!("{}", error.render());
-            error.exit_code()
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let requested = Cli::lorry_messages_requested(&arguments);
+    let (result, messages) = match Cli::parse(arguments) {
+        Ok(cli) => {
+            let messages = cli.lorry_messages;
+            (run(cli), messages)
         }
+        Err(error) => (Err(error), requested),
+    };
+    match result {
+        Ok(code) => code,
+        Err(error) => report_error(error, messages),
     }
 }
 
-fn run<I>(arguments: I) -> Result<i32>
-where
-    I: IntoIterator<Item = String>,
-{
-    let cli = Cli::parse(arguments)?;
+fn report_error(error: diagnostic::Error, messages: bool) -> i32 {
+    eprint!(
+        "{}",
+        if messages {
+            error.render_json()
+        } else {
+            error.render()
+        }
+    );
+    error.exit_code()
+}
+
+fn run(cli: Cli) -> Result<i32> {
     let command = match &cli.command {
         Command::Build(_) => Some("build started"),
         Command::Check(_) => Some("check started"),
@@ -174,6 +188,7 @@ fn print_help(topic: Option<&str>) {
              lorry --version|-V\n  \
              lorry help [COMMAND]\n\n\
              Global options:\n  \
+                 --lorry-messages        Emit Lorry errors as JSON on stderr\n  \
              -q, --quiet                 Suppress progress output\n  \
              -v, --verbose               Show commands, configuration, and timings\n  \
                  --color <WHEN>          auto, always, or never\n  \

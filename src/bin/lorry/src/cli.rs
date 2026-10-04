@@ -25,6 +25,7 @@ pub struct Cli {
     pub color: Color,
     pub verbosity: Verbosity,
     pub use_cargo_registry: bool,
+    pub lorry_messages: bool,
     pub package: Option<String>,
     pub command: Command,
 }
@@ -176,6 +177,14 @@ pub struct UpgradeOptions {
 }
 
 impl Cli {
+    /// Parse errors must honor the option before Clap can return a command.
+    pub fn lorry_messages_requested(arguments: &[String]) -> bool {
+        arguments
+            .iter()
+            .take_while(|argument| argument.as_str() != "--")
+            .any(|argument| argument == "--lorry-messages")
+    }
+
     pub fn jobs(&self) -> Option<Jobs> {
         match &self.command {
             Command::Build(options) => options.jobs,
@@ -319,6 +328,7 @@ impl Cli {
             color,
             verbosity,
             use_cargo_registry,
+            lorry_messages: matches.get_flag("lorry-messages"),
             package,
             command,
         })
@@ -331,6 +341,12 @@ fn command_line() -> ClapCommand {
         .disable_version_flag(true)
         .disable_help_subcommand(true)
         .args_override_self(false)
+        .arg(
+            Arg::new("lorry-messages")
+                .long("lorry-messages")
+                .global(true)
+                .action(ArgAction::SetTrue),
+        )
         .arg(
             Arg::new("quiet")
                 .long("quiet")
@@ -1421,6 +1437,27 @@ mod tests {
         ] {
             assert!(parse(input).unwrap_err().is_usage(), "{input:?}");
         }
+    }
+
+    #[test]
+    fn own_messages_are_global_and_stop_at_child_arguments() {
+        assert!(
+            parse(&["--lorry-messages", "build"])
+                .unwrap()
+                .lorry_messages
+        );
+        assert!(
+            parse(&["build", "--lorry-messages"])
+                .unwrap()
+                .lorry_messages
+        );
+        let child = parse(&["run", "--", "--lorry-messages"]).unwrap();
+        assert!(!child.lorry_messages);
+        assert!(!Cli::lorry_messages_requested(&[
+            "run".to_owned(),
+            "--".to_owned(),
+            "--lorry-messages".to_owned()
+        ]));
     }
 
     #[test]
