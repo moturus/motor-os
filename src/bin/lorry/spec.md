@@ -1123,6 +1123,14 @@ build-script or procedural-macro capability. Their native-tool grants may omit
 `source-tree-sha256`; a same-named nonmember path package still requires that pin
 before receiving native tools. Missing-grant diagnostics suggest the member's
 name, and do not suggest pinning mutable member source trees.
+Named path build-script rules may grant `caller-env = ["NAME"]`. Only matching
+script grants expose those variables, with an empty allowlist by default.
+Unset and empty values remain distinct script/cache inputs. Compiler, Cargo,
+native-tool, loader, and temporary-directory control variables cannot be
+overridden through this allowlist. If a script tracks a caller-set variable
+that was hidden, Lorry warns with its name and configuration advice, never its
+value. Caller grants for crates.io and Git are rejected until their portable
+admission representation is implemented.
 
 Dependency depth has no default cap, matching Cargo. An explicitly configured
 `policy.limits.max-depth` bounds resolution, source preparation, and admission.

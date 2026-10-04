@@ -442,6 +442,7 @@ mod tests {
                         key,
                         crate::policy::PackageAdmission {
                             matching_allow_rules: vec![],
+                            caller_env: Default::default(),
                             native_tools: [NativeToolRole::CCompiler, NativeToolRole::Archiver]
                                 .into(),
                         },

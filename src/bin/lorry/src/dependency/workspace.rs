@@ -350,6 +350,7 @@ mod tests {
                 allow_build_script: true,
                 allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
+                caller_env: Default::default(),
                 provenance: fixture.0.join("lorry.toml"),
             },
         );

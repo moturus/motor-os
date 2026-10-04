@@ -119,6 +119,7 @@ pub struct Admission {
 pub struct PackageAdmission {
     pub matching_allow_rules: Vec<String>,
     pub native_tools: BTreeSet<NativeToolRole>,
+    pub caller_env: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,11 +306,21 @@ pub fn inspect(
                     .copied()
             })
             .collect();
+        let caller_env = script_allows
+            .iter()
+            .flat_map(|id| {
+                preflight.policy.rules[id.as_str()]
+                    .caller_env
+                    .iter()
+                    .cloned()
+            })
+            .collect();
         admitted.insert(
             package.key.clone(),
             PackageAdmission {
                 matching_allow_rules: allows.into_iter().cloned().collect(),
                 native_tools,
+                caller_env,
             },
         );
     }
@@ -1363,6 +1374,7 @@ mod tests {
             allow_build_script: false,
             allow_proc_macro: false,
             native_tools: BTreeSet::new(),
+            caller_env: Default::default(),
             provenance: Path::new("/system/lorry.toml").to_owned(),
         }
     }
@@ -1619,6 +1631,7 @@ mod tests {
                 allow_build_script: false,
                 allow_proc_macro: true,
                 native_tools: BTreeSet::new(),
+                caller_env: Default::default(),
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
         );
@@ -1692,6 +1705,7 @@ mod tests {
                 allow_build_script: true,
                 allow_proc_macro: false,
                 native_tools: BTreeSet::from([NativeToolRole::CCompiler]),
+                caller_env: Default::default(),
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
         );
@@ -1739,6 +1753,7 @@ mod tests {
         grant.allow_build_script = true;
         grant.allow_proc_macro = true;
         grant.native_tools.insert(NativeToolRole::CCompiler);
+        grant.caller_env.insert("PUBLIC".into());
         let mut policy = Policy::default();
         for name in [None, Some("other".to_owned()), grant.name.clone()] {
             let mut candidate = grant.clone();
@@ -1752,6 +1767,10 @@ mod tests {
                 assert_eq!(
                     admission.packages[&package.key].native_tools,
                     grant.native_tools
+                );
+                assert_eq!(
+                    admission.packages[&package.key].caller_env,
+                    grant.caller_env
                 );
             }
             // Inspection must enforce the grants even when source-only

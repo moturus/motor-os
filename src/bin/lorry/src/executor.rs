@@ -488,6 +488,16 @@ fn execute_unit(
                     planned.source_remap.as_ref(),
                 )?;
                 environment.extend(native.environment);
+                let caller = admission
+                    .caller_env
+                    .iter()
+                    .filter_map(|name| std::env::var_os(name).map(|value| (name.clone(), value)))
+                    .collect();
+                build_script::add_caller_environment(
+                    &mut environment,
+                    &admission.caller_env,
+                    &caller,
+                )?;
                 let mut read_only = sandbox_inputs(
                     manifests,
                     options,
@@ -530,6 +540,25 @@ fn execute_unit(
                     out_dir_limits: options.out_dir_limits,
                     verbose: options.verbose,
                 })?;
+                for directive in &build_output.directives {
+                    if let build_script::Directive::RerunIfEnvChanged { name, value: None } =
+                        directive
+                        && std::env::var_os(name).is_some()
+                    {
+                        let advice = if build_script::validate_caller_environment_name(name).is_ok()
+                        {
+                            format!(
+                                "add caller-env = [\"{name}\"] to the named path build-script rule"
+                            )
+                        } else {
+                            "use the documented compiler/native-tool configuration; this variable is controlled".into()
+                        };
+                        eprintln!(
+                            "warning: {} build script tracks hidden caller variable `{name}`; {advice}",
+                            key.package.name
+                        );
+                    }
+                }
                 {
                     let _guard = print
                         .lock()
@@ -1371,6 +1400,7 @@ mod tests {
                 PackageAdmission {
                     matching_allow_rules: Vec::new(),
                     native_tools: BTreeSet::new(),
+                    caller_env: Default::default(),
                 },
             )]),
         };

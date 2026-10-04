@@ -230,6 +230,7 @@ pub struct PolicyRule {
     pub allow_build_script: bool,
     pub allow_proc_macro: bool,
     pub native_tools: BTreeSet<NativeToolRole>,
+    pub caller_env: BTreeSet<String>,
     pub provenance: PathBuf,
 }
 
@@ -986,6 +987,7 @@ fn merge_policy_rules(
                 "allow-build-script",
                 "allow-proc-macro",
                 "native-tools",
+                "caller-env",
             ],
         )?;
         let action_item = table.get("action").ok_or_else(|| {
@@ -1077,6 +1079,27 @@ fn merge_policy_rules(
             Some(item) => parse_native_roles(path, document, item)?,
             None => BTreeSet::new(),
         };
+        let mut caller_env = BTreeSet::new();
+        if let Some(item) = table.get("caller-env") {
+            for name in require_string_array(path, document, item, "policy rule caller-env")? {
+                crate::build_script::validate_caller_environment_name(&name)?;
+                if !caller_env.insert(name.clone()) {
+                    return Err(Error::failure(format!(
+                        "duplicate caller environment name `{name}` in policy rule `{id}`"
+                    )));
+                }
+            }
+        }
+        if !caller_env.is_empty()
+            && (!allow_build_script || source.as_deref() != Some("path") || name.is_none())
+        {
+            return Err(Error::at(
+                path,
+                document.line_of_table(table),
+                format!("policy rule `{id}` caller-env requires a named path build-script grant"),
+                "set name, source = \"path\", and allow-build-script = true; outside-source caller grants are not yet supported",
+            ));
+        }
         if !native_tools.is_empty() && !allow_build_script {
             return Err(Error::at(
                 path,
@@ -1112,6 +1135,7 @@ fn merge_policy_rules(
                 allow_build_script,
                 allow_proc_macro,
                 native_tools,
+                caller_env,
                 provenance: path.to_path_buf(),
             },
         );
@@ -2776,6 +2800,55 @@ locked = [
         )
         .unwrap();
         merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap();
+    }
+
+    #[test]
+    fn caller_env_grants_require_named_path_scripts_and_preserve_controlled_variables() {
+        let temp = TempDir::new();
+        let path = temp.0.join("lorry.toml");
+        for (identity, variables, accepted) in [
+            (
+                "name = \"member\"\nsource = \"path\"\nallow-build-script = true",
+                "\"PUBLIC\", \"EMPTY\"",
+                true,
+            ),
+            (
+                "name = \"member\"\nsource = \"crates.io\"\nallow-build-script = true",
+                "\"PUBLIC\"",
+                false,
+            ),
+            (
+                "source = \"path\"\nallow-build-script = true",
+                "\"PUBLIC\"",
+                false,
+            ),
+            ("name = \"member\"\nsource = \"path\"", "\"PUBLIC\"", false),
+        ] {
+            fs::write(&path, format!("config-version = 1\n[policy.rules.caller]\naction = \"allow\"\n{identity}\ncaller-env = [{variables}]\n")).unwrap();
+            assert_eq!(
+                merge_lorry_file(&path, LayerKind::Local, &mut Config::default()).is_ok(),
+                accepted
+            );
+        }
+        for variable in [
+            "PATH",
+            "RUSTC",
+            "RUSTC_WRAPPER",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_PRIMARY_PACKAGE",
+            "CC_x86_64_unknown_motor",
+            "HOST_AR",
+            "CXXSTDLIB",
+            "LD_PRELOAD",
+            "OUT_DIR",
+            "TMPDIR",
+            "INVALID-NAME",
+        ] {
+            fs::write(&path, format!("config-version = 1\n[policy.rules.caller]\naction = \"allow\"\nname = \"member\"\nsource = \"path\"\nallow-build-script = true\ncaller-env = [\"{variable}\"]\n")).unwrap();
+            let error =
+                merge_lorry_file(&path, LayerKind::Local, &mut Config::default()).unwrap_err();
+            assert!(error.render().contains(variable));
+        }
     }
 
     #[test]

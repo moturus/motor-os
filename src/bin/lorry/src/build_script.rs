@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
@@ -230,6 +230,73 @@ pub fn environment(
     })?;
     value(&mut values, dynamic_library_path_variable(), dynamic);
     Ok(values)
+}
+
+pub(crate) fn validate_caller_environment_name(name: &str) -> Result<()> {
+    validate_environment_name(name, "caller-env")?;
+    let tool = name
+        .strip_prefix("HOST_")
+        .or_else(|| name.strip_prefix("TARGET_"))
+        .unwrap_or(name);
+    let reserved = [
+        "CC",
+        "CFLAGS",
+        "CXX",
+        "CXXFLAGS",
+        "CXXSTDLIB",
+        "AR",
+        "ARFLAGS",
+        "RANLIB",
+    ]
+    .iter()
+    .any(|variable| tool == *variable || tool.starts_with(&format!("{variable}_")));
+    if reserved
+        || [
+            "CARGO", "RUSTC", "RUSTDOC", "RUSTUP", "LORRY", "DEP", "LD", "DYLD",
+        ]
+        .iter()
+        .any(|prefix| name == *prefix || name.starts_with(&format!("{prefix}_")))
+        || matches!(
+            name,
+            "RUSTFLAGS"
+                | "RUSTDOCFLAGS"
+                | "PATH"
+                | "HOST"
+                | "TARGET"
+                | "OUT_DIR"
+                | "NUM_JOBS"
+                | "PROFILE"
+                | "DEBUG"
+                | "OPT_LEVEL"
+                | "TMPDIR"
+                | "TMP"
+                | "TEMP"
+        )
+    {
+        return Err(Error::failure(format!(
+            "caller-env cannot override controlled environment variable `{name}`"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn add_caller_environment(
+    environment: &mut BTreeMap<String, OsString>,
+    granted: &BTreeSet<String>,
+    caller: &BTreeMap<String, OsString>,
+) -> Result<()> {
+    for name in granted {
+        validate_caller_environment_name(name)?;
+        if environment.contains_key(name) {
+            return Err(Error::failure(format!(
+                "caller-env cannot replace build-script environment variable `{name}`"
+            )));
+        }
+        if let Some(value) = caller.get(name) {
+            environment.insert(name.clone(), value.clone());
+        }
+    }
+    Ok(())
 }
 
 fn envify(value: &str) -> String {
@@ -795,6 +862,41 @@ mod tests {
                 .contains("limit")
         );
         assert!(parse(&[0xff], &fixture.options()).is_err());
+    }
+
+    #[test]
+    fn caller_environment_is_explicit_and_preserves_absent_and_empty_values() {
+        let caller = BTreeMap::from([
+            ("PUBLIC".into(), "chosen".into()),
+            ("EMPTY".into(), OsString::new()),
+            ("HIDDEN".into(), "secret".into()),
+        ]);
+        let mut environment = BTreeMap::new();
+        add_caller_environment(&mut environment, &BTreeSet::new(), &caller).unwrap();
+        assert!(environment.is_empty());
+        let grant = ["PUBLIC", "EMPTY", "ABSENT"].map(str::to_owned).into();
+        add_caller_environment(&mut environment, &grant, &caller).unwrap();
+        assert_eq!(environment["PUBLIC"], "chosen");
+        assert_eq!(environment["EMPTY"], OsString::new());
+        assert!(!environment.contains_key("ABSENT"));
+        assert!(!environment.contains_key("HIDDEN"));
+        let fixture = Fixture::new();
+        let mut options = fixture.options();
+        options.environment = &environment;
+        let output = parse(
+            b"cargo:rerun-if-env-changed=EMPTY\ncargo:rerun-if-env-changed=ABSENT\n",
+            &options,
+        )
+        .unwrap();
+        assert!(output.directives.contains(&Directive::RerunIfEnvChanged {
+            name: "EMPTY".into(),
+            value: Some(OsString::new())
+        }));
+        assert!(output.directives.contains(&Directive::RerunIfEnvChanged {
+            name: "ABSENT".into(),
+            value: None
+        }));
+        assert!(add_caller_environment(&mut environment, &grant, &caller).is_err());
     }
 
     #[test]

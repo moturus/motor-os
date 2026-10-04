@@ -863,6 +863,7 @@ mod review {
                         native_tools: capability
                             .map(|capability| capability.native_tools.iter().copied().collect())
                             .unwrap_or_default(),
+                        caller_env: Default::default(),
                         provenance: CompactState::path(root),
                     },
                 );
@@ -902,6 +903,7 @@ mod review {
                         native_tools: capability
                             .map(|capability| capability.native_tools.iter().copied().collect())
                             .unwrap_or_default(),
+                        caller_env: Default::default(),
                         provenance: CompactState::path(root),
                     },
                 );
@@ -3513,6 +3515,7 @@ mod tests {
                 allow_build_script: false,
                 allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
+                caller_env: Default::default(),
                 provenance: fixture.0.join("policy.toml"),
             },
         );

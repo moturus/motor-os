@@ -2443,6 +2443,15 @@ on the next build. All eighteen engine tests, ten script tests, the updated
 execution regression, and strict Clippy pass in
 `/tmp/lorry-m8-workspace-script-freshness-{engine,protocol,integration,clippy-final}.log`.
 
+Named path script grants now have package-specific `caller-env` allowlists,
+empty by default. The executor copies only granted present values, and the
+existing script/cache environment preserves absent/empty distinctions.
+Controlled compiler/tool/loader variables are rejected, and hidden
+`rerun-if-env-changed` inputs receive name-only configuration advice. Non-path
+caller grants remain explicit errors until portable admission records cover
+them. Focused environment/configuration and member policy tests, plus strict
+Clippy, pass in `/tmp/lorry-m8-path-caller-env-{tests,policy,clippy}.log`.
+
 **Result.** Member build-time code and all required targets use the shared
 graph. Workspace `test`, `run`, `clean`, and `new` follow Cargo.
 
