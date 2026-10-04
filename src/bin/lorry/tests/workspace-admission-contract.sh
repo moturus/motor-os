@@ -188,6 +188,11 @@ sed -i "s|$WORK/no-network-curl|$WORK/crates-io/curl|; s/max-packages = 1/max-pa
 cp "$WORK/before-upgrade.lock" Cargo.lock
 "$LORRY" -q --lorry-messages vendor --accept-all >"$WORK/transitive.out" 2>"$WORK/transitive.json"
 cmp Cargo.lock "$WORK/before-upgrade.lock"
+"$LORRY" -q vendor --locked --offline --all-features --accept-all \
+    >"$WORK/users.out" 2>"$WORK/users.err"
+[ "$(grep -c '^  Package: cfg-if ' "$WORK/users.err")" -eq 1 ]
+grep -F 'member users: app, shared' "$WORK/users.err" >/dev/null
+cmp Cargo.lock "$WORK/before-upgrade.lock"
 "$LORRY" -q --lorry-messages vendor --accept-all upgrade cfg-if --to 1.0.4 \
     >"$WORK/upgrade.out" 2>"$WORK/upgrade.json"
 cmp Cargo.lock "$WORK/after-upgrade.lock"

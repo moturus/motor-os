@@ -671,6 +671,12 @@ in human mode. Any package or feature selector replaces that scope as a whole;
 operational options do not reset it. Unused member declarations preserve the
 commitment when the resolved outside packages, contexts, features, and grants
 are unchanged.
+Human review summarizes source and grant changes, then lists each locked
+registry/Git package once with its transitive member users, locked dependencies,
+verified source evidence, and host/target feature contexts. Sources outside
+the scoped closure are labeled explicitly. If prior inputs cannot reconstruct
+the previous commitment, the report identifies that limitation and shows the
+complete candidate instead of claiming a semantic comparison.
 Old per-member records require explicit review with workspace-root
 `vendor --locked`; their presence never supplies workspace approval.
 Legacy records copied to a virtual or multi-member workspace root are also

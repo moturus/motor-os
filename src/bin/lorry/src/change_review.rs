@@ -1,9 +1,12 @@
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 
 use crate::admission_state::Review;
 use crate::diagnostic::{Error, Result};
 use crate::prompt;
+
+pub(crate) mod workspace;
 
 #[derive(Clone, Copy)]
 pub enum Mode {
@@ -16,6 +19,7 @@ pub enum Mode {
 /// committed baseline this is a semantic diff. When visible input changes
 /// prevent reconstruction, the prior commitment and complete candidate are
 /// shown instead.
+#[cfg(test)]
 pub fn approve(
     previous: Option<&Review>,
     previous_sha256: &str,
@@ -168,6 +172,7 @@ fn confirm(
     }
 }
 
+#[cfg(test)]
 fn write_review_difference(
     output: &mut impl Write,
     previous: &Review,
@@ -267,6 +272,7 @@ fn write_review_difference(
     )
 }
 
+#[cfg(test)]
 fn write_difference<T, K>(
     output: &mut impl Write,
     label: &str,
@@ -327,6 +333,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 fn write_difference_line(
     output: &mut impl Write,
     sign: char,

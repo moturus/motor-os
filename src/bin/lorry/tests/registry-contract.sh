@@ -115,7 +115,8 @@ assert declined[0] == message
 assert declined[1]['reason'] == 'lorry-error'
 assert 'no interactive terminal' in declined[1]['text']
 PY
-rm -rf "$PROJECT/.lorry" "$REPOSITORY/objects/crates-io/sha256"
+# Reset both archives and immutable index inputs for a genuinely fresh request.
+rm -rf "$PROJECT/.lorry" "$REPOSITORY/objects/crates-io/sha256" "$REPOSITORY/resolution"
 mkdir "$REPOSITORY/objects/crates-io/sha256"
 (cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
     "$LORRY" vendor --accept-all) >"$WORK/fresh.log" 2>&1
@@ -123,6 +124,10 @@ grep -F "New crates.io packages (1):" "$WORK/fresh.log" >/dev/null || {
     cat "$WORK/fresh.log" >&2
     fail "fresh acquisition did not publish one package"
 }
+[ "$(grep -c '^  Package: cfg-if ' "$WORK/fresh.log")" -eq 1 ] ||
+    fail "human review did not group the package once"
+grep -F 'member users: registry-fixture' "$WORK/fresh.log" >/dev/null ||
+    fail "human review omitted the package's member users"
 grep -F 'Updating crates.io index for `cfg-if`' "$WORK/fresh.log" >/dev/null ||
     fail "fresh acquisition did not report its sparse-index request"
 grep -F 'Downloading cfg-if v1.0.4' "$WORK/fresh.log" >/dev/null ||

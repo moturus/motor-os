@@ -414,12 +414,16 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
                 &mut output,
             )?;
         } else {
-            change_review::approve(
+            let report = change_review::workspace::render(
                 baseline.as_ref(),
-                previous
-                    .as_ref()
-                    .map_or("none", |state| state.review_sha256.as_str()),
+                previous.as_ref().map(|state| state.review_sha256.as_str()),
                 &candidate,
+                &selected,
+            )?;
+            change_review::workspace::approve(
+                baseline.as_ref(),
+                &candidate,
+                &report,
                 mode,
                 stdin.is_terminal(),
                 &mut stdin.lock(),
