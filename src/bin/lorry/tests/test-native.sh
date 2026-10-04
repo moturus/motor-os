@@ -139,16 +139,25 @@ workspace_selection() {
     esac
 }
 
+write_workspace_config() {
+    local fixture="$1"
+    mkdir -p "$fixture/.cargo"
+    printf '[target.%s]\nrustflags = ["-Clink-self-contained=no", "-Cdefault-linker-libraries=yes"]\n' \
+        "$MOTOR_TARGET" >"$fixture/.cargo/config.toml"
+    if [ "$#" -eq 2 ]; then
+        printf 'linker = "%s"\n' "$2" >>"$fixture/.cargo/config.toml"
+    fi
+}
+
 prepare_workspace_identity() {
     local host_home="$1" rustc="$2" selection command member
     local fixture="$WORK/workspace-cross"
     local -a WORKSPACE_ARGUMENTS
     rm -rf "$WORK/workspace-fixture" "$fixture"
     cp -R "$SCRIPT_DIR/fixtures/cargo-identity-workspace" "$WORK/workspace-fixture"
+    write_workspace_config "$WORK/workspace-fixture"
     cp -R "$WORK/workspace-fixture" "$fixture"
-    mkdir "$fixture/.cargo"
-    printf '[target.%s]\nlinker = "%s"\nrustflags = ["-Clink-self-contained=no", "-Cdefault-linker-libraries=yes"]\n' \
-        "$MOTOR_TARGET" "$MOTOR_LINKER" >"$fixture/.cargo/config.toml"
+    write_workspace_config "$fixture" "$MOTOR_LINKER"
     (
         cd "$fixture"
         HOME="$host_home" RUSTC="$rustc" "$WORK/lorry-seed" vendor \
@@ -642,6 +651,9 @@ cleanup() {
         cat "$TIMING_LOG"
     } >"$SUMMARY"
     if [ "$status" -ne 0 ]; then
+        for artifact in "$WORK"/equivalence-workspace-* "$WORK"/workspace-*.cross "$WORK"/workspace-*.native; do
+            [ ! -f "$artifact" ] || cp "$artifact" "$EVIDENCE_DIR/"
+        done
         for artifact in lorry-cross lorry-native; do
             [ ! -f "$WORK/$artifact" ] ||
                 cp "$WORK/$artifact" "$EVIDENCE_DIR/$artifact"

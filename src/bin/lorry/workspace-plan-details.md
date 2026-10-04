@@ -2338,6 +2338,20 @@ workspace, and excluded selections; compares every selected executable byte for
 byte; and runs the second binary to verify its shared red/blue feature union.
 Workspace vendoring is locked and offline because the fixture is path-only.
 
+The first complete M7 gate passed the host contracts and native self-build,
+then failed at shared workspace JSON identity after 822 seconds. Diagnosis found
+that the new cross fixture supplied two Rust flags while its guest copy had no
+Cargo configuration. An offline host reproducer with empty flags exactly
+reproduces all four native artifact hashes; adding those flags reproduces all
+four cross hashes. The fixture now writes identical flag configuration into
+both copies, with only the host's linker path differing. Collision, artifact,
+and JSON assertions remain unchanged. Failed workspace captures and binaries
+are now retained with native evidence. Original gate:
+`/tmp/lorry-m7-full-first.log`; native summary:
+`target/lorry/native-self-tests/self-20261004T182037Z-177862/summary.txt`.
+Diagnostic inputs and captures:
+`/tmp/lorry-m7-native-flags-diagnosis.path`.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 
