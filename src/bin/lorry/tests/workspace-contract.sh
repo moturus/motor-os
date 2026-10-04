@@ -117,6 +117,11 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
 cat >"$WORK/project/app/src/main.rs" <<'EOF'
 fn environment() {
     assert_eq!(std::env::var_os("CARGO").unwrap(), std::env::var_os("LORRY_EXPECT_CARGO").unwrap());
+    let libraries = std::env::split_paths(&std::env::var_os("LD_LIBRARY_PATH").unwrap()).collect::<Vec<_>>();
+    for name in ["LORRY_EXPECT_PROFILE", "LORRY_EXPECT_SYSROOT_LIB", "LORRY_EXPECT_INHERITED_LIB"] {
+        let expected = std::path::PathBuf::from(std::env::var_os(name).unwrap());
+        assert!(libraries.contains(&expected), "{name}: {libraries:?}");
+    }
     for (name, expected) in [
         ("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR")),
         ("CARGO_MANIFEST_PATH", env!("CARGO_MANIFEST_PATH")),
@@ -140,6 +145,10 @@ fn environment() {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--print-libraries") {
+        println!("{}", std::env::var("LD_LIBRARY_PATH").unwrap());
+        return;
+    }
     if std::env::args().any(|arg| arg == "--environment") {
         environment();
         assert_eq!(std::env::current_dir().unwrap(), std::path::Path::new(&std::env::var_os("LORRY_EXPECT_CWD").unwrap()));
@@ -164,12 +173,22 @@ fn integration_environment() {
 }
 EOF
 export LORRY_EXPECT_CARGO="$LORRY"
+export LORRY_EXPECT_PROFILE="$WORK/project/target/lorry/debug"
+export LORRY_EXPECT_SYSROOT_LIB="$("$RUSTC" --print target-libdir)"
+export LORRY_EXPECT_INHERITED_LIB="$WORK/inherited-libraries"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$LORRY_EXPECT_INHERITED_LIB"
 (
     cd "$WORK/project"
     export LORRY_EXPECT_CWD="$PWD"
     [ "$(CARGO_PKG_NAME=stale "$LORRY" run -p app -- --environment)" = app ]
     [ "$(CARGO_PKG_NAME=stale "$LORRY" run -p app -- --environment)" = app ]
     "$LORRY" test -p app -- --quiet
+    libraries="$("$LORRY" run -p app -- --print-libraries)"
+    inherited="$(LD_LIBRARY_PATH="$libraries" "$LORRY" run -p app -- --print-libraries)"
+    [ "$inherited" = "$libraries" ] || {
+        echo "workspace-contract: runtime search paths duplicated an inherited Cargo prefix" >&2
+        exit 1
+    }
 )
 (
     cd "$WORK/project/app"

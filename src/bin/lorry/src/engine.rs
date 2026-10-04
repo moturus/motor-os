@@ -229,7 +229,11 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     artifact,
                     &options.arguments,
                     &current,
-                    &crate::compile::package_environment(&cargo, &manifest),
+                    &crate::compile::runtime_environment(
+                        &cargo,
+                        &manifest,
+                        &artifacts.library_paths,
+                    )?,
                     physical_target.as_deref(),
                     &target_options,
                     cli.verbosity,
@@ -407,7 +411,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 artifact,
                 &options.arguments,
                 &current,
-                &crate::compile::package_environment(&cargo, &manifest),
+                &crate::compile::runtime_environment(&cargo, &manifest, &artifacts.library_paths)?,
                 physical_target.as_deref(),
                 &target_options,
                 cli.verbosity,
@@ -474,7 +478,8 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     cli.verbosity,
                 );
             }
-            let mut environment = crate::compile::package_environment(&cargo, &manifest);
+            let mut environment =
+                crate::compile::runtime_environment(&cargo, &manifest, &artifacts.library_paths)?;
             for (name, path) in &artifacts.binaries {
                 environment.insert(format!("CARGO_BIN_EXE_{name}"), path.as_os_str().to_owned());
             }
@@ -540,6 +545,7 @@ struct BuildArtifacts {
     harnesses: Vec<PathBuf>,
     bundle: Option<PathBuf>,
     messages: Vec<serde_json::Value>,
+    library_paths: Vec<PathBuf>,
 }
 
 struct IncrementalRoots {
@@ -1287,6 +1293,7 @@ fn build_inner(
     };
     crate::trace::event("compiled root targets");
     compiled.messages = message_reporter.messages();
+    compiled.library_paths = runtime_library_paths(&build, &destination, &compiled.messages)?;
 
     if let Some(base) = freshness_base {
         write_fresh_profile(
@@ -1308,6 +1315,7 @@ fn build_inner(
         harnesses: compiled.harnesses,
         bundle: compiled.bundle,
         messages: compiled.messages,
+        library_paths: compiled.library_paths,
     };
 
     crate::trace::event("published build profile");
@@ -1318,6 +1326,75 @@ fn build_inner(
 
 fn finish_build(build: &Build<'_>, artifacts: &BuildArtifacts) -> Result<()> {
     report_finished(build.release, build.verbosity, build.validation, artifacts)
+}
+
+fn runtime_library_paths(
+    build: &Build<'_>,
+    profile: &Path,
+    messages: &[serde_json::Value],
+) -> Result<Vec<PathBuf>> {
+    let mut native = std::collections::BTreeSet::new();
+    let mut dependencies = std::collections::BTreeSet::new();
+    for message in messages {
+        match message.get("reason").and_then(serde_json::Value::as_str) {
+            Some("build-script-executed") => {
+                for value in message["linked_paths"].as_array().into_iter().flatten() {
+                    let value = value
+                        .as_str()
+                        .ok_or_else(|| Error::failure("invalid linked path"))?;
+                    let path = ["native=", "dependency=", "crate=", "all=", "framework="]
+                        .iter()
+                        .find_map(|kind| value.strip_prefix(kind))
+                        .unwrap_or(value);
+                    let path = PathBuf::from(path);
+                    if path.starts_with(profile) {
+                        native.insert(path);
+                    }
+                }
+            }
+            Some("compiler-artifact") => {
+                for value in message["filenames"].as_array().into_iter().flatten() {
+                    if let Some(path) = value.as_str().and_then(|path| Path::new(path).parent())
+                        && path.starts_with(profile)
+                    {
+                        dependencies.insert(path.to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut arguments = vec![OsString::from("--print"), OsString::from("target-libdir")];
+    if let Some(target) = build.physical_target {
+        arguments.extend([OsString::from("--target"), target.into()]);
+    }
+    arguments.extend(build.rustflags.iter().map(OsString::from));
+    let output = process::RustcCommand {
+        child_lease_fd: build.child_lease_fd,
+        program: &build.toolchain.rustc,
+        arguments: &arguments,
+        environment: &BTreeMap::new(),
+        current_dir: &build.manifest.workspace_root,
+        verbose: build.verbosity == Verbosity::Verbose,
+        color: false,
+    }
+    .execute()?;
+    process::RustcCommand::require_success(&output)?;
+    let library = std::str::from_utf8(&output.stdout)
+        .map_err(|_| Error::failure("rustc target library directory is not Unicode"))?
+        .trim();
+    let library = PathBuf::from(library);
+    if !library.is_absolute() {
+        return Err(Error::failure(
+            "rustc target library directory is not absolute",
+        ));
+    }
+    Ok(native
+        .into_iter()
+        .chain(std::iter::once(profile.to_owned()))
+        .chain(dependencies)
+        .chain(std::iter::once(library))
+        .collect())
 }
 
 fn report_finished(
@@ -1361,6 +1438,7 @@ struct FreshProfile {
     local_roots: Vec<PathBuf>,
     dep_info: Vec<PathBuf>,
     messages: Vec<serde_json::Value>,
+    library_paths: Vec<PathBuf>,
 }
 
 struct TrustedFreshness<'a> {
@@ -1578,6 +1656,7 @@ fn restore_fresh_profile(
         harnesses: Vec::new(),
         bundle: None,
         messages: record.messages,
+        library_paths: record.library_paths,
     })
 }
 
@@ -1634,6 +1713,12 @@ fn write_fresh_profile(
         };
         document.push_str(&format!("local-root={}\n", hex(root.as_bytes())));
     }
+    for path in &artifacts.library_paths {
+        let path = path
+            .to_str()
+            .ok_or_else(|| Error::failure("runtime library path is not Unicode"))?;
+        document.push_str(&format!("library-path={}\n", hex(path.as_bytes())));
+    }
     for path in dep_info {
         document.push_str(&format!("dep-info={}\n", path.display()));
     }
@@ -1668,6 +1753,7 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
     let mut binaries = BTreeMap::new();
     let mut local_roots = Vec::new();
     let mut dep_info = Vec::new();
+    let mut library_paths = Vec::new();
     for line in lines {
         if let Some(value) = line.strip_prefix("binary=") {
             let (name, artifact) = value.split_once('\t')?;
@@ -1679,6 +1765,10 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
             }
         } else if let Some(value) = line.strip_prefix("local-root=") {
             local_roots.push(PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?));
+        } else if let Some(value) = line.strip_prefix("library-path=") {
+            let path = PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?);
+            path.is_absolute().then_some(())?;
+            library_paths.push(path);
         } else {
             dep_info.push(safe_profile_path(line.strip_prefix("dep-info=")?)?);
         }
@@ -1691,6 +1781,7 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
         local_roots,
         dep_info,
         messages,
+        library_paths,
     })
 }
 
@@ -2122,6 +2213,7 @@ struct StagedArtifacts {
     bundle: Option<PathBuf>,
     dep_info: Vec<PathBuf>,
     messages: Vec<serde_json::Value>,
+    library_paths: Vec<PathBuf>,
 }
 
 struct TestOutput<'a> {
@@ -2197,6 +2289,7 @@ fn compile_root_targets(
             bundle: None,
             dep_info,
             messages: Vec::new(),
+            library_paths: Vec::new(),
         });
     }
     let library = library.ok_or_else(|| {
@@ -2212,6 +2305,7 @@ fn compile_root_targets(
         bundle: None,
         dep_info: vec![library.dep_info.clone()],
         messages: Vec::new(),
+        library_paths: Vec::new(),
     })
 }
 
@@ -2259,6 +2353,7 @@ fn compile_test_targets(
         bundle: bundled,
         dep_info: Vec::new(),
         messages: Vec::new(),
+        library_paths: Vec::new(),
     })
 }
 
@@ -2347,6 +2442,7 @@ fn compile_planned_test_targets(
         bundle: bundled,
         dep_info: Vec::new(),
         messages: Vec::new(),
+        library_paths: Vec::new(),
     })
 }
 
@@ -2725,6 +2821,7 @@ mod tests {
             bundle: None,
             dep_info: vec![dep_info],
             messages: Vec::new(),
+            library_paths: Vec::new(),
         };
         let base = [7; 32];
 
@@ -2814,6 +2911,7 @@ mod tests {
             bundle: None,
             dep_info: vec![dep_info],
             messages: Vec::new(),
+            library_paths: Vec::new(),
         };
         let base = [5; 32];
         let modified = fs::metadata(&source).unwrap().modified().unwrap();
@@ -3289,6 +3387,7 @@ mod tests {
         let script = fs::read_to_string(&script_path).unwrap().replace(
             "fn main() {",
             r#"fn main() {
+                println!("cargo:rustc-link-search=native={}", std::env::var("OUT_DIR").unwrap());
                 std::fs::write(
                     std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("num-jobs"),
                     std::env::var("NUM_JOBS").unwrap(),
@@ -3364,6 +3463,7 @@ mod tests {
                 .unwrap()
         };
         let out_dir = output_directory();
+        assert!(artifact.library_paths.contains(&out_dir));
         assert_eq!(fs::read_to_string(out_dir.join("num-jobs")).unwrap(), "2");
         let modified = fs::metadata(out_dir.join("num-jobs"))
             .unwrap()

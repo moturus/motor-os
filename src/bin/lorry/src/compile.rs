@@ -806,6 +806,43 @@ pub(crate) fn package_environment(cargo: &Path, manifest: &Manifest) -> BTreeMap
     values
 }
 
+pub(crate) fn runtime_environment(
+    cargo: &Path,
+    manifest: &Manifest,
+    library_paths: &[PathBuf],
+) -> Result<BTreeMap<String, OsString>> {
+    let mut environment = package_environment(cargo, manifest);
+    let variable = dynamic_library_path_variable();
+    let inherited = std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut paths = if inherited.starts_with(library_paths) {
+        inherited.clone()
+    } else {
+        library_paths
+            .iter()
+            .cloned()
+            .chain(inherited.iter().cloned())
+            .collect()
+    };
+    if cfg!(target_os = "macos") && inherited.is_empty() {
+        if let Some(home) = std::env::var_os("HOME") {
+            paths.push(PathBuf::from(home).join("lib"));
+        }
+        paths.extend([PathBuf::from("/usr/local/lib"), PathBuf::from("/usr/lib")]);
+    }
+    environment.insert(
+        variable.to_owned(),
+        std::env::join_paths(paths).map_err(|error| {
+            Error::failure(format!(
+                "failed to construct runtime library search path: {error}"
+            ))
+        })?,
+    );
+    Ok(environment)
+}
+
 pub(crate) fn lint_arguments(manifest: &Manifest) -> Vec<OsString> {
     let mut lints = manifest
         .rust_lints
