@@ -16,6 +16,7 @@ pub mod paths;
 pub mod policy;
 pub mod provenance;
 pub mod search;
+pub mod session_search;
 pub mod shell_words;
 pub mod snapshot;
 pub mod todo;
