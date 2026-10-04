@@ -145,6 +145,13 @@ freshness, including external reads and symlink retargets. The local corpus
 scan matches all 128 source-metadata projections. Build-capable loading was
 audited separately and reports the remaining target/dependency restrictions.
 
+Milestone 6 is in progress. The resolver can solve every member together,
+including optional, development, and platform edges, then project selected
+features without changing the chosen dependency identities. Workspace MSRV
+ranking, Cargo lock formats, and exact lock validation have focused tests;
+offline Cargo locks match across the format thresholds. Command integration,
+exact resolved metadata, fetch, and workspace admission remain to be done.
+
 ## Goal
 
 Make Lorry build, check, and test Cargo workspaces on Linux and on Motor.

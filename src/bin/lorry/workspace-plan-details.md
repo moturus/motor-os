@@ -1671,6 +1671,16 @@ tests passed in `/tmp/lorry-m6-workspace-lock-{validation,legacy-validation}.log
 The oracle checks formats 1 through 4, stale member edges, missing nodes,
 and unchanged lock bytes after validation failures.
 
+Selected workspace requests now recompute features and reachability over
+the complete graph's exact dependency identities. Per-declaration edge
+constraints prevent an unselected member's version constraint from being
+lost. Development edges are enabled only for requested members, and locked
+yanked registry versions remain usable. The focused cases also check optional
+feature removal/activation and a selected development cycle. Thirty-one
+resolver tests and strict Clippy passed in
+`/tmp/lorry-m6-selected-workspace-{yanked-unit,clippy-final}.log`.
+CLI routing and resolver-specific feature oracles follow before activation.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

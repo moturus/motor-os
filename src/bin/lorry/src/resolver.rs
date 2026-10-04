@@ -960,15 +960,21 @@ enum Scope<'a> {
     Complete,
     WorkspaceComplete,
     Selected(TargetSelection<'a>),
+    WorkspaceSelected {
+        selection: TargetSelection<'a>,
+        complete: &'a Resolution,
+        dev_members: &'a BTreeSet<PathBuf>,
+    },
 }
 
-impl Scope<'_> {
+impl<'a> Scope<'a> {
     fn matches(self, compile_kind: CompileKind, selector: Option<&str>) -> Result<bool> {
         let Some(selector) = selector else {
             return Ok(true);
         };
-        let Self::Selected(selection) = self else {
-            return Ok(true);
+        let selection = match self {
+            Self::Selected(selection) | Self::WorkspaceSelected { selection, .. } => selection,
+            _ => return Ok(true),
         };
         let (triple, cfg) = match compile_kind {
             CompileKind::Target => (selection.target_triple, selection.target_cfg),
@@ -979,6 +985,38 @@ impl Scope<'_> {
         } else {
             Ok(selector == triple)
         }
+    }
+
+    fn locked_package(self, event: &Event) -> std::result::Result<Option<&'a PackageKey>, Failure> {
+        let Self::WorkspaceSelected { complete, .. } = self else {
+            return Ok(None);
+        };
+        let Some(parent) = &event.parent else {
+            return Ok(None);
+        };
+        let package = complete
+            .packages
+            .iter()
+            .find(|package| &package.key == parent)
+            .ok_or_else(|| {
+                Failure::fatal("selected dependency parent is absent from the complete resolution")
+            })?;
+        let mut matching = package
+            .lock_edges
+            .iter()
+            .filter(|edge| edge.dependency_index == event.dependency_index);
+        let edge = matching.next().ok_or_else(|| {
+            Failure::fatal(format!(
+                "complete resolution omits dependency `{}` of `{}`",
+                event.dependency.alias, parent.name,
+            ))
+        })?;
+        if matching.any(|other| other.package != edge.package) {
+            return Err(Failure::fatal(
+                "complete resolution has conflicting dependency identities",
+            ));
+        }
+        Ok(Some(&edge.package))
     }
 }
 
@@ -1411,6 +1449,7 @@ fn solve(
     let Some(mut event) = queue.pop_front() else {
         return Ok(state);
     };
+    let locked_package = scope.locked_package(&event)?;
     if event.dependency.source == RequirementSource::CratesIo {
         loader(
             &event.dependency.package,
@@ -1435,6 +1474,7 @@ fn solve(
             key.name == event.dependency.package
                 && event.dependency.requirement.matches(&key.version)
                 && source_matches(&node.record.source, &event.dependency.source)
+                && locked_package.is_none_or(|locked| locked == *key)
         })
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
@@ -1469,6 +1509,14 @@ fn solve(
 
     let candidates = candidates(catalog, &event, options, locked);
     for record in candidates {
+        let key = PackageKey {
+            name: record.name.clone(),
+            version: record.version.clone(),
+            source: record.source.key(),
+        };
+        if locked_package.is_some_and(|locked| locked != &key) {
+            continue;
+        }
         if state.nodes.iter().any(|(key, node)| {
             key.name == record.name
                 && source_matches(&node.record.source, &event.dependency.source)
@@ -1482,11 +1530,6 @@ fn solve(
             }
             continue;
         }
-        let key = PackageKey {
-            name: record.name.clone(),
-            version: record.version.clone(),
-            source: record.source.key(),
-        };
         let limit = &options.package_limit;
         if limit.counts(&key)
             && state.nodes.keys().filter(|node| limit.counts(node)).count() as u64 >= limit.max
@@ -1745,11 +1788,16 @@ fn activate(
     }
 
     for (index, dependency) in record.dependencies.iter().enumerate() {
-        let include_dev = matches!(scope, Scope::WorkspaceComplete)
-            && record
-                .local_manifest
-                .as_ref()
-                .is_some_and(|manifest| manifest.editable);
+        let include_dev = record
+            .local_manifest
+            .as_ref()
+            .is_some_and(|manifest| match scope {
+                Scope::WorkspaceComplete => manifest.editable,
+                Scope::WorkspaceSelected { dev_members, .. } => {
+                    dev_members.contains(&manifest.root)
+                }
+                _ => false,
+            });
         if (dependency.kind == DependencyKind::Dev && !include_dev)
             || (dependency.optional && !activation.enabled_optional.contains(&dependency.alias))
         {
@@ -1996,7 +2044,9 @@ fn root_context(
         Scope::Complete | Scope::WorkspaceComplete => {
             FeatureContext::Target(dependency.target.clone().unwrap_or_default())
         }
-        Scope::Selected(_) => FeatureContext::Target(String::new()),
+        Scope::Selected(_) | Scope::WorkspaceSelected { .. } => {
+            FeatureContext::Target(String::new())
+        }
     };
     normalize_context(resolver, context)
 }
@@ -2008,7 +2058,7 @@ fn child_target_context(
 ) -> FeatureContext {
     match scope {
         Scope::Complete | Scope::WorkspaceComplete => target_dependency_context(parent, selector),
-        Scope::Selected(_) => parent,
+        Scope::Selected(_) | Scope::WorkspaceSelected { .. } => parent,
     }
 }
 
@@ -2238,6 +2288,62 @@ mod tests {
             .unwrap();
         assert!(a.target_features.contains("extra"));
         assert!(a.edges.iter().any(|edge| edge.package.name == "optional"));
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let selection = TargetSelection {
+            host_triple: "x86_64-unknown-linux-gnu",
+            host_cfg: &cfg,
+            target_triple: "x86_64-unknown-linux-gnu",
+            target_cfg: &cfg,
+        };
+        let mut member = workspace::MemberRequest {
+            root: fixture.0.join("a"),
+            features: BTreeSet::new(),
+            default_features: false,
+            dev: false,
+        };
+        // A completed locked identity remains usable if the index marks it yanked.
+        catalog
+            .records
+            .get_mut("shared")
+            .unwrap()
+            .iter_mut()
+            .find(|candidate| candidate.version == Version::new(1, 0, 0))
+            .unwrap()
+            .record
+            .yanked = true;
+        let selected_graph = workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &limits,
+            std::slice::from_ref(&member),
+            selection,
+        )
+        .unwrap();
+        assert_eq!(selected(&selected_graph, "shared")[0].to_string(), "1.0.0");
+        assert_eq!(selected_graph.packages.len(), 2);
+        assert!(
+            selected_graph
+                .packages
+                .iter()
+                .all(|package| !matches!(package.key.name.as_str(), "b" | "optional"))
+        );
+        member.features.insert("extra".to_owned());
+        let selected_graph = workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &limits,
+            &[member],
+            selection,
+        )
+        .unwrap();
+        assert_eq!(selected_graph.packages.len(), 3);
+        assert_eq!(selected(&selected_graph, "shared")[0].to_string(), "1.0.0");
+        assert!(
+            selected_graph
+                .packages
+                .iter()
+                .any(|package| package.key.name == "optional")
+        );
         limits.package_limit = PackageLimit::with_max(1);
         assert!(
             resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| Ok(
@@ -2276,6 +2382,44 @@ mod tests {
             .find(|package| package.key.name == "a")
             .unwrap();
         assert_eq!(a_node.edges[0].kind, DependencyKind::Dev);
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let selection = TargetSelection {
+            host_triple: "x86_64-unknown-linux-gnu",
+            host_cfg: &cfg,
+            target_triple: "x86_64-unknown-linux-gnu",
+            target_cfg: &cfg,
+        };
+        let mut catalog = Catalog::default();
+        let complete =
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        let member = workspace::MemberRequest {
+            root: fixture.0.join("a"),
+            features: BTreeSet::new(),
+            default_features: true,
+            dev: true,
+        };
+        let selected_graph = workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &limits,
+            &[member],
+            selection,
+        )
+        .unwrap();
+        assert_eq!(selected_graph.packages.len(), 2);
+        assert_eq!(
+            selected_graph
+                .packages
+                .iter()
+                .find(|package| package.key.name == "a")
+                .unwrap()
+                .edges[0]
+                .kind,
+            DependencyKind::Dev
+        );
         fs::write(
             fixture.0.join("a/Cargo.toml"),
             a.replace("dev-dependencies", "dependencies"),

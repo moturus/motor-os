@@ -1,6 +1,91 @@
 use super::*;
 use crate::manifest::SourceWorkspace;
 
+pub(crate) struct MemberRequest {
+    pub root: PathBuf,
+    pub features: BTreeSet<String>,
+    pub default_features: bool,
+    pub dev: bool,
+}
+
+/// Recompute features and reachability while retaining every complete-graph
+/// dependency identity, including versions constrained by unselected members.
+pub(crate) fn resolve_selected_workspace(
+    complete: &Resolution,
+    catalog: &Catalog,
+    options: &Options,
+    members: &[MemberRequest],
+    selection: TargetSelection<'_>,
+) -> Result<Resolution> {
+    let dev_members = members
+        .iter()
+        .filter(|member| member.dev)
+        .map(|member| member.root.clone())
+        .collect();
+    let scope = Scope::WorkspaceSelected {
+        selection,
+        complete,
+        dev_members: &dev_members,
+    };
+    let mut queue = VecDeque::new();
+    for (index, member) in members.iter().enumerate() {
+        let package = complete
+            .packages
+            .iter()
+            .find(|package| {
+                package.key.source == PackageSourceKey::Path(member.root.clone())
+                    && package
+                        .local_manifest
+                        .as_ref()
+                        .is_some_and(|manifest| manifest.editable)
+            })
+            .ok_or_else(|| {
+                Error::failure(format!(
+                    "selected member `{}` is absent from the complete resolution",
+                    member.root.display(),
+                ))
+            })?;
+        let dependency = CandidateDependency {
+            dependency: Dependency {
+                alias: package.key.name.clone(),
+                package: package.key.name.clone(),
+                requirement: VersionReq::parse(&format!("={}", package.key.version))
+                    .map_err(|error| Error::failure(format!("invalid member version: {error}")))?,
+                features: member.features.iter().cloned().collect(),
+                optional: false,
+                default_features: member.default_features,
+                target: None,
+                kind: DependencyKind::Normal,
+            },
+            source: RequirementSource::Path(member.root.clone()),
+        };
+        queue.push_back(Event {
+            parent: None,
+            parent_compile_kind: None,
+            dependency_index: index,
+            context: root_context(options.resolver, scope, &dependency),
+            compile_kind: CompileKind::Target,
+            dependency,
+            depth: 0,
+            ancestors: BTreeSet::new(),
+        });
+    }
+    let mut catalog = catalog.clone();
+    let mut options = options.clone();
+    options.package_limit = options
+        .package_limit
+        .with_members(catalog.workspace_members.values().cloned());
+    let locked = LockedPreference::from_resolution(complete);
+    solve_request(
+        queue,
+        &mut catalog,
+        &options,
+        &locked,
+        scope,
+        &mut |_, _, _| Ok(()),
+    )
+}
+
 /// Seed ordinary member packages into one solver, including every optional
 /// member feature. The returned root edges name the members themselves.
 pub(crate) fn resolve_complete_workspace(
