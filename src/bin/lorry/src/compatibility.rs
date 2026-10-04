@@ -27,17 +27,19 @@ pub fn locate_project(manifest_path: Option<&str>, plain: bool) -> Result<i32> {
 pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = Manifest::load_selected_or_manifest_path(
+    let workspace =
+        SourceWorkspace::load(&current, cli.manifest_path.as_deref().map(Path::new), None)?;
+    Manifest::report_warnings(&workspace.packages, cli.verbosity);
+    let config = Config::load_workspace(
         &current,
-        cli.manifest_path.as_deref().map(Path::new),
-        cli.package.as_deref(),
-        false,
+        &workspace.root,
+        workspace
+            .packages
+            .iter()
+            .map(|package| package.root.as_path()),
     )?;
-    Manifest::report_warnings([&manifest], cli.verbosity);
-    let config = Config::load(&current, &manifest)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let target = toolchain.target_info(Some(&options.target))?;
-    manifest.require_supported_target(&target)?;
     let selectors = config.targets.keys().filter_map(|selector| match selector {
         TargetSelector::Cfg(expression) => Some(expression.as_str()),
         TargetSelector::Triple(_) => None,
@@ -65,7 +67,7 @@ pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
     command
         .args(arguments)
         .env_remove("RUSTC_BOOTSTRAP")
-        .current_dir(&manifest.root)
+        .current_dir(&current)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());

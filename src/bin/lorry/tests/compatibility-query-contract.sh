@@ -127,6 +127,23 @@ common_environment=(
     __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS=nightly
     RUSTC_BOOTSTRAP=ambient-bootstrap
 )
+# Virtual roots need no selected or buildable package for compiler queries.
+mkdir -p "$WORK/workspace/other/src" "$WORK/empty"
+printf '[package]\nname = "other"\nversion = "0.1.0"\nedition = "2024"\n' >"$WORK/workspace/other/Cargo.toml"
+printf 'pub fn other() {}\n' >"$WORK/workspace/other/src/lib.rs"
+printf '[workspace]\nmembers = ["app", "other"]\nresolver = "2"\n[profile.custom]\ninherits = "release"\n' \
+    >"$WORK/workspace/Cargo.toml"
+printf '[workspace]\n' >"$WORK/empty/Cargo.toml"
+for root in "$WORK/workspace" "$WORK/empty"; do
+    cfg="$(cd "$root" && env "${common_environment[@]}" "$LORRY" rustc \
+        -Z unstable-options --print cfg --target x86_64-unknown-motor -- -O)"
+    [ "$cfg" = query_cfg_output ] || fail "virtual-root cfg query needs a package"
+    target="$(cd "$WORK" && env "${common_environment[@]}" "$LORRY" rustc \
+        --manifest-path "$root/Cargo.toml" -Z unstable-options --print target-spec-json \
+        --target x86_64-unknown-motor -- -Z unstable-options)"
+    [ "$target" = '{"arch":"x86_64","os":"motor"}' ] || fail "virtual-root target query needs a package"
+    [ ! -e "$root/target" ] && [ ! -e "$root/Cargo.lock" ] && [ ! -e "$root/.lorry" ] || fail "virtual-root query mutated project state"
+done
 cfg="$(cd "$PROJECT" && env "${common_environment[@]}" "$LORRY" rustc \
     -Z unstable-options --print cfg --target x86_64-unknown-motor -- -O)"
 [ "$cfg" = query_cfg_output ] || fail "cfg query did not copy rustc stdout"

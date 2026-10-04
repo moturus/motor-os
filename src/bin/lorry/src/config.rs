@@ -243,21 +243,33 @@ enum LayerKind {
 
 impl Config {
     pub fn load(current: &Path, manifest: &crate::manifest::Manifest) -> Result<Self> {
-        for root in manifest.workspace_members.values() {
+        Self::load_workspace(
+            current,
+            &manifest.workspace_root,
+            manifest.workspace_members.values().map(PathBuf::as_path),
+        )
+    }
+
+    pub(crate) fn load_workspace<'a>(
+        current: &Path,
+        workspace_root: &Path,
+        members: impl Iterator<Item = &'a Path>,
+    ) -> Result<Self> {
+        for root in members {
             let path = root.join("lorry.toml");
-            if root != &manifest.workspace_root && path.is_file() {
+            if root != workspace_root && path.is_file() {
                 return Err(Error::failure(format!(
                     "workspace member configuration `{}` is not supported",
                     path.display()
                 ))
                 .with_help(format!(
                     "move project settings to `{}`",
-                    manifest.workspace_root.join("lorry.toml").display()
+                    workspace_root.join("lorry.toml").display()
                 )));
             }
         }
         let environment = current_environment();
-        Self::load_project_with_environment(current, &manifest.workspace_root, &environment)
+        Self::load_project_with_environment(current, workspace_root, &environment)
     }
 
     pub fn load_global() -> Result<Self> {

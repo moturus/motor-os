@@ -1317,6 +1317,16 @@ must work without selecting a package.
 
 Support `--manifest-path` on every command that reads a manifest.
 
+Rustc configuration queries now load descriptive workspace context without
+selecting a buildable package. Multi-member and empty virtual roots work
+without lockfiles or admission state, and create no project artifacts.
+Sixteen configuration tests, strict Clippy, the exact query contract, and
+the Cargo configuration-discovery contract passed in
+`/tmp/lorry-m5-virtual-queries-config-unit.log`,
+`/tmp/lorry-m5-virtual-queries-clippy.log`,
+`/tmp/lorry-m5-virtual-queries-contract.log`, and
+`/tmp/lorry-m5-virtual-queries-config-contract.log`.
+
 Every manifest-reading command now accepts the option, including build,
 run, test, clean, vendor/upgrade, review, and rustc configuration queries.
 Relative paths resolve against the supplied invocation directory. The
