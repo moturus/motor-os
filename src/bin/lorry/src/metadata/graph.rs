@@ -12,6 +12,8 @@ use crate::unit::CompilationPlan;
 use super::package::{self, Identity};
 use super::wire;
 
+pub(crate) mod workspace;
+
 pub(super) fn no_dependencies(workspace: &SourceWorkspace) -> Result<wire::Metadata> {
     let mut packages = workspace
         .packages
