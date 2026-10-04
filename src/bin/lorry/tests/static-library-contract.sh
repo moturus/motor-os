@@ -47,10 +47,19 @@ printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s
     "$LORRY_MOTOR_LINKER" "$LORRY_MOTOR_SYSROOT" >"$WORK/project/.cargo/config.toml"
 cd "$WORK/project"
 "$LORRY_TEST_CARGO" generate-lockfile --offline
+cp Cargo.toml "$WORK/workspace.toml"
+for mode in debug release-fat; do
+    release=()
+    cp "$WORK/workspace.toml" Cargo.toml
+    if [ "$mode" = release-fat ]; then
+        release=(--release)
+        printf '\n[profile.release]\nlto = "fat"\n' >>Cargo.toml
+    fi
 for platform in native motor; do
     target=()
     profile=debug
     if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); profile=x86_64-unknown-motor/debug; fi
+    if [ "$mode" = release-fat ]; then profile="${profile%debug}release"; fi
     for selection in defaults archive mixed; do
         packages=()
         archive_count=2
@@ -58,9 +67,9 @@ for platform in native motor; do
     for command in build check; do
         comparison=differential-workspace-messages
         if [ "$command" = check ]; then comparison=differential-workspace-check-messages; fi
-        env HOME="$WORK/home" "$LORRY" "$command" -j1 "${target[@]}" "${packages[@]}" \
+        env HOME="$WORK/home" "$LORRY" "$command" -j1 "${target[@]}" "${packages[@]}" "${release[@]}" \
             --message-format=json >"$WORK/lorry.json"
-        "$LORRY_TEST_CARGO" "$command" -j1 "${target[@]}" "${packages[@]}" --offline \
+        "$LORRY_TEST_CARGO" "$command" -j1 "${target[@]}" "${packages[@]}" "${release[@]}" --offline \
             --message-format=json >"$WORK/cargo.json"
         if [ "$command" = build ]; then
             if [ "$selection" = defaults ]; then cmp "target/$profile/app" "target/lorry/$profile/app"; fi
@@ -105,7 +114,7 @@ for line in open(sys.argv[1]):
         for path in event['filenames']:
             if path.endswith('.a'): pathlib.Path(path).unlink()
 PY
-            env HOME="$WORK/home" "$LORRY" build -j1 "${target[@]}" "${packages[@]}" --message-format=json >"$WORK/restored.json"
+            env HOME="$WORK/home" "$LORRY" build -j1 "${target[@]}" "${packages[@]}" "${release[@]}" --message-format=json >"$WORK/restored.json"
             python3 - "$WORK/restored.json" "$archive_count" <<'PY'
 import json, pathlib, sys
 archives = [event for line in open(sys.argv[1]) for event in [json.loads(line)]
@@ -120,4 +129,5 @@ PY
     done
 done
 [ "$(target/lorry/debug/app)" = 42 ]
+done
 echo "PASS: static and mixed archives match Cargo native/cross object bytes, JSON, and cache restoration"

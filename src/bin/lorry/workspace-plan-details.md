@@ -2620,6 +2620,19 @@ Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contra
 
 ### Member build-time code
 
+Release-LTO archive coverage exposed an invalid mixed-library compiler setting:
+Lorry requested `-C lto=fat` for `rlib`/`staticlib`, which rustc rejects.
+The original failure is `/tmp/lorry-m8-static-lto-first-contract.log`; paired
+verbose compiler commands and the exact diagnostic are preserved in
+`/tmp/lorry-m8-static-lto-preserved-diagnostic.log` and
+`/tmp/lorry-static-library-dthDu9`. The pinned Cargo LTO planner requires both
+objects and bitcode for mixed libraries and their transitive Rust inputs.
+Lorry now propagates that requirement before computing identities and retains
+final-link LTO for pure static libraries. Default and release-fat native/cross
+archive member bytes, final executables, JSON, and restoration pass in
+`/tmp/lorry-m8-static-lto-fixed-contract.log`. All eleven planner tests and
+strict Clippy pass in `/tmp/lorry-m8-static-lto-{unit,clippy}.log`.
+
 Replace the current rejection of a selected package's build script only
 when that script actually runs through the common planner and executor.
 Support build-dependencies on other members and on outside packages.

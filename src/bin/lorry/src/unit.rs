@@ -1121,11 +1121,13 @@ pub fn plan_dependency_units_with_remaps(
         ));
     }
 
-    let mut planned: BTreeMap<UnitKey, PlannedUnit> = BTreeMap::new();
+    let mut settings_by_unit = BTreeMap::new();
     for key in &graph.order {
-        let unit = graph.units.get(key).ok_or_else(|| {
-            Error::failure("dependency compilation order references an absent unit")
-        })?;
+        if !graph.units.contains_key(key) {
+            return Err(Error::failure(
+                "dependency compilation order references an absent unit",
+            ));
+        }
         let manifest = manifests.get(&key.package).ok_or_else(|| {
             Error::failure(format!(
                 "dependency compilation plan has no manifest for `{} {}`",
@@ -1133,8 +1135,33 @@ pub fn plan_dependency_units_with_remaps(
             ))
         })?;
         validate_manifest_identity(&key.package, manifest)?;
+        settings_by_unit.insert(key.clone(), unit_settings(graph, key, manifest, options));
+    }
+    // Mixed libraries need objects for their archive and bitcode for LTO consumers.
+    // Propagate that requirement before calculating identities, including shared inputs.
+    for key in graph.order.iter().rev() {
+        if settings_by_unit[key].lto != CargoUnitLto::ObjectAndBitcode {
+            continue;
+        }
+        for edge in &graph.units[key].dependencies {
+            if edge.kind == UnitEdgeKind::RustDependency {
+                let settings = settings_by_unit.get_mut(&edge.unit).ok_or_else(|| {
+                    Error::failure("dependency compilation order omits a dependency unit")
+                })?;
+                if settings.lto == CargoUnitLto::OnlyBitcode {
+                    settings.lto = CargoUnitLto::ObjectAndBitcode;
+                }
+            }
+        }
+    }
 
-        let settings = unit_settings(graph, key, manifest, options);
+    let mut planned: BTreeMap<UnitKey, PlannedUnit> = BTreeMap::new();
+    for key in &graph.order {
+        let unit = &graph.units[key];
+        let manifest = &manifests[&key.package];
+        let settings = settings_by_unit
+            .remove(key)
+            .ok_or_else(|| Error::failure("dependency compilation order repeats a unit"))?;
         let profile = settings.profile.cargo_profile();
         let source_value;
         let source = match &key.package.source {
@@ -1395,17 +1422,38 @@ fn unit_settings(
                 .unwrap()
                 .requires_upstream_objects()
         {
-            root_lto(
-                options.release,
-                options.release_profile.lto,
-                RootTargetKind::Binary,
-                false,
-            )
+            library_lto(key, manifest, options)
         } else {
             unit_lto(key, options.release, options.release_profile.lto)
         },
         logical_target,
         rustflags,
+    }
+}
+
+fn library_lto(
+    key: &UnitKey,
+    manifest: &Manifest,
+    options: &PlanOptions<'_>,
+) -> CargoUnitLto<'static> {
+    let configured = options.release_profile.lto;
+    let ordinary = unit_lto(key, options.release, configured);
+    if !options.release
+        || key.compile_kind == CompileKind::Host
+        || matches!(configured, ManifestLto::Default | ManifestLto::Off)
+    {
+        return ordinary;
+    }
+    let types = &manifest.library.as_ref().unwrap().crate_types;
+    if types
+        .iter()
+        .all(|kind| matches!(kind.as_str(), "staticlib" | "cdylib"))
+    {
+        root_lto(true, configured, RootTargetKind::Binary, false)
+    } else if types.iter().all(|kind| kind == "dylib") {
+        CargoUnitLto::OnlyObject
+    } else {
+        CargoUnitLto::ObjectAndBitcode
     }
 }
 

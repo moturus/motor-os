@@ -510,6 +510,8 @@ outputs. Static archives consume upstream object code and participate in
 staging, cache restoration, freshness, and artifact messages. Archive member
 object bytes agree with Cargo; rustc's random temporary object-name suffixes
 remain outside the final-executable byte-identity promise.
+Release LTO runs on pure static libraries. Mixed libraries and their Rust
+dependencies retain both object code and bitcode, matching Cargo's planner.
 On Motor, declared dynamic types retain their Cargo identities while rustc
 warns and drops unsupported outputs. Builds fail if no usable type remains;
 metadata-only checks can still succeed. Linux dynamic execution is unsupported.
