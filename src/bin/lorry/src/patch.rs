@@ -11,14 +11,19 @@ use crate::source_tree::{DEFAULT_LIMITS, Exclusions, Tree};
 pub fn configure(manifest: &Manifest, catalog: &mut Catalog) -> Result<()> {
     for patch in &manifest.patches {
         match &patch.source {
-            PatchSource::Path(path) => load_local_patch(patch, path, catalog)?,
+            PatchSource::Path(path) => load_local_patch(manifest, patch, path, catalog)?,
             PatchSource::Git(_) => {}
         }
     }
     Ok(())
 }
 
-fn load_local_patch(patch: &Patch, path: &Path, catalog: &mut Catalog) -> Result<()> {
+fn load_local_patch(
+    workspace: &Manifest,
+    patch: &Patch,
+    path: &Path,
+    catalog: &mut Catalog,
+) -> Result<()> {
     let physical_root = fs::canonicalize(path).map_err(|error| {
         Error::failure(format!(
             "failed to resolve local patch `{}` at `{}`: {error}",
@@ -26,15 +31,31 @@ fn load_local_patch(patch: &Patch, path: &Path, catalog: &mut Catalog) -> Result
             path.display()
         ))
     })?;
-    let manifest = Manifest::load_path_dependency(&physical_root)?;
+    let mut manifest = Manifest::load_path_dependency(&physical_root)?;
+    manifest.editable = workspace
+        .workspace_members
+        .values()
+        .any(|member| *member == physical_root);
+    if manifest.editable {
+        manifest
+            .workspace_root
+            .clone_from(&workspace.workspace_root);
+        manifest
+            .workspace_members
+            .clone_from(&workspace.workspace_members);
+    }
     if manifest.name != patch.package {
         return Err(Error::failure(format!(
             "local patch `{}` declares package `{}`, expected `{}`",
             patch.alias, manifest.name, patch.package
         )));
     }
-    let tree = Tree::scan(&manifest.root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?;
-    catalog.insert_path_patch(manifest, physical_root.clone(), physical_root, tree.sha256)
+    let sha256 = if manifest.editable {
+        crate::member_source::snapshot(&manifest, true)?.sha256
+    } else {
+        Tree::scan(&manifest.root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?.sha256
+    };
+    catalog.insert_path_patch(manifest, physical_root.clone(), physical_root, sha256)
 }
 
 #[cfg(test)]

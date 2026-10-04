@@ -307,6 +307,13 @@ features, `--all-features`, and `--no-default-features`. Explicit `dep:`
 names and multiple slashes fail as in Cargo. Source-only metadata describes
 declared features regardless of selection. Commands that require resolution
 reject nondefault feature selection until workspace resolution supports it.
+Editable members use Cargo's package file discovery: Git ignores and tracked
+files, include/exclude rules, symbolic links, and nested package boundaries.
+Dependency archive size/file limits do not constrain member source trees.
+Compiler dep-info permits member reads outside their directories and tracks
+those inputs through unit-cache restores and completed-profile reuse.
+Completed profiles also track the workspace manifest and member compiler
+dep-info, including host-profile paths, with version-5 freshness records.
 Every manifest-reading command accepts --manifest-path. Relative paths use
 the invocation directory; package selection and configuration discovery
 remain independent of that path.

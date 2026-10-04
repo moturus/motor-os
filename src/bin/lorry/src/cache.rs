@@ -280,8 +280,8 @@ impl BuildCache {
             "identity-extra-filename",
             &input.planned.identity.extra_filename,
         );
-        if input.selected {
-            digest.string("selected-root-cache", "external-dep-info-v2");
+        if input.manifest.editable {
+            digest.string("editable-member-cache", "external-dep-info-v3");
         }
 
         let mut replacements = vec![
@@ -322,7 +322,13 @@ impl BuildCache {
             digest.os("rustc-environment-value", value, &replacements);
         }
 
-        if self.validation.is_strict() {
+        if input.manifest.editable {
+            digest.bytes(
+                "editable-source",
+                &crate::member_source::snapshot(input.manifest, self.validation.is_strict())?
+                    .sha256,
+            );
+        } else if self.validation.is_strict() {
             let source = Tree::scan(
                 &input.manifest.root,
                 self.source_limits,

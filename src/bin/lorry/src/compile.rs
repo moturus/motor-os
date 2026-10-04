@@ -66,6 +66,18 @@ pub struct BuildOutput<'a> {
     pub out_dir: &'a Path,
 }
 
+impl RustcOutput {
+    pub(crate) fn dep_info(&self) -> &Path {
+        match self {
+            Self::Library { dep_info, .. }
+            | Self::Binary { dep_info, .. }
+            | Self::Metadata { dep_info, .. }
+            | Self::ProcMacro { dep_info, .. }
+            | Self::BuildScript { dep_info, .. } => dep_info,
+        }
+    }
+}
+
 impl RustcInvocation {
     /// Keep rustc's output private until the unit has succeeded and its
     /// complete directory can be published at the planned path.

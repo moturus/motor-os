@@ -1311,6 +1311,32 @@ The focused Cargo file-list test and strict Clippy passed in
 `/tmp/lorry-m5-member-reader-clippy.log`. Compiler cache/freshness integration
 is the next patch; this source-validation patch alone does not fix builds.
 
+Compiler caches and completed profiles now use the member reader too.
+Every member's dep-info permits external reads and participates in published
+unit validation and library-cache restores. Completed profiles record member
+dep-info, including host paths, and distinguish editable roots from fixed
+dependency trees in freshness format 5. Workspace-manifest changes invalidate
+the shortcut. Path patches naming members use the same reader. The focused
+freshness tests, strict Clippy, and paired workspace contract passed in
+`/tmp/lorry-m5-member-cache-freshness-unit-final.log`,
+`/tmp/lorry-m5-member-cache-clippy.log`, and
+`/tmp/lorry-m5-member-cache-contract-corrected-probes.log`. The contract checks
+external edits, warm symlink retargeting, unchanged-profile reuse, library
+cache restores, strict validation, and member sources exceeding configured
+archive file/byte limits.
+
+The initial expanded contract failed (`/tmp/lorry-m5-member-cache-contract.log`).
+The retained fixture and trace (`/tmp/lorry-m5-member-cache-diagnostic-trace.log`)
+showed that Cargo reused old contents after a symlink retarget to an older
+file; both target files had identical mtimes. Cargo's fingerprint code checks
+the followed file's mtime. The warm Cargo log reports both units fresh, while
+a cold shared-member build produces the expected contents
+(`/tmp/lorry-m5-member-retarget-cargo-{warm,cold}.log`). Lorry's approved
+retarget validation passed. The comparison now keeps Lorry warm and uses
+cold Cargo for this content oracle. The unchanged-build probe now establishes
+the same build selection before its warm assertion, and its inverted grep
+checks are explicit failures instead of relying on shell errexit.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,

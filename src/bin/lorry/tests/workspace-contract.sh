@@ -261,6 +261,62 @@ EOF
 )
 cp "$WORK/profiles.baseline" "$WORK/project/Cargo.toml"
 
+# Editable members retain Cargo's external reads, symlinks, and package
+# boundaries in both compiler caches and the completed-profile shortcut.
+cp "$WORK/project/shared/src/lib.rs" "$WORK/shared-source.baseline"
+cp "$WORK/project/tool/src/main.rs" "$WORK/tool-source.baseline"
+cp "$WORK/home/.config/lorry/lorry.toml" "$WORK/user-config.baseline"
+printf '%s\n' '[policy.limits]' 'max-package-files = 1' \
+    'max-extracted-package-bytes = 65536' >>"$WORK/home/.config/lorry/lorry.toml"
+mkdir -p "$WORK/project/shared/foreign/src"
+printf 'not a manifest\n' >"$WORK/project/shared/foreign/Cargo.toml"
+printf 'outside-before' >"$WORK/project/external.txt"
+printf 'link-before' >"$WORK/project/link-first.txt"
+printf 'link-after' >"$WORK/project/link-second.txt"
+head -c 70000 /dev/zero >"$WORK/project/shared/large-editable-input"
+ln -s ../link-first.txt "$WORK/project/shared/link.txt"
+cat >"$WORK/project/shared/src/lib.rs" <<'EOF'
+pub const VALUE: &str = include_str!("../../external.txt");
+pub const LINK: &str = include_str!("../link.txt");
+EOF
+printf 'fn main() { println!("{}|{}", shared::VALUE, shared::LINK); }\n' \
+    >"$WORK/project/tool/src/main.rs"
+(
+    cd "$WORK/project"
+    for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+        [ "$("$builder" run --quiet -p tool --offline)" = 'outside-before|link-before' ]
+    done
+    "$LORRY" -v build -p tool 2>"$WORK/member-first-build.err"
+    "$LORRY" -v build -p tool 2>"$WORK/member-warm.err"
+    if grep -E 'Verifying dependency state|Compiling ' "$WORK/member-warm.err"; then
+        echo 'workspace-contract: unchanged member build missed completed-profile freshness' >&2
+        exit 1
+    fi
+    printf 'outside-after' >external.txt
+    for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+        [ "$("$builder" run --quiet -p tool --offline)" = 'outside-after|link-before' ]
+    done
+    rm shared/link.txt
+    ln -s ../link-second.txt shared/link.txt
+    [ "$("$LORRY" run --quiet -p tool --offline)" = 'outside-after|link-after' ]
+    # Cargo's mtime check misses retargets to an older file. Keep Lorry's
+    # retarget probe warm, then use a cold Cargo build as the content oracle.
+    "$LORRY_TEST_CARGO" clean -p shared
+    [ "$("$LORRY_TEST_CARGO" run --quiet -p tool --offline)" = 'outside-after|link-after' ]
+    "$LORRY" build --strict-validation -p tool
+    "$LORRY" check -p tool
+    "$LORRY" clean -p tool
+    "$LORRY" -v build -p tool 2>"$WORK/member-cache.err"
+    grep -F 'Fresh shared v0.1.0' "$WORK/member-cache.err" >/dev/null
+    printf 'another-value' >external.txt
+    [ "$("$LORRY" run --quiet -p tool)" = 'another-value|link-after' ]
+)
+cp "$WORK/shared-source.baseline" "$WORK/project/shared/src/lib.rs"
+cp "$WORK/tool-source.baseline" "$WORK/project/tool/src/main.rs"
+cp "$WORK/user-config.baseline" "$WORK/home/.config/lorry/lorry.toml"
+rm -rf "$WORK/project/shared/foreign" "$WORK/project/shared/large-editable-input" \
+    "$WORK/project/shared/link.txt"
+
 # Runtime metadata comes from the selected member, while run keeps its caller.
 cat >"$WORK/project/app/src/main.rs" <<'EOF'
 fn environment() {

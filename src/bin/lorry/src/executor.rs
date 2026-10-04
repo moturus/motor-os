@@ -636,11 +636,12 @@ fn execute_unit(
                 AtomicDirectory::discard_abandoned_staging(unit_dir)?;
                 let dependencies = cache_dependencies(planned, outputs)?;
                 let selected = options.selected_package == Some(&key.package);
-                let selected_inputs = (selected || driver.is_some()).then_some(SelectedInputs {
-                    package_root: &manifest.root,
-                    working_dir: &planned_invocation.current_dir,
-                    source_remap: planned.source_remap.as_ref(),
-                });
+                let selected_inputs =
+                    (manifest.editable || driver.is_some()).then_some(SelectedInputs {
+                        package_root: &manifest.root,
+                        working_dir: &planned_invocation.current_dir,
+                        source_remap: planned.source_remap.as_ref(),
+                    });
                 let cache_build_script = executed_build_script.map(cache_build_script_input);
                 let caches = options.cache;
                 let restorable = matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
@@ -825,7 +826,7 @@ fn execute_unit(
                     &invocation.output,
                     &manifest.root,
                     &invocation.current_dir,
-                    selected,
+                    manifest.editable,
                     executed_build_script.map(|build| build.out_dir.as_path()),
                     planned.source_remap.as_ref(),
                     &clippy_inputs,

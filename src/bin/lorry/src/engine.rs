@@ -1289,6 +1289,19 @@ fn build_inner(
     crate::trace::event("compiled root targets");
     compiled.messages = message_reporter.messages();
     compiled.library_paths = runtime_library_paths(&build, &destination, &compiled.messages)?;
+    if let Some((_, outputs)) = &normal {
+        // Member inputs outside their directories must also invalidate the
+        // completed-profile shortcut before any compiler units are visited.
+        compiled.dep_info.extend(
+            outputs
+                .artifacts
+                .iter()
+                .filter(|(key, _)| manifests[&key.package].editable)
+                .map(|(_, output)| output.dep_info().to_owned()),
+        );
+        compiled.dep_info.sort();
+        compiled.dep_info.dedup();
+    }
 
     if let Some(base) = freshness_base {
         write_fresh_profile(
@@ -1414,7 +1427,7 @@ fn report_finished(
     Ok(())
 }
 
-const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v4";
+const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v5";
 const MAX_FRESH_PROFILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -1430,10 +1443,16 @@ struct FreshProfile {
     inputs: [u8; 32],
     primary: FreshArtifact,
     binaries: BTreeMap<String, FreshArtifact>,
-    local_roots: Vec<PathBuf>,
+    local_roots: Vec<LocalSource>,
     dep_info: Vec<PathBuf>,
     messages: Vec<serde_json::Value>,
     library_paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct LocalSource {
+    root: PathBuf,
+    editable: bool,
 }
 
 struct TrustedFreshness<'a> {
@@ -1475,6 +1494,10 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
     digest.debug("jobs", &inputs.jobs);
     digest.metadata("lorry", inputs.cargo)?;
     digest.metadata("rustc", &inputs.toolchain.rustc)?;
+    digest.metadata(
+        "workspace-manifest",
+        &inputs.manifest.workspace_root.join("Cargo.toml"),
+    )?;
     for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
         if process::is_removed_cargo_client_environment(&name) {
             continue;
@@ -1659,14 +1682,20 @@ fn write_fresh_profile(
     owner_root: &Path,
     base: [u8; 32],
     artifacts: &StagedArtifacts,
-    local_roots: &[PathBuf],
+    local_roots: &[LocalSource],
     validation: ValidationMode,
 ) -> Result<()> {
     let primary = relative_profile_path(profile, &artifacts.primary)?;
     let mut dep_info = artifacts
         .dep_info
         .iter()
-        .map(|path| relative_profile_path(profile, path))
+        .map(|path| {
+            if path.starts_with(profile) {
+                relative_profile_path(profile, path)
+            } else {
+                Ok(path.clone())
+            }
+        })
         .collect::<Result<Vec<_>>>()?;
     dep_info.sort();
     let inputs = if validation.is_strict() {
@@ -1683,7 +1712,7 @@ fn write_fresh_profile(
     };
     let primary_sha256 = artifact_sha256(&artifacts.primary)?;
     let mut document = format!(
-        "lorry-fresh-v4\nbase={}\ninputs={}\nprimary={}\t{}\nmessages={}\n",
+        "lorry-fresh-v5\nbase={}\ninputs={}\nprimary={}\t{}\nmessages={}\n",
         hex(&base),
         hex(&inputs),
         hex(&primary_sha256),
@@ -1700,11 +1729,16 @@ fn write_fresh_profile(
             relative.display()
         ));
     }
-    for root in local_roots {
-        let Some(root) = root.to_str() else {
+    for source in local_roots {
+        let Some(root) = source.root.to_str() else {
             return Ok(());
         };
-        document.push_str(&format!("local-root={}\n", hex(root.as_bytes())));
+        let kind = if source.editable {
+            "editable-root"
+        } else {
+            "local-root"
+        };
+        document.push_str(&format!("{kind}={}\n", hex(root.as_bytes())));
     }
     for path in &artifacts.library_paths {
         let path = path
@@ -1713,7 +1747,14 @@ fn write_fresh_profile(
         document.push_str(&format!("library-path={}\n", hex(path.as_bytes())));
     }
     for path in dep_info {
-        document.push_str(&format!("dep-info={}\n", path.display()));
+        if path.is_absolute() {
+            let path = path
+                .to_str()
+                .ok_or_else(|| Error::failure("dep-info path is not Unicode"))?;
+            document.push_str(&format!("dep-info-absolute={}\n", hex(path.as_bytes())));
+        } else {
+            document.push_str(&format!("dep-info={}\n", path.display()));
+        }
     }
     let mut record = AtomicFile::new(&fresh_record_path(profile, owner_root))?;
     record.write_all(document.as_bytes())?;
@@ -1728,7 +1769,7 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
     }
     let document = String::from_utf8(fs::read(path).ok()?).ok()?;
     let mut lines = document.lines();
-    (lines.next()? == "lorry-fresh-v4").then_some(())?;
+    (lines.next()? == "lorry-fresh-v5").then_some(())?;
     let base = decode_hex(lines.next()?.strip_prefix("base=")?).ok()?;
     let inputs = decode_hex(lines.next()?.strip_prefix("inputs=")?).ok()?;
     let primary = parse_fresh_artifact(lines.next()?.strip_prefix("primary=")?)?;
@@ -1761,8 +1802,18 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
             {
                 return None;
             }
-        } else if let Some(value) = line.strip_prefix("local-root=") {
-            local_roots.push(PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?));
+        } else if let Some(value) = line
+            .strip_prefix("local-root=")
+            .or_else(|| line.strip_prefix("editable-root="))
+        {
+            local_roots.push(LocalSource {
+                root: PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?),
+                editable: line.starts_with("editable-root="),
+            });
+        } else if let Some(value) = line.strip_prefix("dep-info-absolute=") {
+            let path = PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?);
+            path.is_absolute().then_some(())?;
+            dep_info.push(path);
         } else if let Some(value) = line.strip_prefix("library-path=") {
             let path = PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?);
             path.is_absolute().then_some(())?;
@@ -1892,7 +1943,7 @@ fn trusted_input_digest(
     profile: &Path,
     package_root: &Path,
     dep_info: &[PathBuf],
-    local_roots: &[PathBuf],
+    local_roots: &[LocalSource],
 ) -> Result<[u8; 32]> {
     let root = fs::canonicalize(package_root).map_err(|error| {
         Error::failure(format!(
@@ -1967,23 +2018,37 @@ fn trusted_input_digest(
         digest.bytes("source-mtime-secs", &modified.as_secs().to_le_bytes());
         digest.bytes("source-mtime-nanos", &modified.subsec_nanos().to_le_bytes());
     }
-    for root in local_roots {
-        metadata_tree_digest(root, &mut digest)?;
+    for source in local_roots {
+        if source.editable {
+            let mut manifest = Manifest::load_path_dependency(&source.root)?;
+            manifest.workspace_root.clone_from(&root);
+            digest.bytes(
+                "editable-source",
+                &crate::member_source::snapshot(&manifest, false)?.sha256,
+            );
+        } else {
+            metadata_tree_digest(&source.root, &mut digest)?;
+        }
     }
     Ok(digest.finish())
 }
 
-fn local_source_roots(resolution: &Resolution) -> Vec<PathBuf> {
+fn local_source_roots(resolution: &Resolution) -> Vec<LocalSource> {
     let mut roots = resolution
         .packages
         .iter()
         .filter_map(|package| match &package.source {
-            crate::resolver::ResolvedSource::Path { physical_root, .. } => {
-                Some(physical_root.clone())
-            }
-            crate::resolver::ResolvedSource::Git { physical_root, .. } => {
-                Some(physical_root.clone())
-            }
+            crate::resolver::ResolvedSource::Path { physical_root, .. } => Some(LocalSource {
+                root: physical_root.clone(),
+                editable: package
+                    .local_manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.editable),
+            }),
+            crate::resolver::ResolvedSource::Git { physical_root, .. } => Some(LocalSource {
+                root: physical_root.clone(),
+                editable: false,
+            }),
             crate::resolver::ResolvedSource::CratesIo { .. } => None,
         })
         .collect::<Vec<_>>();
