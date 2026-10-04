@@ -965,6 +965,9 @@ enum Scope<'a> {
         complete: &'a Resolution,
         dev_members: &'a BTreeSet<PathBuf>,
     },
+    WorkspaceMetadata {
+        complete: &'a Resolution,
+    },
 }
 
 impl<'a> Scope<'a> {
@@ -988,8 +991,11 @@ impl<'a> Scope<'a> {
     }
 
     fn locked_package(self, event: &Event) -> std::result::Result<Option<&'a PackageKey>, Failure> {
-        let Self::WorkspaceSelected { complete, .. } = self else {
-            return Ok(None);
+        let complete = match self {
+            Self::WorkspaceSelected { complete, .. } | Self::WorkspaceMetadata { complete } => {
+                complete
+            }
+            _ => return Ok(None),
         };
         let Some(parent) = &event.parent else {
             return Ok(None);
@@ -1607,7 +1613,7 @@ fn fulfill(
             .is_some_and(|node| node.record.proc_macro)
     {
         event.compile_kind = CompileKind::Host;
-        event.context = normalize_context(options.resolver, FeatureContext::Host);
+        event.context = normalize_scope_context(options.resolver, scope, FeatureContext::Host);
     }
     if event.ancestors.contains(key) {
         return Err(Failure::new(format!(
@@ -1743,7 +1749,7 @@ fn activate(
             .local_manifest
             .as_ref()
             .is_some_and(|manifest| match scope {
-                Scope::WorkspaceComplete => manifest.editable,
+                Scope::WorkspaceComplete | Scope::WorkspaceMetadata { .. } => manifest.editable,
                 Scope::WorkspaceSelected { dev_members, .. } => {
                     dev_members.contains(&manifest.root)
                 }
@@ -1801,7 +1807,7 @@ fn activate(
             parent_compile_kind: Some(event.compile_kind),
             dependency_index: index,
             dependency,
-            context: normalize_context(options.resolver, child_context),
+            context: normalize_scope_context(options.resolver, scope, child_context),
             compile_kind: child_compile_kind,
             depth: event.depth.saturating_add(1),
             ancestors,
@@ -2075,6 +2081,7 @@ fn root_context(
     dependency: &CandidateDependency,
 ) -> FeatureContext {
     let context = match scope {
+        Scope::WorkspaceMetadata { .. } => FeatureContext::Unified,
         Scope::Complete | Scope::WorkspaceComplete => {
             FeatureContext::Target(dependency.target.clone().unwrap_or_default())
         }
@@ -2082,7 +2089,7 @@ fn root_context(
             FeatureContext::Target(String::new())
         }
     };
-    normalize_context(resolver, context)
+    normalize_scope_context(resolver, scope, context)
 }
 
 fn child_target_context(
@@ -2092,7 +2099,23 @@ fn child_target_context(
 ) -> FeatureContext {
     match scope {
         Scope::Complete | Scope::WorkspaceComplete => target_dependency_context(parent, selector),
-        Scope::Selected(_) | Scope::WorkspaceSelected { .. } => parent,
+        Scope::Selected(_) | Scope::WorkspaceSelected { .. } | Scope::WorkspaceMetadata { .. } => {
+            parent
+        }
+    }
+}
+
+// Metadata reports resolver requests across platforms and dependency kinds;
+// those node lists differ from the per-unit host/target feature sets.
+fn normalize_scope_context(
+    resolver: ResolverVersion,
+    scope: Scope<'_>,
+    context: FeatureContext,
+) -> FeatureContext {
+    if matches!(scope, Scope::WorkspaceMetadata { .. }) {
+        FeatureContext::Unified
+    } else {
+        normalize_context(resolver, context)
     }
 }
 
@@ -2804,6 +2827,116 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_features_match_cargo_across_platforms_and_dependency_kinds() {
+        let fixture = LocalFixture::new();
+        fs::write(fixture.0.join("Cargo.toml"), "[workspace]\nmembers = [\"app\", \"shared\"]\nexclude = [\"leaf\", \"win-only\", \"host-only\"]\nresolver = \"2\"\n").unwrap();
+        fixture.package("app", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nshared = { path = \"../shared\", default-features = false }\n[target.'cfg(windows)'.dependencies]\nwin-only = { path = \"../win-only\", features = [\"win\"] }\nshared = { path = \"../shared\", features = [\"windows\"] }\n[build-dependencies]\nshared = { path = \"../shared\", features = [\"host\"] }\n[dev-dependencies]\nshared = { path = \"../shared\", features = [\"dev\"] }\n");
+        fixture.package("shared", "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nleaf = { path = \"../leaf\", optional = true }\nhost-only = { path = \"../host-only\", optional = true }\n[features]\nwindows = [\"dep:leaf\"]\nhost = [\"dep:host-only\"]\ndev = [\"dep:leaf\"]\n");
+        for name in ["leaf", "win-only", "host-only"] {
+            fixture.package(name, &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\nwin = []\n"));
+        }
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let mut catalog = Catalog::default();
+        let limits = options(ResolverVersion::V2);
+        let complete =
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        let roots = workspace
+            .packages
+            .iter()
+            .map(|member| member.root.clone())
+            .collect();
+        let requests = workspace::features::member_requests(
+            &workspace,
+            &roots,
+            &crate::cli::FeatureSelection::default(),
+            true,
+        )
+        .unwrap();
+        let metadata =
+            workspace::resolve_metadata_workspace(&complete, &catalog, &limits, &requests).unwrap();
+        let features = metadata
+            .packages
+            .iter()
+            .map(|package| {
+                (
+                    package.key.name.clone(),
+                    package
+                        .feature_sets
+                        .values()
+                        .flatten()
+                        .cloned()
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            features["shared"],
+            BTreeSet::from(["dev".to_owned(), "host".to_owned(), "windows".to_owned()])
+        );
+        assert!(features.contains_key("leaf") && features.contains_key("host-only"));
+        for platform in [
+            None,
+            Some("x86_64-unknown-linux-gnu"),
+            Some("x86_64-pc-windows-msvc"),
+        ] {
+            let mut command = std::process::Command::new(env!("CARGO"));
+            command
+                .env(
+                    "RUSTC",
+                    Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+                )
+                .args([
+                    "metadata",
+                    "--offline",
+                    "--format-version=1",
+                    "--manifest-path",
+                ])
+                .arg(fixture.0.join("Cargo.toml"));
+            if let Some(platform) = platform {
+                command.args(["--filter-platform", platform]);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let cargo: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let names = cargo["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|package| {
+                    (
+                        package["id"].as_str().unwrap(),
+                        package["name"].as_str().unwrap(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let nodes = cargo["resolve"]["nodes"].as_array().unwrap();
+            for node in nodes {
+                let name = names[node["id"].as_str().unwrap()];
+                let cargo_features = node["features"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|feature| feature.as_str().unwrap().to_owned())
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(features[name], cargo_features, "{name}, {platform:?}");
+            }
+            if platform.is_none() {
+                assert_eq!(features.len(), nodes.len());
+            }
+            if platform == Some("x86_64-unknown-linux-gnu") {
+                assert!(!names.values().any(|name| *name == "win-only"));
             }
         }
     }

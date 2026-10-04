@@ -30,6 +30,31 @@ pub(crate) fn resolve_selected_workspace(
         complete,
         dev_members: &dev_members,
     };
+    resolve_workspace_request(complete, catalog, options, members, scope)
+}
+
+pub(crate) fn resolve_metadata_workspace(
+    complete: &Resolution,
+    catalog: &Catalog,
+    options: &Options,
+    members: &[MemberRequest],
+) -> Result<Resolution> {
+    resolve_workspace_request(
+        complete,
+        catalog,
+        options,
+        members,
+        Scope::WorkspaceMetadata { complete },
+    )
+}
+
+fn resolve_workspace_request(
+    complete: &Resolution,
+    catalog: &Catalog,
+    options: &Options,
+    members: &[MemberRequest],
+    scope: Scope<'_>,
+) -> Result<Resolution> {
     let mut queue = VecDeque::new();
     for (index, member) in members.iter().enumerate() {
         let package = complete

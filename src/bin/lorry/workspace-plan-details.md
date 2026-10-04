@@ -1716,6 +1716,15 @@ features, default-feature suppression, all features, and an absent feature.
 The focused matrix passed in `/tmp/lorry-m6-cli-features-cargo-matrix.log`;
 strict Clippy passed in `/tmp/lorry-m6-cli-features-cargo-matrix-clippy.log`.
 
+Metadata now has a distinct solver feature scope over the same fixed
+identities. It unifies requests across dependency kinds and platforms,
+including development edges, rather than exposing per-unit build features.
+An actual Cargo metadata oracle checks unfiltered, Linux-filtered, and
+Windows-filtered results: retained nodes keep the complete feature lists.
+Thirty-four resolver tests and strict Clippy passed in
+`/tmp/lorry-m6-metadata-features-{cargo-oracle,clippy}.log`.
+Metadata command/source preparation integration remains pending.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.
