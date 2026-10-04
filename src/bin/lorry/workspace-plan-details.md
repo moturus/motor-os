@@ -1424,6 +1424,15 @@ The shared auxiliary-target reader now accepts and validates it just like
 the existing library flag. The paired metadata contract passed in
 `/tmp/lorry-m5-example-scrape-contract.log`, including a nonboolean rejection.
 
+The final full milestone gate passed in 677 seconds on 2026-10-04
+(`/tmp/lorry-m5-full-example-scrape-fixed.log`). It ran 381 Rust tests
+(ten contract tests intentionally run through their dedicated drivers),
+three own-message tests, all host contracts, Cargo native/cross byte identity,
+and native Motor self-build, cross/native identity, and interrupted-child
+recovery. Native preparation took 165.356 seconds and the native gate took
+256.335 seconds. Host and native online vendoring succeeded without retries.
+The original failures and their diagnoses above remain part of the evidence.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,

@@ -118,7 +118,7 @@ warning in the failing binary's prerequisite and retains exact comparisons.
 has the evidence, the contract of each milestone, the list of defects, the
 policy choices, the decisions, and the reason for each revision.
 
-Milestone 5 is in progress. Builds and source metadata now share membership
+Milestone 5 is complete. Builds and source metadata now share membership
 discovery and default-member rules. Implicit path members receive Clippy
 coverage. Focused Cargo contracts prove implicit membership, duplicate-name
 rejection, exclusions, singleton defaults, and package-limit accounting.
@@ -132,7 +132,10 @@ reading command, version/ID/pattern package selectors, ignored member settings,
 unused profiles, custom metadata, and example/bench descriptions have focused
 Cargo coverage. Compiler queries work at virtual and empty roots without
 selecting a package. Metadata rejects package selectors and source metadata
-always describes every member. The full milestone gate remains pending.
+always describes every member. The full milestone gate passed in 677 seconds
+on 2026-10-04: 381 Rust tests, three own-message tests, all host contracts,
+Cargo native/cross identity, and native Motor self-build, identity, and
+child-recovery checks. Host and native online vendoring needed no retries.
 
 Repeated package selectors, workspace exclusions, and shared Cargo feature
 syntax are implemented, with explicit errors for execution or feature
