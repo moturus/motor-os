@@ -155,6 +155,14 @@ struct Facts<'a> {
 
 pub fn preflight(policy: &Policy, resolution: &Resolution) -> Result<Preflight> {
     let depth = selected_depth(resolution)?;
+    preflight_depth(policy, resolution, depth)
+}
+
+pub(crate) fn preflight_workspace(policy: &Policy, resolution: &Resolution) -> Result<Preflight> {
+    preflight_depth(policy, resolution, graph_depth(resolution, true)?)
+}
+
+fn preflight_depth(policy: &Policy, resolution: &Resolution, depth: u64) -> Result<Preflight> {
     if depth > policy.limits.max_depth {
         return Err(Error::failure(format!(
             "selected dependency depth {depth} exceeds policy limit {}",

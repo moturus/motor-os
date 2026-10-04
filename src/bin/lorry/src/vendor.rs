@@ -38,6 +38,21 @@ use crate::vendor_lock::ProjectVendorLock;
 pub(crate) mod workspace;
 
 pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
+    if options.locked {
+        if !matches!(options.mode, VendorMode::Sync) {
+            return Err(Error::usage(
+                "a locked vendor cannot upgrade dependencies",
+                "remove the upgrade request or --locked",
+            ));
+        }
+        return workspace::vendor_locked(cli, options);
+    }
+    if options.offline {
+        return Err(Error::usage(
+            "offline workspace admission requires --locked",
+            "use `lorry vendor --locked --offline`",
+        ));
+    }
     cli.features.require_default()?;
     if cli.use_cargo_registry {
         return Err(Error::usage(

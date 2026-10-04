@@ -73,6 +73,23 @@ test ! -s "$WORK/offline.err"
 cmp "$WORK/requests" "$WORK/requests.before"
 cmp Cargo.lock "$WORK/original.lock"
 cmp .lorry/dependencies-v2.toml "$WORK/original.admission"
+rm .lorry/dependencies-v2.toml
+"$LORRY" -q --lorry-messages vendor --locked --offline --all-features --accept-all >"$WORK/review.out" 2>"$WORK/review.json"
+test ! -s "$WORK/review.out"
+grep -F 'review-format-version = 4' .lorry/dependencies-v2.toml
+grep -F '"reason":"lorry-vendor-change"' "$WORK/review.json" >/dev/null
+test ! -e app/.lorry/dependencies-v2.toml
+cmp Cargo.lock "$WORK/original.lock"
+cmp "$WORK/requests" "$WORK/requests.before"
+cp .lorry/dependencies-v2.toml "$WORK/original.admission"
+cat >>app/Cargo.toml <<'EOF'
+[features]
+unused = []
+EOF
+"$LORRY" -q --lorry-messages vendor --locked --offline >"$WORK/repeated.out" 2>"$WORK/repeated.err"
+test ! -s "$WORK/repeated.out"
+test ! -s "$WORK/repeated.err"
+cmp .lorry/dependencies-v2.toml "$WORK/original.admission"
 cat >>app/Cargo.toml <<'EOF'
 [dependencies.semver]
 version = "=1.0.27"

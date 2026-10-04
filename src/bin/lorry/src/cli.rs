@@ -180,6 +180,8 @@ pub struct TestOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VendorOptions {
     pub accept_all: bool,
+    pub locked: bool,
+    pub offline: bool,
     pub mode: VendorMode,
 }
 
@@ -880,6 +882,8 @@ fn vendor_command() -> ClapCommand {
         .dont_delimit_trailing_values(true)
         .args_override_self(false)
         .arg(package_argument())
+        .args(workspace_selection_arguments())
+        .args(locked_offline_arguments())
         .args(feature_selection_arguments())
         .arg(manifest_path_argument())
         .arg(
@@ -1039,6 +1043,8 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             };
             Ok(Command::Vendor(VendorOptions {
                 accept_all: options.get_flag("accept-all"),
+                locked: options.get_flag("locked") || options.get_flag("frozen"),
+                offline: options.get_flag("offline") || options.get_flag("frozen"),
                 mode,
             }))
         }
@@ -1671,6 +1677,8 @@ mod tests {
                 .command,
             Command::Vendor(VendorOptions {
                 accept_all: false,
+                locked: false,
+                offline: false,
                 mode: VendorMode::Upgrade(UpgradeOptions {
                     package: "libc".to_owned(),
                     version: "0.2.187".to_owned(),
@@ -1842,7 +1850,7 @@ mod tests {
                 ordinary
             );
         }
-        for command in ["vendor", "review", "new", "cache"] {
+        for command in ["review", "new", "cache"] {
             for flag in ["--locked", "--offline", "--frozen"] {
                 assert!(parse(&[command, flag]).unwrap_err().is_usage());
             }
