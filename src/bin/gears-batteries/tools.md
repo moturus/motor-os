@@ -35,3 +35,8 @@ reports the actual mutation even if saving its bookkeeping later fails.
 `patch` accepts files up to 4 MiB and returns at most 30 KB of diff, with
 an explicit truncation flag. Its matches normalize CRLF and LF line endings;
 escaped newlines and tabs are decoded only after the earlier rules fail.
+
+`check` takes `{}` and runs the selected workspace declaration directly,
+with a 120-second limit and 128 KiB per output stream. Its receipt contains
+the actual exit status, duration and pass/fail result, bounded previews and
+a current-session saved-results path for the full captured output.

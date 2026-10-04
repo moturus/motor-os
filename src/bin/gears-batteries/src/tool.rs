@@ -9,6 +9,10 @@ use crate::paths::ToolContext;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Empty {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReadFile {
     path: String,
     #[serde(default)]
@@ -52,6 +56,11 @@ pub fn run(name: &str, reader: impl Read, context: &ToolContext) -> Result<Value
         return Err("tool arguments exceed 1 MiB".into());
     }
     match name {
+        "check" => {
+            let _: Empty = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("invalid check arguments: {error}"))?;
+            crate::check::execute(context)
+        }
         "patch" => {
             let arguments: Patch = serde_json::from_slice(&bytes)
                 .map_err(|error| format!("invalid patch arguments: {error}"))?;

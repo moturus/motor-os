@@ -1,0 +1,15 @@
+version = 1
+kind = "process"
+name = "check"
+description = "Run the literal check command declared by this workspace and report its actual status, duration and output. This is development evidence, not task acceptance."
+parameters = "parameters.json"
+read_only = false
+
+[process]
+timeout_seconds = 120
+max_output_bytes = 262144
+output = "stdout"
+stdin = "arguments"
+
+[process.command]
+common = ["gears-batteries", "tool", "check"]

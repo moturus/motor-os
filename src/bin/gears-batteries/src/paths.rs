@@ -91,6 +91,18 @@ impl ToolContext {
         Ok(path)
     }
 
+    pub fn save_result(&self, name: &str, bytes: &[u8]) -> Result<Option<PathBuf>, String> {
+        let Some(results) = &self.results else {
+            return Ok(None);
+        };
+        if !results.starts_with(self.state.path()) {
+            return Err("saved results must belong to the Gears directory".into());
+        }
+        let root = StateRoot::new(results.clone())?;
+        root.replace_file(Path::new(name), bytes)?;
+        Ok(Some(root.file(Path::new(name))?))
+    }
+
     pub fn relative(&self, path: &Path) -> PathBuf {
         let base: Vec<_> = self.workspace.components().collect();
         let target: Vec<_> = path.components().collect();
