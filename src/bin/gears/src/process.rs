@@ -147,6 +147,12 @@ pub fn run(
     for name in &request.remove_env {
         command.env_remove(name);
     }
+    if cancellation.cancelled() {
+        return Err(RunError {
+            detail: "cancelled before starting the child process".into(),
+            started: false,
+        });
+    }
     let mut child = crate::platform::spawn(&mut command).map_err(|error| RunError {
         detail: format!("cannot run {}: {error}", request.program),
         started: false,
@@ -437,6 +443,34 @@ mod tests {
         .unwrap_err();
         assert!(!error.started);
         assert!(error.to_string().contains("cannot run"));
+    }
+
+    #[test]
+    fn a_cancelled_request_does_not_spawn_a_child() {
+        let marker = std::env::temp_dir().join(format!("gears-pre-cancel-{}", std::process::id()));
+        if marker.exists() {
+            std::fs::remove_file(&marker).unwrap();
+        }
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        let error = run(
+            &Request {
+                program: shell_program().into(),
+                args: vec!["-c".into(), "printf started > \"$MARKER\"".into()],
+                cwd: std::env::temp_dir(),
+                stdin: None,
+                timeout: Duration::from_secs(2),
+                max_output_bytes: 4096,
+                env: vec![("MARKER".into(), marker.display().to_string())],
+                remove_env: Vec::new(),
+            },
+            &cancellation,
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+        assert!(!error.started);
+        assert!(error.detail.contains("cancelled before starting"));
+        assert!(!marker.exists());
     }
 
     #[cfg(unix)]
