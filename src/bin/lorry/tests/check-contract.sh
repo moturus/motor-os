@@ -266,24 +266,38 @@ for command in build check test; do
                 "$WORK/paired-cargo-$command-$phase.json"
     done
 done
+# Fail-fast builders may visit independent binaries in different orders, even
+# with one job. Put the warning in a prerequisite of the failing target.
+cp "$PROJECT/src/lib.rs" "$WORK/library-before-failure.rs"
+printf 'pub fn failure_warning() -> u8 { old_value() }\n' >>"$PROJECT/src/lib.rs"
+printf 'fn main() { assert_eq!(check_fixture::value(), 42); }\n' >"$PROJECT/src/bin/first.rs"
 printf 'fn main() { compile_error!("paired build failure"); }\n' >"$PROJECT/src/bin/second.rs"
-for driver in lorry cargo; do
-    executable="$LORRY"
-    [ "$driver" != cargo ] || executable="$LORRY_TEST_CARGO"
-    if (
-        cd "$PROJECT"
-        CARGO_HOME="$HOST_CARGO_HOME" "$executable" build --locked --offline \
-            -j1 --message-format=json --target-dir "$WORK/paired-$driver-build"
-    ) >"$WORK/paired-$driver-failure.json" 2>"$WORK/paired-$driver-failure.err"; then
-        echo "check-contract: paired failing build succeeded ($driver)" >&2
-        exit 1
-    else
-        [ "$?" -eq 101 ]
-    fi
+for failure_target in all second; do
+    failure_selection=()
+    [ "$failure_target" = all ] || failure_selection=(--bin second)
+    for driver in lorry cargo; do
+        executable="$LORRY"
+        [ "$driver" != cargo ] || executable="$LORRY_TEST_CARGO"
+        if (
+            cd "$PROJECT"
+            CARGO_HOME="$HOST_CARGO_HOME" "$executable" build --locked --offline \
+                -j1 --message-format=json --target-dir "$WORK/paired-$driver-build" \
+                "${failure_selection[@]}"
+        ) >"$WORK/paired-$driver-failure-$failure_target.json" \
+            2>"$WORK/paired-$driver-failure-$failure_target.err"; then
+            echo "check-contract: paired failing build succeeded ($driver)" >&2
+            exit 1
+        else
+            [ "$?" -eq 101 ]
+        fi
+    done
+    CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+        --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+        -- differential-messages "$WORK/paired-lorry-failure-$failure_target.json" \
+            "$WORK/paired-cargo-failure-$failure_target.json"
 done
-CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
-    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
-    -- differential-messages "$WORK/paired-lorry-failure.json" "$WORK/paired-cargo-failure.json"
+cp "$WORK/library-before-failure.rs" "$PROJECT/src/lib.rs"
+printf 'fn main() { assert_eq!(check_fixture::old_value(), 42); }\n' >"$PROJECT/src/bin/first.rs"
 printf 'fn main() { assert_eq!(check_fixture::value(), 42); }\n' >"$PROJECT/src/bin/second.rs"
 
 printf 'fn main() { println!("program output"); std::process::exit(7); }\n' \
