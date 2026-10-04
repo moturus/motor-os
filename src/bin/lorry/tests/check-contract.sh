@@ -240,6 +240,48 @@ CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
     --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
     -- test-messages "$WORK/test-no-run.json" "$WORK/metadata.json" success plain any
 
+for command in build check test; do
+    extra=()
+    comparison=differential-success-messages
+    [ "$command" != check ] || comparison=differential-check-messages
+    [ "$command" != test ] || extra+=(--no-run)
+    for phase in cold fresh; do
+        (
+            cd "$PROJECT"
+            "$LORRY" --quiet "$command" -j1 --message-format=json \
+                --target-dir "$WORK/paired-lorry-$command" "${extra[@]}"
+        ) >"$WORK/paired-lorry-$command-$phase.json" 2>"$WORK/paired-lorry-$command-$phase.err"
+        (
+            cd "$PROJECT"
+            CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" "$command" --locked --offline \
+                -j1 --message-format=json --target-dir "$WORK/paired-cargo-$command" "${extra[@]}"
+        ) >"$WORK/paired-cargo-$command-$phase.json" 2>"$WORK/paired-cargo-$command-$phase.err"
+        CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+            --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+            -- "$comparison" "$WORK/paired-lorry-$command-$phase.json" \
+                "$WORK/paired-cargo-$command-$phase.json"
+    done
+done
+printf 'fn main() { compile_error!("paired build failure"); }\n' >"$PROJECT/src/bin/second.rs"
+for driver in lorry cargo; do
+    executable="$LORRY"
+    [ "$driver" != cargo ] || executable="$LORRY_TEST_CARGO"
+    if (
+        cd "$PROJECT"
+        CARGO_HOME="$HOST_CARGO_HOME" "$executable" build --locked --offline \
+            -j1 --message-format=json --target-dir "$WORK/paired-$driver-build"
+    ) >"$WORK/paired-$driver-failure.json" 2>"$WORK/paired-$driver-failure.err"; then
+        echo "check-contract: paired failing build succeeded ($driver)" >&2
+        exit 1
+    else
+        [ "$?" -eq 101 ]
+    fi
+done
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- differential-messages "$WORK/paired-lorry-failure.json" "$WORK/paired-cargo-failure.json"
+printf 'fn main() { assert_eq!(check_fixture::value(), 42); }\n' >"$PROJECT/src/bin/second.rs"
+
 printf 'fn main() { println!("program output"); std::process::exit(7); }\n' \
     >"$PROJECT/src/bin/first.rs"
 if (

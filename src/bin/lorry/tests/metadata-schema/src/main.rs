@@ -41,7 +41,15 @@ fn main() {
         match command.as_str() {
             "compare" => compare(Path::new(lorry), Path::new(cargo)),
             "compare-projection" => compare_projection(Path::new(lorry), Path::new(cargo)),
-            "differential-messages" => compare_messages(Path::new(lorry), Path::new(cargo)),
+            "differential-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), false, false)
+            }
+            "differential-success-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, false)
+            }
+            "differential-check-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, true)
+            }
             _ => panic!("unknown comparison command `{command}`"),
         }
         return;
@@ -80,7 +88,7 @@ fn main() {
     assert_eq!(no_deps.workspace_packages().len(), 1);
 }
 
-fn compare_messages(lorry: &Path, cargo: &Path) {
+fn compare_messages(lorry: &Path, cargo: &Path, success: bool, checking: bool) {
     let lorry = read_messages(lorry);
     let cargo = read_messages(cargo);
     for messages in [&lorry, &cargo] {
@@ -92,7 +100,7 @@ fn compare_messages(lorry: &Path, cargo: &Path) {
         );
         assert!(matches!(
             messages.last(),
-            Some(Message::BuildFinished(finished)) if !finished.success
+            Some(Message::BuildFinished(finished)) if finished.success == success
         ));
     }
 
@@ -126,7 +134,45 @@ fn compare_messages(lorry: &Path, cargo: &Path) {
         })
         .collect::<BTreeSet<String>>();
     assert!(levels.contains("warning"));
-    assert!(levels.contains("error"));
+    if success {
+        assert!(!levels.contains("error"));
+        let artifacts = |messages: &[Message]| {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::CompilerArtifact(artifact) => {
+                        let mut extensions = artifact
+                            .filenames
+                            .iter()
+                            .map(|path| path.extension())
+                            .collect::<BTreeSet<_>>();
+                        // The workspace plan defers metadata-only dependency
+                        // checking. Lorry still builds those libraries fully.
+                        if checking && extensions == BTreeSet::from([Some("rlib"), Some("rmeta")]) {
+                            extensions.remove(&Some("rlib"));
+                        }
+                        Some(
+                            serde_json::to_string(&(
+                                &artifact.package_id,
+                                &artifact.target,
+                                &artifact.profile,
+                                &artifact.features,
+                                artifact.executable.is_some(),
+                                extensions,
+                            ))
+                            .unwrap(),
+                        )
+                    }
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        // Locations differ by output layout, and a cold Cargo target can use
+        // artifacts that Lorry already has in its separate dependency cache.
+        assert_eq!(artifacts(&lorry), artifacts(&cargo));
+    } else {
+        assert!(levels.contains("error"));
+    }
 
     let scripts = |messages: &[Message]| {
         messages

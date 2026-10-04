@@ -289,14 +289,9 @@ impl EventReporter for Reporter {
                 Some(self.published_path(executable)?),
             ),
             RustcOutput::Metadata { metadata, .. } => (vec![self.published_path(metadata)?], None),
-            RustcOutput::BuildScript {
-                executable,
-                unhashed_executable,
-                ..
-            } => (
-                vec![self.published_path(executable)?],
-                Some(self.published_path(unhashed_executable)?),
-            ),
+            RustcOutput::BuildScript { executable, .. } => {
+                (vec![self.published_path(executable)?], None)
+            }
         };
         self.write_locked(
             &mut state,
