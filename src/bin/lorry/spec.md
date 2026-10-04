@@ -351,6 +351,9 @@ Build, check, Clippy, test, and tree accept `--workspace` and repeated
 Clean supports repeated package selections through source-only discovery and
 removes their owned units, programs, and local cache entries. Unselected clean
 removes the shared artifact tree, including at an empty workspace root.
+New packages inside a containing workspace omit member-local lockfiles and
+report how to add the member without rewriting existing workspace files.
+Excluded destinations remain standalone packages with their own lockfiles.
 Cargo's workspace precedence applies: without exclusions `-p` is validated
 but all members are selected; with exclusions `-p` is ignored. Unmatched
 exclusions warn, except in quiet mode. Empty selections fail explicitly.

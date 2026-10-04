@@ -20,6 +20,10 @@ pub(crate) struct SourceWorkspace {
 }
 
 impl SourceWorkspace {
+    pub(crate) fn containing_workspace(directory: &Path) -> Result<Option<PathBuf>> {
+        Ok(nearest_workspace(directory)?.map(|workspace| workspace.root))
+    }
+
     pub(crate) fn load_compilation(
         current: &Path,
         manifest_path: Option<&Path>,

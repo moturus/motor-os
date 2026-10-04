@@ -2620,6 +2620,14 @@ Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contra
 
 ### Member build-time code
 
+New-package creation now discovers the containing workspace through the shared
+reader, following canonical parent paths and honoring exclusions. Workspace
+packages omit their unused local lock and receive member-addition guidance;
+standalone and excluded packages retain the existing ready-to-build lock.
+Tests cover nonexistent nested parents, member patterns, exclusions, symlinked
+parents, and unchanged existing workspace manifest/lock bytes. All six creation
+tests and strict Clippy pass in `/tmp/lorry-m8-workspace-new-{unit,clippy}.log`.
+
 Clean now reads the shared source workspace, accepts repeated `-p` and
 `--workspace`, and applies the existing owner checks to every selected member.
 Unselected clean also works at multi-member and empty roots without a lockfile

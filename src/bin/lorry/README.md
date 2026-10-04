@@ -83,7 +83,9 @@ lorry run
 ```
 
 `lorry new` creates an edition-2024 binary package and its dependency-free
-Cargo.lock, so it is immediately buildable without Cargo.
+Cargo.lock, so it is immediately buildable without Cargo. Inside a workspace
+it omits that unused member lockfile and explains how to add the new member.
+It leaves the workspace manifest and lockfile unchanged.
 
 ## Build, run, and test
 

@@ -24,6 +24,14 @@ pub fn execute(path: &str, quiet: bool) -> Result<i32> {
         .expect("normalized package destinations always have a parent");
 
     let staging = AtomicDirectory::new(parent, name)?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        Error::failure(format!(
+            "failed to resolve package parent `{}`: {error}",
+            parent.display()
+        ))
+    })?;
+    let canonical_destination = canonical_parent.join(name);
+    let workspace = crate::manifest::SourceWorkspace::containing_workspace(&canonical_destination)?;
     let source_directory = staging.path().join("src");
     fs::create_dir(&source_directory).map_err(|error| {
         Error::failure(format!(
@@ -35,10 +43,12 @@ pub fn execute(path: &str, quiet: bool) -> Result<i32> {
         &staging.path().join("Cargo.toml"),
         &MANIFEST.replace("{name}", name),
     )?;
-    write(
-        &staging.path().join("Cargo.lock"),
-        &LOCKFILE.replace("{name}", name),
-    )?;
+    if workspace.is_none() {
+        write(
+            &staging.path().join("Cargo.lock"),
+            &LOCKFILE.replace("{name}", name),
+        )?;
+    }
     write(&source_directory.join("main.rs"), MAIN_SOURCE)?;
 
     if !staging.commit_no_replace(&destination)? {
@@ -50,6 +60,14 @@ pub fn execute(path: &str, quiet: bool) -> Result<i32> {
     }
     if !quiet {
         eprintln!("    Created binary (application) `{name}` package");
+        if let Some(workspace) = workspace {
+            let member = canonical_destination.strip_prefix(&workspace).unwrap();
+            eprintln!(
+                "note: add `{}` to `workspace.members` in `{}` if needed; Lorry leaves the workspace manifest unchanged",
+                member.display(),
+                workspace.join("Cargo.toml").display()
+            );
+        }
     }
     Ok(0)
 }
@@ -211,6 +229,46 @@ mod tests {
             LOCKFILE.replace("{name}", "example-app")
         );
         assert!(!destination.join(".git").exists());
+    }
+
+    #[test]
+    fn workspace_packages_omit_member_locks_and_preserve_workspace_files() {
+        let temp = TempDirectory::new();
+        let manifest = "[workspace]\nmembers = [\"packages/*\"]\nexclude = [\"standalone\"]\nresolver = \"2\"\n";
+        let lock = "original workspace lock\n";
+        fs::write(temp.0.join("Cargo.toml"), manifest).unwrap();
+        fs::write(temp.0.join("Cargo.lock"), lock).unwrap();
+        for name in ["packages/member", "nested/added", "standalone/independent"] {
+            let destination = temp.0.join(name);
+            execute(destination.to_str().unwrap(), true).unwrap();
+            assert!(destination.join("Cargo.toml").is_file());
+            assert_eq!(
+                destination.join("Cargo.lock").exists(),
+                name.starts_with("standalone/")
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(temp.0.join("Cargo.toml")).unwrap(),
+            manifest
+        );
+        assert_eq!(fs::read_to_string(temp.0.join("Cargo.lock")).unwrap(), lock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_discovery_follows_the_package_parent_symlink() {
+        let workspace = TempDirectory::new();
+        let outside = TempDirectory::new();
+        fs::write(
+            workspace.0.join("Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&workspace.0, outside.0.join("link")).unwrap();
+        let destination = outside.0.join("link/member");
+        execute(destination.to_str().unwrap(), true).unwrap();
+        assert!(destination.join("Cargo.toml").is_file());
+        assert!(!destination.join("Cargo.lock").exists());
     }
 
     #[test]
