@@ -21,14 +21,10 @@ pub(crate) struct SourceWorkspace {
 impl SourceWorkspace {
     // Editor discovery describes source targets before dependency preparation.
     // It must neither inspect nor repair Cargo.lock or admission state.
-    pub fn load(
-        current: &Path,
-        manifest_path: Option<&Path>,
-        selected: Option<&str>,
-    ) -> Result<Self> {
+    pub fn load(current: &Path, manifest_path: Option<&Path>) -> Result<Self> {
         let manifest_path = discover_manifest(current, manifest_path)?;
         let directory = manifest_path.parent().unwrap().to_owned();
-        let mut workspace = match nearest_workspace(&directory)? {
+        let workspace = match nearest_workspace(&directory)? {
             Some(root) => {
                 let packages = root.load_members()?;
                 if directory == root.root || packages.contains_key(&directory) {
@@ -41,21 +37,6 @@ impl SourceWorkspace {
             }
             None => Self::standalone(&manifest_path)?,
         };
-        if let Some(selected) = selected {
-            let root = super::selection::select_one(
-                workspace.packages.iter().map(|package| {
-                    (
-                        package.name.as_str(),
-                        &package.version,
-                        package.root.as_path(),
-                    )
-                }),
-                selected,
-            )?;
-            workspace.packages.retain(|package| package.root == root);
-            let package = &workspace.packages[0];
-            workspace.default_members = vec![package.root.clone()];
-        }
         Ok(workspace)
     }
 

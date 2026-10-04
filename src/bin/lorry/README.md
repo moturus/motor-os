@@ -243,8 +243,8 @@ and preserve Cargo.lock. Acquisition and admission remain part of `vendor`.
 that warning. `--no-deps` describes
 source targets and declared dependencies without requiring Cargo.lock,
 compiler discovery, or dependency preparation. In a workspace it describes
-all members, including when invoked with a member manifest; `-p` selects one
-member. As in Cargo, path dependencies below the workspace root are members
+all members, including when invoked with a member manifest. Metadata rejects
+package selectors, as Cargo does. Path dependencies below the workspace root are members
 too. Source metadata can describe library crate types, development
 dependencies, and binary `required-features` outside Lorry's build admission
 rules.
@@ -258,7 +258,9 @@ readme and license-file paths are relative to the member. Explicit
 component globs `*`, `?`, and `[...]`; recursive `**` is rejected.
 `[lints] workspace = true` inherits Rust, Clippy, and rustdoc settings from
 `workspace.lints`; member overrides alongside inheritance are rejected.
-Dependency inheritance and example and bench targets follow later.
+Workspace dependencies inherit sources and add member features. Examples and
+benches are described, with explicit targets and Cargo's auto-discovery rules;
+their compilation remains deferred.
 
 Cargo configuration follows the invocation directory and its parents;
 selecting a package or supplying `--manifest-path` does not move that search.

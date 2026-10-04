@@ -510,7 +510,6 @@ fn metadata_command() -> ClapCommand {
     ClapCommand::new("metadata")
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
-        .arg(package_argument())
         .arg(manifest_path_argument())
         .arg(
             Arg::new("format-version")
@@ -1221,11 +1220,10 @@ mod tests {
             "/project/Cargo.toml",
             "--filter-platform=x86_64-unknown-motor",
             "--locked",
-            "-p",
-            "app",
         ])
         .unwrap();
-        assert_eq!(metadata.package.as_deref(), Some("app"));
+        assert_eq!(metadata.package, None);
+        assert!(parse(&["metadata", "-p", "app"]).unwrap_err().is_usage());
         assert_eq!(
             metadata.command,
             Command::Metadata(MetadataOptions {

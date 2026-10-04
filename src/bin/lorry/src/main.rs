@@ -173,7 +173,7 @@ fn print_help(topic: Option<&str>) {
             "Lint a package with Clippy\n\nUsage: lorry [+toolchain] [GLOBAL] clippy [CHECK OPTIONS] [--no-deps] [-- LINT OPTIONS...]"
         ),
         Some("metadata") => println!(
-            "Describe a package graph\n\nUsage: lorry [+toolchain] [GLOBAL] metadata [-p NAME] [--format-version 1] [--manifest-path PATH] [--no-deps] [--filter-platform TRIPLE] [--locked|--offline|--frozen]"
+            "Describe a workspace graph\n\nUsage: lorry [+toolchain] [GLOBAL] metadata [--format-version 1] [--manifest-path PATH] [--no-deps] [--filter-platform TRIPLE] [--locked|--offline|--frozen]"
         ),
         Some("locate-project") => println!(
             "Locate a manifest\n\nUsage: lorry [+toolchain] [GLOBAL] locate-project [--workspace] [--manifest-path PATH] [--message-format json|plain]"

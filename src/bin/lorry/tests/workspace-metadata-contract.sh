@@ -161,10 +161,14 @@ cp "$WORK/target.baseline" "$PROJECT/app/Cargo.toml"
 )
 sha256sum "${source_files[@]}" >"$WORK/sources.after"
 cmp "$WORK/sources.before" "$WORK/sources.after"
-source_metadata "$PROJECT/Cargo.toml" -p app >"$WORK/selected.json"
-grep -F "\"workspace_members\":[\"path+file://$PROJECT/app#0.1.0\"]" \
-    "$WORK/selected.json" >/dev/null
-[ "$(grep -o '"manifest_path":' "$WORK/selected.json" | wc -l)" -eq 1 ]
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    if "$builder" metadata --manifest-path "$PROJECT/Cargo.toml" --no-deps -p app \
+        >"$WORK/selected.json" 2>"$WORK/selected.err"; then
+        echo "workspace-metadata: metadata accepted a package selector" >&2
+        exit 1
+    fi
+    grep -F "unexpected argument '-p'" "$WORK/selected.err" >/dev/null
+done
 [ ! -e "$PROJECT/Cargo.lock" ]
 [ ! -e "$PROJECT/target" ]
 [ ! -e "$PROJECT/.lorry" ]

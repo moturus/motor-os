@@ -134,7 +134,7 @@ lorry [+toolchain] [GLOBAL] clean  [-p NAME]
 lorry [+toolchain] [GLOBAL] new PATH
 lorry [+toolchain] [GLOBAL] locate-project [--workspace] [--manifest-path PATH]
                                           [--message-format json|plain]
-lorry [+toolchain] [GLOBAL] metadata [-p NAME] [--format-version 1]
+lorry [+toolchain] [GLOBAL] metadata [--format-version 1]
                                     [--manifest-path PATH] [--no-deps]
                                     [--filter-platform TRIPLE]
 lorry [+toolchain] [GLOBAL] review [-p NAME]

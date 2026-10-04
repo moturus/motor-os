@@ -1377,6 +1377,15 @@ configuration or resolve dependencies.
 - `metadata` has no package selector. It always describes the workspace;
   its feature options are handled by the metadata resolver mode.
 
+The metadata interface now rejects package selectors, as Cargo does. Source
+workspace loading never filters members, and the Git-patch metadata contract
+uses the package-free interface. The 24 CLI tests, strict Clippy, paired
+source metadata contract, and offline Git-patch contract passed in
+`/tmp/lorry-m5-metadata-selection-cli.log`,
+`/tmp/lorry-m5-metadata-selection-clippy.log`,
+`/tmp/lorry-m5-metadata-selection-source-contract.log`, and
+`/tmp/lorry-m5-metadata-selection-git-contract.log`.
+
 Resolver-specific feature propagation belongs to milestone 6. Before a
 command can execute a selected target or set of packages, reject unsupported
 selections rather than reducing them to one package.

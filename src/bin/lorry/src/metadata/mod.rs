@@ -33,7 +33,6 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         let workspace = SourceWorkspace::load(
             &current,
             options.manifest_path.as_deref().map(std::path::Path::new),
-            cli.package.as_deref(),
         )?;
         warn_default_format(cli, options);
         Manifest::report_warnings(&workspace.packages, cli.verbosity);

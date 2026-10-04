@@ -125,6 +125,14 @@ rejection, exclusions, singleton defaults, and package-limit accounting.
 The shared discovery also serves path/Git dependency inheritance. All 16
 package fields inherit, with rebased file paths and Cargo's readme and publish
 rules. Focused metadata comparisons and strict Clippy validation passed.
+Workspace dependencies and all lint namespaces now inherit too. Cargo
+configuration follows the invocation directory, while project policy belongs
+at the workspace root. Parent manifest discovery, manifest paths on every
+reading command, version/ID/pattern package selectors, ignored member settings,
+unused profiles, custom metadata, and example/bench descriptions have focused
+Cargo coverage. Compiler queries work at virtual and empty roots without
+selecting a package. Metadata rejects package selectors and source metadata
+always describes every member. The full milestone gate remains pending.
 
 ## Goal
 

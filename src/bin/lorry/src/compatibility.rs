@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 
 pub fn locate_project(manifest_path: Option<&str>, plain: bool) -> Result<i32> {
     // Resolved metadata is per package, so a member manifest locates itself.
-    let workspace = SourceWorkspace::load(Path::new("."), manifest_path.map(Path::new), None)?;
+    let workspace = SourceWorkspace::load(Path::new("."), manifest_path.map(Path::new))?;
     let path = workspace
         .manifest_path
         .to_str()
@@ -27,8 +27,7 @@ pub fn locate_project(manifest_path: Option<&str>, plain: bool) -> Result<i32> {
 pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let workspace =
-        SourceWorkspace::load(&current, cli.manifest_path.as_deref().map(Path::new), None)?;
+    let workspace = SourceWorkspace::load(&current, cli.manifest_path.as_deref().map(Path::new))?;
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
     let config = Config::load_workspace(
         &current,
