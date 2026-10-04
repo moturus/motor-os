@@ -104,6 +104,26 @@ impl Approver for UnattendedApproval {
     }
 }
 
+struct QuestionApproval {
+    answer: Option<String>,
+    attended: bool,
+    asked: usize,
+}
+
+impl Approver for QuestionApproval {
+    fn attended(&self) -> bool {
+        self.attended
+    }
+    fn approve(&mut self, _: &Permission) -> Approval {
+        Approval::Deny
+    }
+    fn answer(&mut self, _: &gears::hooks::Question) -> Result<Option<String>, String> {
+        assert!(self.attended, "unattended run asked a question");
+        self.asked += 1;
+        Ok(self.answer.clone())
+    }
+}
+
 fn answer(text: &str) -> Result<Completion, ProviderError> {
     Ok(Completion {
         content: text.to_string(),
@@ -247,6 +267,79 @@ fn after_turn_config(script: &str, argument: &std::path::Path) -> AfterTurnConfi
         ],
         timeout: Duration::from_secs(5),
         max_output_bytes: 4096,
+    }
+}
+
+#[test]
+fn hook_questions_are_answered_before_requests_and_unattended_questions_are_skipped() {
+    for (case, value, attended) in [
+        ("answered", Some("yes"), true),
+        ("unattended", None, false),
+        ("skipped", None, true),
+        ("invalid", Some("other"), true),
+    ] {
+        let fixture = Fixture::new(&format!("question-{case}"));
+        let log = fixture.root.join("answer.json");
+        let question = serde_json::json!({"question": {"id": "q1", "text": "Publish?",
+            "choices": [{"value": "yes", "label": "Publish"}, {"value": "no", "label": "Discard"}]}});
+        let response = serde_json::json!({"state": {"answered": true}, "context": Message::user("decision context")});
+        let script = format!(
+            "event=$(cat); case \"$event\" in *'\"event\":\"initialize\"'*) printf '%s' '{question}' ;; *) printf '%s' \"$event\" > \"$1\"; printf '%s' '{response}' ;; esac"
+        );
+        let config = Config {
+            hooks: vec![HookConfig {
+                name: "question".into(),
+                events: Some(vec!["initialize".into(), "answer".into()]),
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    script,
+                    "question".into(),
+                    log.display().to_string(),
+                ],
+                timeout: Duration::from_secs(2),
+                max_output_bytes: 4096,
+            }],
+            ..Config::default()
+        };
+        let provider = Scripted::new(vec![answer("done")]);
+        let mut runtime = fixture.runtime(provider.clone(), &config);
+        let mut approver = QuestionApproval {
+            answer: value.map(str::to_string),
+            attended,
+            asked: 0,
+        };
+        let mut notices = Vec::new();
+        runtime
+            .turn("work".into(), &mut approver, &mut |event| {
+                if let Event::Notice(text) = event {
+                    notices.push(text);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(approver.asked, usize::from(attended));
+        let event: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(log).unwrap()).unwrap();
+        assert_eq!(event["payload"]["attended"], attended);
+        assert_eq!(
+            event["payload"]["answer"],
+            serde_json::json!(value.filter(|v| *v != "other"))
+        );
+        assert!(!runtime.pending_hook_questions());
+        assert!(
+            provider.requests.lock().unwrap()[0]
+                .messages
+                .iter()
+                .any(|message| message.text_content() == "decision context")
+        );
+        assert_eq!(
+            runtime.session().hook_state("question").unwrap()["answered"],
+            true
+        );
+        if case == "invalid" {
+            assert!(notices.iter().any(|text| text.contains("invalid choice")));
+        }
     }
 }
 

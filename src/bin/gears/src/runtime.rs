@@ -120,6 +120,10 @@ pub enum Approval {
 pub trait Approver {
     fn approve(&mut self, request: &Permission) -> Approval;
 
+    fn answer(&mut self, _question: &crate::hooks::Question) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
     fn attended(&self) -> bool {
         true
     }
@@ -135,6 +139,17 @@ where
 }
 
 pub type ProviderFactory = Arc<dyn Fn(&str) -> Result<Arc<dyn Provider>, String> + Send + Sync>;
+
+struct Unattended;
+
+impl Approver for Unattended {
+    fn approve(&mut self, _: &Permission) -> Approval {
+        Approval::Deny
+    }
+    fn attended(&self) -> bool {
+        false
+    }
+}
 
 pub struct Runtime {
     provider: Arc<dyn Provider>,
@@ -157,6 +172,7 @@ pub struct Runtime {
     after_turn: crate::after_turn::Manager,
     interactive: bool,
     hint: Option<String>,
+    questions_answered: usize,
 }
 
 impl Runtime {
@@ -274,6 +290,7 @@ impl Runtime {
             after_turn: crate::after_turn::Manager::default(),
             interactive: false,
             hint,
+            questions_answered: 0,
         })
     }
 
@@ -535,8 +552,20 @@ impl Runtime {
         argument: &str,
         observer: &mut dyn Observer,
     ) -> Result<(), String> {
+        self.hook_command_with_approver(name, argument, &mut Unattended, observer)
+    }
+
+    pub fn hook_command_with_approver(
+        &mut self,
+        name: &str,
+        argument: &str,
+        approver: &mut dyn Approver,
+        observer: &mut dyn Observer,
+    ) -> Result<(), String> {
         self.prepare_write()?;
         self.cancellation.reset();
+        self.questions_answered = 0;
+        self.handle_hook_questions(approver, observer)?;
         emit_notices(observer, self.take_startup_notices())?;
         let mut notices = Vec::new();
         let result = self.hooks.command(
@@ -549,7 +578,90 @@ impl Runtime {
         emit_notices(observer, notices)?;
         self.emit_hook_hint(observer)?;
         result?;
+        self.handle_hook_questions(approver, observer)?;
+        if self.cancellation.cancelled() {
+            return Err("command cancelled".into());
+        }
         self.start_after_turn(observer)
+    }
+
+    pub fn pending_hook_questions(&self) -> bool {
+        self.hooks.has_questions()
+    }
+
+    pub fn resolve_hook_questions(
+        &mut self,
+        approver: &mut dyn Approver,
+        observer: &mut dyn Observer,
+    ) -> Result<(), String> {
+        self.prepare_write()?;
+        self.questions_answered = 0;
+        self.handle_hook_questions(approver, observer).map(|_| ())
+    }
+
+    fn handle_hook_questions(
+        &mut self,
+        approver: &mut dyn Approver,
+        observer: &mut dyn Observer,
+    ) -> Result<bool, String> {
+        let mut handled = false;
+        while let Some(pending) = self.hooks.take_question() {
+            handled = true;
+            if self.questions_answered >= 16 {
+                self.hooks.discard_questions();
+                observer.event(Event::Notice(
+                    "hook questions exceed the operation limit (16); skipped".into(),
+                ))?;
+                break;
+            }
+            self.questions_answered += 1;
+            let attended = approver.attended();
+            let mut answer = if attended && !self.cancellation.cancelled() {
+                match approver.answer(&pending.question) {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        observer.event(Event::Notice(format!(
+                            "hook {} question failed: {error}",
+                            pending.hook
+                        )))?;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if self.cancellation.cancelled() {
+                answer = None;
+            }
+            if answer.as_ref().is_some_and(|value| {
+                !pending
+                    .question
+                    .choices
+                    .iter()
+                    .any(|choice| &choice.value == value)
+            }) {
+                observer.event(Event::Notice(format!(
+                    "hook {} question received an invalid choice; skipped",
+                    pending.hook
+                )))?;
+                answer = None;
+            }
+            let mut notices = Vec::new();
+            if let Err(error) = self.hooks.answer(
+                &pending,
+                answer.as_deref(),
+                attended,
+                &mut self.session,
+                &self.cancellation,
+                &mut |notice| notices.push(notice),
+            ) {
+                notices.push(format!("hook {} answer failed: {error}", pending.hook));
+            }
+            emit_notices(observer, notices)?;
+            self.emit_hook_hint(observer)?;
+            crate::process::ensure_cleanup()?;
+        }
+        Ok(handled)
     }
 
     /// Interfaces opt in explicitly; library and one-shot runs are unattended.
@@ -565,7 +677,7 @@ impl Runtime {
     }
 
     fn start_after_turn(&mut self, observer: &mut dyn Observer) -> Result<(), String> {
-        if !self.interactive {
+        if !self.interactive || self.cancellation.cancelled() {
             return Ok(());
         }
         let Some(config) = &self.after_turn_command else {
@@ -657,6 +769,8 @@ impl Runtime {
         self.prepare_write()?;
         emit_notices(observer, self.take_startup_notices())?;
         self.cancellation.reset();
+        self.questions_answered = 0;
+        self.handle_hook_questions(approver, observer)?;
         let mut notices = Vec::new();
         let input = self.hooks.transform_input(
             input,
@@ -665,6 +779,7 @@ impl Runtime {
             &mut |notice| notices.push(notice),
         )?;
         emit_notices(observer, notices)?;
+        self.handle_hook_questions(approver, observer)?;
         if input.trim().is_empty() {
             return Err("prompt must not be empty".to_string());
         }
@@ -703,13 +818,21 @@ impl Runtime {
         // The interrupted work has stopped. Lifecycle hooks need a fresh
         // token so they can observe the cancelled turn and session changes.
         self.cancellation.reset();
-        let end_result = self.notify("turn_end", payload, observer).and_then(|()| {
-            observer.event(Event::TurnEnd {
-                status,
-                tool_rounds,
-                last_entry_id,
+        let end_result = self
+            .notify("turn_end", payload, observer)
+            .and_then(|()| {
+                if status == "cancelled" {
+                    self.cancellation.cancel();
+                }
+                self.handle_hook_questions(approver, observer).map(|_| ())
             })
-        });
+            .and_then(|()| {
+                observer.event(Event::TurnEnd {
+                    status,
+                    tool_rounds,
+                    last_entry_id,
+                })
+            });
         match result {
             Ok(()) => end_result.and_then(|()| self.start_after_turn(observer)),
             Err(error) => {
@@ -728,15 +851,22 @@ impl Runtime {
         let mut stop_reminders = 0;
         for _ in 0..self.max_tool_rounds {
             self.maybe_compact(false, None, observer)?;
-            let mut messages = self.session.context_messages()?;
-            let mut notices = Vec::new();
-            messages = self.hooks.transform_context(
-                messages,
-                &mut self.session,
-                &self.cancellation,
-                &mut |notice| notices.push(notice),
-            )?;
-            emit_notices(observer, notices)?;
+            let messages = loop {
+                self.handle_hook_questions(approver, observer)?;
+                let messages = self.session.context_messages()?;
+                let mut notices = Vec::new();
+                let messages = self.hooks.transform_context(
+                    messages,
+                    &mut self.session,
+                    &self.cancellation,
+                    &mut |notice| notices.push(notice),
+                )?;
+                emit_notices(observer, notices)?;
+                let changed = self.handle_hook_questions(approver, observer)?;
+                if !changed || self.questions_answered >= 16 {
+                    break messages;
+                }
+            };
             self.ensure_fits(&messages)?;
             let request = self.request(messages, true);
             let completion = {
@@ -979,6 +1109,7 @@ impl Runtime {
             return std::mem::take(&mut self.startup_notices);
         }
         let mut notices = self.take_startup_notices();
+        self.cancellation.reset();
         self.hooks.notify(
             "session_end",
             serde_json::json!({"session_id": self.session.id()}),
@@ -986,6 +1117,15 @@ impl Runtime {
             &self.cancellation,
             &mut |notice| notices.push(notice),
         );
+        self.questions_answered = 0;
+        if let Err(error) = self.handle_hook_questions(&mut Unattended, &mut |event| {
+            if let Event::Notice(text) = event {
+                notices.push(text);
+            }
+            Ok(())
+        }) {
+            notices.push(error);
+        }
         notices
     }
 
@@ -1192,6 +1332,10 @@ impl Runtime {
             )?;
             return Err(error);
         }
+        if let Err(error) = self.handle_hook_questions(approver, observer) {
+            self.record_unstarted_calls(std::slice::from_ref(&call), &error, observer)?;
+            return Err(error);
+        }
         let allowed = match decision {
             Decision::Deny => false,
             Decision::Allow => true,
@@ -1223,6 +1367,10 @@ impl Runtime {
                 observer,
             )?;
             return Err(error);
+        }
+        if self.cancellation.cancelled() {
+            self.record_unstarted_calls(std::slice::from_ref(&call), "turn cancelled", observer)?;
+            return Err("turn cancelled".into());
         }
         let mut post_error = None;
         let (result, outcome) = if !allowed {
@@ -1324,6 +1472,9 @@ impl Runtime {
             is_error: result.is_error,
             outcome,
         });
+        if let Err(error) = self.handle_hook_questions(approver, observer) {
+            post_error.get_or_insert(error);
+        }
         match post_error
             .or_else(|| crate::process::ensure_cleanup().err())
             .or(notification.err())

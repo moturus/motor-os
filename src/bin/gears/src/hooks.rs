@@ -299,6 +299,10 @@ impl Manager {
         self.feedback.lock().unwrap().questions.pop_front()
     }
 
+    pub fn has_questions(&self) -> bool {
+        !self.feedback.lock().unwrap().questions.is_empty()
+    }
+
     pub fn take_hint(&self) -> Option<Option<String>> {
         self.feedback.lock().unwrap().hint.take()
     }

@@ -56,7 +56,8 @@ with distinct values. A questioning hook must subscribe to `answer`.
 The owning hook receives `{"id":"publish-1","answer":"publish","attended":true,"cancelled":false}`.
 A skipped or unattended question has a null answer; unattended runs never read
 input. Questions are queued in hook order, with at most 16 pending. Answers
-may ask another question, subject to the runtime's per-interaction bound.
+may ask another question; a turn, hook command, or standalone interaction
+handles at most 16 questions, then reports and discards further questions.
 Question answers do not replace Gears' tool permission decisions.
 
 Event-specific result fields are:
