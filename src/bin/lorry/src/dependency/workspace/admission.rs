@@ -120,73 +120,108 @@ pub(crate) fn verify(
     inputs: &ReviewInputs<'_>,
     compact: &CompactState,
 ) -> Result<VerifiedAdmission> {
-    let mut reconstructed = reconstruct(inputs, compact)?;
-    let resolution = if let Some(context) = &inputs.prepare_context {
-        compact.require_context(&context.host, &context.target)?;
-        let current = reconstructed
-            .workspace
-            .packages
-            .iter()
-            .find(|member| member.root == inputs.manifest.root)
-            .ok_or_else(|| Error::failure("requested package is not a workspace member"))?;
-        let scope = compact.scope.as_ref().unwrap();
-        if !scope.packages.is_empty() && !scope.packages.contains(&current.name) {
-            return Err(uncovered(&current.name));
-        }
+    let reconstructed = reconstruct(inputs, compact)?;
+    let resolution = if inputs.prepare_context.is_some() {
         let members = member_requests(
             &reconstructed.workspace,
-            &[current.root.clone()].into(),
+            &[inputs.manifest.root.clone()].into(),
             &FeatureSelection::default(),
             false,
         )?;
-        let host = inputs.toolchain.target_info(Some(&context.host))?;
-        let target = inputs.toolchain.target_info(Some(&context.target))?;
-        let selected = resolve_selected_workspace(
-            &reconstructed.complete,
-            &reconstructed.catalog,
-            inputs.options,
-            &members,
-            TargetSelection {
-                host_triple: &host.triple,
-                host_cfg: &host.cfg,
-                target_triple: &target.triple,
-                target_cfg: &target.cfg,
-            },
-        )?;
-        let reviewed = &reconstructed.scopes[compact
-            .contexts
-            .iter()
-            .position(|candidate| candidate == context)
-            .unwrap()];
-        for member in selected.packages.iter().filter(|package| {
-            package
-                .local_manifest
-                .as_ref()
-                .is_some_and(|manifest| manifest.editable)
-        }) {
-            let Some(admitted) = reviewed
-                .packages
-                .iter()
-                .find(|package| package.key == member.key)
-            else {
-                return Err(uncovered(&member.key.name));
-            };
-            if !member.compile_kinds.is_subset(&admitted.compile_kinds)
-                || !member.target_features.is_subset(&admitted.target_features)
-                || !member.host_features.is_subset(&admitted.host_features)
-            {
-                return Err(uncovered(&member.key.name));
-            }
-        }
-        cover(&reconstructed.review, context, &selected)?;
+        let selected = select_requested(&reconstructed, inputs, compact, &members)?;
         Some(legacy_dependency_graph(selected, &inputs.manifest.root)?)
     } else {
         None
     };
     Ok(VerifiedAdmission {
-        review: std::mem::take(&mut reconstructed.review),
+        review: reconstructed.review,
         resolution,
     })
+}
+
+/// Verify every requested root and feature before exposing the shared member
+/// resolution to compilation or a completed-profile shortcut.
+pub(crate) fn verify_requested(
+    inputs: &ReviewInputs<'_>,
+    compact: &CompactState,
+    members: &[MemberRequest],
+) -> Result<VerifiedAdmission> {
+    let reconstructed = reconstruct(inputs, compact)?;
+    let selected = select_requested(&reconstructed, inputs, compact, members)?;
+    Ok(VerifiedAdmission {
+        review: reconstructed.review,
+        resolution: Some(selected),
+    })
+}
+
+fn select_requested(
+    reconstructed: &Reconstructed,
+    inputs: &ReviewInputs<'_>,
+    compact: &CompactState,
+    members: &[MemberRequest],
+) -> Result<Resolution> {
+    let context = inputs.prepare_context.as_ref().ok_or_else(|| {
+        Error::failure("workspace compilation admission requires a host/target context")
+    })?;
+    compact.require_context(&context.host, &context.target)?;
+    if !members.iter().any(|member| member.selected) {
+        return Err(Error::failure(
+            "workspace compilation admission has no selected members",
+        ));
+    }
+    let scope = compact.scope.as_ref().unwrap();
+    for request in members.iter().filter(|member| member.selected) {
+        let member = reconstructed
+            .workspace
+            .packages
+            .iter()
+            .find(|member| member.root == request.root)
+            .ok_or_else(|| Error::failure("requested package is not a workspace member"))?;
+        if !scope.packages.is_empty() && !scope.packages.contains(&member.name) {
+            return Err(uncovered(&member.name));
+        }
+    }
+    let host = inputs.toolchain.target_info(Some(&context.host))?;
+    let target = inputs.toolchain.target_info(Some(&context.target))?;
+    let selected = resolve_selected_workspace(
+        &reconstructed.complete,
+        &reconstructed.catalog,
+        inputs.options,
+        members,
+        TargetSelection {
+            host_triple: &host.triple,
+            host_cfg: &host.cfg,
+            target_triple: &target.triple,
+            target_cfg: &target.cfg,
+        },
+    )?;
+    let reviewed = &reconstructed.scopes[compact
+        .contexts
+        .iter()
+        .position(|candidate| candidate == context)
+        .unwrap()];
+    for member in selected.packages.iter().filter(|package| {
+        package
+            .local_manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.editable)
+    }) {
+        let Some(admitted) = reviewed
+            .packages
+            .iter()
+            .find(|package| package.key == member.key)
+        else {
+            return Err(uncovered(&member.key.name));
+        };
+        if !member.compile_kinds.is_subset(&admitted.compile_kinds)
+            || !member.target_features.is_subset(&admitted.target_features)
+            || !member.host_features.is_subset(&admitted.host_features)
+        {
+            return Err(uncovered(&member.key.name));
+        }
+    }
+    cover(&reconstructed.review, context, &selected)?;
+    Ok(selected)
 }
 
 fn uncovered(package: &str) -> Error {
@@ -360,6 +395,164 @@ pub(crate) fn review(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn shared_compilation_admission_covers_every_selected_member_and_feature() {
+        let fixture = super::super::super::tests::Fixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\", \"shared\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        for name in ["a", "b", "shared"] {
+            let root = fixture.0.join(name);
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("Cargo.toml"), format!("[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[features]\nextra = []\n")).unwrap();
+            fs::write(
+                root.join("src/lib.rs"),
+                "compile_error!(\"verification must not compile\");\n",
+            )
+            .unwrap();
+        }
+        for name in ["a", "b"] {
+            let path = fixture.0.join(name).join("Cargo.toml");
+            fs::write(
+                &path,
+                format!(
+                    "{}[dependencies]\nshared = {{ path = \"../shared\" }}\n",
+                    fs::read_to_string(&path).unwrap()
+                ),
+            )
+            .unwrap();
+        }
+        fs::write(fixture.0.join("Cargo.lock"), "version = 4\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\ndependencies = [\"shared\"]\n[[package]]\nname = \"b\"\nversion = \"1.0.0\"\ndependencies = [\"shared\"]\n[[package]]\nname = \"shared\"\nversion = \"1.0.0\"\n").unwrap();
+        let config = Config::default();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let mut workspace = SourceWorkspace::load(&fixture.0, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        let manifest = &workspace.packages[0];
+        let options = resolver_options(manifest, &config, &toolchain).unwrap();
+        let repositories = RepositorySet::open(
+            &config.repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            config.policy.limits.max_package_bytes,
+        )
+        .unwrap();
+        let source = RegistrySource::Lorry(&repositories);
+        let direct = crate::git::DirectCatalog::default();
+        let (complete, catalog) =
+            resolve_locked(&workspace, &config, source, &direct, &options).unwrap();
+        let scope = ReviewScope {
+            packages: vec!["a".into(), "b".into()],
+            ..ReviewScope::default()
+        };
+        let contexts = vec![Context {
+            host: target.triple.clone(),
+            target: target.triple.clone(),
+        }];
+        let reviewed = resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &options,
+            &requests(&workspace, &scope).unwrap(),
+            TargetSelection {
+                host_triple: &target.triple,
+                host_cfg: &target.cfg,
+                target_triple: &target.triple,
+                target_cfg: &target.cfg,
+            },
+        )
+        .unwrap();
+        let evidence = reviewed
+            .packages
+            .iter()
+            .map(|package| {
+                (
+                    package.key.clone(),
+                    PackageEvidence::from_path(package).unwrap(),
+                )
+            })
+            .collect();
+        let candidate = review(
+            &workspace,
+            scope.clone(),
+            &contexts,
+            &[reviewed],
+            &evidence,
+            vec![],
+        )
+        .unwrap();
+        let compact = CompactState {
+            scope: Some(scope),
+            review_sha256: candidate.commitment().unwrap(),
+            contexts: contexts.clone(),
+            capabilities: vec![],
+        };
+        compact.write(&fixture.0).unwrap();
+        let before_lock = fs::read(fixture.0.join("Cargo.lock")).unwrap();
+        let before_record = fs::read(CompactState::path(&fixture.0)).unwrap();
+        let inputs = ReviewInputs {
+            manifest,
+            config: &config,
+            source,
+            toolchain: &toolchain,
+            options: &options,
+            staging_parent: &fixture.0,
+            direct: Some(&direct),
+            prepare_context: Some(contexts[0].clone()),
+        };
+        let roots = [fixture.0.join("a"), fixture.0.join("b")].into();
+        let members =
+            member_requests(&workspace, &roots, &FeatureSelection::default(), false).unwrap();
+        let verified = verify_requested(&inputs, &compact, &members).unwrap();
+        let (actual_review, selected) = verified.into_parts();
+        assert_eq!(actual_review, candidate);
+        let selected = selected.unwrap();
+        assert_eq!(selected.root_edges.len(), 2);
+        assert_eq!(selected.packages.len(), 3);
+        assert!(selected.packages.iter().all(|package| {
+            package.local_manifest.as_ref().unwrap().workspace_root == workspace.root
+        }));
+
+        let extra = member_requests(
+            &workspace,
+            &roots,
+            &FeatureSelection {
+                features: ["b/extra".into()].into(),
+                ..FeatureSelection::default()
+            },
+            false,
+        )
+        .unwrap();
+        assert!(
+            verify_requested(&inputs, &compact, &extra)
+                .err()
+                .unwrap()
+                .render()
+                .contains("features of `b`")
+        );
+        let unreviewed = member_requests(
+            &workspace,
+            &[fixture.0.join("shared")].into(),
+            &FeatureSelection::default(),
+            false,
+        )
+        .unwrap();
+        assert!(
+            verify_requested(&inputs, &compact, &unreviewed)
+                .err()
+                .unwrap()
+                .render()
+                .contains("features of `shared`")
+        );
+        assert_eq!(fs::read(fixture.0.join("Cargo.lock")).unwrap(), before_lock);
+        assert_eq!(
+            fs::read(CompactState::path(&fixture.0)).unwrap(),
+            before_record
+        );
+        assert!(!fixture.0.join("target").exists());
+    }
 
     #[test]
     fn compilation_projection_preserves_member_source_identity() {

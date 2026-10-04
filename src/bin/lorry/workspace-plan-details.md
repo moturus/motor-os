@@ -2234,6 +2234,15 @@ profile settings. All ten planner tests and strict Clippy pass in
 `/tmp/lorry-m7-workspace-unit-plan.log`. The engine still uses its existing
 single-package path until preparation and execution integration land.
 
+Shared compilation admission now verifies several requested roots and feature
+sets together and returns the member-root graph intact. The existing single
+package path uses the same coverage checks before its transitional projection.
+The regression verifies two roots sharing a dependency, rejects an uncovered
+feature on the second root and an explicitly unreviewed root, preserves lock
+and admission bytes, and proves verification compiles nothing. All four
+workspace-admission tests and strict Clippy pass in
+`/tmp/lorry-m7-shared-admission-{tests-fixed,clippy}.log`.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 
