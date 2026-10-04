@@ -12,6 +12,10 @@ pub use crate::cancellation::Cancellation;
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 static CLEANUP_FAILED: AtomicBool = AtomicBool::new(false);
 
+pub(crate) fn mark_cleanup_failed() {
+    CLEANUP_FAILED.store(true, Ordering::SeqCst);
+}
+
 /// A failed cleanup leaves ownership uncertain. Closing the current turn's
 /// history is allowed, but no later work may start in this process.
 pub fn ensure_cleanup() -> Result<(), String> {

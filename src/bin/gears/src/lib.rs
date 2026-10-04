@@ -1,5 +1,6 @@
 //! Gears: a small extensible agent harness for Linux and Motor OS.
 
+pub mod after_turn;
 pub mod cancellation;
 pub mod cli;
 pub mod config;
