@@ -88,7 +88,7 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
     Ok(0)
 }
 
-pub(crate) fn vendor_locked(cli: &Cli, options: &VendorOptions) -> Result<i32> {
+pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32> {
     if cli.use_cargo_registry {
         return Err(Error::usage(
             "vendor uses only verified Lorry repositories",
@@ -99,7 +99,7 @@ pub(crate) fn vendor_locked(cli: &Cli, options: &VendorOptions) -> Result<i32> {
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let mut workspace =
         SourceWorkspace::load(&current, cli.manifest_path.as_deref().map(Path::new))?;
-    workspace.load_locked_context()?;
+    workspace.load_context(options.locked)?;
     let mut config = Config::load_workspace(
         &current,
         &workspace.root,
@@ -116,7 +116,18 @@ pub(crate) fn vendor_locked(cli: &Cli, options: &VendorOptions) -> Result<i32> {
     let previous = CompactState::load(&workspace.root)?;
     let scope = review_scope(cli, &workspace, previous.as_ref())?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
-    let manifest = &workspace.packages[0];
+    let mut manifest = workspace.packages[0].clone();
+    let refreshes = if options.locked {
+        vec![]
+    } else {
+        crate::git::resolve_patch_refreshes(
+            &manifest,
+            &config.network,
+            &config.policy.limits,
+            cli.verbosity == Verbosity::Verbose,
+        )?
+    };
+    manifest = apply_patch_refreshes(&manifest, &refreshes)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let host = toolchain.target_info(None)?;
     let contexts = vendor_contexts(&toolchain, &config, &host, previous.as_ref())?
@@ -124,26 +135,62 @@ pub(crate) fn vendor_locked(cli: &Cli, options: &VendorOptions) -> Result<i32> {
         .filter(|context| context.recorded)
         .collect::<Vec<_>>();
     let direct = if options.offline {
-        crate::git::load_locked_sources(manifest, &config.policy.limits)?
+        crate::git::load_locked_sources(&manifest, &config.policy.limits)?
     } else {
         crate::git::materialize_locked_sources(
-            manifest,
+            &manifest,
             &config.network,
             &config.policy.limits,
             cli.verbosity == Verbosity::Verbose,
             progress,
         )?
     };
-    let mut acquisition = Acquisition::for_sources(&config, manifest, progress)?;
-    let resolver_options = dependency::resolver_options(manifest, &config, &toolchain)?;
-    let (complete, mut catalog) = resolve_locked(
-        &workspace,
-        &config,
-        &direct,
-        &resolver_options,
-        &mut acquisition,
-        options.offline,
-    )?;
+    progress.report("Checking dependency repository state")?;
+    let mut acquisition = Acquisition::for_sources(&config, &manifest, progress)?;
+    let resolver_options = dependency::resolver_options(&manifest, &config, &toolchain)?;
+    progress.report("Resolving dependency graph")?;
+    let (complete, mut catalog, staged_lock) = if options.locked {
+        let (complete, catalog) = resolve_locked(
+            &workspace,
+            &config,
+            &direct,
+            &resolver_options,
+            &mut acquisition,
+            options.offline,
+        )?;
+        (complete, catalog, None)
+    } else {
+        let mut catalog = prepare_catalog(
+            &manifest,
+            &config,
+            acquisition.repositories(),
+            true,
+            Some(&direct),
+        )?;
+        let complete = resolve_complete_workspace(
+            &workspace,
+            &mut catalog,
+            &resolver_options,
+            &LockedPreference::from_lockfile(manifest.lock.as_ref())?,
+            &mut |name, requirement, catalog| acquisition.load_sparse(name, requirement, catalog),
+        )?;
+        policy::preflight_sources(&config.policy, &complete)?;
+        let default_format = lockfile::Format::for_workspace(&workspace)?;
+        let format = manifest
+            .lock
+            .as_ref()
+            .map_or(default_format, |lock| lock.format);
+        let lock = lockfile::render_workspace(&complete, format)?;
+        let source = String::from_utf8(lock.clone()).map_err(|error| {
+            Error::failure(format!("generated Cargo.lock is not UTF-8: {error}"))
+        })?;
+        let candidate = manifest.clone().with_lock_source(source)?;
+        for member in &mut workspace.packages {
+            member.lock = candidate.lock.clone();
+        }
+        let staged_lock = stage_lockfile(&workspace.root.join("Cargo.lock"), &lock)?;
+        (complete, catalog, staged_lock)
+    };
     let requests = dependency::workspace::admission::requests(&workspace, &scope)?;
     let (resolutions, selected, evidence) = loop {
         let resolutions = contexts
@@ -168,6 +215,7 @@ pub(crate) fn vendor_locked(cli: &Cli, options: &VendorOptions) -> Result<i32> {
         if !options.offline {
             acquisition.stage_selected(&selected)?;
         }
+        progress.report("Verifying selected dependency sources")?;
         let evidence = acquisition.evidence(&selected, Some(&direct))?;
         policy::inspect_sources(&config.policy, &selected, &evidence)?;
         let mut refined = false;
@@ -210,13 +258,28 @@ pub(crate) fn vendor_locked(cli: &Cli, options: &VendorOptions) -> Result<i32> {
     if !unchanged {
         let stdin = io::stdin();
         let mut output = io::stderr().lock();
+        if !cli.lorry_messages {
+            let added = selected
+                .packages
+                .iter()
+                .filter(|package| {
+                    matches!(package.source, ResolvedSource::CratesIo { .. })
+                        && evidence[&package.key].newly_acquired
+                })
+                .count();
+            if added != 0 {
+                writeln!(output, "New crates.io packages ({added}):").map_err(|error| {
+                    Error::failure(format!("failed to write workspace review summary: {error}"))
+                })?;
+            }
+        }
         let baseline = previous
             .as_ref()
             .filter(|previous| previous.scope.is_some())
             .and_then(|previous| {
                 dependency::workspace::admission::reconstruct(
                     &dependency::ReviewInputs {
-                        manifest,
+                        manifest: &manifest,
                         config: &config,
                         source: dependency::RegistrySource::Lorry(acquisition.repositories()),
                         toolchain: &toolchain,
@@ -260,6 +323,9 @@ pub(crate) fn vendor_locked(cli: &Cli, options: &VendorOptions) -> Result<i32> {
         }
     }
     acquisition.publish()?;
+    if let Some(lock) = staged_lock {
+        lock.commit()?;
+    }
     CompactState {
         scope: Some(scope),
         review_sha256: commitment,

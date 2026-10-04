@@ -23,12 +23,19 @@ impl SourceWorkspace {
     // Source-only discovery leaves the lock and execution settings untouched.
     // Dependency operations explicitly opt into the shared root context.
     pub(crate) fn load_locked_context(&mut self) -> Result<()> {
+        self.load_context(true)
+    }
+
+    pub(crate) fn load_context(&mut self, require_lock: bool) -> Result<()> {
         let path = self.root.join(MANIFEST_NAME);
         let document = Document::load(&path, "Cargo workspace manifest")?;
         let patches = super::parse_patches(&path, &document, &self.root)?;
         let (dev, release, profile_errors) = super::parse_profiles(&path, &document)?;
         let lock_path = self.root.join(super::LOCK_NAME);
-        let lock = super::Lockfile::load(&lock_path)?;
+        let lock = match fs::symlink_metadata(&lock_path) {
+            Err(error) if !require_lock && error.kind() == std::io::ErrorKind::NotFound => None,
+            _ => Some(super::Lockfile::load(&lock_path)?),
+        };
         let members = self
             .packages
             .iter()
@@ -41,7 +48,7 @@ impl SourceWorkspace {
             package.dev.clone_from(&dev);
             package.release.clone_from(&release);
             package.profile_errors.clone_from(&profile_errors);
-            package.lock = Some(lock.clone());
+            package.lock = lock.clone();
         }
         Ok(())
     }

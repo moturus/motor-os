@@ -128,6 +128,9 @@ pub(crate) fn materialize_locked_sources(
     verbose: bool,
     progress: Progress,
 ) -> Result<DirectCatalog> {
+    if manifest.lock.is_none() && !has_git_dependency(manifest) {
+        return Ok(DirectCatalog::default());
+    }
     materialize_locked_catalog(manifest, network, policy, verbose, progress, true)
 }
 

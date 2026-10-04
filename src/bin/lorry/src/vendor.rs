@@ -45,13 +45,16 @@ pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
                 "remove the upgrade request or --locked",
             ));
         }
-        return workspace::vendor_locked(cli, options);
+        return workspace::vendor_workspace(cli, options);
     }
     if options.offline {
         return Err(Error::usage(
             "offline workspace admission requires --locked",
             "use `lorry vendor --locked --offline`",
         ));
+    }
+    if matches!(options.mode, VendorMode::Sync) {
+        return workspace::vendor_workspace(cli, options);
     }
     cli.features.require_default()?;
     if cli.use_cargo_registry {
