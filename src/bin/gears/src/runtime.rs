@@ -12,7 +12,7 @@ use crate::process::{Cancellation, Stream};
 use crate::prompt::Effective;
 use crate::provider::{
     ContentBlock, EventSink, Message, Provider, ProviderError, Request, StreamEvent, ToolCall,
-    ToolOutcome, ToolSpec, UsageMeter,
+    ToolOutcome, ToolSpec, Usage, UsageMeter,
 };
 use crate::session::{
     Compaction, PermissionGrant, Session, SessionInfo, Store, ToolState, TreeItem,
@@ -27,6 +27,7 @@ pub enum Event {
     Text(String),
     Reasoning(String),
     ToolStart {
+        call_id: String,
         name: String,
         detail: String,
     },
@@ -36,13 +37,18 @@ pub enum Event {
         text: String,
     },
     ToolEnd {
+        call_id: String,
         name: String,
         content: String,
         is_error: bool,
+        outcome: ToolOutcome,
     },
     Permission(Permission),
     Notice(String),
-    Usage(String),
+    Usage {
+        request: Usage,
+        total: UsageMeter,
+    },
     ModelChanged(String),
     SessionChanged(SessionSummary),
     TurnEnd,
@@ -604,7 +610,10 @@ impl Runtime {
             self.usage.add(&completion.usage);
             if completion.tool_calls.is_empty() && completion.content.trim().is_empty() {
                 self.session.append_usage(&completion.usage)?;
-                observer.event(Event::Usage(self.usage.summary()))?;
+                observer.event(Event::Usage {
+                    request: completion.usage,
+                    total: self.usage,
+                })?;
                 return self.fail_turn(
                     "model returned an empty reply".to_string(),
                     false,
@@ -619,7 +628,10 @@ impl Runtime {
                 observer,
             )?;
             self.session.append_usage(&completion.usage)?;
-            observer.event(Event::Usage(self.usage.summary()))?;
+            observer.event(Event::Usage {
+                request: completion.usage,
+                total: self.usage,
+            })?;
             if completion.tool_calls.is_empty() {
                 if tool_rounds > 0 && stop_reminders < 3 {
                     let mut notices = Vec::new();
@@ -1039,6 +1051,7 @@ impl Runtime {
             Decision::Ask | Decision::Confirm => false,
         };
         if let Err(error) = observer.event(Event::ToolStart {
+            call_id: call.id.clone(),
             name: call.name.clone(),
             detail,
         }) {
@@ -1143,9 +1156,11 @@ impl Runtime {
             observer,
         );
         let end = observer.event(Event::ToolEnd {
+            call_id: call.id,
             name: call.name,
             content: result.content,
             is_error: result.is_error,
+            outcome,
         });
         match post_error.or(notification.err()).or(end.err()) {
             Some(error) => Err(error),
@@ -1184,9 +1199,11 @@ impl Runtime {
             }
             let _ = notification;
             let _ = observer.event(Event::ToolEnd {
+                call_id: call.id.clone(),
                 name: call.name.clone(),
                 content,
                 is_error: true,
+                outcome: ToolOutcome::NotStarted,
             });
         }
         Ok(())
@@ -1365,6 +1382,10 @@ impl Runtime {
                     .map_err(|error| format!("compaction failed: {error}"))?;
                 self.usage.add(&completion.usage);
                 self.session.append_usage(&completion.usage)?;
+                observer.event(Event::Usage {
+                    request: completion.usage,
+                    total: self.usage,
+                })?;
                 if completion.content.trim().is_empty() {
                     return Err("compaction returned an empty summary".to_string());
                 }

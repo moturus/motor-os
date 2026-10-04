@@ -133,6 +133,104 @@ fn tool(name: &str, arguments: &str) -> Result<Completion, ProviderError> {
     })
 }
 
+#[test]
+fn runtime_events_pair_tool_ids_and_report_numeric_usage() {
+    let fixture = Fixture::new("structured-events");
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"printf forbidden"}"#),
+        priced_answer("denied"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    let mut events = Vec::new();
+    runtime
+        .turn("work".into(), &mut FixedApproval(false), &mut |event| {
+            events.push(event);
+            Ok(())
+        })
+        .unwrap();
+    let started = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolStart { call_id, .. } => Some(call_id),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(started, "call_1");
+    let ended = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolEnd {
+                call_id,
+                outcome,
+                is_error,
+                ..
+            } => Some((call_id, outcome, is_error)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(ended, (started, &ToolOutcome::NotStarted, &true));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::ToolOutput { .. }))
+    );
+    let usage = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Usage { request, total } => Some((request, total)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 2);
+    assert_eq!(usage[1].0.total(), 12);
+    assert_eq!(usage[1].1.completions, 2);
+    assert_eq!(usage[1].1.total_tokens(), 12);
+}
+
+#[test]
+fn compaction_reports_its_usage_as_a_numeric_event() {
+    let fixture = Fixture::new("compaction-usage-event");
+    let config = Config {
+        context: ContextConfig {
+            window_tokens: 10_000,
+            output_reserve_tokens: 2_000,
+            recent_tail_tokens: 50,
+        },
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        priced_answer(&"a".repeat(300)),
+        priced_answer(&"b".repeat(300)),
+        priced_answer("summary"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    for prompt in ["one", "two"] {
+        runtime
+            .turn(prompt.into(), &mut UnexpectedApproval, &mut |_| Ok(()))
+            .unwrap();
+    }
+    let mut reported = Vec::new();
+    runtime
+        .compact(None, &mut |event| {
+            if let Event::Usage { request, total } = event {
+                reported.push((request, total));
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0].0.total(), 12);
+    assert_eq!(reported[0].1.completions, 3);
+    assert_eq!(reported[0].1.total_tokens(), 36);
+}
+
 struct Fixture {
     root: PathBuf,
     workspace: PathBuf,

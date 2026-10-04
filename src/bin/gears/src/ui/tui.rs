@@ -242,7 +242,7 @@ impl App {
                 self.status = "thinking".to_string();
                 self.push(Kind::Reasoning, text, true);
             }
-            Event::ToolStart { name, detail } => {
+            Event::ToolStart { name, detail, .. } => {
                 self.status = format!("running {name}");
                 self.push(Kind::Tool, format!("{name}> {detail}"), false);
             }
@@ -253,6 +253,7 @@ impl App {
                 name,
                 content,
                 is_error,
+                ..
             } => {
                 self.status = if is_error {
                     format!("{name} failed")
@@ -267,7 +268,7 @@ impl App {
             }
             Event::Permission(_) => self.status = "checking permission".to_string(),
             Event::Notice(text) => self.push(Kind::Notice, text, false),
-            Event::Usage(text) => self.status = text,
+            Event::Usage { total, .. } => self.status = total.summary(),
             Event::ModelChanged(model) => self.model = model,
             Event::SessionChanged(session) => self.session = session,
             Event::TurnEnd => self.status = "idle".to_string(),

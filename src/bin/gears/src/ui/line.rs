@@ -363,7 +363,7 @@ impl Observer for Renderer {
                 eprint!("{text}");
                 io::stderr().flush().map_err(|error| error.to_string())?;
             }
-            Event::ToolStart { name, detail } => {
+            Event::ToolStart { name, detail, .. } => {
                 self.finish_stream();
                 eprintln!("tool {name}> {detail}");
             }
@@ -375,6 +375,7 @@ impl Observer for Renderer {
                 name,
                 content,
                 is_error,
+                ..
             } => {
                 self.finish_stream();
                 let outcome = if is_error { "error" } else { "done" };
@@ -385,7 +386,7 @@ impl Observer for Renderer {
                 self.finish_stream();
                 eprintln!("gears: {notice}");
             }
-            Event::Usage(_) | Event::TurnEnd => {}
+            Event::Usage { .. } | Event::TurnEnd => {}
             Event::ModelChanged(model) => eprintln!("model: {model}"),
             Event::SessionChanged(_) => {}
         }
