@@ -983,22 +983,14 @@ fn build_inner(
             selection,
         )
     };
-    let message_reporter = match format {
-        format if format != MessageFormat::Human || freshness_base.is_some() => {
-            let roots =
-                crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
-            Some(crate::check_message::Reporter::new(
-                build.manifest,
-                &prepared,
-                &roots,
-                &destination,
-                &destination,
-                format,
-                build.color,
-            )?)
-        }
-        _ => None,
-    };
+    let roots = crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
+    let message_reporter = crate::check_message::Reporter::new(
+        build.manifest,
+        &prepared,
+        &roots,
+        format,
+        build.color,
+    )?;
     let host_profile = if build.physical_target.is_some() {
         target_root.join(if check.is_some() {
             "check"
@@ -1121,9 +1113,7 @@ fn build_inner(
         native_tools: &build.config.native_tools,
         jobs: build.jobs,
         keep_going: check.is_some_and(|(_, options)| options.keep_going),
-        reporter: message_reporter
-            .as_ref()
-            .map(|reporter| reporter as &dyn executor::EventReporter),
+        reporter: Some(&message_reporter),
     };
     if let Some((_, options)) = check {
         if options.lib && build.manifest.library.is_none() {
@@ -1296,9 +1286,7 @@ fn build_inner(
         )?
     };
     crate::trace::event("compiled root targets");
-    compiled.messages = message_reporter
-        .as_ref()
-        .map_or_else(Vec::new, |reporter| reporter.messages());
+    compiled.messages = message_reporter.messages();
 
     if let Some(base) = freshness_base {
         write_fresh_profile(

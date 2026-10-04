@@ -27,7 +27,13 @@ use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind};
 
 pub trait EventReporter: Sync {
-    fn compiler_messages(&self, key: &UnitKey, stdout: &[u8], stderr: &[u8]) -> Result<()>;
+    fn compiler_messages(
+        &self,
+        key: &UnitKey,
+        planned: &PlannedUnit,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> Result<()>;
 
     fn compiler_artifact(
         &self,
@@ -646,7 +652,7 @@ fn execute_unit(
                         let (stdout, stderr) =
                             cache.published_messages(&planned_invocation.output)?;
                         if let Some(reporter) = options.reporter {
-                            reporter.compiler_messages(key, &stdout, &stderr)?;
+                            reporter.compiler_messages(key, planned, &stdout, &stderr)?;
                         } else {
                             let _guard = print
                                 .lock()
@@ -698,7 +704,7 @@ fn execute_unit(
                             );
                         }
                         if let Some(reporter) = options.reporter {
-                            reporter.compiler_messages(key, &stdout, &stderr)?;
+                            reporter.compiler_messages(key, planned, &stdout, &stderr)?;
                             reporter.compiler_artifact(
                                 key,
                                 planned,
@@ -768,7 +774,12 @@ fn execute_unit(
                 }
                 .execute()?;
                 if let Some(reporter) = options.reporter {
-                    reporter.compiler_messages(key, &rustc_output.stdout, &rustc_output.stderr)?;
+                    reporter.compiler_messages(
+                        key,
+                        planned,
+                        &rustc_output.stdout,
+                        &rustc_output.stderr,
+                    )?;
                     RustcCommand::require_success(&rustc_output)?;
                 } else {
                     let _guard = print

@@ -444,6 +444,27 @@ grep -F '<src/bin/first.rs>' "$LOG" >/dev/null
 grep -F '<src/bin/second.rs>' "$LOG" >/dev/null
 [ -f "$PROFILE/successful-profile" ]
 
+printf '\ncompile_error!("remapped dependency failure");\n' >>"$DEPENDENCY/src/lib.rs"
+if "$LORRY" --quiet check --lib --message-format=json \
+    --manifest-path "$PROJECT/Cargo.toml" --target-dir "$JSON_TARGET" \
+    >"$WORK/dependency-failure.json" 2>"$WORK/dependency-failure.err"; then
+    echo "check-contract: dependency compile error succeeded" >&2
+    exit 1
+else
+    [ "$?" -eq 101 ]
+fi
+grep -F '"reason":"compiler-message"' "$WORK/dependency-failure.json" | \
+    grep -F '"file_name":"'"$DEPENDENCY/src/lib.rs"'"' >/dev/null
+grep -F -- '--> '"$DEPENDENCY/src/lib.rs" "$WORK/dependency-failure.json" >/dev/null
+if "$LORRY" --quiet check --lib --manifest-path "$PROJECT/Cargo.toml" \
+    --target-dir "$TARGET" >"$WORK/dependency-human.out" 2>"$WORK/dependency-human.err"; then
+    echo "check-contract: human dependency compile error succeeded" >&2
+    exit 1
+else
+    [ "$?" -eq 101 ]
+fi
+grep -F -- '--> '"$DEPENDENCY/src/lib.rs" "$WORK/dependency-human.err" >/dev/null
+
 (
     cd "$PROJECT"
     "$LORRY" --quiet clean --target-dir "$TARGET"

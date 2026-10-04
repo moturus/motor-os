@@ -22,6 +22,7 @@ struct Package {
     id: String,
     manifest_path: String,
     targets: Vec<wire::Target>,
+    root: PathBuf,
 }
 
 #[derive(Default)]
@@ -29,14 +30,14 @@ struct State {
     artifacts: BTreeSet<UnitKey>,
     build_scripts: BTreeSet<UnitKey>,
     messages: Vec<Value>,
+    source_paths: Vec<(PathBuf, PathBuf)>,
 }
 
 pub struct Reporter {
     root: Package,
     root_key: PackageKey,
     packages: BTreeMap<PackageKey, Package>,
-    staging: PathBuf,
-    destination: PathBuf,
+    source_paths: Vec<(PathBuf, PathBuf)>,
     format: MessageFormat,
     color: bool,
     state: Mutex<State>,
@@ -47,13 +48,12 @@ impl Reporter {
         root_manifest: &Manifest,
         prepared: &PreparedGraph,
         roots: &BTreeMap<PackageKey, PathBuf>,
-        staging: &Path,
-        destination: &Path,
         format: MessageFormat,
         color: bool,
     ) -> Result<Self> {
         let root = Package::from_manifest(root_manifest, Identity::Root, &root_manifest.root)?;
         let mut packages = BTreeMap::new();
+        let mut source_paths = Vec::new();
         for resolved in &prepared.resolution.packages {
             let manifest = &prepared.packages[&resolved.key].manifest;
             let root = roots.get(&resolved.key).ok_or_else(|| {
@@ -66,13 +66,15 @@ impl Reporter {
                 resolved.key.clone(),
                 Package::from_manifest(manifest, Identity::Resolved(resolved), root)?,
             );
+            source_paths.push((manifest.root.clone(), root.clone()));
         }
+        source_paths.sort_by_key(|(from, _)| std::cmp::Reverse(from.as_os_str().len()));
+        source_paths.dedup();
         Ok(Self {
             root,
             root_key: selected_library_key(root_manifest)?.package,
             packages,
-            staging: staging.to_owned(),
-            destination: destination.to_owned(),
+            source_paths,
             format,
             color,
             state: Mutex::new(State::default()),
@@ -97,6 +99,7 @@ impl Reporter {
         target: &wire::Target,
         stdout: &[u8],
         stderr: &[u8],
+        source_paths: &[(PathBuf, PathBuf)],
     ) -> Result<()> {
         for bytes in [stdout, stderr] {
             for line in bytes.split(|byte| *byte == b'\n') {
@@ -104,7 +107,7 @@ impl Reporter {
                 if line.is_empty() {
                     continue;
                 }
-                let message: Value = serde_json::from_slice(line).map_err(|error| {
+                let mut message: Value = serde_json::from_slice(line).map_err(|error| {
                     Error::failure(format!("rustc emitted a non-JSON check message: {error}"))
                 })?;
                 let object = message.as_object().ok_or_else(|| {
@@ -122,6 +125,7 @@ impl Reporter {
                 {
                     continue;
                 }
+                restore_diagnostic_paths(&mut message, source_paths);
                 self.write_value(json!({
                     "reason": "compiler-message",
                     "package_id": package.id,
@@ -135,16 +139,15 @@ impl Reporter {
     }
 
     fn published_path(&self, path: &Path) -> Result<String> {
-        let path = match path.strip_prefix(&self.staging) {
-            Ok(relative) => self.destination.join(relative),
-            Err(_) => path.to_owned(),
-        };
-        path.into_os_string().into_string().map_err(|path| {
-            Error::failure(format!(
-                "check artifact path `{}` is not valid UTF-8",
-                PathBuf::from(path).display()
-            ))
-        })
+        path.to_owned()
+            .into_os_string()
+            .into_string()
+            .map_err(|path| {
+                Error::failure(format!(
+                    "check artifact path `{}` is not valid UTF-8",
+                    PathBuf::from(path).display()
+                ))
+            })
     }
 
     fn write_value(&self, value: Value) -> Result<()> {
@@ -170,11 +173,91 @@ impl Reporter {
     }
 }
 
+fn restore_path(path: &str, source_paths: &[(PathBuf, PathBuf)]) -> Option<String> {
+    source_paths.iter().find_map(|(from, to)| {
+        let relative = Path::new(path).strip_prefix(from).ok()?;
+        to.join(relative).into_os_string().into_string().ok()
+    })
+}
+
+fn restore_diagnostic_paths(message: &mut Value, source_paths: &[(PathBuf, PathBuf)]) {
+    match message {
+        Value::Array(values) => {
+            for value in values {
+                restore_diagnostic_paths(value, source_paths);
+            }
+        }
+        Value::Object(fields) => {
+            if let Some(filename) = fields.get_mut("file_name")
+                && let Some(path) = filename
+                    .as_str()
+                    .and_then(|path| restore_path(path, source_paths))
+            {
+                *filename = Value::String(path);
+            }
+            if let Some(rendered) = fields.get_mut("rendered")
+                && let Some(text) = rendered.as_str()
+            {
+                let mut restored = String::new();
+                for line in text.split_inclusive('\n') {
+                    let plain = crate::process::strip_ansi(line);
+                    let location = plain
+                        .trim_start()
+                        .strip_prefix("--> ")
+                        .or_else(|| plain.trim_start().strip_prefix("::: "));
+                    let replacement = location.and_then(|location| {
+                        // The final numeric suffix belongs to the diagnostic
+                        // location, not the filename (which may contain colons).
+                        let (path, column) = location.trim_end().rsplit_once(':')?;
+                        column.parse::<usize>().ok()?;
+                        let (path, line) = path.rsplit_once(':')?;
+                        line.parse::<usize>().ok()?;
+                        Some((path.to_owned(), restore_path(path, source_paths)?))
+                    });
+                    match replacement {
+                        Some((from, to)) => restored.push_str(&line.replacen(&from, &to, 1)),
+                        None => restored.push_str(line),
+                    }
+                }
+                *rendered = Value::String(restored);
+            }
+            for value in fields.values_mut() {
+                restore_diagnostic_paths(value, source_paths);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl EventReporter for Reporter {
-    fn compiler_messages(&self, key: &UnitKey, stdout: &[u8], stderr: &[u8]) -> Result<()> {
+    fn compiler_messages(
+        &self,
+        key: &UnitKey,
+        planned: &PlannedUnit,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> Result<()> {
         let package = self.package(&key.package)?;
         let target = package.dependency_target(key.kind, key.target.as_deref())?;
-        self.write_compiler_messages(package, target, stdout, stderr)
+        let paths = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(remap) = &planned.source_remap {
+                for from in [&remap.logical_root, &remap.presented_root] {
+                    let path = (from.clone(), package.root.clone());
+                    if !state.source_paths.contains(&path) {
+                        state.source_paths.push(path);
+                    }
+                }
+            }
+            let mut paths = self.source_paths.clone();
+            paths.extend(state.source_paths.iter().cloned());
+            paths.sort_by_key(|(from, _)| std::cmp::Reverse(from.as_os_str().len()));
+            paths
+        };
+        self.write_compiler_messages(package, target, stdout, stderr, &paths)
     }
 
     fn compiler_artifact(
@@ -298,6 +381,7 @@ impl Package {
                 .ok_or_else(|| Error::failure("message manifest path is not Unicode"))?
                 .to_owned(),
             targets: package::map_targets(manifest, root)?,
+            root: root.to_owned(),
         })
     }
 
@@ -403,4 +487,59 @@ fn write_line(value: &Value) -> Result<()> {
         .write_all(b"\n")
         .and_then(|()| stdout.flush())
         .map_err(|error| Error::failure(format!("failed to write check message: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restores_nested_spans_and_rendered_locations_without_changing_source_text() {
+        let paths = vec![
+            (
+                PathBuf::from("/workspace/logical/pkg"),
+                PathBuf::from("/cache/real/pkg"),
+            ),
+            (
+                PathBuf::from("logical/pkg"),
+                PathBuf::from("/cache/real/pkg"),
+            ),
+            (
+                PathBuf::from("/temporary/pkg"),
+                PathBuf::from("/cache/real/pkg"),
+            ),
+        ];
+        let mut diagnostic = json!({
+            "message": "logical/pkg is mentioned by the user",
+            "spans": [{
+                "file_name": "logical/pkg/src/lib.rs",
+                "expansion": {"span": {"file_name": "/workspace/logical/pkg/src/macro.rs"}},
+            }],
+            "children": [{"spans": [{"file_name": "/temporary/pkg/build.rs"}]}],
+            "rendered": "error: logical/pkg\n \u{1b}[1;34m--> \u{1b}[0mlogical/pkg/src/lib.rs:1:2\n1 | let value = \"logical/pkg/src/lib.rs\";\n",
+        });
+        restore_diagnostic_paths(&mut diagnostic, &paths);
+        assert_eq!(
+            diagnostic["spans"][0]["file_name"],
+            "/cache/real/pkg/src/lib.rs"
+        );
+        assert_eq!(
+            diagnostic["spans"][0]["expansion"]["span"]["file_name"],
+            "/cache/real/pkg/src/macro.rs"
+        );
+        assert_eq!(
+            diagnostic["children"][0]["spans"][0]["file_name"],
+            "/cache/real/pkg/build.rs"
+        );
+        assert_eq!(
+            diagnostic["message"],
+            "logical/pkg is mentioned by the user"
+        );
+        assert_eq!(
+            diagnostic["rendered"],
+            "error: logical/pkg\n \u{1b}[1;34m--> \u{1b}[0m/cache/real/pkg/src/lib.rs:1:2\n1 | let value = \"logical/pkg/src/lib.rs\";\n"
+        );
+        assert!(restore_path("logical/pkg-other/src/lib.rs", &paths).is_none());
+        assert!(restore_path("/rustc/stdlib.rs", &paths).is_none());
+    }
 }
