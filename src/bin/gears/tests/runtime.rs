@@ -271,6 +271,57 @@ fn after_turn_config(script: &str, argument: &std::path::Path) -> AfterTurnConfi
 }
 
 #[test]
+fn endlessly_repeated_hook_questions_are_reported_and_bounded() {
+    let fixture = Fixture::new("question-bound");
+    let log = fixture.root.join("answers.jsonl");
+    let question = serde_json::json!({"question": {"id": "q", "text": "Again?", "choices": [
+        {"value": "yes", "label": "Yes"}, {"value": "no", "label": "No"}]}});
+    let config = Config {
+        hooks: vec![HookConfig {
+            name: "repeated".into(),
+            events: Some(vec!["initialize".into(), "answer".into()]),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!(
+                    "event=$(cat); case \"$event\" in *'\"event\":\"answer\"'*) printf '%s\\n' \"$event\" >> \"$1\" ;; esac; printf '%s' '{question}'"
+                ),
+                "repeated".into(),
+                log.display().to_string(),
+            ],
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 4096,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![answer("done")]);
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    let mut approver = QuestionApproval {
+        answer: Some("yes".into()),
+        attended: true,
+        asked: 0,
+    };
+    let mut notices = Vec::new();
+    runtime
+        .turn("work".into(), &mut approver, &mut |event| {
+            if let Event::Notice(text) = event {
+                notices.push(text);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(approver.asked, 16);
+    assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 16);
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.contains("operation limit (16)"))
+    );
+    assert!(!runtime.pending_hook_questions());
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
 fn hook_questions_are_answered_before_requests_and_unattended_questions_are_skipped() {
     for (case, value, attended) in [
         ("answered", Some("yes"), true),

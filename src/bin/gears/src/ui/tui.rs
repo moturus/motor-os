@@ -430,6 +430,19 @@ impl App {
         self.hint = runtime.hint().map(str::to_string);
     }
 
+    fn begin_question(&mut self, question: &crate::hooks::Question) {
+        let mut text = question.text.clone();
+        for (index, choice) in question.choices.iter().enumerate() {
+            text.push_str(&format!("\n{}. {}", index + 1, choice.label));
+        }
+        self.push(Kind::Notice, text, false);
+        self.scroll = 0;
+        self.status = format!(
+            "answer 1–{} | Enter/Esc skip | Ctrl-C cancel",
+            question.choices.len()
+        );
+    }
+
     fn render(&mut self) -> Result<(), String> {
         let (width, height) = terminal::size().map_err(|error| error.to_string())?;
         let next = self.frame(width, height);
@@ -474,7 +487,8 @@ impl App {
             editor_cursor(self.editor.text(), self.editor.cursor(), editor_width);
         let layout = screen_layout(height, draft_lines.len(), self.approval.is_some());
         let lines = self.transcript_lines(width);
-        let end = lines.len().saturating_sub(self.scroll);
+        let max_scroll = lines.len().saturating_sub(layout.transcript_rows);
+        let end = lines.len().saturating_sub(self.scroll.min(max_scroll));
         let start = end.saturating_sub(layout.transcript_rows);
         let transcript_start = layout.transcript_rows.saturating_sub(end - start);
         for (index, (kind, line)) in lines[start..end].iter().enumerate() {
@@ -697,14 +711,7 @@ fn run_operation(
                             dirty = true;
                         }
                         TurnMessage::Question(question, reply) => {
-                            app.push(Kind::Notice, question.text.clone(), false);
-                            let items = question
-                                .choices
-                                .iter()
-                                .map(|choice| choice.label.clone())
-                                .collect::<Vec<_>>();
-                            let answer = picker(app, &question.text, &items, Some(&cancellation))?
-                                .map(|index| question.choices[index].value.clone());
+                            let answer = question_input(&cancellation, app, &question)?;
                             let _ = reply.send(answer);
                         }
                         TurnMessage::Permission(permission, reply) => {
@@ -858,6 +865,60 @@ fn permission_input(
     }
 }
 
+fn question_input(
+    cancellation: &crate::process::Cancellation,
+    app: &mut App,
+    question: &crate::hooks::Question,
+) -> Result<Option<String>, String> {
+    app.begin_question(question);
+    app.render()?;
+    let answer = loop {
+        match event::read().map_err(|error| error.to_string())? {
+            InputEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    cancellation.cancel();
+                    break None;
+                }
+                match key.code {
+                    KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10),
+                    KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
+                    KeyCode::Enter | KeyCode::Esc => break None,
+                    _ => {
+                        if let Some(index) = question_key(key, question.choices.len()) {
+                            break Some(index);
+                        }
+                    }
+                }
+            }
+            InputEvent::Resize(_, _) => {}
+            _ => continue,
+        }
+        app.render()?;
+    };
+    app.scroll = 0;
+    app.status = if cancellation.cancelled() {
+        "cancelling"
+    } else {
+        "working"
+    }
+    .into();
+    let label = answer.map_or("skipped", |index| question.choices[index].label.as_str());
+    app.push(Kind::Notice, format!("answer> {label}"), false);
+    app.render()?;
+    Ok(answer.map(|index| question.choices[index].value.clone()))
+}
+
+fn question_key(key: KeyEvent, count: usize) -> Option<usize> {
+    if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+        return None;
+    }
+    let KeyCode::Char(value) = key.code else {
+        return None;
+    };
+    let index = value.to_digit(10)?.checked_sub(1)? as usize;
+    (index < count).then_some(index)
+}
+
 /// Maps one key press at the permission prompt; None keeps waiting.
 fn approval_key(key: KeyEvent) -> Option<Approval> {
     let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
@@ -995,8 +1056,8 @@ fn handle_command(
                         )
                     })
                     .collect::<Vec<_>>();
-                let selected = picker(app, "Resume session", &labels, None)?
-                    .ok_or("session selection cancelled")?;
+                let selected =
+                    picker(app, "Resume session", &labels)?.ok_or("session selection cancelled")?;
                 sessions[selected].id.clone()
             } else {
                 argument.to_string()
@@ -1032,7 +1093,6 @@ fn handle_command(
                     app,
                     "Select branch (shell side effects are unchanged)",
                     &labels,
-                    None,
                 )?
                 .ok_or("tree selection cancelled")?;
                 tree[selected].id.clone()
@@ -1059,7 +1119,7 @@ fn handle_command(
                     .iter()
                     .map(|item| format!("{} {}", item.id, item.summary))
                     .collect::<Vec<_>>();
-                let selected = picker(app, "Fork from user message", &labels, None)?
+                let selected = picker(app, "Fork from user message", &labels)?
                     .ok_or("fork selection cancelled")?;
                 tree[selected].id.clone()
             } else {
@@ -1100,8 +1160,8 @@ fn handle_command(
                         choices.push(model.clone());
                     }
                 }
-                let selected = picker(app, "Select model", &choices, None)?
-                    .ok_or("model selection cancelled")?;
+                let selected =
+                    picker(app, "Select model", &choices)?.ok_or("model selection cancelled")?;
                 choices[selected].clone()
             } else {
                 argument.to_string()
@@ -1125,7 +1185,7 @@ fn handle_command(
                         choices.push(provider.clone());
                     }
                 }
-                let selected = picker(app, "Select provider", &choices, None)?
+                let selected = picker(app, "Select provider", &choices)?
                     .ok_or("provider selection cancelled")?;
                 choices[selected].clone()
             } else {
@@ -1172,12 +1232,7 @@ impl Observer for AppObserver<'_> {
     }
 }
 
-fn picker(
-    app: &mut App,
-    title: &str,
-    items: &[String],
-    cancellation: Option<&crate::process::Cancellation>,
-) -> Result<Option<usize>, String> {
+fn picker(app: &mut App, title: &str, items: &[String]) -> Result<Option<usize>, String> {
     if items.is_empty() {
         return Err("nothing to select".to_string());
     }
@@ -1201,9 +1256,6 @@ fn picker(
                     return Ok(None);
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if let Some(cancellation) = cancellation {
-                        cancellation.cancel();
-                    }
                     app.invalidate();
                     app.render()?;
                     return Ok(None);
@@ -1435,6 +1487,55 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn full_questions_are_scrollable_and_only_listed_number_keys_select_answers() {
+        let question = crate::hooks::Question {
+            id: "q".into(),
+            text: format!("Question start {}", "detail ".repeat(120)),
+            choices: vec![
+                crate::hooks::Choice {
+                    value: "yes".into(),
+                    label: "Publish".into(),
+                },
+                crate::hooks::Choice {
+                    value: "no".into(),
+                    label: format!("Discard {}choice end", "reason ".repeat(25)),
+                },
+            ],
+        };
+        let mut app = app();
+        app.begin_question(&question);
+        assert!(
+            app.transcript
+                .back()
+                .unwrap()
+                .text
+                .starts_with(&question.text)
+        );
+        let rendered = |app: &App| {
+            app.frame(40, 10)
+                .lines
+                .iter()
+                .map(|line| line.0.iter().map(|cell| cell.character).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(rendered(&app).contains("choice end"));
+        app.scroll = 100;
+        assert!(rendered(&app).contains("Question start"));
+        assert_eq!(
+            question_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE), 2),
+            Some(1)
+        );
+        for key in [
+            KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT),
+        ] {
+            assert_eq!(question_key(key, 2), None);
+        }
     }
 
     #[test]

@@ -59,6 +59,9 @@ input. Questions are queued in hook order, with at most 16 pending. Answers
 may ask another question; a turn, hook command, or standalone interaction
 handles at most 16 questions, then reports and discards further questions.
 Question answers do not replace Gears' tool permission decisions.
+The line UI accepts a choice number or value, or Enter to skip. The TUI uses
+number keys and Enter/Esc to skip; Page Up and Page Down keep the complete
+question and labels readable. Ctrl-C cancels the current operation.
 
 Event-specific result fields are:
 
