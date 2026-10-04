@@ -1,6 +1,7 @@
 //! Optional coding workflows using Gears' command-hook protocol.
 
 pub mod instructions;
+pub mod snapshot;
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -48,6 +49,13 @@ pub fn read_event(reader: impl Read) -> Result<Event, String> {
 }
 
 pub fn hook(event: Event) -> Result<Value, String> {
+    if event.event == "initialize" {
+        let result = default_root().and_then(gears::state::StateRoot::new);
+        return Ok(match result {
+            Ok(root) => initialize_at(&event, &root),
+            Err(error) => initialization_notice(error),
+        });
+    }
     // Until a policy is installed, this optional hook grants no authority.
     Ok(if event.event == "permission" {
         json!({"decision": "deny"})
@@ -56,9 +64,57 @@ pub fn hook(event: Event) -> Result<Value, String> {
     })
 }
 
+pub fn initialize_at(event: &Event, root: &gears::state::StateRoot) -> Value {
+    snapshot::initialize(event, root).unwrap_or_else(initialization_notice)
+}
+
+fn initialization_notice(error: String) -> Value {
+    json!({"notice": format!("project instructions and prompt snapshot unavailable: {error}")})
+}
+
+pub fn default_root() -> Result<PathBuf, String> {
+    #[cfg(unix)]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".gears"))
+            .ok_or_else(|| "HOME is not set; cannot locate Gears directory".into())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(PathBuf::from("/user/cfg/gears"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_initialization_failure_keeps_previous_hook_state() {
+        let root =
+            std::env::temp_dir().join(format!("batteries-failed-setup-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        let previous = json!({"prompt_snapshot": "invalid", "tasks": ["keep me"]});
+        let event = read_event(
+            json!({"protocol_version": 1, "event": "initialize",
+            "workspace": root.join("workspace"), "session": {"id": "fixture", "state": previous}})
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        let state = gears::state::StateRoot::new(root.join("state")).unwrap();
+        let response = initialize_at(&event, &state);
+        assert!(
+            response["notice"]
+                .as_str()
+                .unwrap()
+                .contains("invalid prompt snapshot hash")
+        );
+        assert!(response.get("state").is_none());
+        assert_eq!(event.session.state, Some(previous));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn rejects_invalid_events_and_defaults_permissions_to_denial() {
