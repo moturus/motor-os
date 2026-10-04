@@ -2620,6 +2620,22 @@ Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contra
 
 ### Member build-time code
 
+The shared planner now has workspace harness graphs with selected dev edges,
+resolved feature unions, script outputs, and separate ordinary-program/test
+panic contexts. Ordinary libraries never receive dev edges, allowing a test's
+dev-dependency to return legally to that member's ordinary library. Integration
+tests retain artifact edges to their own programs. Public workspace test
+execution remains gated until executor/environment integration is connected.
+The first oracle found the missing program artifact edge and representation
+differences for Cargo's crate-name labels on non-Rust edges; evidence remains in
+`/tmp/lorry-m8-workspace-harness-planner-first-oracle.log`. Corrected unit nodes,
+edges/aliases, host/target contexts, feature sets, and profile settings match
+Cargo in `/tmp/lorry-m8-workspace-harness-planner-artifact-edge-oracle.log`.
+All twelve planner tests and strict Clippy pass in
+`/tmp/lorry-m8-workspace-harness-planner-{unit,clippy}.log`. This patch is slightly
+larger than the preferred size because its linked cycle/script/program graph
+needs the full paired oracle fixture.
+
 Member target-edge wiring now shares one helper for script outputs, ordinary
 and development Rust dependencies, and the owning library. Ordinary binaries
 use it with development inputs disabled; the following harness patches reuse
