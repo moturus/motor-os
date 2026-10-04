@@ -155,7 +155,7 @@ write_host_config() {
         'path-roots = []' \
         '' \
         '[policy.limits]' \
-        'max-packages = 192' \
+        'max-packages = 384' \
         'max-depth = 16' \
         'max-package-bytes = 16777216' \
         'max-extracted-package-bytes = 134217728' \

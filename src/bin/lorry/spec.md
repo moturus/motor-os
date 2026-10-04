@@ -599,6 +599,10 @@ verified source descriptions. It accepts feature selection, remains offline,
 and does not require or reconstruct admission. Explicit source vetoes and
 resource limits apply; tree neither compiles package code nor needs build-time
 execution grants.
+The developer image's Lorry policy and native product fixture allow 384 outside
+packages in the complete lock. The ordinary default remains 64; the one-run
+`--max-packages N` override obeys configured system constraints.
+
 Path-root allowlists constrain outside path packages. Editable members are
 recognized by their canonical workspace membership, including selected roots;
 explicit named denies still apply to those members.
