@@ -1880,7 +1880,15 @@ The final real-workspace comparison passes the existing complete projection
 oracle in `/tmp/lorry-m6-sys-metadata-projection-final-checked.log`. It compares
 every package/node field after only the documented source-root and semantic-set
 normalizations, and the original lock remains byte-for-byte unchanged.
-The final full gate is running in `/tmp/lorry-m6-full-final.log`.
+The next full gate reached the Clippy contract and rejected unchanged `shared`
+sources; the original failure is in `/tmp/lorry-m6-full-final.log`. A focused
+regression proves that the transitional compilation-manifest reload discarded
+the workspace root, changing the base used for source identity paths. The
+projection now retains workspace ownership. The regression also proves that a
+real source edit still fails evidence verification. Admission tests, the full
+Clippy contract, and strict Clippy pass in
+`/tmp/lorry-m6-source-identity-{fixed,contract,clippy}.log`; the original focused
+failure is in `/tmp/lorry-m6-source-identity-original.log`.
 
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.

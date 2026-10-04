@@ -282,6 +282,12 @@ fn legacy_dependency_graph(mut selected: Resolution, root: &Path) -> Result<Reso
         if let Some(manifest) = &package.local_manifest {
             let mut compilation = Manifest::load_path_dependency(&manifest.root)?;
             compilation.editable = manifest.editable;
+            compilation
+                .workspace_root
+                .clone_from(&manifest.workspace_root);
+            compilation
+                .workspace_members
+                .clone_from(&manifest.workspace_members);
             package.local_manifest = Some(compilation);
         }
     }
@@ -354,6 +360,85 @@ pub(crate) fn review(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn compilation_projection_preserves_member_source_identity() {
+        let fixture = super::super::super::tests::Fixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"shared\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        for name in ["app", "shared"] {
+            let root = fixture.0.join(name);
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(
+                root.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+            )
+            .unwrap();
+            fs::write(root.join("src/lib.rs"), "pub fn value() {}\n").unwrap();
+        }
+        let mut workspace = SourceWorkspace::load(&fixture.0, None).unwrap();
+        workspace.load_context(false).unwrap();
+        let packages = workspace
+            .packages
+            .iter()
+            .map(|manifest| ResolvedPackage {
+                key: PackageKey {
+                    name: manifest.name.clone(),
+                    version: semver::Version::parse(&manifest.version.original).unwrap(),
+                    source: PackageSourceKey::Path(manifest.root.clone()),
+                },
+                source: ResolvedSource::Path {
+                    logical_root: manifest.root.clone(),
+                    physical_root: manifest.root.clone(),
+                    source_tree_sha256: crate::member_source::snapshot(manifest, true)
+                        .unwrap()
+                        .sha256,
+                    patched_crates_io: false,
+                },
+                local_manifest: Some(manifest.clone()),
+                feature_sets: BTreeMap::new(),
+                compile_kinds: [CompileKind::Target].into(),
+                target_features: BTreeSet::new(),
+                host_features: BTreeSet::new(),
+                edges: vec![],
+                lock_edges: vec![],
+            })
+            .collect::<Vec<_>>();
+        let before = PackageEvidence::from_path(&packages[1]).unwrap();
+        let original = packages[1].local_manifest.as_ref().unwrap().clone();
+        let projected = legacy_dependency_graph(
+            Resolution {
+                root_edges: vec![],
+                packages,
+            },
+            &fixture.0.join("app"),
+        )
+        .unwrap();
+        let shared = &projected.packages[0];
+        let compilation = shared.local_manifest.as_ref().unwrap();
+        let after = PackageEvidence::from_path(shared).unwrap_or_else(|error| {
+            panic!(
+                "{}; source workspace={}, compilation workspace={}",
+                error.render(),
+                original.workspace_root.display(),
+                compilation.workspace_root.display()
+            )
+        });
+        assert_eq!(before, after);
+        assert_eq!(compilation.workspace_root, original.workspace_root);
+        assert_eq!(compilation.workspace_members, original.workspace_members);
+        assert!(compilation.editable);
+        fs::write(compilation.root.join("src/lib.rs"), "pub fn edited() {}\n").unwrap();
+        assert!(
+            PackageEvidence::from_path(shared)
+                .unwrap_err()
+                .render()
+                .contains("changed after resolution")
+        );
+    }
 
     #[test]
     fn reconstructs_recorded_scope_without_executing_member_code() {
