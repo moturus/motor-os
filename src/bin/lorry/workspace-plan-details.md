@@ -2618,6 +2618,32 @@ as well as builds for every supported setting, including scripts and host
 dependencies. Both paired contracts, all twenty-eight CLI tests, and strict
 Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contract,cli,clippy}.log`.
 
+Selected procedural-macro test harnesses now use host features and compilation,
+including the `proc_macro` extern and `prefer-dynamic`. The contract compares
+all harness bytes and Cargo JSON in native/cross debug/release builds, both
+macro-only and whole-workspace selections. Script execution and generated-file
+runtime checks remain covered. The unit oracle now includes native compilation
+and a selected macro also used as another member's dependency.
+
+The original isolated byte failure is retained in
+`/tmp/lorry-m8-proc-macro-test-first-contract.log`. Diagnosis found that Lorry
+used the script compiler's reduced profile for the script run instead of the
+consumer's profile. The generated include also embedded physical `OUT_DIR`
+source paths; the byte fixture now reads that file at runtime. Combined selection
+then exposed incorrect selected-macro dependency settings, followed by automatic
+stripping chosen after host debug reduction. Those failures are preserved in
+`/tmp/lorry-m8-proc-macro-test-{workspace,shared-profile}-contract.log`.
+Release selection exposed merged script runs for optimized harnesses and
+unoptimized macro dependencies; the Cargo release graph confirms distinct runs.
+The new native oracle initially lacked its proc-macro projection, and the split
+script edit initially attempted mutable iteration over a set; both compile/test
+failures are preserved in the corresponding native-oracle and distinct-run logs.
+Final native/cross executable bytes and JSON pass in
+`/tmp/lorry-m8-proc-macro-test-distinct-run-contract.log`; the native and explicit
+target graph oracle passes in
+`/tmp/lorry-m8-proc-macro-test-native-oracle-fixed.log`. Strict Clippy passes in
+`/tmp/lorry-m8-proc-macro-test-final-clippy.log`.
+
 ### Member build-time code
 
 The shared planner now has workspace harness graphs with selected dev edges,

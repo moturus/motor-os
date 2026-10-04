@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/current-toolchain.sh"
 lorry_load_current_toolchain
 export RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-member-macro-contract-XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained failed fixture: $WORK" >&2; fi' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project"/{app,derive,helper}/src "$WORK/project/.cargo"
 printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" >"$WORK/home/.config/lorry/lorry.toml"
 cat >"$WORK/project/Cargo.toml" <<'EOF'
@@ -108,4 +108,55 @@ PY
     done
 done
 [ "$(target/lorry/debug/app)" = 42 ]
+cat >>derive/Cargo.toml <<'EOF'
+[features]
+default = ["checked"]
+checked = []
+EOF
+sed -i '/proc-macro = true/a doctest = false' derive/Cargo.toml
+printf '\nallow-build-script = true\n' >>lorry.toml
+cat >derive/build.rs <<'EOF'
+fn main() {
+    assert!(cfg!(feature = "checked"));
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("generated.rs"), "const SCRIPT_VALUE: &str = \"generated\";").unwrap();
+    println!("cargo:rustc-env=SCRIPT_OWNER=derive");
+    println!("cargo:rerun-if-changed=build.rs");
+}
+EOF
+cat >>derive/src/lib.rs <<'EOF'
+#[test]
+fn host_harness() {
+    assert!(cfg!(feature = "checked"));
+    assert_eq!(helper::expansion(), "41");
+    assert_eq!(std::env::var("SCRIPT_OWNER").unwrap(), "derive");
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    assert_eq!(std::fs::read_to_string(out.join("generated.rs")).unwrap(), "const SCRIPT_VALUE: &str = \"generated\";");
+}
+EOF
+for platform in native motor native-release motor-release; do
+    target=()
+    release=()
+    if [[ "$platform" = motor* ]]; then target=(--target x86_64-unknown-motor); fi
+    if [[ "$platform" = *-release ]]; then release=(--release); fi
+    for selection in macro all; do
+        packages=(-p derive)
+        if [ "$selection" = all ]; then packages=(--workspace); fi
+        env HOME="$WORK/home" "$LORRY" test "${packages[@]}" --no-run "${target[@]}" "${release[@]}" --message-format=json >"$WORK/lorry-test.json"
+        "$LORRY_TEST_CARGO" test "${packages[@]}" --no-run "${target[@]}" "${release[@]}" --offline --message-format=json >"$WORK/cargo-test.json"
+        "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \
+            differential-script-clean-messages "$WORK/lorry-test.json" "$WORK/cargo-test.json"
+        python3 - "$WORK/lorry-test.json" "$WORK/cargo-test.json" <<'PY'
+import json, pathlib, sys
+def harnesses(path):
+    return [pathlib.Path(event['executable']).read_bytes() for line in open(path)
+            for event in [json.loads(line)] if event['reason'] == 'compiler-artifact'
+            and event['profile']['test']]
+lorry, cargo = map(harnesses, sys.argv[1:])
+assert lorry and len(lorry) == len(cargo) and sorted(lorry) == sorted(cargo)
+PY
+    done
+done
+env HOME="$WORK/home" "$LORRY" test -p derive
+"$LORRY_TEST_CARGO" test -p derive --offline
 echo "PASS: selected member macros match Cargo host/cross bytes and JSON"

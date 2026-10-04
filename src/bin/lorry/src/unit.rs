@@ -756,9 +756,10 @@ pub(crate) fn workspace_test_units(
     resolution: &Resolution,
     manifests: &BTreeMap<PackageKey, Manifest>,
     selected: &[PackageKey],
-    panic_abort: bool,
+    options: &PlanOptions<'_>,
     integration_name: Option<&str>,
 ) -> Result<UnitGraph> {
+    let panic_abort = options.panic_abort;
     if let Some(name) = integration_name
         && !selected.iter().any(|package| {
             manifests[package]
@@ -823,7 +824,22 @@ pub(crate) fn workspace_test_units(
             )? {
                 continue;
             }
-            let mut key = unit_key(package, kind, CompileKind::Target, &features);
+            let compile_kind = if kind == UnitKind::LibraryHarness
+                && manifest
+                    .library
+                    .as_ref()
+                    .is_some_and(|library| library.proc_macro)
+            {
+                CompileKind::Host
+            } else {
+                CompileKind::Target
+            };
+            let mut key = unit_key(
+                package,
+                kind,
+                compile_kind,
+                &features_for(package, compile_kind),
+            );
             key.mode = UnitMode::Test;
             key.target = Some(name.clone());
             insert_unit(&mut tests.units, key.clone());
@@ -859,6 +875,40 @@ pub(crate) fn workspace_test_units(
         }
     }
     tests = tests.with_profile(ProfileContext::Test, panic_abort);
+    let root_opt = if options.release {
+        options.release_profile.opt_level
+    } else {
+        options.dev_profile.opt_level
+    };
+    if root_opt != "0" {
+        for root in roots.iter().filter(|key| {
+            key.kind == UnitKind::LibraryHarness && key.compile_kind == CompileKind::Host
+        }) {
+            let script = tests.units[root]
+                .dependencies
+                .iter()
+                .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
+                .map(|edge| edge.unit.clone());
+            if let Some(script) = script {
+                let mut run = tests.units[&script].clone();
+                run.key.profile = ProfileContext::Selected;
+                let selected = run.key.clone();
+                tests.units.insert(selected.clone(), run);
+                let harness = tests.units.get_mut(root).unwrap();
+                harness.dependencies = harness
+                    .dependencies
+                    .iter()
+                    .cloned()
+                    .map(|mut edge| {
+                        if edge.unit == script {
+                            edge.unit = selected.clone();
+                        }
+                        edge
+                    })
+                    .collect();
+            }
+        }
+    }
     // Normal programs keep their panic strategy; harnesses and their libraries unwind.
     // Keeping those graphs separate also permits legal dev cycles back to ordinary libraries.
     if programs.is_empty() {
@@ -1575,16 +1625,42 @@ fn unit_settings(
         local,
         key.profile == ProfileContext::Test,
     );
-    let selected_macro = key.kind == UnitKind::ProcMacro
-        && graph.selected_packages.contains(&key.package)
-        && (key.profile == ProfileContext::Selected
-            || (!options.release
-                && (key.mode == UnitMode::Check
-                    || !graph.units.contains_key(&UnitKey {
-                        mode: UnitMode::Check,
-                        ..key.clone()
+    let test_graph = graph.units.keys().any(|key| key.mode == UnitMode::Test);
+    let selected_macro_profile = |key: &UnitKey| {
+        let selected_macro = (key.kind == UnitKind::ProcMacro
+            && !test_graph
+            && (key.profile == ProfileContext::Selected
+                || (!options.release
+                    && (key.mode == UnitMode::Check
+                        || !graph.units.contains_key(&UnitKey {
+                            mode: UnitMode::Check,
+                            ..key.clone()
+                        })))))
+            || (key.kind == UnitKind::LibraryHarness
+                && manifest
+                    .library
+                    .as_ref()
+                    .is_some_and(|library| library.proc_macro));
+        selected_macro && graph.selected_packages.contains(&key.package)
+    };
+    let macro_dependency = graph.units.keys().any(|parent| {
+        parent.package == key.package
+            && parent.kind == UnitKind::ProcMacro
+            && !selected_macro_profile(parent)
+    });
+    let selected_macro = selected_macro_profile(key)
+        || (key.kind == UnitKind::BuildScriptRun
+            && (key.profile == ProfileContext::Selected
+                || (!macro_dependency
+                    && graph.units.values().any(|parent| {
+                        parent.key.package == key.package
+                            && selected_macro_profile(&parent.key)
+                            && parent.dependencies.iter().any(|edge| {
+                                edge.kind == UnitEdgeKind::BuildScriptOutput && edge.unit == *key
+                            })
                     }))));
     let for_host = key.uses_host_profile() && !selected_macro;
+    let run_strip = run_build_profile(&profile).strip;
     if selected_macro {
         profile.panic = CargoPanicStrategy::Unwind;
     }
@@ -1608,7 +1684,15 @@ fn unit_settings(
         }
     }
     if key.kind == UnitKind::BuildScriptRun {
+        if key.profile == ProfileContext::Selected
+            && options.logical_target.is_none()
+            && macro_dependency
+        {
+            profile.debuginfo = CargoDebugInfo::None;
+        }
         profile = run_build_profile(&profile);
+        // Cargo chooses automatic stripping before it reduces host debug information.
+        profile.strip = run_strip;
     }
 
     let logical_target = match key.compile_kind {
@@ -2947,12 +3031,13 @@ mod tests {
         let fixture = Fixture::new();
         fs::write(
             fixture.0.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"a\", \"b\", \"helper\"]\nresolver = \"2\"\n",
+            "[workspace]\nmembers = [\"a\", \"b\", \"helper\", \"derive\"]\nresolver = \"2\"\n",
         )
         .unwrap();
         fixture.package("helper", "[package]\nname = \"helper\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ntest = false\ndoctest = false\n[features]\nbuild = []\nnormal = []\n", false);
-        fixture.package("a", "[package]\nname = \"a\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ndoctest = false\n[features]\nnormal = []\n[dependencies]\nhelper = { path = \"../helper\", features = [\"normal\"] }\n[dev-dependencies]\nb = { path = \"../b\", features = [\"dev\"] }\n[build-dependencies]\nhelper = { path = \"../helper\", features = [\"build\"] }\n", true);
+        fixture.package("a", "[package]\nname = \"a\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ndoctest = false\n[features]\nnormal = []\n[dependencies]\nderive = { path = \"../derive\" }\nhelper = { path = \"../helper\", features = [\"normal\"] }\n[dev-dependencies]\nb = { path = \"../b\", features = [\"dev\"] }\n[build-dependencies]\nhelper = { path = \"../helper\", features = [\"build\"] }\n", true);
         fixture.package("b", "[package]\nname = \"b\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ndoctest = false\n[features]\ndev = []\n[dependencies]\na = { path = \"../a\", features = [\"normal\"] }\n", false);
+        fixture.package("derive", "[package]\nname = \"derive\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\nproc-macro = true\ndoctest = false\n[features]\ndefault = [\"harness\"]\nharness = []\n[dependencies]\nhelper = { path = \"../helper\", features = [\"normal\"] }\n[build-dependencies]\nhelper = { path = \"../helper\", features = [\"build\"] }\n", true);
         fs::write(fixture.0.join("a/src/main.rs"), "fn main() {}\n").unwrap();
         fs::create_dir(fixture.0.join("a/tests")).unwrap();
         fs::write(
@@ -3020,30 +3105,46 @@ mod tests {
             .iter()
             .map(|package| package.key.clone())
             .collect::<Vec<_>>();
+        let options = PlanOptions {
+            workspace_root: &fixture.0,
+            release: false,
+            test_profile: false,
+            panic_abort: false,
+            dev_profile: &crate::manifest::DevProfile::default(),
+            release_profile: &ReleaseProfile::default(),
+            rustc: &toolchain(),
+            logical_target: None,
+            rustflags: &[],
+        };
         assert!(
-            workspace_test_units(&resolution, &manifests, &selected, false, Some("missing"))
-                .is_err()
-        );
-        for integration_name in [None, Some("integration"), Some("disabled")] {
-            let graph =
-                workspace_test_units(&resolution, &manifests, &selected, false, integration_name)
-                    .unwrap();
-            let plan = plan_dependency_units(
-                &graph,
+            workspace_test_units(
+                &resolution,
                 &manifests,
-                &PlanOptions {
-                    workspace_root: &fixture.0,
-                    release: false,
-                    test_profile: false,
-                    panic_abort: false,
-                    dev_profile: &crate::manifest::DevProfile::default(),
-                    release_profile: &ReleaseProfile::default(),
-                    rustc: &toolchain(),
-                    logical_target: Some("x86_64-unknown-linux-gnu"),
-                    rustflags: &[],
-                },
+                &selected,
+                &options,
+                Some("missing")
+            )
+            .is_err()
+        );
+        for (integration_name, logical_target) in [
+            (None, None),
+            (None, Some("x86_64-unknown-linux-gnu")),
+            (Some("integration"), Some("x86_64-unknown-linux-gnu")),
+            (Some("disabled"), Some("x86_64-unknown-linux-gnu")),
+        ] {
+            let options = PlanOptions {
+                logical_target,
+                ..options
+            };
+            let graph = workspace_test_units(
+                &resolution,
+                &manifests,
+                &selected,
+                &options,
+                integration_name,
             )
             .unwrap();
+            let plan = plan_dependency_units(&graph, &manifests, &options).unwrap();
             let mut command = Command::new(env!("CARGO"));
             command
                 .args([
@@ -3053,12 +3154,13 @@ mod tests {
                     "--unit-graph",
                     "--workspace",
                     "--offline",
-                    "--target",
-                    "x86_64-unknown-linux-gnu",
                 ])
                 .env("CARGO_HOME", fixture.0.join("cargo-home"))
                 .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
                 .current_dir(&fixture.0);
+            if let Some(target) = logical_target {
+                command.args(["--target", target]);
+            }
             if let Some(name) = integration_name {
                 command.args(["--test", name]);
             }
@@ -3088,6 +3190,12 @@ mod tests {
                         unit["target"]["name"].as_str().unwrap().to_owned(),
                         unit["mode"].as_str().unwrap().to_owned(),
                         unit["platform"].is_string(),
+                        unit["features"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|feature| feature.as_str().unwrap().to_owned())
+                            .collect::<Vec<_>>(),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -3095,11 +3203,17 @@ mod tests {
                 (
                     key.package.name.clone(),
                     match key.kind {
-                        UnitKind::Library | UnitKind::LibraryHarness => "lib",
+                        UnitKind::Library | UnitKind::LibraryHarness => {
+                            if manifests[&key.package].library.as_ref().unwrap().proc_macro {
+                                "proc-macro"
+                            } else {
+                                "lib"
+                            }
+                        }
                         UnitKind::Binary | UnitKind::BinaryHarness => "bin",
                         UnitKind::IntegrationHarness => "test",
+                        UnitKind::ProcMacro => "proc-macro",
                         UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => "custom-build",
-                        _ => panic!("unexpected harness fixture kind"),
                     }
                     .to_owned(),
                     key.target.clone().unwrap_or_else(|| {
@@ -3118,7 +3232,8 @@ mod tests {
                         _ => "build",
                     }
                     .to_owned(),
-                    key.compile_kind == CompileKind::Target,
+                    key.compile_kind == CompileKind::Target && logical_target.is_some(),
+                    key.features.iter().cloned().collect::<Vec<_>>(),
                 )
             };
             assert_eq!(
@@ -3173,8 +3288,12 @@ mod tests {
                     reference["profile"]["opt_level"],
                     unit.settings.profile.opt_level
                 );
-                assert_eq!(reference["profile"]["debuginfo"], 2);
-                assert_eq!(unit.settings.profile.debuginfo, CargoDebugInfo::Full);
+                let debug = match unit.settings.profile.debuginfo {
+                    CargoDebugInfo::None => 0,
+                    CargoDebugInfo::Full => 2,
+                    other => panic!("unexpected debug setting {other:?}"),
+                };
+                assert_eq!(reference["profile"]["debuginfo"], debug);
                 assert_eq!(reference["profile"]["panic"], "unwind");
                 assert_eq!(unit.settings.profile.panic, CargoPanicStrategy::Unwind);
             }

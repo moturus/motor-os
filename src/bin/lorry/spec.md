@@ -1356,6 +1356,10 @@ their `test` flags. A named integration selection omits those harnesses and
 selects matching targets across members, including `test = false` targets.
 Required features still apply to explicit selections. The prepared graph
 computes these units' source remaps and identities through the common planner.
+Procedural-macro library harnesses compile for the host with host features,
+`prefer-dynamic`, and the `proc_macro` extern. Their scripts compile as host
+tools and run with Cargo's consumer profile; optimized macro harnesses and
+ordinary macro dependencies can require separate script executions.
 
 For `build`, the selected package's library is compiled on the same unit DAG
 and executor as its normal dependencies. Its dependency edges retain the

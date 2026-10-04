@@ -62,7 +62,7 @@ impl PreparedGraph {
             &self.resolution,
             &manifests,
             selected,
-            options.panic_abort,
+            options,
             integration_name,
         )?;
         self.finish_plan(options, manifests, graph)

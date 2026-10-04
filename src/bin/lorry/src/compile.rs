@@ -406,7 +406,13 @@ pub fn dependency_rustc_invocation_with_build_output(
         push(&mut arguments, crate_type);
     }
     push(&mut arguments, &format!("--emit={emit}"));
-    if key.kind == UnitKind::ProcMacro {
+    let proc_macro = key.kind == UnitKind::ProcMacro
+        || (key.kind == UnitKind::LibraryHarness
+            && manifest
+                .library
+                .as_ref()
+                .is_some_and(|library| library.proc_macro));
+    if proc_macro {
         codegen(&mut arguments, "prefer-dynamic");
     }
     profile_arguments(&mut arguments, planned, manifest);
@@ -448,7 +454,7 @@ pub fn dependency_rustc_invocation_with_build_output(
     }
     let dependency_directories =
         dependency_arguments(&mut arguments, plan, manifests, planned, options)?;
-    if key.kind == UnitKind::ProcMacro {
+    if proc_macro {
         push(&mut arguments, "--extern");
         push(&mut arguments, "proc_macro");
     }
