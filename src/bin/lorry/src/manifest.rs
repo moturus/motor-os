@@ -190,6 +190,7 @@ pub struct LibraryTarget {
     pub test: bool,
     pub doctest: bool,
     pub doc: bool,
+    pub harness: bool,
 }
 
 impl LibraryTarget {
@@ -216,6 +217,7 @@ pub struct BinaryTarget {
     pub path: PathBuf,
     pub test: bool,
     pub doc: bool,
+    pub harness: bool,
     pub required_features: Option<Vec<String>>,
 }
 
@@ -1376,6 +1378,7 @@ fn parse_library(
             test: true,
             doctest: true,
             doc: true,
+            harness: true,
         }));
     };
     let table = require_table(path, document, item, "lib")?;
@@ -1391,6 +1394,7 @@ fn parse_library(
                 | "doc"
                 | "proc-macro"
                 | "doc-scrape-examples"
+                | "harness"
         ) {
             return Err(unsupported_key(path, document, item, &format!("lib.{key}")));
         }
@@ -1486,6 +1490,7 @@ fn parse_library(
         doctest: optional_bool(path, document, table, "lib", "doctest")?.unwrap_or(true)
             && doctestable,
         doc: optional_bool(path, document, table, "lib", "doc")?.unwrap_or(true),
+        harness: optional_bool(path, document, table, "lib", "harness")?.unwrap_or(true),
     }))
 }
 
@@ -1532,7 +1537,7 @@ fn parse_binaries(
         }
         for table in tables.iter() {
             for (key, item) in table.iter() {
-                if !matches!(key, "name" | "path" | "test" | "bench" | "doc")
+                if !matches!(key, "name" | "path" | "test" | "bench" | "doc" | "harness")
                     && !(mode == ManifestMode::Source && key == "required-features")
                 {
                     return Err(unsupported_key(path, document, item, &format!("bin.{key}")));
@@ -1588,6 +1593,7 @@ fn parse_binaries(
                 path: source,
                 test: optional_bool(path, document, table, "bin", "test")?.unwrap_or(true),
                 doc: optional_bool(path, document, table, "bin", "doc")?.unwrap_or(true),
+                harness: optional_bool(path, document, table, "bin", "harness")?.unwrap_or(true),
                 required_features: optional_string_array(
                     path,
                     document,
@@ -1654,6 +1660,7 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
                 path: main,
                 test: true,
                 doc: true,
+                harness: true,
                 required_features: None,
             },
         );
@@ -1721,6 +1728,7 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
                     path: source,
                     test: true,
                     doc: true,
+                    harness: true,
                     required_features: None,
                 },
             )

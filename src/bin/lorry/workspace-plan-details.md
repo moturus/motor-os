@@ -2620,6 +2620,17 @@ Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contra
 
 ### Member build-time code
 
+Library and binary targets now accept `harness = false` and compile their
+test programs with Cargo's `--cfg test` convention. The new offline contract
+compares native/cross program bytes, test and all-target check artifacts,
+package variables, package-root working directories, and execution order.
+The first fixture used the existing failed-script comparison mode by mistake;
+the product builds succeeded, and selecting the ordinary successful-stream
+oracle fixes that test assertion. The original is preserved in
+`/tmp/lorry-m8-harness-free-first-contract.log`. The corrected contract, all
+26 manifest tests, and strict Clippy pass in
+`/tmp/lorry-m8-harness-free-{correct-schema-contract,parser,clippy}.log`.
+
 Release-LTO archive coverage exposed an invalid mixed-library compiler setting:
 Lorry requested `-C lto=fat` for `rlib`/`staticlib`, which rustc rejects.
 The original failure is `/tmp/lorry-m8-static-lto-first-contract.log`; paired
