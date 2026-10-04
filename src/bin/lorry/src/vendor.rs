@@ -94,7 +94,7 @@ fn execute_reconcile(
         progress,
     )?;
     let previous = CompactState::load(&manifest.root)?;
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
+    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     engine::check_rust_version(&manifest, &toolchain)?;
     let host = toolchain.target_info(None)?;
     let contexts = vendor_contexts(&toolchain, &config, &host, previous.as_ref())?;
@@ -1393,6 +1393,7 @@ mod tests {
     fn toolchain() -> Toolchain {
         Toolchain {
             rustc: "/rustc".into(),
+            clippy: None,
             verbose_version: String::new(),
             release: "1.98.0-nightly".to_owned(),
             host: "x86_64-unknown-linux-gnu".to_owned(),

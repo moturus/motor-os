@@ -22,7 +22,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         )
     })?;
     let config = Config::load(&manifest.root)?;
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
+    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     engine::check_rust_version(&manifest, &toolchain)?;
     let options = dependency::resolver_options(&manifest, &config, &toolchain)?;
     let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-review")?;

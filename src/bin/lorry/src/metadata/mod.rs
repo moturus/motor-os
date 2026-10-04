@@ -46,7 +46,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     )?;
     warn_default_format(cli, options);
     let mut config = Config::load(&manifest.root)?;
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
+    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     crate::engine::check_rust_version(&manifest, &toolchain)?;
     let physical_target = config.selected_target(options.filter_platform.as_deref())?;
     let target = toolchain.target_info(physical_target.as_deref())?;

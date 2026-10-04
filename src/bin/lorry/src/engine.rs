@@ -111,7 +111,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
     migrate_artifact_layout(&target_root)?;
     crate::trace::event("loaded manifest, admission state, and configuration");
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
+    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     check_rust_version(&manifest, &toolchain)?;
     crate::trace::event("discovered rustc toolchain");
     if cli.verbosity == Verbosity::Verbose {
@@ -1094,6 +1094,7 @@ fn build_inner(
         cargo: &cargo,
         child_lease_fd: build.child_lease_fd,
         workspace_root: &build.manifest.workspace_root,
+        workspace_members: &build.manifest.workspace_members,
         selected_package: Some(&selected_root.package),
         toolchain: build.toolchain,
         host: build.host,
@@ -2984,7 +2985,7 @@ mod tests {
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let build_once = || {
@@ -3110,7 +3111,7 @@ mod tests {
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifact = build(Build {
@@ -3159,7 +3160,7 @@ mod tests {
 
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let build_with = |binary_selection| {
@@ -3221,7 +3222,7 @@ mod tests {
         assert_eq!(manifest, Manifest::load(&member).unwrap());
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
@@ -3265,7 +3266,7 @@ mod tests {
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
@@ -3332,7 +3333,7 @@ mod tests {
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let build_once = || {
@@ -3416,7 +3417,7 @@ mod tests {
                 provenance: fixture.0.join("lorry.toml"),
             },
         );
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let build_once = |jobs, format| {
@@ -3569,7 +3570,7 @@ mod tests {
                 provenance: fixture.0.join("lorry.toml"),
             },
         );
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let build_once = || {
@@ -3654,7 +3655,7 @@ mod tests {
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         config.test.extraction_root = Some(fixture.0.join("target/bundle-extraction"));
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let build_bundle = || {
@@ -3797,7 +3798,7 @@ mod tests {
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         config.test.extraction_root = Some(fixture.0.join("target/bundle-extraction"));
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
@@ -3917,7 +3918,7 @@ mod tests {
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let error = build(Build {

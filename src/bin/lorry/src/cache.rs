@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::Write;
@@ -84,6 +84,8 @@ pub struct BuildCache {
     quarantine: PathBuf,
     cargo: PathBuf,
     workspace_root: PathBuf,
+    workspace_members: BTreeSet<PathBuf>,
+    clippy: Option<crate::toolchain::ClippyDriver>,
     base: [u8; 32],
     source_limits: TreeLimits,
     payload_limits: TreeLimits,
@@ -163,6 +165,13 @@ impl BuildCache {
             quarantine,
             cargo: options.cargo.to_owned(),
             workspace_root: options.root_manifest.workspace_root.clone(),
+            workspace_members: options
+                .root_manifest
+                .workspace_members
+                .values()
+                .cloned()
+                .collect(),
+            clippy: options.toolchain.clippy.clone(),
             base: digest.finish(),
             source_limits: options.source_limits,
             payload_limits,
@@ -178,6 +187,12 @@ impl BuildCache {
         }
         let mut digest = KeyDigest::new();
         digest.bytes("base", &self.base);
+        if self.workspace_members.contains(&input.manifest.root)
+            && let Some(driver) = &self.clippy
+        {
+            digest.os("clippy-driver-path", driver.path.as_os_str(), &[]);
+            digest.bytes("clippy-driver-sha256", &driver.sha256);
+        }
         digest.string("package-name", &input.key.package.name);
         digest.string("package-version", &input.key.package.version.to_string());
         digest.string(
@@ -717,6 +732,8 @@ impl BuildCache {
             quarantine: root.join("v1/quarantine"),
             cargo: PathBuf::from("/test/lorry"),
             workspace_root: PathBuf::from("/test/workspace"),
+            workspace_members: BTreeSet::new(),
+            clippy: None,
             base: [3; 32],
             source_limits: limits,
             payload_limits: limits,

@@ -9,10 +9,17 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug)]
 pub struct Toolchain {
     pub rustc: PathBuf,
+    pub clippy: Option<ClippyDriver>,
     pub verbose_version: String,
     pub release: String,
     pub host: String,
     pub compatibility: CargoCompat,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClippyDriver {
+    pub path: PathBuf,
+    pub sha256: [u8; 32],
 }
 
 #[derive(Clone, Debug)]
@@ -22,7 +29,7 @@ pub struct TargetInfo {
 }
 
 impl Toolchain {
-    pub fn discover(selector: Option<&str>, config: &Config) -> Result<Self> {
+    pub fn discover(selector: Option<&str>, config: &Config, clippy: bool) -> Result<Self> {
         let mut rustc = if cfg!(target_os = "motor") {
             if selector.is_some() {
                 return Err(Error::failure(
@@ -85,9 +92,13 @@ impl Toolchain {
                 "use the current Motor Rust toolchain or set `cargo-compat-version = \"1.99\"` for an equivalent custom toolchain",
             )
         })?;
+        let clippy = clippy
+            .then(|| discover_clippy_driver(&rustc, &verbose_version))
+            .transpose()?;
 
         Ok(Self {
             rustc,
+            clippy,
             verbose_version,
             release,
             host,
@@ -118,6 +129,34 @@ impl Toolchain {
             cfg: CfgSet::parse(&text)?,
         })
     }
+}
+
+fn discover_clippy_driver(rustc: &Path, rustc_version: &str) -> Result<ClippyDriver> {
+    let path = rustc.with_file_name(if cfg!(windows) {
+        "clippy-driver.exe"
+    } else {
+        "clippy-driver"
+    });
+    validate_program(&path, "Clippy driver").map_err(|error| {
+        error.with_help("install clippy-driver beside the selected rustc, from the same toolchain")
+    })?;
+    let output = process::query_rustc(
+        &path,
+        &["--rustc", "-vV"],
+        "Clippy embedded compiler version query",
+    )?;
+    let version = String::from_utf8(output.stdout)
+        .map_err(|_| Error::failure("Clippy embedded compiler version output is not Unicode"))?;
+    if version.trim() != rustc_version.trim() {
+        return Err(Error::failure(format!(
+            "Clippy driver `{}` does not embed the selected rustc `{}`",
+            path.display(),
+            rustc.display()
+        ))
+        .with_help("select rustc and clippy-driver from the same toolchain"));
+    }
+    let sha256 = crate::hash::sha256_file(&path)?;
+    Ok(ClippyDriver { path, sha256 })
 }
 
 fn resolve_rustup_proxy(rustc: PathBuf) -> Result<PathBuf> {
@@ -406,6 +445,68 @@ impl CfgParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn clippy_discovery_requires_a_matching_executable_sibling() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "lorry-clippy-driver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let fixture = Fixture(root);
+        let rustc = fixture.0.join("rustc");
+        let driver = fixture.0.join("clippy-driver");
+        let version = "rustc 1.99.0-dev\ncommit-hash: selected\nhost: host\nrelease: 1.99.0-dev\n";
+        let missing = discover_clippy_driver(&rustc, version).unwrap_err();
+        assert!(missing.render().contains("beside the selected rustc"));
+        fs::write(&driver, "#!/bin/sh\nprintf 'different compiler\\n'\n").unwrap();
+        assert!(discover_clippy_driver(&rustc, version).is_err());
+        fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            discover_clippy_driver(&rustc, version)
+                .unwrap_err()
+                .render()
+                .contains("does not embed the selected rustc")
+        );
+        let script = format!(
+            "#!/bin/sh\n[ \"$*\" = '--rustc -vV' ] || exit 2\ncat <<'VERSION'\n{version}VERSION\n"
+        );
+        fs::write(&driver, &script).unwrap();
+        let first = discover_clippy_driver(&rustc, version).unwrap();
+        assert_eq!(first.path, driver);
+        assert_eq!(first.sha256, crate::hash::sha256_file(&driver).unwrap());
+        fs::write(&driver, format!("{script}# changed lint implementation\n")).unwrap();
+        assert_ne!(
+            first.sha256,
+            discover_clippy_driver(&rustc, version).unwrap().sha256
+        );
+        assert!(discover_clippy_driver(&rustc, &version.replace("selected", "other")).is_err());
+    }
+
+    #[cfg(not(target_os = "motor"))]
+    #[test]
+    fn selected_toolchains_clippy_embeds_its_rustc() {
+        let toolchain = Toolchain::discover(None, &Config::default(), true).unwrap();
+        let driver = toolchain.clippy.unwrap();
+        assert_eq!(driver.path.parent(), toolchain.rustc.parent());
+        assert_eq!(
+            driver.sha256,
+            crate::hash::sha256_file(&driver.path).unwrap()
+        );
+    }
 
     #[test]
     fn parses_rustc_verbose_version_and_family() {

@@ -50,6 +50,7 @@ pub struct Options<'a> {
     pub child_lease_fd: Option<i32>,
     pub cargo: &'a Path,
     pub workspace_root: &'a Path,
+    pub workspace_members: &'a BTreeMap<String, PathBuf>,
     pub selected_package: Option<&'a PackageKey>,
     pub toolchain: &'a Toolchain,
     pub host: &'a TargetInfo,
@@ -765,7 +766,17 @@ fn execute_unit(
                 }
                 let rustc_output = RustcCommand {
                     child_lease_fd: options.child_lease_fd,
-                    program: &options.toolchain.rustc,
+                    program: options
+                        .toolchain
+                        .clippy
+                        .as_ref()
+                        .filter(|_| {
+                            options
+                                .workspace_members
+                                .values()
+                                .any(|root| root == &manifest.root)
+                        })
+                        .map_or(&options.toolchain.rustc, |driver| &driver.path),
                     arguments: &invocation.arguments,
                     environment: &invocation.environment,
                     current_dir: &invocation.current_dir,
@@ -1269,7 +1280,7 @@ mod tests {
     fn actual_toolchain() -> (Toolchain, TargetInfo) {
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
-        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         (toolchain, target)
     }
@@ -1361,6 +1372,7 @@ mod tests {
                 cargo: &cargo,
                 child_lease_fd: None,
                 workspace_root: &fixture.0,
+                workspace_members: &BTreeMap::new(),
                 selected_package: None,
                 toolchain: &toolchain,
                 host: &target,

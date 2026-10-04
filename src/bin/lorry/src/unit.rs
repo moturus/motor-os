@@ -1389,6 +1389,7 @@ mod tests {
     fn toolchain() -> Toolchain {
         Toolchain {
             rustc: "/rustc".into(),
+            clippy: None,
             verbose_version: "rustc 1.98.0-nightly (bc2112ed5 2026-06-18)\n\
                               binary: rustc\n\
                               commit-hash: bc2112ed56c99fa649e09ab3ab286afab3d9059a\n\

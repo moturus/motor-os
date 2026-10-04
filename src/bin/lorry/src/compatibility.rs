@@ -29,7 +29,7 @@ pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = Manifest::load_for_vendor_selected(&current, cli.package.as_deref())?;
     let config = Config::load(&manifest.root)?;
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
+    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let target = toolchain.target_info(Some(&options.target))?;
     manifest.require_supported_target(&target)?;
     let selectors = config.targets.keys().filter_map(|selector| match selector {
