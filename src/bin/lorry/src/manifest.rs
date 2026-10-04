@@ -3816,7 +3816,7 @@ members = ["ignored-member"]
         assert!(root.join("Cargo.toml").is_file());
         let manifest = Manifest::load(root).unwrap();
         assert_eq!(manifest.name, "lorry");
-        assert_eq!(manifest.dependencies.len(), 13);
+        assert_eq!(manifest.dependencies.len(), 14);
         assert!(manifest.dependencies.iter().any(|dependency| {
             dependency.package == "moto-rt"
                 && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
@@ -3837,8 +3837,14 @@ members = ["ignored-member"]
                 && dependency
                     .features
                     .iter()
-                    .any(|feature| feature == "dirwalk")
+                    .any(|feature| feature == "attributes")
         }));
+        assert!(
+            manifest
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.package == "gix-dir")
+        );
         assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 164);
     }
 

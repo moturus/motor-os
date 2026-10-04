@@ -1383,6 +1383,26 @@ enabled feature and the exact new count. Its focused run passed in
 `/tmp/lorry-m5-lock-count-test.log`; no product behavior or assertion strength
 changed. The complete gate is rerun after this test-only correction.
 
+The rerun passed all host contracts and both Cargo byte-identity targets,
+then failed native preparation at the unchanged depth limit of 16
+(`/tmp/lorry-m5-full-lock-count-fixed.log`, 305 seconds). A diagnostic native
+run preserved the exact selected graph in `/tmp/lorry-m5-depth-lorry-graph.json`
+and its log in `/tmp/lorry-m5-depth-diagnostic-native.log`. The 17-package
+path runs through gix, gix-dir, gix-worktree, gix-index, and finally
+thiserror-impl, syn, quote, proc-macro2, and unicode-ident. Cargo's host and
+Motor compiler graphs confirm the same package path. An initial comparison
+of distinct packages on Cargo's longest *unit* path incorrectly reported 16;
+weighting package transitions correctly reports 17. No policy bug was found.
+
+The member reader now calls the same gix-dir walker directly, with public
+gix index/ignore/pathspec APIs and filesystem capabilities. Gix retains its
+attributes feature but no longer depends on gix-dir; Lorry depends on it
+directly. Cargo's compiler graph now has a maximum package depth of 16
+(`/tmp/lorry-m5-depth-cargo-direct-walker-unit-graph.json`). The package count
+remains 164, and no policy limit, timeout, or external source was changed.
+Temporary policy diagnostics were removed. Cargo file-list comparison and
+strict Clippy passed in `/tmp/lorry-m5-direct-walker-{unit,clippy}.log`.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,

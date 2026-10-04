@@ -193,7 +193,7 @@ fn git_files(
     ancestors: &mut Vec<PathBuf>,
     files: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    use gix::dir::{
+    use gix_dir::{
         entry::{Kind, Status},
         walk::EmissionMode,
     };
@@ -210,27 +210,67 @@ fn git_files(
         .index_or_empty()
         .map_err(|error| Error::failure(error.to_string()))?;
     let target = gix::path::into_bstr(prefix.join("target/"));
-    let options = repo
-        .dirwalk_options()
-        .map_err(|error| Error::failure(error.to_string()))?
-        .emit_untracked(EmissionMode::Matching)
-        .emit_ignored(None)
-        .emit_tracked(true)
-        .recurse_repositories(false)
-        .symlinks_to_directories_are_ignored_like_directories(true)
-        .emit_empty_directories(false);
+    let capabilities = repo
+        .filesystem_options()
+        .map_err(|error| Error::failure(error.to_string()))?;
+    let lookup = capabilities
+        .ignore_case
+        .then(|| index.prepare_icase_backing());
     let patterns = [
         format!(":(top){}", prefix.display()),
         format!(":!(exclude,top){}", target),
     ];
-    let mut candidates = Vec::new();
-    for item in repo
-        .dirwalk_iter(index.clone(), patterns, Default::default(), options)
+    let mut pathspec = repo
+        .pathspec(
+            false,
+            patterns.iter().map(gix::bstr::BStr::new),
+            true,
+            &index,
+            gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+        )
         .map_err(|error| Error::failure(error.to_string()))?
-    {
-        let entry = item
-            .map_err(|error| Error::failure(error.to_string()))?
-            .entry;
+        .search()
+        .clone();
+    let mut excludes = repo
+        .excludes(
+            &index,
+            None,
+            gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+        )
+        .map_err(|error| Error::failure(error.to_string()))?
+        .detach();
+    let git_dir =
+        fs::canonicalize(repo.git_dir()).map_err(|error| io_error(repo.git_dir(), error))?;
+    let mut collected = gix_dir::walk::delegate::Collect::default();
+    // Use Cargo's walker directly to avoid another level in the package graph.
+    // These internally generated pathspecs never request attribute matching.
+    gix_dir::walk(
+        root,
+        gix_dir::walk::Context {
+            should_interrupt: None,
+            git_dir_realpath: &git_dir,
+            current_dir: repo.current_dir(),
+            index: &index,
+            ignore_case_index_lookup: lookup.as_ref(),
+            pathspec: &mut pathspec,
+            pathspec_attributes: &mut |_, _, _, _| false,
+            excludes: Some(&mut excludes),
+            objects: &repo.objects,
+            explicit_traversal_root: Some(root),
+        },
+        gix_dir::walk::Options {
+            precompose_unicode: capabilities.precompose_unicode,
+            ignore_case: capabilities.ignore_case,
+            emit_tracked: true,
+            emit_untracked: EmissionMode::Matching,
+            symlinks_to_directories_are_ignored_like_directories: true,
+            ..Default::default()
+        },
+        &mut collected,
+    )
+    .map_err(|error| Error::failure(error.to_string()))?;
+    let mut candidates = Vec::new();
+    for (entry, _) in collected.unorded_entries {
         if entry.disk_kind == Some(Kind::Untrackable)
             || (entry.status == Status::Untracked && entry.rela_path == "Cargo.lock")
         {

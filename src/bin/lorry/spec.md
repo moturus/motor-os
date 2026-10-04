@@ -310,6 +310,9 @@ reject nondefault feature selection until workspace resolution supports it.
 Editable members use Cargo's package file discovery: Git ignores and tracked
 files, include/exclude rules, symbolic links, and nested package boundaries.
 Dependency archive size/file limits do not constrain member source trees.
+Git file discovery calls Cargo's `gix-dir` walker directly with gix's index,
+ignore stack, pathspecs, and filesystem capabilities. This retains the
+configured dependency-depth bound for Lorry's own graph.
 Compiler dep-info permits member reads outside their directories and tracks
 those inputs through unit-cache restores and completed-profile reuse.
 Completed profiles also track the workspace manifest and member compiler
