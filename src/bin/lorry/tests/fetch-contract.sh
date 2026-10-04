@@ -66,6 +66,24 @@ mkdir "$PROJECT/.lorry"
 echo 'existing admission bytes' >"$PROJECT/.lorry/dependencies-v2.toml"
 cp "$PROJECT/.lorry/dependencies-v2.toml" "$WORK/original.admission"
 cd "$PROJECT"
+cp "$HOME/.config/lorry/lorry.toml" "$WORK/allowed.config"
+cat >>"$HOME/.config/lorry/lorry.toml" <<'EOF_CONFIG'
+[policy.rules.veto]
+action = "deny"
+name = "cfg-if"
+version = "=1.0.4"
+source = "crates.io"
+checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+EOF_CONFIG
+if "$LORRY" -q --lorry-messages fetch >"$WORK/veto.out" 2>"$WORK/veto.err"; then
+    echo 'fetch acquired an explicitly denied locked source' >&2
+    exit 1
+fi
+grep -F 'denied by policy rule' "$WORK/veto.err" >/dev/null
+test ! -e "$WORK/requests"
+cmp Cargo.lock "$WORK/original.lock"
+cmp .lorry/dependencies-v2.toml "$WORK/original.admission"
+cp "$WORK/allowed.config" "$HOME/.config/lorry/lorry.toml"
 "$LORRY" fetch --locked --target x86_64-unknown-linux-gnu >"$WORK/targeted.out" 2>"$WORK/targeted.err"
 grep -F 'Downloading cfg-if v1.0.4' "$WORK/targeted.err"
 if grep -F 'https://static.crates.io/crates/equivalent/' "$WORK/requests"; then

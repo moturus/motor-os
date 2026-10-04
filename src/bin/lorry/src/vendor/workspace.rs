@@ -33,6 +33,7 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
     if workspace.packages.is_empty() {
         return Ok(0);
     }
+    policy::preflight_locked_sources(&config.policy, workspace.packages[0].lock.as_ref().unwrap())?;
     let _lock = ProjectVendorLock::acquire(&workspace.root)?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     let manifest = &workspace.packages[0];
@@ -111,6 +112,12 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     config.apply_max_packages(cli.max_packages)?;
     if workspace.packages.is_empty() {
         return Ok(0);
+    }
+    if options.locked {
+        policy::preflight_locked_sources(
+            &config.policy,
+            workspace.packages[0].lock.as_ref().unwrap(),
+        )?;
     }
     let lock = ProjectVendorLock::acquire(&workspace.root)?;
     if cli.verbosity == Verbosity::Verbose {

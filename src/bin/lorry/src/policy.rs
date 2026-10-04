@@ -146,7 +146,7 @@ enum Fact {
 }
 
 struct Facts<'a> {
-    package: &'a ResolvedPackage,
+    package: &'a PackageKey,
     source: SourceKind,
     checksum: Fact,
     source_tree_sha256: Fact,
@@ -186,7 +186,7 @@ fn preflight_depth(policy: &Policy, resolution: &Resolution, depth: u64) -> Resu
                 potential_rules.push(id.clone());
             }
             if rule.action == PolicyAction::Deny && rule_definitely_matches(rule, &facts) {
-                return Err(denied_by_rule(package, id, rule));
+                return Err(denied_by_rule(&package.key, id, rule));
             }
         }
 
@@ -265,7 +265,7 @@ pub fn inspect(
             .find(|id| preflight.policy.rules[id.as_str()].action == PolicyAction::Deny)
         {
             return Err(denied_by_rule(
-                package,
+                &package.key,
                 id,
                 &preflight.policy.rules[id.as_str()],
             ));
@@ -314,6 +314,57 @@ pub fn inspect(
     }
 
     Ok(Admission { packages: admitted })
+}
+
+/// Veto known locked identities before any index or Git acquisition. Tree and
+/// license constraints remain unknown until verified sources can supply them.
+pub(crate) fn preflight_locked_sources(
+    policy: &Policy,
+    lock: &crate::manifest::Lockfile,
+) -> Result<()> {
+    for package in &lock.packages {
+        let Some(source) = &package.source else {
+            continue;
+        };
+        let (source_kind, source_key, checksum) =
+            if source == "registry+https://github.com/rust-lang/crates.io-index" {
+                (
+                    SourceKind::CratesIo,
+                    PackageSourceKey::CratesIo,
+                    package.checksum.clone().map_or(Fact::Absent, Fact::Value),
+                )
+            } else if source.starts_with("git+") {
+                crate::git::parse_locked_source(source)?;
+                (
+                    SourceKind::Git,
+                    PackageSourceKey::Git(source.clone()),
+                    Fact::Absent,
+                )
+            } else {
+                return Err(Error::failure(format!(
+                    "unsupported locked source `{source}`"
+                )));
+            };
+        let key = PackageKey {
+            name: package.name.clone(),
+            version: Version::parse(&package.version.original)
+                .map_err(|error| Error::failure(format!("invalid locked version: {error}")))?,
+            source: source_key,
+        };
+        let facts = Facts {
+            package: &key,
+            source: source_kind,
+            checksum,
+            source_tree_sha256: Fact::Unknown,
+            license: Fact::Unknown,
+        };
+        for (id, rule) in &policy.rules {
+            if rule.action == PolicyAction::Deny && rule_definitely_matches(rule, &facts) {
+                return Err(denied_by_rule(&key, id, rule));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Source preparation checks vetoes and resource limits without granting any
@@ -379,7 +430,7 @@ pub(crate) fn inspect_sources(
 fn check_denies(policy: &Policy, package: &ResolvedPackage, facts: &Facts<'_>) -> Result<()> {
     for (id, rule) in &policy.rules {
         if rule.action == PolicyAction::Deny && rule_definitely_matches(rule, facts) {
-            return Err(denied_by_rule(package, id, rule));
+            return Err(denied_by_rule(&package.key, id, rule));
         }
     }
     Ok(())
@@ -639,7 +690,7 @@ impl PackageEvidence {
 fn preliminary_facts(package: &ResolvedPackage) -> Facts<'_> {
     match &package.source {
         ResolvedSource::CratesIo { checksum } => Facts {
-            package,
+            package: &package.key,
             source: SourceKind::CratesIo,
             checksum: Fact::Value(hex(checksum)),
             source_tree_sha256: Fact::Unknown,
@@ -648,7 +699,7 @@ fn preliminary_facts(package: &ResolvedPackage) -> Facts<'_> {
         ResolvedSource::Path {
             source_tree_sha256, ..
         } => Facts {
-            package,
+            package: &package.key,
             source: SourceKind::Path,
             checksum: Fact::Absent,
             source_tree_sha256: Fact::Value(hex(source_tree_sha256)),
@@ -662,7 +713,7 @@ fn preliminary_facts(package: &ResolvedPackage) -> Facts<'_> {
         ResolvedSource::Git {
             source_tree_sha256, ..
         } => Facts {
-            package,
+            package: &package.key,
             source: SourceKind::Git,
             checksum: Fact::Absent,
             source_tree_sha256: Fact::Value(hex(source_tree_sha256)),
@@ -683,7 +734,7 @@ fn complete_facts<'a>(package: &'a ResolvedPackage, evidence: &'a PackageEvidenc
         ResolvedSource::Path { .. } | ResolvedSource::Git { .. } => Fact::Absent,
     };
     Facts {
-        package,
+        package: &package.key,
         source,
         checksum,
         source_tree_sha256: Fact::Value(hex(&evidence.source_tree_sha256)),
@@ -751,11 +802,11 @@ fn rule_matches(rule: &PolicyRule, facts: &Facts<'_>) -> bool {
 fn basic_rule_matches(rule: &PolicyRule, facts: &Facts<'_>) -> bool {
     rule.name
         .as_ref()
-        .is_none_or(|name| name == &facts.package.key.name)
+        .is_none_or(|name| name == &facts.package.name)
         && rule
             .version
             .as_ref()
-            .is_none_or(|version| version.matches(&facts.package.key.version))
+            .is_none_or(|version| version.matches(&facts.package.version))
         && rule
             .source
             .as_deref()
@@ -958,11 +1009,11 @@ fn tail_depth(
     Ok(depth)
 }
 
-fn denied_by_rule(package: &ResolvedPackage, id: &str, rule: &PolicyRule) -> Error {
+fn denied_by_rule(package: &PackageKey, id: &str, rule: &PolicyRule) -> Error {
     Error::failure(format!(
         "package `{} {}` is denied by policy rule `{id}` from `{}`",
-        package.key.name,
-        package.key.version,
+        package.name,
+        package.version,
         rule.provenance.display()
     ))
 }
@@ -1267,6 +1318,46 @@ mod tests {
             file_count: 2,
             source_tree_sha256: checksum(9),
         }
+    }
+
+    #[test]
+    fn locked_git_veto_uses_known_identity_without_inventing_source_evidence() {
+        let lock = crate::manifest::Lockfile {
+            format: crate::lockfile::Format::V4,
+            packages: vec![crate::manifest::LockedPackage {
+                name: "demo".into(),
+                version: crate::manifest::Version {
+                    original: "1.2.3".into(),
+                    major: 1,
+                    minor: 2,
+                    patch: 3,
+                    pre: String::new(),
+                    build: String::new(),
+                },
+                source: Some(format!("git+https://example.test/demo#{}", "1".repeat(40))),
+                checksum: None,
+                dependencies: vec![],
+            }],
+        };
+        let mut veto = rule(PolicyAction::Deny, None, None);
+        veto.source = Some("git".into());
+        let mut policy = Policy {
+            default: PolicyDefault::Deny,
+            path_roots: vec![],
+            limits: PolicyLimits::default(),
+            rules: BTreeMap::from([("veto".into(), veto)]),
+        };
+        assert!(
+            preflight_locked_sources(&policy, &lock)
+                .unwrap_err()
+                .render()
+                .contains("veto")
+        );
+        policy.rules.get_mut("veto").unwrap().source_tree_sha256 = Some("0".repeat(64));
+        preflight_locked_sources(&policy, &lock).unwrap();
+        policy.rules.get_mut("veto").unwrap().source_tree_sha256 = None;
+        policy.rules.get_mut("veto").unwrap().license = Some("MIT".into());
+        preflight_locked_sources(&policy, &lock).unwrap();
     }
 
     #[test]
