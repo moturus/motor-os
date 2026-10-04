@@ -131,7 +131,8 @@ fn source_digest(source: &str) -> String {
     hex(&digest.finish())
 }
 
-pub use review::{Capability, CompactState, Context, Review};
+#[allow(unused_imports)] // Workspace command wiring consumes ReviewScope next.
+pub use review::{Capability, CompactState, Context, Review, ReviewScope};
 #[cfg(test)]
 pub use review::{ContextRegistry, LockedRegistry, RegistrySource, UnitKind};
 
@@ -152,6 +153,78 @@ mod review {
     const MAX_CFG_DEPTH: usize = 64;
     const COMPACT_FORMAT_VERSION: u64 = 3;
     const REVIEW_FORMAT_VERSION: u64 = 3;
+
+    /// Empty package selection means the whole workspace. Names and feature
+    /// requests are normalized so the same scope reconstructs the same review.
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub struct ReviewScope {
+        pub packages: Vec<String>,
+        pub features: Vec<String>,
+        pub all_features: bool,
+        pub no_default_features: bool,
+    }
+
+    impl ReviewScope {
+        fn validate(&self) -> Result<()> {
+            limit(self.packages.len(), 64, "reviewed members")?;
+            limit(
+                self.features.len(),
+                MAX_FEATURES,
+                "reviewed feature requests",
+            )?;
+            ordered(&self.packages, "reviewed members")?;
+            ordered(&self.features, "reviewed feature requests")?;
+            for name in &self.packages {
+                nonempty(name, "reviewed member name")?;
+                if !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                {
+                    return Err(invalid("contains an invalid reviewed member name"));
+                }
+            }
+            for feature in &self.features {
+                nonempty(feature, "reviewed feature request")?;
+            }
+            Ok(())
+        }
+
+        fn parse(path: &Path, table: &Table) -> Result<Self> {
+            require_keys(
+                path,
+                table,
+                &[
+                    "packages",
+                    "features",
+                    "all-features",
+                    "no-default-features",
+                ],
+                &[],
+            )?;
+            let boolean = |key| {
+                required_item(path, table, key)?
+                    .as_bool()
+                    .ok_or_else(|| invalid(format!("review scope `{key}` must be a boolean")))
+            };
+            let scope = Self {
+                packages: required_strings(path, table, "packages")?,
+                features: required_strings(path, table, "features")?,
+                all_features: boolean("all-features")?,
+                no_default_features: boolean("no-default-features")?,
+            };
+            scope.validate()?;
+            Ok(scope)
+        }
+
+        fn write(&self, writer: &mut Writer) -> Result<()> {
+            self.validate()?;
+            writer.raw("\n[review-scope]\n")?;
+            writer.strings("packages", &self.packages)?;
+            writer.strings("features", &self.features)?;
+            writer.boolean("all-features", self.all_features)?;
+            writer.boolean("no-default-features", self.no_default_features)
+        }
+    }
 
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub struct Context {
@@ -298,6 +371,7 @@ mod review {
 
     #[derive(Clone, Debug, Default, Eq, PartialEq)]
     pub struct Review {
+        pub scope: Option<ReviewScope>,
         pub resolver_version: u64,
         pub contexts: Vec<Context>,
         pub direct_registry: Vec<DirectRegistry>,
@@ -315,6 +389,7 @@ mod review {
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct CompactState {
+        pub scope: Option<ReviewScope>,
         pub review_sha256: String,
         pub contexts: Vec<Context>,
         pub capabilities: Vec<Capability>,
@@ -424,7 +499,7 @@ mod review {
                     "review-sha256",
                     "context",
                 ],
-                &["capability"],
+                &["capability", "review-scope"],
             )?;
             compact_version(
                 path,
@@ -432,13 +507,29 @@ mod review {
                 "format-version",
                 COMPACT_FORMAT_VERSION,
             )?;
+            let scope = document
+                .root()
+                .get("review-scope")
+                .map(|item| {
+                    ReviewScope::parse(
+                        path,
+                        item.as_table()
+                            .ok_or_else(|| invalid("review scope must be a table"))?,
+                    )
+                })
+                .transpose()?;
             compact_version(
                 path,
                 document.root(),
                 "review-format-version",
-                REVIEW_FORMAT_VERSION,
+                if scope.is_some() {
+                    4
+                } else {
+                    REVIEW_FORMAT_VERSION
+                },
             )?;
             let state = Self {
+                scope,
                 review_sha256: required_string(path, document.root(), "review-sha256")?,
                 contexts: parse_compact_contexts(path, document)?,
                 capabilities: parse_compact_capabilities(path, document)?,
@@ -452,8 +543,18 @@ mod review {
             let mut writer = Writer::compact();
             writer.raw("# Generated by Lorry. Do not edit.\n")?;
             writer.integer("format-version", COMPACT_FORMAT_VERSION)?;
-            writer.integer("review-format-version", REVIEW_FORMAT_VERSION)?;
+            writer.integer(
+                "review-format-version",
+                if self.scope.is_some() {
+                    4
+                } else {
+                    REVIEW_FORMAT_VERSION
+                },
+            )?;
             writer.string("review-sha256", &self.review_sha256)?;
+            if let Some(scope) = &self.scope {
+                scope.write(&mut writer)?;
+            }
             write_contexts(&mut writer, &self.contexts)?;
             write_capabilities(&mut writer, &self.capabilities)?;
             writer.finish()
@@ -461,6 +562,9 @@ mod review {
 
         pub fn validate(&self) -> Result<()> {
             digest(&self.review_sha256, "review digest")?;
+            if let Some(scope) = &self.scope {
+                scope.validate()?;
+            }
             validate_contexts(&self.contexts)?;
             validate_capabilities(&self.capabilities)
         }
@@ -784,10 +888,20 @@ mod review {
         pub fn render(&self) -> Result<Vec<u8>> {
             self.validate()?;
             let mut writer = Writer::new();
-            writer.integer("review-format-version", REVIEW_FORMAT_VERSION)?;
+            writer.integer(
+                "review-format-version",
+                if self.scope.is_some() {
+                    4
+                } else {
+                    REVIEW_FORMAT_VERSION
+                },
+            )?;
             writer.integer("source-tree-format-version", 1)?;
             writer.integer("cargo-lock-format-version", 4)?;
             writer.integer("resolver-version", self.resolver_version)?;
+            if let Some(scope) = &self.scope {
+                scope.write(&mut writer)?;
+            }
             write_contexts(&mut writer, &self.contexts)?;
             for value in &self.direct_registry {
                 writer.table("direct-registry")?;
@@ -882,6 +996,16 @@ mod review {
         }
 
         pub fn validate(&self) -> Result<()> {
+            if let Some(scope) = &self.scope {
+                scope.validate()?;
+                if !self.direct_registry.is_empty()
+                    || !self.direct_git.is_empty()
+                    || !self.root_features.is_empty()
+                    || !self.crates_io_patches.is_empty()
+                {
+                    return Err(invalid("workspace review contains member declarations"));
+                }
+            }
             validate_contexts(&self.contexts)?;
             validate_capabilities(&self.capabilities)?;
             limit(
@@ -2019,10 +2143,63 @@ mod review {
 
         fn compact_state() -> CompactState {
             CompactState {
+                scope: None,
                 review_sha256: "44".repeat(32),
                 contexts: empty_review().contexts,
                 capabilities: Vec::new(),
             }
+        }
+
+        #[test]
+        fn workspace_scope_round_trips_and_is_part_of_the_commitment() {
+            let scope = ReviewScope {
+                packages: vec!["app".to_owned(), "helper".to_owned()],
+                features: vec!["app/extra".to_owned()],
+                all_features: false,
+                no_default_features: true,
+            };
+            let mut compact = compact_state();
+            compact.scope = Some(scope.clone());
+            let bytes = compact.render().unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("review-format-version = 4"));
+            assert_eq!(
+                CompactState::parse(Path::new("state.toml"), text.clone()).unwrap(),
+                compact
+            );
+            assert!(
+                CompactState::parse(
+                    Path::new("state.toml"),
+                    text.replace("review-format-version = 4", "review-format-version = 3"),
+                )
+                .is_err()
+            );
+            assert!(
+                CompactState::parse(
+                    Path::new("state.toml"),
+                    text.replace(
+                        "packages = [\"app\", \"helper\"]",
+                        "packages = [\"app\", \"app\"]"
+                    ),
+                )
+                .is_err()
+            );
+            let mut review = empty_review();
+            review.scope = Some(scope);
+            let first = review.commitment().unwrap();
+            review.scope.as_mut().unwrap().no_default_features = false;
+            assert_ne!(review.commitment().unwrap(), first);
+            review.root_features.push(RootFeature {
+                name: "unused".to_owned(),
+                values: vec![],
+            });
+            assert!(
+                review
+                    .render()
+                    .unwrap_err()
+                    .render()
+                    .contains("member declarations")
+            );
         }
 
         fn capability() -> Capability {
@@ -3099,6 +3276,7 @@ mod tests {
 
     fn state() -> CompactState {
         CompactState {
+            scope: None,
             review_sha256: "44".repeat(32),
             contexts: vec![context()],
             capabilities: vec![Capability {

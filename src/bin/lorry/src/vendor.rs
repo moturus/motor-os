@@ -525,6 +525,7 @@ fn prepare_networked_with_approval(
         staged_lock.commit()?;
     }
     CompactState {
+        scope: None,
         review_sha256: commitment,
         contexts: recorded,
         capabilities,
