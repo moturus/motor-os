@@ -117,6 +117,8 @@ Cargo registry description loading verifies the same archives, markers, and
 source trees as compilation loading, without imposing build-target restrictions.
 Source-only workspace preparation retains registry target descriptions and
 development declarations through evidence inspection and publication.
+Locked Git descriptions retain those same fields and bind internal development
+paths to the verified locked Git source, without moving branch references.
 
 Debug builds must reproduce Cargo-equivalent compilation semantics but need
 not be byte-identical across hosts because paths and debug information can

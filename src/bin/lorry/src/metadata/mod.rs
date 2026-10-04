@@ -98,7 +98,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
         _ => unreachable!("exactly one registry source is constructed"),
     };
-    let direct = crate::git::load_locked_dependencies(manifest, &config.policy.limits)?;
+    let direct = crate::git::load_locked_sources(manifest, &config.policy.limits)?;
     let resolver_options = dependency::resolver_options(manifest, &config, &toolchain)?;
     let (complete, catalog) = dependency::workspace::resolve_locked(
         &workspace,
