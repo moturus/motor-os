@@ -9,6 +9,7 @@ pub mod journal;
 pub mod patch_match;
 pub mod paths;
 pub mod search;
+pub mod shell_words;
 pub mod snapshot;
 pub mod todo;
 pub mod tool;
