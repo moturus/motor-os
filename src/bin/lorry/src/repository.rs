@@ -438,6 +438,29 @@ impl RepositoryTransaction {
         record: &SparseRecord,
         archive: &Path,
     ) -> Result<&StagedRegistryObject> {
+        self.stage_registry_package(record, archive, false)
+    }
+
+    #[allow(dead_code)] // Consumed by the workspace acquisition command next.
+    pub(crate) fn stage_registry_description(
+        &mut self,
+        record: &SparseRecord,
+        archive: &Path,
+    ) -> Result<&StagedRegistryObject> {
+        self.stage_registry_package(record, archive, true)
+    }
+
+    fn stage_registry_package(
+        &mut self,
+        record: &SparseRecord,
+        archive: &Path,
+        describe: bool,
+    ) -> Result<&StagedRegistryObject> {
+        let load = if describe {
+            Manifest::load_source_dependency
+        } else {
+            Manifest::load_path_dependency
+        };
         if self
             .objects
             .iter()
@@ -496,7 +519,7 @@ impl RepositoryTransaction {
             &record.version,
             self.writer.archive_limits,
         )?;
-        let manifest = Manifest::load_path_dependency(extracted.path())?;
+        let manifest = load(extracted.path())?;
         let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
             Error::failure(format!(
                 "downloaded package has invalid version `{} {}`: {error}",
@@ -509,7 +532,7 @@ impl RepositoryTransaction {
                 manifest.name, manifest.version.original, record.name, record.version
             )));
         }
-        if manifest.metadata.license.is_empty() {
+        if !describe && manifest.metadata.license.is_empty() {
             return Err(Error::failure(format!(
                 "downloaded package `{} {}` has no license expression",
                 record.name, record.version
@@ -537,10 +560,7 @@ impl RepositoryTransaction {
                 &tree.manifest_bytes(),
             )?;
             extracted.commit(&object_path.join("source"))?;
-            (
-                Manifest::load_path_dependency(&object_path.join("source"))?,
-                None,
-            )
+            (load(&object_path.join("source"))?, None)
         } else {
             (manifest, Some(extracted))
         };
@@ -985,7 +1005,9 @@ fn verify_registry_object(
             package_path.display()
         )));
     }
-    let license = require_nonempty_string(&package_path, &document, document.root(), "license")?;
+    // Source acquisition can inspect a package with no SPDX expression. Empty
+    // evidence cannot satisfy a policy rule that requires a named license.
+    let license = require_string(&package_path, &document, document.root(), "license")?;
     let archive_bytes = require_u64(&package_path, &document, document.root(), "archive-bytes")?;
     let extracted_bytes =
         require_u64(&package_path, &document, document.root(), "extracted-bytes")?;
@@ -1754,6 +1776,17 @@ mod tests {
     }
 
     fn crate_archive(name: &str, version: &str) -> Vec<u8> {
+        crate_archive_with_manifest(
+            name,
+            version,
+            &format!(
+                "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\
+                 edition = \"2021\"\nlicense = \"MIT OR Apache-2.0\"\n"
+            ),
+        )
+    }
+
+    fn crate_archive_with_manifest(name: &str, version: &str, manifest: &str) -> Vec<u8> {
         fn put_octal(field: &mut [u8], value: u64) {
             let text = format!("{value:0width$o}", width = field.len() - 1);
             field[..text.len()].copy_from_slice(text.as_bytes());
@@ -1779,20 +1812,13 @@ mod tests {
 
         let root = format!("{name}-{version}");
         let mut tar = Vec::new();
-        append_file(
-            &mut tar,
-            &format!("{root}/Cargo.toml"),
-            format!(
-                "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\
-                 edition = \"2021\"\nlicense = \"MIT OR Apache-2.0\"\n"
-            )
-            .as_bytes(),
-        );
+        append_file(&mut tar, &format!("{root}/Cargo.toml"), manifest.as_bytes());
         append_file(
             &mut tar,
             &format!("{root}/src/lib.rs"),
             b"pub fn fixture() {}\n",
         );
+        append_file(&mut tar, &format!("{root}/LICENSE"), b"Fixture license\n");
         tar.resize(tar.len() + 1024, 0);
         let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
         gzip.write_all(&tar).unwrap();
@@ -1877,6 +1903,82 @@ mod tests {
         assert!(staged.manifest().path.is_file());
         assert!(staged.object().root.join("source/src/lib.rs").is_file());
         assert_eq!(transaction.objects().len(), 1);
+    }
+
+    #[test]
+    fn stages_source_descriptions_without_build_target_or_spdx_requirements() {
+        let root = TempDir::new("stage-description");
+        let repositories = Repositories {
+            local: Some(root.0.join("repository")),
+            ..Repositories::default()
+        };
+        let writer = RepositoryWriter::open(
+            &repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            archive_limits(),
+        )
+        .unwrap();
+        let bytes = crate_archive_with_manifest(
+            "demo",
+            "1.2.3",
+            "[package]\nname = \"demo\"\nversion = \"1.2.3\"\n\
+             license-file = \"LICENSE\"\n[lib]\ncrate-type = [\"staticlib\"]\n",
+        );
+        let archive = root.0.join("demo.crate");
+        fs::write(&archive, &bytes).unwrap();
+        let mut digest = Sha256::new();
+        digest.update(&bytes);
+        let checksum = digest.finish();
+        let record = SparseRecord::parse(
+            Path::new("/fixture/index.json"),
+            format!(
+                "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\"deps\":[],\
+                 \"cksum\":\"{}\",\"features\":{{}},\"yanked\":false}}\n",
+                hex(&checksum)
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut compilation = writer.begin().unwrap();
+        assert!(compilation.stage_registry(&record, &archive).is_err());
+        drop(compilation);
+        let mut transaction = RepositoryWriter::open(
+            &repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            archive_limits(),
+        )
+        .unwrap()
+        .begin()
+        .unwrap();
+        let staged = transaction
+            .stage_registry_description(&record, &archive)
+            .unwrap();
+        assert_eq!(staged.manifest().metadata.license_file, "LICENSE");
+        assert!(staged.manifest().metadata.license.is_empty());
+        assert_eq!(
+            staged.manifest().library.as_ref().unwrap().crate_types,
+            ["staticlib"]
+        );
+        assert_eq!(staged.object().checksum, checksum);
+        transaction.publish().unwrap();
+        let verified = RepositorySet::open(&repositories, crate::source_tree::DEFAULT_LIMITS, 1024)
+            .unwrap()
+            .lookup_registry(&hex(&checksum))
+            .unwrap()
+            .unwrap();
+        assert!(verified.license.is_empty());
+        fs::write(verified.root.join("source/LICENSE"), "tampered").unwrap();
+        assert!(
+            verify_registry_object(
+                verified.layer,
+                &verified.root,
+                checksum,
+                crate::source_tree::DEFAULT_LIMITS,
+                1024,
+                true,
+            )
+            .is_err()
+        );
     }
 
     #[test]
