@@ -1636,6 +1636,13 @@ and a legal development cycle; its generated lock matches byte-for-byte.
 All four lockfile tests passed in `/tmp/lorry-m6-workspace-lock-unit.log`.
 Lock-format selection and command wiring follow in separate increments.
 
+Checking Cargo's lock encoder exposed an existing Git-reference parser bug:
+qualified dependency references omit the commit, whereas package sources
+retain it. The original rejection is preserved in
+`/tmp/lorry-m6-git-reference-original.log`. The parser now handles that form
+while rejecting a wrong branch, a wrong explicit commit, and ambiguity.
+Five offline-validation tests passed in `/tmp/lorry-m6-git-reference-fixed.log`.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

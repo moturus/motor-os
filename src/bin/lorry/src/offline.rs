@@ -286,7 +286,18 @@ pub(crate) fn resolve_lock_reference<'a>(
                     .is_ok_and(|candidate| candidate == *version)
             })
         })
-        .filter(|package| source.is_none_or(|source| package.source.as_deref() == Some(source)))
+        .filter(|package| {
+            source.is_none_or(|source| {
+                package.source.as_deref().is_some_and(|locked| {
+                    locked == source
+                        || (source.starts_with("git+")
+                            && !source.contains('#')
+                            && locked
+                                .rsplit_once('#')
+                                .is_some_and(|(remote, _)| remote == source))
+                })
+            })
+        })
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [package] => Ok(package),
@@ -551,6 +562,54 @@ mod tests {
         assert_eq!(
             resolve_lock_reference("local", &packages).unwrap().name,
             "local"
+        );
+    }
+
+    #[test]
+    fn git_dependency_references_omit_the_locked_commit() {
+        let source = format!(
+            "git+https://example.com/demo?branch=motor#{}",
+            "0".repeat(40)
+        );
+        let packages = [locked("demo", "1.0.0", Some(&source))];
+        assert_eq!(
+            resolve_lock_reference(
+                "demo 1.0.0 (git+https://example.com/demo?branch=motor)",
+                &packages
+            )
+            .unwrap()
+            .source
+            .as_deref(),
+            Some(source.as_str())
+        );
+        assert!(
+            resolve_lock_reference(
+                "demo 1.0.0 (git+https://example.com/demo?branch=other)",
+                &packages
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_lock_reference(
+                &format!(
+                    "demo 1.0.0 (git+https://example.com/demo?branch=motor#{})",
+                    "1".repeat(40)
+                ),
+                &packages
+            )
+            .is_err()
+        );
+        let mut ambiguous = packages.to_vec();
+        ambiguous.push(LockedPackage {
+            source: Some(source.replace(&"0".repeat(40), &"1".repeat(40))),
+            ..packages[0].clone()
+        });
+        assert!(
+            resolve_lock_reference(
+                "demo 1.0.0 (git+https://example.com/demo?branch=motor)",
+                &ambiguous
+            )
+            .is_err()
         );
     }
 
