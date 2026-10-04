@@ -2581,6 +2581,26 @@ and strict Clippy pass in
 Original failure logs and the diagnostic fixture are preserved under
 `/tmp/lorry-m8-explicit-tests-*` and `/tmp/lorry-explicit-tests-MS6kLR`.
 
+Release `debug` and `opt-level` now reach unit profiles, Cargo identities,
+rustc, and build-script environments. Parser regressions cover Cargo's values
+and reject invalid values. Automatic stripping respects requested debug info.
+The paired fixture now includes a selected member used as a host dependency
+and a script. Its first byte mismatch exposed host reduction's old assumption
+that the presence of a matching target key implied reusable settings. Reuse
+now compares effective profiles and LTO. Cargo reduces host debug information
+when optimization or panic differs, even with explicit root debug settings.
+An older unit expectation for `panic = "abort"` reflected that assumption;
+the added paired dev-abort case proves the correction.
+Native/cross bytes, all artifact profiles, script output, and JSON pass in
+`/tmp/lorry-m8-release-settings-complete-contract.log`; parser, all eleven unit
+planner tests, identity tests, and strict Clippy pass in
+`/tmp/lorry-m8-release-settings-{parser,unit-corrected,identity,clippy}.log`.
+Earlier new-fixture failures were an incorrect grant table and reuse of an
+oracle that required the original fixture's warning/generated file. The new
+clean-script mode retains those original requirements for existing tests.
+Original failures, compiler command diagnosis, and the retained fixture are in
+`/tmp/lorry-m8-release-settings-*` and `/tmp/lorry-release-profile-contract-Xv6EeU`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only

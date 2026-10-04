@@ -195,6 +195,10 @@ root/dependency profiles and check metadata. Native and cross-Motor debug and
 release comparisons cover their artifacts and consumers.
 Registry and Git caller-variable grants now round-trip through portable
 admission and appear in capability change reviews.
+Explicit `rlib` and `staticlib`, mixed archives, Motor dynamic-type dropping,
+and single-member explicit/harness-free integration tests have paired Cargo
+contracts. Release `debug` and `opt-level` settings now match Cargo, including
+host-profile reduction and automatic stripping.
 
 ## Goal
 

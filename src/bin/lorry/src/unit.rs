@@ -11,7 +11,7 @@ use crate::identity::{
     CargoProfileLto, CargoSource, CargoStrip, CargoTargetKind, CargoUnitIdentityInput,
     CargoUnitLto, Identity, RootTargetKind, cargo_unit_identity, root_lto,
 };
-use crate::manifest::{Lto as ManifestLto, Manifest, ReleaseProfile, Strip as ManifestStrip};
+use crate::manifest::{Lto as ManifestLto, Manifest, ReleaseProfile};
 use crate::resolver::{
     CompileKind, FeatureContext, PackageKey, PackageSourceKey, Resolution, ResolvedEdge,
     ResolvedPackage, selected_root_features,
@@ -1357,7 +1357,7 @@ fn unit_settings(
         };
         if profile.debuginfo != CargoDebugInfo::None
             && options.logical_target.is_none()
-            && !shared_native_library(graph, &sharing_key, options.logical_target)
+            && !shared_native_library(graph, &sharing_key, options, &profile)
         {
             profile.debuginfo = CargoDebugInfo::None;
         }
@@ -1416,10 +1416,10 @@ fn base_profile(
 ) -> UnitProfile {
     if release {
         UnitProfile {
-            opt_level: "3",
+            opt_level: configured.opt_level,
             lto: profile_lto(configured.lto),
             codegen_units: configured.codegen_units,
-            debuginfo: CargoDebugInfo::None,
+            debuginfo: configured.debug.unwrap_or(CargoDebugInfo::None),
             debug_assertions: false,
             overflow_checks: false,
             incremental: false,
@@ -1428,7 +1428,10 @@ fn base_profile(
             } else {
                 CargoPanicStrategy::Unwind
             },
-            strip: profile_strip(configured.strip),
+            strip: crate::identity::manifest_strip(
+                configured.strip,
+                configured.debug.unwrap_or(CargoDebugInfo::None),
+            ),
         }
     } else {
         UnitProfile {
@@ -1467,14 +1470,30 @@ fn run_build_profile(for_unit: &UnitProfile) -> UnitProfile {
     }
 }
 
-fn shared_native_library(graph: &UnitGraph, key: &UnitKey, logical_target: Option<&str>) -> bool {
+fn shared_native_library(
+    graph: &UnitGraph,
+    key: &UnitKey,
+    options: &PlanOptions<'_>,
+    host_profile: &UnitProfile,
+) -> bool {
+    let target = UnitKey {
+        compile_kind: CompileKind::Target,
+        ..key.clone()
+    };
     key.kind == UnitKind::Library
         && key.compile_kind == CompileKind::Host
-        && logical_target.is_none()
-        && graph.units.contains_key(&UnitKey {
-            compile_kind: CompileKind::Target,
-            ..key.clone()
-        })
+        && options.logical_target.is_none()
+        && graph.units.contains_key(&target)
+        && *host_profile
+            == base_profile(
+                options.release,
+                options.release_profile,
+                options.panic_abort,
+                matches!(key.package.source, PackageSourceKey::Path(_)),
+                key.profile == ProfileContext::Test,
+            )
+        && unit_lto(key, options.release, options.release_profile.lto)
+            == unit_lto(&target, options.release, options.release_profile.lto)
 }
 
 fn profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
@@ -1484,15 +1503,6 @@ fn profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
         ManifestLto::Fat => CargoProfileLto::Named("fat"),
         ManifestLto::Thin => CargoProfileLto::Named("thin"),
         ManifestLto::Off => CargoProfileLto::Off,
-    }
-}
-
-fn profile_strip(strip: ManifestStrip) -> CargoStrip<'static> {
-    match strip {
-        ManifestStrip::Default => CargoStrip::Named("debuginfo"),
-        ManifestStrip::None => CargoStrip::None,
-        ManifestStrip::Debuginfo => CargoStrip::Named("debuginfo"),
-        ManifestStrip::Symbols => CargoStrip::Named("symbols"),
     }
 }
 
@@ -1693,6 +1703,7 @@ mod tests {
     use crate::compile::{CommandOptions, RustcOutput, dependency_rustc_invocation};
     use crate::config::CargoCompat;
     use crate::manifest::Manifest;
+    use crate::manifest::Strip as ManifestStrip;
     use crate::resolver::{
         Catalog, Options, ResolvedEdge, ResolvedSource, TargetSelection, resolve_selected,
     };
@@ -2773,6 +2784,7 @@ mod tests {
             lto: ManifestLto::Fat,
             strip: ManifestStrip::Symbols,
             codegen_units: Some(1),
+            ..ReleaseProfile::default()
         };
         let rustflags = vec!["-Ctarget-cpu=x86-64-v3".to_owned()];
         let plan = plan_dependency_units(
@@ -2865,7 +2877,7 @@ mod tests {
                     && unit.unit.key.compile_kind == CompileKind::Host
             })
             .unwrap();
-        assert_eq!(shared_host.settings.profile.debuginfo, CargoDebugInfo::Full);
+        assert_eq!(shared_host.settings.profile.debuginfo, CargoDebugInfo::None);
         assert_eq!(
             shared_host.settings.profile.panic,
             CargoPanicStrategy::Unwind
@@ -3092,6 +3104,7 @@ mod tests {
                     lto: ManifestLto::Fat,
                     strip: ManifestStrip::Symbols,
                     codegen_units: Some(1),
+                    ..ReleaseProfile::default()
                 },
                 rustc: &toolchain(),
                 logical_target: None,

@@ -42,19 +42,27 @@ fn main() {
             "compare" => compare(Path::new(lorry), Path::new(cargo)),
             "compare-projection" => compare_projection(Path::new(lorry), Path::new(cargo)),
             "differential-messages" => {
-                compare_messages(Path::new(lorry), Path::new(cargo), false, false, true)
+                compare_messages(Path::new(lorry), Path::new(cargo), false, false, true, true)
             }
             "differential-success-messages" => {
-                compare_messages(Path::new(lorry), Path::new(cargo), true, false, true)
+                compare_messages(Path::new(lorry), Path::new(cargo), true, false, true, true)
             }
             "differential-check-messages" => {
-                compare_messages(Path::new(lorry), Path::new(cargo), true, true, true)
+                compare_messages(Path::new(lorry), Path::new(cargo), true, true, true, true)
             }
-            "differential-workspace-messages" => {
-                compare_messages(Path::new(lorry), Path::new(cargo), true, false, false)
-            }
+            "differential-workspace-messages" => compare_messages(
+                Path::new(lorry),
+                Path::new(cargo),
+                true,
+                false,
+                false,
+                false,
+            ),
             "differential-workspace-check-messages" => {
-                compare_messages(Path::new(lorry), Path::new(cargo), true, true, false)
+                compare_messages(Path::new(lorry), Path::new(cargo), true, true, false, false)
+            }
+            "differential-script-clean-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, false, true, false)
             }
             _ => panic!("unknown comparison command `{command}`"),
         }
@@ -94,7 +102,14 @@ fn main() {
     assert_eq!(no_deps.workspace_packages().len(), 1);
 }
 
-fn compare_messages(lorry: &Path, cargo: &Path, success: bool, checking: bool, scripted: bool) {
+fn compare_messages(
+    lorry: &Path,
+    cargo: &Path,
+    success: bool,
+    checking: bool,
+    scripted: bool,
+    require_warnings: bool,
+) {
     let lorry = read_messages(lorry);
     let cargo = read_messages(cargo);
     for messages in [&lorry, &cargo] {
@@ -139,7 +154,7 @@ fn compare_messages(lorry: &Path, cargo: &Path, success: bool, checking: bool, s
             _ => None,
         })
         .collect::<BTreeSet<String>>();
-    if scripted {
+    if require_warnings {
         assert!(levels.contains("warning"));
     } else {
         assert!(

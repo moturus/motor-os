@@ -6,6 +6,7 @@ use semver::{Version as SemVersion, VersionReq};
 use toml_edit::{Array, InlineTable, Item, Table, Value};
 
 use crate::diagnostic::{Error, Result};
+use crate::identity::CargoDebugInfo;
 use crate::sparse::DependencyKind;
 use crate::toml::Document;
 use crate::toolchain::TargetInfo;
@@ -146,6 +147,8 @@ pub struct DevProfile {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReleaseProfile {
+    pub opt_level: &'static str,
+    pub debug: Option<CargoDebugInfo>,
     pub panic_abort: bool,
     pub lto: Lto,
     pub strip: Strip,
@@ -155,6 +158,8 @@ pub struct ReleaseProfile {
 impl Default for ReleaseProfile {
     fn default() -> Self {
         Self {
+            opt_level: "3",
+            debug: None,
             panic_abort: false,
             lto: Lto::Default,
             strip: Strip::Default,
@@ -2649,7 +2654,17 @@ fn parse_profiles(path: &Path, document: &Document) -> Result<ParsedProfiles> {
     let mut errors = BTreeMap::new();
     for (name, allowed) in [
         ("dev", &["panic"][..]),
-        ("release", &["panic", "lto", "strip", "codegen-units"][..]),
+        (
+            "release",
+            &[
+                "panic",
+                "lto",
+                "strip",
+                "codegen-units",
+                "debug",
+                "opt-level",
+            ][..],
+        ),
         ("test", &[][..]),
     ] {
         if let Some(table) = profiles.get(name).and_then(Item::as_table)
@@ -2727,11 +2742,75 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
         },
     };
     Ok(ReleaseProfile {
+        opt_level: parse_opt_level(path, document, table, "profile.release", "3")?,
+        debug: parse_profile_debug(path, document, table, "profile.release")?,
         panic_abort,
         lto,
         strip,
         codegen_units,
     })
+}
+
+fn parse_opt_level(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    profile: &str,
+    default: &'static str,
+) -> Result<&'static str> {
+    let Some(item) = table.get("opt-level") else {
+        return Ok(default);
+    };
+    let text = item
+        .as_integer()
+        .map(|value| value.to_string())
+        .or_else(|| item.as_str().map(str::to_owned));
+    match text.as_deref() {
+        Some("0") => Ok("0"),
+        Some("1") => Ok("1"),
+        Some("2") => Ok("2"),
+        Some("3") => Ok("3"),
+        Some("s") => Ok("s"),
+        Some("z") => Ok("z"),
+        _ => Err(Error::at(
+            path,
+            document.line_of_item(item),
+            format!("unsupported `{profile}.opt-level`"),
+            "choose 0, 1, 2, 3, `s`, or `z`",
+        )),
+    }
+}
+
+fn parse_profile_debug(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    profile: &str,
+) -> Result<Option<CargoDebugInfo>> {
+    let Some(item) = table.get("debug") else {
+        return Ok(None);
+    };
+    let text = item
+        .as_bool()
+        .map(|value| if value { "2" } else { "0" }.to_owned())
+        .or_else(|| item.as_integer().map(|value| value.to_string()))
+        .or_else(|| item.as_str().map(str::to_owned));
+    let value = match text.as_deref() {
+        Some("0" | "none") => CargoDebugInfo::None,
+        Some("1" | "limited") => CargoDebugInfo::Limited,
+        Some("2" | "full") => CargoDebugInfo::Full,
+        Some("line-tables-only") => CargoDebugInfo::LineTablesOnly,
+        Some("line-directives-only") => CargoDebugInfo::LineDirectivesOnly,
+        _ => {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("unsupported `{profile}.debug`"),
+                "choose false, true, 0, 1, 2, `none`, `limited`, `full`, `line-tables-only`, or `line-directives-only`",
+            ));
+        }
+    };
+    Ok(Some(value))
 }
 
 fn parse_panic_abort(
@@ -3945,6 +4024,47 @@ unsafe_code = { level = "forbid", priority = 1 }
                 .iter()
                 .all(|dependency| dependency.kind == DependencyKind::Build)
         );
+    }
+
+    #[test]
+    fn release_debug_and_optimization_accept_cargo_values() {
+        let path = Path::new("/profile/Cargo.toml");
+        let source = |debug: &str, opt: &str| {
+            format!(
+                "[package]\nname=\"profile\"\nversion=\"1.0.0\"\n[profile.release]\ndebug={debug}\nopt-level={opt}\n"
+            )
+        };
+        for (debug, expected) in [
+            ("false", CargoDebugInfo::None),
+            ("true", CargoDebugInfo::Full),
+            ("0", CargoDebugInfo::None),
+            ("1", CargoDebugInfo::Limited),
+            ("2", CargoDebugInfo::Full),
+            ("\"none\"", CargoDebugInfo::None),
+            ("\"limited\"", CargoDebugInfo::Limited),
+            ("\"full\"", CargoDebugInfo::Full),
+            ("\"line-tables-only\"", CargoDebugInfo::LineTablesOnly),
+            (
+                "\"line-directives-only\"",
+                CargoDebugInfo::LineDirectivesOnly,
+            ),
+        ] {
+            for opt in ["0", "1", "2", "3", "\"s\"", "\"z\""] {
+                let manifest =
+                    Manifest::parse(path.parent().unwrap(), path, &source(debug, opt)).unwrap();
+                manifest.require_profile(true, false).unwrap();
+                assert_eq!(manifest.release.debug, Some(expected));
+                assert_eq!(manifest.release.opt_level, opt.trim_matches('"'));
+            }
+        }
+        for invalid in ["-1", "4", "false", "\"fast\"", "[]"] {
+            assert!(
+                Manifest::parse(path.parent().unwrap(), path, &source("false", invalid)).is_err()
+            );
+        }
+        for invalid in ["-1", "3", "\"debug\"", "[]"] {
+            assert!(Manifest::parse(path.parent().unwrap(), path, &source(invalid, "3")).is_err());
+        }
     }
 
     #[test]

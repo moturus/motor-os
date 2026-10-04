@@ -538,7 +538,10 @@ deferred capability when possible.
 `profile.dev.panic` accepts `unwind` and `abort`. The selected strategy enters
 unit identity and rustc arguments for ordinary target crates, while test,
 build-script, and procedural-macro units use unwind. `profile.release`
-additionally supports `lto`, `strip`, and `codegen-units`.
+additionally supports `debug`, `opt-level`, `lto`, `strip`, and `codegen-units`.
+Debug and optimization values follow Cargo. Omitted stripping preserves debug
+information when requested, and host debug reduction requires matching
+effective runtime settings before a unit can be shared.
 
 ## Cargo configuration
 

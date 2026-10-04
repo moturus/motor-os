@@ -104,8 +104,8 @@ and target ownership. Membership, package/dependency/lint inheritance, and
 component globs follow the rules below. External members remain unsupported.
 
 The dev profile accepts `panic = "unwind"` or `panic = "abort"`. The release
-profile additionally accepts Lorry's documented `lto`, `strip`, and
-`codegen-units` keys. A panic strategy applies to ordinary root and target
+profile additionally accepts `debug`, `opt-level`, and Lorry's documented
+`lto`, `strip`, and `codegen-units` keys. A panic strategy applies to ordinary root and target
 dependency crates; Cargo-compatible test, build-script, and procedural-macro
 units continue to unwind.
 

@@ -279,11 +279,11 @@ fn stage_one_profile<'a>(input: &'a IdentityInput<'a>) -> CargoProfile<'a> {
     let release = input.release;
     if release {
         CargoProfile {
-            opt_level: "3",
+            opt_level: input.release_profile.opt_level,
             lto: manifest_profile_lto(input.release_profile.lto),
             codegen_backend: None,
             codegen_units: input.release_profile.codegen_units,
-            debuginfo: CargoDebugInfo::None,
+            debuginfo: input.release_profile.debug.unwrap_or(CargoDebugInfo::None),
             split_debuginfo: None,
             debug_assertions: false,
             overflow_checks: false,
@@ -294,7 +294,10 @@ fn stage_one_profile<'a>(input: &'a IdentityInput<'a>) -> CargoProfile<'a> {
             } else {
                 CargoPanicStrategy::Abort
             },
-            strip: manifest_strip(input.release_profile.strip),
+            strip: manifest_strip(
+                input.release_profile.strip,
+                input.release_profile.debug.unwrap_or(CargoDebugInfo::None),
+            ),
             rustflags: &[],
         }
     } else {
@@ -346,8 +349,9 @@ fn manifest_profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
     }
 }
 
-fn manifest_strip(strip: ManifestStrip) -> CargoStrip<'static> {
+pub(crate) fn manifest_strip(strip: ManifestStrip, debug: CargoDebugInfo) -> CargoStrip<'static> {
     match strip {
+        ManifestStrip::Default if debug != CargoDebugInfo::None => CargoStrip::None,
         ManifestStrip::Default => CargoStrip::Named("debuginfo"),
         ManifestStrip::None => CargoStrip::None,
         ManifestStrip::Debuginfo => CargoStrip::Named("debuginfo"),
@@ -473,6 +477,7 @@ mod tests {
             lto: ManifestLto::Fat,
             strip: ManifestStrip::Symbols,
             codegen_units: Some(1),
+            ..ReleaseProfile::default()
         }
     }
 

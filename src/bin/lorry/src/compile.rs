@@ -1351,6 +1351,7 @@ mod tests {
                     lto: Lto::Fat,
                     strip: Strip::Symbols,
                     codegen_units: Some(1),
+                    ..ReleaseProfile::default()
                 },
                 rustc: &toolchain(),
                 logical_target: None,
@@ -1689,6 +1690,7 @@ mod tests {
                     lto: Lto::Fat,
                     strip: Strip::Symbols,
                     codegen_units: Some(1),
+                    ..ReleaseProfile::default()
                 },
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
