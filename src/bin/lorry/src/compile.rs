@@ -23,7 +23,7 @@ pub struct CommandOptions<'a> {
     pub host_linker: Option<&'a Path>,
     pub target_linker: Option<&'a Path>,
     pub integration_binaries: Option<&'a BTreeMap<PackageKey, BTreeMap<String, PathBuf>>>,
-    pub integration_temp_dir: Option<&'a Path>,
+    pub integration_temp_dirs: Option<&'a BTreeMap<PackageKey, PathBuf>>,
     pub verbose: bool,
 }
 
@@ -498,7 +498,8 @@ pub fn dependency_rustc_invocation_with_build_output(
             &mut environment,
             "CARGO_TARGET_TMPDIR",
             options
-                .integration_temp_dir
+                .integration_temp_dirs
+                .and_then(|packages| packages.get(&key.package))
                 .ok_or_else(|| Error::failure("integration harness has no temporary directory"))?,
         );
     }
@@ -988,8 +989,22 @@ pub(crate) fn runtime_environment(
     cargo: &Path,
     manifest: &Manifest,
     library_paths: &[PathBuf],
+    build_output: Option<&BuildOutput<'_>>,
 ) -> Result<BTreeMap<String, OsString>> {
-    let mut environment = package_environment(cargo, manifest);
+    let mut environment = BTreeMap::new();
+    if let Some(build_output) = build_output {
+        value(&mut environment, "OUT_DIR", build_output.out_dir);
+        for directive in &build_output.output.directives {
+            if let Directive::RustcEnv {
+                name,
+                value: contents,
+            } = directive
+            {
+                value(&mut environment, name, contents);
+            }
+        }
+    }
+    environment.extend(package_environment(cargo, manifest));
     let variable = dynamic_library_path_variable();
     let inherited = std::env::var_os(variable)
         .filter(|value| !value.is_empty())
@@ -1167,6 +1182,55 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn runtime_script_environment_retains_owner_package_metadata() {
+        let fixture = Fixture::new();
+        fixture.package(
+            "owner",
+            "[package]\nname = \"owner\"\nversion = \"1.0.0\"\nedition = \"2024\"\n",
+            true,
+        );
+        let manifest = Manifest::load_path_dependency(&fixture.0.join("owner")).unwrap();
+        let output = BuildScriptOutput {
+            directives: vec![
+                Directive::RustcEnv {
+                    name: "SCRIPT_VALUE".into(),
+                    value: "generated".into(),
+                },
+                Directive::RustcEnv {
+                    name: "CARGO_PKG_NAME".into(),
+                    value: "foreign".into(),
+                },
+            ],
+            diagnostics: Vec::new(),
+            stderr: String::new(),
+            out_dir: crate::source_tree::Tree::scan(
+                &fixture.0,
+                crate::source_tree::DEFAULT_LIMITS,
+                crate::source_tree::Exclusions::None,
+            )
+            .unwrap(),
+        };
+        let out_dir = fixture.0.join("output");
+        let environment = runtime_environment(
+            Path::new("/lorry"),
+            &manifest,
+            &[],
+            Some(&BuildOutput {
+                output: &output,
+                out_dir: &out_dir,
+            }),
+        )
+        .unwrap();
+        assert_eq!(environment["OUT_DIR"], out_dir);
+        assert_eq!(environment["SCRIPT_VALUE"], "generated");
+        assert_eq!(environment["CARGO_PKG_NAME"], "owner");
+        assert_eq!(environment["CARGO_MANIFEST_DIR"], manifest.root);
+        let ordinary = runtime_environment(Path::new("/lorry"), &manifest, &[], None).unwrap();
+        assert!(!ordinary.contains_key("OUT_DIR"));
+        assert!(!ordinary.contains_key("SCRIPT_VALUE"));
     }
 
     fn toolchain() -> Toolchain {
@@ -1387,7 +1451,7 @@ mod tests {
             host_linker: None,
             target_linker: None,
             integration_binaries: None,
-            integration_temp_dir: None,
+            integration_temp_dirs: None,
             verbose: true,
         };
 
@@ -1726,7 +1790,7 @@ mod tests {
             host_linker: Some(Path::new("/host-cc")),
             target_linker: Some(Path::new("/target-cc")),
             integration_binaries: None,
-            integration_temp_dir: None,
+            integration_temp_dirs: None,
             verbose: true,
         };
         let target_key = cross_plan
@@ -1876,7 +1940,7 @@ mod tests {
             host_linker: None,
             target_linker: None,
             integration_binaries: None,
-            integration_temp_dir: None,
+            integration_temp_dirs: None,
             verbose: false,
         };
         let derive_key = plan

@@ -1616,6 +1616,10 @@ mod tests {
             ),
         ]);
         let temp_dir = fixture.0.join("output/tmp");
+        let temp_dirs = BTreeMap::from([
+            (library.package.clone(), temp_dir.clone()),
+            (other_package.clone(), fixture.0.join("other/tmp")),
+        ]);
         let command_options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
@@ -1628,7 +1632,7 @@ mod tests {
             host_linker: None,
             target_linker: None,
             integration_binaries: Some(&binary_paths),
-            integration_temp_dir: Some(&temp_dir),
+            integration_temp_dirs: Some(&temp_dirs),
             verbose: false,
         };
         let invocation =

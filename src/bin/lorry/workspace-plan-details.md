@@ -2636,6 +2636,15 @@ All twelve planner tests and strict Clippy pass in
 larger than the preferred size because its linked cycle/script/program graph
 needs the full paired oracle fixture.
 
+Integration temporary-directory lookup now uses the same package identity
+as program lookup; the focused regression gives another package a different
+temporary path. Runtime environment construction accepts an owning script's
+output and follows Cargo's script-values/package-metadata precedence, proved
+by a focused reserved-name case. Temporary-path validation and strict Clippy
+pass in `/tmp/lorry-m8-member-temp-environment-{unit,clippy}.log`; runtime
+validation and final strict Clippy pass in
+`/tmp/lorry-m8-runtime-script-environment-{unit,clippy}.log`.
+
 Test artifact collection now takes an owning package identity, installs only
 that package's normal programs, and returns harnesses in Cargo's target order
 independently of DAG scheduling. The existing executable integration regression

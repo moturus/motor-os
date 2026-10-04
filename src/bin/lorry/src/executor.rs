@@ -63,7 +63,7 @@ pub struct Options<'a> {
     pub host_linker: Option<&'a Path>,
     pub target_linker: Option<&'a Path>,
     pub integration_binaries: Option<&'a BTreeMap<PackageKey, BTreeMap<String, PathBuf>>>,
-    pub integration_temp_dir: Option<&'a Path>,
+    pub integration_temp_dirs: Option<&'a BTreeMap<PackageKey, PathBuf>>,
     pub release: bool,
     pub quiet: bool,
     pub verbose: bool,
@@ -218,7 +218,7 @@ fn execute_inner(
         host_linker: options.host_linker,
         target_linker: options.target_linker,
         integration_binaries: options.integration_binaries,
-        integration_temp_dir: options.integration_temp_dir,
+        integration_temp_dirs: options.integration_temp_dirs,
         verbose: options.verbose,
     };
 
@@ -1468,7 +1468,7 @@ mod tests {
                 host_linker: None,
                 target_linker: None,
                 integration_binaries: None,
-                integration_temp_dir: None,
+                integration_temp_dirs: None,
                 release: false,
                 quiet: false,
                 verbose: false,

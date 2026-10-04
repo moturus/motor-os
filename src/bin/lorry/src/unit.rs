@@ -2332,7 +2332,7 @@ mod tests {
                 host_linker: None,
                 target_linker: None,
                 integration_binaries: None,
-                integration_temp_dir: None,
+                integration_temp_dirs: None,
                 verbose: false,
             },
         )
@@ -2358,7 +2358,7 @@ mod tests {
                 host_linker: None,
                 target_linker: None,
                 integration_binaries: None,
-                integration_temp_dir: None,
+                integration_temp_dirs: None,
                 verbose: false,
             },
         )

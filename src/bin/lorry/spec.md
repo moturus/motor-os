@@ -1335,6 +1335,10 @@ The integration compiler invocation receives `CARGO_BIN_EXE_<name>` for each
 program in its own package and `CARGO_TARGET_TMPDIR` from the selected test
 environment. Program maps are keyed by package identity, so another member's
 same-named binary cannot replace that path or contribute extra variables.
+Temporary-directory maps are also keyed by package identity, permitting
+separate member bundle extraction paths. Runtime environment construction
+accepts the owning script's output, preserving `OUT_DIR` and `rustc-env` values
+while retaining Cargo's package-metadata precedence.
 
 The shared workspace test planner selects library and binary harnesses by
 their `test` flags. A named integration selection omits those harnesses and

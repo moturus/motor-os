@@ -417,6 +417,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                         &cargo,
                         &manifest,
                         &artifacts.library_paths,
+                        None,
                     )?,
                     physical_target.as_deref(),
                     &target_options,
@@ -544,7 +545,12 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 artifact,
                 &options.arguments,
                 &current,
-                &crate::compile::runtime_environment(&cargo, &manifest, &artifacts.library_paths)?,
+                &crate::compile::runtime_environment(
+                    &cargo,
+                    &manifest,
+                    &artifacts.library_paths,
+                    None,
+                )?,
                 physical_target.as_deref(),
                 &target_options,
                 cli.verbosity,
@@ -613,8 +619,12 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     cli.verbosity,
                 );
             }
-            let mut environment =
-                crate::compile::runtime_environment(&cargo, &manifest, &artifacts.library_paths)?;
+            let mut environment = crate::compile::runtime_environment(
+                &cargo,
+                &manifest,
+                &artifacts.library_paths,
+                None,
+            )?;
             for (name, path) in &artifacts.binaries {
                 environment.insert(format!("CARGO_BIN_EXE_{name}"), path.as_os_str().to_owned());
             }
@@ -1255,26 +1265,29 @@ fn build_inner(
             .collect::<BTreeMap<_, _>>();
         BTreeMap::from([(selected_root.package.clone(), binaries)])
     });
-    let integration_temp_dir = (selected_integration || check_integration).then(|| {
-        if check_integration {
+    let integration_temp_dirs = (selected_integration || check_integration).then(|| {
+        let directory = if check_integration {
             destination.clone()
         } else {
             bundle_layout.as_ref().map_or_else(
                 || target_root.join("tmp"),
                 bundle::Layout::temporary_directory,
             )
-        }
+        };
+        BTreeMap::from([(selected_root.package.clone(), directory)])
     });
-    if let Some(directory) = &integration_temp_dir
+    if let Some(directories) = &integration_temp_dirs
         && !check_integration
         && bundle_layout.is_none()
     {
-        fs::create_dir_all(directory).map_err(|error| {
-            Error::failure(format!(
-                "failed to create test temporary directory `{}`: {error}",
-                directory.display()
-            ))
-        })?;
+        for directory in directories.values() {
+            fs::create_dir_all(directory).map_err(|error| {
+                Error::failure(format!(
+                    "failed to create test temporary directory `{}`: {error}",
+                    directory.display()
+                ))
+            })?;
+        }
     }
     let executor_options = executor::Options {
         cargo: &cargo,
@@ -1293,7 +1306,7 @@ fn build_inner(
         host_linker: build.host_options.linker.as_deref(),
         target_linker: build.target_options.linker.as_deref(),
         integration_binaries: integration_binaries.as_ref(),
-        integration_temp_dir: integration_temp_dir.as_deref(),
+        integration_temp_dirs: integration_temp_dirs.as_ref(),
         release: build.release,
         quiet: build.verbosity == Verbosity::Quiet,
         verbose: build.verbosity == Verbosity::Verbose,
