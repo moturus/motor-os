@@ -16,6 +16,7 @@ pub fn run(
     models: &[String],
     providers: &[String],
 ) -> Result<(), String> {
+    runtime.set_interactive(interactive)?;
     let mut input = Input::new()?;
     let mut renderer = Renderer::default();
     for notice in runtime.take_startup_notices() {
@@ -34,6 +35,7 @@ pub fn run(
     }
 
     loop {
+        show_runtime_notices(runtime, &mut renderer)?;
         let Some(line) = input.read_line("gears> ")? else {
             renderer.finish_stream();
             return Ok(());
@@ -43,7 +45,9 @@ pub fn run(
             continue;
         }
         if line.starts_with('/') {
-            match command(runtime, &line, models, providers, &mut input, &mut renderer) {
+            let result = command(runtime, &line, models, providers, &mut input, &mut renderer);
+            show_runtime_notices(runtime, &mut renderer)?;
+            match result {
                 Ok(Command::Continue) => continue,
                 Ok(Command::Quit) => return Ok(()),
                 Ok(Command::Draft(draft)) => {

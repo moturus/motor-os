@@ -250,6 +250,35 @@ fn after_turn_config(script: &str, argument: &std::path::Path) -> AfterTurnConfi
     }
 }
 
+fn wait_for_review_pid(path: &std::path::Path) -> u32 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(pid @ 2..) = text.parse()
+        {
+            return pid;
+        }
+        assert!(std::time::Instant::now() < deadline, "review did not start");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn assert_review_stopped(pid: u32) {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        let state = stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            .unwrap();
+        assert!(
+            matches!(state, "Z" | "X" | "x"),
+            "review child still running: {stat}"
+        );
+    }
+}
+
 #[test]
 fn after_turn_requires_an_interactive_completed_saved_turn_and_runs_after_hooks() {
     let fixture = Fixture::new("after-turn-order");
@@ -350,6 +379,55 @@ fn after_turn_requires_an_interactive_completed_saved_turn_and_runs_after_hooks(
         )
         .unwrap();
     assert!(notices.iter().any(|n| n.contains("no saved path")));
+}
+
+#[test]
+fn after_turn_is_joined_before_writes_session_changes_and_exit() {
+    for action in ["turn", "name", "model", "new", "close", "drop"] {
+        let fixture = Fixture::new(&format!("after-turn-stop-{action}"));
+        let pid_file = fixture.root.join("pid");
+        let config = Config {
+            after_turn: Some(after_turn_config(
+                "sleep 30 & printf '%s' $! > \"$1\"; wait",
+                &pid_file,
+            )),
+            ..Config::default()
+        };
+        let mut runtime =
+            fixture.runtime(Scripted::new(vec![answer("one"), answer("two")]), &config);
+        let mut ignore = |_: Event| Ok(());
+        runtime.set_interactive(true).unwrap();
+        runtime
+            .turn("one".into(), &mut FixedApproval(false), &mut ignore)
+            .unwrap();
+        let pid = wait_for_review_pid(&pid_file);
+        let session_path = runtime.session().path().unwrap().to_path_buf();
+        match action {
+            "turn" => {
+                runtime
+                    .turn("two".into(), &mut FixedApproval(false), &mut |_: Event| {
+                        assert_review_stopped(pid);
+                        Ok(())
+                    })
+                    .unwrap();
+                runtime.set_interactive(false).unwrap();
+            }
+            "name" => runtime.set_name("renamed").unwrap(),
+            "model" => runtime
+                .set_model("other/model".into(), &mut ignore)
+                .unwrap(),
+            "new" => runtime.new_session(false, None).unwrap(),
+            "close" => assert!(runtime.close().iter().any(|n| n.contains("stopped"))),
+            "drop" => {
+                drop(runtime);
+                assert_review_stopped(pid);
+                assert!(!session_path.with_extension("jsonl.lock").exists());
+                continue;
+            }
+            _ => unreachable!(),
+        }
+        assert_review_stopped(pid);
+    }
 }
 
 #[test]

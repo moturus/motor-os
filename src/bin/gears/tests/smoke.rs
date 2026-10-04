@@ -47,6 +47,94 @@ fn gears(root: &Path, workspace: &Path, config: &Path) -> Command {
 }
 
 #[test]
+fn after_turn_line_ui_receives_paths_without_the_key_and_one_shots_skip_it() {
+    for mode in ["interactive", "text", "jsonl"] {
+        let root = fixture(&format!("after-turn-{mode}"));
+        let workspace = root.join("workspace with spaces");
+        std::fs::create_dir(&workspace).unwrap();
+        let server = MockServer::start_one(sse_response(&[
+            r#"{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}"#,
+        ]))
+        .unwrap();
+        let config = config(&root, &server);
+        let marker = root.join("review.json");
+        let script = "printf '{\"workspace\":\"%s\",\"session\":\"%s\",\"config\":\"%s\",\"key\":\"%s\"}' \"$GEARS_WORKSPACE\" \"$GEARS_SESSION_PATH\" \"$GEARS_CONFIG_PATH\" \"${OPENROUTER_API_KEY-unset}\" > \"$1\"";
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&config)
+            .unwrap();
+        writeln!(
+            file,
+            "\n[after_turn]\ncommand = ['/bin/sh', '-c', '''{}''', 'review', '{}']",
+            script,
+            marker.display()
+        )
+        .unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_gears"));
+        command
+            .env("HOME", &root)
+            .env("OPENROUTER_API_KEY", "must-not-leak")
+            .args(["--ui", "line", "--config"])
+            .arg(&config)
+            .arg("--workspace")
+            .arg(&workspace);
+        if mode != "interactive" {
+            let output = command
+                .args(["-p", "hello", "--output", mode])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!marker.exists(), "one-shot started a review");
+        } else {
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = child.stdin.take().unwrap();
+            input.write_all(b"hello\n").unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let review = loop {
+                if let Ok(text) = std::fs::read_to_string(&marker)
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
+                {
+                    break value;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    let output = child.wait_with_output().unwrap();
+                    panic!(
+                        "review did not start: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            input.write_all(b"/quit\n").unwrap();
+            drop(input);
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(review["workspace"], workspace.display().to_string());
+            assert_eq!(review["config"], config.display().to_string());
+            assert_eq!(review["key"], "unset");
+            assert!(Path::new(review["session"].as_str().unwrap()).is_file());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("after-turn command"));
+        }
+        assert_eq!(server.requests().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn help_version_and_bad_arguments_need_no_configuration() {
     let version = Command::new(env!("CARGO_BIN_EXE_gears"))
         .arg("--version")

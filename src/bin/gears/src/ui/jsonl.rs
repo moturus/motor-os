@@ -22,6 +22,7 @@ pub fn run(runtime: &mut Runtime, prompt: String, writer: impl Write) -> Result<
             "session_id": summary.id, "path": summary.path,
             "session_format_version": runtime.session().format_version(),
         }))?;
+        runtime.set_interactive(false)?;
         for notice in runtime.take_startup_notices() {
             output.event(Event::Notice(notice))?;
         }

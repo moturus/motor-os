@@ -29,6 +29,7 @@ pub fn run(
     models: &[String],
     providers: &[String],
 ) -> Result<(), String> {
+    runtime.set_interactive(interactive)?;
     let mut screen = Screen::enter()?;
     let mut app = App::new(runtime);
     let result = (|| {
@@ -37,14 +38,20 @@ pub fn run(
         }
         if let Some(prompt) = initial {
             app.push(Kind::User, prompt.clone(), false);
-            run_turn(runtime, prompt, &mut app)?;
+            run_turn(runtime, prompt, interactive, &mut app)?;
             if !interactive {
                 app.render()?;
                 return Ok(());
             }
         }
         while !app.quit {
+            show_runtime_notices(runtime, &mut app);
             app.render()?;
+            if runtime.after_turn_running()
+                && !event::poll(POLL).map_err(|error| error.to_string())?
+            {
+                continue;
+            }
             let input = event::read().map_err(|error| error.to_string())?;
             let Some(action) = app.edit(input) else {
                 continue;
@@ -52,11 +59,15 @@ pub fn run(
             match action {
                 Action::Quit => app.quit = true,
                 Action::Submit(text) if text.starts_with('/') => {
-                    handle_command(runtime, &mut app, &text, models, providers)?
+                    let result = handle_command(runtime, &mut app, &text, models, providers);
+                    show_runtime_notices(runtime, &mut app);
+                    if let Err(error) = result {
+                        app.push(Kind::Error, error, false);
+                    }
                 }
                 Action::Submit(text) if !text.trim().is_empty() => {
                     app.push(Kind::User, text.clone(), false);
-                    if let Err(error) = run_turn(runtime, text, &mut app) {
+                    if let Err(error) = run_turn(runtime, text, true, &mut app) {
                         app.push(Kind::Error, error, false);
                     }
                 }
@@ -629,7 +640,12 @@ enum TurnMessage {
     Done(Result<(), String>),
 }
 
-fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), String> {
+fn run_turn(
+    runtime: &mut Runtime,
+    prompt: String,
+    interactive: bool,
+    app: &mut App,
+) -> Result<(), String> {
     app.input_enabled = false;
     app.status = "working".to_string();
     app.render()?;
@@ -643,6 +659,7 @@ fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), 
             };
             let mut approver = ChannelApprover {
                 sender: worker_sender,
+                interactive,
             };
             let result = runtime.turn(prompt, &mut approver, &mut observer);
             let _ = sender.send(TurnMessage::Done(result));
@@ -806,7 +823,7 @@ fn permission_input(
 
 /// Maps one key press at the permission prompt; None keeps waiting.
 fn approval_key(key: KeyEvent) -> Option<Approval> {
-    let plain = !key.modifiers.contains(KeyModifiers::CONTROL);
+    let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
     match key.code {
         KeyCode::Char('y') if plain => Some(Approval::Once),
         KeyCode::Char('s') if plain => Some(Approval::Session),
@@ -832,10 +849,18 @@ impl Observer for ChannelObserver {
 
 struct ChannelApprover {
     sender: mpsc::Sender<TurnMessage>,
+    interactive: bool,
 }
 
 impl Approver for ChannelApprover {
+    fn attended(&self) -> bool {
+        self.interactive
+    }
+
     fn approve(&mut self, request: &Permission) -> Approval {
+        if !self.interactive {
+            return Approval::Deny;
+        }
         let (sender, receiver) = mpsc::channel();
         if self
             .sender
@@ -1317,6 +1342,32 @@ mod tests {
             None
         );
         assert_eq!(approval_key(key(KeyCode::Char('x'), none)), None);
+        assert_eq!(
+            approval_key(key(KeyCode::Char('s'), KeyModifiers::ALT)),
+            None
+        );
+    }
+
+    #[test]
+    fn one_shot_tui_does_not_ask_for_permission() {
+        let (sender, receiver) = mpsc::channel();
+        let mut approver = ChannelApprover {
+            sender,
+            interactive: false,
+        };
+        assert!(!approver.attended());
+        assert_eq!(
+            approver.approve(&Permission {
+                tool: "sh".into(),
+                detail: "unattended".into(),
+                workspace: "/work".into(),
+            }),
+            Approval::Deny
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
     }
 
     #[test]

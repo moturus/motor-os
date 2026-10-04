@@ -502,6 +502,10 @@ impl Runtime {
         std::mem::take(&mut self.startup_notices)
     }
 
+    pub fn after_turn_running(&self) -> bool {
+        self.after_turn.is_running()
+    }
+
     /// Interfaces opt in explicitly; library and one-shot runs are unattended.
     pub fn set_interactive(&mut self, interactive: bool) -> Result<(), String> {
         self.prepare_write()?;

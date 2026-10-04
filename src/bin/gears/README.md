@@ -94,6 +94,22 @@ Configured hooks are trusted code and run with the user's authority. There is
 no directory scan, shell interpolation, hot reload, or in-process extension
 runtime. See [hook-protocol.md](hook-protocol.md) for the version-1 protocol.
 
+An optional command runs in the background after a completed interactive turn,
+after its `turn_end` hooks:
+
+    [after_turn]
+    command = ["gears-batteries", "review"]
+    timeout_seconds = 3600
+    max_output_bytes = 1048576
+
+It receives `GEARS_WORKSPACE`, `GEARS_SESSION_ID`, `GEARS_SESSION_PATH`, and
+`GEARS_CONFIG_PATH` (when a configuration file was loaded), with the provider
+key removed. Arguments are passed literally. Relative program paths resolve
+beside the configuration file; `gears-batteries` resolves beside Gears.
+One-shot runs do not start it, and ephemeral sessions report that it was
+skipped. Gears stops and joins its process tree before another turn, a runtime
+write, a session change, or exit. Output and failures appear as UI notices.
+
 ## Sessions
 
 Saved sessions are versioned append-only JSONL trees grouped by canonical

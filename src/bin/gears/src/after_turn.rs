@@ -15,6 +15,10 @@ struct Running {
 }
 
 impl Manager {
+    pub fn is_running(&self) -> bool {
+        self.running.is_some()
+    }
+
     pub fn start(&mut self, request: Request) -> Result<(), String> {
         process::ensure_cleanup()?;
         if self.running.is_some() {
