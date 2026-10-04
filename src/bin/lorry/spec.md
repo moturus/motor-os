@@ -577,6 +577,12 @@ host-independent logical paths without changing their physical storage:
 no source remapping, including for path dependencies. The root package is not
 remapped.
 
+`tree` resolves selected members against the complete workspace lock and reads
+verified source descriptions. It accepts feature selection, remains offline,
+and does not require or reconstruct admission. Explicit source vetoes and
+resource limits apply; tree neither compiles package code nor needs build-time
+execution grants.
+
 ## Portable dependency admission state
 
 `Cargo.toml` is the only project dependency file intended for human editing.
