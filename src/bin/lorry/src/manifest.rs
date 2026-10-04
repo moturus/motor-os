@@ -180,7 +180,7 @@ pub struct BinaryTarget {
     pub path: PathBuf,
     pub test: bool,
     pub doc: bool,
-    pub required_features: Vec<String>,
+    pub required_features: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1499,8 +1499,7 @@ fn parse_binaries(
                     table,
                     "bin",
                     "required-features",
-                )?
-                .unwrap_or_default(),
+                )?,
             };
             if !explicit_names.insert(target.name.clone()) {
                 return Err(Error::at(
@@ -1560,7 +1559,7 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
                 path: main,
                 test: true,
                 doc: true,
-                required_features: Vec::new(),
+                required_features: None,
             },
         );
     }
@@ -1627,7 +1626,7 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
                     path: source,
                     test: true,
                     doc: true,
-                    required_features: Vec::new(),
+                    required_features: None,
                 },
             )
             .is_some()

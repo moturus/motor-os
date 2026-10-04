@@ -95,7 +95,7 @@ pub struct Target {
     pub name: String,
     pub kind: Vec<String>,
     pub crate_types: Vec<String>,
-    pub required_features: Vec<String>,
+    pub required_features: Option<Vec<String>>,
     pub src_path: String,
     pub edition: String,
     pub doctest: bool,
@@ -184,17 +184,27 @@ serialize_wire_struct!(Dependency, "Dependency", 11,
     "registry" => registry,
     "path" => path,
 );
-serialize_wire_struct!(Target, "Target", 9,
-    "name" => name,
-    "kind" => kind,
-    "crate_types" => crate_types,
-    "required-features" => required_features,
-    "src_path" => src_path,
-    "edition" => edition,
-    "doctest" => doctest,
-    "test" => test,
-    "doc" => doc,
-);
+impl Serialize for Target {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut value = serializer
+            .serialize_struct("Target", 8 + usize::from(self.required_features.is_some()))?;
+        value.serialize_field("name", &self.name)?;
+        value.serialize_field("kind", &self.kind)?;
+        value.serialize_field("crate_types", &self.crate_types)?;
+        if let Some(features) = &self.required_features {
+            value.serialize_field("required-features", features)?;
+        }
+        value.serialize_field("src_path", &self.src_path)?;
+        value.serialize_field("edition", &self.edition)?;
+        value.serialize_field("doctest", &self.doctest)?;
+        value.serialize_field("test", &self.test)?;
+        value.serialize_field("doc", &self.doc)?;
+        value.end()
+    }
+}
 
 impl Serialize for DependencyKind {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -249,7 +259,7 @@ mod tests {
                 name: "app".into(),
                 kind: vec!["bin".into()],
                 crate_types: vec!["bin".into()],
-                required_features: Vec::new(),
+                required_features: None,
                 src_path: "/workspace/src/main.rs".into(),
                 edition: "2024".into(),
                 doctest: false,
@@ -291,7 +301,7 @@ mod tests {
                 name: "dep".into(),
                 kind: vec!["lib".into()],
                 crate_types: vec!["lib".into()],
-                required_features: Vec::new(),
+                required_features: None,
                 src_path: "/cache/dep/src/lib.rs".into(),
                 edition: "2021".into(),
                 doctest: true,
@@ -356,6 +366,28 @@ mod tests {
             workspace_metadata: serde_json::Value::Null,
             version: 1,
         }
+    }
+
+    #[test]
+    fn required_features_preserve_absent_empty_and_nonempty_declarations() {
+        let mut document = fixture(false);
+        let target = &mut document.packages[0].targets[0];
+        assert!(
+            serde_json::to_value(&*target)
+                .unwrap()
+                .get("required-features")
+                .is_none()
+        );
+        target.required_features = Some(Vec::new());
+        assert_eq!(
+            serde_json::to_value(&*target).unwrap()["required-features"],
+            serde_json::json!([])
+        );
+        target.required_features = Some(vec!["extra".to_owned()]);
+        assert_eq!(
+            serde_json::to_value(&*target).unwrap()["required-features"],
+            serde_json::json!(["extra"])
+        );
     }
 
     #[test]

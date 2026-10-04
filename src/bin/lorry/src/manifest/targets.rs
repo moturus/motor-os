@@ -19,7 +19,7 @@ pub(crate) struct DescribedTarget {
     pub name: String,
     pub path: PathBuf,
     pub crate_types: Vec<String>,
-    pub required_features: Vec<String>,
+    pub required_features: Option<Vec<String>>,
     pub edition: Edition,
     pub test: bool,
     pub doc: bool,
@@ -79,7 +79,7 @@ pub(super) fn parse(
                 name: name.clone(),
                 path: source,
                 crate_types: vec!["bin".to_owned()],
-                required_features: Vec::new(),
+                required_features: None,
                 edition,
                 test: false,
                 doc: false,
@@ -190,8 +190,7 @@ pub(super) fn parse(
                     table,
                     kind,
                     "required-features",
-                )?
-                .unwrap_or_default(),
+                )?,
                 edition: if let Some(item) = table.get("edition") {
                     warnings.push(format!(
                         "{}: `edition` is set on {kind} `{name}` which is deprecated",
