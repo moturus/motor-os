@@ -47,9 +47,11 @@ Linux-to-Motor, and native Motor. Direct Git dependencies and root Git patches
 are vendored natively on both supported hosts through the Git source model
 specified below.
 
-Root build scripts, workspace-wide selection and
-inheritance, CLI feature selection, and custom/build-std targets remain
-unsupported. `full-native-build.md` is a non-normative audit of those and the
+Workspace membership and inheritance, shared resolution, metadata, fetch,
+tree, and scoped root admission are implemented. Compilation still requires
+one selected member and default CLI features. Root build scripts and
+custom/build-std targets remain unsupported. `full-native-build.md` is a
+non-normative audit of those and the
 other gaps exposed by the repository `Makefile`; future source-model rationale
 belongs in `design.md`.
 
@@ -176,6 +178,10 @@ lorry [+toolchain] [GLOBAL] test   [NAME] [-p NAME]
                                   [--no-run] [--bundle]
                                   [-- ARGS...]
 lorry [+toolchain] [GLOBAL] vendor [-p NAME] [--accept-all]
+                                  [--locked] [--offline] [--workspace]
+                                  [--exclude NAME] [FEATURE OPTIONS]
+lorry [+toolchain] [GLOBAL] fetch [--manifest-path PATH] [--target TRIPLE]
+                                 [--locked|--offline|--frozen]
 lorry [+toolchain] [GLOBAL] tree   [-p NAME] [--manifest-path PATH] [--target TRIPLE]
 lorry [+toolchain] [GLOBAL] rustc -Z unstable-options --print cfg --target TRIPLE -- -O
 lorry [+toolchain] [GLOBAL] rustc -Z unstable-options --print target-spec-json
@@ -211,7 +217,9 @@ rules, including nonterminal rejection and explicit `--accept-all`.
 `build`, `check`, `run`, `test`, `clean`, `metadata`, and `tree` accept
 `--locked`, `--offline`, and `--frozen`. Those commands already prohibit
 acquisition and lock-file changes, so the flags preserve their existing
-constraints. They do not apply to `vendor` or its admission workflow.
+constraints. Fetch is always locked; offline fetch verifies retained inputs.
+Vendor accepts `--locked` and `--offline`, with offline requiring locked;
+locked vendor verifies the complete lock before reviewing its selected scope.
 `metadata` defaults to format version 1 and warns when `--format-version`
 is omitted, except in quiet mode, as Cargo does.
 `--max-packages N` sets the positive outside-package resolution bound for one
@@ -318,7 +326,9 @@ root compilation, freshness validation, and artifact publication.
 
 ## Package and manifest model
 
-Build, clean, run, test, vendor, and review operate on one selected package.
+Build, clean, run, and test currently execute one selected package. Vendor
+and review use the workspace-root record; fetch and resolved metadata use
+the complete workspace lock, independent of admission scope.
 The current package is selected by its `Cargo.toml`; `-p NAME` selects one
 exact member from a workspace root. Builds and source metadata share the
 membership reader: a root package and recursively reached normal, build,
@@ -346,9 +356,9 @@ Build, check, Clippy, run, test, tree, metadata, vendor, and review share
 repeated `--features`/`-F`, comma/space lists, qualified and weak dependency
 features, `--all-features`, and `--no-default-features`. Explicit `dep:`
 names and multiple slashes fail as in Cargo. Source-only metadata describes
-declared features regardless of selection. Commands that require resolution
-other than metadata reject nondefault feature selection until their workspace
-resolution integration is implemented. Resolved metadata accepts those flags.
+declared features regardless of selection. Metadata, tree, and vendor resolve
+those flags. Compiler commands reject nondefault CLI features until their
+workspace integration is implemented.
 Editable members use Cargo's package file discovery: Git ignores and tracked
 files, include/exclude rules, symbolic links, and nested package boundaries.
 Dependency archive size/file limits do not constrain member source trees.
@@ -409,14 +419,14 @@ the corresponding lint tool is not active. Dependency inheritance follows.
 `new` and `cache clean` do not inspect
 a current package.
 
-A W1 workspace shares its root Cargo.lock, resolver, dev and release profiles,
+A workspace shares its root Cargo.lock, resolver, dev and release profiles,
 crates.io patches, and `target/lorry` ownership. Every selected member uses the
 same `target/lorry` output layout. The first command after upgrading resets
 the previous Lorry artifact tree under the artifact lock, records the shared
-layout version, and reports the migration. Portable admission remains beside
-the selected member.
-Vendoring updates that member's closure while retaining the validated locked
-closures of unselected explicit members.
+layout version, and reports the migration. Portable admission belongs at the
+workspace root. Vendoring resolves every member together, including optional,
+development, and all-platform edges; selectors change review/acquisition scope
+without narrowing complete resolution or its outside-package cap.
 
 A root package may contain at most one library and 64 binary targets. Lorry
 discovers `src/main.rs`, `src/bin/*.rs`, and `src/bin/*/main.rs`, merges exact
@@ -519,13 +529,15 @@ location to which its settings should move. System constraints still apply.
 
 ## Locking, resolution, and source selection
 
-- Every build, run, and test requires a present, current Cargo.lock version 3
-  or 4, including dependency-free projects. These commands treat it as
+- Every build, run, and test requires a present, current Cargo.lock in format
+  1 through 4, including dependency-free projects. These commands treat it as
   read-only, remain offline, and never repair it.
 - `lorry vendor` creates a missing lock or repairs a stale lock while
-  preserving compatible locked versions. It preserves an unchanged version 3
-  lock byte-for-byte and writes canonical version 4 when creation or repair is
-  required. When portable admission state exists, an ordinary vendor operation
+  preserving compatible locked versions. An unchanged lock is preserved
+  byte-for-byte; repair retains its format. A fresh lock uses Cargo's member
+  Rust-version thresholds: below 1.41 selects V1, below 1.53 V2, below 1.83
+  V3, otherwise V4. Without declared member versions, V4 is used.
+  When portable admission state exists, an ordinary vendor operation
   reconciles dependency-intent or lock-graph drift only after interactive
   review or complete-candidate approval with `--accept-all`.
   If the visible inputs no longer reconstruct the committed review, it shows
@@ -540,7 +552,12 @@ location to which its settings should move. System constraints still apply.
   modified.
 - Resolver versions 1, 2, and 3 must follow Cargo-compatible feature,
   target, yanked-version, candidate-ordering/backtracking, and Rust-version
-  behavior for the supported single-root model.
+  behavior for complete and selected workspace graphs. Resolver 3 ranks
+  unlocked versions by compatibility with declared member Rust versions;
+  compatible locked identities and their parent edges remain preferred.
+  Complete resolution and metadata follow weak dependency feature references
+  without activating the corresponding implicit feature. Selected compilation
+  retains Cargo's deferred optional activation.
 - An omitted path/Git version accepts any source package version, including
   prereleases. An explicit `version = "*"` keeps Cargo's semver prerelease
   exclusion. Inherited dependencies retain that distinction.
@@ -554,8 +571,8 @@ location to which its settings should move. System constraints still apply.
   Search stores queued-edge continuation and backtracking state on the heap;
   a wide graph cannot exhaust the process stack within the dependency-depth
   limit. Forced choices do not retain unnecessary backtracking frames.
-  Acquisition includes only the default-feature closure selected by the union
-  of `[vendor].targets` and, by default, the current host.
+  Vendor acquisition includes its normalized review scope's feature closure
+  selected by the union of `[vendor].targets` and, by default, the current host.
 - Default vendor targets are `x86_64-unknown-linux-musl` and
   `x86_64-unknown-motor`; the rustc host is included unless explicitly
   disabled.
@@ -572,7 +589,7 @@ location to which its settings should move. System constraints still apply.
   Git source identities and modern dependency references remain distinct.
 - Builds never fall back to Cargo's cache or the network. Missing selected
   objects must identify the package/version/source and recommend
-  `lorry vendor`.
+  `lorry fetch`.
 - The explicit `--use-cargo-registry` mode is offline. Its first use verifies
   Cargo's cached archive and extracted source against each other and
   Cargo.lock, then atomically records the resulting Lorry evidence below the
@@ -654,19 +671,20 @@ Cargo or Lorry. Lorry owns `.lorry/dependencies-v2.toml`; it is deterministic,
 portable, intended to be committed, and must be changed only by Lorry.
 
 The compact state is an approval record, never an additional version
-requirement and never trusted evidence. Format 3 contains only:
+requirement and never trusted evidence. The workspace record contains:
 
 - the SHA-256 commitment to the canonical review document defined below,
   which Lorry reconstructs from Cargo.toml, Cargo.lock, and verified repository
   objects before synthesizing any generated policy;
+- the normalized member/feature review scope;
 - the reviewed `(host, target)` build contexts; and
 - the explicit build-script, procedural-macro, and native-tool capability
   grants that must stay visible in a source diff.
 
-Build, run, and test require the discovered host and selected target to be an
-exact reviewed context, reconstruct the canonical document for every recorded
-context, and compare its digest with the commitment before any generated
-allow rule exists. Missing, corrupt, conflicting, or extra evidence fails
+Compilation using registry/Git dependencies requires an exact reviewed
+host/target context. It reconstructs the canonical document for every recorded
+context, verifies its digest and grants, and checks the requested package and
+feature coverage before reuse or compilation. Missing, corrupt, conflicting, or extra evidence fails
 closed, and an explicit configured deny always wins over committed admission.
 Ordinary non-root path dependency edits remain governed by path policy and
 source verification and do not require dependency upgrades.
@@ -702,7 +720,25 @@ during review fail closed. With `--lorry-messages`, proposed and completed
 migration reports use `reason = "lorry-admission-migration"`, `stage`, and
 `replaced_records` fields on stderr.
 
-### Compact admission format 3
+### Workspace admission format 4
+
+Workspace admission retains compact `format-version = 3`, sets
+`review-format-version = 4`, and adds one required `[review-scope]` table.
+Its fields occur in this order: `packages`, `features`, `all-features`, and
+`no-default-features`. Arrays and booleans are always present; arrays are
+sorted and duplicate-free. Empty packages mean every member; otherwise
+entries are exact member names. Features are normalized CLI requests. There
+are at most 64 member names and the existing feature-count bound applies.
+The table precedes the contexts in both compact and canonical documents.
+
+Canonical review format 4 uses the format-3 ordering and schemas below,
+except that it adds this scope table and omits `direct-registry`, `direct-git`,
+`root-feature`, and `crates-io-patch`. Every locked registry/Git identity and
+edge remains committed, including inactive nodes. Context selection, verified
+source evidence, and capabilities describe the review scope. Compilation
+verifies that recorded review before checking requested coverage.
+
+### Legacy compact admission format 3
 
 The compact file is UTF-8 TOML. Its allowed top-level keys are exactly
 `format-version`, `review-format-version`, `review-sha256`, `context`, and

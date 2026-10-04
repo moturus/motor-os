@@ -1725,6 +1725,163 @@ Thirty-four resolver tests and strict Clippy passed in
 `/tmp/lorry-m6-metadata-features-{cargo-oracle,clippy}.log`.
 Metadata command/source preparation integration remains pending.
 
+### Command and admission integration, 2026-10-04
+
+The foundation above now serves ordinary and locked vendor, fetch, tree,
+resolved metadata, and workspace admission. Complete resolution includes every
+member and retains Cargo's existing lock format on repair; unchanged inputs
+preserve exact lock bytes. Upgrades protect every member's direct dependency
+intent. Descriptive loading retains development targets and outside path/Git
+workspace inheritance without imposing compilation restrictions on navigation.
+
+Fetch acquires exact locked sources without execution admission, defaults to
+the complete graph, and can project a target closure with host build-time
+dependencies. A newly inspected registry procedural macro triggers host
+projection before its child archives are chosen. Exact Git source trees are
+resolution inputs before projection, matching Cargo's source query behavior.
+Independent immutable index records retain the complete lock's resolution
+inputs without authorizing compilation or requiring inactive archives.
+Missing metadata sources name an explicit fetch instead of returning partial
+results. Empty-workspace source metadata and fetch match Cargo and preserve
+the existing empty lock. Configuration supplies metadata's target directory
+without compiler discovery in the no-deps path.
+
+One root compact record now carries review format 4 and normalized scope.
+It commits to resolved outside identities, source evidence, contexts, features,
+and grants, and omits members' raw declarations. Plain vendor repeats and
+prints the stored scope; selectors replace it as a whole. Migration reports
+the selected member records before confirmation and removes only those exact
+records after durable root approval. Changed files, symlinks, and copied
+legacy root approval fail closed. Explicit denials remain effective before
+acquisition and on ordinary or cached compilation paths.
+
+Human review groups each locked registry/Git package once and lists transitive
+member users, evidence, dependencies, and feature contexts. Machine review
+uses the approved `lorry-vendor-change` event, including source/capability
+differences, prior-reconstruction status, and full canonical candidate.
+The grouped workspace, registry, and Git contracts and approval unit tests
+passed; strict Clippy passed after correcting argument count and restricting
+the old single-package renderer to its legacy tests. The registry contract's
+fresh phase initially retained independent index inputs from its preceding
+machine phase. Resetting both resolution inputs and archives restored its
+real sparse-request assertion. Original evidence is retained in
+`/tmp/lorry-m6-grouped-review-registry-contract.log`; final contracts use
+`/tmp/lorry-m6-grouped-review-{workspace,registry,git}-final.log`.
+
+Actual Cargo unit graphs now cover another 18 resolver/platform/command
+contexts. They exposed resolver-1 development/platform feature activation,
+feature propagation into every compilation kind, and host cfg evaluation for
+build dependencies. All 37 resolver tests then passed in
+`/tmp/lorry-m6-selected-cross-context-resolver-final.log`.
+Completed-profile reuse now follows scope reconstruction and coverage checks;
+the script counter and corrupt-commitment contract passed in
+`/tmp/lorry-m6-admitted-profile-contract-fixed.log`.
+Native capability extraction now sorts roles by canonical name rather than
+enum ordinal. Source-only fetch, review JSON, and Clippy contracts passed.
+
+The locked Git contract advances its branch, disables curl, and proves both
+locked vendor forms preserve the old commit and all state bytes. It exposed
+a registry lookup attempted for a package already supplied by a locked Git
+patch. The fixed contract passed in
+`/tmp/lorry-m6-locked-git-patch-contract.log`.
+Local Cargo Git locks also confirmed that V1/V2 omit `branch=master` from
+dependency references while retaining it on package sources. Validation and
+canonical review now share format-specific reference matching. Six offline
+tests, five lock tests, 24 review tests, and strict Clippy passed in
+`/tmp/lorry-m6-legacy-{master-reference-fixed,git-reference-lockfile,git-reference-admission,git-reference-clippy}.log`.
+This changes no Git source-ID equivalence.
+
+The developer-image and native fixture package limit is now 384. The approved
+manual fetch uses an isolated tracked-source copy of `src/sys` and its outside
+third-party paths at `/tmp/lorry-m6-sys-fetch-p0o_692n`, with separate HOME,
+repository, and cache. Its first configured run exposed Lorry's conflation
+of omitted path versions with explicit `*`, which rejects prereleases such
+as `moto-netstack`. Actual offline Cargo locks distinguish those cases. The
+resolver and selected projection now retain that distinction; all 38 resolver
+tests, manifest tests, and strict Clippy passed. Original and fixed evidence
+use `/tmp/lorry-m6-prerelease-*.log`.
+
+The next manual fetch reached a separate stack overflow, preserved in
+`/tmp/lorry-m6-sys-manual-fetch-prerelease-fixed.log`. An offline 321-package
+graph of depth two reproduces it in
+`/tmp/lorry-m6-wide-resolver-reproducer.log`. GDB counted 445 frames, 431 in
+the recursive resolver or its closures. The dependency-depth bound did not
+bound recursion through queued edges. Search now uses explicit backtracking
+state and discards forced-choice frames. A second regression preserves lazy
+candidate discovery after a reused selection's children fail; it passes with
+the original recursive solver and the final iterative implementation. The
+first iterative attempt queried those candidates too early and failed that
+test. All 40 resolver tests and strict Clippy pass in
+`/tmp/lorry-m6-iterative-resolver-{final,clippy-final}.log`. The final real
+workspace fetch and full milestone validation follow this fix.
+
+Strict workspace resolution now constrains each dependency by its parent's
+locked edge set. Previously, a compatible package already selected by another
+parent could replace that exact edge. An offline Cargo path-patch fixture
+retains two versions after one requirement broadens to `*`; Lorry's strict
+metadata now matches it exactly and ordinary vendoring preserves those edges
+as preferences while allowing changed requirements to repair them. Explicit
+upgrades override those preferences. Resolver tests, strict Clippy, and the
+workspace admission/upgrade contract passed in
+`/tmp/lorry-m6-parent-{edge-resolver-checked,preference-fixed,preference-clippy,preference-admission}.log`.
+
+The next real fetch exposed a missing `jiff` weak dependency edge. Cargo's
+package resolver follows weak dependency feature references unconditionally;
+its compilation feature resolver narrows optional activation afterward. An
+offline Cargo fixture with an optional normal alias and an inactive dev alias
+confirms both behaviors, including when no other package selects that child.
+All 42 resolver tests and strict Clippy pass in
+`/tmp/lorry-m6-weak-complete-{fixed,clippy}.log`. The initial missing-edge
+failure is preserved in `/tmp/lorry-m6-sys-manual-fetch-parent-edges.log`.
+
+Acquisition then exposed `nom`'s declared example paths whose files are absent
+from its published archive. Cargo source metadata permits explicit paths
+without reading those unused targets. Descriptive loading now does likewise;
+compilation still checks its library input. All 24 manifest tests, including
+an actual offline Cargo missing-target comparison, and strict Clippy pass in
+`/tmp/lorry-m6-missing-target-{manifest,clippy}.log`. The isolated locked fetch
+then succeeded in 86.48 seconds with peak RSS 484,952 KiB, preserved the original
+lock bytes, and created no admission record. Offline Lorry metadata also
+succeeded, reporting 35 members and 234 resolved packages. Logs and JSON are
+`/tmp/lorry-m6-sys-manual-fetch-target-fixed.log` and
+`/tmp/lorry-m6-sys-metadata.{json,log}`. No external retries were needed.
+
+The first full milestone gate passed 422 Rust tests plus ten explicitly
+ignored native contracts, then failed the own-message metadata test. Its
+fixture inherited a user configuration containing unsupported
+`required-patches`; no-deps metadata now reads configuration to report the
+correct target directory. Isolating that fixture's HOME/Cargo home fixes the
+test without altering configuration validation. Original evidence is
+`/tmp/lorry-m6-full-first.log`, and all three own-message tests pass in
+`/tmp/lorry-m6-own-messages-isolated.log`.
+
+The next gate stopped at the metadata contract's old vendor setup: reviewing
+its member build script now correctly requires an explicit grant, while source
+metadata requires none. The fixture now preserves an invalid admission record
+and proves metadata ignores it. Its exact Cargo comparisons pass in
+`/tmp/lorry-m6-metadata-source-only-setup.log`; the original rejection is in
+`/tmp/lorry-m6-full-isolated-messages.log`.
+
+An offline Cargo comparison of the fetched real workspace uses directory
+sources made from the verified registry objects and an isolated copy of
+retained Cargo Git sources. The initial ordinary Cargo cache lacked
+`portable-atomic-util`; no extra network access was used for this oracle.
+It exposed missing required test features and directory/main.rs test
+inference, custom dependency library names, precise internal Git path sources,
+noncanonical cfg formatting, and Cargo's optional hints field. Focused Cargo
+oracles, golden wire checks, and strict Clippy pass after their fixes; evidence
+uses `/tmp/lorry-m6-{test-target,dependency-crate-name,git-path-source,cfg,hints}-*.log`.
+One old discovery test still expected nested targets to be omitted; the gate
+preserved that failure in `/tmp/lorry-m6-full-metadata-fixed.log`, and its
+expectation now includes the Cargo-compatible target. The metadata projection
+helper also needed to normalize inner dependency-kind sets before sorting the
+outer dependencies. Temporary comparison dumps were removed before validation.
+The final real-workspace comparison passes the existing complete projection
+oracle in `/tmp/lorry-m6-sys-metadata-projection-final-checked.log`. It compares
+every package/node field after only the documented source-root and semantic-set
+normalizations, and the original lock remains byte-for-byte unchanged.
+The final full gate is running in `/tmp/lorry-m6-full-final.log`.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

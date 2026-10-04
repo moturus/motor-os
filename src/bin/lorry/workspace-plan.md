@@ -153,8 +153,16 @@ offline Cargo locks match across the format thresholds. Resolved metadata now
 uses the shared graph without execution admission, resolves CLI features across
 members, and filters package reachability without narrowing feature lists.
 Focused offline command contracts match Cargo and preserve the lock, admission,
-and output state. Fetch, workspace admission, and remaining source-description
-coverage are still in progress; the full milestone gate has not run yet.
+and output state. Locked fetch, targeted acquisition, scoped root admission,
+record migration, source-only tree, and human/machine reviews are implemented.
+Compilation verifies approval and requested coverage before completed-profile
+reuse. The approved isolated `src/sys` fetch and offline metadata now pass
+with unchanged lock bytes and no admission. Diagnosed fixes cover prerelease
+paths, resolver stack use, exact parent edges, weak feature references, and
+missing unused target files. Whole-workspace metadata also passes the offline
+Cargo projection comparison. Gate failures exposed stale metadata fixture
+setup and discovery expectations; those are fixed and the full gate is running
+again.
 
 ## Goal
 
