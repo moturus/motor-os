@@ -35,6 +35,7 @@ pub enum Directive {
         value: String,
     },
     RustcLinkLib(String),
+    RustcLinkArg(String),
     RustcLinkSearch {
         kind: Option<String>,
         path: PathBuf,
@@ -583,6 +584,7 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                 }
             }
             "rustc-link-lib" => Directive::RustcLinkLib(value.to_owned()),
+            "rustc-link-arg" => Directive::RustcLinkArg(value.to_owned()),
             "rustc-link-search" => {
                 let (kind, path) = split_link_search(value)?;
                 Directive::RustcLinkSearch {
@@ -804,6 +806,7 @@ mod tests {
              cargo:rustc-env=GENERATED=value=with=equals\n\
              cargo:rustc-link-search=native={}\n\
              cargo:rustc-link-lib=static=native\n\
+             cargo::rustc-link-arg=-Wl,--gc-sections\n\
              cargo::warning=reviewed warning\n",
             fixture.out.display()
         );
@@ -830,6 +833,7 @@ mod tests {
                     path: fixture.out.clone(),
                 },
                 Directive::RustcLinkLib("static=native".to_owned()),
+                Directive::RustcLinkArg("-Wl,--gc-sections".to_owned()),
                 Directive::Warning("reviewed warning".to_owned()),
             ]
         );
@@ -840,6 +844,12 @@ mod tests {
         let fixture = Fixture::new();
         for (source, expected) in [
             ("cargo:metadata=value\n", "unsupported"),
+            ("cargo:rustc-link-arg-bins=-s\n", "unsupported"),
+            ("cargo:rustc-link-arg-bin=program=-s\n", "unsupported"),
+            ("cargo:rustc-link-arg-tests=-s\n", "unsupported"),
+            ("cargo:rustc-link-arg-benches=-s\n", "unsupported"),
+            ("cargo:rustc-link-arg-examples=-s\n", "unsupported"),
+            ("cargo:rustc-link-arg-cdylib=-s\n", "unsupported"),
             ("cargo::error=bad input\n", "reported an error"),
             ("cargo:rerun-if-env-changed=9BAD\n", "invalid environment"),
             ("cargo:rustc-env=9BAD=value\n", "invalid environment"),

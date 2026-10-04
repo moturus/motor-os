@@ -1071,6 +1071,10 @@ fn directive_digest(
                 digest.string("directive", "rustc-link-lib");
                 digest.os("value", OsStr::new(value), replacements);
             }
+            Directive::RustcLinkArg(value) => {
+                digest.string("directive", "rustc-link-arg");
+                digest.os("value", OsStr::new(value), replacements);
+            }
             Directive::RustcLinkSearch { kind, path } => {
                 digest.string("directive", "rustc-link-search");
                 digest.string("kind", kind.as_deref().unwrap_or(""));
@@ -1366,6 +1370,10 @@ fn build_script_manifest(build: &BuildScriptInput<'_>) -> Vec<u8> {
                 ),
                 Directive::RustcLinkLib(value) => (
                     "rustc-link-lib",
+                    vec![("value-encoded", encoded(OsStr::new(value), &replacements))],
+                ),
+                Directive::RustcLinkArg(value) => (
+                    "rustc-link-arg",
                     vec![("value-encoded", encoded(OsStr::new(value), &replacements))],
                 ),
                 Directive::RustcLinkSearch { kind, path } => (
@@ -2013,6 +2021,41 @@ mod tests {
         fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&second, &link).unwrap();
         assert_ne!(previous, external_inputs_digest(&dep_info, inputs).unwrap());
+    }
+
+    #[test]
+    fn link_arguments_bind_cached_outputs_in_emission_order() {
+        let fixture = Fixture::new();
+        let profile = fixture.0.join("profile");
+        let (mut output, environment) = generated_build_output(&profile);
+        output.directives.extend([
+            Directive::RustcLinkArg("-Wl,--gc-sections".to_owned()),
+            Directive::RustcLinkArg("-Wl,--as-needed".to_owned()),
+        ]);
+        let out_dir = profile.join("build/package-hash/out");
+        let temp_dir = profile.join("build/package-hash/tmp");
+        let record = |output: &BuildScriptOutput| {
+            build_script_manifest(&BuildScriptInput {
+                output,
+                environment: &environment,
+                executable_sha256: [6; 32],
+                out_dir: &out_dir,
+                temp_dir: &temp_dir,
+            })
+        };
+        let digest = |output: &BuildScriptOutput| {
+            let mut digest = KeyDigest::new();
+            directive_digest(&mut digest, &output.directives, &[]);
+            digest.finish()
+        };
+        let original_record = record(&output);
+        let original_digest = digest(&output);
+        output.directives.swap(1, 2);
+        assert_ne!(original_record, record(&output));
+        assert_ne!(original_digest, digest(&output));
+        output.directives[1] = Directive::RustcLinkArg("-s".to_owned());
+        assert_ne!(original_record, record(&output));
+        assert_ne!(original_digest, digest(&output));
     }
 
     #[test]

@@ -1447,12 +1447,15 @@ additions, removals, and symlink retargets invalidate reuse. Script directives
 retain their declared paths after validating their current canonical locations.
 
 The supported directive protocol accepts both `cargo:` and `cargo::` forms of
-`rustc-cfg`, `rustc-check-cfg`, `rustc-env`, `rustc-link-lib`,
+`rustc-cfg`, `rustc-check-cfg`, `rustc-env`, `rustc-link-lib`, `rustc-link-arg`,
 `rustc-link-search`, `rerun-if-changed`, `rerun-if-env-changed`, `warning`,
 and `error`. Unknown directives, unsafe paths, malformed/oversized output,
 timeout, sandbox violation, or nonzero exit are hard failures. An
 `rerun-if-env-changed` name absent from the cleared safe environment is tracked
 as explicitly absent; ambient values remain inaccessible.
+Common link arguments reach every target of the emitting package, preserving
+their order after link libraries. Target-specific `rustc-link-arg-*` forms
+remain unsupported.
 
 Lorry currently has only `c-compiler` and `archiver` native-tool roles. They are
 configured per target as absolute executable, fixed prefix-argument array, and

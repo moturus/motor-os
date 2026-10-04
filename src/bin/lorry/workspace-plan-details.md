@@ -2471,6 +2471,13 @@ contract, compiler oracle test, and strict Clippy pass in
 **Result.** Member build-time code and all required targets use the shared
 graph. Workspace `test`, `run`, `clean`, and `new` follow Cargo.
 
+The common `rustc-link-arg` directive now reaches all compiler consumers of
+its emitting package, including libraries, matching the pinned Cargo source.
+Order is preserved after link libraries and is bound into cache digests and
+audit records. Target-specific forms still fail explicitly. Protocol, compiler
+ordering, cache invalidation, paired member-script byte/JSON contracts, and
+strict Clippy pass in `/tmp/lorry-m8-link-arg-{protocol,compiler,cache,contract,clippy}.log`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only

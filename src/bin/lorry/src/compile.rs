@@ -468,6 +468,12 @@ fn apply_build_output(
             push(arguments, library);
         }
     }
+    // Cargo's common link-arg instruction reaches every target of this package.
+    for directive in &build.output.directives {
+        if let Directive::RustcLinkArg(argument) = directive {
+            codegen(arguments, &format!("link-arg={argument}"));
+        }
+    }
     for directive in &build.output.directives {
         if let Directive::RustcCfg(cfg) = directive {
             push(arguments, "--cfg");
@@ -1426,6 +1432,8 @@ mod tests {
                     value: "yes".to_owned(),
                 },
                 Directive::RustcLinkLib("static=fixture".to_owned()),
+                Directive::RustcLinkArg("-Wl,--gc-sections".to_owned()),
+                Directive::RustcLinkArg("-Wl,--as-needed".to_owned()),
                 Directive::RustcCfg("generated_cfg".to_owned()),
                 Directive::RustcLinkSearch {
                     kind: Some("native".to_owned()),
@@ -1461,6 +1469,10 @@ mod tests {
             format!("native={}", script_out.display()),
             "-l".to_owned(),
             "static=fixture".to_owned(),
+            "-C".to_owned(),
+            "link-arg=-Wl,--gc-sections".to_owned(),
+            "-C".to_owned(),
+            "link-arg=-Wl,--as-needed".to_owned(),
             "--cfg".to_owned(),
             "generated_cfg".to_owned(),
             "--check-cfg".to_owned(),

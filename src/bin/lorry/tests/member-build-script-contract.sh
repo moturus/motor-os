@@ -45,6 +45,8 @@ fn main() {
     println!("cargo:rustc-cfg=scripted");
     println!("cargo:rustc-check-cfg=cfg(scripted)");
     println!("cargo:rustc-env=FROM_SCRIPT=present");
+    println!("cargo:rustc-link-arg=-Wl,--gc-sections");
+    println!("cargo:rustc-link-arg=-Wl,--as-needed");
     println!("cargo:rerun-if-env-changed=SCRIPT_INPUT");
 }
 EOF
