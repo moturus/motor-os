@@ -256,8 +256,9 @@ Source metadata reads only workspace membership: `members` (which may list
 accepted. Build-only tables, such as profiles and patches, are ignored.
 All 16 Cargo package fields can inherit from `workspace.package`; inherited
 readme and license-file paths are relative to the member. Explicit
-`readme = false` disables discovery. Dependency and lint inheritance, member
-globs, and example and bench targets are not supported yet.
+`readme = false` disables discovery. Members and default-members accept
+component globs `*`, `?`, and `[...]`; recursive `**` is rejected.
+Dependency and lint inheritance and example and bench targets follow later.
 
 `locate-project` emits `{"root":"/absolute/path/Cargo.toml"}`, or the path
 alone with `--message-format plain`. The manifest must currently be in the

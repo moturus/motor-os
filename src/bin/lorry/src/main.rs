@@ -23,6 +23,7 @@ mod diagnostic;
 mod engine;
 mod executor;
 mod git;
+mod glob;
 mod hash;
 mod identity;
 mod json;

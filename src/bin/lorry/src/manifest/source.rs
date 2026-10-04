@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::{
     DependencySource, MANIFEST_NAME, MAX_WORKSPACE_MEMBERS, Manifest, ManifestMode,
@@ -60,9 +60,6 @@ impl SourceWorkspace {
                 );
             };
             workspace.default_members = vec![package.root.clone()];
-        }
-        if workspace.packages.is_empty() {
-            return Err(Error::failure("workspace has no source packages"));
         }
         Ok(workspace)
     }
@@ -140,6 +137,7 @@ impl WorkspaceRoot {
     // Path dependencies below the root are implicit members in Cargo.
     pub fn load_members(&self) -> Result<BTreeMap<PathBuf, Manifest>> {
         let mut pending = self.member_roots(&self.members)?;
+        pending.retain(|directory| !self.excludes(directory));
         if self.package {
             pending.push(self.root.clone());
         }
@@ -208,14 +206,117 @@ impl WorkspaceRoot {
         }
         let path = self.root.join(MANIFEST_NAME);
         let document = Document::load(&path, "Cargo workspace manifest")?;
-        declared
-            .iter()
-            .map(|member| match member.as_str() {
-                "." => Ok(self.root.clone()),
-                _ => workspace_member_root(&self.root, &path, &document, member),
-            })
-            .collect()
+        let mut roots = BTreeSet::new();
+        for member in declared {
+            for directory in expand_members(&self.root, member)? {
+                let relative = directory.strip_prefix(&self.root).unwrap();
+                let canonical = if relative.as_os_str().is_empty() {
+                    self.root.clone()
+                } else {
+                    workspace_member_root(
+                        &self.root,
+                        &path,
+                        &document,
+                        relative
+                            .to_str()
+                            .ok_or_else(|| Error::failure("workspace member path is not UTF-8"))?,
+                    )?
+                };
+                roots.insert(canonical);
+                if roots.len() > MAX_WORKSPACE_MEMBERS {
+                    return Err(Error::failure(format!(
+                        "workspace has more than {MAX_WORKSPACE_MEMBERS} members"
+                    )));
+                }
+            }
+        }
+        Ok(roots.into_iter().collect())
     }
+}
+
+fn expand_members(root: &Path, member: &str) -> Result<Vec<PathBuf>> {
+    if member.is_empty() || member.contains("**") {
+        return Err(Error::failure(format!(
+            "unsupported workspace member pattern `{member}`"
+        )));
+    }
+    let mut components = Vec::new();
+    for component in Path::new(member).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(value) => components.push(value),
+            _ => {
+                return Err(Error::failure(format!(
+                    "workspace member `{member}` must be below the root"
+                )));
+            }
+        }
+    }
+    let mut paths = vec![root.to_owned()];
+    for (index, component) in components.iter().enumerate() {
+        let text = component
+            .to_str()
+            .ok_or_else(|| Error::failure("workspace pattern is not UTF-8"))?;
+        let pattern = crate::glob::Pattern::parse(text).map_err(Error::failure)?;
+        let magic = text.chars().any(|value| matches!(value, '*' | '?' | '['));
+        let mut next = Vec::new();
+        let mut matched = false;
+        let mut include = |path: PathBuf| -> Result<()> {
+            matched = true;
+            // Cargo ignores matching files. Do not retain those matches or
+            // apply a package count to them, even in a directory of files.
+            if path.is_dir() {
+                if next.len() == MAX_WORKSPACE_MEMBERS {
+                    return Err(Error::failure(format!(
+                        "workspace pattern `{member}` exceeds {MAX_WORKSPACE_MEMBERS} directories"
+                    )));
+                }
+                next.push(path);
+            }
+            Ok(())
+        };
+        for directory in &paths {
+            if magic {
+                let entries = fs::read_dir(directory).map_err(|error| {
+                    Error::failure(format!("failed to match `{member}`: {error}"))
+                })?;
+                for entry in entries {
+                    let entry = entry.map_err(|error| {
+                        Error::failure(format!("failed to match `{member}`: {error}"))
+                    })?;
+                    if entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| pattern.matches(name))
+                    {
+                        include(entry.path())?;
+                    }
+                }
+            } else {
+                let path = directory.join(component);
+                match fs::metadata(&path) {
+                    Ok(_) => include(path)?,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) => {}
+                    Err(error) => {
+                        return Err(Error::failure(format!(
+                            "failed to match `{member}`: {error}"
+                        )));
+                    }
+                }
+            }
+        }
+        if !matched || (next.is_empty() && index + 1 != components.len()) {
+            return Err(Error::failure(format!(
+                "workspace member pattern `{member}` matches no paths"
+            )));
+        }
+        paths = next;
+    }
+    Ok(paths)
 }
 
 // Cargo uses the nearest enclosing workspace that does not exclude the package.

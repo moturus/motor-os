@@ -1157,6 +1157,16 @@ contract proves explicit false/true, inherited paths and default discovery,
 Cargo's rejection of inheriting false, and all publish forms. Include/exclude
 arrays are retained for the member-file work.
 
+Member and default-member component globs now share a standard-Rust matcher
+with linear star closure. Focused manifest tests (23), strict Clippy, and
+paired metadata/build contracts passed in `/tmp/lorry-m5-globs-unit.log`,
+`/tmp/lorry-m5-globs-clippy.log`,
+`/tmp/lorry-m5-globs-metadata-contract.log`, and
+`/tmp/lorry-m5-globs-build-contract.log`. Cargo comparisons cover star,
+question mark, ranges and negated classes, explicit exclusion overrides,
+matching files, missing manifests, unmatched patterns, and empty virtual
+workspaces. Recursive `**` is rejected explicitly.
+
 **Result.** Every command uses the same workspace membership and manifest
 inheritance rules. One member can be built or checked from the workspace
 root. The shared model is ready for multi-member execution.

@@ -27,7 +27,7 @@ export HOME="$WORK/home"
 
 printf '%s\n' \
     '[workspace]' \
-    'members = ["app", "tool", "scripted"]' \
+    'members = ["a[p]p", "to?l", "script*"]' \
     'default-members = ["tool"]' \
     'resolver = "2"' \
     '[workspace.package]' \

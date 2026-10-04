@@ -810,15 +810,12 @@ fn workspace_member_root(
         || candidate
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
-        || member
-            .bytes()
-            .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b']'))
     {
         return Err(Error::at(
             path,
             document.line_of_item(document.root().get("workspace").unwrap()),
             format!("unsupported workspace member path `{member}`"),
-            "use an explicit descendant path without globs or `..`",
+            "use a descendant path without `..`",
         ));
     }
     let declared = root.join(candidate);
@@ -828,7 +825,7 @@ fn workspace_member_root(
             declared.display()
         ))
     })?;
-    if !canonical.starts_with(root) || !canonical.join(MANIFEST_NAME).is_file() {
+    if !canonical.starts_with(root) {
         return Err(Error::failure(format!(
             "workspace member `{}` is not a package directory below the workspace root",
             declared.display()

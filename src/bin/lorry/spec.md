@@ -289,7 +289,11 @@ A singleton default can execute; larger or empty selections fail explicitly
 until multi-package execution is implemented. A member-directory invocation
 may search ancestors for its workspace.
 General upward package discovery, `--manifest-path`, workspace-wide commands,
-member globs and members outside the root are unsupported.
+Members and default-members accept component globs `*`, `?`, and `[...]`,
+including negated character classes. `**` and paths outside the root are
+rejected. Matching files are ignored; matching directories need manifests,
+and unmatched patterns fail. Explicit paths override exclusion, while glob
+matches do not. Source metadata can describe an empty virtual workspace.
 All manifest modes inherit Cargo's 16 package fields from `workspace.package`
 when the member sets `workspace = true`: authors, categories, description,
 documentation, edition, exclude, homepage, include, keywords, license,

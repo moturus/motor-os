@@ -232,3 +232,43 @@ grep -Fx "  --> $WORK/empty/Cargo.toml:$line" "$WORK/bad-inheritance.err" >/dev/
 }
 
 echo "PASS: unprepared workspace source metadata agrees with Cargo"
+
+GLOB="$WORK/glob"
+package "$GLOB"
+for name in one two drop; do package "$GLOB/crates/$name"; done
+printf 'ignored file\n' >"$GLOB/crates/README"
+cp "$GLOB/Cargo.toml" "$WORK/glob.package"
+for pattern in 'crates/*' 'crates/???' 'crates/[ot]*' 'crates/[!d]*' 'crates/[a-z]*'; do
+    cp "$WORK/glob.package" "$GLOB/Cargo.toml"
+    printf '[workspace]\nmembers = ["%s"]\nexclude = ["crates/drop"]\ndefault-members = ["crates/t?o"]\n' \
+        "$pattern" >>"$GLOB/Cargo.toml"
+    agrees_with_cargo "$GLOB/Cargo.toml" glob
+done
+# A glob does not override exclusion, while an explicit member path does.
+printf 'members = ["crates/*", "crates/drop"]\n' >"$WORK/glob.members"
+sed '/^members = /d' "$GLOB/Cargo.toml" >"$WORK/glob.manifest"
+cat "$WORK/glob.manifest" "$WORK/glob.members" >"$GLOB/Cargo.toml"
+agrees_with_cargo "$GLOB/Cargo.toml" explicit-excluded
+cp "$WORK/glob.package" "$GLOB/Cargo.toml"
+printf '[workspace]\nmembers = ["crates/README"]\n' >>"$GLOB/Cargo.toml"
+agrees_with_cargo "$GLOB/Cargo.toml" file-match
+mkdir "$GLOB/crates/missing"
+for pattern in 'crates/*' 'crates/absent-*'; do
+    cp "$WORK/glob.package" "$GLOB/Cargo.toml"
+    printf '[workspace]\nmembers = ["%s"]\n' "$pattern" >>"$GLOB/Cargo.toml"
+    for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+        if "$builder" metadata --no-deps --offline --format-version 1 \
+            --manifest-path "$GLOB/Cargo.toml" >"$WORK/bad-glob.json" 2>"$WORK/bad-glob.err"; then
+            echo "workspace-metadata: accepted a missing member manifest or unmatched glob" >&2
+            exit 1
+        fi
+    done
+done
+cp "$WORK/glob.package" "$GLOB/Cargo.toml"
+printf '[workspace]\nmembers = ["crates/**"]\n' >>"$GLOB/Cargo.toml"
+if source_metadata "$GLOB/Cargo.toml" >"$WORK/recursive.json" 2>"$WORK/recursive.err"; then exit 1; fi
+grep -F 'unsupported workspace member pattern' "$WORK/recursive.err" >/dev/null
+mkdir "$WORK/empty-virtual"
+printf '[workspace]\n' >"$WORK/empty-virtual/Cargo.toml"
+agrees_with_cargo "$WORK/empty-virtual/Cargo.toml" empty-virtual
+echo "PASS: Cargo member globs, exclusions, file matches, and empty workspaces"
