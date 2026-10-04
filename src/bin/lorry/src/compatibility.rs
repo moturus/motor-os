@@ -9,14 +9,18 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-pub fn locate_project(manifest_path: &str) -> Result<i32> {
+pub fn locate_project(manifest_path: Option<&str>, plain: bool) -> Result<i32> {
     // Resolved metadata is per package, so a member manifest locates itself.
-    let workspace = SourceWorkspace::load(Path::new("."), Some(Path::new(manifest_path)), None)?;
+    let workspace = SourceWorkspace::load(Path::new("."), manifest_path.map(Path::new), None)?;
     let path = workspace
         .manifest_path
         .to_str()
         .ok_or_else(|| Error::failure("selected manifest path is not Unicode"))?;
-    println!("{}", serde_json::json!({ "root": path }));
+    if plain {
+        println!("{path}");
+    } else {
+        println!("{}", serde_json::json!({ "root": path }));
+    }
     Ok(0)
 }
 

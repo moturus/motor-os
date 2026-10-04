@@ -269,6 +269,13 @@ CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
     --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
     -- test-messages "$WORK/test-json-prefix.json" "$WORK/metadata.json" success plain any
 grep -F 'test result: FAILED' "$WORK/test-json.out" >/dev/null
+(
+    cd "$PROJECT"
+    "$LORRY" --quiet test integration --test integration --message-format=json \
+        --target-dir "$WORK/test-json" -- --exact
+) >"$WORK/test-filter.out" 2>"$WORK/test-filter.err"
+grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out' \
+    "$WORK/test-filter.out" >/dev/null
 for selector in first second; do
     : >"$LOG"
     "$LORRY" check -p "$PACKAGE_ID" --bin "$selector" --quiet \

@@ -82,6 +82,16 @@ MANIFEST="$(realpath "$PROJECT/Cargo.toml")"
 located="$(cd "$PROJECT" && HOME="$HOME_DIR" \
     "$LORRY" locate-project --workspace --manifest-path "$MANIFEST")"
 [ "$located" = "{\"root\":\"$MANIFEST\"}" ] || fail "wrong locate-project output: $located"
+for arguments in '' '--workspace' '--message-format=json'; do
+    located="$(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" locate-project $arguments)"
+    [ "$located" = "{\"root\":\"$MANIFEST\"}" ] || fail "wrong default locate-project output"
+done
+located="$(cd "$WORK" && HOME="$HOME_DIR" "$LORRY" locate-project \
+    --manifest-path "$MANIFEST" --message-format plain)"
+[ "$located" = "$MANIFEST" ] || fail "plain locate-project output is not the manifest path"
+if (cd "$PROJECT/src" && HOME="$HOME_DIR" "$LORRY" locate-project) >"$WORK/locate.err" 2>&1; then
+    fail "locate-project searched parent directories before workspace discovery is supported"
+fi
 
 mkdir -p "$WORK/workspace/app/src"
 cat >"$WORK/workspace/Cargo.toml" <<'EOF'

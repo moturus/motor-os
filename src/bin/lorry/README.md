@@ -87,7 +87,7 @@ Cargo.lock, so it is immediately buildable without Cargo.
 ```text
 lorry build [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation]
 lorry run   [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]
-lorry test  [--release|-r] [--target TRIPLE] [--strict-validation]
+lorry test  [NAME] [--release|-r] [--target TRIPLE] [--strict-validation]
             [--test NAME] [--no-run] [--bundle] [-- ARGS...]
 ```
 
@@ -122,7 +122,8 @@ unless one exact `--bin` is selected. `run` selects `--bin`, then
 
 `run` returns the program's status. Ordinary tests build separate library,
 binary, and integration-test harnesses, then run them in order and stop at the
-first failure. `--test NAME` selects one integration test. `--no-run` prints
+first failure. Positional `NAME` filters test names in each harness; `--test
+NAME` selects one integration-test target. `--no-run` prints
 the built harness paths.
 
 Normal builds report dependency verification and preparation, then each

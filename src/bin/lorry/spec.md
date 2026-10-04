@@ -131,7 +131,7 @@ lorry [+toolchain] [GLOBAL] review [-p NAME]
 lorry [+toolchain] [GLOBAL] run    [-p NAME] [--bin NAME]
                                   [--release|-r] [--target TRIPLE]
                                   [--target-dir DIRECTORY] [--strict-validation] [-- ARGS...]
-lorry [+toolchain] [GLOBAL] test   [-p NAME]
+lorry [+toolchain] [GLOBAL] test   [NAME] [-p NAME]
                                   [--release|-r] [--target TRIPLE]
                                   [--target-dir DIRECTORY]
                                   [--strict-validation] [--test NAME]
@@ -226,6 +226,8 @@ root compilation, freshness validation, and artifact publication.
   `--use-cargo-registry`.
 - `test` builds all selected harnesses before running them in Cargo-compatible
   fail-fast target order. Arguments after `--` go to every executed harness.
+- `test NAME` passes the name filter to each harness before arguments after
+  `--`. As with Cargo, `--no-run` accepts those arguments without running a harness.
 - `test --test NAME` selects one discovered integration test and its required
   library/program graph.
 - Ordinary `test --no-run` builds separate harnesses and prints deterministic

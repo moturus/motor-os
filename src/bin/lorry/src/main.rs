@@ -132,7 +132,10 @@ fn run(cli: Cli) -> Result<i32> {
         Command::New { path } => new_package::execute(path, cli.verbosity == cli::Verbosity::Quiet),
         Command::CacheClean => cache_clean::execute(cli.verbosity),
         Command::Clean(options) => clean::execute(options, cli.package.as_deref(), cli.verbosity),
-        Command::LocateProject { manifest_path } => compatibility::locate_project(manifest_path),
+        Command::LocateProject {
+            manifest_path,
+            plain,
+        } => compatibility::locate_project(manifest_path.as_deref(), *plain),
         Command::Metadata(options) => metadata::execute(&cli, options),
         Command::Tree(options) => tree::execute(&cli, options),
         Command::Review => review::execute(&cli),
@@ -161,6 +164,9 @@ fn print_help(topic: Option<&str>) {
         Some("metadata") => println!(
             "Describe a package graph\n\nUsage: lorry [+toolchain] [GLOBAL] metadata [-p NAME] [--format-version 1] [--manifest-path PATH] [--no-deps] [--filter-platform TRIPLE] [--locked|--offline|--frozen]"
         ),
+        Some("locate-project") => println!(
+            "Locate a manifest\n\nUsage: lorry [+toolchain] [GLOBAL] locate-project [--workspace] [--manifest-path PATH] [--message-format json|plain]"
+        ),
         Some("new") => {
             println!("Create a binary package\n\nUsage: lorry [+toolchain] [GLOBAL] new PATH")
         }
@@ -171,7 +177,7 @@ fn print_help(topic: Option<&str>) {
             "Build and run a package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [-p NAME] [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]"
         ),
         Some("test") => println!(
-            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [-p NAME] [--release|-r] [--target TRIPLE] [--strict-validation] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
+            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [NAME] [-p NAME] [--release|-r] [--target TRIPLE] [--strict-validation] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
         ),
         Some("tree") => println!(
             "Display a package dependency tree\n\nUsage: lorry [+toolchain] [GLOBAL] tree [-p NAME] [--manifest-path PATH] [--target TRIPLE]"
@@ -198,6 +204,7 @@ fn print_help(topic: Option<&str>) {
              cache                       Manage the global Lorry cache\n  \
              check                       Check a package without linking\n  \
              clean                       Remove generated Lorry artifacts\n  \
+             locate-project              Locate a manifest\n  \
              metadata                    Describe a package graph\n  \
              new                         Create a binary package\n  \
              review                      Write the verified dependency review\n  \

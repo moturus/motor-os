@@ -36,9 +36,14 @@ pub enum Command {
     CacheClean,
     Check(CheckOptions),
     Clean(CleanOptions),
-    LocateProject { manifest_path: String },
+    LocateProject {
+        manifest_path: Option<String>,
+        plain: bool,
+    },
     Metadata(MetadataOptions),
-    New { path: String },
+    New {
+        path: String,
+    },
     Review,
     Run(RunOptions),
     RustcQuery(RustcQueryOptions),
@@ -436,8 +441,19 @@ fn command_line() -> ClapCommand {
                     Arg::new("topic")
                         .num_args(0..=1)
                         .value_parser(PossibleValuesParser::new([
-                            "build", "cache", "check", "clean", "metadata", "new", "review", "run",
-                            "test", "tree", "vendor", "help",
+                            "build",
+                            "cache",
+                            "check",
+                            "clean",
+                            "locate-project",
+                            "metadata",
+                            "new",
+                            "review",
+                            "run",
+                            "test",
+                            "tree",
+                            "vendor",
+                            "help",
                         ])),
                 ),
         )
@@ -597,15 +613,16 @@ fn locate_project_command() -> ClapCommand {
         .arg(
             Arg::new("workspace")
                 .long("workspace")
-                .action(ArgAction::SetTrue)
-                .required(true),
+                .action(ArgAction::SetTrue),
         )
+        .arg(manifest_path_argument())
         .arg(
-            Arg::new("manifest-path")
-                .long("manifest-path")
-                .value_name("PATH")
+            Arg::new("message-format")
+                .long("message-format")
+                .value_name("FMT")
                 .num_args(1)
-                .required(true),
+                .value_parser(PossibleValuesParser::new(["json", "plain"]))
+                .ignore_case(true),
         )
 }
 
@@ -720,6 +737,7 @@ fn run_command() -> ClapCommand {
 fn test_command() -> ClapCommand {
     compile_command("test", false)
         .arg(message_format_argument())
+        .arg(Arg::new("filter").value_name("NAME").num_args(0..=1))
         .arg(
             Arg::new("test")
                 .long("test")
@@ -793,10 +811,10 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             build: build_options(options, false),
         })),
         Some(("locate-project", options)) => Ok(Command::LocateProject {
-            manifest_path: options
-                .get_one::<String>("manifest-path")
-                .expect("Clap requires the manifest path")
-                .clone(),
+            manifest_path: options.get_one::<String>("manifest-path").cloned(),
+            plain: options
+                .get_one::<String>("message-format")
+                .is_some_and(|format| format.eq_ignore_ascii_case("plain")),
         }),
         Some(("metadata", options)) => Ok(Command::Metadata(MetadataOptions {
             manifest_path: options.get_one::<String>("manifest-path").cloned(),
@@ -816,12 +834,9 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             arguments: values(options, "arguments"),
         })),
         Some(("test", options)) => {
-            let arguments = values(options, "arguments");
-            if options.get_flag("no-run") && !arguments.is_empty() {
-                return Err(Error::usage(
-                    "test arguments cannot be combined with `--no-run`",
-                    "remove the arguments after `--` or remove `--no-run`",
-                ));
+            let mut arguments = values(options, "arguments");
+            if let Some(filter) = options.get_one::<String>("filter") {
+                arguments.insert(0, filter.clone());
             }
             Ok(Command::Test(TestOptions {
                 build: build_options(options, true),
@@ -1038,7 +1053,8 @@ mod tests {
             .unwrap()
             .command,
             Command::LocateProject {
-                manifest_path: "/project/Cargo.toml".to_owned(),
+                manifest_path: Some("/project/Cargo.toml".to_owned()),
+                plain: false,
             }
         );
         assert_eq!(
@@ -1080,10 +1096,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_locate_formats_and_harness_filters() {
+        for input in [&["locate-project"][..], &["locate-project", "--workspace"]] {
+            assert_eq!(
+                parse(input).unwrap().command,
+                Command::LocateProject {
+                    manifest_path: None,
+                    plain: false,
+                }
+            );
+        }
+        assert_eq!(
+            parse(&["locate-project", "--message-format=PLAIN"])
+                .unwrap()
+                .command,
+            Command::LocateProject {
+                manifest_path: None,
+                plain: true,
+            }
+        );
+        for no_run in [false, true] {
+            let mut input = vec!["test", "matching", "--test", "integration"];
+            if no_run {
+                input.push("--no-run");
+            }
+            input.extend(["--", "--exact"]);
+            let Command::Test(options) = parse(&input).unwrap().command else {
+                panic!("expected test command");
+            };
+            assert_eq!(options.test.as_deref(), Some("integration"));
+            assert_eq!(options.arguments, ["matching", "--exact"]);
+            assert_eq!(options.no_run, no_run);
+        }
+    }
+
+    #[test]
     fn rejects_other_cargo_compatibility_forms() {
         for input in [
-            &["locate-project", "--manifest-path", "/project/Cargo.toml"][..],
-            &["locate-project", "--workspace"],
+            &["locate-project", "--message-format", "yaml"][..],
+            &["locate-project", "--manifest-path="],
             &["rustc", "--print", "cfg", "--target", "triple", "--", "-O"],
             &[
                 "rustc",
@@ -1433,7 +1484,7 @@ mod tests {
             &["new", "one", "two"],
             &["new", "example", "--lib"],
             &["test", "--test=x", "--test", "y"],
-            &["test", "--no-run", "--", "filter"],
+            &["test", "first", "second"],
         ] {
             assert!(parse(input).unwrap_err().is_usage(), "{input:?}");
         }
