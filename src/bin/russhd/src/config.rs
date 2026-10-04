@@ -189,7 +189,8 @@ impl User {
             return Err(russh::Error::NotAuthenticated);
         };
 
-        if pubkey.eq(key) {
+        // PublicKey equality includes the comment, which clients never send.
+        if pubkey.key_data() == key.key_data() {
             Ok(())
         } else {
             Err(russh::Error::NotAuthenticated)
