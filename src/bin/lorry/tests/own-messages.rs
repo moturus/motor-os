@@ -55,6 +55,16 @@ impl Fixture {
         fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
         Self(root)
     }
+
+    fn lorry(&self, arguments: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_lorry"))
+            .args(arguments)
+            .env("HOME", &self.0)
+            .env("CARGO_HOME", self.0.join("cargo-home"))
+            .current_dir(&self.0)
+            .output()
+            .unwrap()
+    }
 }
 
 impl Drop for Fixture {
@@ -69,7 +79,7 @@ fn manifest_errors_have_structured_locations_and_preserve_stdout() {
     let path = fixture.0.join("Cargo.toml");
     fs::write(&path, "[package\n").unwrap();
     let value = error_message(
-        &lorry(&[
+        &fixture.lorry(&[
             "metadata",
             "--no-deps",
             "--lorry-messages",
@@ -88,7 +98,7 @@ fn manifest_errors_have_structured_locations_and_preserve_stdout() {
         "[package]\nname = \"own-messages\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
     )
     .unwrap();
-    let output = lorry(&[
+    let output = fixture.lorry(&[
         "metadata",
         "--no-deps",
         "--format-version=1",
@@ -96,7 +106,11 @@ fn manifest_errors_have_structured_locations_and_preserve_stdout() {
         "--manifest-path",
         path.to_str().unwrap(),
     ]);
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(output.stderr.is_empty());
     let metadata: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(metadata["version"], 1);
