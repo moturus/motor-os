@@ -51,7 +51,7 @@ of the member selected by `-p`.
 
 A supported package has:
 
-- one selected package for compilation, optionally in a workspace;
+- one or more selected members for ordinary build, check, and Clippy;
 - at most one library and 64 binary targets;
 - optional `tests/*.rs` and `tests/*/main.rs` integration tests;
 - a current Cargo.lock in Cargo format 1 through 4, including for
@@ -66,8 +66,11 @@ supported. `build`, `run`, `test`, `check`, and `clippy` reject a selected packa
 that has a build script, including a workspace member selected with `-p`. Alternative registries, selecting a
 procedural-macro package as the root, root dev
 dependencies selected for the build target, examples, benches, explicit test
-targets, and CLI feature selection for compilation are not supported. Metadata,
-tree, and vendor support CLI feature selection. A target-conditioned
+targets, and CLI feature selection for run and test are not supported. Build,
+check, Clippy, metadata, tree, and vendor support CLI feature selection. Ordinary
+workspace build, check, and Clippy share one compilation graph for default
+members, `--workspace`, repeated `-p`, and `--exclude`. Workspace test, example,
+and bench target selection remains deferred. A target-conditioned
 root dev-dependency for a different target is ignored.
 
 ## Create a package

@@ -15,6 +15,7 @@ if [ -z "${LORRY_TEST_RUSTC:-}" ]; then
     lorry_load_current_toolchain
 fi
 export RUSTC="$LORRY_TEST_RUSTC"
+export PATH="$(dirname "$RUSTC"):$PATH"
 WORK="$(mktemp -d /tmp/lorry-workspace-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
@@ -169,15 +170,18 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
     "$LORRY_TEST_CARGO" run --quiet --locked --offline \
         --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- compare-projection \
         "$WORK/features.lorry.json" "$WORK/features.cargo.json"
-    for command in check build test; do
-        if "$LORRY" "$command" -p app --no-default-features 2>"$WORK/features.err"; then exit 1; fi
-        grep -F 'feature selection is not yet supported by workspace resolution' "$WORK/features.err" >/dev/null
+    for command in check build; do
+        "$LORRY" "$command" -p app --no-default-features
+        "$LORRY_TEST_CARGO" "$command" -p app --no-default-features --offline
     done
-    for selectors in '-p app -p tool' '--workspace -p app'; do
+    if "$LORRY" test -p app --no-default-features 2>"$WORK/features.err"; then exit 1; fi
+    grep -F 'feature selection is not yet supported by workspace resolution' "$WORK/features.err" >/dev/null
+    for selectors in '-p app -p tool' '--workspace -p app --exclude scripted'; do
         read -r -a options <<<"$selectors"
-        if "$LORRY" check "${options[@]}" 2>"$WORK/selection.err"; then exit 1; fi
-        grep -F 'multi-package execution is not yet supported' "$WORK/selection.err" >/dev/null
-        "$LORRY_TEST_CARGO" check "${options[@]}" --offline
+        for command in check build clippy; do
+            "$LORRY" "$command" "${options[@]}"
+            "$LORRY_TEST_CARGO" "$command" "${options[@]}" --offline
+        done
     done
 )
 (
@@ -220,7 +224,7 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
         done
     done
     if "$LORRY" check -p 's*' --offline 2>"$WORK/selector.err"; then exit 1; fi
-    grep -F 'selects 2 packages; multi-package execution is not yet supported' "$WORK/selector.err" >/dev/null
+    grep -F 'does not run build scripts of the selected package' "$WORK/selector.err" >/dev/null
     "$LORRY_TEST_CARGO" check -p 's*' --offline
     for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
         if "$builder" run -p 'a*' --offline 2>"$WORK/run-selector.err"; then exit 1; fi

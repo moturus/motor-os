@@ -53,23 +53,35 @@ fn report_build_completion(cli: &Cli, reported: &mut bool) -> Result<()> {
 }
 
 fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
-    cli.features.require_default()?;
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let (_workspace, mut selected) = crate::manifest::SourceWorkspace::load_compilation(
+    let (workspace, selected) = crate::manifest::SourceWorkspace::load_compilation(
         &current,
         cli.manifest_path.as_deref().map(Path::new),
         &cli.selection,
     )?;
-    if selected.len() != 1 {
+    let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
+    let shared =
+        ordinary && (selected.len() > 1 || cli.features != crate::cli::FeatureSelection::default());
+    if !ordinary {
+        cli.features.require_default()?;
+    }
+    if selected.len() != 1 && !shared {
         return Err(Error::failure(format!(
             "package selection selects {} packages; multi-package execution is not yet supported",
             selected.len()
         ))
         .with_help("select one workspace package with `-p NAME`"));
     }
-    let manifest = selected.pop().unwrap();
-    Manifest::report_warnings([&manifest], cli.verbosity);
+    let manifest = selected[0].clone();
+    Manifest::report_warnings(&selected, cli.verbosity);
+    if shared
+        && matches!(&cli.command, Command::Check(options) if options.all_targets || options.test.is_some() || options.examples)
+    {
+        return Err(Error::failure(
+            "workspace test, example, and bench target selection is not yet supported",
+        ));
+    }
     if matches!(&cli.command, Command::Check(options) if options.all_targets)
         && !manifest.described_targets.is_empty()
         && cli.verbosity != Verbosity::Quiet
@@ -78,23 +90,25 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             "note: --all-targets leaves out examples and benches until their compilation is implemented"
         );
     }
-    // Compiling the selected package without its build script would quietly
-    // produce a different crate, so reject it before any other work.
-    if let Some(script) = &manifest.build_script {
-        return Err(Error::failure(format!(
-            "package `{}` has a build script (`{}`), and Lorry does not run build \
+    for manifest in &selected {
+        // Compiling the selected package without its build script would quietly
+        // produce a different crate, so reject it before any other work.
+        if let Some(script) = &manifest.build_script {
+            return Err(Error::failure(format!(
+                "package `{}` has a build script (`{}`), and Lorry does not run build \
              scripts of the selected package",
-            manifest.name,
-            script.display()
-        ))
-        .with_help(
-            "Lorry runs build scripts only for dependencies; build scripts of the \
+                manifest.name,
+                script.display()
+            ))
+            .with_help(
+                "Lorry runs build scripts only for dependencies; build scripts of the \
              selected package are a deferred capability",
-        ));
+            ));
+        }
     }
     if let Command::Check(options) = &cli.command
         && options.lib
-        && manifest.library.is_none()
+        && selected.iter().all(|member| member.library.is_none())
     {
         return Err(Error::failure(format!(
             "no library targets found in package `{}`",
@@ -102,7 +116,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         )));
     }
     if let Command::Check(options) = &cli.command {
-        validate_binary_selection(&manifest, options.bin.as_deref())?;
+        validate_member_binary_selection(&selected, options.bin.as_deref())?;
         if let Some(name) = &options.test
             && !manifest
                 .integration_tests
@@ -112,17 +126,21 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             return Err(unknown_integration_test(&manifest, name));
         }
     }
-    if manifest.root != manifest.workspace_root && CompactState::path(&manifest.root).exists() {
-        return Err(
-            Error::failure("per-member admission must be migrated to the workspace root")
-                .with_help("run workspace-root `lorry vendor --locked` to review the workspace"),
-        );
+    for manifest in &selected {
+        if manifest.root != manifest.workspace_root && CompactState::path(&manifest.root).exists() {
+            return Err(Error::failure(
+                "per-member admission must be migrated to the workspace root",
+            )
+            .with_help("run workspace-root `lorry vendor --locked` to review the workspace"));
+        }
     }
     let compact_state = CompactState::load(&manifest.workspace_root)?;
     if compact_state
         .as_ref()
         .is_some_and(|state| state.scope.is_none())
-        && (manifest.root != manifest.workspace_root || manifest.workspace_members.len() > 1)
+        && (shared
+            || manifest.root != manifest.workspace_root
+            || manifest.workspace_members.len() > 1)
     {
         return Err(
             Error::failure("legacy admission does not cover a workspace").with_help(
@@ -155,7 +173,9 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     {
         driver.arguments = arguments.join(crate::clippy::ARG_SEPARATOR);
     }
-    check_rust_version(&manifest, &toolchain)?;
+    for manifest in &selected {
+        check_rust_version(manifest, &toolchain)?;
+    }
     crate::trace::event("discovered rustc toolchain");
     if cli.verbosity == Verbosity::Verbose {
         eprintln!(
@@ -185,9 +205,13 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         ),
         _ => unreachable!("non-build command passed to engine"),
     };
-    manifest.require_profile(release, matches!(cli.command, Command::Test(_)))?;
+    for manifest in &selected {
+        manifest.require_profile(release, matches!(cli.command, Command::Test(_)))?;
+    }
     let binary_selection = match &cli.command {
-        Command::Build(options) => validate_binary_selection(&manifest, options.bin.as_deref())?,
+        Command::Build(options) => {
+            validate_member_binary_selection(&selected, options.bin.as_deref())?
+        }
         Command::Check(_) | Command::Run(_) | Command::Test(_) => None,
         _ => unreachable!(),
     };
@@ -197,7 +221,9 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
-    manifest.require_supported_target(&target_info)?;
+    for manifest in &selected {
+        manifest.require_supported_target(&target_info)?;
+    }
     let host_info = if physical_target.is_some() {
         toolchain.target_info(None)?
     } else {
@@ -225,7 +251,8 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
 
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
-    let ordinary_freshness_base = (!validation.is_strict()
+    let ordinary_freshness_base = (!shared
+        && !validation.is_strict()
         && !(compact_state.is_none()
             && manifest
                 .lock
@@ -286,29 +313,57 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
         _ => unreachable!("exactly one registry source is constructed"),
     };
-    let direct = crate::git::load_locked_dependencies(&manifest, &config.policy.limits)?;
+    let direct = if shared {
+        crate::git::load_locked_sources(&manifest, &config.policy.limits)?
+    } else {
+        crate::git::load_locked_dependencies(&manifest, &config.policy.limits)?
+    };
+    let members = shared
+        .then(|| {
+            crate::resolver::workspace::features::member_requests(
+                &workspace,
+                &selected.iter().map(|member| member.root.clone()).collect(),
+                &cli.features,
+                false,
+            )
+        })
+        .transpose()?;
     crate::trace::event("opened dependency source");
+    let options = dependency::resolver_options(&manifest, &config, &toolchain)?;
+    let inputs = dependency::ReviewInputs {
+        manifest: &manifest,
+        config: &config,
+        source,
+        toolchain: &toolchain,
+        options: &options,
+        staging_parent: admission_staging.path(),
+        direct: Some(&direct),
+        prepare_context: Some(crate::admission_state::Context {
+            host: host_info.triple.clone(),
+            target: target_info.triple.clone(),
+        }),
+    };
     let verified_resolution = if let Some(compact) = &compact_state {
-        let options = dependency::resolver_options(&manifest, &config, &toolchain)?;
-        let verified = dependency::verify_compact_admission(
-            &dependency::ReviewInputs {
-                manifest: &manifest,
-                config: &config,
-                source,
-                toolchain: &toolchain,
-                options: &options,
-                staging_parent: admission_staging.path(),
-                direct: Some(&direct),
-                prepare_context: Some(crate::admission_state::Context {
-                    host: host_info.triple.clone(),
-                    target: target_info.triple.clone(),
-                }),
-            },
-            compact,
-        )?;
+        let verified = if let Some(members) = &members {
+            dependency::workspace::admission::verify_requested(&inputs, compact, members)?
+        } else {
+            dependency::verify_compact_admission(&inputs, compact)?
+        };
         let (review, resolution) = verified.into_parts();
         review.apply_to_policy(&mut config.policy, &manifest.root)?;
         resolution
+    } else if let Some(members) = &members {
+        Some(dependency::workspace::resolve_compilation(
+            &inputs,
+            &workspace,
+            members,
+            TargetSelection {
+                host_triple: &host_info.triple,
+                host_cfg: &host_info.cfg,
+                target_triple: &target_info.triple,
+                target_cfg: &target_info.cfg,
+            },
+        )?)
     } else {
         None
     };
@@ -363,7 +418,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
-                    members: None,
+                    members: shared.then_some(selected.as_slice()),
                     global_cache_root: &global_cache_root,
                     config: &config,
                     toolchain: &toolchain,
@@ -396,7 +451,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 target_root: Some(&target_root),
                 child_lease_fd: artifact_lock.child_lease_fd(),
                 manifest: &manifest,
-                members: None,
+                members: shared.then_some(selected.as_slice()),
                 global_cache_root: &global_cache_root,
                 config: &config,
                 toolchain: &toolchain,
@@ -760,8 +815,27 @@ fn invalidate_fresh_profile(profile: &Path, package_root: &Path) -> Result<()> {
     }
 }
 
+fn validate_member_binary_selection<'a>(
+    members: &[Manifest],
+    requested: Option<&'a str>,
+) -> Result<Option<&'a str>> {
+    if let [member] = members {
+        return validate_binary_selection(member, requested);
+    }
+    if let Some(name) = requested
+        && !members
+            .iter()
+            .any(|member| member.binaries.iter().any(|target| target.name == name))
+    {
+        return Err(Error::failure(format!(
+            "no binary target named `{name}` in selected packages"
+        )));
+    }
+    Ok(requested)
+}
+
 fn validate_binary_selection<'a>(
-    manifest: &'a Manifest,
+    manifest: &Manifest,
     requested: Option<&'a str>,
 ) -> Result<Option<&'a str>> {
     let Some(name) = requested else {
@@ -1201,10 +1275,13 @@ fn build_inner(
         reporter: Some(&message_reporter),
     };
     if let Some((_, options)) = check {
-        if options.lib && build.manifest.library.is_none() {
+        let members = build
+            .members
+            .unwrap_or_else(|| std::slice::from_ref(build.manifest));
+        if options.lib && members.iter().all(|member| member.library.is_none()) {
             return Err(Error::failure("selected package has no library target"));
         }
-        validate_binary_selection(build.manifest, options.bin.as_deref())?;
+        validate_member_binary_selection(members, options.bin.as_deref())?;
         if let Some(name) = options.test.as_deref()
             && !build
                 .manifest

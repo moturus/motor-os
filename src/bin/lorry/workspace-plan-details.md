@@ -2297,6 +2297,19 @@ without executing code. The engine regression compares the resulting graph to
 its direct shared selection and proves resolution creates no admission or target
 artifacts.
 
+Public ordinary commands now route several selected roots and nondefault CLI
+features through shared resolution, admission verification, preparation, and
+execution. Every selected member receives compiler-version, profile, and target
+validation. Existing single-member default-feature behavior and completed-profile
+reuse remain covered. The paired workspace contract now builds, checks, and
+lints repeated selections and workspace exclusions, and exercises nondefault
+feature flags. Its original failure was a test-only Cargo-Clippy launcher using
+the isolated home's rustup shim; putting the selected toolchain binaries first
+on PATH matches the existing Clippy fixture and resolves that launcher error.
+The complete workspace contract passes in
+`/tmp/lorry-m7-public-workspace-contract-fixed.log`; the original is preserved
+in `/tmp/lorry-m7-public-workspace-contract.log`.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 

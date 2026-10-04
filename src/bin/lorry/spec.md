@@ -39,7 +39,7 @@ checks are validation infrastructure and are not operational Lorry inputs.
 ## Current capability baseline
 
 The current product builds dependency-free and locked crates.io/Git/path graphs,
-multiple ordinary binaries, one selected member of an explicit workspace,
+multiple ordinary binaries and selected workspace members,
 dependency build scripts, and compiler-host procedural-macro dependencies. It
 vendors crates.io sources, maintains compact admission state, caches
 dependency units, builds and runs test harnesses, and operates on Linux,
@@ -48,8 +48,10 @@ are vendored natively on both supported hosts through the Git source model
 specified below.
 
 Workspace membership and inheritance, shared resolution, metadata, fetch,
-tree, and scoped root admission are implemented. Compilation still requires
-one selected member and default CLI features. Root build scripts and
+tree, and scoped root admission are implemented. Ordinary build, check, and
+Clippy compile several members together with shared CLI feature resolution.
+Run, test, and test-target checking retain their single-member default-feature
+path until remaining target support lands. Root build scripts and
 custom/build-std targets remain unsupported. `full-native-build.md` is a
 non-normative audit of those and the
 other gaps exposed by the repository `Makefile`; future source-model rationale
@@ -336,29 +338,31 @@ dev, and target-specific path dependencies below the root are members.
 `members` may be absent or include `"."`. Exclusions are directory prefixes;
 explicitly listed members take precedence. Root `default-members` apply
 at the workspace root, while a member invocation defaults to itself.
-A singleton default can execute; larger or empty selections fail explicitly
-until multi-package execution is implemented. Manifest discovery searches
+Build, check, and Clippy execute ordinary targets for every default member.
+Empty selections fail explicitly. Manifest discovery searches
 the working directory and its parents. `--manifest-path` establishes the
-workspace independently of `-p`, which may select any member. Workspace-wide
-execution remains deferred.
+workspace independently of `-p`, which may select any member.
 Package selectors accept names, partial or full `name@version`, Cargo
-file package IDs, and member-name patterns. An unmatched selector fails,
-and a pattern selecting several members fails until multi-package execution
-is implemented. Repeated `-p` options are combined and deduplicated.
+file package IDs, and member-name patterns. An unmatched selector fails;
+ordinary build, check, and Clippy execute all matching members together. Repeated `-p` options are combined and deduplicated.
 Build, check, Clippy, test, and tree accept `--workspace` and repeated
 `--exclude`; clean accepts `--workspace`. Exclusions require `--workspace`.
 Cargo's workspace precedence applies: without exclusions `-p` is validated
 but all members are selected; with exclusions `-p` is ignored. Unmatched
-exclusions warn, except in quiet mode. Empty and multi-member selections
-fail explicitly until execution support lands. Run accepts one `-p` and
+exclusions warn, except in quiet mode. Empty selections fail explicitly.
+Workspace test-target execution remains deferred. Run accepts one `-p` and
 rejects package patterns. Package IDs do not require a manifest-path option.
 Build, check, Clippy, run, test, tree, metadata, vendor, and review share
 repeated `--features`/`-F`, comma/space lists, qualified and weak dependency
 features, `--all-features`, and `--no-default-features`. Explicit `dep:`
 names and multiple slashes fail as in Cargo. Source-only metadata describes
 declared features regardless of selection. Metadata, tree, and vendor resolve
-those flags. Compiler commands reject nondefault CLI features until their
-workspace integration is implemented.
+those flags. Ordinary build, check, and Clippy also resolve those flags across
+selected members, retaining feature unions when a member is a dependency too.
+Run and test still reject nondefault CLI features. Several selected members use
+one unit graph, package-specific primary compiler roles and Cargo JSON IDs,
+and binary owner records. Shared execution currently reuses individual units;
+single-member default-feature builds retain completed-profile reuse.
 Editable members use Cargo's package file discovery: Git ignores and tracked
 files, include/exclude rules, symbolic links, and nested package boundaries.
 Dependency archive size/file limits do not constrain member source trees.

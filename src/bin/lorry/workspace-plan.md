@@ -174,7 +174,10 @@ Online host and native vendoring succeeded without retries.
 Milestone 7 is in progress. Compiler and executor options accept several
 primary packages. The ordinary shared unit planner matches Cargo for build and
 check across default selection, all members, repeated package selectors, and
-exclusions. Its engine integration remains pending.
+exclusions. The engine now executes shared ordinary graphs, verifies admission
+for all selected roots and features, publishes each binary with its package
+owner, and supports workspace build, check, and Clippy selection. Collision
+warnings, keep-going, and milestone identity coverage remain in progress.
 
 ## Goal
 
