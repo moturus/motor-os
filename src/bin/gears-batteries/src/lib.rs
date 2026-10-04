@@ -14,6 +14,7 @@ pub mod journal;
 pub mod patch_match;
 pub mod paths;
 pub mod policy;
+pub mod provenance;
 pub mod search;
 pub mod shell_words;
 pub mod snapshot;
@@ -75,6 +76,11 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
 }
 
 pub fn hook(event: Event) -> Result<Value, String> {
+    if event.event == "tool_result" {
+        return Ok(provenance::transform(&event).unwrap_or_else(
+            |error| json!({"notice": format!("output provenance unavailable: {error}")}),
+        ));
+    }
     if matches!(
         event.event.as_str(),
         "turn_start" | "entry" | "turn_end" | "before_stop"
