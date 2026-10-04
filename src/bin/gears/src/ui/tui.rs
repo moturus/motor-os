@@ -271,7 +271,7 @@ impl App {
             Event::Usage { total, .. } => self.status = total.summary(),
             Event::ModelChanged(model) => self.model = model,
             Event::SessionChanged(session) => self.session = session,
-            Event::TurnEnd => self.status = "idle".to_string(),
+            Event::TurnEnd { .. } => self.status = "idle".to_string(),
         }
     }
 
@@ -1435,7 +1435,11 @@ mod tests {
             workspace: "/tmp".into(),
         }));
         assert!(status(&app).starts_with("gears | checking permission |"));
-        app.apply(Event::TurnEnd);
+        app.apply(Event::TurnEnd {
+            status: "completed",
+            tool_rounds: 0,
+            last_entry_id: None,
+        });
         assert!(status(&app).starts_with("gears | idle |"));
     }
 

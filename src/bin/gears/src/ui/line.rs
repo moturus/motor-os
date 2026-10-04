@@ -386,7 +386,7 @@ impl Observer for Renderer {
                 self.finish_stream();
                 eprintln!("gears: {notice}");
             }
-            Event::Usage { .. } | Event::TurnEnd => {}
+            Event::Usage { .. } | Event::TurnEnd { .. } => {}
             Event::ModelChanged(model) => eprintln!("model: {model}"),
             Event::SessionChanged(_) => {}
         }

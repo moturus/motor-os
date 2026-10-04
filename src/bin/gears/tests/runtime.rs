@@ -236,6 +236,90 @@ struct Fixture {
     workspace: PathBuf,
 }
 
+#[test]
+fn turn_end_metadata_counts_rounds_and_identifies_the_last_entry_on_all_exits() {
+    for (case, responses, status, rounds, limit) in [
+        ("chat", vec![answer("done")], "completed", 0, 32),
+        (
+            "tools",
+            vec![
+                Ok(Completion {
+                    tool_calls: vec![
+                        ToolCall::new("one", "sh", r#"{"command":"printf one"}"#),
+                        ToolCall::new("two", "sh", r#"{"command":"printf two"}"#),
+                    ],
+                    ..Completion::default()
+                }),
+                answer("done"),
+            ],
+            "completed",
+            1,
+            32,
+        ),
+        (
+            "error",
+            vec![Err(ProviderError::Protocol("broken".into()))],
+            "error",
+            0,
+            32,
+        ),
+        (
+            "cancel",
+            vec![Err(ProviderError::Aborted("cancelled".into()))],
+            "cancelled",
+            0,
+            32,
+        ),
+        (
+            "limit",
+            vec![tool("sh", r#"{"command":"printf limited"}"#)],
+            "error",
+            1,
+            1,
+        ),
+    ] {
+        let fixture = Fixture::new(&format!("turn-end-{case}"));
+        let log = fixture.root.join("event.json");
+        let config = Config {
+            hooks: vec![HookConfig {
+                name: "end".into(),
+                events: Some(vec!["turn_end".into()]),
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    format!("cat > '{}'; printf '{{}}'", log.display()),
+                ],
+                timeout: Duration::from_secs(2),
+                max_output_bytes: 4096,
+            }],
+            max_tool_rounds: limit,
+            ..Config::default()
+        };
+        let mut runtime = fixture.runtime(Scripted::new(responses), &config);
+        let mut end = None;
+        let result = runtime.turn("work".into(), &mut FixedApproval(false), &mut |event| {
+            if let Event::TurnEnd {
+                status,
+                tool_rounds,
+                last_entry_id,
+            } = event
+            {
+                end = Some((status, tool_rounds, last_entry_id));
+            }
+            Ok(())
+        });
+        assert_eq!(result.is_ok(), status == "completed", "{case}: {result:?}");
+        let id = runtime.session().active_leaf().unwrap();
+        assert_eq!(end, Some((status, rounds, Some(id.to_string()))));
+        let event: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(log).unwrap()).unwrap();
+        assert_eq!(event["payload"]["status"], status);
+        assert_eq!(event["payload"]["tool_rounds"], rounds);
+        assert_eq!(event["payload"]["last_entry_id"], id);
+        assert!(runtime.session().entry(id).is_some());
+    }
+}
+
 impl Fixture {
     fn new(name: &str) -> Self {
         let root =

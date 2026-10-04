@@ -202,6 +202,9 @@ fn jsonl_one_shot_streams_reasoning_text_and_numeric_usage() {
     assert!(records[0]["path"].is_null());
     assert_eq!(records[1]["text"], "thinking\n");
     assert_eq!(records[2]["text"], "hello\nmock");
+    assert_eq!(records[4]["status"], "completed");
+    assert_eq!(records[4]["tool_rounds"], 0);
+    assert!(records[4]["last_entry_id"].as_str().is_some());
     let last = records.last().unwrap();
     assert_eq!(last["success"], true);
     assert_eq!(last["answer"], "hello\nmock");

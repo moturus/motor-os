@@ -130,7 +130,14 @@ impl<W: Write> Observer for Renderer<W> {
             Event::SessionChanged(session) => json!({
                 "type": "session_changed", "session_id": session.id, "path": session.path,
             }),
-            Event::TurnEnd => json!({"type": "turn_end"}),
+            Event::TurnEnd {
+                status,
+                tool_rounds,
+                last_entry_id,
+            } => json!({
+                "type": "turn_end", "status": status,
+                "tool_rounds": tool_rounds, "last_entry_id": last_entry_id,
+            }),
         };
         self.record(record)
     }

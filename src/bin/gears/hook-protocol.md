@@ -17,6 +17,11 @@ and compaction. Its prompt fragments
 and tool registrations replace the previous setup's registrations. Failed
 setup leaves the active session and its registrations usable.
 
+`turn_end` carries `status` (`completed`, `cancelled`, or `error`), an optional
+`error`, the number of `tool_rounds`, and `last_entry_id` before end-of-turn
+hooks run. A round counts a provider reply requesting tools, including calls
+that were denied or never started; several calls in one reply count once.
+
 Every event has this envelope:
 
     {

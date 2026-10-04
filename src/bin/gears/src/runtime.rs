@@ -51,7 +51,11 @@ pub enum Event {
     },
     ModelChanged(String),
     SessionChanged(SessionSummary),
-    TurnEnd,
+    TurnEnd {
+        status: &'static str,
+        tool_rounds: usize,
+        last_entry_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -544,29 +548,39 @@ impl Runtime {
         self.notify("turn_start", serde_json::json!({"input": input}), observer)?;
 
         let entries_before = self.session.entries().len();
-        let result = self.run_turn(approver, observer).or_else(|error| {
-            let recorded = self.session.entries()[entries_before..]
-                .iter()
-                .any(|entry| entry.kind == "turn_error");
-            if recorded {
-                Err(error)
-            } else {
-                self.fail_turn(error, self.cancellation.cancelled(), observer)
-            }
-        });
-        let payload = match &result {
-            Ok(()) => serde_json::json!({"status": "completed"}),
-            Err(error) => serde_json::json!({
-                "status": if self.cancellation.cancelled() { "cancelled" } else { "error" },
-                "error": error,
-            }),
+        let mut tool_rounds = 0;
+        let result = self
+            .run_turn(approver, observer, &mut tool_rounds)
+            .or_else(|error| {
+                let recorded = self.session.entries()[entries_before..]
+                    .iter()
+                    .any(|entry| entry.kind == "turn_error");
+                if recorded {
+                    Err(error)
+                } else {
+                    self.fail_turn(error, self.cancellation.cancelled(), observer)
+                }
+            });
+        let status = match &result {
+            Ok(()) => "completed",
+            Err(_) if self.cancellation.cancelled() => "cancelled",
+            Err(_) => "error",
         };
+        let last_entry_id = self.session.active_leaf().map(str::to_string);
+        let payload = serde_json::json!({
+            "status": status, "error": result.as_ref().err(),
+            "tool_rounds": tool_rounds, "last_entry_id": last_entry_id,
+        });
         // The interrupted work has stopped. Lifecycle hooks need a fresh
         // token so they can observe the cancelled turn and session changes.
         self.cancellation.reset();
-        let end_result = self
-            .notify("turn_end", payload, observer)
-            .and_then(|()| observer.event(Event::TurnEnd));
+        let end_result = self.notify("turn_end", payload, observer).and_then(|()| {
+            observer.event(Event::TurnEnd {
+                status,
+                tool_rounds,
+                last_entry_id,
+            })
+        });
         match result {
             Ok(()) => end_result,
             Err(error) => {
@@ -580,8 +594,8 @@ impl Runtime {
         &mut self,
         approver: &mut dyn Approver,
         observer: &mut dyn Observer,
+        tool_rounds: &mut usize,
     ) -> Result<(), String> {
-        let mut tool_rounds = 0;
         let mut stop_reminders = 0;
         for _ in 0..self.max_tool_rounds {
             self.maybe_compact(false, None, observer)?;
@@ -637,7 +651,7 @@ impl Runtime {
                 total: self.usage,
             })?;
             if completion.tool_calls.is_empty() {
-                if tool_rounds > 0 && stop_reminders < 3 {
+                if *tool_rounds > 0 && stop_reminders < 3 {
                     let mut notices = Vec::new();
                     let reminder = self.hooks.before_stop(
                         serde_json::json!({"tool_rounds": tool_rounds, "last_entry_id": entry}),
@@ -661,7 +675,7 @@ impl Runtime {
                 }
                 return Ok(());
             }
-            tool_rounds += 1;
+            *tool_rounds += 1;
             let calls = completion.tool_calls;
             for (index, call) in calls.iter().cloned().enumerate() {
                 if let Err(error) = self.execute_call(call, approver, observer) {
