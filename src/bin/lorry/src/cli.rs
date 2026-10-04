@@ -316,6 +316,16 @@ impl Cli {
         } else {
             parse_command(&matches)?
         };
+        if matches!(command, Command::Run(_))
+            && package.as_ref().is_some_and(|package| {
+                !package.contains("://") && package.contains(['*', '?', '[', ']'])
+            })
+        {
+            return Err(Error::usage(
+                "package patterns are not allowed for run",
+                "select one package by name, version, or package ID",
+            ));
+        }
         if use_cargo_registry
             && matches!(
                 command,

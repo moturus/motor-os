@@ -42,23 +42,18 @@ impl SourceWorkspace {
             None => Self::standalone(&manifest_path)?,
         };
         if let Some(selected) = selected {
-            let available = workspace
-                .packages
-                .iter()
-                .map(|package| package.name.clone())
-                .collect::<Vec<_>>();
-            workspace
-                .packages
-                .retain(|package| package.name == selected);
-            let Some(package) = workspace.packages.first() else {
-                return Err(
-                    Error::failure(format!("workspace has no package named `{selected}`"))
-                        .with_help(format!(
-                            "available workspace packages: {}",
-                            available.join(", ")
-                        )),
-                );
-            };
+            let root = super::selection::select_one(
+                workspace.packages.iter().map(|package| {
+                    (
+                        package.name.as_str(),
+                        &package.version,
+                        package.root.as_path(),
+                    )
+                }),
+                selected,
+            )?;
+            workspace.packages.retain(|package| package.root == root);
+            let package = &workspace.packages[0];
             workspace.default_members = vec![package.root.clone()];
         }
         Ok(workspace)

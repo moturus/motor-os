@@ -790,25 +790,6 @@ fn load_check_manifest(
     options: &CheckOptions,
     package: Option<&str>,
 ) -> Result<Manifest> {
-    if let Some(id) = package.filter(|value| value.starts_with("path+")) {
-        let path = options
-            .manifest_path
-            .as_deref()
-            .ok_or_else(|| Error::failure("a Cargo package ID requires --manifest-path"))?;
-        let manifest = Manifest::load_manifest_path(Path::new(path), None, true)?;
-        let expected = crate::metadata::package::package_id(
-            &manifest,
-            crate::metadata::package::Identity::Root,
-        )?;
-        // Never reinterpret an arbitrary ID as a name or change the selected
-        // manifest: rust-analyzer must be checking exactly the loaded package.
-        if id != expected {
-            return Err(Error::failure(format!(
-                "package ID `{id}` does not match selected package `{expected}`"
-            )));
-        }
-        return Ok(manifest);
-    }
     Manifest::load_selected_or_manifest_path(
         current,
         options.manifest_path.as_deref().map(Path::new),

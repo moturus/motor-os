@@ -11,6 +11,7 @@ use crate::toml::Document;
 use crate::toolchain::TargetInfo;
 
 mod inheritance;
+mod selection;
 mod source;
 mod targets;
 pub(crate) use source::SourceWorkspace;
@@ -380,13 +381,15 @@ impl Manifest {
         let Some(workspace) = discover_workspace(&root)? else {
             let mut manifest =
                 Self::finish_root(root.clone(), path, document, &root, require_current_lock)?;
-            if let Some(requested) = package
-                && requested != manifest.name
-            {
-                return Err(Error::failure(format!(
-                    "package `{requested}` is not the current package `{}`",
-                    manifest.name
-                )));
+            if let Some(requested) = package {
+                selection::select_one(
+                    std::iter::once((
+                        manifest.name.as_str(),
+                        &manifest.version,
+                        manifest.root.as_path(),
+                    )),
+                    requested,
+                )?;
             }
             manifest.workspace_root = root;
             return Ok(manifest);
@@ -735,6 +738,7 @@ fn canonical_manifest(manifest_path: &Path) -> Result<PathBuf> {
 struct Workspace {
     root: PathBuf,
     members: BTreeMap<String, PathBuf>,
+    versions: BTreeMap<String, Version>,
     defaults: Vec<PathBuf>,
     dev: DevProfile,
     release: ReleaseProfile,
@@ -773,6 +777,10 @@ impl Workspace {
 
         let packages = membership.load_members()?;
         let defaults = membership.defaults(current, packages.keys())?;
+        let versions = packages
+            .values()
+            .map(|package| (package.name.clone(), package.version.clone()))
+            .collect();
         let warnings = packages
             .values()
             .flat_map(|package| package.warnings.clone())
@@ -785,6 +793,7 @@ impl Workspace {
         Ok(Self {
             root: root.to_owned(),
             members,
+            versions,
             defaults,
             dev,
             release,
@@ -797,14 +806,12 @@ impl Workspace {
 
     fn select(&self, current: &Path, requested: Option<&str>) -> Result<PathBuf> {
         if let Some(name) = requested {
-            return self.members.get(name).cloned().ok_or_else(|| {
-                Error::failure(format!("workspace has no package named `{name}`")).with_help(
-                    format!(
-                        "available workspace packages: {}",
-                        self.members.keys().cloned().collect::<Vec<_>>().join(", ")
-                    ),
-                )
-            });
+            return selection::select_one(
+                self.members
+                    .iter()
+                    .map(|(name, root)| (name.as_str(), &self.versions[name], root.as_path())),
+                name,
+            );
         }
         if let [member] = self.defaults.as_slice() {
             return Ok(member.clone());

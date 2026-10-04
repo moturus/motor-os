@@ -1319,6 +1319,20 @@ Support `--manifest-path` on every command that reads a manifest.
 
 ### Package and feature selection
 
+The common single-member selector now accepts names, partial/full versions,
+Cargo file package IDs, and member-name patterns. IDs work without a manifest
+path; wrong names, versions, and source directories still fail before
+compiler queries. Run rejects patterns, and a multi-member pattern reports
+the pending execution limitation. The 23 manifest tests, 24 CLI tests,
+strict Clippy, workspace contract, and editor contract passed in
+`/tmp/lorry-m5-package-selectors-{unit,cli,clippy}.log`,
+`/tmp/lorry-m5-package-selectors-workspace-contract.log`, and
+`/tmp/lorry-m5-package-selectors-check-contract-fixed.log`. The initial
+editor-contract run (`/tmp/lorry-m5-package-selectors-check-contract.log`)
+failed because the newly added no-path success probe ran at the repository
+root, which has no Cargo.toml. The probe now runs in its fixture directory;
+package IDs select within a discovered workspace and do not discover one.
+
 The selector consumes a workspace and command options; it does not reload
 configuration or resolve dependencies.
 

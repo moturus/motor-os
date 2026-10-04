@@ -268,7 +268,7 @@ fn validate_identity(manifest: &Manifest, package: &ResolvedPackage) -> Result<(
     Ok(())
 }
 
-fn path_package_id(root: &Path, name: &str, version: &str) -> Result<String> {
+pub(crate) fn path_package_id(root: &Path, name: &str, version: &str) -> Result<String> {
     let root = fs::canonicalize(root).map_err(|error| {
         Error::failure(format!(
             "failed to canonicalize package root `{}`: {error}",

@@ -148,6 +148,23 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
     cmp "$WORK/locate.lorry" "$WORK/locate.cargo"
     "$LORRY" check --manifest-path ../../Cargo.toml -p shared --lib
     "$LORRY_TEST_CARGO" check --manifest-path ../../Cargo.toml -p shared --lib --offline
+    for selector in shared@0 shared@0.1 shared@0.1.0 'sha*' \
+        "path+file://$WORK/project/shared#0.1.0" \
+        "file://$WORK/project/shared#shared@0.1"; do
+        "$LORRY" check -p "$selector" --lib
+        "$LORRY_TEST_CARGO" check -p "$selector" --lib --offline
+    done
+    for selector in shared@9 '^shared' "path+file://$WORK/other#shared@0.1.0"; do
+        for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+            if "$builder" check -p "$selector" --offline 2>"$WORK/selector.err"; then exit 1; fi
+        done
+    done
+    if "$LORRY" check -p 's*' --offline 2>"$WORK/selector.err"; then exit 1; fi
+    grep -F 'selects 2 packages; multi-package execution is not yet supported' "$WORK/selector.err" >/dev/null
+    "$LORRY_TEST_CARGO" check -p 's*' --offline
+    for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+        if "$builder" run -p 'a*' --offline 2>"$WORK/run-selector.err"; then exit 1; fi
+    done
 )
 (
     cd "$WORK/project"

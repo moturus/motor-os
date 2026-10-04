@@ -401,10 +401,9 @@ reject_check_selector() {
 for wrong in "${PACKAGE_ID%0.1.0}9.9.9" "${PACKAGE_ID/check-fixture/other-name}" \
     "${PACKAGE_ID/\/project/\/another-project}"; do
     reject_check_selector -p "$wrong" --manifest-path "$PROJECT/Cargo.toml"
-    grep -F 'does not match selected package' "$WORK/rejected.err" >/dev/null
+    grep -F 'did not match any workspace package' "$WORK/rejected.err" >/dev/null
 done
-reject_check_selector -p "$PACKAGE_ID"
-grep -F 'requires --manifest-path' "$WORK/rejected.err" >/dev/null
+(cd "$PROJECT" && "$LORRY" check -p "$PACKAGE_ID" --quiet --target-dir "$TARGET")
 for selector in bin test; do
     reject_check_selector --"$selector" missing --all-targets --manifest-path "$PROJECT/Cargo.toml"
 done

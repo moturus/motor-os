@@ -290,6 +290,11 @@ until multi-package execution is implemented. Manifest discovery searches
 the working directory and its parents. `--manifest-path` establishes the
 workspace independently of `-p`, which may select any member. Workspace-wide
 execution remains deferred.
+Single-member selectors accept names, partial or full `name@version`, Cargo
+file package IDs, and member-name patterns. An unmatched selector fails,
+and a pattern selecting several members fails until multi-package execution
+is implemented. Run rejects package patterns. Package IDs do not require a
+manifest-path option.
 Member profiles, patches, and replacements are ignored with Cargo-style
 warnings. An explicit conflicting member resolver also warns. A virtual
 workspace without a resolver uses version 1 and warns when a member's edition
