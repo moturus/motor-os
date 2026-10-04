@@ -1629,6 +1629,13 @@ tests and strict Clippy passed in
 failures identified option constructors missed during the API migration;
 all constructors are now migrated.
 
+Complete graphs now have a shared lock renderer without a privileged root
+package or preserved fragments from independently selected locks. The offline
+Cargo oracle covers unselected members, optional features, platform edges,
+and a legal development cycle; its generated lock matches byte-for-byte.
+All four lockfile tests passed in `/tmp/lorry-m6-workspace-lock-unit.log`.
+Lock-format selection and command wiring follow in separate increments.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.
