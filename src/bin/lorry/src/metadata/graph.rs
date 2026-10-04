@@ -69,6 +69,7 @@ fn map_node(
     manifest: &Manifest,
     features: BTreeSet<String>,
     ids: &BTreeMap<PackageKey, String>,
+    crate_names: &BTreeMap<PackageKey, String>,
 ) -> Result<wire::Node> {
     let mut aliases = BTreeMap::<String, (String, String)>::new();
     let mut grouped =
@@ -95,7 +96,14 @@ fn map_node(
                 manifest.name, edge.package.name, edge.package.version
             ))
         })?;
-        let name = edge.alias.replace('-', "_");
+        let name = if dependency.alias == dependency.package {
+            crate_names
+                .get(&edge.package)
+                .cloned()
+                .unwrap_or_else(|| edge.alias.replace('-', "_"))
+        } else {
+            edge.alias.replace('-', "_")
+        };
         if let Some((previous_alias, previous_package)) =
             aliases.insert(name.clone(), (edge.alias.clone(), package_id.clone()))
             && (previous_alias != edge.alias || previous_package != *package_id)
@@ -247,6 +255,7 @@ mod tests {
             &manifest,
             BTreeSet::new(),
             &ids,
+            &BTreeMap::new(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("collide as `foo_bar`"));
@@ -260,6 +269,7 @@ mod tests {
             &[edge(0, "foo-bar", key("one"))],
             &manifest,
             BTreeSet::new(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
         )
         .unwrap_err();
@@ -288,6 +298,7 @@ mod tests {
             &manifest,
             BTreeSet::new(),
             &ids,
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(node.deps.len(), 1);
@@ -305,7 +316,15 @@ mod tests {
                 "package" => invalid.package.name = "another".to_owned(),
                 _ => unreachable!(),
             }
-            let error = map_node("root", &[invalid], &manifest, BTreeSet::new(), &ids).unwrap_err();
+            let error = map_node(
+                "root",
+                &[invalid],
+                &manifest,
+                BTreeSet::new(),
+                &ids,
+                &BTreeMap::new(),
+            )
+            .unwrap_err();
             assert!(
                 error.to_string().contains("has no declaration"),
                 "{mismatch}: {error}"

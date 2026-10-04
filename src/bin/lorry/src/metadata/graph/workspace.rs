@@ -23,6 +23,19 @@ pub(crate) fn resolved(
             fs::canonicalize(&presented_roots[&package.key]).map_err(path_error)?,
         );
     }
+    let crate_names = prepared
+        .packages
+        .iter()
+        .map(|(key, package)| {
+            (
+                key.clone(),
+                package.manifest.library.as_ref().map_or_else(
+                    || key.name.replace('-', "_"),
+                    |library| library.name.clone(),
+                ),
+            )
+        })
+        .collect();
     let mut pending = prepared
         .resolution
         .root_edges
@@ -58,6 +71,7 @@ pub(crate) fn resolved(
                 .cloned()
                 .collect(),
             &ids,
+            &crate_names,
         )?);
     }
     let order = ids
@@ -158,7 +172,7 @@ mod tests {
                  windows-only = { path = \"../windows-only\" }\n\
                  [[bin]]\nname = \"app\"\nrequired-features = []\n"
             } else {
-                "[features]\ndev = []\nwindows = []\n"
+                "[lib]\nname = \"custom_library\"\n[features]\ndev = []\nwindows = []\n"
             };
             fs::write(root.join(name).join("Cargo.toml"), format!(
                 "[package]\nname = {name:?}\nversion = \"1.0.0\"\nedition = \"2021\"\n{declarations}")).unwrap();
