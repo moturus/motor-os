@@ -128,6 +128,10 @@ cat >>derive/src/lib.rs <<'EOF'
 #[test]
 fn host_harness() {
     assert!(cfg!(feature = "checked"));
+    if let Some(expected) = std::env::var_os("EXPECTED_HOST_LIBDIR") {
+        let paths = std::env::var_os("LD_LIBRARY_PATH").unwrap();
+        assert!(std::env::split_paths(&paths).any(|path| path == std::path::PathBuf::from(&expected)));
+    }
     assert_eq!(helper::expansion(), "41");
     assert_eq!(std::env::var("SCRIPT_OWNER").unwrap(), "derive");
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
@@ -159,4 +163,12 @@ PY
 done
 env HOME="$WORK/home" "$LORRY" test -p derive
 "$LORRY_TEST_CARGO" test -p derive --offline
+cat >"$WORK/target-runner.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 73
+EOF
+printf '\nrunner = ["bash", "%s"]\n' "$WORK/target-runner.sh" >>.cargo/config.toml
+host_libdir="$("$RUSTC" --print target-libdir)"
+env EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY_TEST_CARGO" test -p derive --target x86_64-unknown-motor --offline
+env HOME="$WORK/home" EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY" test -p derive --target x86_64-unknown-motor
 echo "PASS: selected member macros match Cargo host/cross bytes and JSON"

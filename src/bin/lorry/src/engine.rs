@@ -13,7 +13,7 @@ use crate::manifest::Manifest;
 use crate::process;
 use crate::progress::Progress;
 use crate::repository::RepositorySet;
-use crate::resolver::{PackageKey, Resolution, TargetSelection};
+use crate::resolver::{CompileKind, PackageKey, Resolution, TargetSelection};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{
@@ -622,11 +622,13 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                             .harnesses
                             .into_iter()
                             .map(|executable| TestExecutable {
+                                compile_kind: CompileKind::Target,
                                 executable,
                                 environment: environment.clone(),
                             })
                             .collect(),
                         bundle: artifacts.bundle.map(|executable| TestExecutable {
+                            compile_kind: CompileKind::Target,
                             executable,
                             environment: BTreeMap::new(),
                         }),
@@ -663,8 +665,14 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     let result = run_artifact(
                         &harness.executable,
                         &options.arguments,
-                        physical_target.as_deref(),
-                        &target_options,
+                        match harness.compile_kind {
+                            CompileKind::Target => physical_target.as_deref(),
+                            CompileKind::Host => None,
+                        },
+                        match harness.compile_kind {
+                            CompileKind::Target => &target_options,
+                            CompileKind::Host => &host_options,
+                        },
                         &RuntimeOptions {
                             current_dir: &member.root,
                             environment: &harness.environment,
@@ -755,6 +763,7 @@ struct BuildArtifacts {
 }
 
 struct TestExecutable {
+    compile_kind: CompileKind,
     executable: PathBuf,
     environment: BTreeMap<String, OsString>,
 }
@@ -1513,8 +1522,30 @@ fn build_inner(
         if build.validation.is_strict() {
             prepared.revalidate_cargo_registry_sources(source_limits)?;
         }
-        let library_paths =
-            runtime_library_paths(&build, &destination, &message_reporter.messages())?;
+        let mut library_paths = BTreeMap::new();
+        for kind in plan
+            .units
+            .keys()
+            .filter(|key| {
+                matches!(
+                    key.kind,
+                    UnitKind::LibraryHarness
+                        | UnitKind::BinaryHarness
+                        | UnitKind::IntegrationHarness
+                )
+            })
+            .map(|key| key.compile_kind)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let profile = match kind {
+                CompileKind::Target => &destination,
+                CompileKind::Host => &host_profile,
+            };
+            library_paths.insert(
+                kind,
+                runtime_library_paths(&build, profile, &message_reporter.messages(), kind)?,
+            );
+        }
         let mut members = members.iter().collect::<Vec<_>>();
         members.sort_by_key(|member| &member.name);
         let mut tests = Vec::new();
@@ -1536,7 +1567,7 @@ fn build_inner(
                 let mut environment = crate::compile::runtime_environment(
                     &cargo,
                     member,
-                    &library_paths,
+                    &library_paths[&harness.key.compile_kind],
                     output.as_ref(),
                 )?;
                 if harness.key.kind == UnitKind::IntegrationHarness
@@ -1550,6 +1581,7 @@ fn build_inner(
                     }
                 }
                 harnesses.push(TestExecutable {
+                    compile_kind: harness.key.compile_kind,
                     executable: harness.executable,
                     environment,
                 });
@@ -1590,6 +1622,7 @@ fn build_inner(
                 );
                 install_primary(&staged, &executable, &package)?;
                 Some(TestExecutable {
+                    compile_kind: CompileKind::Target,
                     executable,
                     environment: harnesses[0].environment.clone(),
                 })
@@ -1767,7 +1800,12 @@ fn build_inner(
     };
     crate::trace::event("compiled root targets");
     compiled.messages = message_reporter.messages();
-    compiled.library_paths = runtime_library_paths(&build, &destination, &compiled.messages)?;
+    compiled.library_paths = runtime_library_paths(
+        &build,
+        &destination,
+        &compiled.messages,
+        CompileKind::Target,
+    )?;
     if let Some((_, outputs)) = &normal {
         // Member inputs outside their directories must also invalidate the
         // completed-profile shortcut before any compiler units are visited.
@@ -1834,6 +1872,7 @@ fn runtime_library_paths(
     build: &Build<'_>,
     profile: &Path,
     messages: &[serde_json::Value],
+    compile_kind: CompileKind,
 ) -> Result<Vec<PathBuf>> {
     let mut native = std::collections::BTreeSet::new();
     let mut dependencies = std::collections::BTreeSet::new();
@@ -1867,10 +1906,14 @@ fn runtime_library_paths(
         }
     }
     let mut arguments = vec![OsString::from("--print"), OsString::from("target-libdir")];
-    if let Some(target) = build.physical_target {
+    if compile_kind == CompileKind::Target
+        && let Some(target) = build.physical_target
+    {
         arguments.extend([OsString::from("--target"), target.into()]);
     }
-    arguments.extend(build.rustflags.iter().map(OsString::from));
+    if compile_kind == CompileKind::Target || build.logical_target.is_none() {
+        arguments.extend(build.rustflags.iter().map(OsString::from));
+    }
     let output = process::RustcCommand {
         child_lease_fd: build.child_lease_fd,
         program: &build.toolchain.rustc,

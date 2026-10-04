@@ -2644,6 +2644,19 @@ target graph oracle passes in
 `/tmp/lorry-m8-proc-macro-test-native-oracle-fixed.log`. Strict Clippy passes in
 `/tmp/lorry-m8-proc-macro-test-final-clippy.log`.
 
+Ordinary workspace test execution now retains each harness's host/target
+compilation kind. Runtime library-directory queries use that kind's profile,
+target and rustflags, and cross-target runners apply only to target harnesses.
+The paired macro regression configures a runner that exits 73 and asserts the
+host standard-library directory is in the harness's runtime search path. Cargo
+runs that cross-invocation host harness successfully; the original Lorry failure
+is preserved in `/tmp/lorry-m8-proc-macro-cross-runtime-original.log` and fixture
+`/tmp/lorry-member-macro-contract-0nkmaZ`. The corrected paired contract,
+ordinary workspace/bundle regression, and strict Clippy pass in
+`/tmp/lorry-m8-proc-macro-cross-runtime-fixed.log`,
+`/tmp/lorry-m8-proc-macro-runtime-workspace-regression.log`, and
+`/tmp/lorry-m8-proc-macro-cross-runtime-clippy.log`.
+
 ### Member build-time code
 
 The shared planner now has workspace harness graphs with selected dev edges,

@@ -1455,6 +1455,9 @@ these paths, so warm runs need no additional compiler query.
 Integration harnesses also receive `CARGO_BIN_EXE_*`
 for the built programs. `run` preserves the caller's working directory;
 harnesses use their package root. Test bundles retain their launcher rules.
+Each ordinary harness uses its own compilation platform for runtime library
+paths and runner selection. Host procedural-macro harnesses run directly with
+host libraries even when the invocation specifies a cross target and runner.
 The global `-q`/`--quiet`, `-v`/`--verbose`, and `--color` options also
 work after the command name. Arguments following `run --` or `test --`
 remain child arguments, including strings starting with `+`.
