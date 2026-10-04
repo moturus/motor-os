@@ -157,9 +157,26 @@ impl Store {
     }
 
     pub fn open(&self, selector: &str) -> Result<Session, String> {
+        self.open_path(&self.resolve_selector(selector)?)
+    }
+
+    /// Read a live session without taking its writer lock or repairing its file.
+    pub fn read(&self, selector: &str) -> Result<Snapshot, String> {
+        let snapshot = read_snapshot(&self.resolve_selector(selector)?)?;
+        if snapshot.workspace() != self.workspace {
+            return Err(format!(
+                "session {} belongs to workspace {}",
+                snapshot.path().unwrap().display(),
+                snapshot.workspace().display()
+            ));
+        }
+        Ok(snapshot)
+    }
+
+    fn resolve_selector(&self, selector: &str) -> Result<PathBuf, String> {
         let candidate = PathBuf::from(selector);
         if candidate.exists() || candidate.components().count() > 1 {
-            return self.open_path(&candidate);
+            return Ok(candidate);
         }
         let matches = self
             .list()?
@@ -168,7 +185,7 @@ impl Store {
             .collect::<Vec<_>>();
         match matches.as_slice() {
             [] => Err(format!("no session matches {selector:?}")),
-            [info] => self.open_path(&info.path),
+            [info] => Ok(info.path.clone()),
             _ => Err(format!("session id {selector:?} is ambiguous")),
         }
     }
@@ -240,8 +257,16 @@ impl Store {
     }
 
     pub fn clone_active(&self, source: &Session) -> Result<Session, String> {
+        self.clone_active_with_options(source, false)
+    }
+
+    pub fn clone_active_with_options(
+        &self,
+        source: &Session,
+        ephemeral: bool,
+    ) -> Result<Session, String> {
         let records = source.active_entries()?;
-        self.create_from(false, source.name().as_deref(), source.path(), &records)
+        self.create_from(ephemeral, source.name().as_deref(), source.path(), &records)
     }
 
     pub fn fork_at_user(
@@ -305,6 +330,36 @@ impl Store {
         }
         Ok(session)
     }
+}
+
+/// An immutable view of the complete, usable prefix of a session file.
+/// Later appends do not change this snapshot. It never owns a writer or lock.
+pub struct Snapshot(Session);
+
+impl std::ops::Deref for Snapshot {
+    type Target = Session;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Read while another process appends. Partial records and unfinished tool
+/// rounds are omitted in memory; the source file is never changed.
+pub fn read_snapshot(path: &Path) -> Result<Snapshot, String> {
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("session {}: {error}", path.display()))?;
+    let parsed = read_session(&path)?;
+    Session::from_parts(
+        parsed.header,
+        parsed.entries,
+        Some(path),
+        None,
+        None,
+        parsed.discarded_entries,
+    )
+    .map(Snapshot)
 }
 
 pub struct Session {
@@ -860,7 +915,10 @@ fn read_session(path: &Path) -> Result<Parsed, String> {
     }
     let mut bytes = Vec::new();
     File::open(path)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .and_then(|file| {
+            let length = file.metadata()?.len();
+            file.take(length).read_to_end(&mut bytes)
+        })
         .map_err(|error| format!("{}: {error}", path.display()))?;
     let mut valid_len = bytes
         .iter()
@@ -1127,6 +1185,97 @@ fn system_ms(time: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshots_read_a_locked_writer_without_changing_its_file() {
+        let (base, _, store) = fixture("live-snapshot");
+        let mut writer = store.create(false, Some("live")).unwrap();
+        writer.append_message(&Message::user("first")).unwrap();
+        let path = writer.path().unwrap().to_path_buf();
+        let lock = writer.lock.clone().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(store.open(writer.id()).is_err());
+        let snapshot = store.read(writer.id()).unwrap();
+        assert_eq!(snapshot.id(), writer.id());
+        assert_eq!(snapshot.path(), Some(path.as_path()));
+        assert_eq!(snapshot.name().as_deref(), Some("live"));
+        assert_eq!(snapshot.context_messages().unwrap().len(), 1);
+        writer
+            .append_message(&Message::assistant("second"))
+            .unwrap();
+        assert_eq!(snapshot.context_messages().unwrap().len(), 1);
+        let updated = read_snapshot(&path).unwrap();
+        assert_eq!(updated.context_messages().unwrap().len(), 2);
+        drop(snapshot);
+        drop(updated);
+        assert!(std::fs::read(&path).unwrap().starts_with(&before));
+        assert!(lock.exists());
+        writer.append_message(&Message::user("third")).unwrap();
+        drop(writer);
+        assert!(!lock.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn snapshots_omit_partial_records_and_unfinished_rounds_without_repairing() {
+        let (base, _, store) = fixture("live-snapshot-prefix");
+        let mut writer = store.create(false, None).unwrap();
+        writer.append_message(&Message::user("work")).unwrap();
+        let message = Message::assistant_response(
+            "running".into(),
+            vec![crate::provider::ToolCall::new("live-call", "sh", "{}")],
+        );
+        writer.append_message(&message).unwrap();
+        let path = writer.path().unwrap();
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(b"{partial").unwrap();
+        let before = std::fs::read(path).unwrap();
+        let snapshot = read_snapshot(path).unwrap();
+        assert_eq!(
+            snapshot.context_messages().unwrap(),
+            [Message::user("work")]
+        );
+        assert_eq!(snapshot.recovered_entries(), 2);
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        drop(snapshot);
+        drop(writer);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_live_snapshot_can_be_forked_ephemerally_without_saved_grants() {
+        let (base, _, store) = fixture("live-ephemeral-fork");
+        let mut writer = store.create(false, Some("parent")).unwrap();
+        writer.append_message(&Message::user("work")).unwrap();
+        writer
+            .append_permission_grant(&PermissionGrant {
+                name: "sh".into(),
+                identity: "a".repeat(64),
+                allow: Some(true),
+                ..PermissionGrant::default()
+            })
+            .unwrap();
+        let snapshot = store.read(writer.id()).unwrap();
+        let mut fork = store.clone_active_with_options(&snapshot, true).unwrap();
+        assert!(fork.is_ephemeral());
+        assert!(fork.path().is_none());
+        assert_eq!(fork.header.parent_session.as_deref(), writer.path());
+        assert_eq!(fork.name().as_deref(), Some("parent"));
+        assert!(fork.permission_grants().unwrap().is_empty());
+        fork.append_message(&Message::assistant("child")).unwrap();
+        assert_eq!(writer.context_messages().unwrap(), [Message::user("work")]);
+        assert_eq!(store.list().unwrap().len(), 1);
+        let other = Store::with_root(&base, base.join("other-state")).unwrap();
+        assert!(
+            other
+                .read(writer.path().unwrap().to_str().unwrap())
+                .is_err()
+        );
+        drop(fork);
+        drop(snapshot);
+        drop(writer);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn saved_shell_state_stays_beside_the_session() {

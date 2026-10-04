@@ -107,6 +107,12 @@ the conversation branch; it does not undo commands or filesystem changes.
 Only one process may write a saved session. A partial final record is ignored
 after a crash, while earlier corruption is reported.
 
+Library callers can use `session::read_snapshot(path)` or `Store::read(id)`
+while the owning process writes. The immutable snapshot includes the usable
+complete prefix, omits unfinished records and tool rounds, and leaves the
+source file and writer lock untouched. `Store::clone_active_with_options`
+can copy that snapshot into a saved or ephemeral child session.
+
 Useful startup options are --continue, --resume ID, --session ID,
 --fork ID, --ephemeral, and --name NAME. Interactive commands include /new,
 /resume, /name, /session, /tree, /label, /fork, /clone, /compact, /tools,
