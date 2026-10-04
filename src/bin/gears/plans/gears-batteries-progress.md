@@ -144,8 +144,12 @@ only three missing-check reminders. No provider or Internet request is made.
   through without these substitutions. The system prompt now states that
   the request's tool definitions are the complete available list, requires
   exact names and declared capabilities, and explains the no-tools case.
-  The user's active configuration and `/tools` output are not yet confirmed;
-  the default sample disables every directory tool. The Gears release gate
+  The user confirmed that all tools were disabled in that conversation,
+  and that `/tool enable sh` and `/tools` report the enabled/disabled states.
+  Actual shell execution and the batteries workflow have not yet been
+  reported from that session. The default sample disables every directory
+  tool; the separate batteries configuration also registers its hook.
+  The Gears release gate
   passes (`/tmp/gears-tool-inventory-prompt-host-gate.log`), as does the native
   release build (`/tmp/gears-tool-inventory-prompt-motor-build.log`). This is
   prompt hardening; the reported real-model response has not been retested.
