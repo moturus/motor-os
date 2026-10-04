@@ -1343,6 +1343,18 @@ selections rather than reducing them to one package.
 
 ### Patches and proof
 
+Example and bench descriptions now include explicit tables, file and
+directory discovery, auto flags, required features, crate types, test/doc
+flags, harness settings, and per-target editions. Explicit names and paths
+suppress inferred targets, and edition 2015 retains Cargo's legacy default.
+Compilation remains deferred: all-targets prints one omission note, and
+explicit example checking fails. The 23 focused manifest tests, strict
+Clippy, and paired source/build contracts passed in
+`/tmp/lorry-m5-described-targets-unit.log`,
+`/tmp/lorry-m5-described-targets-clippy.log`,
+`/tmp/lorry-m5-described-targets-source-contract.log`, and
+`/tmp/lorry-m5-described-targets-build-contract.log`.
+
 Land the common reader, inheritance, configuration, selection, and source
 description in separate patches. Each carries an offline Cargo comparison.
 Do not require all glob or target-description cases before the next

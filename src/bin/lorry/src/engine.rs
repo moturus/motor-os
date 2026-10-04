@@ -60,6 +60,14 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         _ => Manifest::load_selected(&current, cli.package.as_deref())?,
     };
     Manifest::report_warnings([&manifest], cli.verbosity);
+    if matches!(&cli.command, Command::Check(options) if options.all_targets)
+        && !manifest.described_targets.is_empty()
+        && cli.verbosity != Verbosity::Quiet
+    {
+        eprintln!(
+            "note: --all-targets leaves out examples and benches until their compilation is implemented"
+        );
+    }
     // Compiling the selected package without its build script would quietly
     // produce a different crate, so reject it before any other work.
     if let Some(script) = &manifest.build_script {

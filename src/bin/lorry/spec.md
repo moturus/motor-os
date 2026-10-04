@@ -299,6 +299,11 @@ the selected dev or release profile, or an explicit test-profile override,
 fail before compilation. Known profile values still receive type validation.
 Package and workspace custom metadata are preserved in metadata JSON,
 including nested tables, arrays, and Cargo's TOML datetime serialization.
+Examples and benches are described from explicit tables and automatic file
+or directory discovery. Explicit names and paths override inferred targets;
+auto flags and edition 2015's defaults follow Cargo. Compilation of these
+targets remains deferred. `check --all-targets` prints one omission note;
+`check --examples` fails explicitly.
 Members and default-members accept component globs `*`, `?`, and `[...]`,
 including negated character classes. `**` and paths outside the root are
 rejected. Matching files are ignored; matching directories need manifests,

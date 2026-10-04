@@ -193,6 +193,19 @@ pub(crate) fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::
             doc: false,
         });
     }
+    for target in &manifest.described_targets {
+        targets.push(wire::Target {
+            name: target.name.clone(),
+            kind: vec![target.kind.to_owned()],
+            crate_types: target.crate_types.clone(),
+            required_features: target.required_features.clone(),
+            src_path: rebase_path(manifest, root, &target.path, "target source")?,
+            edition: edition(target.edition).to_owned(),
+            doctest: false,
+            test: target.test,
+            doc: target.doc,
+        });
+    }
     Ok(targets)
 }
 

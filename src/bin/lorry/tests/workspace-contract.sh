@@ -96,6 +96,8 @@ printf '%s\n' \
 printf 'fn main() { println!("cargo:rustc-cfg=scripted"); }\n' \
     >"$WORK/project/scripted/build.rs"
 printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
+mkdir "$WORK/project/app/examples"
+printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
 
 (
     cd "$WORK/project"
@@ -114,6 +116,11 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
     [ "$(grep -Fc 'resolver for the non root package will be ignored' "$WORK/app-build.stderr")" -eq 1 ]
     [ "$("$LORRY" run --jobs=default -p app)" = app ]
     "$LORRY" test -p app -- --quiet
+    "$LORRY" check -p app --all-targets 2>"$WORK/all-targets.stderr"
+    [ "$(grep -Fc 'note: --all-targets leaves out examples and benches' "$WORK/all-targets.stderr")" -eq 1 ]
+    "$LORRY_TEST_CARGO" check -p app --all-targets --offline
+    if "$LORRY" check -p app --examples 2>"$WORK/examples.stderr"; then exit 1; fi
+    grep -F 'check --examples` is not supported' "$WORK/examples.stderr" >/dev/null
     "$LORRY" build --jobs=-1 -p app
     "$LORRY" build --jobs 1 -p tool 2>"$WORK/tool-build.stderr"
     [ "$("$LORRY" run)" = tool ]

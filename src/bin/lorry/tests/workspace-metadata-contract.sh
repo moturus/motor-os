@@ -79,6 +79,27 @@ crate-type = ["staticlib"]
 EOF
 printf 'fn main() { shared::answer(); }\n' >"$PROJECT/app/src/main.rs"
 printf 'pub fn answer() {}\n' >"$PROJECT/shared/src/lib.rs"
+mkdir -p "$PROJECT/app/examples/group" "$PROJECT/app/benches/group"
+printf 'fn main() {}\n' >"$PROJECT/app/examples/demo.rs"
+printf 'fn main() {}\n' >"$PROJECT/app/examples/group/main.rs"
+printf 'pub fn example() {}\n' >"$PROJECT/app/src/example.rs"
+printf 'fn main() {}\n' >"$PROJECT/app/benches/speed.rs"
+printf 'fn main() {}\n' >"$PROJECT/app/benches/group/main.rs"
+cat >>"$PROJECT/app/Cargo.toml" <<'EOF'
+[[example]]
+name = "demo"
+path = "src/example.rs"
+crate-type = ["rlib"]
+edition = "2021"
+required-features = ["extra"]
+test = true
+doc = true
+[[bench]]
+name = "custom"
+path = "benches/speed.rs"
+harness = false
+test = true
+EOF
 # Path dependencies below the root are implicit members, recursively and for
 # every dependency kind. Excluded paths and paths outside the root are not.
 package() {
@@ -120,6 +141,14 @@ agrees_with_cargo "$PROJECT/Cargo.toml" root
 agrees_with_cargo "$PROJECT/app/Cargo.toml" member
 agrees_with_cargo "$PROJECT/tools/helper/Cargo.toml" implicit
 agrees_with_cargo "$PROJECT/tools/excluded/Cargo.toml" excluded
+cp "$PROJECT/app/Cargo.toml" "$WORK/target.baseline"
+for edition in 2015 2024; do
+    sed "s/edition = \"2021\"/edition = \"$edition\"/" "$WORK/target.baseline" >"$PROJECT/app/Cargo.toml"
+    agrees_with_cargo "$PROJECT/Cargo.toml" "targets-$edition"
+done
+sed '/^\[package\]$/a autoexamples = false\nautobenches = false' "$WORK/target.baseline" >"$PROJECT/app/Cargo.toml"
+agrees_with_cargo "$PROJECT/Cargo.toml" targets-explicit-only
+cp "$WORK/target.baseline" "$PROJECT/app/Cargo.toml"
 (
     cd "$PROJECT/app/src"
     HOME="$WORK/home" RUSTC="$WORK/absent-rustc" "$LORRY" metadata \

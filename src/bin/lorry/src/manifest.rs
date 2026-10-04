@@ -12,7 +12,9 @@ use crate::toolchain::TargetInfo;
 
 mod inheritance;
 mod source;
+mod targets;
 pub(crate) use source::SourceWorkspace;
+pub(crate) use targets::DescribedTarget;
 
 const MANIFEST_NAME: &str = "Cargo.toml";
 const LOCK_NAME: &str = "Cargo.lock";
@@ -49,6 +51,7 @@ pub struct Manifest {
     #[allow(dead_code)]
     pub binaries: Vec<BinaryTarget>,
     pub integration_tests: Vec<IntegrationTestTarget>,
+    pub described_targets: Vec<DescribedTarget>,
     #[allow(dead_code)]
     pub dependencies: Vec<Dependency>,
     #[allow(dead_code)]
@@ -425,6 +428,11 @@ impl Manifest {
         manifest.workspace_root = lock_root.to_owned();
         manifest.path = manifest.root.join(MANIFEST_NAME);
         resolve_target_defaults(&mut manifest)?;
+        if manifest.library.is_none() && manifest.binaries.is_empty() {
+            return Err(Error::failure(
+                "selected package has only example or bench targets; compiling these targets is not yet supported",
+            ));
+        }
         manifest.integration_tests = discover_integration_tests(&manifest.root)?;
 
         let lock_path = lock_root.join(LOCK_NAME);
@@ -558,8 +566,26 @@ impl Manifest {
         } else {
             Vec::new()
         };
-        let mut dependencies = Vec::new();
         let mut warnings = Vec::new();
+        let mut described_targets = targets::parse(
+            root,
+            path,
+            document,
+            package,
+            edition,
+            "example",
+            &mut warnings,
+        )?;
+        described_targets.extend(targets::parse(
+            root,
+            path,
+            document,
+            package,
+            edition,
+            "bench",
+            &mut warnings,
+        )?);
+        let mut dependencies = Vec::new();
         let mut fields = DependencyFields {
             path,
             document,
@@ -654,6 +680,7 @@ impl Manifest {
             library,
             binaries,
             integration_tests,
+            described_targets,
             dependencies,
             features,
             patches,
@@ -956,6 +983,8 @@ fn validate_manifest_tables(
                         | "profile"
                         | "lib"
                         | "bin"
+                        | "example"
+                        | "bench"
                         | "lints"
                         | "workspace"
                 ) | (
@@ -1021,6 +1050,8 @@ fn validate_package_keys(
         "exclude",
         "default-run",
         "autobins",
+        "autoexamples",
+        "autobenches",
         "metadata",
     ];
     const DEPENDENCY_ONLY: &[&str] = &[
@@ -1044,15 +1075,17 @@ fn validate_package_keys(
             ));
         }
     }
-    if let Some(item) = package.get("autobins")
-        && item.as_bool().is_none()
-    {
-        return Err(type_error(
-            path,
-            document.line_of_item(item),
-            "package.autobins",
-            "a boolean",
-        ));
+    for key in ["autobins", "autoexamples", "autobenches"] {
+        if let Some(item) = package.get(key)
+            && item.as_bool().is_none()
+        {
+            return Err(type_error(
+                path,
+                document.line_of_item(item),
+                &format!("package.{key}"),
+                "a boolean",
+            ));
+        }
     }
     if matches!(mode, ManifestMode::Dependency | ManifestMode::Source) {
         for key in DEPENDENCY_ONLY
@@ -1528,7 +1561,10 @@ fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
             )));
         }
     }
-    if manifest.library.is_none() && manifest.binaries.is_empty() {
+    if manifest.library.is_none()
+        && manifest.binaries.is_empty()
+        && manifest.described_targets.is_empty()
+    {
         return Err(Error::failure(format!(
             "package `{}` has no supported library or binary target",
             manifest.name
