@@ -17,19 +17,22 @@ pub fn query(program: &Path, arguments: &[&str], description: &str) -> Result<Ou
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::failure(format!(
-            "{description} `{}` failed{}{}",
-            program.display(),
-            output
-                .status
-                .code()
-                .map_or_else(String::new, |code| format!(" with status {code}")),
-            if stderr.trim().is_empty() {
-                String::new()
-            } else {
-                format!(": {}", stderr.trim())
-            }
-        )));
+        return Err(command_failure(
+            output.status,
+            format!(
+                "{description} `{}` failed{}{}",
+                program.display(),
+                output
+                    .status
+                    .code()
+                    .map_or_else(String::new, |code| format!(" with status {code}")),
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                }
+            ),
+        ));
     }
     Ok(output)
 }
@@ -50,11 +53,14 @@ pub fn query_rustc(program: &Path, arguments: &[&str], description: &str) -> Res
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::failure(format!(
-            "{description} `{}` failed: {}",
-            program.display(),
-            stderr.trim()
-        )));
+        return Err(command_failure(
+            output.status,
+            format!(
+                "{description} `{}` failed: {}",
+                program.display(),
+                stderr.trim()
+            ),
+        ));
     }
     Ok(output)
 }
@@ -132,11 +138,22 @@ impl RustcCommand<'_> {
         if output.status.success() {
             Ok(())
         } else {
-            Err(Error::failure(match output.status.code() {
-                Some(code) => format!("rustc failed with status {code}"),
-                None => "rustc was terminated by a signal".to_owned(),
-            }))
+            Err(command_failure(
+                output.status,
+                match output.status.code() {
+                    Some(code) => format!("rustc failed with status {code}"),
+                    None => "rustc was terminated by a signal".to_owned(),
+                },
+            ))
         }
+    }
+}
+
+pub fn command_failure(status: std::process::ExitStatus, message: impl Into<String>) -> Error {
+    if exit_status_code(status) == 130 {
+        Error::interrupted(message)
+    } else {
+        Error::failure(message)
     }
 }
 
@@ -370,6 +387,26 @@ fn quote_display(argument: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_children_keep_exit_130_and_other_failures_keep_101() {
+        use std::os::unix::process::ExitStatusExt;
+        for (status, expected) in [
+            (130 << 8, 130),
+            (libc::SIGINT, 130),
+            (9 << 8, 101),
+            (libc::SIGKILL, 101),
+        ] {
+            let output = Output {
+                status: std::process::ExitStatus::from_raw(status),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            };
+            let error = RustcCommand::require_success(&output).unwrap_err();
+            assert_eq!(error.exit_code(), expected);
+        }
+    }
 
     #[test]
     fn extracts_and_decodes_rendered_json_diagnostic() {

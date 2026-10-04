@@ -304,24 +304,27 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
     if !captured.status.success() {
         let stdout = String::from_utf8_lossy(&captured.stdout);
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(Error::failure(format!(
-            "build script `{}` failed{}{}{}",
-            options.executable.display(),
-            captured.status.code().map_or_else(
-                || " after being terminated by a signal".to_owned(),
-                |code| { format!(" with status {code}") }
+        return Err(crate::process::command_failure(
+            captured.status,
+            format!(
+                "build script `{}` failed{}{}{}",
+                options.executable.display(),
+                captured.status.code().map_or_else(
+                    || " after being terminated by a signal".to_owned(),
+                    |code| { format!(" with status {code}") }
+                ),
+                if stdout.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("; stdout: {}", stdout.trim())
+                },
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("; stderr: {}", stderr.trim())
+                }
             ),
-            if stdout.trim().is_empty() {
-                String::new()
-            } else {
-                format!("; stdout: {}", stdout.trim())
-            },
-            if stderr.trim().is_empty() {
-                String::new()
-            } else {
-                format!("; stderr: {}", stderr.trim())
-            }
-        )));
+        ));
     }
 
     let mut output = parse(

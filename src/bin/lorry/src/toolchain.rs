@@ -102,6 +102,9 @@ impl Toolchain {
         }
         let output = process::query_rustc(&self.rustc, &arguments, "rustc target cfg query")
             .map_err(|error| {
+                if error.exit_code() == 130 {
+                    return error;
+                }
                 Error::failure(format!(
                     "rustc does not support target `{}`: {error}",
                     explicit_target.unwrap_or(&self.host)

@@ -102,3 +102,74 @@ fn manifest_errors_have_structured_locations_and_preserve_stdout() {
     assert_eq!(metadata["version"], 1);
     assert!(metadata.get("reason").is_none());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_interrupted_compiler_query_finishes_the_cargo_stream_unsuccessfully() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("Cargo.toml"),
+        "[package]\nname = \"interrupted\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    let rustc = fixture.0.join("rustc-interrupted");
+    fs::write(
+        fixture.0.join("Cargo.lock"),
+        "version = 4\n[[package]]\nname = \"interrupted\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(&rustc, "#!/bin/sh\nexit 130\n").unwrap();
+    fs::set_permissions(&rustc, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_lorry"))
+        .args([
+            "build",
+            "--quiet",
+            "--lorry-messages",
+            "--message-format=json",
+        ])
+        .env("RUSTC", rustc)
+        .env("HOME", &fixture.0)
+        .current_dir(&fixture.0)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["kind"], "interrupted");
+    assert_eq!(error["exit_code"], 130);
+    let finished: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(finished["reason"], "build-finished");
+    assert_eq!(finished["success"], false);
+
+    // A successful version query must not let target-query context turn an
+    // interruption into an ordinary unsupported-target failure.
+    fs::write(fixture.0.join("rustc-interrupted"), "#!/bin/sh\nif [ \"$1\" = --version ]; then\n  printf 'release: 1.99.0\\nhost: x86_64-unknown-linux-gnu\\n'\n  exit 0\nfi\nexit 130\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_lorry"))
+        .args([
+            "build",
+            "--quiet",
+            "--lorry-messages",
+            "--message-format=json",
+        ])
+        .env("RUSTC", fixture.0.join("rustc-interrupted"))
+        .env("HOME", &fixture.0)
+        .current_dir(&fixture.0)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["kind"], "interrupted");
+    assert!(error["help"].is_null());
+    let finished: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(finished["success"], false);
+}
