@@ -171,6 +171,11 @@ execution grants. The complete Lorry suite passed in 674 seconds on 2026-10-04:
 identity, native Motor self-build, cross/native identity, Clippy, and recovery.
 Online host and native vendoring succeeded without retries.
 
+Milestone 7 is in progress. Compiler and executor options accept several
+primary packages. The ordinary shared unit planner matches Cargo for build and
+check across default selection, all members, repeated package selectors, and
+exclusions. Its engine integration remains pending.
+
 ## Goal
 
 Make Lorry build, check, and test Cargo workspaces on Linux and on Motor.

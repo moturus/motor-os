@@ -2219,6 +2219,21 @@ strict Clippy pass in `/tmp/lorry-m7-library-alias-{units-final,metadata,clippy}
 Raw renamed aliases remain in graph edges; compiler rendering retains its
 existing hyphen normalization.
 
+The ordinary workspace planner now consumes selected member roots directly.
+It retains resolved feature unions and deduplicates a library selected both as
+a root and as a dependency. Binary-only selected members receive binary units
+without a fabricated library. Check mode applies to editable member libraries,
+including dependency members; outside packages retain the documented full
+library compilation behavior. Selected member build-time code remains an
+explicit error until milestone 8.
+An offline paired Cargo oracle covers eight build/check selection cases:
+defaults, all members, repeated `-p`, and workspace exclusion. It compares
+units, dependency edges and crate names, roots, feature sets, modes, and dev
+profile settings. All ten planner tests and strict Clippy pass in
+`/tmp/lorry-m7-workspace-unit-{tests,clippy}.log`; the focused comparison is in
+`/tmp/lorry-m7-workspace-unit-plan.log`. The engine still uses its existing
+single-package path until preparation and execution integration land.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 
