@@ -1782,7 +1782,20 @@ fn activate(
         }
     }
 
-    for (index, dependency) in record.dependencies.iter().enumerate() {
+    // Unified feature changes must reach dependencies of every already active
+    // compilation kind, even when the new request arrived in only one kind.
+    let compile_kinds = if event.context == FeatureContext::Unified {
+        node.compile_kinds.clone()
+    } else {
+        BTreeSet::from([event.compile_kind])
+    };
+    for (parent_kind, (index, dependency)) in compile_kinds.iter().flat_map(|kind| {
+        record
+            .dependencies
+            .iter()
+            .enumerate()
+            .map(move |dependency| (*kind, dependency))
+    }) {
         let include_dev = record
             .local_manifest
             .as_ref()
@@ -1798,16 +1811,16 @@ fn activate(
         {
             continue;
         }
+        let child_compile_kind = match dependency.kind {
+            DependencyKind::Build => CompileKind::Host,
+            DependencyKind::Normal | DependencyKind::Dev => parent_kind,
+        };
         if !scope
-            .matches(event.compile_kind, dependency.target.as_deref())
+            .matches(child_compile_kind, dependency.target.as_deref())
             .map_err(|error| Failure::new(error.to_string()))?
         {
             continue;
         }
-        let child_compile_kind = match dependency.kind {
-            DependencyKind::Build => CompileKind::Host,
-            DependencyKind::Normal | DependencyKind::Dev => event.compile_kind,
-        };
         let child_context = match options.resolver {
             ResolverVersion::V1 => FeatureContext::Unified,
             ResolverVersion::V2 | ResolverVersion::V3 => match dependency.kind {
@@ -1825,7 +1838,7 @@ fn activate(
             features,
             default_features: dependency.default_features,
         };
-        let sent_key = (event.compile_kind, index);
+        let sent_key = (parent_kind, index);
         if activation.sent.get(&sent_key) == Some(&sent) {
             continue;
         }
@@ -1842,7 +1855,7 @@ fn activate(
         };
         queue.push_back(Event {
             parent: Some(key.clone()),
-            parent_compile_kind: Some(event.compile_kind),
+            parent_compile_kind: Some(parent_kind),
             dependency_index: index,
             dependency,
             context: normalize_scope_context(options.resolver, scope, child_context),
@@ -2976,6 +2989,178 @@ mod tests {
         }
     }
 
+    #[test]
+    fn selected_workspace_contexts_match_cargo_for_all_resolvers() {
+        let fixture = LocalFixture::new();
+        fixture.package(
+            "app",
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+shared = { path = "../shared", features = ["normal"] }
+[build-dependencies]
+shared = { path = "../shared", features = ["host"] }
+[dev-dependencies]
+shared = { path = "../shared", features = ["dev"] }
+[target.'cfg(windows)'.dependencies]
+shared = { path = "../shared", features = ["windows"] }
+windows-only = { path = "../windows-only" }
+[target.'cfg(unix)'.build-dependencies]
+shared = { path = "../shared", features = ["linux-host"] }
+[target.'cfg(windows)'.build-dependencies]
+shared = { path = "../shared", features = ["windows-host"] }
+"#,
+        );
+        fs::write(fixture.0.join("app/build.rs"), "fn main() {}\n").unwrap();
+        fixture.package(
+            "shared",
+            r#"[package]
+name = "shared"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+leaf = { path = "../leaf", optional = true }
+[features]
+normal = []
+host = []
+linux-host = []
+windows-host = []
+windows = ["dep:leaf"]
+dev = ["dep:leaf"]
+"#,
+        );
+        for package in ["leaf", "windows-only"] {
+            fixture.package(
+                package,
+                &format!(
+                    "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+                ),
+            );
+        }
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let windows = CfgSet::parse("windows\ntarget_os=\"windows\"\n").unwrap();
+        let selections = [
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+            },
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-pc-windows-msvc",
+                target_cfg: &windows,
+            },
+        ];
+        for (version, resolver) in [
+            (1, ResolverVersion::V1),
+            (2, ResolverVersion::V2),
+            (3, ResolverVersion::V3),
+        ] {
+            fs::write(fixture.0.join("Cargo.toml"), format!(
+                "[workspace]\nmembers = [\"app\", \"shared\"]\nexclude = [\"leaf\", \"windows-only\"]\nresolver = \"{version}\"\n"
+            )).unwrap();
+            let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+            let mut catalog = Catalog::default();
+            let limits = options(resolver);
+            let complete = resolve_complete_workspace(
+                &workspace,
+                &mut catalog,
+                &limits,
+                &[],
+                &mut |_, _, _| Ok(()),
+            )
+            .unwrap();
+            for (selection, mode) in selections
+                .iter()
+                .flat_map(|selection| ["build", "check", "test"].map(|mode| (*selection, mode)))
+            {
+                let requests = workspace::features::member_requests(
+                    &workspace,
+                    &BTreeSet::from([fixture.0.join("app")]),
+                    &crate::cli::FeatureSelection::default(),
+                    mode == "test",
+                )
+                .unwrap();
+                let resolution = workspace::resolve_selected_workspace(
+                    &complete, &catalog, &limits, &requests, selection,
+                )
+                .unwrap();
+                let actual = resolution
+                    .packages
+                    .iter()
+                    .flat_map(|package| {
+                        package.compile_kinds.iter().map(|kind| {
+                            let host = *kind == CompileKind::Host;
+                            let features = if host {
+                                &package.host_features
+                            } else {
+                                &package.target_features
+                            };
+                            ((package.key.name.clone(), host), features.clone())
+                        })
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let output = std::process::Command::new(env!("CARGO"))
+                    .env(
+                        "RUSTC",
+                        Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+                    )
+                    .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                    .args([
+                        mode,
+                        "--offline",
+                        "-p",
+                        "app",
+                        "--lib",
+                        "--target",
+                        selection.target_triple,
+                        "-Z",
+                        "unstable-options",
+                        "--unit-graph",
+                        "--manifest-path",
+                    ])
+                    .arg(fixture.0.join("Cargo.toml"))
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let graph: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                let expected = graph["units"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|unit| unit["target"]["kind"] == serde_json::json!(["lib"]))
+                    .map(|unit| {
+                        let id = unit["pkg_id"].as_str().unwrap();
+                        let (source, fragment) = id.rsplit_once('#').unwrap();
+                        let name = fragment
+                            .split_once('@')
+                            .map_or_else(|| source.rsplit('/').next().unwrap(), |(name, _)| name);
+                        let features = unit["features"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|value| value.as_str().unwrap().to_owned())
+                            .collect::<BTreeSet<_>>();
+                        ((name.to_owned(), unit["platform"].is_null()), features)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(
+                    actual, expected,
+                    "resolver {version}, {mode}, {}",
+                    selection.target_triple
+                );
+            }
+        }
+    }
+
     fn checksum(version: &str) -> String {
         let digit = version
             .bytes()
@@ -3853,8 +4038,8 @@ mod tests {
                 "1.0.0",
                 &format!(
                     "[{},{}]",
-                    dependency_for_target("host-build", "1", "cfg(unix)", "build"),
-                    dependency_for_target("inactive-build", "1", "cfg(windows)", "build"),
+                    dependency_for_target("host-build", "1", "cfg(windows)", "build"),
+                    dependency_for_target("inactive-build", "1", "cfg(unix)", "build"),
                 ),
                 "{}",
                 "",
@@ -3908,7 +4093,7 @@ mod tests {
             .unwrap();
         assert_eq!(target.edges[0].alias, "host-build");
         assert_eq!(target.edges[0].kind, DependencyKind::Build);
-        assert_eq!(target.edges[0].target.as_deref(), Some("cfg(unix)"));
+        assert_eq!(target.edges[0].target.as_deref(), Some("cfg(windows)"));
         let host = resolution
             .packages
             .iter()

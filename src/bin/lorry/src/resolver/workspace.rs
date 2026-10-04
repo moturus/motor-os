@@ -30,7 +30,35 @@ pub(crate) fn resolve_selected_workspace(
         complete,
         dev_members: &dev_members,
     };
-    resolve_workspace_request(complete, catalog, options, members, scope)
+    // Cargo's resolver 1 activates features from inactive platforms and
+    // member dev-dependencies, then builds only reachable active units.
+    let features = if options.resolver == ResolverVersion::V1 {
+        Scope::WorkspaceMetadata { complete }
+    } else {
+        scope
+    };
+    let mut resolution = resolve_workspace_request(complete, catalog, options, members, features)?;
+    if options.resolver == ResolverVersion::V1 {
+        for package in &mut resolution.packages {
+            let dev = matches!(&package.key.source, PackageSourceKey::Path(root) if dev_members.contains(root));
+            let active = |edge: &ResolvedEdge| -> Result<bool> {
+                let platform = if edge.kind == DependencyKind::Build {
+                    CompileKind::Host
+                } else {
+                    edge.parent_compile_kind.unwrap()
+                };
+                Ok((edge.kind != DependencyKind::Dev || dev)
+                    && scope.matches(platform, edge.target.as_deref())?)
+            };
+            for edges in [&mut package.edges, &mut package.lock_edges] {
+                let keep = edges.iter().map(active).collect::<Result<Vec<_>>>()?;
+                let mut keep = keep.into_iter();
+                edges.retain(|_| keep.next().unwrap());
+            }
+        }
+        retain_selected_roots(&mut resolution, members);
+    }
+    Ok(resolution)
 }
 
 pub(crate) fn resolve_metadata_workspace(

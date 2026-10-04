@@ -530,6 +530,12 @@ location to which its settings should move. System constraints still apply.
 - Resolver versions 1, 2, and 3 must follow Cargo-compatible feature,
   target, yanked-version, candidate-ordering/backtracking, and Rust-version
   behavior for the supported single-root model.
+- Resolver 1 unifies selected requests across host/target kinds, inactive
+  platforms, and workspace member development dependencies before filtering
+  the units to build. A unified feature change reaches dependencies in every
+  active compilation kind. Resolvers 2/3 keep host and target requests
+  separate and enable development requests when needed. Platform-specific
+  build dependencies are evaluated against the host.
 - Resolution creates the complete all-target Cargo-compatible lock graph.
   Acquisition includes only the default-feature closure selected by the union
   of `[vendor].targets` and, by default, the current host.
