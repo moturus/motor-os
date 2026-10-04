@@ -1317,8 +1317,9 @@ impl Runtime {
         let decision = if saved_answer == Some(false) {
             Decision::Deny
         } else {
-            self.hooks.permission(
+            self.hooks.permission_with_metadata(
                 &call,
+                self.tool_metadata(&call.name),
                 &mut self.session,
                 &self.cancellation,
                 &mut |notice| notices.push(notice),
@@ -1462,7 +1463,7 @@ impl Runtime {
             ))?;
         let notification = self.notify(
             "entry",
-            serde_json::json!({"id": entry, "type": "message", "role": "tool"}),
+            self.tool_entry(&entry, &call, &result, outcome),
             observer,
         );
         let end = observer.event(Event::ToolEnd {
@@ -1508,7 +1509,15 @@ impl Runtime {
             }
             let notification = self.notify(
                 "entry",
-                serde_json::json!({"id": entry, "type": "message", "role": "tool"}),
+                self.tool_entry(
+                    &entry,
+                    call,
+                    &ToolResult {
+                        content: content.clone(),
+                        is_error: true,
+                    },
+                    ToolOutcome::NotStarted,
+                ),
                 observer,
             );
             if cancelled {
@@ -1524,6 +1533,27 @@ impl Runtime {
             });
         }
         Ok(())
+    }
+
+    fn tool_metadata(&self, name: &str) -> serde_json::Value {
+        serde_json::json!({"read_only": self.tools.enabled(name).is_some_and(|tool| tool.read_only)})
+    }
+
+    fn tool_entry(
+        &self,
+        id: &str,
+        call: &ToolCall,
+        result: &ToolResult,
+        outcome: ToolOutcome,
+    ) -> serde_json::Value {
+        let mut end = result.content.len().min(64 * 1024);
+        while !result.content.is_char_boundary(end) {
+            end -= 1;
+        }
+        serde_json::json!({"id": id, "type": "message", "role": "tool",
+            "tool_call": call, "tool": self.tool_metadata(&call.name), "outcome": outcome,
+            "tool_result": {"content": &result.content[..end], "is_error": result.is_error},
+            "tool_result_truncated": end < result.content.len()})
     }
 
     fn execute_directory_tool(

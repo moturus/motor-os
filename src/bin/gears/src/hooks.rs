@@ -442,12 +442,23 @@ impl Manager {
         cancellation: &Cancellation,
         notice: &mut dyn FnMut(String),
     ) -> Decision {
+        self.permission_with_metadata(call, Value::Null, session, cancellation, notice)
+    }
+
+    pub fn permission_with_metadata(
+        &self,
+        call: &ToolCall,
+        metadata: Value,
+        session: &mut Session,
+        cancellation: &Cancellation,
+        notice: &mut dyn FnMut(String),
+    ) -> Decision {
         let mut result = Decision::Ask;
         for index in 0..self.hooks.len() {
             let response = self.invoke(
                 index,
                 "permission",
-                serde_json::json!({"tool_call": call}),
+                serde_json::json!({"tool_call": call, "tool": metadata}),
                 session,
                 cancellation,
                 notice,

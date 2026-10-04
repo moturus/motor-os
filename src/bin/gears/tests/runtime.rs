@@ -750,6 +750,162 @@ fn turn_end_metadata_counts_rounds_and_identifies_the_last_entry_on_all_exits() 
     }
 }
 
+#[test]
+fn entry_hooks_identify_saved_outcomes_and_read_only_tools_even_when_not_started() {
+    for allow in [false, true] {
+        let fixture = Fixture::new(&format!("tool-entry-{allow}"));
+        let log = fixture.root.join("events.jsonl");
+        std::fs::write(fixture.workspace.join("source"), "fixture text").unwrap();
+        let config = Config {
+            tools: ["sh", "cat"]
+                .into_iter()
+                .map(|name| ToolDirectory {
+                    directory: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("tools")
+                        .join(name),
+                    enabled: true,
+                })
+                .collect(),
+            hooks: vec![HookConfig {
+                name: "record".into(),
+                events: Some(vec!["entry".into(), "permission".into()]),
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    format!(
+                        "cat >> '{}'; printf '\\n' >> '{}'; printf '{{}}'",
+                        log.display(),
+                        log.display()
+                    ),
+                ],
+                timeout: Duration::from_secs(2),
+                max_output_bytes: 4096,
+            }],
+            ..Config::default()
+        };
+        let calls = vec![
+            ToolCall::new("write", "sh", r#"{"command":"printf output"}"#),
+            ToolCall::new("read", "cat", r#"{"path":"source"}"#),
+            ToolCall::new("unknown", "missing", "{}"),
+        ];
+        let provider = Scripted::new(vec![
+            Ok(Completion {
+                tool_calls: calls.clone(),
+                ..Completion::default()
+            }),
+            answer("done"),
+        ]);
+        let mut runtime = fixture.runtime(provider, &config);
+        runtime
+            .turn("work".into(), &mut FixedApproval(allow), &mut |_| Ok(()))
+            .unwrap();
+        let events: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let permissions: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"] == "permission")
+            .collect();
+        assert_eq!(permissions.len(), 2);
+        assert_eq!(permissions[0]["payload"]["tool"]["read_only"], false);
+        assert_eq!(permissions[1]["payload"]["tool"]["read_only"], true);
+        let entries: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"] == "entry" && event["payload"]["role"] == "tool")
+            .collect();
+        assert_eq!(entries.len(), calls.len());
+        for (index, event) in entries.iter().enumerate() {
+            let payload = &event["payload"];
+            assert_eq!(
+                payload["tool_call"],
+                serde_json::to_value(&calls[index]).unwrap()
+            );
+            assert_eq!(payload["tool"]["read_only"], index == 1);
+            assert_eq!(
+                payload["outcome"],
+                if allow && index < 2 {
+                    "completed"
+                } else {
+                    "not_started"
+                }
+            );
+            let entry = runtime
+                .session()
+                .entry(payload["id"].as_str().unwrap())
+                .unwrap();
+            let message: Message = serde_json::from_value(entry.data.clone()).unwrap();
+            assert_eq!(payload["tool_result"]["content"], message.text_content());
+            assert_eq!(payload["tool_result_truncated"], false);
+        }
+    }
+}
+
+#[test]
+fn entry_hooks_bound_unicode_text_without_truncating_the_saved_result() {
+    let fixture = Fixture::new("bounded-tool-entry");
+    let log = fixture.root.join("event.json");
+    let result = fixture.root.join("result.json");
+    let text = format!("x{}", "🦀".repeat(20_000));
+    std::fs::write(
+        &result,
+        serde_json::json!({"tool_result": {
+            "content": text, "is_error": false,
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let config = Config {
+        hooks: vec![HookConfig {
+            name: "record".into(),
+            events: Some(vec![
+                "initialize".into(),
+                "tool_execute".into(),
+                "entry".into(),
+            ]),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!(
+                    r#"body=$(cat)
+case "$body" in
+  *'"event":"initialize"'*) printf '%s' '{{"tools":[{{"name":"large","description":"fixture","parameters":{{"type":"object"}}}}]}}';;
+  *'"event":"tool_execute"'*) cat '{}';;
+  *'"role":"tool"'*) printf '%s' "$body" > '{}'; printf '{{}}';;
+  *) printf '{{}}';;
+esac"#,
+                    result.display(),
+                    log.display()
+                ),
+            ],
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 128 * 1024,
+        }],
+        ..Config::default()
+    };
+    let mut runtime = fixture.runtime(
+        Scripted::new(vec![tool("large", "{}"), answer("done")]),
+        &config,
+    );
+    runtime
+        .turn("work".into(), &mut FixedApproval(true), &mut |_| Ok(()))
+        .unwrap();
+    let event: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(log).unwrap()).unwrap();
+    let payload = &event["payload"];
+    let clipped = payload["tool_result"]["content"].as_str().unwrap();
+    assert!(clipped.len() <= 64 * 1024);
+    assert_eq!(payload["tool_result_truncated"], true);
+    assert!(text.starts_with(clipped));
+    let entry = runtime
+        .session()
+        .entry(payload["id"].as_str().unwrap())
+        .unwrap();
+    let saved: Message = serde_json::from_value(entry.data.clone()).unwrap();
+    assert_eq!(saved.text_content(), text);
+}
+
 impl Fixture {
     fn new(name: &str) -> Self {
         let root =

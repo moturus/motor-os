@@ -22,6 +22,15 @@ setup leaves the active session and its registrations usable.
 hooks run. A round counts a provider reply requesting tools, including calls
 that were denied or never started; several calls in one reply count once.
 
+Runtime `permission` events also carry `tool.read_only`, taken from the
+enabled directory manifest; hook tools and unknown tools default to false.
+Tool-role `entry` events are sent after the result is saved. They include
+its entry `id`, `tool_call`, `tool.read_only`, runtime `outcome`, and
+`tool_result`. This covers denied, unknown and otherwise unstarted calls,
+including interrupted turns. Entry-notification result text is limited to
+64 KiB at a UTF-8 boundary, with `tool_result_truncated`; the saved result
+and model context retain their normal limits.
+
 Every event has this envelope:
 
     {
