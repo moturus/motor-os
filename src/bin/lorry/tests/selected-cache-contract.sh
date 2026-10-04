@@ -71,3 +71,57 @@ printf 'fn main() { assert_eq!(selected_cache::value(), 42); }\n' \
     target/lorry/debug/selected-cache
 )
 echo "PASS: selected library is restored from its verified local unit cache"
+
+echo "== Reusing workspace admission without starting build-time code =="
+mkdir -p "$WORK/helper/src"
+cat >"$WORK/helper/Cargo.toml" <<'EOF'
+[package]
+name = "cache-helper"
+version = "0.1.0"
+edition = "2024"
+EOF
+printf 'pub fn value() {}\n' >"$WORK/helper/src/lib.rs"
+cat >"$WORK/helper/build.rs" <<'EOF'
+use std::io::Write;
+fn main() {
+    std::fs::OpenOptions::new().create(true).append(true)
+        .open(std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("script-runs"))
+        .unwrap().write_all(b"x").unwrap();
+}
+EOF
+cat >>"$WORK/project/Cargo.toml" <<'EOF'
+[dependencies]
+cache-helper = { path = "../helper" }
+EOF
+cat >>"$HOME/.config/lorry/lorry.toml" <<'EOF'
+[policy.rules.allow-helper-script]
+action = "allow"
+name = "cache-helper"
+version = "=0.1.0"
+source = "path"
+allow-build-script = true
+EOF
+(
+    cd "$WORK/project"
+    RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" generate-lockfile --offline
+    "$LORRY" vendor --accept-all >"$WORK/vendor.out" 2>"$WORK/vendor.err"
+    test -z "$(find target/lorry -name script-runs -print)"
+    "$LORRY" --quiet build
+    counter="$(find target/lorry/debug/build/cache-helper -name script-runs -print)"
+    test "$(cat "$counter")" = x
+    "$LORRY" --quiet build --message-format=json >"$WORK/admitted-fresh.json"
+    test "$(cat "$counter")" = x
+    if rg -F '"reason":"compiler-artifact"' "$WORK/admitted-fresh.json" | rg -Fq '"fresh":false'; then
+        echo 'selected-cache-contract: admitted profile rebuilt a compiler unit' >&2
+        exit 1
+    fi
+    sed -i 's/^review-sha256 = ".*"/review-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"/' \
+        .lorry/dependencies-v2.toml
+    if "$LORRY" --quiet build >"$WORK/stale.out" 2>"$WORK/stale.err"; then
+        echo 'selected-cache-contract: cached profile bypassed admission verification' >&2
+        exit 1
+    fi
+    rg -Fq 'workspace admission commitment does not match' "$WORK/stale.err"
+    test "$(cat "$counter")" = x
+)
+echo "PASS: admitted profiles preserve validation and skip build scripts"

@@ -107,6 +107,9 @@ complete feature lists. Cargo's `build.target` does not filter metadata.
 Metadata reads verified sources without reconstructing an execution admission
 record or preparing compilation units. Explicit denies and source resource
 limits still apply. Locks and admission records are never changed.
+Compilation verifies recorded workspace admission and requested coverage before
+reusing a completed profile. An unchanged ordinary build or run can then reuse
+that profile without starting build scripts or compilers.
 Target `required-features` preserves absent, explicitly empty, and nonempty
 declarations in the JSON document.
 Outside path packages retain their development declarations and all described

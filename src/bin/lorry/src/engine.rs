@@ -208,9 +208,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
     let ordinary_freshness_base = (!validation.is_strict()
-        && !compact_state
-            .as_ref()
-            .is_some_and(|state| state.scope.is_some())
         && !(compact_state.is_none()
             && manifest
                 .lock
@@ -239,46 +236,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         })
     })
     .transpose()?;
-    if let Some(base) = ordinary_freshness_base
-        && let Some(artifacts) = restore_fresh_profile(
-            &profile_destination(&target_root, physical_target.as_deref(), release),
-            &manifest.workspace_root,
-            &manifest.root,
-            base,
-            validation,
-        )
-    {
-        crate::trace::event("accepted fresh root profile before dependency admission");
-        crate::check_message::replay(&artifacts.messages, cli.message_format(), color)?;
-        report_finished(release, cli.verbosity, validation, &artifacts)?;
-        report_build_completion(cli, reported)?;
-        return match &cli.command {
-            Command::Build(_) => Ok(0),
-            Command::Run(options) => {
-                let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
-                    Error::failure("selected binary is absent from the fresh build profile")
-                })?;
-                drop(artifact_lock);
-                crate::trace::event("starting program");
-                let status = run_artifact(
-                    artifact,
-                    &options.arguments,
-                    &current,
-                    &crate::compile::runtime_environment(
-                        &cargo,
-                        &manifest,
-                        &artifacts.library_paths,
-                    )?,
-                    physical_target.as_deref(),
-                    &target_options,
-                    cli.verbosity,
-                )?;
-                crate::trace::event("program exited");
-                Ok(status)
-            }
-            _ => unreachable!("only build and run use the ordinary freshness fast path"),
-        };
-    }
 
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     progress.report("Verifying dependency state")?;
@@ -338,6 +295,47 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         None
     };
     crate::trace::event("verified dependency admission");
+    if let Some(base) = ordinary_freshness_base
+        && let Some(artifacts) = restore_fresh_profile(
+            &profile_destination(&target_root, physical_target.as_deref(), release),
+            &manifest.workspace_root,
+            &manifest.root,
+            base,
+            validation,
+        )
+    {
+        crate::trace::event("accepted fresh root profile after dependency admission");
+        crate::check_message::replay(&artifacts.messages, cli.message_format(), color)?;
+        report_finished(release, cli.verbosity, validation, &artifacts)?;
+        report_build_completion(cli, reported)?;
+        return match &cli.command {
+            Command::Build(_) => Ok(0),
+            Command::Run(options) => {
+                let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
+                    Error::failure("selected binary is absent from the fresh build profile")
+                })?;
+                drop(artifact_lock);
+                crate::trace::event("starting program");
+                let status = run_artifact(
+                    artifact,
+                    &options.arguments,
+                    &current,
+                    &crate::compile::runtime_environment(
+                        &cargo,
+                        &manifest,
+                        &artifacts.library_paths,
+                    )?,
+                    physical_target.as_deref(),
+                    &target_options,
+                    cli.verbosity,
+                )?;
+                crate::trace::event("program exited");
+                Ok(status)
+            }
+            _ => unreachable!("only build and run use the ordinary freshness fast path"),
+        };
+    }
+
     let global_cache_root = config.cache_directory()?;
 
     match &cli.command {
