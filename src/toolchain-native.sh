@@ -147,6 +147,15 @@ toolchain_validate_native_rustfmt() {
 	toolchain_validate_native_elf "$binary" "$STANDALONE_LLVM_BIN/llvm-readelf" "$binary"
 }
 
+toolchain_validate_native_clippy_driver() {
+	local binary="$1"
+	[ -x "$binary" ] || toolchain_die "native clippy-driver was not produced: $binary" || return
+	grep -aFq "$EFFECTIVE_MOTOR_RUST_REV" "$binary" &&
+		grep -aFq "$SELECTED_TOOLCHAIN_DESCRIPTION" "$binary" ||
+		toolchain_die "native clippy-driver lacks the selected compiler identity" || return
+	toolchain_validate_native_elf "$binary" "$STANDALONE_LLVM_BIN/llvm-readelf" "${2:-$binary}"
+}
+
 toolchain_render_native_llvm_config() {
 	local real_bin="$1" target_root="$2" real_root
 	local real_bin_q real_root_q target_root_q
@@ -230,7 +239,7 @@ toolchain_build_native_rustc() {
 	if ! (cd "$rust" && PYTHONDONTWRITEBYTECODE=1 \
 		PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache" \
 		./x.py --config "$NATIVE_BOOTSTRAP_CONFIG" build \
-		--stage 2 compiler src/tools/rustfmt --host x86_64-unknown-motor \
+		--stage 2 compiler src/tools/rustfmt src/tools/clippy --host x86_64-unknown-motor \
 		--target x86_64-unknown-motor); then
 		toolchain_reject_assembly "native Rust bootstrap failed"
 		return 1
@@ -251,6 +260,7 @@ toolchain_build_native_rustc() {
 	}
 	RUSTC_MAIN="$rust/build/x86_64-unknown-linux-gnu/stage2-rustc/x86_64-unknown-motor/release/rustc-main"
 	RUSTFMT_MAIN="$rust/build/x86_64-unknown-linux-gnu/stage2-tools/x86_64-unknown-motor/release/rustfmt"
+	CLIPPY_DRIVER_MAIN="$rust/build/x86_64-unknown-linux-gnu/stage2-tools/x86_64-unknown-motor/release/clippy-driver"
 	toolchain_validate_native_rustc "$RUSTC_MAIN" || {
 		toolchain_reject_assembly "native rustc identity validation failed"
 		return 1
@@ -263,6 +273,10 @@ toolchain_build_native_rustc() {
 	toolchain_validate_native_rustfmt "$RUSTFMT_MAIN" \
 		"dev (${EFFECTIVE_MOTOR_RUST_REV:0:10} $rustfmt_date)" || {
 		toolchain_reject_assembly "native rustfmt identity validation failed"
+		return 1
+	}
+	toolchain_validate_native_clippy_driver "$CLIPPY_DRIVER_MAIN" || {
+		toolchain_reject_assembly "native clippy-driver identity validation failed"
 		return 1
 	}
 }

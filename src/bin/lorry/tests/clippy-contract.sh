@@ -102,6 +102,12 @@ linted = [message['target']['name'] for message in messages
           if message['reason'] == 'compiler-message']
 assert linted == ['app'], linted
 PY
+"$LORRY" clippy -p app --lib --no-deps --message-format=json \
+    -- -W clippy::cargo_common_metadata >"$WORK/metadata-lint.lorry.json"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" clippy -p app --lib --no-deps \
+    --target-dir "$WORK/cargo-metadata-lint" --message-format=json \
+    -- -W clippy::cargo_common_metadata >"$WORK/metadata-lint.cargo.json"
+compare "$WORK/metadata-lint.lorry.json" "$WORK/metadata-lint.cargo.json"
 if "$LORRY" clippy -p app --lib --no-deps --message-format=json \
     -- -D clippy::needless_return >"$WORK/deny.json" 2>"$WORK/deny.err"; then
     echo "denied Clippy lint succeeded" >&2

@@ -729,6 +729,15 @@ export TMPDIR=/devtools/tmp
 exec /devtools/rust/bin/rustfmt "$@"
 EOF
 	chmod +x "$RUSTC_IMG/devtools/bin/rustfmt"
+	"$B/llvm-strip" -o "$rust_img/bin/clippy-driver" "$CLIPPY_DRIVER_MAIN"
+	toolchain_validate_native_clippy_driver "$rust_img/bin/clippy-driver" "$CLIPPY_DRIVER_MAIN" ||
+		die "staged clippy-driver validation failed"
+	cat > "$RUSTC_IMG/devtools/bin/clippy-driver" << 'EOF'
+#!/system/bin/rush
+export TMPDIR=/devtools/tmp
+exec /devtools/rust/bin/clippy-driver "$@"
+EOF
+	chmod +x "$RUSTC_IMG/devtools/bin/clippy-driver"
 	# A binary that still carries mlibc's operator-delete panic stub would
 	# abort at runtime; the stub guard must have taken effect.
 	if grep -aq 'operator delete called! delete expressions' "$rust_img/bin/rustc"; then
@@ -991,6 +1000,7 @@ main() {
 		"$LLVM_IMG/devtools/llvm/bin/llvm"
 		"$RUSTC_IMG/devtools/rust/bin/rustc"
 		"$RUSTC_IMG/devtools/rust/bin/rustfmt"
+		"$RUSTC_IMG/devtools/rust/bin/clippy-driver"
 		"$RG_IMG/system/bin/rg"
 		"$HELIX_IMG/devtools/helix/hx"
 		"$SED_IMG/devtools/bin/sed"

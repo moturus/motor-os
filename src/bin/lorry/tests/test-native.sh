@@ -307,6 +307,8 @@ prepare_host() {
     copy_native_fixture "$WORK/native-fixture"
     rm -rf "$WORK/proc-macro-fixture"
     cp -R "$SCRIPT_DIR/proc-macro-fixture" "$WORK/proc-macro-fixture"
+    rm -rf "$WORK/clippy-native-fixture"
+    cp -R "$SCRIPT_DIR/clippy-native-fixture" "$WORK/clippy-native-fixture"
     rm -rf "$guest_tree/src/bin/lorry/target"
     mkdir -p "$source/.cargo"
     printf '[target.%s]\nlinker = "%s"\nrustflags = ["-Clink-self-contained=no", "-Cdefault-linker-libraries=yes"]\n' \
@@ -393,6 +395,7 @@ run_native() {
     local first="$REMOTE_ROOT/lorry-first/src/bin/lorry"
     local fixture="$REMOTE_ROOT/native-fixture"
     local proc_macro_fixture="$REMOTE_ROOT/proc-macro-fixture"
+    local clippy_fixture="$REMOTE_ROOT/clippy-native-fixture"
     local destination="$REMOTE_ROOT/lorry-first"
 
     remote_command "[ -d $REMOTE_BASE ] || /system/bin/mkdir $REMOTE_BASE"
@@ -424,6 +427,8 @@ run_native() {
     upload_tree "$WORK/native-fixture" "$fixture"
     remote_command "[ -d $proc_macro_fixture ] || /system/bin/mkdir $proc_macro_fixture"
     upload_tree "$WORK/proc-macro-fixture" "$proc_macro_fixture"
+    remote_command "[ -d $clippy_fixture ] || /system/bin/mkdir $clippy_fixture"
+    upload_tree "$WORK/clippy-native-fixture" "$clippy_fixture"
 
     if [ "$WARM" -eq 1 ] && [ "$CROSS_CHANGED" -eq 1 ]; then
         remote_command "$REMOTE_ROOT/lorry-cross cache clean"
@@ -436,6 +441,43 @@ run_native() {
     download_file "$first/target/lorry/release/lorry" "$WORK/lorry-native"
     cmp "$WORK/lorry-cross" "$WORK/lorry-native" ||
         fail "Linux-to-Motor and Motor-native Lorry executables differ"
+    remote_command "/devtools/bin/rustc -vV > $REMOTE_ROOT/clippy-rustc.version"
+    remote_command "/devtools/bin/clippy-driver --rustc -vV > $REMOTE_ROOT/clippy-driver.version"
+    download_file "$REMOTE_ROOT/clippy-rustc.version" "$WORK/clippy-rustc.version"
+    download_file "$REMOTE_ROOT/clippy-driver.version" "$WORK/clippy-driver.version"
+    cmp "$WORK/clippy-rustc.version" "$WORK/clippy-driver.version" ||
+        fail "native Clippy embeds a different rustc"
+    remote_command "cd $clippy_fixture && $REMOTE_ROOT/lorry-native vendor --accept-all"
+    remote_command "cd $clippy_fixture && $REMOTE_ROOT/lorry-native clippy --lib > $REMOTE_ROOT/clippy.human.out 2> $REMOTE_ROOT/clippy.human.err"
+    remote_command "cd $clippy_fixture && $REMOTE_ROOT/lorry-native clippy --lib --message-format=json > $REMOTE_ROOT/clippy.json"
+    remote_command "cd $clippy_fixture && $REMOTE_ROOT/lorry-native clippy --lib --message-format=json -- -W clippy::cargo_common_metadata > $REMOTE_ROOT/clippy.metadata.json"
+    remote_command_expect_failure "cd $clippy_fixture && $REMOTE_ROOT/lorry-native -q --lorry-messages clippy --lib --no-deps --message-format=json -- -D clippy::needless_return > $REMOTE_ROOT/clippy-deny.json 2> $REMOTE_ROOT/clippy-deny.errors"
+    for output in human.out human.err json metadata.json deny.json deny.errors; do
+        local remote_name="$REMOTE_ROOT/clippy.$output"
+        case "$output" in deny.*) remote_name="$REMOTE_ROOT/clippy-$output" ;; esac
+        download_file "$remote_name" "$WORK/clippy.$output"
+    done
+    [ ! -s "$WORK/clippy.human.out" ] || fail "native human Clippy wrote compiler output to stdout"
+    grep -F 'unneeded `return` statement' "$WORK/clippy.human.err" >/dev/null ||
+        fail "native Clippy omitted the known lint"
+    python3 - "$WORK/clippy.json" "$WORK/clippy.deny.json" "$WORK/clippy.deny.errors" "$WORK/clippy.metadata.json" <<'PY'
+import json, sys
+success, failure, own, metadata = ([json.loads(line) for line in open(path)] for path in sys.argv[1:])
+assert success[-1] == {'reason': 'build-finished', 'success': True}
+assert any(event['reason'] == 'compiler-message'
+           and (event['message'].get('code') or {}).get('code') == 'clippy::needless_return'
+           for event in success)
+assert failure[-1] == {'reason': 'build-finished', 'success': False}
+assert any(event['reason'] == 'compiler-message' and event['message']['level'] == 'error'
+           and (event['message'].get('code') or {}).get('code') == 'clippy::needless_return'
+           for event in failure)
+assert len(own) == 1 and own[0]['reason'] == 'lorry-error' and own[0]['exit_code'] == 101, own
+assert metadata[-1] == {'reason': 'build-finished', 'success': True}
+messages = [event['message'] for event in metadata if event['reason'] == 'compiler-message']
+assert any((message.get('code') or {}).get('code') == 'clippy::cargo_common_metadata'
+           and 'is missing' in message['message'] for message in messages)
+assert not any('could not read cargo metadata' in message['message'] for message in messages)
+PY
     local equivalence_target="$REMOTE_ROOT/native-equivalence-target"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native locate-project --workspace --manifest-path $fixture/Cargo.toml > $REMOTE_ROOT/equivalence-locate.native"
     remote_command "cd $fixture && __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS=nightly $REMOTE_ROOT/lorry-native rustc -Z unstable-options --print cfg --target $MOTOR_TARGET -- -O > $REMOTE_ROOT/equivalence-cfg.native"

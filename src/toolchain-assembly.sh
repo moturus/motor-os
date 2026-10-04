@@ -59,9 +59,10 @@ toolchain_content_tree_digest() (
 )
 
 toolchain_native_configuration_digest() {
-	toolchain_hash_pairs schema motor-native-config-v5 target x86_64-unknown-motor \
+	toolchain_hash_pairs schema motor-native-config-v6 target x86_64-unknown-motor \
 		rust_analyzer_recipe motor-native-rust-analyzer-v3-std \
 		rustfmt_recipe motor-native-rustfmt-v1 \
+		clippy_recipe motor-native-clippy-v1 \
 		build_type Release llvm_projects 'clang;lld' llvm_targets X86 \
 		llvm_assertions true libc_subdir devtools/llvm libc_config system/cfg/libc \
 		llvm_config_adapter motor-native-llvm-config-v2 \
@@ -135,6 +136,7 @@ toolchain_validate_assembly_outputs() {
 		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" \
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc" \
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt" \
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver" \
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer" \
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src/lib.rs" \
 		"$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"; do
@@ -187,6 +189,8 @@ host_cargo_verbose_base64=$(printf '%s' "$VALIDATED_CARGO_VERBOSE" | base64 -w0)
 native_rustc_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc" | awk '{print $1}')
 native_rustfmt_expected_version_base64=$(printf '%s' "$VALIDATED_RUSTFMT_VERSION" | base64 -w0)
 native_rustfmt_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt" | awk '{print $1}')
+native_clippy_recipe=motor-native-clippy-v1
+native_clippy_driver_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver" | awk '{print $1}')
 native_llvm_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" | awk '{print $1}')
 libc_sha256=$(sha256sum "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a" | awk '{print $1}')
 libcxx_sha256=$(sha256sum "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a" | awk '{print $1}')
@@ -251,11 +255,11 @@ toolchain_validate_consumed_assembly() (
 	analyzer_sources="$(toolchain_rust_analyzer_manifest_fields)" || exit
 	fields=(schema toolchain_key assembly_key standalone_llvm_config_digest
 		mlibc_rev mlibc_tree_state
-		native_configuration_digest rust_analyzer_inputs_digest native_rust_analyzer_recipe)
+		native_configuration_digest rust_analyzer_inputs_digest native_rust_analyzer_recipe native_clippy_recipe)
 	expected_values=("$MOTOR_GENERATED_MANIFEST_SCHEMA" "$MOTOR_TOOLCHAIN_KEY"
 		"$MOTOR_ASSEMBLY_KEY" "$STANDALONE_LLVM_CONFIG_DIGEST"
 		"$MOTOR_MLIBC_REV" clean
-		"$NATIVE_CONFIGURATION_DIGEST" "$analyzer_inputs" motor-native-rust-analyzer-v3-std)
+		"$NATIVE_CONFIGURATION_DIGEST" "$analyzer_inputs" motor-native-rust-analyzer-v3-std motor-native-clippy-v1)
 	for ((field = 0; field < ${#fields[@]}; field++)); do
 		expected="${expected_values[$field]}"
 		actual="$(toolchain_manifest_value "$manifest" "${fields[$field]}")" || {
@@ -278,13 +282,14 @@ toolchain_validate_consumed_assembly() (
 	actual="$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/rust-analyzer" \
 		devtools/rust/lib/rustlib/src/rust/library)" || exit
 	[ "$actual" = "$expected" ] || { toolchain_die 'assembly rust-src digest differs'; exit 1; }
-	hash_fields=(native_rust_analyzer_sha256 native_rustc_sha256 native_rustfmt_sha256
+	hash_fields=(native_rust_analyzer_sha256 native_rustc_sha256 native_rustfmt_sha256 native_clippy_driver_sha256
 		native_llvm_sha256
 		libc_sha256 libcxx_sha256 moto_rt_cabi_sha256 libc_config_sha256)
 	hash_paths=(
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver"
 		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
 		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a"
 		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a"

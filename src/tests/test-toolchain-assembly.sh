@@ -121,6 +121,7 @@ printf shim > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a"
 printf llvm > "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
 printf rustc > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
 printf rustfmt > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
+printf clippy > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver"
 printf shells > "$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"
 mkdir "${ASSEMBLY_ROOT}.building"
 toolchain_complete_assembly
@@ -138,6 +139,9 @@ toolchain_claim_assembly
 	fail "unkeyed Motor OS revision prevented assembly reuse"
 
 # Committing the shim sources changes the current state, not the producer's record.
+printf changed >> "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver"
+if toolchain_claim_assembly 2>/dev/null; then fail "changed Clippy driver was accepted"; fi
+printf clippy > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver"
 producer_key="$MOTOR_ASSEMBLY_KEY"
 producer_manifest_sha256="$(sha256sum "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST")"
 git -C "$root" add . && git -C "$root" commit -qm 'commit shim sources'

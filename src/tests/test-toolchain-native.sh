@@ -55,6 +55,7 @@ toolchain_validate_native_elf() {
 	case "$1" in
 	"$rust/build/x86_64-unknown-linux-gnu/stage2-rustc/x86_64-unknown-motor/release/rustc-main" | \
 		"$rust/build/x86_64-unknown-linux-gnu/stage2-tools/x86_64-unknown-motor/release/rustfmt") ;;
+	"$rust/build/x86_64-unknown-linux-gnu/stage2-tools/x86_64-unknown-motor/release/clippy-driver") ;;
 	*) return 1 ;;
 	esac
 	[ "$2" = "$STANDALONE_LLVM_BIN/llvm-readelf" ]
@@ -66,13 +67,16 @@ cat > "$rust/x.py" <<EOF
 [ "\${PYTHONDONTWRITEBYTECODE:-}" = 1 ] || exit 8
 [ "\${PYTHONPYCACHEPREFIX:-}" = '$TOOLCHAIN_STATE_ROOT/python-cache' ] || exit 9
 [ "\${*#*src/tools/rustfmt}" != "\$*" ] || exit 10
+[ "\${*#*src/tools/clippy}" != "\$*" ] || exit 11
 binary='$rust/build/x86_64-unknown-linux-gnu/stage2-rustc/x86_64-unknown-motor/release/rustc-main'
 rustfmt='$rust/build/x86_64-unknown-linux-gnu/stage2-tools/x86_64-unknown-motor/release/rustfmt'
+clippy='$rust/build/x86_64-unknown-linux-gnu/stage2-tools/x86_64-unknown-motor/release/clippy-driver'
 mkdir -p "\$(dirname "\$binary")"
 mkdir -p "\$(dirname "\$rustfmt")"
 printf '%s\n' '$EFFECTIVE_MOTOR_RUST_REV' '$MOTOR_TOOLCHAIN_ID' > "\$binary"
 printf '%s\n' 'dev (${EFFECTIVE_MOTOR_RUST_REV:0:10} $(git -C "$rust" log -1 --format=%cs))' > "\$rustfmt"
-chmod +x "\$binary" "\$rustfmt"
+cp "\$binary" "\$clippy"
+chmod +x "\$binary" "\$rustfmt" "\$clippy"
 [ "\${MUTATE_PREFIX:-0}" != 1 ] || printf changed >> '$temporary/prefix/bin/rustc'
 EOF
 chmod +x "$rust/x.py"
@@ -93,6 +97,19 @@ if toolchain_validate_native_rustfmt "$RUSTFMT_MAIN" "$expected_rustfmt_build" 2
 	fail "native rustfmt with the wrong identity was accepted"
 fi
 mv "$temporary/rustfmt" "$RUSTFMT_MAIN"
+toolchain_validate_native_clippy_driver "$CLIPPY_DRIVER_MAIN" ||
+	fail "native Clippy compiler identity was rejected"
+cp "$CLIPPY_DRIVER_MAIN" "$temporary/clippy-driver"
+rm "$CLIPPY_DRIVER_MAIN"
+if toolchain_validate_native_clippy_driver "$CLIPPY_DRIVER_MAIN" 2>/dev/null; then
+	fail "missing native Clippy driver was accepted"
+fi
+printf wrong-compiler > "$CLIPPY_DRIVER_MAIN"
+chmod +x "$CLIPPY_DRIVER_MAIN"
+if toolchain_validate_native_clippy_driver "$CLIPPY_DRIVER_MAIN" 2>/dev/null; then
+	fail "Clippy with the wrong embedded compiler was accepted"
+fi
+mv "$temporary/clippy-driver" "$CLIPPY_DRIVER_MAIN"
 adapter="$ASSEMBLY_ROOT/native-llvm-config/bin/llvm-config"
 target_llvm="$rust/build/x86_64-unknown-motor/llvm"
 [ -x "$adapter" ] || fail "native llvm-config adapter is missing"
