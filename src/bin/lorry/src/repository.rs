@@ -28,6 +28,8 @@ const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-
 const INDEX_RECORD_LIMIT: usize = 16 * 1024 * 1024;
 const MANIFEST_LIMIT: usize = 16 * 1024 * 1024;
 
+mod index;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Layer {
     Local,
@@ -102,6 +104,7 @@ pub struct RepositoryTransaction {
     writer: RepositoryWriter,
     staging: AtomicDirectory,
     objects: Vec<StagedRegistryObject>,
+    index_records: BTreeMap<String, index::Staged>,
 }
 
 #[derive(Debug)]
@@ -424,6 +427,7 @@ impl RepositoryWriter {
             writer: self,
             staging,
             objects: Vec::new(),
+            index_records: BTreeMap::new(),
         })
     }
 }
@@ -584,6 +588,7 @@ impl RepositoryTransaction {
     }
 
     pub fn publish(self) -> Result<Vec<PublishedRegistryObject>> {
+        self.validate_index_records()?;
         for staged in &self.objects {
             persist_object_tree(&staged.object.root, &self.writer.sync_file)?;
             let verified = verify_registry_object(
@@ -618,7 +623,7 @@ impl RepositoryTransaction {
             let object = verify_matching_object(&self.writer, staged, &destination)?;
             published.push(PublishedRegistryObject { object, added });
         }
-        drop(self);
+        self.publish_index_records()?;
         Ok(published)
     }
 
