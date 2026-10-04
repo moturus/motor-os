@@ -16,6 +16,7 @@ pub(crate) struct SourceWorkspace {
     pub packages: Vec<Manifest>,
     pub default_members: Vec<PathBuf>,
     pub metadata: serde_json::Value,
+    pub virtual_root: bool,
 }
 
 impl SourceWorkspace {
@@ -52,6 +53,7 @@ impl SourceWorkspace {
         Ok(Self {
             manifest_path,
             metadata: root.metadata,
+            virtual_root: !root.package,
             root: root.root,
             packages: packages.into_values().collect(),
             default_members,
@@ -66,6 +68,7 @@ impl SourceWorkspace {
             packages: vec![load_package(directory, directory)?],
             default_members: vec![directory.to_owned()],
             metadata: serde_json::Value::Null,
+            virtual_root: false,
         })
     }
 }

@@ -1701,6 +1701,15 @@ unit-graph oracle passed with all 33 resolver tests in
 and strict Clippy passed in `/tmp/lorry-m6-many-member-selection.log` and
 `/tmp/lorry-m6-feature-only-roots-clippy.log`.
 
+CLI feature routing now distinguishes Cargo's virtual-root behavior from
+resolver 1's package-root behavior. Resolvers 2/3 match features against
+selected members, with dependency-alias precedence; resolver 1 retains
+current-package defaults and qualified selected-member features. Shared
+all-feature expansion omits hidden implicit optional features. Thirty-three
+resolver tests, including the routed Cargo feature oracles, passed in
+`/tmp/lorry-m6-cli-feature-routing-unit.log`; strict Clippy passed in
+`/tmp/lorry-m6-cli-feature-routing-clippy.log`.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

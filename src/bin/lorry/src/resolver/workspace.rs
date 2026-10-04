@@ -1,6 +1,8 @@
 use super::*;
 use crate::manifest::SourceWorkspace;
 
+pub(crate) mod features;
+
 pub(crate) struct MemberRequest {
     pub root: PathBuf,
     pub features: BTreeSet<String>,
@@ -200,22 +202,7 @@ pub(crate) fn resolve_complete_workspace(
             patched,
         )?;
         let version = candidate.version.clone();
-        let namespaced = member
-            .features
-            .values()
-            .flatten()
-            .filter_map(|reference| reference.strip_prefix("dep:"))
-            .collect::<BTreeSet<_>>();
-        let mut features = member.features.keys().cloned().collect::<BTreeSet<_>>();
-        features.extend(
-            member
-                .dependencies
-                .iter()
-                .filter(|dependency| {
-                    dependency.optional && !namespaced.contains(dependency.alias.as_str())
-                })
-                .map(|dependency| dependency.alias.clone()),
-        );
+        let features = features::all_features(&member);
         records.retain(|existing| {
             existing.source.key() != PackageSourceKey::Path(member.root.clone())
         });

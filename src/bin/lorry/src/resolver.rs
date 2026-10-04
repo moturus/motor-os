@@ -2548,20 +2548,22 @@ mod tests {
                 &mut |_, _, _| Ok(()),
             )
             .unwrap();
-            let member = workspace::MemberRequest {
-                root: fixture.0.join("a"),
-                features: features.split(',').map(str::to_owned).collect(),
-                default_features: false,
-                dev: false,
-                selected: true,
-            };
-            let resolved = workspace::resolve_selected_workspace(
-                &complete,
-                &catalog,
-                &limits,
-                &[member],
-                selection,
+            let roots = BTreeSet::from([fixture.0.join("a")]);
+            let requests = workspace::features::member_requests(
+                &workspace,
+                &roots,
+                &crate::cli::FeatureSelection {
+                    features: features.split(',').map(str::to_owned).collect(),
+                    all: false,
+                    no_default: true,
+                },
+                false,
             );
+            let resolved = requests.and_then(|requests| {
+                workspace::resolve_selected_workspace(
+                    &complete, &catalog, &limits, &requests, selection,
+                )
+            });
             let output = std::process::Command::new(env!("CARGO"))
                 .env(
                     "RUSTC",
@@ -2625,22 +2627,17 @@ mod tests {
             target_triple: "x86_64-unknown-linux-gnu",
             target_cfg: &cfg,
         };
-        let requests = [
-            workspace::MemberRequest {
-                root: fixture.0.clone(),
+        let requests = workspace::features::member_requests(
+            &workspace,
+            &BTreeSet::from([fixture.0.join("b")]),
+            &crate::cli::FeatureSelection {
                 features: BTreeSet::from(["extra".to_owned()]),
-                default_features: true,
-                dev: false,
-                selected: false,
+                all: false,
+                no_default: false,
             },
-            workspace::MemberRequest {
-                root: fixture.0.join("b"),
-                features: BTreeSet::new(),
-                default_features: true,
-                dev: false,
-                selected: true,
-            },
-        ];
+            false,
+        )
+        .unwrap();
         let selected = workspace::resolve_selected_workspace(
             &complete, &catalog, &limits, &requests, selection,
         )
