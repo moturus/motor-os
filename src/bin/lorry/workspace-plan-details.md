@@ -2620,6 +2620,14 @@ Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contra
 
 ### Member build-time code
 
+Member target-edge wiring now shares one helper for script outputs, ordinary
+and development Rust dependencies, and the owning library. Ordinary binaries
+use it with development inputs disabled; the following harness patches reuse
+the same wiring with development inputs enabled. This refactor preserves
+existing unit identities and behavior. All eleven planner tests, including
+the Cargo workspace/script graph oracles, and strict Clippy pass in
+`/tmp/lorry-m8-member-target-edges-{unit,clippy}.log`.
+
 Compiler-capable manifests now retain regular and target-conditioned root
 dev-dependency declarations through the same parser as source metadata.
 Ordinary build/check leaves their features inactive. The expanded binary

@@ -632,70 +632,7 @@ pub(crate) fn workspace_units(
             );
             binary.target = Some(target.name.clone());
             insert_unit(&mut graph.units, binary.clone());
-            if manifest.build_script.is_some() {
-                add_edge(
-                    &mut graph.units,
-                    &binary,
-                    unit_key(
-                        package,
-                        UnitKind::BuildScriptRun,
-                        CompileKind::Target,
-                        &features_for(package, CompileKind::Target),
-                    ),
-                    UnitEdgeKind::BuildScriptOutput,
-                    None,
-                )?;
-            }
-            for edge in package.edges.iter().filter(|edge| {
-                edge.kind == DependencyKind::Normal
-                    && edge.parent_compile_kind == Some(CompileKind::Target)
-            }) {
-                let dependency = resolution
-                    .packages
-                    .iter()
-                    .find(|package| package.key == edge.package)
-                    .ok_or_else(|| {
-                        Error::failure("member dependency is absent from the resolution")
-                    })?;
-                let child = &manifests[&edge.package];
-                add_edge(
-                    &mut graph.units,
-                    &binary,
-                    unit_key(
-                        dependency,
-                        library_unit_kind(child),
-                        edge.compile_kind,
-                        &features_for(dependency, edge.compile_kind),
-                    ),
-                    UnitEdgeKind::RustDependency,
-                    Some(dependency_alias(edge, manifest, child)),
-                )?;
-            }
-            if let Some(library) = &manifest.library {
-                add_edge(
-                    &mut graph.units,
-                    &binary,
-                    unit_key(
-                        package,
-                        library_unit_kind(manifest),
-                        if library.proc_macro {
-                            CompileKind::Host
-                        } else {
-                            CompileKind::Target
-                        },
-                        &features_for(
-                            package,
-                            if library.proc_macro {
-                                CompileKind::Host
-                            } else {
-                                CompileKind::Target
-                            },
-                        ),
-                    ),
-                    UnitEdgeKind::RustDependency,
-                    Some(library.name.clone()),
-                )?;
-            }
+            add_member_target_edges(&mut graph, resolution, manifests, &binary, false, true)?;
         }
     }
     if release {
@@ -811,6 +748,79 @@ pub(crate) fn workspace_units(
     graph.units.retain(|key, _| reachable.contains(key));
     graph.order = topological_order(&graph.units)?;
     Ok(graph)
+}
+
+fn add_member_target_edges(
+    graph: &mut UnitGraph,
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    parent: &UnitKey,
+    dev: bool,
+    own_library: bool,
+) -> Result<()> {
+    let package = resolution
+        .packages
+        .iter()
+        .find(|package| package.key == parent.package)
+        .ok_or_else(|| Error::failure("selected member is absent from the unit resolution"))?;
+    let manifest = &manifests[&package.key];
+    if manifest.build_script.is_some() {
+        add_edge(
+            &mut graph.units,
+            parent,
+            unit_key(
+                package,
+                UnitKind::BuildScriptRun,
+                parent.compile_kind,
+                &features_for(package, parent.compile_kind),
+            ),
+            UnitEdgeKind::BuildScriptOutput,
+            None,
+        )?;
+    }
+    for edge in package.edges.iter().filter(|edge| {
+        (edge.kind == DependencyKind::Normal || (dev && edge.kind == DependencyKind::Dev))
+            && edge.parent_compile_kind == Some(parent.compile_kind)
+    }) {
+        let dependency = resolution
+            .packages
+            .iter()
+            .find(|package| package.key == edge.package)
+            .ok_or_else(|| Error::failure("member dependency is absent from the resolution"))?;
+        let child = &manifests[&edge.package];
+        add_edge(
+            &mut graph.units,
+            parent,
+            unit_key(
+                dependency,
+                library_unit_kind(child),
+                edge.compile_kind,
+                &features_for(dependency, edge.compile_kind),
+            ),
+            UnitEdgeKind::RustDependency,
+            Some(dependency_alias(edge, manifest, child)),
+        )?;
+    }
+    if own_library && let Some(library) = &manifest.library {
+        let compile_kind = if library.proc_macro {
+            CompileKind::Host
+        } else {
+            parent.compile_kind
+        };
+        add_edge(
+            &mut graph.units,
+            parent,
+            unit_key(
+                package,
+                library_unit_kind(manifest),
+                compile_kind,
+                &features_for(package, compile_kind),
+            ),
+            UnitEdgeKind::RustDependency,
+            Some(library.name.clone()),
+        )?;
+    }
+    Ok(())
 }
 
 fn target_enabled(
