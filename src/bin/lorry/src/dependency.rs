@@ -47,6 +47,27 @@ pub struct PreparedPackage {
 }
 
 impl PreparedGraph {
+    pub(crate) fn workspace_test_plan(
+        &self,
+        options: &PlanOptions<'_>,
+        selected: &[PackageKey],
+        integration_name: Option<&str>,
+    ) -> Result<CompilationPlan> {
+        let manifests = self
+            .packages
+            .iter()
+            .map(|(key, package)| (key.clone(), package.manifest.clone()))
+            .collect();
+        let graph = crate::unit::workspace_test_units(
+            &self.resolution,
+            &manifests,
+            selected,
+            options.panic_abort,
+            integration_name,
+        )?;
+        self.finish_plan(options, manifests, graph)
+    }
+
     pub(crate) fn workspace_plan(
         &self,
         options: &PlanOptions<'_>,

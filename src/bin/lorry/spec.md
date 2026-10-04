@@ -1336,6 +1336,12 @@ program in its own package and `CARGO_TARGET_TMPDIR` from the selected test
 environment. Program maps are keyed by package identity, so another member's
 same-named binary cannot replace that path or contribute extra variables.
 
+The shared workspace test planner selects library and binary harnesses by
+their `test` flags. A named integration selection omits those harnesses and
+selects matching targets across members, including `test = false` targets.
+Required features still apply to explicit selections. The prepared graph
+computes these units' source remaps and identities through the common planner.
+
 For `build`, the selected package's library is compiled on the same unit DAG
 and executor as its normal dependencies. Its dependency edges retain the
 declared extern aliases, and its source identity is the package path relative

@@ -757,7 +757,20 @@ pub(crate) fn workspace_test_units(
     manifests: &BTreeMap<PackageKey, Manifest>,
     selected: &[PackageKey],
     panic_abort: bool,
+    integration_name: Option<&str>,
 ) -> Result<UnitGraph> {
+    if let Some(name) = integration_name
+        && !selected.iter().any(|package| {
+            manifests[package]
+                .integration_tests
+                .iter()
+                .any(|target| target.name == name)
+        })
+    {
+        return Err(Error::failure(format!(
+            "no integration-test target named `{name}`"
+        )));
+    }
     let base = dependency_units_with_selected(resolution, manifests, selected)?;
     let mut normal = base.clone();
     let mut tests = base;
@@ -774,12 +787,12 @@ pub(crate) fn workspace_test_units(
         let library = manifest
             .library
             .iter()
-            .filter(|target| target.test)
+            .filter(|target| integration_name.is_none() && target.test)
             .map(|target| (UnitKind::LibraryHarness, &target.name, None));
         let binaries = manifest
             .binaries
             .iter()
-            .filter(|target| target.test)
+            .filter(|target| integration_name.is_none() && target.test)
             .map(|target| {
                 (
                     UnitKind::BinaryHarness,
@@ -790,7 +803,7 @@ pub(crate) fn workspace_test_units(
         let integrations = manifest
             .integration_tests
             .iter()
-            .filter(|target| target.test)
+            .filter(|target| integration_name.map_or(target.test, |name| name == target.name))
             .map(|target| {
                 (
                     UnitKind::IntegrationHarness,
@@ -800,7 +813,14 @@ pub(crate) fn workspace_test_units(
             });
         let mut integration = false;
         for (kind, name, required) in library.chain(binaries).chain(integrations) {
-            if !target_enabled(resolution, manifest, &features, name, required, false)? {
+            if !target_enabled(
+                resolution,
+                manifest,
+                &features,
+                name,
+                required,
+                integration_name.is_some(),
+            )? {
                 continue;
             }
             let mut key = unit_key(package, kind, CompileKind::Target, &features);
@@ -2940,6 +2960,14 @@ mod tests {
             "#[test]\nfn integration() {}\n",
         )
         .unwrap();
+        fs::write(
+            fixture.0.join("a/tests/disabled.rs"),
+            "#[test] fn disabled() {}\n",
+        )
+        .unwrap();
+        let manifest_path = fixture.0.join("a/Cargo.toml");
+        let manifest_text = fs::read_to_string(&manifest_path).unwrap();
+        fs::write(&manifest_path, format!("{manifest_text}\n[[test]]\nname = \"disabled\"\ntest = false\nrequired-features = [\"normal\"]\n")).unwrap();
         let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
         let options = Options {
             resolver: crate::manifest::Resolver::V2,
@@ -2992,153 +3020,164 @@ mod tests {
             .iter()
             .map(|package| package.key.clone())
             .collect::<Vec<_>>();
-        let graph = workspace_test_units(&resolution, &manifests, &selected, false).unwrap();
-        let plan = plan_dependency_units(
-            &graph,
-            &manifests,
-            &PlanOptions {
-                workspace_root: &fixture.0,
-                release: false,
-                test_profile: false,
-                panic_abort: false,
-                dev_profile: &crate::manifest::DevProfile::default(),
-                release_profile: &ReleaseProfile::default(),
-                rustc: &toolchain(),
-                logical_target: Some("x86_64-unknown-linux-gnu"),
-                rustflags: &[],
-            },
-        )
-        .unwrap();
-        let output = Command::new(env!("CARGO"))
-            .args([
-                "-Z",
-                "unstable-options",
-                "test",
-                "--unit-graph",
-                "--workspace",
-                "--offline",
-                "--target",
-                "x86_64-unknown-linux-gnu",
-            ])
-            .env("CARGO_HOME", fixture.0.join("cargo-home"))
-            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
-            .current_dir(&fixture.0)
-            .output()
-            .unwrap();
         assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+            workspace_test_units(&resolution, &manifests, &selected, false, Some("missing"))
+                .is_err()
         );
-        let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let units = cargo["units"].as_array().unwrap();
-        let cargo_nodes = units
-            .iter()
-            .map(|unit| {
-                (
-                    unit["pkg_id"]
-                        .as_str()
-                        .unwrap()
-                        .split('#')
-                        .next()
-                        .unwrap()
-                        .rsplit('/')
-                        .next()
-                        .unwrap()
-                        .to_owned(),
-                    unit["target"]["kind"][0].as_str().unwrap().to_owned(),
-                    unit["target"]["name"].as_str().unwrap().to_owned(),
-                    unit["mode"].as_str().unwrap().to_owned(),
-                    unit["platform"].is_string(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let node = |key: &UnitKey| {
-            (
-                key.package.name.clone(),
-                match key.kind {
-                    UnitKind::Library | UnitKind::LibraryHarness => "lib",
-                    UnitKind::Binary | UnitKind::BinaryHarness => "bin",
-                    UnitKind::IntegrationHarness => "test",
-                    UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => "custom-build",
-                    _ => panic!("unexpected harness fixture kind"),
-                }
-                .to_owned(),
-                key.target.clone().unwrap_or_else(|| {
-                    if matches!(
-                        key.kind,
-                        UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun
-                    ) {
-                        "build-script-build".to_owned()
-                    } else {
-                        key.package.name.clone()
-                    }
-                }),
-                match key.kind {
-                    UnitKind::BuildScriptRun => "run-custom-build",
-                    _ if key.mode == UnitMode::Test => "test",
-                    _ => "build",
-                }
-                .to_owned(),
-                key.compile_kind == CompileKind::Target,
+        for integration_name in [None, Some("integration"), Some("disabled")] {
+            let graph =
+                workspace_test_units(&resolution, &manifests, &selected, false, integration_name)
+                    .unwrap();
+            let plan = plan_dependency_units(
+                &graph,
+                &manifests,
+                &PlanOptions {
+                    workspace_root: &fixture.0,
+                    release: false,
+                    test_profile: false,
+                    panic_abort: false,
+                    dev_profile: &crate::manifest::DevProfile::default(),
+                    release_profile: &ReleaseProfile::default(),
+                    rustc: &toolchain(),
+                    logical_target: Some("x86_64-unknown-linux-gnu"),
+                    rustflags: &[],
+                },
             )
-        };
-        assert_eq!(
-            cargo_nodes.iter().cloned().collect::<BTreeSet<_>>(),
-            plan.units.keys().map(node).collect()
-        );
-        let cargo_edges = units
-            .iter()
-            .enumerate()
-            .flat_map(|(parent, unit)| {
-                let nodes = &cargo_nodes;
-                unit["dependencies"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(move |edge| {
-                        (
-                            nodes[parent].clone(),
-                            nodes[edge["index"].as_u64().unwrap() as usize].clone(),
-                            edge["extern_crate_name"].as_str().unwrap().to_owned(),
-                        )
-                    })
-            })
-            .collect::<BTreeSet<_>>();
-        let edges = plan
-            .units
-            .values()
-            .flat_map(|unit| {
-                unit.unit.dependencies.iter().map(|edge| {
+            .unwrap();
+            let mut command = Command::new(env!("CARGO"));
+            command
+                .args([
+                    "-Z",
+                    "unstable-options",
+                    "test",
+                    "--unit-graph",
+                    "--workspace",
+                    "--offline",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
+                ])
+                .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(&fixture.0);
+            if let Some(name) = integration_name {
+                command.args(["--test", name]);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let units = cargo["units"].as_array().unwrap();
+            let cargo_nodes = units
+                .iter()
+                .map(|unit| {
                     (
-                        node(&unit.unit.key),
-                        node(&edge.unit),
-                        edge.alias.clone().unwrap_or_else(|| {
-                            edge.unit
-                                .target
-                                .as_deref()
-                                .unwrap_or("build-script-build")
-                                .replace('-', "_")
-                        }),
+                        unit["pkg_id"]
+                            .as_str()
+                            .unwrap()
+                            .split('#')
+                            .next()
+                            .unwrap()
+                            .rsplit('/')
+                            .next()
+                            .unwrap()
+                            .to_owned(),
+                        unit["target"]["kind"][0].as_str().unwrap().to_owned(),
+                        unit["target"]["name"].as_str().unwrap().to_owned(),
+                        unit["mode"].as_str().unwrap().to_owned(),
+                        unit["platform"].is_string(),
                     )
                 })
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(cargo_edges, edges);
-        for (key, unit) in &plan.units {
-            let reference = &units[cargo_nodes
-                .iter()
-                .position(|candidate| *candidate == node(key))
-                .unwrap()];
-            assert_eq!(reference["features"], serde_json::json!(key.features));
+                .collect::<Vec<_>>();
+            let node = |key: &UnitKey| {
+                (
+                    key.package.name.clone(),
+                    match key.kind {
+                        UnitKind::Library | UnitKind::LibraryHarness => "lib",
+                        UnitKind::Binary | UnitKind::BinaryHarness => "bin",
+                        UnitKind::IntegrationHarness => "test",
+                        UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => "custom-build",
+                        _ => panic!("unexpected harness fixture kind"),
+                    }
+                    .to_owned(),
+                    key.target.clone().unwrap_or_else(|| {
+                        if matches!(
+                            key.kind,
+                            UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun
+                        ) {
+                            "build-script-build".to_owned()
+                        } else {
+                            key.package.name.clone()
+                        }
+                    }),
+                    match key.kind {
+                        UnitKind::BuildScriptRun => "run-custom-build",
+                        _ if key.mode == UnitMode::Test => "test",
+                        _ => "build",
+                    }
+                    .to_owned(),
+                    key.compile_kind == CompileKind::Target,
+                )
+            };
             assert_eq!(
-                reference["profile"]["opt_level"],
-                unit.settings.profile.opt_level
+                cargo_nodes.iter().cloned().collect::<BTreeSet<_>>(),
+                plan.units.keys().map(node).collect()
             );
-            assert_eq!(reference["profile"]["debuginfo"], 2);
-            assert_eq!(unit.settings.profile.debuginfo, CargoDebugInfo::Full);
-            assert_eq!(reference["profile"]["panic"], "unwind");
-            assert_eq!(unit.settings.profile.panic, CargoPanicStrategy::Unwind);
+            let cargo_edges = units
+                .iter()
+                .enumerate()
+                .flat_map(|(parent, unit)| {
+                    let nodes = &cargo_nodes;
+                    unit["dependencies"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(move |edge| {
+                            (
+                                nodes[parent].clone(),
+                                nodes[edge["index"].as_u64().unwrap() as usize].clone(),
+                                edge["extern_crate_name"].as_str().unwrap().to_owned(),
+                            )
+                        })
+                })
+                .collect::<BTreeSet<_>>();
+            let edges = plan
+                .units
+                .values()
+                .flat_map(|unit| {
+                    unit.unit.dependencies.iter().map(|edge| {
+                        (
+                            node(&unit.unit.key),
+                            node(&edge.unit),
+                            edge.alias.clone().unwrap_or_else(|| {
+                                edge.unit
+                                    .target
+                                    .as_deref()
+                                    .unwrap_or("build-script-build")
+                                    .replace('-', "_")
+                            }),
+                        )
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(cargo_edges, edges);
+            for (key, unit) in &plan.units {
+                let reference = &units[cargo_nodes
+                    .iter()
+                    .position(|candidate| *candidate == node(key))
+                    .unwrap()];
+                assert_eq!(reference["features"], serde_json::json!(key.features));
+                assert_eq!(
+                    reference["profile"]["opt_level"],
+                    unit.settings.profile.opt_level
+                );
+                assert_eq!(reference["profile"]["debuginfo"], 2);
+                assert_eq!(unit.settings.profile.debuginfo, CargoDebugInfo::Full);
+                assert_eq!(reference["profile"]["panic"], "unwind");
+                assert_eq!(unit.settings.profile.panic, CargoPanicStrategy::Unwind);
+            }
         }
     }
 

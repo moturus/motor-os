@@ -2636,6 +2636,14 @@ All twelve planner tests and strict Clippy pass in
 larger than the preferred size because its linked cycle/script/program graph
 needs the full paired oracle fixture.
 
+The shared harness graph now accepts named integration selections across
+members and includes explicitly named `test = false` targets. Preparation
+finishes those plans through the common identity/source-remap path. The legal
+dev-cycle Cargo oracle covers default selection, an ordinary named test,
+a disabled named test with enabled required features, and missing-name
+rejection. Focused validation and strict Clippy pass in
+`/tmp/lorry-m8-named-workspace-harness-{oracle,clippy}.log`.
+
 Integration compiler environments now look up program paths by owning package
 identity. A focused regression puts the same program name and an extra foreign
 program in another package's map, verifies the owner's path and absence of the
