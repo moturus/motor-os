@@ -239,43 +239,11 @@ pub fn inspect(
             "resolved package graph changed between policy passes",
         ));
     }
-    if evidence.keys().cloned().collect::<BTreeSet<_>>() != selected {
-        return Err(Error::failure(
-            "second policy pass does not have exact evidence for every selected package",
-        ));
-    }
-
-    let mut compressed_total = 0_u64;
-    let mut extracted_total = 0_u64;
+    inspect_evidence(&preflight.policy, resolution, evidence)?;
     let mut admitted = BTreeMap::new();
     for package in &resolution.packages {
         let evidence = &evidence[&package.key];
-        check_evidence_identity(package, evidence)?;
-        if !package
-            .local_manifest
-            .as_ref()
-            .is_some_and(|manifest| manifest.editable)
-        {
-            check_package_limits(&preflight.policy, package, evidence)?;
-        }
         let source = source_kind(package);
-        if source == SourceKind::CratesIo && evidence.newly_acquired {
-            let archive_bytes = evidence.archive_bytes.ok_or_else(|| {
-                Error::failure(format!(
-                    "crates.io package `{} {}` has no inspected archive size",
-                    package.key.name, package.key.version
-                ))
-            })?;
-            compressed_total = compressed_total
-                .checked_add(archive_bytes)
-                .ok_or_else(|| Error::failure("vendor transaction byte count overflowed"))?;
-            extracted_total = extracted_total
-                .checked_add(evidence.extracted_bytes)
-                .ok_or_else(|| {
-                    Error::failure("vendor transaction extracted byte count overflowed")
-                })?;
-        }
-
         let facts = complete_facts(package, evidence);
         let preliminary = &preflight.packages[&package.key];
         let matching = preliminary
@@ -336,19 +304,138 @@ pub fn inspect(
         );
     }
 
-    if compressed_total > preflight.policy.limits.max_transaction_bytes {
+    Ok(Admission { packages: admitted })
+}
+
+/// Source preparation checks vetoes and resource limits without granting any
+/// capability to compile or execute a build script or procedural macro.
+pub(crate) fn preflight_sources(policy: &Policy, resolution: &Resolution) -> Result<()> {
+    PackageLimit {
+        max: policy.limits.max_packages,
+        source: policy.limits.max_packages_source.clone(),
+        members: resolution
+            .packages
+            .iter()
+            .filter_map(|package| {
+                let PackageSourceKey::Path(root) = &package.key.source else {
+                    return None;
+                };
+                package
+                    .local_manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.editable)
+                    .then(|| root.clone())
+            })
+            .collect(),
+    }
+    .check(resolution)?;
+    let depth = graph_depth(resolution, true)?;
+    if depth > policy.limits.max_depth {
+        return Err(Error::failure(format!(
+            "complete dependency depth {depth} exceeds policy limit {}",
+            policy.limits.max_depth
+        )));
+    }
+    let mut keys = BTreeSet::new();
+    for package in &resolution.packages {
+        if !keys.insert(&package.key) {
+            return Err(Error::failure(
+                "source graph contains a duplicate package identity",
+            ));
+        }
+        check_path_root(policy, package)?;
+        let facts = preliminary_facts(package);
+        check_denies(policy, package, &facts)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn inspect_sources(
+    policy: &Policy,
+    resolution: &Resolution,
+    evidence: &BTreeMap<PackageKey, PackageEvidence>,
+) -> Result<()> {
+    preflight_sources(policy, resolution)?;
+    inspect_evidence(policy, resolution, evidence)?;
+    for package in &resolution.packages {
+        check_denies(
+            policy,
+            package,
+            &complete_facts(package, &evidence[&package.key]),
+        )?;
+    }
+    Ok(())
+}
+
+fn check_denies(policy: &Policy, package: &ResolvedPackage, facts: &Facts<'_>) -> Result<()> {
+    for (id, rule) in &policy.rules {
+        if rule.action == PolicyAction::Deny && rule_definitely_matches(rule, facts) {
+            return Err(denied_by_rule(package, id, rule));
+        }
+    }
+    Ok(())
+}
+
+fn inspect_evidence(
+    policy: &Policy,
+    resolution: &Resolution,
+    evidence: &BTreeMap<PackageKey, PackageEvidence>,
+) -> Result<()> {
+    let selected = resolution
+        .packages
+        .iter()
+        .map(|package| package.key.clone())
+        .collect::<BTreeSet<_>>();
+    if selected.len() != resolution.packages.len()
+        || evidence.keys().cloned().collect::<BTreeSet<_>>() != selected
+    {
+        return Err(Error::failure(
+            "second policy pass does not have exact evidence for every selected package",
+        ));
+    }
+    let mut compressed_total = 0_u64;
+    let mut extracted_total = 0_u64;
+    for package in &resolution.packages {
+        let evidence = &evidence[&package.key];
+        check_evidence_identity(package, evidence)?;
+        if !package
+            .local_manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.editable)
+        {
+            check_package_limits(policy, package, evidence)?;
+        }
+        let source = source_kind(package);
+        if source == SourceKind::CratesIo && evidence.newly_acquired {
+            let archive_bytes = evidence.archive_bytes.ok_or_else(|| {
+                Error::failure(format!(
+                    "crates.io package `{} {}` has no inspected archive size",
+                    package.key.name, package.key.version
+                ))
+            })?;
+            compressed_total = compressed_total
+                .checked_add(archive_bytes)
+                .ok_or_else(|| Error::failure("vendor transaction byte count overflowed"))?;
+            extracted_total = extracted_total
+                .checked_add(evidence.extracted_bytes)
+                .ok_or_else(|| {
+                    Error::failure("vendor transaction extracted byte count overflowed")
+                })?;
+        }
+    }
+    if compressed_total > policy.limits.max_transaction_bytes {
         return Err(Error::failure(format!(
             "selected crates.io archives total {compressed_total} bytes, exceeding policy transaction limit {}",
-            preflight.policy.limits.max_transaction_bytes
+            policy.limits.max_transaction_bytes
         )));
     }
-    if extracted_total > preflight.policy.limits.max_extracted_transaction_bytes {
+    if extracted_total > policy.limits.max_extracted_transaction_bytes {
         return Err(Error::failure(format!(
             "selected crates.io sources total {extracted_total} extracted bytes, exceeding policy transaction limit {}",
-            preflight.policy.limits.max_extracted_transaction_bytes
+            policy.limits.max_extracted_transaction_bytes
         )));
     }
-    Ok(Admission { packages: admitted })
+    Ok(())
 }
 
 impl PackageEvidence {
@@ -769,6 +856,10 @@ fn check_package_limits(
 }
 
 fn selected_depth(resolution: &Resolution) -> Result<u64> {
+    graph_depth(resolution, false)
+}
+
+fn graph_depth(resolution: &Resolution, member_roots: bool) -> Result<u64> {
     let packages = resolution
         .packages
         .iter()
@@ -778,14 +869,32 @@ fn selected_depth(resolution: &Resolution) -> Result<u64> {
     let mut visiting = BTreeSet::new();
     let mut depth = 0;
     for edge in &resolution.root_edges {
-        depth = depth.max(tail_depth(
-            &edge.package,
-            &packages,
-            &mut memo,
-            &mut visiting,
-        )?);
+        let tail = tail_depth(&edge.package, &packages, &mut memo, &mut visiting, None)?;
+        depth = depth.max(tail.saturating_sub(u64::from(member_roots)));
     }
-    if memo.len() != packages.len() {
+    let mut reachable = memo.keys().cloned().collect::<BTreeSet<_>>();
+    if member_roots {
+        for edge in &resolution.root_edges {
+            for dev in packages[&edge.package]
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == crate::sparse::DependencyKind::Dev)
+            {
+                // A development dependency may depend back on this member.
+                // Its ordinary dependencies were already traversed above.
+                let mut dev_memo = BTreeMap::new();
+                depth = depth.max(tail_depth(
+                    &dev.package,
+                    &packages,
+                    &mut dev_memo,
+                    &mut visiting,
+                    Some(&edge.package),
+                )?);
+                reachable.extend(dev_memo.into_keys());
+            }
+        }
+    }
+    if reachable.len() != packages.len() {
         return Err(Error::failure(
             "policy graph contains a selected package unreachable from the root",
         ));
@@ -798,7 +907,11 @@ fn tail_depth(
     packages: &BTreeMap<PackageKey, &ResolvedPackage>,
     memo: &mut BTreeMap<PackageKey, u64>,
     visiting: &mut BTreeSet<PackageKey>,
+    development_root: Option<&PackageKey>,
 ) -> Result<u64> {
+    if development_root == Some(key) {
+        return Ok(0);
+    }
     if let Some(depth) = memo.get(key) {
         return Ok(*depth);
     }
@@ -816,9 +929,18 @@ fn tail_depth(
     }
     let mut depth = 1;
     for edge in &package.edges {
+        if edge.kind == crate::sparse::DependencyKind::Dev {
+            continue;
+        }
         depth = depth.max(
             1_u64
-                .checked_add(tail_depth(&edge.package, packages, memo, visiting)?)
+                .checked_add(tail_depth(
+                    &edge.package,
+                    packages,
+                    memo,
+                    visiting,
+                    development_root,
+                )?)
                 .ok_or_else(|| Error::failure("policy dependency depth overflowed"))?,
         );
     }
@@ -1136,6 +1258,113 @@ mod tests {
             file_count: 2,
             source_tree_sha256: checksum(9),
         }
+    }
+
+    #[test]
+    fn source_inspection_needs_no_execution_grants_but_keeps_vetoes_and_limits() {
+        let package = registry_package("demo", "1.2.3", 4);
+        let resolution = make_resolution(vec![package.clone()]);
+        let mut policy = Policy {
+            default: PolicyDefault::Deny,
+            path_roots: Vec::new(),
+            limits: PolicyLimits::default(),
+            rules: BTreeMap::new(),
+        };
+        let mut inspected = evidence(&package, true);
+        inspected.proc_macro = true;
+        let evidence = BTreeMap::from([(package.key.clone(), inspected)]);
+        assert!(preflight(&policy, &resolution).is_err());
+        inspect_sources(&policy, &resolution, &evidence).unwrap();
+        policy.limits.max_package_bytes = 99;
+        assert!(
+            inspect_sources(&policy, &resolution, &evidence)
+                .unwrap_err()
+                .to_string()
+                .contains("package-byte")
+        );
+        policy.limits.max_package_bytes = 100;
+        policy.rules.insert(
+            "veto".to_owned(),
+            rule(PolicyAction::Deny, None, Some("MIT")),
+        );
+        preflight_sources(&policy, &resolution).unwrap();
+        assert!(
+            inspect_sources(&policy, &resolution, &evidence)
+                .unwrap_err()
+                .to_string()
+                .contains("veto")
+        );
+        policy.rules.get_mut("veto").unwrap().license = None;
+        assert!(
+            preflight_sources(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("veto")
+        );
+        policy.rules.clear();
+        assert!(inspect_sources(&policy, &resolution, &BTreeMap::new()).is_err());
+        policy.limits.max_packages = 0;
+        assert!(
+            preflight_sources(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("limit of 0")
+        );
+    }
+
+    #[test]
+    fn workspace_source_depth_excludes_member_roots_and_allows_development_cycles() {
+        let mut member = path_package(Path::new("/workspace/member"), false, false);
+        member.local_manifest.as_mut().unwrap().editable = true;
+        let child = registry_package("child", "1.0.0", 1);
+        let edge = |package, kind| ResolvedEdge {
+            dependency_index: 0,
+            alias: "dependency".to_owned(),
+            target: None,
+            kind,
+            parent_compile_kind: Some(crate::resolver::CompileKind::Target),
+            compile_kind: crate::resolver::CompileKind::Target,
+            context: FeatureContext::Unified,
+            package,
+        };
+        member
+            .edges
+            .push(edge(member.key.clone(), crate::sparse::DependencyKind::Dev));
+        member.edges.push(edge(
+            child.key.clone(),
+            crate::sparse::DependencyKind::Normal,
+        ));
+        let mut resolution = make_resolution(vec![member.clone()]);
+        resolution.packages.push(child);
+        let mut policy = Policy {
+            default: PolicyDefault::Deny,
+            path_roots: Vec::new(),
+            limits: PolicyLimits::default(),
+            rules: BTreeMap::new(),
+        };
+        policy.limits.max_depth = 1;
+        policy.limits.max_packages = 1;
+        preflight_sources(&policy, &resolution).unwrap();
+        policy.limits.max_depth = 0;
+        assert!(
+            preflight_sources(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("depth 1")
+        );
+        policy.limits.max_depth = 1;
+        policy.limits.max_packages = 0;
+        assert!(preflight_sources(&policy, &resolution).is_err());
+        resolution.packages.truncate(1);
+        resolution.packages[0].edges.truncate(1);
+        preflight_sources(&policy, &resolution).unwrap();
+        resolution.packages[0].edges[0].kind = crate::sparse::DependencyKind::Normal;
+        assert!(
+            preflight_sources(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("cycle")
+        );
     }
 
     #[test]
