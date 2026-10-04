@@ -811,6 +811,29 @@ fn entry_hooks_identify_saved_outcomes_and_read_only_tools_even_when_not_started
         assert_eq!(permissions.len(), 2);
         assert_eq!(permissions[0]["payload"]["tool"]["read_only"], false);
         assert_eq!(permissions[1]["payload"]["tool"]["read_only"], true);
+        let shell = PathBuf::from(
+            permissions[0]["payload"]["tool"]["shell_state_directory"]
+                .as_str()
+                .unwrap(),
+        );
+        assert_eq!(
+            shell,
+            runtime.session().path().unwrap().with_extension("sh-state")
+        );
+        assert!(permissions[1]["payload"]["tool"]["shell_state_directory"].is_null());
+        if allow {
+            assert_eq!(
+                std::fs::read_to_string(shell.join("cwd"))
+                    .unwrap()
+                    .trim_end(),
+                fixture.workspace.to_str().unwrap()
+            );
+        } else {
+            assert!(
+                !shell.exists(),
+                "permission metadata must not create shell state"
+            );
+        }
         let entries: Vec<_> = events
             .iter()
             .filter(|event| event["event"] == "entry" && event["payload"]["role"] == "tool")

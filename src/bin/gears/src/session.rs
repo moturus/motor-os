@@ -487,6 +487,15 @@ impl Session {
     }
 
     /// Allocate shell state only when the session first runs `sh`.
+    /// The saved shell directory, without creating it during permission checks.
+    pub fn shell_state_path(&self) -> Option<PathBuf> {
+        self.ephemeral_shell_state.clone().or_else(|| {
+            self.path
+                .as_ref()
+                .map(|path| path.with_extension("sh-state"))
+        })
+    }
+
     pub fn shell_state_directory(&mut self) -> Result<PathBuf, String> {
         if let Some(path) = &self.ephemeral_shell_state {
             return Ok(path.clone());

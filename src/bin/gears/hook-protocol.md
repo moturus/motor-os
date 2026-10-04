@@ -24,6 +24,9 @@ that were denied or never started; several calls in one reply count once.
 
 Runtime `permission` events also carry `tool.read_only`, taken from the
 enabled directory manifest; hook tools and unknown tools default to false.
+For a shell-state tool, `tool.shell_state_directory` names the saved state
+without creating it. Its `cwd` file, when present and usable, is the shell's
+starting directory; otherwise the shell starts in the selected workspace.
 Tool-role `entry` events are sent after the result is saved. They include
 its entry `id`, `tool_call`, `tool.read_only`, runtime `outcome`, and
 `tool_result`. This covers denied, unknown and otherwise unstarted calls,

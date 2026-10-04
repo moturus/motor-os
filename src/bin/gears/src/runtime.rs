@@ -1536,7 +1536,13 @@ impl Runtime {
     }
 
     fn tool_metadata(&self, name: &str) -> serde_json::Value {
-        serde_json::json!({"read_only": self.tools.enabled(name).is_some_and(|tool| tool.read_only)})
+        let tool = self.tools.enabled(name);
+        let shell_state = tool
+            .is_some_and(|tool| tool.process.shell_state)
+            .then(|| self.session.shell_state_path())
+            .flatten();
+        serde_json::json!({"read_only": tool.is_some_and(|tool| tool.read_only),
+            "shell_state_directory": shell_state})
     }
 
     fn tool_entry(
