@@ -485,12 +485,18 @@ The supported manifest surface includes:
   compiler-host units and require an explicit procedural-macro grant.
 
 Crates.io dependencies require a version requirement. Path dependencies may
-omit one; when supplied, it must match the selected local package. Root build
-scripts, build-dependencies, and dev-dependencies are unsupported. A
+omit one; when supplied, it must match the selected local package. Root
+build-script execution and dev-dependencies are unsupported. A
 target-conditioned root dev-dependency is inert when its selector does not
 match the selected target, and produces the unsupported-dependency diagnostic
 when it does. Lorry may compile approved transitive build-dependencies for
 dependency build scripts.
+
+Compiler manifests now retain top-level and target-qualified build
+dependencies. The shared planner can create the member's host script compiler,
+per-target script execution, and output edges to its library and binaries,
+including binary-only members. Public member script execution remains rejected
+until its environment and sandbox policy are fully wired.
 
 A selected package with a build script fails before any compilation:
 `build`, `run`, `test`, and `check` reject it, naming the script. Commands

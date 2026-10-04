@@ -679,9 +679,7 @@ impl Manifest {
                 &mut dependencies,
             )?;
         }
-        if matches!(mode, ManifestMode::Dependency | ManifestMode::Source)
-            && let Some(item) = document.root().get("build-dependencies")
-        {
+        if let Some(item) = document.root().get("build-dependencies") {
             let table = require_table(path, document, item, "build-dependencies")?;
             parse_dependency_table(
                 &mut fields,
@@ -1049,6 +1047,7 @@ fn validate_manifest_tables(
                     ManifestMode::Root,
                     "package"
                         | "dependencies"
+                        | "build-dependencies"
                         | "target"
                         | "features"
                         | "patch"
@@ -2230,9 +2229,7 @@ fn parse_target_dependencies(
         for (key, item) in target.iter() {
             let kind = match (mode, key) {
                 (_, "dependencies") => Some(DependencyKind::Normal),
-                (ManifestMode::Dependency | ManifestMode::Source, "build-dependencies") => {
-                    Some(DependencyKind::Build)
-                }
+                (_, "build-dependencies") => Some(DependencyKind::Build),
                 (ManifestMode::Source, "dev-dependencies") => Some(DependencyKind::Dev),
                 (ManifestMode::Dependency, "dev-dependencies") => None,
                 (ManifestMode::Root, "dev-dependencies") => {
@@ -3871,6 +3868,27 @@ unsafe_code = { level = "forbid", priority = 1 }
             "app"
         );
         fs::remove_dir_all(from_root.workspace_root).unwrap();
+    }
+
+    #[test]
+    fn root_build_dependencies_match_source_manifest_declarations() {
+        let root = Path::new("/workspace/member");
+        let path = root.join("Cargo.toml");
+        let source = "[package]\nname = \"member\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\
+                      build = \"build.rs\"\n[build-dependencies]\nbuilder = \"1\"\n\
+                      [target.'cfg(unix)'.build-dependencies]\ntarget-builder = \"2\"\n";
+        let manifest = Manifest::parse(root, &path, source).unwrap();
+        let document = Document::parse(&path, "Cargo manifest", source.to_owned()).unwrap();
+        let description =
+            Manifest::parse_document(root, &path, &document, ManifestMode::Source).unwrap();
+        assert_eq!(manifest.dependencies, description.dependencies);
+        assert_eq!(manifest.dependencies.len(), 2);
+        assert!(
+            manifest
+                .dependencies
+                .iter()
+                .all(|dependency| dependency.kind == DependencyKind::Build)
+        );
     }
 
     #[test]

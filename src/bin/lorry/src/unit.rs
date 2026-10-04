@@ -431,10 +431,7 @@ fn dependency_units_with_selected(
     let mut units = BTreeMap::new();
     for package in &resolution.packages {
         let manifest = &manifests[&package.key];
-        if manifest.library.is_none() {
-            if selected.contains(&package.key) {
-                continue;
-            }
+        if manifest.library.is_none() && !selected.contains(&package.key) {
             return Err(Error::failure(format!(
                 "dependency package `{} {}` has no supported library target",
                 package.key.name, package.key.version
@@ -443,8 +440,13 @@ fn dependency_units_with_selected(
         for compile_kind in &package.compile_kinds {
             let features = features_for(package, *compile_kind);
             let kind = library_unit_kind(manifest);
-            let library = unit_key(package, kind, *compile_kind, &features);
-            insert_unit(&mut units, library.clone());
+            let library = manifest
+                .library
+                .as_ref()
+                .map(|_| unit_key(package, kind, *compile_kind, &features));
+            if let Some(library) = &library {
+                insert_unit(&mut units, library.clone());
+            }
             if manifest.build_script.is_some() {
                 let compile = unit_key(
                     package,
@@ -462,13 +464,15 @@ fn dependency_units_with_selected(
                     UnitEdgeKind::BuildScriptExecutable,
                     None,
                 )?;
-                add_edge(
-                    &mut units,
-                    &library,
-                    run,
-                    UnitEdgeKind::BuildScriptOutput,
-                    None,
-                )?;
+                if let Some(library) = &library {
+                    add_edge(
+                        &mut units,
+                        library,
+                        run,
+                        UnitEdgeKind::BuildScriptOutput,
+                        None,
+                    )?;
+                }
             }
         }
     }
@@ -591,7 +595,7 @@ pub(crate) fn workspace_units(
             .find(|package| &package.key == key)
             .ok_or_else(|| Error::failure("selected member is absent from the unit resolution"))?;
         let manifest = &manifests[key];
-        if manifest.build_script.is_some() || library_unit_kind(manifest) == UnitKind::ProcMacro {
+        if library_unit_kind(manifest) == UnitKind::ProcMacro {
             return Err(Error::failure(format!(
                 "selected member `{}` requires build-time code; workspace execution of member build-time code is not yet supported",
                 key.name
@@ -613,6 +617,20 @@ pub(crate) fn workspace_units(
             );
             binary.target = Some(target.name.clone());
             insert_unit(&mut graph.units, binary.clone());
+            if manifest.build_script.is_some() {
+                add_edge(
+                    &mut graph.units,
+                    &binary,
+                    unit_key(
+                        package,
+                        UnitKind::BuildScriptRun,
+                        CompileKind::Target,
+                        &features_for(package, CompileKind::Target),
+                    ),
+                    UnitEdgeKind::BuildScriptOutput,
+                    None,
+                )?;
+            }
             for edge in package.edges.iter().filter(|edge| {
                 edge.kind == DependencyKind::Normal
                     && edge.parent_compile_kind == Some(CompileKind::Target)
@@ -2234,6 +2252,214 @@ mod tests {
                     .cloned()
                     .collect::<Vec<_>>();
                 assert_ordinary_cargo_plan(&cargo, &plan, &manifests, &roots);
+            }
+        }
+    }
+
+    #[test]
+    fn selected_member_build_script_graphs_match_cargo() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\", \"builder\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fixture.package("builder", "[package]\nname = \"builder\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[features]\nnormal = []\nbuild = []\n", false);
+        fixture.package("a", "[package]\nname = \"a\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[dependencies]\nbuilder = { path = \"../builder\", features = [\"normal\"] }\n[build-dependencies]\nbuilder = { path = \"../builder\", features = [\"build\"] }\n", true);
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[target.'cfg(unix)'.build-dependencies]\nbuilder = { path = \"../builder\", features = [\"build\"] }\n", true);
+        fs::remove_file(fixture.0.join("b/src/lib.rs")).unwrap();
+        fs::write(fixture.0.join("b/src/main.rs"), "fn main() {}\n").unwrap();
+        let lock = Command::new(env!("CARGO"))
+            .args(["generate-lockfile", "--offline"])
+            .env("CARGO_HOME", fixture.0.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(&fixture.0)
+            .output()
+            .unwrap();
+        assert!(
+            lock.status.success(),
+            "{}",
+            String::from_utf8_lossy(&lock.stderr)
+        );
+        let (workspace, members) = crate::manifest::SourceWorkspace::load_compilation(
+            &fixture.0,
+            None,
+            &crate::manifest::PackageSelection {
+                workspace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            members
+                .iter()
+                .filter(|member| member.build_script.is_some())
+                .all(|member| member
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency.kind == DependencyKind::Build))
+        );
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let options = Options {
+            resolver: members[0].resolver,
+            incompatible_rust_versions: None,
+            rust_versions: vec![Version::parse("1.99.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: None,
+        };
+        let mut catalog = Catalog::default();
+        let complete = crate::resolver::workspace::resolve_complete_workspace(
+            &workspace,
+            &mut catalog,
+            &options,
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let requests = crate::resolver::workspace::features::member_requests(
+            &workspace,
+            &members.iter().map(|member| member.root.clone()).collect(),
+            &crate::cli::FeatureSelection::default(),
+            false,
+        )
+        .unwrap();
+        let resolution = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &options,
+            &requests,
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let manifests = resolution
+            .packages
+            .iter()
+            .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let selected = resolution
+            .packages
+            .iter()
+            .map(|package| package.key.clone())
+            .collect::<Vec<_>>();
+        for command in ["build", "check"] {
+            let output = Command::new(env!("CARGO"))
+                .args([
+                    "-Z",
+                    "unstable-options",
+                    command,
+                    "--unit-graph",
+                    "--offline",
+                    "--workspace",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
+                ])
+                .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(&fixture.0)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let units = cargo["units"].as_array().unwrap();
+            let cargo_nodes = units
+                .iter()
+                .map(|unit| {
+                    (
+                        unit["pkg_id"]
+                            .as_str()
+                            .unwrap()
+                            .split('#')
+                            .next()
+                            .unwrap()
+                            .rsplit('/')
+                            .next()
+                            .unwrap()
+                            .to_owned(),
+                        unit["target"]["kind"][0].as_str().unwrap().to_owned(),
+                        unit["mode"].as_str().unwrap().to_owned(),
+                        unit["platform"].as_str().is_some(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let graph = workspace_units(
+                &resolution,
+                &manifests,
+                &selected,
+                command == "check",
+                true,
+                None,
+            )
+            .unwrap();
+            let node = |key: &UnitKey| {
+                (
+                    key.package.name.clone(),
+                    match key.kind {
+                        UnitKind::Library => "lib",
+                        UnitKind::Binary => "bin",
+                        UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => "custom-build",
+                        _ => panic!("unexpected scripted member unit"),
+                    }
+                    .to_owned(),
+                    if key.kind == UnitKind::BuildScriptRun {
+                        "run-custom-build"
+                    } else if key.mode == UnitMode::Check {
+                        "check"
+                    } else {
+                        "build"
+                    }
+                    .to_owned(),
+                    key.compile_kind == CompileKind::Target,
+                )
+            };
+            assert_eq!(
+                cargo_nodes.iter().cloned().collect::<BTreeSet<_>>(),
+                graph.units.keys().map(node).collect()
+            );
+            let cargo_edges = units
+                .iter()
+                .enumerate()
+                .flat_map(|(parent, unit)| {
+                    let nodes = &cargo_nodes;
+                    unit["dependencies"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(move |edge| {
+                            (
+                                nodes[parent].clone(),
+                                nodes[edge["index"].as_u64().unwrap() as usize].clone(),
+                            )
+                        })
+                })
+                .collect::<BTreeSet<_>>();
+            let edges = graph
+                .units
+                .values()
+                .flat_map(|unit| {
+                    unit.dependencies
+                        .iter()
+                        .map(|edge| (node(&unit.key), node(&edge.unit)))
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(cargo_edges, edges);
+            for unit in graph.units.values() {
+                let index = cargo_nodes
+                    .iter()
+                    .position(|candidate| *candidate == node(&unit.key))
+                    .unwrap();
+                assert_eq!(
+                    units[index]["features"],
+                    serde_json::json!(unit.key.features)
+                );
             }
         }
     }

@@ -2413,6 +2413,16 @@ yet remove the selected-member execution rejection.
 All thirteen policy tests, both native-tool grant configuration tests, and
 strict Clippy pass in `/tmp/lorry-m8-member-policy-{tests,config,clippy}.log`.
 
+Compiler manifests now retain member build-dependencies, including target
+tables. The shared planner retains script units for selected binary-only roots
+and attaches script outputs to each selected binary as well as its library.
+An offline Cargo unit-graph comparison covers scripted library and binary
+members, a selected build-dependency member, separate host/target features,
+and both build and check. That oracle, the root/source declaration comparison,
+and strict Clippy pass in `/tmp/lorry-m8-script-planner-{oracle-lock-fixed,manifest,clippy}.log`.
+Public script execution remains gated while environment and read-only workspace
+policy are implemented.
+
 **Result.** Member build-time code and all required targets use the shared
 graph. Workspace `test`, `run`, `clean`, and `new` follow Cargo.
 
