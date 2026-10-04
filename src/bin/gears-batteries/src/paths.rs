@@ -12,6 +12,15 @@ pub struct ToolContext {
 }
 
 impl ToolContext {
+    pub fn for_event(event: &crate::Event) -> Result<Self, String> {
+        Self::new(
+            event.workspace.clone(),
+            crate::default_root()?,
+            event.session.id.clone(),
+            event.session.path.as_deref(),
+        )
+    }
+
     pub fn from_env() -> Result<Self, String> {
         let workspace = std::env::var_os("GEARS_WORKSPACE")
             .map(PathBuf::from)

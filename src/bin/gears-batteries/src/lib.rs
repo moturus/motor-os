@@ -12,6 +12,7 @@ pub mod search;
 pub mod snapshot;
 pub mod todo;
 pub mod tool;
+pub mod turns;
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -67,6 +68,13 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
 }
 
 pub fn hook(event: Event) -> Result<Value, String> {
+    if matches!(event.event.as_str(), "turn_start" | "entry" | "turn_end") {
+        let result = paths::ToolContext::for_event(&event)
+            .and_then(|context| turns::observe(&event, &context));
+        return Ok(result.unwrap_or_else(
+            |error| json!({"notice": format!("turn record unavailable: {error}")}),
+        ));
+    }
     if event.event == "tool_execute" {
         return todo::execute(&event);
     }
