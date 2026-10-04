@@ -48,6 +48,22 @@ fn gears(root: &Path, workspace: &Path, config: &Path) -> Command {
 
 #[test]
 fn batteries_hook_uses_the_gears_sibling_even_when_path_contains_another_program() {
+    // Parallel spawns can inherit a writable copy fd until exec. Prepare and
+    // run these executables in a process with no other process-creating tests.
+    const CHILD: &str = "GEARS_SIBLING_FIXTURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "batteries_hook_uses_the_gears_sibling_even_when_path_contains_another_program",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let root = fixture("batteries-sibling");
     let workspace = root.join("workspace");
