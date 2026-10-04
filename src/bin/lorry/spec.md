@@ -400,8 +400,14 @@ Lorry reads only Cargo's compilation-related configuration for:
 
 It follows Cargo's discovery/merge behavior and supported
 `CARGO_TARGET_<TRIPLE>_*` environment forms for that subset. Registry,
-credential, alias, network, unstable, and other output-affecting unsupported
+credential, network, unstable, and other output-affecting unsupported
 settings must be rejected rather than adopted or ignored.
+Cargo configuration is discovered from the invocation directory and its
+parents, then CARGO_HOME. Package selection and --manifest-path do not move
+that search. An alias table may exist; Lorry does not execute aliases.
+Project lorry.toml is found at or above the workspace root, layered over
+user/system settings. A member-local lorry.toml fails with the workspace
+location to which its settings should move. System constraints still apply.
 
 ## Locking, resolution, and source selection
 

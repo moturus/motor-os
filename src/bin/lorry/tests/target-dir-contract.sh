@@ -15,6 +15,7 @@ if [ -z "${LORRY_TEST_RUSTC:-}" ]; then
 fi
 export RUSTC="$LORRY_TEST_RUSTC"
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 WORK="$(mktemp -d /tmp/lorry-target-dir-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project/.cargo" "$WORK/project/app/src"
@@ -64,4 +65,39 @@ printf '[build]\ntarget-dir = "configured"\n' \
     test -f "$WORK/project/app/cli-output/.lorry-artifacts.lock"
     test -f "$WORK/project/app/env-output/lorry/debug/app"
 )
+mkdir "$WORK/project/app/.cargo"
+printf '[build]\ntarget-dir = "member-configured"\n[alias]\nagent-build = ["build", "-p", "app"]\n' \
+    >"$WORK/project/app/.cargo/config.toml"
+(
+    cd "$WORK/project"
+    "$LORRY" build -p app
+    "$LORRY_TEST_CARGO" build --offline -p app
+    test -f configured/lorry/debug/app
+    test -f configured/debug/app
+    test ! -e app/member-configured
+    "$LORRY" check --manifest-path app/Cargo.toml --bin app
+    "$LORRY_TEST_CARGO" check --offline --manifest-path app/Cargo.toml --bin app
+    test -d configured/lorry/check
+    test ! -e app/member-configured
+)
+(
+    cd "$WORK/project/app"
+    "$LORRY" build
+    "$LORRY_TEST_CARGO" build --offline
+    test -f member-configured/lorry/debug/app
+    test -f member-configured/debug/app
+    if "$LORRY" agent-build >"$WORK/alias.out" 2>"$WORK/alias.err"; then
+        echo "target-dir-contract: executed a Cargo alias" >&2
+        exit 1
+    fi
+)
+printf 'config-version = 1\n' >"$WORK/project/app/lorry.toml"
+if (cd "$WORK/project" && "$LORRY" build -p app) 2>"$WORK/member-config.err"; then
+    echo "target-dir-contract: accepted member-local project configuration" >&2
+    exit 1
+fi
+grep -F "$WORK/project/app/lorry.toml" "$WORK/member-config.err" >/dev/null
+grep -F "move project settings to \`$WORK/project/lorry.toml\`" "$WORK/member-config.err" >/dev/null
+mv "$WORK/project/app/lorry.toml" "$WORK/project/lorry.toml"
+(cd "$WORK/project" && "$LORRY" build -p app)
 echo "PASS: CLI, environment, and Cargo config choose target directories like Cargo"

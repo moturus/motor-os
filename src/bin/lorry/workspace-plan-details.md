@@ -1173,6 +1173,16 @@ manifest tests, the paired Clippy contract, and strict Clippy in
 all three namespaces, including lint priorities, in explicit and implicit
 members. Both Cargo and Lorry reject a member override alongside inheritance.
 
+Configuration discovery now separates the invocation directory from the
+workspace policy root. Sixteen focused configuration tests and the paired
+Cargo target-directory contract passed in `/tmp/lorry-m5-config-unit.log` and
+`/tmp/lorry-m5-config-contract.log`. The contract gives a member a different
+Cargo target directory and proves root invocation and manifest-path selection
+still use root configuration, while member invocation uses its own Cargo
+configuration. It also covers alias acceptance without execution, an
+actionable member-local Lorry configuration error, and moving that file to
+the workspace root.
+
 **Result.** Every command uses the same workspace membership and manifest
 inheritance rules. One member can be built or checked from the workspace
 root. The shared model is ready for multi-member execution.

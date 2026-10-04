@@ -262,6 +262,12 @@ component globs `*`, `?`, and `[...]`; recursive `**` is rejected.
 `workspace.lints`; member overrides alongside inheritance are rejected.
 Dependency inheritance and example and bench targets follow later.
 
+Cargo configuration follows the invocation directory and its parents;
+selecting a package or supplying `--manifest-path` does not move that search.
+Cargo alias tables are accepted, but aliases are not executed. Project
+`lorry.toml` belongs at the workspace root or above it. A member-local file
+is rejected with the location to which its settings should move.
+
 `locate-project` emits `{"root":"/absolute/path/Cargo.toml"}`, or the path
 alone with `--message-format plain`. The manifest must currently be in the
 working directory or supplied with `--manifest-path`. Both with and without

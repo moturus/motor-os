@@ -73,7 +73,7 @@ fn execute_reconcile(
     requested: Option<(&str, &str)>,
 ) -> Result<i32> {
     let manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
-    let config = Config::load(&manifest.root)?;
+    let config = Config::load(current, &manifest)?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     let lock = ProjectVendorLock::acquire(&manifest.workspace_root)?;
     if cli.verbosity == Verbosity::Verbose {

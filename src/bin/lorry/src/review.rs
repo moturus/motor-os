@@ -21,7 +21,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             "run `lorry vendor [--accept-all]` once to create `.lorry/dependencies-v2.toml`",
         )
     })?;
-    let config = Config::load(&manifest.root)?;
+    let config = Config::load(&current, &manifest)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     engine::check_rust_version(&manifest, &toolchain)?;
     let options = dependency::resolver_options(&manifest, &config, &toolchain)?;

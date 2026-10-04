@@ -10,7 +10,7 @@ pub fn execute(options: &CleanOptions, package: Option<&str>, verbosity: Verbosi
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = crate::manifest::Manifest::load_selected(&current, package)?;
-    let config = Config::load(&manifest.root)?;
+    let config = Config::load(&current, &manifest)?;
     let target_directory = config.target_directory(
         &current,
         &manifest.workspace_root,

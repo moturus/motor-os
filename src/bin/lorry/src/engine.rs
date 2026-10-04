@@ -94,7 +94,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         }
     }
     let compact_state = CompactState::load(&manifest.root)?;
-    let mut config = Config::load(&manifest.root)?;
+    let mut config = Config::load(&current, &manifest)?;
     let requested_target_directory = match &cli.command {
         Command::Build(options) => options.target_dir.as_deref(),
         Command::Check(options) => options.target_dir.as_deref(),

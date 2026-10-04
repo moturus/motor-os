@@ -29,7 +29,7 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
         cli.package.as_deref(),
         true,
     )?;
-    let mut config = Config::load(&manifest.root)?;
+    let mut config = Config::load(&current, &manifest)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     crate::engine::check_rust_version(&manifest, &toolchain)?;
     let physical_target = config.selected_target(options.target.as_deref())?;

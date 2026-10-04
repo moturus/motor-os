@@ -242,24 +242,46 @@ enum LayerKind {
 }
 
 impl Config {
-    pub fn load(package_root: &Path) -> Result<Self> {
+    pub fn load(current: &Path, manifest: &crate::manifest::Manifest) -> Result<Self> {
+        for root in manifest.workspace_members.values() {
+            let path = root.join("lorry.toml");
+            if root != &manifest.workspace_root && path.is_file() {
+                return Err(Error::failure(format!(
+                    "workspace member configuration `{}` is not supported",
+                    path.display()
+                ))
+                .with_help(format!(
+                    "move project settings to `{}`",
+                    manifest.workspace_root.join("lorry.toml").display()
+                )));
+            }
+        }
         let environment = current_environment();
-        Self::load_with_environment(package_root, &environment)
+        Self::load_project_with_environment(current, &manifest.workspace_root, &environment)
     }
 
     pub fn load_global() -> Result<Self> {
         Self::load_global_with_environment(&current_environment())
     }
 
+    #[cfg(test)]
     fn load_with_environment(
         package_root: &Path,
         environment: &BTreeMap<String, String>,
     ) -> Result<Self> {
+        Self::load_project_with_environment(package_root, package_root, environment)
+    }
+
+    fn load_project_with_environment(
+        current: &Path,
+        workspace_root: &Path,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Self> {
         reject_environment(environment)?;
         let mut config = Config::default();
-        load_lorry_layers(package_root, environment, &mut config)?;
+        load_lorry_layers(workspace_root, environment, &mut config)?;
         validate_storage_layout(&config, environment)?;
-        load_cargo_layers(package_root, environment, &mut config)?;
+        load_cargo_layers(current, environment, &mut config)?;
         apply_cargo_environment(environment, &mut config)?;
         Ok(config)
     }
@@ -1256,14 +1278,17 @@ fn cargo_config_in(directory: &Path) -> Option<PathBuf> {
 fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
     let document = Document::load(path, "Cargo configuration")?;
     for (key, item) in document.root().iter() {
-        if !matches!(key, "build" | "target" | "resolver") {
+        if !matches!(key, "build" | "target" | "resolver" | "alias") {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
                 format!("unsupported Cargo configuration table or key `{key}`"),
-                "Lorry reads only build, target, and resolver configuration",
+                "Lorry reads build, target, and resolver configuration and accepts aliases without executing them",
             ));
         }
+    }
+    if let Some(item) = document.root().get("alias") {
+        require_table(path, &document, item, "alias")?;
     }
     let definition_root = path
         .parent()
