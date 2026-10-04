@@ -2243,6 +2243,17 @@ and admission bytes, and proves verification compiles nothing. All four
 workspace-admission tests and strict Clippy pass in
 `/tmp/lorry-m7-shared-admission-{tests-fixed,clippy}.log`.
 
+Compilation preparation now accepts the verified member-root graph, validates
+compiler manifests while preserving workspace source ownership, enforces
+execution grants, and feeds the shared planner with the existing source remaps
+and identity machinery. Its regression covers a binary-only root and an
+unselected scripted member dependency: preparation rejects a missing grant,
+then retains identical source evidence with an exact grant and plans all four
+units without executing code. The initial diagnostic confirmed that the
+dependency manifest loader omits binaries; binary-only members now use selected
+package loading. Six workspace preparation/admission tests and strict Clippy
+pass in `/tmp/lorry-m7-shared-preparation-plan-{tests,clippy}.log`.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 

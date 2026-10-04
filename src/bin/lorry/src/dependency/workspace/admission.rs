@@ -313,19 +313,7 @@ fn legacy_dependency_graph(mut selected: Resolution, root: &Path) -> Result<Reso
             edge
         })
         .collect();
-    for package in &mut selected.packages {
-        if let Some(manifest) = &package.local_manifest {
-            let mut compilation = Manifest::load_path_dependency(&manifest.root)?;
-            compilation.editable = manifest.editable;
-            compilation
-                .workspace_root
-                .clone_from(&manifest.workspace_root);
-            compilation
-                .workspace_members
-                .clone_from(&manifest.workspace_members);
-            package.local_manifest = Some(compilation);
-        }
-    }
+    compilation_manifests(&mut selected)?;
     Ok(selected)
 }
 

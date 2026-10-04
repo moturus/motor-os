@@ -62,10 +62,205 @@ pub(crate) fn prepare_sources(
     })
 }
 
+pub(crate) fn prepare_compilation(
+    mut resolution: Resolution,
+    config: &Config,
+    source: RegistrySource<'_>,
+    staging_parent: &Path,
+    direct: &crate::git::DirectCatalog,
+) -> Result<PreparedGraph> {
+    compilation_manifests(&mut resolution)?;
+    policy::preflight_sources(&config.policy, &resolution)?;
+    let preflight = policy::preflight_workspace(&config.policy, &resolution)?;
+    let packages =
+        prepare_resolution_packages(&resolution, config, source, staging_parent, direct, false)?;
+    let evidence = packages
+        .iter()
+        .map(|(key, package)| (key.clone(), package.evidence.clone()))
+        .collect();
+    let admission = policy::inspect(&preflight, &resolution, &evidence)?;
+    Ok(PreparedGraph {
+        resolution,
+        admission,
+        packages,
+        cargo_registry_mode: matches!(source, RegistrySource::Cargo(_)),
+    })
+}
+
+// Compiler loading validates executable target descriptions. Preserve the
+// workspace ownership that also defines member source identity and freshness.
+pub(super) fn compilation_manifests(resolution: &mut Resolution) -> Result<()> {
+    for package in &mut resolution.packages {
+        if let Some(manifest) = &package.local_manifest {
+            let mut compilation = if manifest.editable && manifest.library.is_none() {
+                Manifest::load_selected(&manifest.root, None)?
+            } else {
+                Manifest::load_path_dependency(&manifest.root)?
+            };
+            compilation.editable = manifest.editable;
+            compilation
+                .workspace_root
+                .clone_from(&manifest.workspace_root);
+            compilation
+                .workspace_members
+                .clone_from(&manifest.workspace_members);
+            package.local_manifest = Some(compilation);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn compilation_preparation_retains_member_roots_and_requires_execution_grants() {
+        let fixture = super::super::tests::Fixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"shared\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        for member in ["app", "shared"] {
+            let root = fixture.0.join(member);
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(
+                root.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{member}\"\nversion = \"1.0.0\"\nedition = \"2024\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        fs::write(fixture.0.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[dependencies]\nshared = { path = \"../shared\" }\n").unwrap();
+        fs::write(fixture.0.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(fixture.0.join("shared/src/lib.rs"), "pub fn shared() {}\n").unwrap();
+        fs::write(
+            fixture.0.join("shared/build.rs"),
+            format!(
+                "fn main() {{ std::fs::write({:?}, \"executed\").unwrap(); }}\n",
+                fixture.0.join("executed")
+            ),
+        )
+        .unwrap();
+        fs::write(fixture.0.join("Cargo.lock"), "version = 4\n[[package]]\nname = \"app\"\nversion = \"1.0.0\"\ndependencies = [\"shared\"]\n[[package]]\nname = \"shared\"\nversion = \"1.0.0\"\n").unwrap();
+        let mut workspace = SourceWorkspace::load(&fixture.0, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        let mut config = Config::default();
+        let repositories = RepositorySet::open(
+            &config.repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            config.policy.limits.max_package_bytes,
+        )
+        .unwrap();
+        let source = RegistrySource::Lorry(&repositories);
+        let direct = crate::git::DirectCatalog::default();
+        let options = super::super::tests::options(&workspace.packages[0]);
+        let (complete, catalog) =
+            resolve_locked(&workspace, &config, source, &direct, &options).unwrap();
+        let cfg = crate::toolchain::CfgSet::parse("unix\n").unwrap();
+        let members = crate::resolver::workspace::features::member_requests(
+            &workspace,
+            &[fixture.0.join("app")].into(),
+            &crate::cli::FeatureSelection::default(),
+            false,
+        )
+        .unwrap();
+        let selected = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &options,
+            &members,
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let before = selected
+            .packages
+            .iter()
+            .map(|package| {
+                (
+                    package.key.clone(),
+                    PackageEvidence::from_path(package).unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let error = prepare_compilation(selected.clone(), &config, source, &fixture.0, &direct)
+            .unwrap_err();
+        assert!(
+            error
+                .render()
+                .contains("contains a build script without an explicit matching policy grant"),
+            "{}",
+            error.render()
+        );
+        let shared = selected
+            .packages
+            .iter()
+            .find(|package| package.key.name == "shared")
+            .unwrap();
+        config.policy.rules.insert(
+            "shared-script".into(),
+            crate::config::PolicyRule {
+                action: crate::config::PolicyAction::Allow,
+                name: Some("shared".into()),
+                version: Some(semver::VersionReq::parse("=1.0.0").unwrap()),
+                source: Some("path".into()),
+                checksum: None,
+                source_tree_sha256: Some(hex(&before[&shared.key].source_tree_sha256)),
+                license: None,
+                allow_build_script: true,
+                allow_proc_macro: false,
+                native_tools: BTreeSet::new(),
+                provenance: fixture.0.join("lorry.toml"),
+            },
+        );
+        let prepared = prepare_compilation(selected, &config, source, &fixture.0, &direct).unwrap();
+        assert_eq!(prepared.resolution.root_edges.len(), 1);
+        assert_eq!(prepared.packages.len(), 2);
+        for (key, package) in &prepared.packages {
+            assert_eq!(package.evidence, before[key]);
+            assert_eq!(package.manifest.workspace_root, workspace.root);
+            assert!(package.manifest.editable);
+        }
+        let app = prepared
+            .packages
+            .keys()
+            .find(|key| key.name == "app")
+            .unwrap()
+            .clone();
+        assert!(prepared.packages[&app].manifest.library.is_none());
+        assert_eq!(prepared.packages[&app].manifest.binaries.len(), 1);
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
+        let plan = prepared
+            .workspace_plan(
+                &PlanOptions {
+                    workspace_root: &workspace.root,
+                    release: false,
+                    test_profile: false,
+                    panic_abort: false,
+                    release_profile: &workspace.packages[0].release,
+                    rustc: &toolchain,
+                    logical_target: None,
+                    rustflags: &[],
+                },
+                &[app],
+                false,
+                true,
+                None,
+            )
+            .unwrap();
+        assert_eq!(plan.units.len(), 4);
+        assert!(!fixture.0.join("executed").exists());
+        assert!(!fixture.0.join("target").exists());
+        assert!(!fixture.0.join(".lorry").exists());
+    }
 
     #[test]
     fn complete_workspace_sources_do_not_execute_or_create_admission() {
