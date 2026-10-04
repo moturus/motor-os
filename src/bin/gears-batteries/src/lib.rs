@@ -5,6 +5,7 @@ pub mod file_record;
 pub mod instructions;
 pub mod paths;
 pub mod snapshot;
+pub mod tool;
 
 use std::io::Read;
 use std::path::PathBuf;

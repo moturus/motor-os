@@ -10,6 +10,14 @@ fn main() {
 fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [role, name] if role == "tool" => {
+            let context = gears_batteries::paths::ToolContext::from_env()?;
+            let response = gears_batteries::tool::run(name, std::io::stdin().lock(), &context)?;
+            serde_json::to_writer(std::io::stdout().lock(), &response)
+                .map_err(|error| error.to_string())?;
+            println!();
+            Ok(())
+        }
         [role] if role == "hook" => {
             let event = gears_batteries::read_event(std::io::stdin().lock())?;
             let response = gears_batteries::hook(event)?;
@@ -18,9 +26,9 @@ fn run() -> Result<(), String> {
             stdout.write_all(b"\n").map_err(|error| error.to_string())
         }
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("usage: gears-batteries hook\nOptional workflows for Gears.");
+            println!("usage: gears-batteries hook | tool NAME\nOptional workflows for Gears.");
             Ok(())
         }
-        _ => Err("usage: gears-batteries hook".into()),
+        _ => Err("usage: gears-batteries hook | tool NAME".into()),
     }
 }

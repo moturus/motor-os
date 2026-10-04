@@ -1,0 +1,1 @@
+{"type":"object","properties":{"path":{"type":"string","description":"File path, relative to the workspace or absolute."},"offset":{"type":"integer","minimum":0,"description":"Byte offset returned by the previous page; omit for the first page."}},"required":["path"],"additionalProperties":false}

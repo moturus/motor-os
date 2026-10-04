@@ -1,0 +1,15 @@
+version = 1
+kind = "process"
+name = "read_file"
+description = "Read numbered UTF-8 file text in bounded pages. Follow next_offset until all_pages_read before overwriting an existing file."
+parameters = "parameters.json"
+read_only = true
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 262144
+output = "stdout"
+stdin = "arguments"
+
+[process.command]
+common = ["gears-batteries", "tool", "read_file"]
