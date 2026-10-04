@@ -774,6 +774,7 @@ struct Acquisition<'a> {
     inspections: Vec<ExtractedArchive>,
     state: Option<AcquisitionState>,
     progress: Progress,
+    describe: bool,
 }
 
 struct AcquisitionState {
@@ -837,7 +838,73 @@ impl<'a> Acquisition<'a> {
             inspections: Vec::new(),
             state: None,
             progress,
+            describe: false,
         })
+    }
+
+    #[allow(dead_code)] // Used by the workspace fetch command next.
+    fn for_sources(config: &'a Config, manifest: &Manifest, progress: Progress) -> Result<Self> {
+        let mut acquisition = Self::new(config, manifest, progress)?;
+        acquisition.describe = true;
+        Ok(acquisition)
+    }
+
+    #[allow(dead_code)] // Locked acquisition also serves vendor --locked.
+    fn load_locked_sparse(
+        &mut self,
+        manifest: &Manifest,
+        name: &str,
+        catalog: &mut Catalog,
+        offline: bool,
+    ) -> Result<()> {
+        let locked = manifest
+            .lock
+            .iter()
+            .flat_map(|lock| &lock.packages)
+            .filter(|package| {
+                package.name == name
+                    && package.source.as_deref()
+                        == Some("registry+https://github.com/rust-lang/crates.io-index")
+            })
+            .collect::<Vec<_>>();
+        if locked.is_empty() {
+            return Err(
+                Error::failure(format!("Cargo.lock has no crates.io package `{name}`"))
+                    .with_help("run `lorry vendor` to reconcile the workspace lock"),
+            );
+        }
+        for package in locked {
+            let version = Version::parse(&package.version.original)
+                .map_err(|error| Error::failure(format!("invalid locked version: {error}")))?;
+            let key = (name.to_owned(), version.clone());
+            if !self.records.contains_key(&key) {
+                if offline {
+                    return Err(Error::failure(format!(
+                        "verified index evidence for `{name} {version}` is unavailable offline"
+                    ))
+                    .with_help("run `lorry fetch` to acquire the locked sources"));
+                }
+                let exact = semver::VersionReq::parse(&format!("={version}")).map_err(|error| {
+                    Error::failure(format!("invalid locked requirement: {error}"))
+                })?;
+                // Downloading an index must not admit candidates outside the lock.
+                self.load_sparse(name, &exact, &mut Catalog::default())?;
+            }
+            let record = self.records.get(&key).ok_or_else(|| {
+                Error::failure(format!(
+                    "crates.io index has no locked package `{name} {version}`"
+                ))
+            })?;
+            if package.checksum.as_deref() != Some(hex(&record.checksum).as_str()) {
+                return Err(Error::failure(format!(
+                    "crates.io index checksum disagrees with Cargo.lock for `{name} {version}`"
+                )));
+            }
+            if !catalog.contains_registry(name, &version) {
+                catalog.insert(record.clone())?;
+            }
+        }
+        Ok(())
     }
 
     fn repositories(&self) -> &RepositorySet {
@@ -897,6 +964,7 @@ impl<'a> Acquisition<'a> {
 
     fn stage_selected(&mut self, resolution: &Resolution) -> Result<usize> {
         let max_package_bytes = self.config.policy.limits.max_package_bytes;
+        let describe = self.describe;
         self.stage_selected_with(resolution, |state, package, record| {
             let url = archive_url(&package.key.name, &package.key.version)?;
             let download = state.client.download(
@@ -905,7 +973,13 @@ impl<'a> Acquisition<'a> {
                 state.transaction.path(),
                 max_package_bytes,
             )?;
-            state.transaction.stage_registry(record, download.path())?;
+            if describe {
+                state
+                    .transaction
+                    .stage_registry_description(record, download.path())?;
+            } else {
+                state.transaction.stage_registry(record, download.path())?;
+            }
             Ok(())
         })
     }
@@ -936,7 +1010,9 @@ impl<'a> Acquisition<'a> {
                 retained.push(object);
             }
         }
-        repositories.load_registry_manifests(&retained)?;
+        if !self.describe {
+            repositories.load_registry_manifests(&retained)?;
+        }
         let git_packages = resolution
             .packages
             .iter()
@@ -1000,7 +1076,9 @@ impl<'a> Acquisition<'a> {
                             self.inspections.push(extracted);
                             (source, tree)
                         };
-                        let manifest = if object.retained_source {
+                        let manifest = if self.describe {
+                            Manifest::load_source_dependency(&source)?
+                        } else if object.retained_source {
                             repositories.load_registry_manifest(&object)?
                         } else {
                             Manifest::load_path_dependency(&source)?
@@ -1903,6 +1981,36 @@ mod tests {
             .records
             .insert(("demo".to_owned(), version.clone()), record.clone());
         acquisition.fetched.insert("demo".to_owned());
+        let mut locked_catalog = Catalog::default();
+        acquisition
+            .load_locked_sparse(&manifest, "demo", &mut locked_catalog, true)
+            .unwrap();
+        assert!(locked_catalog.contains_registry("demo", &version));
+        assert!(
+            acquisition
+                .load_locked_sparse(&manifest, "absent", &mut Catalog::default(), true)
+                .is_err()
+        );
+        let mut wrong_lock = manifest.clone();
+        wrong_lock.lock.as_mut().unwrap().packages[0].checksum = Some("00".repeat(32));
+        assert!(
+            acquisition
+                .load_locked_sparse(&wrong_lock, "demo", &mut Catalog::default(), true)
+                .unwrap_err()
+                .render()
+                .contains("checksum disagrees")
+        );
+        let mut missing =
+            Acquisition::for_sources(&config, &manifest, Progress::new(false)).unwrap();
+        assert!(missing.describe);
+        assert!(
+            missing
+                .load_locked_sparse(&manifest, "demo", &mut Catalog::default(), true)
+                .unwrap_err()
+                .render()
+                .contains("unavailable offline")
+        );
+        assert!(missing.state.is_none());
         let requirement = semver::VersionReq::parse("^1").unwrap();
         let mut catalog = Catalog::default();
         acquisition

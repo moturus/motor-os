@@ -441,7 +441,6 @@ impl RepositoryTransaction {
         self.stage_registry_package(record, archive, false)
     }
 
-    #[allow(dead_code)] // Consumed by the workspace acquisition command next.
     pub(crate) fn stage_registry_description(
         &mut self,
         record: &SparseRecord,
