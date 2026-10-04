@@ -1,5 +1,5 @@
 #!/bin/bash
-# The installed batteries binary against native command-hook input.
+# Native policy input and a hermetic real-tool workflow with a compiler check.
 set -euo pipefail
 WD="$(cd "$(dirname "$0")" && pwd)"
 case "${1:-}" in
@@ -24,4 +24,12 @@ if printf '{}' | "${SSH[@]}" "$BATTERIES_BIN" hook; then
   echo "batteries accepted malformed hook input" >&2
   exit 1
 fi
+"${SSH[@]}" "${GEARS_BATTERIES_VM_SMOKE:-/devtools/tests/gears/gears-batteries-smoke}" \
+  "$BATTERIES_BIN" /devtools/bin/rustc
+# No chat prompt: load the installed config and its sibling hook without a
+# provider request or a persistent session. The key is a fixture placeholder.
+OUTPUT="$(printf '/tools\n/quit\n' | "${SSH[@]}" \
+  'OPENROUTER_API_KEY=fixture-local /devtools/bin/gears --ui line --ephemeral --config /user/cfg/gears/gears-batteries.toml --provider local --model fixture --workspace /user/tmp' 2>&1)"
+# /tools lists directory tools; hook setup failures appear as gears: notices.
+python3 -c 'import sys; output = sys.stdin.read(); assert "read_file: enabled (config)" in output and "check: enabled (config)" in output, output; assert "gears:" not in output, output' <<< "$OUTPUT"
 echo "test-gears-batteries-vm.sh ALL PASS"

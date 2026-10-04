@@ -91,6 +91,8 @@ On Linux, use `~/.gears/gears-batteries.toml` as the configuration path.
 The sample selects OpenRouter and reads `openrouter.key` beside the config.
 For a local OpenAI-compatible server, set `providers.local.base_url` and
 select `--provider local --model MODEL`. Only loopback HTTP is enabled.
+If the server uses another host, add it to both `net.egress_allowlist` and
+`net.plain_http_allowlist` when using HTTP.
 Put the local server's key in `local.key` beside the config; for a server
 that ignores authentication, that file can contain a placeholder such as
 `local`. Explicit keys are required for HTTP providers.

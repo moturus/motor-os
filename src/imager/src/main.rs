@@ -957,6 +957,12 @@ mod tests {
             .input_files
             .iter()
             .any(|path| path == "/devtools/bin/gears"));
+        for path in [
+            "/devtools/bin/gears-batteries",
+            "/devtools/tests/gears/gears-batteries-smoke",
+        ] {
+            assert!(config.input_files.iter().any(|candidate| candidate == path));
+        }
         assert!(config
             .input_files
             .iter()
@@ -1060,7 +1066,7 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/devtools/tests/gears"));
-        assert_eq!(config.source_dirs.len(), 6);
+        assert_eq!(config.source_dirs.len(), 7);
         for (source, destination) in [
             ("src/bin/red", "/devtools/src/motor-os/bin/red"),
             ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
@@ -1070,6 +1076,7 @@ mod tests {
                 "/devtools/src/motor-os/bin/gears-batteries",
             ),
             ("src/bin/gears/tools", "/user/cfg/gears/tools"),
+            ("src/bin/gears-batteries/tools", "/user/cfg/gears/tools"),
             ("src/bin/gears/config", "/user/cfg/gears"),
         ] {
             assert!(config

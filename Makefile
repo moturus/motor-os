@@ -227,8 +227,10 @@ gears:
 
 gears-batteries:
 	mkdir -p $(BIN_DIR)
-	cd src/bin/gears-batteries && CARGO_TARGET_DIR="$(OBJ_DIR)/gears-batteries" $(DO_BUILD)
+	cd src/bin/gears-batteries && CARGO_TARGET_DIR="$(OBJ_DIR)/gears-batteries" \
+		$(DO_BUILD) --bins --examples
 	strip -o "$(BIN_DIR)/gears-batteries" "$(OBJ_DIR)/gears-batteries/$(SUB_DIR)/gears-batteries"
+	strip -o "$(BIN_DIR)/gears-batteries-smoke" "$(OBJ_DIR)/gears-batteries/$(SUB_DIR)/examples/workflow-smoke"
 
 gears-mock-provider:
 	mkdir -p $(BIN_DIR)

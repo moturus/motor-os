@@ -25,11 +25,27 @@ shell wrappers and saved shell directories. Commands that may publish or
 discard work require fresh confirmation. This prevents accidents and makes
 no confinement claim. A malformed policy request denies the call; optional
 recording and setup failures report notices and preserve their prior state.
-The installed Gears configuration does not enable the batteries hook yet.
+The default `gears.toml` keeps optional tools disabled. The developer image
+also installs `/user/cfg/gears/gears-batteries.toml`, which enables the
+batteries hook and coding tools. Select it explicitly:
+
+```sh
+gears --config /user/cfg/gears/gears-batteries.toml --model MODEL
+```
+
+On Linux, install that sample and both crates' tool directories in `~/.gears`,
+with `gears-batteries` beside `gears`. Use `~/.gears/gears-batteries.toml` as
+the config path. See [Gears setup](../gears/README.md) for provider selection
+and explicit key files. The bare batteries program name resolves beside the
+Gears executable for tools, hooks and after-turn commands.
 
 Run `src/tests/test-gears-batteries.sh` from the Motor OS repository root for
 the hermetic host gate. The release developer-image gate exercises the
-installed binary and rebuilds the packaged source with Lorry.
+installed binary and rebuilds the packaged source with Lorry. The portable
+workflow fixture uses a scripted provider to drive real file tools, a Rust
+compiler check, task branching and the bounded missing-check reminder.
+It also verifies saved approval details and the mechanical turn journal.
+The host and native workflow tests make no provider or Internet requests.
 
 Declare one check at the workspace root in `.gears/batteries.toml`:
 
@@ -41,6 +57,14 @@ For platform overrides, use `[check]` with `linux = [...]`, `motor = [...]`
 and an optional `common = [...]` fallback. Every item is a literal argument;
 use a program or script directly. Shell `-c` declarations are refused.
 The declaration is limited to 128 items and 8 KiB of serialized JSON.
+Lorry builds are already offline; a Motor OS declaration can use
+`check = ["lorry", "test"]`. For a workspace tested on both systems:
+
+```toml
+[check]
+linux = ["cargo", "test", "--offline"]
+motor = ["lorry", "test"]
+```
 
 The check approval prompt shows the declared vector. Its first run and each
 changed declaration require fresh confirmation; a denied call does not
