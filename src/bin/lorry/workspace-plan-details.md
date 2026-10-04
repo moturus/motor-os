@@ -1400,6 +1400,14 @@ Resolver-specific feature propagation belongs to milestone 6. Before a
 command can execute a selected target or set of packages, reject unsupported
 selections rather than reducing them to one package.
 
+The shared CLI now preserves repeated comma/space lists, qualified names,
+weak dependency features, and all/default feature flags. Cargo's early
+syntax errors are rejected, while source-only metadata accepts feature
+options without resolving them. Other readers explicitly reject nondefault
+feature selection until milestone 6. The 26 CLI tests, strict Clippy, and
+paired workspace contract passed in
+`/tmp/lorry-m5-feature-syntax-{cli,clippy,contract}.log`.
+
 ### Patches and proof
 
 Example and bench descriptions now include explicit tables, file and

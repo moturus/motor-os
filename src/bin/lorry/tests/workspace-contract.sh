@@ -157,6 +157,20 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
     done
     "$LORRY" build -p app -p app@0.1
     "$LORRY" test -p app -p app --no-run
+    for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+        "$builder" metadata --no-deps --format-version 1 --features 'unused,app/unknown optional?/feature' \
+            -F 'unused, other' --all-features --no-default-features >"$WORK/features.$(basename "$builder").json"
+        for invalid in 'dep:optional' 'package/feature/other'; do
+            if "$builder" metadata --no-deps --features "$invalid" 2>"$WORK/features.err"; then exit 1; fi
+        done
+    done
+    "$LORRY_TEST_CARGO" run --quiet --locked --offline \
+        --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- compare-projection \
+        "$WORK/features.lorry.json" "$WORK/features.cargo.json"
+    for command in check build test; do
+        if "$LORRY" "$command" -p app --no-default-features 2>"$WORK/features.err"; then exit 1; fi
+        grep -F 'feature selection is not yet supported by workspace resolution' "$WORK/features.err" >/dev/null
+    done
     for selectors in '-p app -p tool' '--workspace -p app'; do
         read -r -a options <<<"$selectors"
         if "$LORRY" check "${options[@]}" 2>"$WORK/selection.err"; then exit 1; fi

@@ -21,6 +21,7 @@ use crate::toolchain::Toolchain;
 use crate::validation::ValidationMode;
 
 pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
+    cli.features.require_default()?;
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = Manifest::load_selection(

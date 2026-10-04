@@ -13,6 +13,7 @@ use crate::repository::RepositorySet;
 use crate::toolchain::Toolchain;
 
 pub fn execute(cli: &Cli) -> Result<i32> {
+    cli.features.require_default()?;
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = Manifest::load_selection(

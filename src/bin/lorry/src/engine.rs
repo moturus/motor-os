@@ -53,6 +53,7 @@ fn report_build_completion(cli: &Cli, reported: &mut bool) -> Result<()> {
 }
 
 fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
+    cli.features.require_default()?;
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = Manifest::load_selection(

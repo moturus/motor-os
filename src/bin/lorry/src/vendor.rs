@@ -36,6 +36,7 @@ use crate::upgrade;
 use crate::vendor_lock::ProjectVendorLock;
 
 pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
+    cli.features.require_default()?;
     if cli.use_cargo_registry {
         return Err(Error::usage(
             "`--use-cargo-registry` cannot be combined with `vendor`",

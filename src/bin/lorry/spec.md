@@ -301,6 +301,12 @@ but all members are selected; with exclusions `-p` is ignored. Unmatched
 exclusions warn, except in quiet mode. Empty and multi-member selections
 fail explicitly until execution support lands. Run accepts one `-p` and
 rejects package patterns. Package IDs do not require a manifest-path option.
+Build, check, Clippy, run, test, tree, metadata, vendor, and review share
+repeated `--features`/`-F`, comma/space lists, qualified and weak dependency
+features, `--all-features`, and `--no-default-features`. Explicit `dep:`
+names and multiple slashes fail as in Cargo. Source-only metadata describes
+declared features regardless of selection. Commands that require resolution
+reject nondefault feature selection until workspace resolution supports it.
 Every manifest-reading command accepts --manifest-path. Relative paths use
 the invocation directory; package selection and configuration discovery
 remain independent of that path.

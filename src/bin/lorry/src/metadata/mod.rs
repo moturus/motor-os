@@ -38,6 +38,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         Manifest::report_warnings(&workspace.packages, cli.verbosity);
         return write_document(&graph::no_dependencies(&workspace)?);
     }
+    cli.features.require_default()?;
     let manifest = Manifest::load_selected_or_manifest_path(
         &current,
         options.manifest_path.as_deref().map(std::path::Path::new),

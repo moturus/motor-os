@@ -6,6 +6,9 @@ use crate::diagnostic::{Error, Result};
 use crate::manifest::PackageSelection;
 use crate::validation::ValidationMode;
 
+mod features;
+pub(crate) use features::FeatureSelection;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Color {
     Auto,
@@ -28,6 +31,7 @@ pub struct Cli {
     pub use_cargo_registry: bool,
     pub lorry_messages: bool,
     pub selection: PackageSelection,
+    pub features: FeatureSelection,
     pub manifest_path: Option<String>,
     pub command: Command,
 }
@@ -302,6 +306,11 @@ impl Cli {
                 exclude: optional_values(command, "exclude"),
             })
             .unwrap_or_default();
+        let features = matches
+            .subcommand()
+            .map(|(_, command)| FeatureSelection::parse(command))
+            .transpose()?
+            .unwrap_or_default();
         let manifest_path = matches
             .subcommand()
             .and_then(|(_, command)| {
@@ -365,6 +374,7 @@ impl Cli {
             use_cargo_registry,
             lorry_messages: matches.get_flag("lorry-messages"),
             selection,
+            features,
             manifest_path,
             command,
         })
@@ -467,6 +477,7 @@ fn command_line() -> ClapCommand {
                 .disable_help_flag(true)
                 .dont_delimit_trailing_values(true)
                 .arg(package_argument())
+                .args(feature_selection_arguments())
                 .arg(manifest_path_argument()),
         )
         .subcommand(run_command())
@@ -516,6 +527,7 @@ fn metadata_command() -> ClapCommand {
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
         .arg(manifest_path_argument())
+        .args(feature_selection_arguments())
         .arg(
             Arg::new("format-version")
                 .long("format-version")
@@ -547,6 +559,7 @@ fn check_command(name: &'static str) -> ClapCommand {
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
         .arg(package_argument())
+        .args(feature_selection_arguments())
         .arg(manifest_path_argument())
         .args(locked_offline_arguments())
         .arg(jobs_argument())
@@ -632,6 +645,7 @@ fn tree_command() -> ClapCommand {
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
         .arg(package_argument())
+        .args(feature_selection_arguments())
         .args(workspace_selection_arguments())
         .arg(manifest_path_argument())
         .args(locked_offline_arguments())
@@ -758,12 +772,32 @@ fn workspace_selection_arguments() -> [Arg; 2] {
     ]
 }
 
-fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
-    let command = build_command(name).arg(jobs_argument()).arg(
-        Arg::new("strict-validation")
-            .long("strict-validation")
+fn feature_selection_arguments() -> [Arg; 3] {
+    [
+        Arg::new("features")
+            .long("features")
+            .short('F')
+            .value_name("FEATURES")
+            .num_args(1)
+            .action(ArgAction::Append),
+        Arg::new("all-features")
+            .long("all-features")
             .action(ArgAction::SetTrue),
-    );
+        Arg::new("no-default-features")
+            .long("no-default-features")
+            .action(ArgAction::SetTrue),
+    ]
+}
+
+fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
+    let command = build_command(name)
+        .args(feature_selection_arguments())
+        .arg(jobs_argument())
+        .arg(
+            Arg::new("strict-validation")
+                .long("strict-validation")
+                .action(ArgAction::SetTrue),
+        );
     let command = if name == "run" {
         command.mut_arg("selected-package", |argument| {
             argument.action(ArgAction::Set)
@@ -822,6 +856,7 @@ fn vendor_command() -> ClapCommand {
         .dont_delimit_trailing_values(true)
         .args_override_self(false)
         .arg(package_argument())
+        .args(feature_selection_arguments())
         .arg(manifest_path_argument())
         .arg(
             Arg::new("accept-all")
@@ -1133,6 +1168,49 @@ mod tests {
         ] {
             assert!(parse(input).unwrap_err().is_usage(), "{input:?}");
         }
+    }
+
+    #[test]
+    fn parses_shared_feature_syntax_without_losing_qualified_or_weak_names() {
+        for command in [
+            "build", "check", "clippy", "run", "test", "tree", "metadata", "vendor", "review",
+        ] {
+            let cli = parse(&[
+                command,
+                "--features",
+                "local,package/feature local",
+                "-F",
+                "optional?/feature, other",
+                "--all-features",
+                "--no-default-features",
+            ])
+            .unwrap();
+            assert_eq!(
+                cli.features.features,
+                ["local", "package/feature", "optional?/feature", "other"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            );
+            assert!(cli.features.all && cli.features.no_default);
+            assert!(cli.features.require_default().is_err());
+            assert_eq!(
+                parse(&[command, "--features", " , "]).unwrap().features,
+                FeatureSelection::default()
+            );
+            for invalid in ["dep:optional", "package/feature/other"] {
+                assert!(
+                    parse(&[command, "--features", invalid])
+                        .unwrap_err()
+                        .is_usage()
+                );
+            }
+        }
+        assert!(
+            parse(&["clean", "--features", "local"])
+                .unwrap_err()
+                .is_usage()
+        );
     }
 
     #[test]
@@ -1467,10 +1545,8 @@ mod tests {
     fn rejects_unsupported_cargo_form_options() {
         for input in [
             &["metadata", "--format-version", "2"][..],
-            &["metadata", "--format-version", "1", "--features", "x"],
             &["check", "--message-format=short"],
             &["check", "--example", "demo"],
-            &["check", "--features", "x"],
             &["check", "--target-dir="],
             &["tree", "--target-dir", "out"],
             &["tree", "--manifest-path="],
