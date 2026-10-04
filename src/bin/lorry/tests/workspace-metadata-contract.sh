@@ -102,6 +102,16 @@ agrees_with_cargo "$PROJECT/Cargo.toml" root
 agrees_with_cargo "$PROJECT/app/Cargo.toml" member
 agrees_with_cargo "$PROJECT/tools/helper/Cargo.toml" implicit
 agrees_with_cargo "$PROJECT/tools/excluded/Cargo.toml" excluded
+(
+    cd "$PROJECT/app/src"
+    HOME="$WORK/home" RUSTC="$WORK/absent-rustc" "$LORRY" metadata \
+        --format-version 1 --no-deps >"$WORK/subdirectory.json"
+    RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" metadata \
+        --format-version 1 --no-deps --offline >"$WORK/subdirectory.cargo.json"
+    RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" run --quiet --locked --offline \
+        --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- \
+        compare-projection "$WORK/subdirectory.json" "$WORK/subdirectory.cargo.json"
+)
 sha256sum "${source_files[@]}" >"$WORK/sources.after"
 cmp "$WORK/sources.before" "$WORK/sources.after"
 source_metadata "$PROJECT/Cargo.toml" -p app >"$WORK/selected.json"

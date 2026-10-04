@@ -1183,6 +1183,16 @@ configuration. It also covers alias acceptance without execution, an
 actionable member-local Lorry configuration error, and moving that file to
 the workspace root.
 
+Manifest discovery now searches the invocation directory and its parents,
+including relative invocation paths used by locate-project. Manifest-path
+selection establishes the workspace independently of the selected member.
+The 23 focused manifest tests and paired build/source-metadata contracts
+passed in `/tmp/lorry-m5-parent-discovery-unit.log`,
+`/tmp/lorry-m5-parent-discovery-contract.log`, and
+`/tmp/lorry-m5-parent-discovery-metadata-contract.log`. Cargo comparisons
+cover subdirectory invocation, locate-project output, and a root manifest
+path combined with another member's package selection.
+
 **Result.** Every command uses the same workspace membership and manifest
 inheritance rules. One member can be built or checked from the workspace
 root. The shared model is ready for multi-member execution.

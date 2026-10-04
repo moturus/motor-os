@@ -180,8 +180,8 @@ constraints. They do not apply to `vendor` or its admission workflow.
 is omitted, except in quiet mode, as Cargo does.
 
 `locate-project` defaults to JSON and accepts plain output. With no explicit
-manifest, it currently reads `Cargo.toml` in the working directory. Parent
-discovery waits for milestone 5. A member still locates itself even with
+manifest, it finds the nearest `Cargo.toml` in the working directory or its
+parents. A member still locates itself even with
 `--workspace`; workspace-root answers wait for milestone 9.
 The two `rustc` query forms above are read-only compatibility queries; other
 `cargo rustc` forms are rejected. Build, check, run, and test share the message
@@ -286,9 +286,10 @@ dev, and target-specific path dependencies below the root are members.
 explicitly listed members take precedence. Root `default-members` apply
 at the workspace root, while a member invocation defaults to itself.
 A singleton default can execute; larger or empty selections fail explicitly
-until multi-package execution is implemented. A member-directory invocation
-may search ancestors for its workspace.
-General upward package discovery, `--manifest-path`, workspace-wide commands,
+until multi-package execution is implemented. Manifest discovery searches
+the working directory and its parents. `--manifest-path` establishes the
+workspace independently of `-p`, which may select any member. Workspace-wide
+execution remains deferred.
 Members and default-members accept component globs `*`, `?`, and `[...]`,
 including negated character classes. `**` and paths outside the root are
 rejected. Matching files are ignored; matching directories need manifests,

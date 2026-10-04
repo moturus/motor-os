@@ -123,6 +123,15 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
     [ "$("$LORRY" run)" = app ]
 )
 (
+    cd "$WORK/project/app/src"
+    [ "$("$LORRY" run)" = app ]
+    "$LORRY" locate-project --message-format plain >"$WORK/locate.lorry"
+    "$LORRY_TEST_CARGO" locate-project --message-format plain >"$WORK/locate.cargo"
+    cmp "$WORK/locate.lorry" "$WORK/locate.cargo"
+    "$LORRY" check --manifest-path ../../Cargo.toml -p shared --lib
+    "$LORRY_TEST_CARGO" check --manifest-path ../../Cargo.toml -p shared --lib --offline
+)
+(
     cd "$WORK/project"
     "$LORRY" clean -p app
 )

@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::{
     DependencySource, MANIFEST_NAME, MAX_WORKSPACE_MEMBERS, Manifest, ManifestMode,
-    canonical_manifest, dependency_workspace_package, require_table, resolve_target_defaults,
+    dependency_workspace_package, discover_manifest, require_table, resolve_target_defaults,
     string_array, workspace_member_root,
 };
 use crate::diagnostic::{Error, Result};
@@ -25,8 +25,7 @@ impl SourceWorkspace {
         manifest_path: Option<&Path>,
         selected: Option<&str>,
     ) -> Result<Self> {
-        let manifest_path =
-            canonical_manifest(manifest_path.unwrap_or(&current.join(MANIFEST_NAME)))?;
+        let manifest_path = discover_manifest(current, manifest_path)?;
         let directory = manifest_path.parent().unwrap().to_owned();
         let mut workspace = match nearest_workspace(&directory)? {
             Some(root) => {

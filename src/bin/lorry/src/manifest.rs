@@ -298,16 +298,7 @@ impl Manifest {
     ) -> Result<Self> {
         let path = canonical_manifest(manifest_path)?;
         let root = path.parent().unwrap();
-        let manifest = Self::load_project(root, package, require_current_lock)?;
-        if manifest.path != path {
-            return Err(Error::failure(format!(
-                "manifest path `{}` does not select package `{}`",
-                path.display(),
-                manifest.name
-            ))
-            .with_help("make --manifest-path and -p select the same exact package"));
-        }
-        Ok(manifest)
+        Self::load_project(root, package, require_current_lock)
     }
 
     pub fn with_lock_source(mut self, source: String) -> Result<Self> {
@@ -344,19 +335,8 @@ impl Manifest {
         package: Option<&str>,
         require_current_lock: bool,
     ) -> Result<Self> {
-        let root = fs::canonicalize(root).map_err(|error| {
-            Error::failure(format!(
-                "failed to canonicalize package directory `{}`: {error}",
-                root.display()
-            ))
-        })?;
-        let path = root.join(MANIFEST_NAME);
-        if !path.is_file() {
-            return Err(Error::failure(format!(
-                "manifest `{}` does not exist; Lorry does not search parent directories",
-                path.display()
-            )));
-        }
+        let path = discover_manifest(root, None)?;
+        let root = path.parent().unwrap().to_owned();
         let document = Document::load(&path, "Cargo manifest")?;
         let Some(workspace) = discover_workspace(&root)? else {
             let mut manifest =
@@ -637,6 +617,28 @@ impl Manifest {
             unsupported_target_dev_dependencies,
         })
     }
+}
+
+fn discover_manifest(current: &Path, manifest_path: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = manifest_path {
+        return canonical_manifest(&current.join(path));
+    }
+    let current = fs::canonicalize(current).map_err(|error| {
+        Error::failure(format!(
+            "failed to canonicalize invocation directory `{}`: {error}",
+            current.display()
+        ))
+    })?;
+    for directory in current.ancestors() {
+        let path = directory.join(MANIFEST_NAME);
+        if path.is_file() {
+            return canonical_manifest(&path);
+        }
+    }
+    Err(Error::failure(format!(
+        "could not find Cargo.toml in `{}` or any parent directory",
+        current.display()
+    )))
 }
 
 fn canonical_manifest(manifest_path: &Path) -> Result<PathBuf> {
@@ -3363,14 +3365,16 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert!(from_root.lock.is_some());
         assert!(Manifest::load_selected(&from_root.workspace_root, None).is_err());
         assert!(Manifest::load_selected(&from_root.workspace_root, Some("missing")).is_err());
-        assert!(
+        assert_eq!(
             Manifest::load_selected_or_manifest_path(
                 &from_root.root,
                 Some(&root.join("app/Cargo.toml")),
                 Some("shared"),
                 true,
             )
-            .is_err()
+            .unwrap()
+            .name,
+            "shared"
         );
         assert!(
             Manifest::load_selected_or_manifest_path(

@@ -44,12 +44,10 @@ self-host generations likewise belong to the test harness under `tests/` and
 
 ## Package requirements
 
-Run Lorry from the directory containing the package's `Cargo.toml`, or from an
-explicit workspace root with `-p NAME`. From a declared member directory,
-Lorry discovers its workspace root only to obtain shared workspace inputs.
-It does not perform general parent package discovery. `metadata`, `check`, and
-`tree` accept `--manifest-path` only when it names the selected package's own
-`Cargo.toml`.
+Lorry finds the nearest `Cargo.toml` in the working directory or its parents.
+Use `-p NAME` to select a workspace member. `metadata`, `check`, and `tree`
+also accept `--manifest-path`; it establishes the workspace independently
+of the member selected by `-p`.
 
 A supported package has:
 
@@ -269,10 +267,10 @@ Cargo alias tables are accepted, but aliases are not executed. Project
 is rejected with the location to which its settings should move.
 
 `locate-project` emits `{"root":"/absolute/path/Cargo.toml"}`, or the path
-alone with `--message-format plain`. The manifest must currently be in the
-working directory or supplied with `--manifest-path`. Both with and without
-`--workspace`, a selected member still locates itself; workspace-root lookup
-and parent-directory discovery arrive in later workspace milestones.
+alone with `--message-format plain`. The manifest is discovered in the
+working directory or its parents, or supplied with `--manifest-path`. Both
+with and without `--workspace`, a selected member still locates itself;
+workspace-root lookup arrives in milestone 9.
 
 Without `--no-deps`, the command verifies and resolves the selected package's
 admitted graph and publishes stable content-addressed source views needed by
