@@ -132,6 +132,26 @@ impl Manager {
         cancellation: &Cancellation,
         notice: &mut dyn FnMut(String),
     ) -> Result<Self, String> {
+        Self::initialize_with_payload(
+            configs,
+            workspace,
+            reserved_names,
+            Value::Object(Default::default()),
+            session,
+            cancellation,
+            notice,
+        )
+    }
+
+    pub fn initialize_with_payload(
+        configs: Vec<HookConfig>,
+        workspace: PathBuf,
+        reserved_names: &[String],
+        payload: Value,
+        session: &mut Session,
+        cancellation: &Cancellation,
+        notice: &mut dyn FnMut(String),
+    ) -> Result<Self, String> {
         let hooks = configs
             .into_iter()
             .map(|config| Hook { config })
@@ -149,7 +169,7 @@ impl Manager {
             let response = manager.invoke(
                 index,
                 "initialize",
-                Value::Object(Default::default()),
+                payload.clone(),
                 session,
                 cancellation,
                 notice,
@@ -169,6 +189,26 @@ impl Manager {
             }
         }
         Ok(manager)
+    }
+
+    /// Build fresh registrations without replacing a working manager on failure.
+    pub fn setup_again(
+        &self,
+        reserved_names: &[String],
+        payload: Value,
+        session: &mut Session,
+        cancellation: &Cancellation,
+        notice: &mut dyn FnMut(String),
+    ) -> Result<Self, String> {
+        Self::initialize_with_payload(
+            self.hooks.iter().map(|hook| hook.config.clone()).collect(),
+            self.workspace.clone(),
+            reserved_names,
+            payload,
+            session,
+            cancellation,
+            notice,
+        )
     }
 
     pub fn initialized(&self) -> Initialize {
@@ -935,5 +975,70 @@ esac"#
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_setup_replaces_registrations_and_preserves_the_previous_manager_on_failure() {
+        let (workspace, mut session) = fixture("setup-again");
+        let response = workspace.join("response.json");
+        std::fs::write(&response, r#"{"prompt_fragments":["first"]}"#).unwrap();
+        let script = format!("cat >/dev/null; cat '{}'", response.display());
+        let manager = Manager::initialize(
+            vec![hook("setup", &script, std::time::Duration::from_secs(2))],
+            workspace.clone(),
+            &mut session,
+            &Cancellation::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+        std::fs::write(&response, r#"{"prompt_fragments":["second"],"tools":[{"name":"registered","description":"fixture","parameters":{"type":"object"}}]}"#).unwrap();
+        let next = manager
+            .setup_again(
+                &[],
+                serde_json::json!({"reason":"new","provider":"local","model":"test/model"}),
+                &mut session,
+                &Cancellation::new(),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(next.initialized().prompt_fragments, ["second"]);
+        assert!(next.owns_tool("registered"));
+        assert_eq!(manager.initialized().prompt_fragments, ["first"]);
+        assert!(!manager.owns_tool("registered"));
+        assert!(
+            next.setup_again(
+                &["registered".into()],
+                serde_json::json!({}),
+                &mut session,
+                &Cancellation::new(),
+                &mut |_| {}
+            )
+            .is_err()
+        );
+        std::fs::write(&response, "invalid").unwrap();
+        assert!(
+            next.setup_again(
+                &[],
+                serde_json::json!({}),
+                &mut session,
+                &Cancellation::new(),
+                &mut |_| {}
+            )
+            .is_err()
+        );
+        assert!(next.owns_tool("registered"));
+        std::fs::write(&response, "{}").unwrap();
+        let cleared = next
+            .setup_again(
+                &[],
+                serde_json::json!({}),
+                &mut session,
+                &Cancellation::new(),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(cleared.initialized().prompt_fragments.is_empty());
+        assert!(!cleared.owns_tool("registered"));
     }
 }

@@ -2469,6 +2469,33 @@ fn before_stop_reminders_are_saved_as_user_notes_and_bounded_per_turn() {
 }
 
 #[test]
+fn hook_setup_receives_startup_provider_and_model() {
+    let fixture = Fixture::new("setup-payload");
+    let log = fixture.root.join("setup.json");
+    let config = Config {
+        hooks: vec![HookConfig {
+            name: "setup".into(),
+            events: Some(vec!["initialize".into()]),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("cat > '{}'; printf '{{}}'", log.display()),
+            ],
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 4096,
+        }],
+        ..Config::default()
+    };
+    let runtime = fixture.runtime(Scripted::new(Vec::new()), &config);
+    let event: serde_json::Value = serde_json::from_slice(&std::fs::read(log).unwrap()).unwrap();
+    assert_eq!(
+        event["payload"],
+        serde_json::json!({"reason":"startup","provider":"default","model":"test/model"})
+    );
+    assert_eq!(event["session"]["id"], runtime.session().id());
+}
+
+#[test]
 fn a_failed_before_stop_hook_is_reported_without_repeating_the_answer() {
     let fixture = Fixture::new("before-stop-failure");
     let config = Config {

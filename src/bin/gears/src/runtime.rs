@@ -202,10 +202,12 @@ impl Runtime {
             .iter()
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
-        let hooks = Hooks::initialize_with_reserved(
+        let provider_name = session.provider().unwrap_or_else(|| "default".to_string());
+        let hooks = Hooks::initialize_with_payload(
             config.hooks.clone(),
             store.workspace().to_path_buf(),
             &reserved_names,
+            serde_json::json!({"reason": "startup", "provider": provider_name, "model": model}),
             &mut session,
             &cancellation,
             &mut |notice| startup_notices.push(notice),
@@ -233,7 +235,6 @@ impl Runtime {
             &mut |notice| startup_notices.push(notice),
         );
         let usage = session.usage();
-        let provider_name = session.provider().unwrap_or_else(|| "default".to_string());
         Ok(Self {
             provider,
             provider_name,
