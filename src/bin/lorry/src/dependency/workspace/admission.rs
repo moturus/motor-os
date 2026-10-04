@@ -313,7 +313,7 @@ fn legacy_dependency_graph(mut selected: Resolution, root: &Path) -> Result<Reso
             edge
         })
         .collect();
-    compilation_manifests(&mut selected)?;
+    compilation_manifests(&mut selected, &[])?;
     Ok(selected)
 }
 

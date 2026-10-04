@@ -2265,6 +2265,15 @@ workspace exclusion. The focused selection test, existing workspace command
 contract, and strict Clippy pass in
 `/tmp/lorry-m7-compilation-loading-{selected,workspace-contract,clippy-fixed}.log`.
 
+Selected compiler manifests now share direct member loading with preparation.
+Every selected root retains its binaries, including a member that also has a
+library; dependency-only loading remains appropriate for other packages. Direct
+loading cannot accidentally reapply `default-members` and choose a different
+package. The regression selects a root whose defaults point elsewhere, both
+with and without its library. Seven workspace tests, the manifest-equivalence
+test, and strict Clippy pass in
+`/tmp/lorry-m7-selected-target-{preparation-tests,manifest-tests,preparation-clippy}.log`.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 

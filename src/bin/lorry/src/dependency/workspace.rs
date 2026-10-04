@@ -69,7 +69,12 @@ pub(crate) fn prepare_compilation(
     staging_parent: &Path,
     direct: &crate::git::DirectCatalog,
 ) -> Result<PreparedGraph> {
-    compilation_manifests(&mut resolution)?;
+    let selected = resolution
+        .root_edges
+        .iter()
+        .map(|edge| edge.package.clone())
+        .collect::<Vec<_>>();
+    compilation_manifests(&mut resolution, &selected)?;
     policy::preflight_sources(&config.policy, &resolution)?;
     let preflight = policy::preflight_workspace(&config.policy, &resolution)?;
     let packages =
@@ -89,11 +94,16 @@ pub(crate) fn prepare_compilation(
 
 // Compiler loading validates executable target descriptions. Preserve the
 // workspace ownership that also defines member source identity and freshness.
-pub(super) fn compilation_manifests(resolution: &mut Resolution) -> Result<()> {
+pub(super) fn compilation_manifests(
+    resolution: &mut Resolution,
+    selected: &[PackageKey],
+) -> Result<()> {
     for package in &mut resolution.packages {
         if let Some(manifest) = &package.local_manifest {
-            let mut compilation = if manifest.editable && manifest.library.is_none() {
-                Manifest::load_selected(&manifest.root, None)?
+            let mut compilation = if manifest.editable
+                && (selected.contains(&package.key) || manifest.library.is_none())
+            {
+                Manifest::load_compilation_member(manifest)?
             } else {
                 Manifest::load_path_dependency(&manifest.root)?
             };
@@ -114,6 +124,70 @@ pub(super) fn compilation_manifests(resolution: &mut Resolution) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn selected_library_members_retain_binary_targets_during_preparation() {
+        let fixture = super::super::tests::Fixture::new();
+        fs::write(fixture.0.join("Cargo.toml"), "[package]\nname = \"root\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[workspace]\nmembers = [\"other\"]\ndefault-members = [\"other\"]\nresolver = \"2\"\n").unwrap();
+        fs::write(fixture.0.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(fixture.0.join("other/src")).unwrap();
+        fs::write(fixture.0.join("other/src/lib.rs"), "").unwrap();
+        fs::write(
+            fixture.0.join("other/Cargo.toml"),
+            "[package]\nname = \"other\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(fixture.0.join("Cargo.lock"), "version = 4\n[[package]]\nname = \"root\"\nversion = \"1.0.0\"\n[[package]]\nname = \"other\"\nversion = \"1.0.0\"\n").unwrap();
+        for library in [true, false] {
+            if !library {
+                fs::remove_file(fixture.0.join("src/lib.rs")).unwrap();
+            }
+            let mut workspace = SourceWorkspace::load(&fixture.0, None).unwrap();
+            workspace.load_locked_context().unwrap();
+            let config = Config::default();
+            let repositories = RepositorySet::open(
+                &config.repositories,
+                crate::source_tree::DEFAULT_LIMITS,
+                config.policy.limits.max_package_bytes,
+            )
+            .unwrap();
+            let source = RegistrySource::Lorry(&repositories);
+            let direct = crate::git::DirectCatalog::default();
+            let options = super::super::tests::options(&workspace.packages[0]);
+            let (complete, catalog) =
+                resolve_locked(&workspace, &config, source, &direct, &options).unwrap();
+            let members = crate::resolver::workspace::features::member_requests(
+                &workspace,
+                &[fixture.0.clone()].into(),
+                &crate::cli::FeatureSelection::default(),
+                false,
+            )
+            .unwrap();
+            let cfg = crate::toolchain::CfgSet::parse("unix\n").unwrap();
+            let selected = crate::resolver::workspace::resolve_selected_workspace(
+                &complete,
+                &catalog,
+                &options,
+                &members,
+                TargetSelection {
+                    host_triple: "x86_64-unknown-linux-gnu",
+                    host_cfg: &cfg,
+                    target_triple: "x86_64-unknown-linux-gnu",
+                    target_cfg: &cfg,
+                },
+            )
+            .unwrap();
+            let prepared =
+                prepare_compilation(selected, &config, source, &fixture.0, &direct).unwrap();
+            assert_eq!(prepared.packages.len(), 1);
+            let root = &prepared.packages.values().next().unwrap().manifest;
+            assert_eq!(root.name, "root");
+            assert_eq!(root.root, fixture.0);
+            assert_eq!(root.library.is_some(), library);
+            assert_eq!(root.binaries.len(), 1);
+            assert_eq!(root.binaries[0].name, "root");
+        }
+    }
 
     #[test]
     fn compilation_preparation_retains_member_roots_and_requires_execution_grants() {

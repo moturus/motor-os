@@ -44,17 +44,7 @@ impl SourceWorkspace {
                 .iter()
                 .find(|member| member.root == root)
                 .unwrap();
-            let document = Document::load(&source.path, "Cargo workspace member manifest")?;
-            let mut member =
-                Manifest::finish_root(root, source.path.clone(), document, &workspace.root, true)?;
-            member
-                .workspace_members
-                .clone_from(&source.workspace_members);
-            member.dev.clone_from(&source.dev);
-            member.release.clone_from(&source.release);
-            member.profile_errors.clone_from(&source.profile_errors);
-            member.resolver = source.resolver;
-            member.patches.clone_from(&source.patches);
+            let mut member = Manifest::load_compilation_member(source)?;
             member.warnings.extend(warnings.iter().cloned());
             for package in &workspace.packages {
                 member.warnings.extend(package.warnings.iter().cloned());

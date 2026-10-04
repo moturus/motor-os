@@ -370,6 +370,26 @@ impl Manifest {
         Self::load_project(path.parent().unwrap(), selection, require_current_lock)
     }
 
+    pub(crate) fn load_compilation_member(source: &Self) -> Result<Self> {
+        let document = Document::load(&source.path, "Cargo workspace member manifest")?;
+        let mut member = Self::finish_root(
+            source.root.clone(),
+            source.path.clone(),
+            document,
+            &source.workspace_root,
+            true,
+        )?;
+        member
+            .workspace_members
+            .clone_from(&source.workspace_members);
+        member.dev.clone_from(&source.dev);
+        member.release.clone_from(&source.release);
+        member.profile_errors.clone_from(&source.profile_errors);
+        member.resolver = source.resolver;
+        member.patches.clone_from(&source.patches);
+        Ok(member)
+    }
+
     pub fn with_lock_source(mut self, source: String) -> Result<Self> {
         let path = self.root.join(LOCK_NAME);
         let document = Document::parse(&path, "Cargo lockfile", source)?;
