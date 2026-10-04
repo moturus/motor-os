@@ -250,7 +250,15 @@ pub struct Lint {
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Lockfile {
+    pub format: crate::lockfile::Format,
     pub packages: Vec<LockedPackage>,
+}
+
+impl Lockfile {
+    pub(crate) fn load(path: &Path) -> Result<Self> {
+        let document = Document::load(path, "Cargo lockfile")?;
+        parse_lock_document(None, path, &document)
+    }
 }
 
 #[allow(dead_code)]
@@ -349,7 +357,7 @@ impl Manifest {
     pub fn with_lock_source(mut self, source: String) -> Result<Self> {
         let path = self.root.join(LOCK_NAME);
         let document = Document::parse(&path, "Cargo lockfile", source)?;
-        self.lock = Some(parse_lock_document(&self, &path, &document, true)?);
+        self.lock = Some(parse_lock_document(Some(&self), &path, &document)?);
         Ok(self)
     }
 
@@ -456,13 +464,12 @@ impl Manifest {
             }
             return Ok(manifest);
         }
-        let lock_document = Document::load(&lock_path, "Cargo lockfile")?;
-        manifest.lock = Some(parse_lock_document(
-            &manifest,
-            &lock_path,
-            &lock_document,
-            require_current_lock,
-        )?);
+        manifest.lock = Some(if require_current_lock {
+            let document = Document::load(&lock_path, "Cargo lockfile")?;
+            parse_lock_document(Some(&manifest), &lock_path, &document)?
+        } else {
+            Lockfile::load(&lock_path)?
+        });
         Ok(manifest)
     }
 
@@ -2595,40 +2602,42 @@ fn parse_panic_abort(
 #[cfg(test)]
 fn validate_lock_source(manifest: &Manifest, path: &Path, source: &str) -> Result<Lockfile> {
     let document = Document::parse(path, "Cargo lockfile", source.to_owned())?;
-    parse_lock_document(manifest, path, &document, true)
+    parse_lock_document(Some(manifest), path, &document)
 }
 
 fn parse_lock_document(
-    manifest: &Manifest,
+    manifest: Option<&Manifest>,
     path: &Path,
     document: &Document,
-    require_current_root: bool,
 ) -> Result<Lockfile> {
     for (key, item) in document.root().iter() {
-        if !matches!(key, "version" | "package") {
+        if !matches!(key, "version" | "package" | "metadata") {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
                 format!("unsupported root Cargo.lock key `{key}`"),
-                "use Cargo.lock format version 3 or 4",
+                "use a supported Cargo.lock format",
             ));
         }
     }
-    let version = document.root().get("version").ok_or_else(|| {
-        Error::failure(format!(
-            "lockfile `{}` is missing a supported format version",
-            path.display()
-        ))
-        .with_help("regenerate the lockfile with a current Cargo")
-    })?;
-    if !matches!(version.as_integer(), Some(3 | 4)) {
-        return Err(Error::at(
-            path,
-            document.line_of_item(version),
-            "unsupported Cargo.lock format; expected `version = 3` or `version = 4`",
-            "regenerate the lockfile with a current Cargo",
-        ));
-    }
+    let mut format = match document.root().get("version") {
+        None => crate::lockfile::Format::V1,
+        Some(version) if version.as_integer() == Some(3) => crate::lockfile::Format::V3,
+        Some(version) if version.as_integer() == Some(4) => crate::lockfile::Format::V4,
+        Some(version) => {
+            return Err(Error::at(
+                path,
+                document.line_of_item(version),
+                "unsupported Cargo.lock format; expected `version = 3` or `version = 4`, or a legacy lock without a version field",
+                "regenerate the lockfile with a current Cargo",
+            ));
+        }
+    };
+    let metadata = document
+        .root()
+        .get("metadata")
+        .map(|item| require_table(path, document, item, "metadata"))
+        .transpose()?;
     let package_item = document.root().get("package").ok_or_else(|| {
         Error::failure(format!(
             "lockfile `{}` contains no package records",
@@ -2677,7 +2686,27 @@ fn parse_lock_document(
                 "use crates.io, a canonical pinned anonymous HTTPS Git source, or a local path package",
             ));
         }
-        let checksum = optional_string(path, document, table, "package", "checksum")?;
+        let mut checksum = optional_string(path, document, table, "package", "checksum")?;
+        if checksum.is_some() && format == crate::lockfile::Format::V1 {
+            format = crate::lockfile::Format::V2;
+        }
+        if let Some(source) = &source
+            && checksum.is_none()
+            && let Some(metadata) = metadata
+        {
+            let key = format!(
+                "checksum {name} {version_text} ({})",
+                crate::lockfile::encode_source(source, crate::lockfile::Format::V1, false)?
+            );
+            if let Some(item) = metadata.get(&key) {
+                let value = item.as_str().ok_or_else(|| {
+                    type_error(path, document.line_of_item(item), &key, "a checksum string")
+                })?;
+                if value != "<none>" {
+                    checksum = Some(value.to_owned());
+                }
+            }
+        }
         match (&source, &checksum) {
             (Some(_), Some(value)) if is_sha256(value) => {}
             (Some(source), None) if crate::git::parse_locked_source(source).is_ok() => {}
@@ -2703,6 +2732,13 @@ fn parse_lock_document(
         }
         let dependencies = optional_string_array(path, document, table, "package", "dependencies")?
             .unwrap_or_default();
+        if format == crate::lockfile::Format::V1
+            && dependencies
+                .iter()
+                .any(|reference| reference.split_whitespace().nth(1).is_none())
+        {
+            format = crate::lockfile::Format::V2;
+        }
         let identity = (name.clone(), version.original.clone(), source.clone());
         if !identities.insert(identity) {
             return Err(Error::at(
@@ -2720,21 +2756,23 @@ fn parse_lock_document(
             dependencies,
         });
     }
-    let roots = packages
-        .iter()
-        .filter(|package| {
-            package.name == manifest.name
-                && package.version.original == manifest.version.original
-                && package.source.is_none()
-        })
-        .count();
-    if require_current_root && roots != 1 {
-        return Err(Error::failure(format!(
-            "Cargo.lock is stale: expected one root path package `{} {}`, found {roots}",
-            manifest.name, manifest.version.original
-        )));
+    if let Some(manifest) = manifest {
+        let roots = packages
+            .iter()
+            .filter(|package| {
+                package.name == manifest.name
+                    && package.version.original == manifest.version.original
+                    && package.source.is_none()
+            })
+            .count();
+        if roots != 1 {
+            return Err(Error::failure(format!(
+                "Cargo.lock is stale: expected one root path package `{} {}`, found {roots}",
+                manifest.name, manifest.version.original
+            )));
+        }
     }
-    Ok(Lockfile { packages })
+    Ok(Lockfile { format, packages })
 }
 
 #[derive(Clone, Copy)]
@@ -4136,6 +4174,37 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
                 .len(),
             2
         );
+        let version_two = valid.replace("version = 4\n", "");
+        let loaded =
+            validate_lock_source(&manifest, Path::new("Cargo.lock"), &version_two).unwrap();
+        assert_eq!(loaded.format, crate::lockfile::Format::V2);
+        let version_one = version_two.replace("dependencies = [\"serde\"]", &format!("dependencies = [\"serde 1.0.228 ({CRATES_IO_SOURCE})\"]"))
+            .replace("checksum = \"9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e\"", &format!("[metadata]\n\"checksum serde 1.0.228 ({CRATES_IO_SOURCE})\" = \"9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e\""));
+        let loaded =
+            validate_lock_source(&manifest, Path::new("Cargo.lock"), &version_one).unwrap();
+        assert_eq!(loaded.format, crate::lockfile::Format::V1);
+        assert!(
+            loaded
+                .packages
+                .iter()
+                .find(|package| package.name == "serde")
+                .unwrap()
+                .checksum
+                .is_some()
+        );
+        for invalid in [
+            version_one.replace(
+                "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
+                "invalid",
+            ),
+            version_one.replace(
+                "\" = \"9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e\"",
+                "\" = 9",
+            ),
+            version_one.replace("checksum serde 1.0.228", "checksum other 1.0.228"),
+        ] {
+            assert!(validate_lock_source(&manifest, Path::new("Cargo.lock"), &invalid).is_err());
+        }
         let unsupported = valid.replace("version = 4", "version = 2");
         let error = validate_lock_source(&manifest, Path::new("Cargo.lock"), &unsupported)
             .unwrap_err()

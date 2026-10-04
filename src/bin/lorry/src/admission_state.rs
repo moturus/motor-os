@@ -2516,10 +2516,12 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 dependencies: Vec::new(),
             };
             let git = Lockfile {
+                format: crate::lockfile::Format::V4,
                 packages: vec![package(Some("git+https://example.com/demo"), None)],
             };
             assert!(locked_graph(&git).is_err());
             let unchecksummed = Lockfile {
+                format: crate::lockfile::Format::V4,
                 packages: vec![package(Some(CRATES_IO_SOURCE), None)],
             };
             assert!(locked_graph(&unchecksummed).is_err());

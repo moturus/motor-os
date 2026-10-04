@@ -465,7 +465,7 @@ fn dependency_reference(
     }
 }
 
-fn encode_source(source: &str, format: Format, precise: bool) -> Result<String> {
+pub(crate) fn encode_source(source: &str, format: Format, precise: bool) -> Result<String> {
     if source == CRATES_IO_SOURCE {
         return Ok(source.to_owned());
     }
@@ -642,6 +642,13 @@ mod tests {
                 fs::read(fixture.0.join("Cargo.lock")).unwrap(),
                 "rust-version {rust}"
             );
+            assert_eq!(
+                crate::manifest::Lockfile::load(&fixture.0.join("Cargo.lock"))
+                    .unwrap()
+                    .packages
+                    .len(),
+                3
+            );
         }
     }
 
@@ -685,6 +692,25 @@ mod tests {
             hex(&[9; 32])
         )));
         assert!(legacy.contains("\"checksum git 1.0.0 (git+https://example.com/repo?branch=feature/motor)\" = \"<none>\""));
+        let fixture = Fixture::new();
+        for format in [Format::V1, Format::V2, Format::V3, Format::V4] {
+            fs::write(
+                fixture.0.join("Cargo.lock"),
+                render_nodes(&nodes, format).unwrap(),
+            )
+            .unwrap();
+            let loaded = crate::manifest::Lockfile::load(&fixture.0.join("Cargo.lock")).unwrap();
+            assert_eq!(loaded.format, format);
+            assert_eq!(
+                loaded
+                    .packages
+                    .iter()
+                    .find(|package| package.name == "registry")
+                    .unwrap()
+                    .checksum,
+                Some(hex(&[9; 32]))
+            );
+        }
         let duplicate = Identity {
             source: Some(CRATES_IO_SOURCE.to_owned()),
             ..git.clone()

@@ -1652,6 +1652,17 @@ actual offline Cargo lock comparisons at all six threshold boundaries.
 Strict Clippy passed in `/tmp/lorry-m6-lock-formats-clippy.log`.
 Reading legacy formats follows next, before command integration.
 
+The common lock reader now retains the detected format and accepts Cargo's
+legacy versionless encodings and checksum metadata. Generic workspace loading
+does not require a privileged root package. All five lock round-trip tests
+and the manifest lock-validation test passed in
+`/tmp/lorry-m6-lock-reader-{round-trip,manifest}.log`; malformed, absent, and
+mistyped checksum evidence is rejected. Strict Clippy passed in
+`/tmp/lorry-m6-lock-reader-clippy-fixed.log` after connecting the generic
+reader to the existing unlocked loading path.
+The final focused manifest run passed all 23 tests in
+`/tmp/lorry-m6-lock-reader-manifest-final.log`.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.
