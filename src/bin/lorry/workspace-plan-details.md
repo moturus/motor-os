@@ -1932,6 +1932,19 @@ and passing result are preserved in
 `/tmp/lorry-m6-cargo-depth-default-{original,fixed}.log`. M6 remains incomplete
 until its full milestone gate passes.
 
+The next gate passed 427 Rust tests, three own-message integration tests, all
+host contracts, and Cargo native/cross identity. Host online vendoring passed
+the depth-20 graph, then failed because its generated installation policy
+omitted the developer image's exact execution grants for `bisync_macros` and
+the self-build's other build-time packages. Evidence is
+`/tmp/lorry-m6-full-cargo-depth-default.log` and
+`target/lorry/native-self-tests/self-20261004T165405Z-99262/summary.txt`.
+The older single-package renewal helper broadly granted registry build-time
+capabilities; workspace vendoring instead requires explicit grants, as planned.
+The native fixture now copies the shipped exact package/version/checksum rules
+into its host policy, making cross and native self-build policy consistent.
+No product policy was relaxed and no network retry was used.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

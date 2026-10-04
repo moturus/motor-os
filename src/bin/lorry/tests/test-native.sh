@@ -164,6 +164,11 @@ write_host_config() {
         'build-script-seconds = 300' \
         'build-script-output-bytes = 8388608' \
         >"$host_home/.config/lorry/lorry.toml"
+    # Cross and native self-builds use the same exact execution grants.
+    # Default allow admits ordinary sources, not build-time capabilities.
+    awk '/^\[policy\.rules\./ { rules = 1 } rules { print }' \
+        "$ROOT_DIR/img_files/motor-os-dev/devtools/cfg/lorry.toml" \
+        >>"$host_home/.config/lorry/lorry.toml"
 }
 
 remote_command() {
