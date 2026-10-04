@@ -237,8 +237,12 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
-    for manifest in &selected {
-        manifest.require_supported_target(&target_info)?;
+    if matches!(&cli.command, Command::Test(_))
+        || matches!(&cli.command, Command::Check(options) if options.all_targets || options.test.is_some() || options.examples)
+    {
+        for manifest in &selected {
+            manifest.require_dev_targets_supported(&target_info)?;
+        }
     }
     let host_info = if physical_target.is_some() {
         toolchain.target_info(None)?

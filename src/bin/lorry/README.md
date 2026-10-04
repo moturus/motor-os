@@ -65,14 +65,14 @@ Ordinary build, check, and Clippy run selected members' build scripts and
 build-dependencies through the shared graph, with named path execution grants.
 Scripts receive private output directories and package-specific `caller-env`
 allowlists; editable members can read the workspace without writing it.
-Run and test still reject selected packages with build scripts. Alternative registries, root dev
-dependencies selected for the build target, examples, benches, explicit test
-targets, and CLI feature selection for run and test are not supported. Build,
+Run and test still reject selected packages with build scripts. Alternative
+registries, execution of targets using dev-dependencies, examples, benches,
+and CLI feature selection for run and test are not supported. Build,
 check, Clippy, metadata, tree, and vendor support CLI feature selection. Ordinary
 workspace build, check, and Clippy share one compilation graph for default
 members, `--workspace`, repeated `-p`, and `--exclude`. Workspace test, example,
-and bench target selection remains deferred. A target-conditioned
-root dev-dependency for a different target is ignored.
+and bench target selection remains deferred. Ordinary build/check accepts
+root dev-dependencies without activating their features.
 
 ## Create a package
 

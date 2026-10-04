@@ -2620,6 +2620,15 @@ Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contra
 
 ### Member build-time code
 
+Compiler-capable manifests now retain regular and target-conditioned root
+dev-dependency declarations through the same parser as source metadata.
+Ordinary build/check leaves their features inactive. The expanded binary
+feature contract proves this on native and cross-Motor, including an active
+Motor-only declaration. Targets that need dev-dependencies still fail before
+execution until the common planner connects those edges. The contract, all
+26 parser tests, and strict Clippy pass in
+`/tmp/lorry-m8-dev-declarations-{ordinary-contract,parser,clippy}.log`.
+
 Binary `required-features` now filters shared build/check targets and ordinary
 test harnesses. A common predicate also handles dependency-qualified requirements
 for integration tests. Named errors list every declared requirement, including

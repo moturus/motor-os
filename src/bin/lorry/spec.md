@@ -493,10 +493,9 @@ The supported manifest surface includes:
 
 Crates.io dependencies require a version requirement. Path dependencies may
 omit one; when supplied, it must match the selected local package. Root
-dev-dependencies are unsupported. A
-target-conditioned root dev-dependency is inert when its selector does not
-match the selected target, and produces the unsupported-dependency diagnostic
-when it does. Lorry may compile approved transitive build-dependencies for
+dev-dependencies, including target-conditioned declarations, are retained and
+remain inactive for ordinary build/check. Execution of targets needing them
+is gated until their common-planner wiring is implemented. Lorry may compile approved transitive build-dependencies for
 dependency build scripts.
 
 Compiler manifests now retain top-level and target-qualified build

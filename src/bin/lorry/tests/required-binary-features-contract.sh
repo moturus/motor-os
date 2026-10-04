@@ -21,6 +21,10 @@ present = []
 extra = ["helper/enabled"]
 [dependencies]
 helper = { path = "../helper" }
+[dev-dependencies]
+helper = { path = "../helper", features = ["enabled"] }
+[target.'cfg(target_os = "motor")'.dev-dependencies]
+helper = { path = "../helper", features = ["enabled"] }
 [[bin]]
 name = "gated"
 required-features = ["present", "extra"]

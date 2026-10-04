@@ -69,13 +69,6 @@ pub struct Manifest {
     pub rustdoc_lints: BTreeMap<String, Lint>,
     #[allow(dead_code)]
     pub lock: Option<Lockfile>,
-    unsupported_target_dev_dependencies: Vec<UnsupportedTargetDevDependency>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct UnsupportedTargetDevDependency {
-    selector: String,
-    line: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -435,23 +428,23 @@ impl Manifest {
         Ok(self)
     }
 
-    pub fn require_supported_target(&self, target: &TargetInfo) -> Result<()> {
-        for dependency in &self.unsupported_target_dev_dependencies {
-            let selected = if dependency.selector.starts_with("cfg(") {
-                target.cfg.matches_selector(&dependency.selector)?
-            } else {
-                dependency.selector == target.triple
+    pub fn require_dev_targets_supported(&self, target: &TargetInfo) -> Result<()> {
+        for dependency in self
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency.kind == DependencyKind::Dev)
+        {
+            let selected = match dependency.target.as_deref() {
+                Some(selector) if selector.starts_with("cfg(") => {
+                    target.cfg.matches_selector(selector)?
+                }
+                Some(selector) => selector == target.triple,
+                None => true,
             };
             if selected {
-                return Err(Error::at(
-                    &self.path,
-                    dependency.line,
-                    format!(
-                        "root `target.{}.dev-dependencies` is not supported in Stage 2",
-                        dependency.selector
-                    ),
-                    "remove the selected target's root dev-dependencies",
-                ));
+                return Err(Error::failure(format!(
+                    "dev-dependency targets for package `{}` are not yet supported by workspace execution", self.name
+                )).with_help("ordinary build/check selections do not use dev-dependencies"));
             }
         }
         Ok(())
@@ -723,7 +716,7 @@ impl Manifest {
             )?;
         }
         validate_ignored_dev_dependencies(path, document)?;
-        if mode == ManifestMode::Source
+        if mode != ManifestMode::Dependency
             && let Some(item) = document.root().get("dev-dependencies")
         {
             let table = require_table(path, document, item, "dev-dependencies")?;
@@ -735,13 +728,7 @@ impl Manifest {
                 &mut dependencies,
             )?;
         }
-        let mut unsupported_target_dev_dependencies = Vec::new();
-        parse_target_dependencies(
-            &mut fields,
-            mode,
-            &mut dependencies,
-            &mut unsupported_target_dev_dependencies,
-        )?;
+        parse_target_dependencies(&mut fields, mode, &mut dependencies)?;
         let features = parse_features(path, document)?;
         let patches = if mode == ManifestMode::Root && !member {
             parse_patches(path, document, root)?
@@ -795,7 +782,6 @@ impl Manifest {
             clippy_lints,
             rustdoc_lints,
             lock: None,
-            unsupported_target_dev_dependencies,
         })
     }
 }
@@ -1081,6 +1067,7 @@ fn validate_manifest_tables(
                     "package"
                         | "dependencies"
                         | "build-dependencies"
+                        | "dev-dependencies"
                         | "target"
                         | "features"
                         | "patch"
@@ -2298,7 +2285,6 @@ fn parse_target_dependencies(
     fields: &mut DependencyFields<'_>,
     mode: ManifestMode,
     output: &mut Vec<Dependency>,
-    unsupported_target_dev_dependencies: &mut Vec<UnsupportedTargetDevDependency>,
 ) -> Result<()> {
     let path = fields.path;
     let document = fields.document;
@@ -2313,21 +2299,10 @@ fn parse_target_dependencies(
             let kind = match (mode, key) {
                 (_, "dependencies") => Some(DependencyKind::Normal),
                 (_, "build-dependencies") => Some(DependencyKind::Build),
-                (ManifestMode::Source, "dev-dependencies") => Some(DependencyKind::Dev),
-                (ManifestMode::Dependency, "dev-dependencies") => None,
-                (ManifestMode::Root, "dev-dependencies") => {
-                    require_table(
-                        path,
-                        document,
-                        item,
-                        &format!("target.{selector}.dev-dependencies"),
-                    )?;
-                    unsupported_target_dev_dependencies.push(UnsupportedTargetDevDependency {
-                        selector: selector.to_owned(),
-                        line: document.line_of_item(item),
-                    });
-                    continue;
+                (ManifestMode::Root | ManifestMode::Source, "dev-dependencies") => {
+                    Some(DependencyKind::Dev)
                 }
+                (ManifestMode::Dependency, "dev-dependencies") => None,
                 _ => {
                     return Err(Error::at(
                         path,
@@ -4584,7 +4559,6 @@ members = ["ignored-member"]
     #[test]
     fn rejects_unknown_and_unsupported_build_semantics() {
         for source in [
-            format!("{RED}\n[dev-dependencies]\nhelper = \"1\"\n"),
             RED.replace(
                 "[dependencies]",
                 "[dependencies]\nthing = { version = \"1\", registry = \"alternate\" }",
@@ -4618,18 +4592,22 @@ members = ["ignored-member"]
     }
 
     #[test]
-    fn rejects_root_target_dev_dependencies_only_for_matching_targets() {
+    fn retains_root_dev_dependencies_and_gates_their_execution() {
         let source = format!("{RED}\n[target.'cfg(unix)'.dev-dependencies]\nlibc = \"0.2\"\n");
         let manifest = parsed(&source).unwrap();
         let linux = TargetInfo {
             triple: "x86_64-unknown-linux-gnu".to_owned(),
             cfg: CfgSet::parse("target_os=\"linux\"\nunix\n").unwrap(),
         };
-        let error = manifest.require_supported_target(&linux).unwrap_err();
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].kind, DependencyKind::Dev);
+        assert_eq!(
+            manifest.dependencies[0].target.as_deref(),
+            Some("cfg(unix)")
+        );
+        let error = manifest.require_dev_targets_supported(&linux).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("target.cfg(unix).dev-dependencies"),
+            error.to_string().contains("dev-dependency targets"),
             "{error}"
         );
 
@@ -4637,7 +4615,10 @@ members = ["ignored-member"]
             triple: "x86_64-unknown-motor".to_owned(),
             cfg: CfgSet::parse("target_os=\"motor\"\n").unwrap(),
         };
-        manifest.require_supported_target(&motor).unwrap();
+        manifest.require_dev_targets_supported(&motor).unwrap();
+        let regular = parsed(&format!("{RED}\n[dev-dependencies]\nhelper = \"1\"\n")).unwrap();
+        assert_eq!(regular.dependencies[0].kind, DependencyKind::Dev);
+        assert!(regular.require_dev_targets_supported(&motor).is_err());
     }
 
     #[test]
