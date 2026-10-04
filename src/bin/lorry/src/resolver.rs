@@ -1638,6 +1638,14 @@ fn activate(
         }
     }
     for (dependency, dependency_feature) in weak {
+        // Cargo's package resolver follows weak references too. Only the
+        // compilation feature resolver defers inactive optional dependencies.
+        if matches!(
+            scope,
+            Scope::WorkspaceComplete { .. } | Scope::WorkspaceMetadata { .. }
+        ) {
+            activation.enabled_optional.insert(dependency.clone());
+        }
         if activation.enabled_optional.contains(&dependency)
             || record
                 .dependencies
@@ -4292,6 +4300,103 @@ dev = ["dep:leaf"]
         );
         assert_eq!(helper.host_features, ["macro-context".to_owned()].into());
         assert_eq!(helper.target_features, ["target-context".to_owned()].into());
+    }
+
+    #[test]
+    fn complete_weak_edges_match_cargo_and_stay_inactive_in_builds() {
+        let fixture = LocalFixture::new();
+        fixture.package(
+            "parent",
+            "[package]\nname = \"parent\"\nversion = \"1.0.0\"\nedition = \"2021\"\n[workspace]\n\
+            [dependencies]\nweak = { path = \"../weak\", optional = true }\n\
+            [dev-dependencies]\nweak = { path = \"../weak\" }\n\
+            [features]\nstd = [\"weak?/feature\"]\n",
+        );
+        fixture.package("weak", "[package]\nname = \"weak\"\nversion = \"1.0.0\"\nedition = \"2021\"\n[workspace]\n[features]\nfeature = []\n");
+        let root = fixture.0.join("ws");
+        for direct in ["", "weak = { path = \"../weak\" }\n"] {
+            fixture.package("ws", &format!("[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n\
+                [dependencies]\nparent = {{ path = \"../parent\", features = [\"std\"] }}\n{direct}"));
+            let _ = fs::remove_file(root.join("Cargo.lock"));
+            let cargo = std::process::Command::new(env!("CARGO"))
+                .args(["generate-lockfile", "--offline"])
+                .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                cargo.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+            let source = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+            let lock = Lockfile::load(&root.join("Cargo.lock")).unwrap();
+            let mut catalog = Catalog::default();
+            let complete = workspace::resolve_locked_workspace(
+                &source,
+                &mut catalog,
+                &options(ResolverVersion::V2),
+                &lock,
+                &mut |_, _, _| Ok(()),
+            )
+            .unwrap();
+            crate::offline::validate_workspace_resolution(&lock, &complete).unwrap();
+            let parent = complete
+                .packages
+                .iter()
+                .find(|package| package.key.name == "parent")
+                .unwrap();
+            assert_eq!(parent.lock_edges.len(), 1);
+            let weak = complete
+                .packages
+                .iter()
+                .find(|package| package.key.name == "weak")
+                .unwrap();
+            assert!(weak.target_features.contains("feature"));
+            assert!(!parent.target_features.contains("weak"));
+            let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+            let members = [workspace::MemberRequest {
+                root: root.clone(),
+                features: BTreeSet::new(),
+                default_features: true,
+                dev: false,
+                selected: true,
+            }];
+            let build = workspace::resolve_selected_workspace(
+                &complete,
+                &catalog,
+                &options(ResolverVersion::V2),
+                &members,
+                TargetSelection {
+                    host_triple: "x86_64-unknown-linux-gnu",
+                    host_cfg: &cfg,
+                    target_triple: "x86_64-unknown-linux-gnu",
+                    target_cfg: &cfg,
+                },
+            )
+            .unwrap();
+            let parent = build
+                .packages
+                .iter()
+                .find(|package| package.key.name == "parent")
+                .unwrap();
+            assert!(parent.edges.is_empty());
+            assert_eq!(
+                build
+                    .packages
+                    .iter()
+                    .any(|package| package.key.name == "weak"),
+                !direct.is_empty()
+            );
+            if let Some(weak) = build
+                .packages
+                .iter()
+                .find(|package| package.key.name == "weak")
+            {
+                assert!(!weak.target_features.contains("feature"));
+            }
+        }
     }
 
     #[test]
