@@ -606,6 +606,11 @@ remapped.
 Targeted fetch inspects a registry package's source description before following
 its dependencies. Discovery of a procedural macro recomputes its host context
 before choosing child archives; neither inspection nor acquisition runs code.
+Git resolution descriptions come from the exact locked source trees, which
+may be materialized before platform projection, as in Cargo. Locked Git/path
+patches supply crates.io requirements without a sparse-index entry for the
+replaced package. Locked vendoring never advertises or refreshes branch refs;
+cached sources let both locked and offline locked reviews run without curl.
 
 Locked acquisition retains digest-protected sparse resolution inputs for the
 complete lock independently of downloaded source objects. This lets an offline

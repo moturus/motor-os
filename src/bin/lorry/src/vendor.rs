@@ -861,6 +861,11 @@ impl<'a> Acquisition<'a> {
             })
             .collect::<Vec<_>>();
         if locked.is_empty() {
+            // A locked path or Git patch supplies the crates.io requirement
+            // without any registry package or sparse-index input in the lock.
+            if catalog.contains_crates_io_candidate(name, &semver::VersionReq::STAR) {
+                return Ok(());
+            }
             return Err(
                 Error::failure(format!("Cargo.lock has no crates.io package `{name}`"))
                     .with_help("run `lorry vendor` to reconcile the workspace lock"),

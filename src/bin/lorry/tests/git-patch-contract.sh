@@ -183,7 +183,7 @@ grep -F 'no interactive terminal is available' \
     fail "first-materialization rejection had the wrong diagnostic"
 [ "$(sha256sum "$PROJECT/Cargo.lock")" = "$INITIAL_LOCK_HASH" ] ||
     fail "unapproved first materialization changed Cargo.lock"
-[ ! -e "$PROJECT/app/.lorry/dependencies-v2.toml" ] ||
+[ ! -e "$PROJECT/.lorry/dependencies-v2.toml" ] ||
     fail "unapproved first materialization published admission state"
 [ "$(manifest_hashes)" = "$MANIFEST_HASHES" ] ||
     fail "unapproved first materialization changed an input manifest"
@@ -201,7 +201,7 @@ if grep -F 'checksum =' "$PROJECT/Cargo.lock" >/dev/null; then
     fail "Cargo.lock gave a Git package a registry checksum"
 fi
 LOCK_HASH="$(sha256sum "$PROJECT/Cargo.lock")"
-STATE_PATH="$PROJECT/app/.lorry/dependencies-v2.toml"
+STATE_PATH="$PROJECT/.lorry/dependencies-v2.toml"
 STATE_HASH="$(sha256sum "$STATE_PATH")"
 
 echo "== Reusing unchanged Git state non-interactively =="
@@ -221,6 +221,16 @@ EOF
 /usr/bin/git -C "$WORK/source" commit -q -m update
 NEW_COMMIT="$(/usr/bin/git -C "$WORK/source" rev-parse HEAD)"
 /usr/bin/git -C "$WORK/source" push -q "$WORK/git/repository.git" main
+
+echo "== Keeping the locked commit after its branch advances =="
+chmod 000 "$WORK/bin/git-curl"
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --locked -p app </dev/null)
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --locked --offline -p app </dev/null)
+chmod 0700 "$WORK/bin/git-curl"
+[ "$(sha256sum "$PROJECT/Cargo.lock")" = "$LOCK_HASH" ] ||
+    fail "locked vendor moved a branch"
+[ "$(sha256sum "$STATE_PATH")" = "$STATE_HASH" ] ||
+    fail "locked vendor changed admission after a branch moved"
 
 if (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor -p app \
     </dev/null >"$WORK/unapproved.out" 2>&1); then
@@ -368,8 +378,9 @@ chmod 000 "$WORK/bin/git-curl"
 )
 grep -F '[[locked-git]]' "$WORK/review.toml" >/dev/null ||
     fail "review omitted the locked Git identity"
-grep -F '[[crates-io-patch]]' "$WORK/review.toml" >/dev/null ||
-    fail "review omitted the patch alias and package identity"
+if grep -F '[[crates-io-patch]]' "$WORK/review.toml" >/dev/null; then
+    fail "workspace review retained raw member patch declarations"
+fi
 grep -F "source = \"$CARGO_SOURCE\"" "$WORK/review.toml" >/dev/null ||
     fail "review omitted the exact Cargo Git source"
 grep -F '[[git-source]]' "$WORK/review.toml" >/dev/null ||
