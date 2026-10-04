@@ -2334,6 +2334,7 @@ mod tests {
             features: BTreeSet::new(),
             default_features: false,
             dev: false,
+            selected: true,
         };
         // A completed locked identity remains usable if the index marks it yanked.
         catalog
@@ -2434,6 +2435,7 @@ mod tests {
             features: BTreeSet::new(),
             default_features: true,
             dev: true,
+            selected: true,
         };
         let selected_graph = workspace::resolve_selected_workspace(
             &complete,
@@ -2472,6 +2474,30 @@ mod tests {
             .to_string()
             .contains("dependency cycle")
         );
+    }
+
+    fn cargo_unit_features(output: &[u8]) -> BTreeMap<String, BTreeSet<String>> {
+        let graph: serde_json::Value = serde_json::from_slice(output).unwrap();
+        graph["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|unit| {
+                let id = unit["pkg_id"].as_str().unwrap();
+                let (source, fragment) = id.rsplit_once('#').unwrap();
+                let name = fragment
+                    .split_once('@')
+                    .map_or_else(|| source.rsplit('/').next().unwrap(), |(name, _)| name)
+                    .to_owned();
+                let features = unit["features"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|feature| feature.as_str().unwrap().to_owned())
+                    .collect::<BTreeSet<_>>();
+                (name, features)
+            })
+            .collect::<BTreeMap<_, _>>()
     }
 
     #[test]
@@ -2527,6 +2553,7 @@ mod tests {
                 features: features.split(',').map(str::to_owned).collect(),
                 default_features: false,
                 dev: false,
+                selected: true,
             };
             let resolved = workspace::resolve_selected_workspace(
                 &complete,
@@ -2566,27 +2593,7 @@ mod tests {
             if !succeeds {
                 continue;
             }
-            let graph: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            let cargo_features = graph["units"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|unit| {
-                    let id = unit["pkg_id"].as_str().unwrap();
-                    let (source, fragment) = id.rsplit_once('#').unwrap();
-                    let name = fragment
-                        .split_once('@')
-                        .map_or_else(|| source.rsplit('/').next().unwrap(), |(name, _)| name)
-                        .to_owned();
-                    let features = unit["features"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|feature| feature.as_str().unwrap().to_owned())
-                        .collect::<BTreeSet<_>>();
-                    (name, features)
-                })
-                .collect::<BTreeMap<_, _>>();
+            let cargo_features = cargo_unit_features(&output.stdout);
             let lorry_features = resolved
                 .unwrap()
                 .packages
@@ -2595,6 +2602,87 @@ mod tests {
                 .collect::<BTreeMap<_, _>>();
             assert_eq!(lorry_features, cargo_features, "{features}");
         }
+    }
+
+    #[test]
+    fn resolver_one_current_package_features_do_not_compile_an_unselected_root() {
+        let fixture = LocalFixture::new();
+        fixture.package("", "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\nmembers = [\"b\", \"shared\"]\nresolver = \"1\"\n[dependencies]\nshared = { path = \"shared\", default-features = false }\n[features]\nextra = [\"shared/extra\"]\n");
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nshared = { path = \"../shared\", default-features = false }\n");
+        fixture.package("shared", "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\nextra = []\n");
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let mut catalog = Catalog::default();
+        let limits = options(ResolverVersion::V1);
+        let complete =
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let selection = TargetSelection {
+            host_triple: "x86_64-unknown-linux-gnu",
+            host_cfg: &cfg,
+            target_triple: "x86_64-unknown-linux-gnu",
+            target_cfg: &cfg,
+        };
+        let requests = [
+            workspace::MemberRequest {
+                root: fixture.0.clone(),
+                features: BTreeSet::from(["extra".to_owned()]),
+                default_features: true,
+                dev: false,
+                selected: false,
+            },
+            workspace::MemberRequest {
+                root: fixture.0.join("b"),
+                features: BTreeSet::new(),
+                default_features: true,
+                dev: false,
+                selected: true,
+            },
+        ];
+        let selected = workspace::resolve_selected_workspace(
+            &complete, &catalog, &limits, &requests, selection,
+        )
+        .unwrap();
+        assert_eq!(selected.root_edges.len(), 1);
+        assert_eq!(selected.root_edges[0].package.name, "b");
+        let features = selected
+            .packages
+            .into_iter()
+            .map(|package| (package.key.name, package.target_features))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            features.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["b", "shared"]
+        );
+        assert_eq!(features["shared"], BTreeSet::from(["extra".to_owned()]));
+        let output = std::process::Command::new(env!("CARGO"))
+            .env(
+                "RUSTC",
+                Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+            )
+            .args([
+                "build",
+                "--offline",
+                "-p",
+                "b",
+                "--features",
+                "extra",
+                "-Z",
+                "unstable-options",
+                "--unit-graph",
+                "--manifest-path",
+            ])
+            .arg(fixture.0.join("Cargo.toml"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(features, cargo_unit_features(&output.stdout));
     }
 
     fn checksum(version: &str) -> String {

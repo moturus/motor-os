@@ -6,6 +6,7 @@ pub(crate) struct MemberRequest {
     pub features: BTreeSet<String>,
     pub default_features: bool,
     pub dev: bool,
+    pub selected: bool,
 }
 
 /// Recompute features and reachability while retaining every complete-graph
@@ -76,14 +77,71 @@ pub(crate) fn resolve_selected_workspace(
         .package_limit
         .with_members(catalog.workspace_members.values().cloned());
     let locked = LockedPreference::from_resolution(complete);
-    solve_request(
+    let mut resolution = solve_request(
         queue,
         &mut catalog,
         &options,
         &locked,
         scope,
         &mut |_, _, _| Ok(()),
-    )
+    )?;
+    retain_selected_roots(&mut resolution, members);
+    Ok(resolution)
+}
+
+// Resolver 1 may activate the current package's features even when only another
+// member is selected. Keep that unification without compiling the extra root.
+fn retain_selected_roots(resolution: &mut Resolution, members: &[MemberRequest]) {
+    resolution.root_edges.retain(|edge| {
+        members.iter().any(|member| {
+            member.selected && edge.package.source == PackageSourceKey::Path(member.root.clone())
+        })
+    });
+    let packages = resolution
+        .packages
+        .iter()
+        .map(|package| (&package.key, package))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = resolution
+        .root_edges
+        .iter()
+        .map(|edge| (edge.package.clone(), edge.compile_kind))
+        .collect::<Vec<_>>();
+    let mut reachable = BTreeMap::<PackageKey, BTreeSet<CompileKind>>::new();
+    while let Some((key, kind)) = pending.pop() {
+        if !reachable.entry(key.clone()).or_default().insert(kind) {
+            continue;
+        }
+        for edge in &packages[&key].edges {
+            if edge.parent_compile_kind == Some(kind) {
+                pending.push((edge.package.clone(), edge.compile_kind));
+            }
+        }
+    }
+    resolution
+        .packages
+        .retain(|package| reachable.contains_key(&package.key));
+    for package in &mut resolution.packages {
+        package.compile_kinds.clone_from(&reachable[&package.key]);
+        package.feature_sets.retain(|context, _| match context {
+            FeatureContext::Unified => true,
+            FeatureContext::Target(_) => package.compile_kinds.contains(&CompileKind::Target),
+            FeatureContext::Host => package.compile_kinds.contains(&CompileKind::Host),
+        });
+        if !package.compile_kinds.contains(&CompileKind::Target) {
+            package.target_features.clear();
+        }
+        if !package.compile_kinds.contains(&CompileKind::Host) {
+            package.host_features.clear();
+        }
+        for edges in [&mut package.edges, &mut package.lock_edges] {
+            edges.retain(|edge| {
+                edge.parent_compile_kind
+                    .is_some_and(|kind| package.compile_kinds.contains(&kind))
+                    && reachable.contains_key(&edge.package)
+            });
+        }
+    }
 }
 
 /// Seed ordinary member packages into one solver, including every optional

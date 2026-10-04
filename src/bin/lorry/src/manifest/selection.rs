@@ -27,6 +27,21 @@ impl PackageSelection {
         members: impl Iterator<Item = (&'a str, &'a Version, &'a Path)>,
         defaults: impl Iterator<Item = &'a Path>,
     ) -> Result<(PathBuf, Vec<String>)> {
+        let (mut selected, warnings) = self.select(members, defaults)?;
+        match selected.len() {
+            1 => Ok((selected.pop().unwrap(), warnings)),
+            count => Err(Error::failure(format!(
+                "package selection selects {count} packages; multi-package execution is not yet supported"
+            ))
+            .with_help("select one workspace package with `-p NAME`")),
+        }
+    }
+
+    pub(crate) fn select<'a>(
+        &self,
+        members: impl Iterator<Item = (&'a str, &'a Version, &'a Path)>,
+        defaults: impl Iterator<Item = &'a Path>,
+    ) -> Result<(Vec<PathBuf>, Vec<String>)> {
         let members = members.collect::<Vec<_>>();
         let available = || {
             format!(
@@ -83,14 +98,12 @@ impl PackageSelection {
                 selected.extend(requested(name)?);
             }
         }
-        match selected.len() {
-            1 => Ok((selected.pop_first().unwrap(), warnings)),
-            0 => Err(Error::failure("package selection contains no packages to compile")),
-            count => Err(Error::failure(format!(
-                "package selection selects {count} packages; multi-package execution is not yet supported"
-            ))
-            .with_help("select one workspace package with `-p NAME`")),
+        if selected.is_empty() {
+            return Err(Error::failure(
+                "package selection contains no packages to compile",
+            ));
         }
+        Ok((selected.into_iter().collect(), warnings))
     }
 }
 

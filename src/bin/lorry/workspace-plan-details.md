@@ -1691,6 +1691,16 @@ passed in `/tmp/lorry-m6-qualified-features-clippy-final.log`. The first
 oracle run exposed a test assumption about Cargo path IDs: Cargo omits a
 package name when it matches the directory. Both ID forms are now handled.
 
+Package selection now exposes a deduplicated set while existing execution
+callers retain their single-package guard. Selected resolution can activate
+a feature-only current-package root, then retain only units reachable from
+the actual selected members. This preserves resolver 1's cross-package
+feature unification without compiling an unselected root. Its actual Cargo
+unit-graph oracle passed with all 33 resolver tests in
+`/tmp/lorry-m6-feature-only-roots-cargo-oracle.log`; the focused member selector
+and strict Clippy passed in `/tmp/lorry-m6-many-member-selection.log` and
+`/tmp/lorry-m6-feature-only-roots-clippy.log`.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

@@ -3642,6 +3642,22 @@ unsafe_code = { level = "forbid", priority = 1 }
                 .to_string()
                 .contains("did not match")
         );
+        let workspace = SourceWorkspace::load(&root, None).unwrap();
+        let selection = PackageSelection {
+            packages: vec!["app".to_owned(), "app@0.1".to_owned(), "sha*".to_owned()],
+            ..PackageSelection::default()
+        };
+        let (roots, warnings) = selection
+            .select(
+                workspace
+                    .packages
+                    .iter()
+                    .map(|member| (member.name.as_str(), &member.version, member.root.as_path())),
+                workspace.default_members.iter().map(PathBuf::as_path),
+            )
+            .unwrap();
+        assert_eq!(roots, [root.join("app"), root.join("shared")]);
+        assert!(warnings.is_empty());
         let unmatched = selected(&[], true, &["shared", "missing"]).unwrap();
         assert!(
             unmatched
