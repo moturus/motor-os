@@ -24,7 +24,7 @@ use crate::resolver::{CompileKind, PackageKey};
 use crate::sandbox::Executable;
 use crate::source_tree::Limits as TreeLimits;
 use crate::toolchain::{TargetInfo, Toolchain};
-use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind, UnitMode};
+use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind};
 
 pub trait EventReporter: Sync {
     fn compiler_messages(&self, key: &UnitKey, stdout: &[u8], stderr: &[u8]) -> Result<()>;
@@ -628,7 +628,6 @@ fn execute_unit(
                         })
                     })
                     .transpose()?;
-                let replay_diagnostics = matches!(key.mode, UnitMode::Check | UnitMode::CheckTest);
                 if let (Some(caches), Some(cache_key)) = (caches, cache_key) {
                     let cache = caches.for_unit(planned);
                     if cache.published_fresh(
@@ -636,7 +635,7 @@ fn execute_unit(
                         &planned_invocation.output,
                         selected_inputs,
                         &key.package,
-                        replay_diagnostics,
+                        true,
                     )? {
                         if options.verbose {
                             eprintln!(
@@ -644,17 +643,15 @@ fn execute_unit(
                                 key.package.name, key.package.version
                             );
                         }
-                        if replay_diagnostics {
-                            let (stdout, stderr) =
-                                cache.published_messages(&planned_invocation.output)?;
-                            if let Some(reporter) = options.reporter {
-                                reporter.compiler_messages(key, &stdout, &stderr)?;
-                            } else {
-                                let _guard = print
-                                    .lock()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                RustcCommand::render_messages(&stdout, &stderr, options.color);
-                            }
+                        let (stdout, stderr) =
+                            cache.published_messages(&planned_invocation.output)?;
+                        if let Some(reporter) = options.reporter {
+                            reporter.compiler_messages(key, &stdout, &stderr)?;
+                        } else {
+                            let _guard = print
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            RustcCommand::render_messages(&stdout, &stderr, options.color);
                         }
                         if let Some(reporter) = options.reporter {
                             reporter.compiler_artifact(
@@ -682,7 +679,8 @@ fn execute_unit(
                 if let (Some(caches), Some(cache_key)) = (caches, cache_key) {
                     let cache = caches.for_unit(planned);
                     if restorable
-                        && cache.restore(cache_key, &invocation.output, selected_inputs)?
+                        && let Some((stdout, stderr)) =
+                            cache.restore(cache_key, &invocation.output, selected_inputs)?
                     {
                         cache.record_cache_owner(cache_key, &key.package)?;
                         cache.record_published(
@@ -690,7 +688,7 @@ fn execute_unit(
                             &invocation.output,
                             selected_inputs,
                             &key.package,
-                            None,
+                            Some((&stdout, &stderr)),
                         )?;
                         staging.commit(unit_dir)?;
                         if options.verbose {
@@ -700,12 +698,18 @@ fn execute_unit(
                             );
                         }
                         if let Some(reporter) = options.reporter {
+                            reporter.compiler_messages(key, &stdout, &stderr)?;
                             reporter.compiler_artifact(
                                 key,
                                 planned,
                                 &planned_invocation.output,
                                 true,
                             )?;
+                        } else {
+                            let _guard = print
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            RustcCommand::render_messages(&stdout, &stderr, options.color);
                         }
                         return Ok(Executed::Artifact {
                             output: planned_invocation.output,
@@ -773,6 +777,10 @@ fn execute_unit(
                     RustcCommand::finish(&rustc_output, options.color)?;
                 }
                 verify_outputs(&invocation.output)?;
+                let diagnostics = (
+                    RustcCommand::diagnostic_messages(&rustc_output.stdout)?,
+                    RustcCommand::diagnostic_messages(&rustc_output.stderr)?,
+                );
                 validate_dep_info(
                     &invocation.output,
                     &manifest.root,
@@ -787,6 +795,7 @@ fn execute_unit(
                         &invocation.output,
                         cache_build_script.as_ref(),
                         selected_inputs,
+                        (&diagnostics.0, &diagnostics.1),
                     )?;
                     caches
                         .for_unit(planned)
@@ -806,10 +815,7 @@ fn execute_unit(
                         &invocation.output,
                         selected_inputs,
                         &key.package,
-                        replay_diagnostics.then_some((
-                            rustc_output.stdout.as_slice(),
-                            rustc_output.stderr.as_slice(),
-                        )),
+                        Some((&diagnostics.0, &diagnostics.1)),
                     )?;
                 }
                 staging.commit(unit_dir)?;
