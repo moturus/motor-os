@@ -30,6 +30,10 @@ printf '%s\n' \
     'members = ["app", "tool", "scripted"]' \
     'default-members = ["tool"]' \
     'resolver = "2"' \
+    '[workspace.package]' \
+    'version = "0.1.0"' \
+    'edition = "2024"' \
+    'rust-version = "1.85.0"' \
     '' \
     '[profile.dev]' \
     'panic = "abort"' >"$WORK/project/Cargo.toml"
@@ -54,8 +58,9 @@ for package in app tool; do
     printf '%s\n' \
         '[package]' \
         "name = \"$package\"" \
-        'version = "0.1.0"' \
-        'edition = "2024"' >"$WORK/project/$package/Cargo.toml"
+        'version.workspace = true' \
+        'edition.workspace = true' \
+        'rust-version.workspace = true' >"$WORK/project/$package/Cargo.toml"
     printf 'fn main() { println!("%s"); }\n' "$package" \
         >"$WORK/project/$package/src/main.rs"
 done
@@ -67,8 +72,9 @@ printf 'fn main() { println!("{}", shared::VALUE); }\n' \
 printf '%s\n' \
     '[package]' \
     'name = "shared"' \
-    'version = "0.1.0"' \
-    'edition = "2024"' \
+    'version.workspace = true' \
+    'edition.workspace = true' \
+    'rust-version.workspace = true' \
     '' \
     '[lib]' \
     'path = "src/lib.rs"' >"$WORK/project/shared/Cargo.toml"

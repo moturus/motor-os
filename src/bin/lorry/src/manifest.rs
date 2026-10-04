@@ -392,7 +392,14 @@ impl Manifest {
         lock_root: &Path,
         require_current_lock: bool,
     ) -> Result<Self> {
-        let mut manifest = Self::parse_document(&root, &path, &document, ManifestMode::Root)?;
+        let inherited = dependency_workspace_package(&root)?;
+        let mut manifest = Self::parse_document_with_inheritance(
+            &root,
+            &path,
+            &document,
+            ManifestMode::Root,
+            inherited.as_ref(),
+        )?;
         manifest.root = root;
         manifest.workspace_root = lock_root.to_owned();
         manifest.path = manifest.root.join(MANIFEST_NAME);
@@ -437,7 +444,7 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo path dependency manifest")?;
-        let inherited = dependency_workspace_package(&root, &path, &document)?;
+        let inherited = dependency_workspace_package(&root)?;
         let mut manifest = Self::parse_document_with_inheritance(
             &root,
             &path,
@@ -687,7 +694,16 @@ impl Workspace {
             parse_resolver(&path, &document, Some(item), Edition::E2015, 1)?
         } else if let Some(package) = document.root().get("package") {
             let package = require_table(&path, &document, package, "package")?;
-            let edition = parse_edition(&path, &document, package.get("edition"), 1, None)?;
+            let inherited = dependency_workspace_package(root)?;
+            let edition = parse_edition(
+                &path,
+                &document,
+                package.get("edition"),
+                1,
+                inherited
+                    .as_ref()
+                    .and_then(|values| values.edition.as_deref()),
+            )?;
             parse_resolver(&path, &document, package.get("resolver"), edition, 1)?
         } else {
             Resolver::V1
@@ -838,108 +854,33 @@ struct InheritedPackage {
     rust_version: Option<String>,
 }
 
-fn dependency_workspace_package(
-    root: &Path,
-    path: &Path,
-    document: &Document,
-) -> Result<Option<InheritedPackage>> {
-    for ancestor in root.ancestors() {
-        let candidate_path = ancestor.join(MANIFEST_NAME);
-        let candidate_document;
-        let workspace_document = if candidate_path == path {
-            document
-        } else {
-            if !candidate_path.is_file() {
-                continue;
-            }
-            candidate_document =
-                Document::load(&candidate_path, "possible dependency workspace manifest")?;
-            &candidate_document
-        };
-        let Some(workspace_item) = workspace_document.root().get("workspace") else {
-            continue;
-        };
-        let workspace = require_table(
-            &candidate_path,
-            workspace_document,
-            workspace_item,
-            "workspace",
-        )?;
-        if ancestor != root
-            && !dependency_workspace_contains(
-                root,
-                ancestor,
-                &candidate_path,
-                workspace_document,
-                workspace,
-            )?
-        {
-            continue;
-        }
-        let Some(package_item) = workspace.get("package") else {
-            return Ok(Some(InheritedPackage::default()));
-        };
-        let package = require_table(
-            &candidate_path,
-            workspace_document,
-            package_item,
-            "workspace.package",
-        )?;
-        return Ok(Some(InheritedPackage {
-            version: optional_string(
-                &candidate_path,
-                workspace_document,
-                package,
-                "workspace.package",
-                "version",
-            )?,
-            edition: optional_string(
-                &candidate_path,
-                workspace_document,
-                package,
-                "workspace.package",
-                "edition",
-            )?,
-            rust_version: optional_string(
-                &candidate_path,
-                workspace_document,
-                package,
-                "workspace.package",
-                "rust-version",
-            )?,
-        }));
-    }
-    Ok(None)
-}
-
-fn dependency_workspace_contains(
-    root: &Path,
-    workspace_root: &Path,
-    path: &Path,
-    document: &Document,
-    workspace: &Table,
-) -> Result<bool> {
-    let Some(item) = workspace.get("members") else {
-        return Ok(false);
+fn dependency_workspace_package(root: &Path) -> Result<Option<InheritedPackage>> {
+    let Some(workspace) = source::nearest_workspace(root)? else {
+        return Ok(None);
     };
-    for member in string_array(path, document, item, "workspace.members")? {
-        let relative = Path::new(&member);
-        if member.is_empty()
-            || relative
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-            || member
-                .bytes()
-                .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b']'))
-        {
-            continue;
-        }
-        let candidate = workspace_root.join(relative);
-        if fs::canonicalize(candidate).is_ok_and(|candidate| candidate == root) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let path = workspace.root.join(MANIFEST_NAME);
+    let document = Document::load(&path, "Cargo workspace manifest")?;
+    let table = require_table(
+        &path,
+        &document,
+        document.root().get("workspace").unwrap(),
+        "workspace",
+    )?;
+    let Some(item) = table.get("package") else {
+        return Ok(Some(InheritedPackage::default()));
+    };
+    let package = require_table(&path, &document, item, "workspace.package")?;
+    Ok(Some(InheritedPackage {
+        version: optional_string(&path, &document, package, "workspace.package", "version")?,
+        edition: optional_string(&path, &document, package, "workspace.package", "edition")?,
+        rust_version: optional_string(
+            &path,
+            &document,
+            package,
+            "workspace.package",
+            "rust-version",
+        )?,
+    }))
 }
 
 fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode) -> Result<()> {

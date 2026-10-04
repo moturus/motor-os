@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use super::{
     DependencySource, MANIFEST_NAME, MAX_WORKSPACE_MEMBERS, Manifest, ManifestMode,
-    canonical_manifest, require_table, resolve_target_defaults, string_array,
-    workspace_member_root,
+    canonical_manifest, dependency_workspace_package, require_table, resolve_target_defaults,
+    string_array, workspace_member_root,
 };
 use crate::diagnostic::{Error, Result};
 use crate::toml::Document;
@@ -95,14 +95,14 @@ impl SourceWorkspace {
     }
 }
 
-// Only membership is read from the root. Profiles, patches, and inherited
-// tables matter to builds, not to a description of source targets.
+// Keep declarations separate from loading members: dependency inheritance
+// must not require describing every package in an external workspace.
 pub(super) struct WorkspaceRoot {
     pub root: PathBuf,
     package: bool,
-    members: Vec<PathBuf>,
+    members: Vec<String>,
     exclude: Vec<PathBuf>,
-    default_members: Option<Vec<PathBuf>>,
+    default_members: Option<Vec<String>>,
 }
 
 impl WorkspaceRoot {
@@ -112,48 +112,34 @@ impl WorkspaceRoot {
         let paths = |key: &str| {
             table
                 .get(key)
-                .map(|item| {
-                    let values = string_array(path, document, item, &format!("workspace.{key}"))?;
-                    if values.len() > MAX_WORKSPACE_MEMBERS {
-                        return Err(Error::failure(format!(
-                            "workspace.{key} lists more than {MAX_WORKSPACE_MEMBERS} paths"
-                        )));
-                    }
-                    Ok(values)
-                })
+                .map(|item| string_array(path, document, item, &format!("workspace.{key}")))
                 .transpose()
-        };
-        let member_roots = |values: Vec<String>| {
-            values
-                .iter()
-                .map(|member| match member.as_str() {
-                    "." => Ok(root.to_owned()),
-                    _ => workspace_member_root(root, path, document, member),
-                })
-                .collect::<Result<Vec<_>>>()
         };
         Ok(Self {
             root: root.to_owned(),
             package: document.root().contains_key("package"),
-            members: member_roots(paths("members")?.unwrap_or_default())?,
+            members: paths("members")?.unwrap_or_default(),
             exclude: paths("exclude")?
                 .unwrap_or_default()
                 .iter()
                 .map(|entry| root.join(entry))
                 .collect(),
-            default_members: paths("default-members")?.map(member_roots).transpose()?,
+            default_members: paths("default-members")?,
         })
     }
 
     // An explicit member path takes precedence over `exclude`, as in Cargo.
     pub fn excludes(&self, directory: &Path) -> bool {
         self.exclude.iter().any(|path| directory.starts_with(path))
-            && !self.members.iter().any(|path| directory.starts_with(path))
+            && !self
+                .members
+                .iter()
+                .any(|path| directory.starts_with(self.root.join(path)))
     }
 
     // Path dependencies below the root are implicit members in Cargo.
     pub fn load_members(&self) -> Result<BTreeMap<PathBuf, Manifest>> {
-        let mut pending = self.members.clone();
+        let mut pending = self.member_roots(&self.members)?;
         if self.package {
             pending.push(self.root.clone());
         }
@@ -198,19 +184,37 @@ impl WorkspaceRoot {
         if current == self.root
             && let Some(declared) = &self.default_members
         {
+            let declared = self.member_roots(declared)?;
             if let Some(path) = declared.iter().find(|path| !members.contains(path)) {
                 return Err(Error::failure(format!(
                     "package `{}` is listed in default-members but is not a member",
                     path.display()
                 )));
             }
-            return Ok(declared.clone());
+            return Ok(declared);
         }
         if current != self.root || self.package {
             Ok(vec![current.to_owned()])
         } else {
             Ok(members.into_iter().cloned().collect())
         }
+    }
+
+    fn member_roots(&self, declared: &[String]) -> Result<Vec<PathBuf>> {
+        if declared.len() > MAX_WORKSPACE_MEMBERS {
+            return Err(Error::failure(format!(
+                "workspace lists more than {MAX_WORKSPACE_MEMBERS} member paths"
+            )));
+        }
+        let path = self.root.join(MANIFEST_NAME);
+        let document = Document::load(&path, "Cargo workspace manifest")?;
+        declared
+            .iter()
+            .map(|member| match member.as_str() {
+                "." => Ok(self.root.clone()),
+                _ => workspace_member_root(&self.root, &path, &document, member),
+            })
+            .collect()
     }
 }
 
@@ -235,7 +239,14 @@ pub(super) fn nearest_workspace(directory: &Path) -> Result<Option<WorkspaceRoot
 fn load_package(directory: &Path, root: &Path) -> Result<Manifest> {
     let path = directory.join(MANIFEST_NAME);
     let document = Document::load(&path, "Cargo source manifest")?;
-    let mut manifest = Manifest::parse_document(directory, &path, &document, ManifestMode::Source)?;
+    let inherited = dependency_workspace_package(directory)?;
+    let mut manifest = Manifest::parse_document_with_inheritance(
+        directory,
+        &path,
+        &document,
+        ManifestMode::Source,
+        inherited.as_ref(),
+    )?;
     resolve_target_defaults(&mut manifest)?;
     manifest.workspace_root = root.to_owned();
     Ok(manifest)

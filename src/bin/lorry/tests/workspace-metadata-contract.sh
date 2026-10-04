@@ -144,4 +144,18 @@ agrees_with_cargo "$WORK/dot/Cargo.toml" dot
 agrees_with_cargo "$WORK/empty/Cargo.toml" empty
 agrees_with_cargo "$WORK/empty/inner/Cargo.toml" empty-inner
 
+# All manifest modes use the same workspace discovery for inherited compiler
+# identity fields, including implicit members in a root without members.
+for root in "$WORK/dot" "$WORK/empty"; do
+    printf '\n[workspace.package]\nversion = "1.2.3"\nedition = "2024"\nrust-version = "1.85.0"\n' \
+        >>"$root/Cargo.toml"
+    for package in "$root" "$root/inner" "$root/listed"; do
+        sed -i 's/version = "0.1.0"/version.workspace = true/; s/edition = "2021"/edition.workspace = true/' \
+            "$package/Cargo.toml"
+        sed -i '/^name = /a rust-version.workspace = true' "$package/Cargo.toml"
+    done
+done
+agrees_with_cargo "$WORK/dot/Cargo.toml" inherited-listed
+agrees_with_cargo "$WORK/empty/inner/Cargo.toml" inherited-implicit
+
 echo "PASS: unprepared workspace source metadata agrees with Cargo"
