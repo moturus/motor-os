@@ -115,6 +115,8 @@ Targets follow Cargo's library, binary, example, test, bench, and build-script
 ordering.
 Cargo registry description loading verifies the same archives, markers, and
 source trees as compilation loading, without imposing build-target restrictions.
+Source-only workspace preparation retains registry target descriptions and
+development declarations through evidence inspection and publication.
 
 Debug builds must reproduce Cargo-equivalent compilation semantics but need
 not be byte-identical across hosts because paths and debug information can

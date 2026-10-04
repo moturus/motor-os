@@ -498,6 +498,7 @@ fn registry_package_evidence_set(
     config: &Config,
     staging_parent: &Path,
     packages: &[(&ResolvedPackage, [u8; 32])],
+    describe: bool,
 ) -> Result<BTreeMap<PackageKey, PreparedPackage>> {
     if packages.is_empty() {
         return Ok(BTreeMap::new());
@@ -522,6 +523,7 @@ fn registry_package_evidence_set(
                                     staging_parent,
                                     package,
                                     checksum,
+                                    describe,
                                 ),
                             )
                         })
@@ -768,6 +770,7 @@ fn resolve_review_context(
                 inputs.config,
                 inputs.staging_parent,
                 &pending_registry,
+                false,
             )?
             .into_iter()
             .map(|(key, package)| (key, package.evidence)),
@@ -823,7 +826,7 @@ fn prepare_verified_resolution(
     offline::validate_selected_resolution(manifest, &resolution)?;
     let preflight = policy::preflight(&config.policy, &resolution)?;
     let packages =
-        prepare_resolution_packages(&resolution, config, source, staging_parent, direct)?;
+        prepare_resolution_packages(&resolution, config, source, staging_parent, direct, false)?;
     let evidence = packages
         .iter()
         .map(|(key, package)| (key.clone(), package.evidence.clone()))
@@ -843,6 +846,7 @@ fn prepare_resolution_packages(
     source: RegistrySource<'_>,
     staging_parent: &Path,
     direct: &crate::git::DirectCatalog,
+    describe: bool,
 ) -> Result<BTreeMap<PackageKey, PreparedPackage>> {
     let git = resolution
         .packages
@@ -858,7 +862,8 @@ fn prepare_resolution_packages(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let mut packages = registry_package_evidence_set(source, config, staging_parent, &registry)?;
+    let mut packages =
+        registry_package_evidence_set(source, config, staging_parent, &registry, describe)?;
     for package in &resolution.packages {
         if packages.contains_key(&package.key) {
             continue;
@@ -905,6 +910,7 @@ fn registry_package_evidence(
     staging_parent: &Path,
     package: &ResolvedPackage,
     checksum: &[u8; 32],
+    describe: bool,
 ) -> Result<PreparedPackage> {
     match source {
         RegistrySource::Lorry(repositories) => {
@@ -929,7 +935,9 @@ fn registry_package_evidence(
                 )?;
                 (extracted.path().to_owned(), Some(extracted))
             };
-            let inspected_manifest = if object.retained_source {
+            let inspected_manifest = if describe {
+                Manifest::load_source_dependency(&source_root)?
+            } else if object.retained_source {
                 repositories.load_registry_manifest(&object)?
             } else {
                 Manifest::load_path_dependency(&source_root)?
@@ -965,8 +973,15 @@ fn registry_package_evidence(
         }
         RegistrySource::Cargo(registry) => {
             let locked_checksum = hex(checksum);
-            let cached =
-                registry.load(&package.key.name, &package.key.version, &locked_checksum)?;
+            let cached = if describe {
+                registry.load_description(
+                    &package.key.name,
+                    &package.key.version,
+                    &locked_checksum,
+                )?
+            } else {
+                registry.load(&package.key.name, &package.key.version, &locked_checksum)?
+            };
             if cached.checksum != *checksum {
                 return Err(Error::failure(format!(
                     "Cargo registry source checksum does not match resolved package `{} {}`",
@@ -1044,6 +1059,7 @@ fn prepare_locked_with(
             config,
             staging_parent,
             &pending_registry,
+            false,
         )?);
         for package in &resolution.packages {
             if !packages.contains_key(&package.key) {

@@ -752,6 +752,59 @@ mod tests {
             .unwrap()
             .sha256
         );
+        let root = fixture.0.join("project");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"1.0.0\"\n\
+             [dependencies]\ndemo = \"=1.2.3\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("Cargo.lock"), format!(
+            "version = 4\n[[package]]\nname = \"root\"\nversion = \"1.0.0\"\ndependencies = [\"demo\"]\n\
+             [[package]]\nname = \"demo\"\nversion = \"1.2.3\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = {checksum:?}\n")).unwrap();
+        let mut workspace = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        let config = crate::config::Config::default();
+        let options = crate::resolver::Options {
+            resolver: workspace.packages[0].resolver,
+            incompatible_rust_versions: config.incompatible_rust_versions,
+            rust_versions: vec![Version::new(1, 99, 0)],
+            package_limit: crate::policy::PackageLimit::new(
+                &config.policy.limits,
+                &workspace.packages[0],
+            ),
+            max_depth: config.policy.limits.max_depth,
+        };
+        let direct = crate::git::DirectCatalog::default();
+        let registry_source = crate::dependency::RegistrySource::Cargo(&registry);
+        let (complete, _) = crate::dependency::workspace::resolve_locked(
+            &workspace,
+            &config,
+            registry_source,
+            &direct,
+            &options,
+        )
+        .unwrap();
+        let prepared = crate::dependency::workspace::prepare_sources(
+            complete,
+            &config,
+            registry_source,
+            &root.join("staging"),
+            &direct,
+        )
+        .unwrap();
+        let dependency = prepared
+            .packages
+            .values()
+            .find(|package| package.manifest.name == "demo")
+            .unwrap();
+        assert_eq!(dependency.manifest.binaries.len(), 1);
+        assert_eq!(dependency.manifest.described_targets.len(), 1);
+        assert!(!root.join(".lorry").exists());
+        assert!(!root.join("target").exists());
         fs::write(source.join("examples/demo.rs"), "fn changed() {}\n").unwrap();
         assert!(
             registry

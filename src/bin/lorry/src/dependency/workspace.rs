@@ -48,7 +48,7 @@ pub(crate) fn prepare_sources(
 ) -> Result<PreparedSources> {
     policy::preflight_sources(&config.policy, &resolution)?;
     let packages =
-        prepare_resolution_packages(&resolution, config, source, staging_parent, direct)?;
+        prepare_resolution_packages(&resolution, config, source, staging_parent, direct, true)?;
     let evidence = packages
         .iter()
         .map(|(key, package)| (key.clone(), package.evidence.clone()))
