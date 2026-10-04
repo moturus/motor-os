@@ -15,6 +15,7 @@ use crossterm::terminal::{self, Clear, ClearType, disable_raw_mode, enable_raw_m
 use crossterm::{execute, queue};
 
 use crate::runtime::{Approval, Approver, Event, Observer, Permission, Runtime, SessionSummary};
+use crate::ui::history::Kind;
 use crate::ui::tui_editor::{Edit, Editor};
 
 const POLL: Duration = Duration::from_millis(50);
@@ -31,7 +32,7 @@ pub fn run(
 ) -> Result<(), String> {
     runtime.set_interactive(interactive)?;
     let mut screen = Screen::enter()?;
-    let mut app = App::new(runtime);
+    let mut app = App::new(runtime)?;
     let result = (|| {
         for notice in runtime.take_startup_notices() {
             app.apply(Event::Notice(notice));
@@ -133,17 +134,6 @@ impl Drop for Screen {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    User,
-    Assistant,
-    Reasoning,
-    Tool,
-    ToolOutput,
-    Notice,
-    Error,
-}
-
 struct Entry {
     kind: Kind,
     text: String,
@@ -234,8 +224,8 @@ fn screen_layout(height: usize, editor_rows: usize, approval: bool) -> Layout {
 }
 
 impl App {
-    fn new(runtime: &Runtime) -> Self {
-        Self {
+    fn new(runtime: &Runtime) -> Result<Self, String> {
+        let mut app = Self {
             transcript: VecDeque::new(),
             bytes: 0,
             editor: Editor::new(),
@@ -248,7 +238,23 @@ impl App {
             input_enabled: true,
             quit: false,
             last_frame: None,
-        }
+        };
+        app.restore_history(runtime)?;
+        Ok(app)
+    }
+
+    fn restore_history(&mut self, runtime: &Runtime) -> Result<(), String> {
+        self.transcript.clear();
+        self.bytes = 0;
+        self.scroll = 0;
+        super::history::replay(runtime.session(), |kind, text| {
+            self.push(kind, text, false);
+            Ok(())
+        })?;
+        self.refresh(runtime);
+        self.status = "idle".into();
+        self.invalidate();
+        Ok(())
     }
 
     fn apply(&mut self, event: Event) {
@@ -297,6 +303,7 @@ impl App {
 
     fn push(&mut self, kind: Kind, text: String, live: bool) {
         let text = clean(&text);
+        let text = suffix(&text, TRANSCRIPT_BYTES);
         if text.is_empty() {
             return;
         }
@@ -1040,6 +1047,7 @@ fn handle_command(
         "name" => runtime.set_name(argument)?,
         "new" => {
             runtime.new_session(argument == "--ephemeral", None)?;
+            app.restore_history(runtime)?;
             show_runtime_notices(runtime, app);
         }
         "resume" => {
@@ -1063,6 +1071,7 @@ fn handle_command(
                 argument.to_string()
             };
             runtime.resume(&selector)?;
+            app.restore_history(runtime)?;
             show_runtime_notices(runtime, app);
         }
         "label" => {
@@ -1099,7 +1108,9 @@ fn handle_command(
             } else {
                 argument.to_string()
             };
-            if let Some(draft) = runtime.select_entry(&id)? {
+            let draft = runtime.select_entry(&id)?;
+            app.restore_history(runtime)?;
+            if let Some(draft) = draft {
                 app.replace_draft(draft);
             }
             app.push(
@@ -1126,6 +1137,7 @@ fn handle_command(
                 argument.to_string()
             };
             let draft = runtime.fork_at(&id)?;
+            app.restore_history(runtime)?;
             show_runtime_notices(runtime, app);
             app.replace_draft(draft);
             app.push(
@@ -1136,6 +1148,7 @@ fn handle_command(
         }
         "clone" => {
             runtime.clone_session()?;
+            app.restore_history(runtime)?;
             show_runtime_notices(runtime, app);
             app.push(
                 Kind::Notice,
@@ -1404,6 +1417,156 @@ fn fold(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn saved_runtime(label: &str) -> (Runtime, std::path::PathBuf) {
+        use crate::provider::{
+            Completion, EventSink, Message, Provider, ProviderError, Request, ToolCall,
+        };
+        use crate::session::{Compaction, Store};
+
+        struct NoRequests;
+        impl Provider for NoRequests {
+            fn complete(
+                &self,
+                _: &Request,
+                _: &mut dyn EventSink,
+            ) -> Result<Completion, ProviderError> {
+                panic!("displaying saved history requested a model response");
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("gears-tui-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Store::with_root(&root, root.join("state")).unwrap();
+        let mut session = store.create(false, None).unwrap();
+        session
+            .append_message(&Message::user("saved question\x1b"))
+            .unwrap();
+        let branch = session
+            .append_message(&Message::assistant("saved answer"))
+            .unwrap();
+        session
+            .append_message(&Message::assistant("abandoned answer"))
+            .unwrap();
+        session.select(&branch).unwrap();
+        let mut message = Message::assistant_response(
+            "saved follow-up".into(),
+            vec![ToolCall::new(
+                "c1",
+                "sh",
+                "{\"command\":\"touch must-not-run\"}",
+            )],
+        );
+        message.reasoning = Some("saved reasoning".into());
+        session.append_message(&message).unwrap();
+        session
+            .append_message(&Message::tool_result("c1", "sh", "saved output", false))
+            .unwrap();
+        session.append_error("saved failure", true).unwrap();
+        session
+            .append_compaction(&Compaction {
+                summary: "model context summary".into(),
+                retained_tail: Vec::new(),
+                tokens_before: 10,
+            })
+            .unwrap();
+        session
+            .append_message(&Message::assistant("latest answer"))
+            .unwrap();
+        let id = session.id().to_string();
+        drop(session);
+        let session = store.open(&id).unwrap();
+        let runtime = Runtime::new_with_registry_at(
+            std::sync::Arc::new(NoRequests),
+            store,
+            session,
+            &crate::config::Config::default(),
+            "test/model".into(),
+            crate::tools::Registry::default(),
+            root.join("global"),
+        )
+        .unwrap();
+        (runtime, root)
+    }
+
+    #[test]
+    fn resumed_session_displays_saved_active_history_without_running_it() {
+        let (runtime, root) = saved_runtime("resume-history");
+        let before = std::fs::read(runtime.session().path().unwrap()).unwrap();
+        let context = runtime.session().context_messages().unwrap();
+        let app = App::new(&runtime).unwrap();
+        let visible = visible(&app);
+        for text in [
+            "saved question",
+            "saved answer",
+            "saved reasoning",
+            "saved follow-up",
+            "saved output",
+            "saved failure",
+            "latest answer",
+        ] {
+            assert!(visible.contains(text), "missing {text:?}: {visible}");
+        }
+        assert!(!visible.contains("abandoned answer"));
+        assert!(!visible.contains('\x1b'));
+        assert!(!root.join("must-not-run").exists());
+        assert_eq!(runtime.session().context_messages().unwrap(), context);
+        assert_eq!(
+            std::fs::read(runtime.session().path().unwrap()).unwrap(),
+            before
+        );
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn visible(app: &App) -> String {
+        app.frame(100, 40)
+            .lines
+            .iter()
+            .map(|line| line.0.iter().map(|cell| cell.character).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn session_and_branch_commands_replace_the_visible_history() {
+        let (mut runtime, root) = saved_runtime("switch-history");
+        let id = runtime.session().id().to_string();
+        let branch = runtime
+            .session()
+            .entries()
+            .iter()
+            .find(|entry| entry.data["content"][0]["text"] == "saved answer")
+            .unwrap()
+            .id
+            .clone();
+        let mut app = App::new(&runtime).unwrap();
+        app.scroll = 100;
+        handle_command(&mut runtime, &mut app, "/new", &[], &[]).unwrap();
+        assert!(!visible(&app).contains("saved answer"));
+        handle_command(&mut runtime, &mut app, &format!("/resume {id}"), &[], &[]).unwrap();
+        assert!(visible(&app).contains("latest answer"));
+        assert_eq!(app.scroll, 0);
+        handle_command(&mut runtime, &mut app, &format!("/tree {branch}"), &[], &[]).unwrap();
+        assert!(visible(&app).contains("saved answer"));
+        assert!(!visible(&app).contains("latest answer"));
+        assert!(!visible(&app).contains("abandoned answer"));
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_saved_reply_keeps_its_visible_end() {
+        let mut app = app();
+        app.push(
+            Kind::Assistant,
+            format!("{}latest end", "α".repeat(TRANSCRIPT_BYTES)),
+            false,
+        );
+        assert!(visible(&app).contains("latest end"));
+        assert!(app.bytes <= TRANSCRIPT_BYTES);
+    }
 
     fn app() -> App {
         App {

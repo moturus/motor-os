@@ -1,3 +1,4 @@
+mod history;
 pub mod jsonl;
 pub mod line;
 pub mod select;
