@@ -46,6 +46,7 @@ fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -
         &lock.packages,
         &source_kinds,
         edge_mode,
+        lock.format,
     )?;
 
     validate_packages(lock, resolution, &source_kinds, edge_mode)
@@ -114,6 +115,7 @@ fn validate_packages(
             &lock.packages,
             source_kinds,
             edge_mode,
+            lock.format,
         )?;
     }
     Ok(())
@@ -211,6 +213,7 @@ fn validate_edges(
     packages: &[LockedPackage],
     source_kinds: &BTreeMap<PackageKey, Option<String>>,
     mode: EdgeMode,
+    format: crate::lockfile::Format,
 ) -> Result<()> {
     let expected = resolved
         .iter()
@@ -236,7 +239,7 @@ fn validate_edges(
                 "{owner} repeats Cargo.lock dependency reference `{reference}`"
             )));
         }
-        let package = resolve_lock_reference(reference, packages)?;
+        let package = resolve_lock_reference(reference, packages, format)?;
         actual.insert(LockKey {
             name: package.name.clone(),
             version: Version::parse(&package.version.original).map_err(|error| {
@@ -264,6 +267,7 @@ fn validate_edges(
 pub(crate) fn resolve_lock_reference<'a>(
     reference: &str,
     packages: &'a [LockedPackage],
+    format: crate::lockfile::Format,
 ) -> Result<&'a LockedPackage> {
     let (identity, source) = match reference.strip_suffix(')') {
         Some(without_close) => {
@@ -309,14 +313,10 @@ pub(crate) fn resolve_lock_reference<'a>(
         })
         .filter(|package| {
             source.is_none_or(|source| {
-                package.source.as_deref().is_some_and(|locked| {
-                    locked == source
-                        || (source.starts_with("git+")
-                            && !source.contains('#')
-                            && locked
-                                .rsplit_once('#')
-                                .is_some_and(|(remote, _)| remote == source))
-                })
+                package
+                    .source
+                    .as_deref()
+                    .is_some_and(|locked| lock_source_matches(source, locked, format))
             })
         })
         .collect::<Vec<_>>();
@@ -341,6 +341,29 @@ pub(crate) fn resolve_lock_reference<'a>(
             "Cargo.lock dependency reference `{reference}` is ambiguous"
         ))),
     }
+}
+
+pub(crate) fn lock_source_matches(
+    reference: &str,
+    locked: &str,
+    format: crate::lockfile::Format,
+) -> bool {
+    if reference == locked {
+        return true;
+    }
+    if !reference.starts_with("git+") || reference.contains('#') {
+        return false;
+    }
+    let Some((remote, _)) = locked.rsplit_once('#') else {
+        return false;
+    };
+    // Cargo's legacy dependency encoding omits master; package source IDs
+    // remain distinct. Never apply this equivalence to modern references.
+    remote == reference
+        || (matches!(
+            format,
+            crate::lockfile::Format::V1 | crate::lockfile::Format::V2
+        ) && remote.strip_suffix("?branch=master") == Some(reference))
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -564,24 +587,33 @@ mod tests {
             locked("local", "1.0.0", None),
         ];
         assert_eq!(
-            resolve_lock_reference("demo 1.0.0", &packages)
+            resolve_lock_reference("demo 1.0.0", &packages, crate::lockfile::Format::V4)
                 .unwrap()
                 .version
                 .original,
             "1.0.0"
         );
         assert_eq!(
-            resolve_lock_reference(&format!("demo 2.0.0 ({CRATES_IO_SOURCE})"), &packages,)
-                .unwrap()
-                .version
-                .original,
+            resolve_lock_reference(
+                &format!("demo 2.0.0 ({CRATES_IO_SOURCE})"),
+                &packages,
+                crate::lockfile::Format::V4
+            )
+            .unwrap()
+            .version
+            .original,
             "2.0.0"
         );
-        assert!(resolve_lock_reference("demo", &packages).is_err());
-        assert!(resolve_lock_reference("missing", &packages).is_err());
-        assert!(resolve_lock_reference("demo bad version", &packages).is_err());
+        assert!(resolve_lock_reference("demo", &packages, crate::lockfile::Format::V4).is_err());
+        assert!(resolve_lock_reference("missing", &packages, crate::lockfile::Format::V4).is_err());
+        assert!(
+            resolve_lock_reference("demo bad version", &packages, crate::lockfile::Format::V4)
+                .is_err()
+        );
         assert_eq!(
-            resolve_lock_reference("local", &packages).unwrap().name,
+            resolve_lock_reference("local", &packages, crate::lockfile::Format::V4)
+                .unwrap()
+                .name,
             "local"
         );
     }
@@ -596,7 +628,8 @@ mod tests {
         assert_eq!(
             resolve_lock_reference(
                 "demo 1.0.0 (git+https://example.com/demo?branch=motor)",
-                &packages
+                &packages,
+                crate::lockfile::Format::V4,
             )
             .unwrap()
             .source
@@ -606,7 +639,8 @@ mod tests {
         assert!(
             resolve_lock_reference(
                 "demo 1.0.0 (git+https://example.com/demo?branch=other)",
-                &packages
+                &packages,
+                crate::lockfile::Format::V4,
             )
             .is_err()
         );
@@ -616,7 +650,8 @@ mod tests {
                     "demo 1.0.0 (git+https://example.com/demo?branch=motor#{})",
                     "1".repeat(40)
                 ),
-                &packages
+                &packages,
+                crate::lockfile::Format::V4,
             )
             .is_err()
         );
@@ -628,10 +663,56 @@ mod tests {
         assert!(
             resolve_lock_reference(
                 "demo 1.0.0 (git+https://example.com/demo?branch=motor)",
-                &ambiguous
+                &ambiguous,
+                crate::lockfile::Format::V4,
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn legacy_git_master_dependency_reference_omits_the_branch() {
+        // Cargo V1/V2 keep the branch on package sources, but omit it on
+        // dependency references even when a path package needs disambiguation.
+        let source = format!(
+            "git+https://example.com/demo?branch=master#{}",
+            "0".repeat(40)
+        );
+        let packages = [
+            locked("demo", "1.0.0", Some(&source)),
+            locked("demo", "1.0.0", None),
+        ];
+        for format in [crate::lockfile::Format::V1, crate::lockfile::Format::V2] {
+            assert_eq!(
+                resolve_lock_reference(
+                    "demo 1.0.0 (git+https://example.com/demo)",
+                    &packages,
+                    format
+                )
+                .unwrap()
+                .source
+                .as_deref(),
+                Some(source.as_str())
+            );
+        }
+        for format in [crate::lockfile::Format::V3, crate::lockfile::Format::V4] {
+            assert!(
+                resolve_lock_reference(
+                    "demo 1.0.0 (git+https://example.com/demo)",
+                    &packages,
+                    format
+                )
+                .is_err()
+            );
+            assert!(
+                resolve_lock_reference(
+                    "demo 1.0.0 (git+https://example.com/demo?branch=master)",
+                    &packages,
+                    format
+                )
+                .is_ok()
+            );
+        }
     }
 
     fn locked(name: &str, version: &str, source: Option<&str>) -> LockedPackage {

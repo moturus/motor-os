@@ -255,7 +255,8 @@ fn preserve_inactive_dependencies(
             .get_mut(&identity)
             .ok_or_else(|| Error::failure("resolved Cargo.lock node disappeared"))?;
         for reference in &locked.dependencies {
-            let dependency = crate::offline::resolve_lock_reference(reference, &lock.packages)?;
+            let dependency =
+                crate::offline::resolve_lock_reference(reference, &lock.packages, lock.format)?;
             let dependency_identity = locked_identity(dependency)?;
             if node.dependencies.contains(&dependency_identity)
                 || local_manifest.is_some_and(|manifest| {
@@ -327,7 +328,8 @@ fn preserve_locked_packages<'a>(
         }
         let mut dependencies = BTreeSet::new();
         for reference in &package.dependencies {
-            let dependency = crate::offline::resolve_lock_reference(reference, &lock.packages)?;
+            let dependency =
+                crate::offline::resolve_lock_reference(reference, &lock.packages, lock.format)?;
             dependencies.insert(locked_identity(dependency)?);
             pending.push(dependency);
         }

@@ -1829,7 +1829,7 @@ mod review {
             let mut dependencies = package
                 .dependencies
                 .iter()
-                .map(|spelling| resolve_reference(&nodes, spelling))
+                .map(|spelling| resolve_reference(&nodes, spelling, lock.format))
                 .collect::<Result<Vec<_>>>()?;
             dependencies.sort();
             result.push(LockedRegistry {
@@ -1884,6 +1884,7 @@ mod review {
     fn resolve_reference(
         nodes: &BTreeMap<&str, Vec<(&LockedPackage, ReferenceSource)>>,
         spelling: &str,
+        format: crate::lockfile::Format,
     ) -> Result<DependencyReference> {
         let mut fields = spelling.split(' ');
         let name = fields.next().unwrap_or_default();
@@ -1913,7 +1914,11 @@ mod review {
             .iter()
             .filter(|(package, _)| version.is_none_or(|value| package.version.original == value))
             .filter(|(package, _)| {
-                source.is_none_or(|value| package.source.as_deref() == Some(value))
+                source.is_none_or(|value| {
+                    package.source.as_deref().is_some_and(|locked| {
+                        crate::offline::lock_source_matches(value, locked, format)
+                    })
+                })
             })
             .collect();
         match candidates.as_slice() {
@@ -2726,6 +2731,45 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 packages: vec![package(Some(CRATES_IO_SOURCE), None)],
             };
             assert!(locked_graph(&unchecksummed).is_err());
+        }
+
+        #[test]
+        fn registry_graph_resolves_git_references_without_commits() {
+            let project = Project::new(
+                "[package]\nname = \"root\"\nversion = \"0.1.0\"\n",
+                &format!(
+                    "version = 4\n\n[[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\
+                     [[package]]\nname = \"git\"\nversion = \"1.0.0\"\n\
+                     source = \"git+https://example.com/demo?branch=master#{}\"\n\
+                     [[package]]\nname = \"user\"\nversion = \"1.0.0\"\n\
+                     source = \"{CRATES_IO_SOURCE}\"\nchecksum = \"{}\"\n\
+                     dependencies = [\"git 1.0.0 (git+https://example.com/demo?branch=master)\"]\n",
+                    "0".repeat(40),
+                    "1".repeat(64),
+                ),
+            );
+            let mut lock = Manifest::load(&project.0).unwrap().lock.unwrap();
+            for format in [crate::lockfile::Format::V3, crate::lockfile::Format::V4] {
+                lock.format = format;
+                assert_eq!(
+                    locked_graph(&lock).unwrap()[0].dependencies[0].source,
+                    ReferenceSource::Git
+                );
+            }
+            lock.packages
+                .iter_mut()
+                .find(|package| package.name == "user")
+                .unwrap()
+                .dependencies[0] = "git 1.0.0 (git+https://example.com/demo)".to_owned();
+            for format in [crate::lockfile::Format::V1, crate::lockfile::Format::V2] {
+                lock.format = format;
+                assert_eq!(
+                    locked_graph(&lock).unwrap()[0].dependencies[0].source,
+                    ReferenceSource::Git
+                );
+            }
+            lock.format = crate::lockfile::Format::V4;
+            assert!(locked_graph(&lock).is_err());
         }
 
         fn resolved(
