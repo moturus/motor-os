@@ -636,6 +636,7 @@ fn bind_internal_dependencies(manifest: &mut Manifest, object: &Object) -> Resul
             ))
         })?;
         if canonical.strip_prefix(&object.source).is_ok() {
+            dependency.git_path_source = Some(object.locked.cargo_source.clone());
             dependency.source = DependencySource::Git(GitDependency {
                 url: object.locked.url.clone(),
                 selector: object.locked.selector.clone(),
@@ -749,6 +750,10 @@ mod tests {
         };
         let mut manifest = Manifest::load_path_dependency(&source.join("first")).unwrap();
         bind_internal_dependencies(&mut manifest, &object).unwrap();
+        assert_eq!(
+            manifest.dependencies[0].git_path_source.as_deref(),
+            Some(object.locked.cargo_source.as_str())
+        );
 
         assert!(matches!(
             &manifest.dependencies[0].source,

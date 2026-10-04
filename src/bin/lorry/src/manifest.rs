@@ -200,6 +200,7 @@ pub struct Dependency {
     pub package: String,
     pub requirement: VersionReq,
     pub version_specified: bool,
+    pub git_path_source: Option<String>,
     pub source: DependencySource,
     pub optional: bool,
     pub default_features: bool,
@@ -1940,6 +1941,7 @@ fn parse_dependency(
             package: alias.to_owned(),
             requirement: parse_requirement(path, document.line_of_item(item), alias, requirement)?,
             version_specified: true,
+            git_path_source: None,
             source: DependencySource::CratesIo,
             optional: false,
             default_features: true,
@@ -2118,6 +2120,7 @@ fn parse_dependency(
         package,
         requirement,
         version_specified: lookup.get("version").is_some(),
+        git_path_source: None,
         source,
         optional: lookup_bool(path, document, &lookup, alias, "optional")?.unwrap_or(false),
         default_features: lookup_bool(path, document, &lookup, alias, "default-features")?

@@ -245,7 +245,15 @@ fn map_dependency(
             let presented = dependency_roots.get(&canonical).unwrap_or(&canonical);
             (None, Some(path_utf8(presented, "dependency path")?))
         }
-        DependencySource::Git(git) => (Some(git_source(git)), None),
+        DependencySource::Git(git) => (
+            Some(
+                dependency
+                    .git_path_source
+                    .clone()
+                    .unwrap_or_else(|| git_source(git)),
+            ),
+            None,
+        ),
     };
     Ok(wire::Dependency {
         name: dependency.package.clone(),
@@ -458,6 +466,30 @@ mod tests {
                 "1.0.0"
             ),
             "git+https://example.test/demo.git#demo@1.0.0"
+        );
+    }
+
+    #[test]
+    fn internal_git_path_sources_retain_the_precise_commit() {
+        let mut manifest = Manifest::parse_dependency(Path::new("/fixture"), Path::new("/fixture/Cargo.toml"),
+            "[package]\nname=\"root\"\nversion=\"1.0.0\"\n[dependencies]\nchild={git=\"https://example.test/repo.git\",branch=\"main\"}\n").unwrap();
+        let dependency = &mut manifest.dependencies[0];
+        let source = "git+https://example.test/repo.git?branch=main";
+        assert_eq!(
+            map_dependency(dependency, &BTreeMap::new())
+                .unwrap()
+                .source
+                .as_deref(),
+            Some(source)
+        );
+        let precise = format!("{source}#{}", "1".repeat(40));
+        dependency.git_path_source = Some(precise.clone());
+        assert_eq!(
+            map_dependency(dependency, &BTreeMap::new())
+                .unwrap()
+                .source
+                .as_deref(),
+            Some(precise.as_str())
         );
     }
 
