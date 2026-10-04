@@ -14,6 +14,7 @@ mod inheritance;
 mod selection;
 mod source;
 mod targets;
+pub(crate) use selection::PackageSelection;
 pub(crate) use source::SourceWorkspace;
 pub(crate) use targets::DescribedTarget;
 
@@ -312,11 +313,11 @@ impl Manifest {
     }
 
     pub fn load_selected(root: &Path, package: Option<&str>) -> Result<Self> {
-        Self::load_project(root, package, true)
+        Self::load_project(root, &PackageSelection::single(package), true)
     }
 
     pub fn load_for_vendor_selected(root: &Path, package: Option<&str>) -> Result<Self> {
-        Self::load_project(root, package, false)
+        Self::load_project(root, &PackageSelection::single(package), false)
     }
 
     pub fn load_selected_or_manifest_path(
@@ -325,20 +326,22 @@ impl Manifest {
         package: Option<&str>,
         require_current_lock: bool,
     ) -> Result<Self> {
-        match manifest_path {
-            Some(path) => Self::load_manifest_path(&root.join(path), package, require_current_lock),
-            None => Self::load_project(root, package, require_current_lock),
-        }
+        Self::load_selection(
+            root,
+            manifest_path,
+            &PackageSelection::single(package),
+            require_current_lock,
+        )
     }
 
-    pub fn load_manifest_path(
-        manifest_path: &Path,
-        package: Option<&str>,
+    pub fn load_selection(
+        root: &Path,
+        manifest_path: Option<&Path>,
+        selection: &PackageSelection,
         require_current_lock: bool,
     ) -> Result<Self> {
-        let path = canonical_manifest(manifest_path)?;
-        let root = path.parent().unwrap();
-        Self::load_project(root, package, require_current_lock)
+        let path = discover_manifest(root, manifest_path)?;
+        Self::load_project(path.parent().unwrap(), selection, require_current_lock)
     }
 
     pub fn with_lock_source(mut self, source: String) -> Result<Self> {
@@ -372,7 +375,7 @@ impl Manifest {
 
     fn load_project(
         root: &Path,
-        package: Option<&str>,
+        selection: &PackageSelection,
         require_current_lock: bool,
     ) -> Result<Self> {
         let path = discover_manifest(root, None)?;
@@ -381,20 +384,19 @@ impl Manifest {
         let Some(workspace) = discover_workspace(&root)? else {
             let mut manifest =
                 Self::finish_root(root.clone(), path, document, &root, require_current_lock)?;
-            if let Some(requested) = package {
-                selection::select_one(
-                    std::iter::once((
-                        manifest.name.as_str(),
-                        &manifest.version,
-                        manifest.root.as_path(),
-                    )),
-                    requested,
-                )?;
-            }
+            let (_, warnings) = selection.select_one(
+                std::iter::once((
+                    manifest.name.as_str(),
+                    &manifest.version,
+                    manifest.root.as_path(),
+                )),
+                std::iter::once(manifest.root.as_path()),
+            )?;
+            manifest.warnings.extend(warnings);
             manifest.workspace_root = root;
             return Ok(manifest);
         };
-        let member = workspace.select(&root, package)?;
+        let (member, warnings) = workspace.select(selection)?;
         let member_path = member.join(MANIFEST_NAME);
         let member_document = if member == root {
             document
@@ -409,6 +411,7 @@ impl Manifest {
             require_current_lock,
         )?;
         workspace.apply(&mut manifest)?;
+        manifest.warnings.extend(warnings);
         Ok(manifest)
     }
 
@@ -804,26 +807,13 @@ impl Workspace {
         })
     }
 
-    fn select(&self, current: &Path, requested: Option<&str>) -> Result<PathBuf> {
-        if let Some(name) = requested {
-            return selection::select_one(
-                self.members
-                    .iter()
-                    .map(|(name, root)| (name.as_str(), &self.versions[name], root.as_path())),
-                name,
-            );
-        }
-        if let [member] = self.defaults.as_slice() {
-            return Ok(member.clone());
-        }
-        Err(Error::failure(format!(
-            "workspace defaults select {} packages; multi-package execution is not yet supported",
-            self.defaults.len()
-        ))
-        .with_help(format!(
-            "select one workspace package with `-p NAME` from `{}`",
-            current.display()
-        )))
+    fn select(&self, selection: &PackageSelection) -> Result<(PathBuf, Vec<String>)> {
+        selection.select_one(
+            self.members
+                .iter()
+                .map(|(name, root)| (name.as_str(), &self.versions[name], root.as_path())),
+            self.defaults.iter().map(PathBuf::as_path),
+        )
     }
 
     fn apply(&self, manifest: &mut Manifest) -> Result<()> {
@@ -3481,6 +3471,58 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert!(from_root.lock.is_some());
         assert!(Manifest::load_selected(&from_root.workspace_root, None).is_err());
         assert!(Manifest::load_selected(&from_root.workspace_root, Some("missing")).is_err());
+        let selected = |packages: &[&str], workspace, exclude: &[&str]| {
+            Manifest::load_selection(
+                &root,
+                None,
+                &PackageSelection {
+                    packages: packages.iter().map(|name| (*name).to_owned()).collect(),
+                    workspace,
+                    exclude: exclude.iter().map(|name| (*name).to_owned()).collect(),
+                },
+                true,
+            )
+        };
+        assert_eq!(
+            selected(&["app", "app@0.1"], false, &[]).unwrap().name,
+            "app"
+        );
+        assert!(
+            selected(&["app", "shared"], false, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("selects 2 packages")
+        );
+        assert_eq!(selected(&[], true, &["sha*"]).unwrap().name, "app");
+        assert_eq!(
+            selected(&["missing"], true, &["shared"]).unwrap().name,
+            "app"
+        );
+        assert!(
+            selected(&["missing"], true, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("did not match")
+        );
+        let unmatched = selected(&[], true, &["shared", "missing"]).unwrap();
+        assert!(
+            unmatched
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("excluded package selector `missing`"))
+        );
+        assert!(
+            selected(&[], true, &["*"])
+                .unwrap_err()
+                .to_string()
+                .contains("no packages")
+        );
+        assert!(
+            selected(&["app"], false, &["shared"])
+                .unwrap_err()
+                .to_string()
+                .contains("--exclude")
+        );
         assert_eq!(
             Manifest::load_selected_or_manifest_path(
                 &from_root.root,

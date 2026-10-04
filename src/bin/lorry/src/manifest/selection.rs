@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use semver::{Comparator, Op, Version as SemVersion, VersionReq};
@@ -5,6 +6,93 @@ use semver::{Comparator, Op, Version as SemVersion, VersionReq};
 use super::Version;
 use crate::diagnostic::{Error, Result};
 use crate::glob::Pattern;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PackageSelection {
+    pub packages: Vec<String>,
+    pub workspace: bool,
+    pub exclude: Vec<String>,
+}
+
+impl PackageSelection {
+    pub(super) fn single(package: Option<&str>) -> Self {
+        Self {
+            packages: package.into_iter().map(str::to_owned).collect(),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn select_one<'a>(
+        &self,
+        members: impl Iterator<Item = (&'a str, &'a Version, &'a Path)>,
+        defaults: impl Iterator<Item = &'a Path>,
+    ) -> Result<(PathBuf, Vec<String>)> {
+        let members = members.collect::<Vec<_>>();
+        let available = || {
+            format!(
+                "available workspace packages: {}",
+                members
+                    .iter()
+                    .map(|member| member.0)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let requested = |name: &str| -> Result<Vec<PathBuf>> {
+            let selected = matching(members.iter().copied(), name)?;
+            if selected.is_empty() {
+                Err(Error::failure(format!(
+                    "package selector `{name}` did not match any workspace package"
+                ))
+                .with_help(available()))
+            } else {
+                Ok(selected)
+            }
+        };
+        if !self.workspace && !self.exclude.is_empty() {
+            return Err(Error::failure(
+                "--exclude can only be used together with --workspace",
+            ));
+        }
+        let mut warnings = Vec::new();
+        let mut selected = BTreeSet::new();
+        if self.workspace {
+            selected.extend(members.iter().map(|member| member.2.to_owned()));
+            if self.exclude.is_empty() {
+                for name in &self.packages {
+                    requested(name)?;
+                }
+            } else {
+                // Cargo's opt-out selection takes precedence over any -p options.
+                for name in &self.exclude {
+                    let excluded = matching(members.iter().copied(), name)?;
+                    if excluded.is_empty() {
+                        warnings.push(format!(
+                            "excluded package selector `{name}` not found in workspace"
+                        ));
+                    }
+                    for member in excluded {
+                        selected.remove(&member);
+                    }
+                }
+            }
+        } else if self.packages.is_empty() {
+            selected.extend(defaults.map(Path::to_owned));
+        } else {
+            for name in &self.packages {
+                selected.extend(requested(name)?);
+            }
+        }
+        match selected.len() {
+            1 => Ok((selected.pop_first().unwrap(), warnings)),
+            0 => Err(Error::failure("package selection contains no packages to compile")),
+            count => Err(Error::failure(format!(
+                "package selection selects {count} packages; multi-package execution is not yet supported"
+            ))
+            .with_help("select one workspace package with `-p NAME`")),
+        }
+    }
+}
 
 enum VersionSpec {
     Full(SemVersion),
@@ -49,10 +137,10 @@ impl VersionSpec {
     }
 }
 
-pub(super) fn select_one<'a>(
+fn matching<'a>(
     members: impl Iterator<Item = (&'a str, &'a Version, &'a Path)>,
     requested: &str,
-) -> Result<PathBuf> {
+) -> Result<Vec<PathBuf>> {
     let (source, fragment) = if requested.contains("://") {
         let requested = requested.strip_prefix("path+").unwrap_or(requested);
         let (source, fragment) = requested
@@ -97,9 +185,7 @@ pub(super) fn select_one<'a>(
         ));
     }
     let mut matches = Vec::new();
-    let mut available = Vec::new();
     for (candidate, candidate_version, root) in members {
-        available.push(candidate.to_owned());
         if !pattern.matches(candidate)
             || version
                 .as_ref()
@@ -119,18 +205,5 @@ pub(super) fn select_one<'a>(
         }
         matches.push(root.to_owned());
     }
-    match matches.as_slice() {
-        [member] => Ok(member.clone()),
-        [] => Err(Error::failure(format!(
-            "package selector `{requested}` did not match any workspace package"
-        ))
-        .with_help(format!(
-            "available workspace packages: {}",
-            available.join(", ")
-        ))),
-        _ => Err(Error::failure(format!(
-            "package selector `{requested}` selects {} packages; multi-package execution is not yet supported",
-            matches.len()
-        ))),
-    }
+    Ok(matches)
 }
