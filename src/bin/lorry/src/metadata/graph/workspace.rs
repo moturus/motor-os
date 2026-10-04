@@ -168,7 +168,7 @@ mod tests {
             let declarations = if name == "app" {
                 "[dependencies]\nshared = { path = \"../shared\" }\n\
                  [dev-dependencies]\nshared = { path = \"../shared\", features = [\"dev\"] }\n\
-                 [target.'cfg(windows)'.dependencies]\nshared = { path = \"../shared\", features = [\"windows\"] }\n\
+                 [target.'cfg(all( target_os=\"windows\",))'.dependencies]\nshared = { path = \"../shared\", features = [\"windows\"] }\n\
                  windows-only = { path = \"../windows-only\" }\n\
                  [[bin]]\nname = \"app\"\nrequired-features = []\n"
             } else {

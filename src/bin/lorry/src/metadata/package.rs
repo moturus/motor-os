@@ -267,7 +267,11 @@ fn map_dependency(
         optional: dependency.optional,
         uses_default_features: dependency.default_features,
         features: dependency.features.clone(),
-        target: dependency.target.clone(),
+        target: dependency
+            .target
+            .as_deref()
+            .map(crate::toolchain::canonical_selector)
+            .transpose()?,
         rename: (dependency.alias != dependency.package).then(|| dependency.alias.clone()),
         registry: None,
         path,

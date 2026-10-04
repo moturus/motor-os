@@ -116,7 +116,14 @@ fn map_node(
         grouped
             .entry((package_order(&edge.package)?, name, package_id.clone()))
             .or_default()
-            .insert((kind_order(edge.kind), dependency.target.clone()));
+            .insert((
+                kind_order(edge.kind),
+                dependency
+                    .target
+                    .as_deref()
+                    .map(crate::toolchain::canonical_selector)
+                    .transpose()?,
+            ));
     }
     let deps: Vec<wire::NodeDep> = grouped
         .into_iter()

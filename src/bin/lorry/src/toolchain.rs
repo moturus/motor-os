@@ -329,6 +329,21 @@ impl CfgSet {
 }
 
 fn evaluate_selector(selector: &str, cfg: &CfgSet) -> Result<bool> {
+    Ok(parse_selector(selector, cfg, false)?.0)
+}
+
+pub(crate) fn canonical_selector(selector: &str) -> Result<String> {
+    if selector.starts_with("cfg(") {
+        Ok(format!(
+            "cfg({})",
+            parse_selector(selector, &CfgSet::default(), true)?.1
+        ))
+    } else {
+        Ok(selector.to_owned())
+    }
+}
+
+fn parse_selector(selector: &str, cfg: &CfgSet, render: bool) -> Result<(bool, String)> {
     let expression = selector
         .strip_prefix("cfg(")
         .and_then(|value| value.strip_suffix(')'))
@@ -337,6 +352,7 @@ fn evaluate_selector(selector: &str, cfg: &CfgSet) -> Result<bool> {
         source: expression.as_bytes(),
         position: 0,
         cfg,
+        render,
     };
     let result = parser.expression()?;
     parser.space();
@@ -350,24 +366,33 @@ struct CfgParser<'a> {
     source: &'a [u8],
     position: usize,
     cfg: &'a CfgSet,
+    render: bool,
 }
 
 impl CfgParser<'_> {
-    fn expression(&mut self) -> Result<bool> {
+    fn expression(&mut self) -> Result<(bool, String)> {
         self.space();
         let name = self.identifier()?;
         self.space();
         if self.take(b'=') {
             self.space();
             let value = self.string()?;
-            return Ok(self
+            let enabled = self
                 .cfg
                 .values
                 .get(&name)
-                .is_some_and(|values| values.contains(&value)));
+                .is_some_and(|values| values.contains(&value));
+            return Ok((
+                enabled,
+                if self.render {
+                    format!("{name} = \"{value}\"")
+                } else {
+                    String::new()
+                },
+            ));
         }
         if !self.take(b'(') {
-            return Ok(self.cfg.names.contains(&name));
+            return Ok((self.cfg.names.contains(&name), name));
         }
         let mut values = Vec::new();
         loop {
@@ -384,13 +409,24 @@ impl CfgParser<'_> {
                 return Err(self.error("expected `,` or `)`"));
             }
         }
-        match name.as_str() {
-            "all" => Ok(values.into_iter().all(|value| value)),
-            "any" => Ok(values.into_iter().any(|value| value)),
-            "not" if values.len() == 1 => Ok(!values[0]),
-            "not" => Err(self.error("`not` requires exactly one argument")),
-            _ => Err(self.error(format!("unknown cfg predicate `{name}`"))),
-        }
+        let enabled = match name.as_str() {
+            "all" => values.iter().all(|value| value.0),
+            "any" => values.iter().any(|value| value.0),
+            "not" if values.len() == 1 => !values[0].0,
+            "not" => return Err(self.error("`not` requires exactly one argument")),
+            _ => return Err(self.error(format!("unknown cfg predicate `{name}`"))),
+        };
+        let rendered = if self.render {
+            let arguments = values
+                .into_iter()
+                .map(|value| value.1)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}({arguments})")
+        } else {
+            String::new()
+        };
+        Ok((enabled, rendered))
     }
 
     fn identifier(&mut self) -> Result<String> {
@@ -459,6 +495,23 @@ impl CfgParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_target_cfgs_preserve_values_and_remove_trailing_commas() {
+        assert_eq!(
+            canonical_selector("cfg(all( unix,not( target_os=\"motor\"), any(),))").unwrap(),
+            "cfg(all(unix, not(target_os = \"motor\"), any()))"
+        );
+        assert_eq!(
+            canonical_selector("cfg(custom=\"two words\")").unwrap(),
+            "cfg(custom = \"two words\")"
+        );
+        assert_eq!(
+            canonical_selector("x86_64-unknown-motor").unwrap(),
+            "x86_64-unknown-motor"
+        );
+        assert!(canonical_selector("cfg(not(unix, windows))").is_err());
+    }
 
     #[cfg(unix)]
     #[test]
