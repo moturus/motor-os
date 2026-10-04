@@ -902,18 +902,30 @@ fn build_inner(
         host_cfg: &build.host.cfg,
     };
     let prepared = if let Some((source, direct, verified_resolution)) = build.source.take() {
-        dependency::prepare_locked_source(
-            build.manifest,
-            build.config,
-            dependency::LockedSource {
-                registry: source,
+        if build.members.is_some() {
+            dependency::workspace::prepare_compilation(
+                verified_resolution.ok_or_else(|| {
+                    Error::failure("shared compilation requires a selected workspace resolution")
+                })?,
+                build.config,
+                source,
+                staging.path(),
                 direct,
-                verified_resolution,
-            },
-            &resolver_options,
-            selection,
-            staging.path(),
-        )?
+            )?
+        } else {
+            dependency::prepare_locked_source(
+                build.manifest,
+                build.config,
+                dependency::LockedSource {
+                    registry: source,
+                    direct,
+                    verified_resolution,
+                },
+                &resolver_options,
+                selection,
+                staging.path(),
+            )?
+        }
     } else if build.use_cargo_registry {
         let registry = CargoRegistry::discover_with_validation(
             staging.path(),
@@ -968,7 +980,7 @@ fn build_inner(
     manifests.insert(selected_root.package.clone(), build.manifest.clone());
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
-    let freshness_base = (check.is_none() && !build.test)
+    let freshness_base = (check.is_none() && !build.test && build.members.is_none())
         .then(|| freshness_base(&build, &prepared, &cargo))
         .transpose()?;
     if let Some(base) = freshness_base {
@@ -988,7 +1000,10 @@ fn build_inner(
         }
         crate::trace::event("root profile requires rebuilding");
     }
-    let dependency_plan = |test_profile, include_selected, include_binaries, include_harnesses| {
+    let dependency_plan = |test_profile: bool,
+                           include_selected: bool,
+                           include_binaries: bool,
+                           include_harnesses: bool| {
         let options = PlanOptions {
             workspace_root: &build.manifest.workspace_root,
             release: build.release,
@@ -999,7 +1014,20 @@ fn build_inner(
             logical_target: build.logical_target,
             rustflags: build.rustflags,
         };
-        if include_selected {
+        if build.members.is_some() {
+            if test_profile || include_harnesses || !include_selected {
+                return Err(Error::failure(
+                    "workspace test targets are not yet supported",
+                ));
+            }
+            prepared.workspace_plan(
+                &options,
+                &selected_packages,
+                false,
+                include_binaries,
+                build.binary_selection,
+            )
+        } else if include_selected {
             prepared.selected_targets_plan(
                 &options,
                 build.manifest,
@@ -1012,20 +1040,32 @@ fn build_inner(
         }
     };
     let selected_check_plan = |selection: &CheckTargetSelection<'_>| {
-        prepared.selected_check_plan(
-            &PlanOptions {
-                workspace_root: &build.manifest.workspace_root,
-                release: build.release,
-                test_profile: false,
-                panic_abort: build.manifest.panic_abort(build.release),
-                release_profile: &build.manifest.release,
-                rustc: build.toolchain,
-                logical_target: build.logical_target,
-                rustflags: build.rustflags,
-            },
-            build.manifest,
-            selection,
-        )
+        let options = PlanOptions {
+            workspace_root: &build.manifest.workspace_root,
+            release: build.release,
+            test_profile: false,
+            panic_abort: build.manifest.panic_abort(build.release),
+            release_profile: &build.manifest.release,
+            rustc: build.toolchain,
+            logical_target: build.logical_target,
+            rustflags: build.rustflags,
+        };
+        if build.members.is_some() {
+            if selection.harnesses || selection.integrations || !selection.normal {
+                return Err(Error::failure(
+                    "workspace test targets are not yet supported",
+                ));
+            }
+            prepared.workspace_plan(
+                &options,
+                &selected_packages,
+                true,
+                selection.binaries,
+                selection.binary_name,
+            )
+        } else {
+            prepared.selected_check_plan(&options, build.manifest, selection)
+        }
     };
     let roots = crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
     let message_reporter = crate::check_message::Reporter::new(
@@ -1283,7 +1323,17 @@ fn build_inner(
         None
     };
     let test_harnesses = test_result.as_deref().unwrap_or(&[]);
-    let normal_library = match (normal.as_ref(), selected_library.as_ref()) {
+    let workspace_library = build.members.and_then(|_| {
+        normal.as_ref()?.0.order.iter().find(|key| {
+            selected_packages.contains(&key.package)
+                && key.kind == UnitKind::Library
+                && key.compile_kind == crate::resolver::CompileKind::Target
+        })
+    });
+    let normal_library = match (
+        normal.as_ref(),
+        workspace_library.or(selected_library.as_ref()),
+    ) {
         (Some((plan, outputs)), Some(key)) if plan.units.contains_key(key) => {
             Some(planned_root_library(outputs, key)?)
         }
@@ -2872,6 +2922,144 @@ mod tests {
     fn only_binary(artifacts: &BuildArtifacts) -> &Path {
         assert_eq!(artifacts.binaries.len(), 1);
         artifacts.binaries.values().next().unwrap()
+    }
+
+    #[test]
+    fn executes_shared_selected_members_and_reuses_their_units() {
+        use std::os::unix::fs::MetadataExt;
+
+        let fixture = Fixture::new();
+        let path = fixture.0.join("Cargo.toml");
+        fs::write(
+            &path,
+            format!(
+                "{}\n[workspace]\nmembers = [\"local\"]\nresolver = \"2\"\n",
+                fs::read_to_string(&path).unwrap()
+            ),
+        )
+        .unwrap();
+        let (_, members) = crate::manifest::SourceWorkspace::load_compilation(
+            &fixture.0,
+            None,
+            &crate::manifest::PackageSelection {
+                workspace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let manifest = members
+            .iter()
+            .find(|member| member.name == "root-bin")
+            .unwrap();
+        let mut workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_99);
+        let toolchain = Toolchain::discover(None, &config, false).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let options = dependency::resolver_options(manifest, &config, &toolchain).unwrap();
+        let repositories = RepositorySet::open(
+            &config.repositories,
+            repository_tree_limits(&config.policy.limits).unwrap(),
+            config.policy.limits.max_package_bytes,
+        )
+        .unwrap();
+        let source = dependency::RegistrySource::Lorry(&repositories);
+        let direct = crate::git::DirectCatalog::default();
+        let (complete, catalog) =
+            dependency::workspace::resolve_locked(&workspace, &config, source, &direct, &options)
+                .unwrap();
+        let requests = crate::resolver::workspace::features::member_requests(
+            &workspace,
+            &members.iter().map(|member| member.root.clone()).collect(),
+            &crate::cli::FeatureSelection::default(),
+            false,
+        )
+        .unwrap();
+        let resolution = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &options,
+            &requests,
+            TargetSelection {
+                host_triple: &target.triple,
+                host_cfg: &target.cfg,
+                target_triple: &target.triple,
+                target_cfg: &target.cfg,
+            },
+        )
+        .unwrap();
+        let target_options = TargetOptions::default();
+        let global_cache = fixture.0.join("global-cache");
+        let target_root = artifact_root(manifest);
+        let build_once = |check_options| {
+            build_inner(
+                Build {
+                    manifest,
+                    members: Some(&members),
+                    target_root: Some(&target_root),
+                    child_lease_fd: None,
+                    global_cache_root: &global_cache,
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &target,
+                    target: &target,
+                    host_options: &target_options,
+                    target_options: &target_options,
+                    physical_target: None,
+                    logical_target: None,
+                    rustflags: &[],
+                    release: false,
+                    test: false,
+                    test_name: None,
+                    color: false,
+                    verbosity: Verbosity::Quiet,
+                    jobs: 2,
+                    use_cargo_registry: false,
+                    source: Some((source, &direct, Some(resolution.clone()))),
+                    bundle: false,
+                    validation: ValidationMode::Trusted,
+                    ordinary_freshness_base: None,
+                    binary_selection: None,
+                },
+                check_options,
+                MessageFormat::Human,
+            )
+            .unwrap()
+        };
+        let BuildOutcome::Artifacts(cold) = build_once(None) else {
+            panic!("expected artifacts")
+        };
+        let output = std::process::Command::new(&cold.primary).output().unwrap();
+        assert_eq!(output.stdout, b"dependency-ok");
+        let libraries = cold
+            .messages
+            .iter()
+            .filter(|message| {
+                message["reason"] == "compiler-artifact" && message["target"]["kind"][0] == "lib"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(libraries.len(), 1, "selected dependency must compile once");
+        let inode = fs::metadata(&cold.primary).unwrap().ino();
+        let BuildOutcome::Artifacts(warm) = build_once(None) else {
+            panic!("expected artifacts")
+        };
+        assert_eq!(fs::metadata(&warm.primary).unwrap().ino(), inode);
+        assert!(
+            warm.messages
+                .iter()
+                .filter(|message| message["reason"] == "compiler-artifact")
+                .all(|message| message["fresh"] == true)
+        );
+        let cli = Cli::parse(["check"].map(str::to_owned)).unwrap();
+        let Command::Check(options) = cli.command else {
+            panic!("expected check")
+        };
+        assert!(matches!(
+            build_once(Some((&target_root, &options))),
+            BuildOutcome::Check(0)
+        ));
+        assert!(!target_root.join("check/root-bin").exists());
     }
 
     #[test]

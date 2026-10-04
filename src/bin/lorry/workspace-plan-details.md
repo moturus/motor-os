@@ -2280,6 +2280,15 @@ roles, and publishes each selected binary with its actual package owner. The
 publication regression covers two selected roots and one unselected package;
 only selected binaries are installed, with distinct ownership records.
 
+The engine now prepares and executes a supplied shared member resolution through
+that planner, including check mode and resolved library feature keys. Its
+regression selects both an application and its library dependency, proves the
+library compiles once, executes the result, verifies fresh unit reuse on a warm
+build, and checks that check creates no top-level executable. All seventeen
+engine tests pass in `/tmp/lorry-m7-shared-execution-engine-tests.log`. Shared
+commands currently use per-unit freshness; completed-profile selection tracking
+will be added before exposing their shortcut. Public selection wiring follows.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 
