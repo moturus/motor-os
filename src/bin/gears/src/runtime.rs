@@ -570,6 +570,8 @@ impl Runtime {
         approver: &mut dyn Approver,
         observer: &mut dyn Observer,
     ) -> Result<(), String> {
+        let mut tool_rounds = 0;
+        let mut stop_reminders = 0;
         for _ in 0..self.max_tool_rounds {
             self.maybe_compact(false, None, observer)?;
             let mut messages = self.session.context_messages()?;
@@ -618,8 +620,31 @@ impl Runtime {
             self.session.append_usage(&completion.usage)?;
             observer.event(Event::Usage(self.usage.summary()))?;
             if completion.tool_calls.is_empty() {
+                if tool_rounds > 0 && stop_reminders < 3 {
+                    let mut notices = Vec::new();
+                    let reminder = self.hooks.before_stop(
+                        serde_json::json!({"tool_rounds": tool_rounds, "last_entry_id": entry}),
+                        &mut self.session,
+                        &self.cancellation,
+                        &mut |notice| notices.push(notice),
+                    );
+                    emit_notices(observer, notices)?;
+                    if self.cancellation.cancelled() {
+                        return self.fail_turn("turn cancelled".into(), true, observer);
+                    }
+                    if let Some(reminder) = reminder {
+                        stop_reminders += 1;
+                        let note = self
+                            .session
+                            .append_message(&Message::user(reminder.clone()))?;
+                        self.notify("entry", serde_json::json!({"id": note, "type": "message", "role": "user", "source": "before_stop"}), observer)?;
+                        observer.event(Event::Notice(format!("before_stop: {reminder}")))?;
+                        continue;
+                    }
+                }
                 return Ok(());
             }
+            tool_rounds += 1;
             let calls = completion.tool_calls;
             for (index, call) in calls.iter().cloned().enumerate() {
                 if let Err(error) = self.execute_call(call, approver, observer) {

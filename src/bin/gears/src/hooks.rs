@@ -66,6 +66,7 @@ struct Response {
     state: Option<Value>,
     context: Option<Message>,
     notice: Option<String>,
+    message: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +350,48 @@ impl Manager {
         Ok(result)
     }
 
+    pub fn before_stop(
+        &self,
+        payload: Value,
+        session: &mut Session,
+        cancellation: &Cancellation,
+        notice: &mut dyn FnMut(String),
+    ) -> Option<String> {
+        let mut messages = Vec::new();
+        let mut bytes = 0;
+        for index in 0..self.hooks.len() {
+            let response = self.invoke(
+                index,
+                "before_stop",
+                payload.clone(),
+                session,
+                cancellation,
+                notice,
+            );
+            match response {
+                Ok(response) => {
+                    if let Some(message) = response.message.filter(|text| !text.trim().is_empty()) {
+                        let added = message.len() + usize::from(!messages.is_empty());
+                        if bytes + added > 4096 {
+                            notice(format!(
+                                "hook {}: before_stop messages exceed 4096 bytes; skipped",
+                                self.hooks[index].config.name
+                            ));
+                        } else {
+                            bytes += added;
+                            messages.push(message);
+                        }
+                    }
+                }
+                Err(error) => notice(format!(
+                    "before_stop hook {} failed: {error}",
+                    self.hooks[index].config.name
+                )),
+            }
+        }
+        (!messages.is_empty()).then(|| messages.join("\n"))
+    }
+
     pub fn before_compact(
         &self,
         payload: Value,
@@ -545,6 +588,9 @@ fn validate_result_fields(event: &str, value: &Value) -> Result<(), String> {
         }
         "before_compact" => {
             allowed.insert("compaction");
+        }
+        "before_stop" => {
+            allowed.insert("message");
         }
         _ => {}
     }
@@ -846,5 +892,48 @@ esac"#
             ),
             Decision::Ask
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn before_stop_messages_are_bounded_without_truncation() {
+        for bytes in [4096, 4097] {
+            let (workspace, mut session) = fixture(&format!("stop-note-{bytes}"));
+            let message = "x".repeat(bytes);
+            let response = serde_json::json!({"message": message}).to_string();
+            let mut config = hook(
+                "check",
+                &format!("cat >/dev/null; printf '%s' '{response}'"),
+                std::time::Duration::from_secs(2),
+            );
+            config.events = Some(vec!["before_stop".into()]);
+            config.max_output_bytes = 8192;
+            let manager = Manager::initialize(
+                vec![config],
+                workspace,
+                &mut session,
+                &Cancellation::new(),
+                &mut |_| {},
+            )
+            .unwrap();
+            let mut notices = Vec::new();
+            let result = manager.before_stop(
+                serde_json::json!({}),
+                &mut session,
+                &Cancellation::new(),
+                &mut |notice| notices.push(notice),
+            );
+            if bytes == 4096 {
+                assert_eq!(result.as_deref(), Some(message.as_str()));
+                assert!(notices.is_empty());
+            } else {
+                assert!(result.is_none());
+                assert!(
+                    notices
+                        .iter()
+                        .any(|notice| notice.contains("exceed 4096 bytes"))
+                );
+            }
+        }
     }
 }

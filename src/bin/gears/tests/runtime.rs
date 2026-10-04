@@ -2408,6 +2408,112 @@ fn cancellation_pairs_every_call_in_a_tool_round() {
 }
 
 #[test]
+fn before_stop_reminders_are_saved_as_user_notes_and_bounded_per_turn() {
+    let fixture = Fixture::new("before-stop");
+    let hook = fixture.root.join("hook.sh");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"message\":\"Run the declared check.\"}'\n",
+    )
+    .unwrap();
+    let config = Config {
+        hooks: vec![HookConfig {
+            name: "check".into(),
+            command: vec!["sh".into(), hook.display().to_string()],
+            events: Some(vec!["before_stop".into()]),
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 4096,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"printf checked"}"#),
+        answer("one"),
+        answer("two"),
+        answer("three"),
+        answer("four"),
+        answer("chat only"),
+    ]);
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    let mut reminders = 0;
+    runtime
+        .turn("work".into(), &mut FixedApproval(true), &mut |event| {
+            if matches!(event, Event::Notice(ref text) if text.starts_with("before_stop:")) {
+                reminders += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(reminders, 3);
+    let context = runtime.session().context_messages().unwrap();
+    let notes = context
+        .iter()
+        .filter(|message| {
+            message.role == gears::provider::Role::User
+                && message.text_content() == "Run the declared check."
+        })
+        .count();
+    assert_eq!(notes, 3);
+    assert_eq!(context.last().unwrap().text_content(), "four");
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        requests[2].messages.last().unwrap().text_content(),
+        "Run the declared check."
+    );
+    drop(requests);
+    runtime
+        .turn("hello".into(), &mut UnexpectedApproval, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(provider.requests.lock().unwrap().len(), 6);
+}
+
+#[test]
+fn a_failed_before_stop_hook_is_reported_without_repeating_the_answer() {
+    let fixture = Fixture::new("before-stop-failure");
+    let config = Config {
+        hooks: vec![HookConfig {
+            name: "broken".into(),
+            command: vec!["/bin/sh".into(), "-c".into(), "printf invalid".into()],
+            events: Some(vec!["before_stop".into()]),
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 4096,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"printf checked"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    let mut notices = Vec::new();
+    runtime
+        .turn("work".into(), &mut FixedApproval(true), &mut |event| {
+            if let Event::Notice(text) = event {
+                notices.push(text);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.contains("before_stop hook broken failed"))
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    assert_eq!(
+        runtime
+            .session()
+            .context_messages()
+            .unwrap()
+            .last()
+            .unwrap()
+            .text_content(),
+        "done"
+    );
+}
+
+#[test]
 fn cancellation_keeps_the_tool_result_when_a_result_hook_cannot_run() {
     let fixture = Fixture::new("cancel-result-hook");
     let hook = fixture.root.join("hook.sh");

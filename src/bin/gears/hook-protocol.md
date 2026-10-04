@@ -42,6 +42,7 @@ Event-specific result fields are:
 | tool_execute | tool_result |
 | tool_result | tool_result |
 | before_compact | compaction |
+| before_stop | message |
 | after_compact and lifecycle events | common fields only |
 
 A tool result is {"content":"text","is_error":false}. Registered tools use
@@ -49,6 +50,13 @@ A tool result is {"content":"text","is_error":false}. Registered tools use
 A before_compact result may set cancel, focus, output_reserve_tokens,
 recent_tail_tokens, or both summary and retained_tail. Supplying a summary
 without the complete retained tail is invalid.
+
+After a reply that follows a tool round, `before_stop` receives `tool_rounds`
+and `last_entry_id`. A nonempty `message` becomes a saved user-role note and
+starts another model request, at most three times per turn. Combined hook
+messages are limited to 4096 bytes. Empty replies add no request; hook failures
+and oversized messages are reported and skipped. Chat-only turns do not call
+this event. The normal tool-round budget still bounds the turn.
 
 Unknown input fields must be ignored. A hook must not return fields that are
 invalid for its current event. Incompatible protocol changes require a new
