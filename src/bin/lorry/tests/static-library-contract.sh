@@ -51,16 +51,20 @@ for platform in native motor; do
     target=()
     profile=debug
     if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); profile=x86_64-unknown-motor/debug; fi
+    for selection in defaults archive mixed; do
+        packages=()
+        archive_count=2
+        if [ "$selection" != defaults ]; then packages=(-p "$selection"); archive_count=1; fi
     for command in build check; do
         comparison=differential-workspace-messages
         if [ "$command" = check ]; then comparison=differential-workspace-check-messages; fi
-        env HOME="$WORK/home" "$LORRY" "$command" -j1 "${target[@]}" \
+        env HOME="$WORK/home" "$LORRY" "$command" -j1 "${target[@]}" "${packages[@]}" \
             --message-format=json >"$WORK/lorry.json"
-        "$LORRY_TEST_CARGO" "$command" -j1 "${target[@]}" --offline \
+        "$LORRY_TEST_CARGO" "$command" -j1 "${target[@]}" "${packages[@]}" --offline \
             --message-format=json >"$WORK/cargo.json"
         if [ "$command" = build ]; then
-            cmp "target/$profile/app" "target/lorry/$profile/app"
-            python3 - "$WORK/lorry.json" "$WORK/cargo.json" <<'PY'
+            if [ "$selection" = defaults ]; then cmp "target/$profile/app" "target/lorry/$profile/app"; fi
+            python3 - "$WORK/lorry.json" "$WORK/cargo.json" "$archive_count" <<'PY'
 import json, pathlib, re, sys
 def members(path):
     data = pathlib.Path(path).read_bytes()
@@ -89,8 +93,8 @@ def archives(filename):
             for line in open(filename) for event in [json.loads(line)]
             if event['reason'] == 'compiler-artifact'
             for path in event['filenames'] if path.endswith('.a')}
-lorry, cargo = map(archives, sys.argv[1:])
-assert len(lorry) == len(cargo) == 2 and lorry == cargo
+lorry, cargo = map(archives, sys.argv[1:3])
+assert len(lorry) == len(cargo) == int(sys.argv[3]) and lorry == cargo
 PY
             # A missing published archive must be restored from the complete cache entry.
             python3 - "$WORK/lorry.json" <<'PY'
@@ -101,17 +105,18 @@ for line in open(sys.argv[1]):
         for path in event['filenames']:
             if path.endswith('.a'): pathlib.Path(path).unlink()
 PY
-            env HOME="$WORK/home" "$LORRY" build -j1 "${target[@]}" --message-format=json >"$WORK/restored.json"
-            python3 - "$WORK/restored.json" <<'PY'
+            env HOME="$WORK/home" "$LORRY" build -j1 "${target[@]}" "${packages[@]}" --message-format=json >"$WORK/restored.json"
+            python3 - "$WORK/restored.json" "$archive_count" <<'PY'
 import json, pathlib, sys
 archives = [event for line in open(sys.argv[1]) for event in [json.loads(line)]
             if event['reason'] == 'compiler-artifact' and any(path.endswith('.a') for path in event['filenames'])]
-assert len(archives) == 2 and all(event['fresh'] for event in archives)
+assert len(archives) == int(sys.argv[2]) and all(event['fresh'] for event in archives)
 assert all(pathlib.Path(path).is_file() for event in archives for path in event['filenames'])
 PY
         fi
         "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" \
             --locked --offline -- "$comparison" "$WORK/lorry.json" "$WORK/cargo.json"
+    done
     done
 done
 [ "$(target/lorry/debug/app)" = 42 ]

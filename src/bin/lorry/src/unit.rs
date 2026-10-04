@@ -1363,9 +1363,7 @@ fn unit_settings(
                 .library
                 .as_ref()
                 .unwrap()
-                .crate_types
-                .iter()
-                .any(|kind| kind == "staticlib")
+                .requires_upstream_objects()
         {
             root_lto(
                 options.release,

@@ -217,9 +217,7 @@ pub fn dependency_rustc_invocation_with_build_output(
                 } else {
                     "lib"
                 },
-                if key.kind == UnitKind::ProcMacro
-                    || library.crate_types.iter().any(|kind| kind == "staticlib")
-                {
+                if library.requires_upstream_objects() {
                     "dep-info,link"
                 } else {
                     "dep-info,metadata,link"
@@ -315,6 +313,37 @@ pub fn dependency_rustc_invocation_with_build_output(
         emit = "dep-info,metadata";
     }
 
+    if key.kind == UnitKind::Library {
+        let library = manifest.library.as_ref().unwrap();
+        if library.dynamic() {
+            let motor = match key.compile_kind {
+                CompileKind::Host => cfg!(target_os = "motor"),
+                CompileKind::Target => options
+                    .physical_target
+                    .map_or(cfg!(target_os = "motor"), |target| {
+                        target == "x86_64-unknown-motor"
+                    }),
+            };
+            if !motor {
+                return Err(Error::failure(
+                    "Linux `cdylib` and `dylib` execution is not yet supported",
+                ));
+            }
+            if key.mode == UnitMode::Build
+                && !library
+                    .crate_types
+                    .iter()
+                    .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "staticlib"))
+            {
+                return Err(Error::failure(format!(
+                    "cannot produce {} for `{}` as the target `{}` does not support these crate types",
+                    library.crate_types.join(", "),
+                    manifest.name,
+                    "x86_64-unknown-motor"
+                )));
+            }
+        }
+    }
     let mut arguments = Vec::new();
     push(&mut arguments, "--crate-name");
     push(&mut arguments, crate_name);
@@ -356,7 +385,14 @@ pub fn dependency_rustc_invocation_with_build_output(
         codegen(&mut arguments, "prefer-dynamic");
     }
     profile_arguments(&mut arguments, planned, manifest);
-    identity_arguments(&mut arguments, &planned.identity);
+    if unhashed_library_output(key, manifest) {
+        codegen(
+            &mut arguments,
+            &format!("metadata={}", planned.identity.metadata),
+        );
+    } else {
+        identity_arguments(&mut arguments, &planned.identity);
+    }
     push(&mut arguments, "--out-dir");
     arguments.push(output_dir.as_os_str().to_owned());
     if key.compile_kind == CompileKind::Target
@@ -649,21 +685,23 @@ fn dependency_arguments(
             .as_deref()
             .unwrap_or(&dependency.unit.package.name)
             .replace('-', "_");
-        let stem = format!("{}{}", child_library.name, child.identity.extra_filename);
+        let stem = output_stem(
+            &dependency.unit,
+            child_manifest,
+            &child_library.name,
+            &child.identity,
+        );
         let filename = if dependency.unit.kind == UnitKind::ProcMacro {
             proc_macro_filename(&stem)
         } else {
             let parent_links_objects = manifests[&planned.unit.key.package]
                 .library
                 .as_ref()
-                .is_some_and(|library| library.crate_types.iter().any(|kind| kind == "staticlib"));
+                .is_some_and(|library| library.requires_upstream_objects());
             let extension = if matches!(dependency.unit.mode, UnitMode::Check | UnitMode::CheckTest)
                 || ((matches!(planned.unit.key.mode, UnitMode::Check | UnitMode::CheckTest)
                     || (planned.unit.key.kind == UnitKind::Library && !parent_links_objects))
-                    && !child_library
-                        .crate_types
-                        .iter()
-                        .any(|kind| kind == "staticlib"))
+                    && !child_library.requires_upstream_objects())
             {
                 "rmeta"
             } else {
@@ -744,6 +782,20 @@ pub(crate) fn unit_output_directory(
     }
 }
 
+fn unhashed_library_output(key: &UnitKey, manifest: &Manifest) -> bool {
+    key.kind == UnitKind::Library
+        && key.mode == UnitMode::Build
+        && manifest.library.as_ref().unwrap().dynamic()
+}
+
+fn output_stem(key: &UnitKey, manifest: &Manifest, name: &str, identity: &Identity) -> String {
+    if unhashed_library_output(key, manifest) {
+        name.to_owned()
+    } else {
+        format!("{name}{}", identity.extra_filename)
+    }
+}
+
 fn expected_output(
     key: &UnitKey,
     manifest: &Manifest,
@@ -751,7 +803,7 @@ fn expected_output(
     identity: &Identity,
     output_dir: &Path,
 ) -> RustcOutput {
-    let stem = format!("{crate_name}{}", identity.extra_filename);
+    let stem = output_stem(key, manifest, crate_name, identity);
     if matches!(key.mode, UnitMode::Check | UnitMode::CheckTest) {
         return RustcOutput::Metadata {
             metadata: output_dir.join(format!("lib{stem}.rmeta")),
@@ -759,7 +811,15 @@ fn expected_output(
         };
     }
     match key.kind {
-        UnitKind::Library if manifest.library.as_ref().unwrap().crate_types == ["staticlib"] => {
+        UnitKind::Library
+            if !manifest
+                .library
+                .as_ref()
+                .unwrap()
+                .crate_types
+                .iter()
+                .any(|kind| matches!(kind.as_str(), "lib" | "rlib")) =>
+        {
             RustcOutput::StaticLibrary {
                 archive: output_dir.join(format!("lib{stem}.a")),
                 dep_info: output_dir.join(format!("{stem}.d")),
@@ -773,9 +833,7 @@ fn expected_output(
                     .library
                     .as_ref()
                     .unwrap()
-                    .crate_types
-                    .iter()
-                    .any(|kind| kind == "staticlib")
+                    .requires_upstream_objects()
                 {
                     "rlib"
                 } else {

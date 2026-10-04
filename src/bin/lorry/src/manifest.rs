@@ -175,6 +175,23 @@ pub struct LibraryTarget {
     pub doc: bool,
 }
 
+impl LibraryTarget {
+    pub(crate) fn requires_upstream_objects(&self) -> bool {
+        self.crate_types.iter().any(|kind| {
+            matches!(
+                kind.as_str(),
+                "staticlib" | "dylib" | "cdylib" | "proc-macro"
+            )
+        })
+    }
+
+    pub(crate) fn dynamic(&self) -> bool {
+        self.crate_types
+            .iter()
+            .any(|kind| matches!(kind.as_str(), "dylib" | "cdylib"))
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BinaryTarget {
@@ -1396,16 +1413,25 @@ fn parse_library(
     if let Some(values) = &declared_crate_types
         && (values.is_empty()
             || values.iter().any(|value| {
-                !matches!(value.as_str(), "lib" | "rlib" | "staticlib")
-                    && !(mode == ManifestMode::Source
-                        && matches!(value.as_str(), "staticlib" | "dylib" | "cdylib"))
+                !matches!(
+                    value.as_str(),
+                    "lib" | "rlib" | "staticlib" | "dylib" | "cdylib"
+                )
             }))
     {
         return Err(Error::at(
             path,
             document.line_of_item(table.get("crate-type").unwrap()),
             "custom library crate types are not supported in Stage 2",
-            "use `lib`, `rlib`, or `staticlib`; dynamic crate types are not yet supported",
+            "use a supported Rust library crate type",
+        ));
+    }
+    if let Some(types) = &declared_crate_types
+        && types.iter().any(|kind| kind == "dylib")
+        && types.iter().any(|kind| kind == "cdylib")
+    {
+        return Err(Error::failure(
+            "library cannot set both `dylib` and `cdylib` crate types",
         ));
     }
     let proc_macro = optional_bool(path, document, table, "lib", "proc-macro")?.unwrap_or(false);

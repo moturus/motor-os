@@ -69,7 +69,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     || member
                         .library
                         .as_ref()
-                        .is_some_and(|library| library.proc_macro)
+                        .is_some_and(|library| library.requires_upstream_objects())
             }));
     if !ordinary {
         cli.features.require_default()?;

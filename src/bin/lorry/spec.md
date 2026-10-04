@@ -510,9 +510,12 @@ outputs. Static archives consume upstream object code and participate in
 staging, cache restoration, freshness, and artifact messages. Archive member
 object bytes agree with Cargo; rustc's random temporary object-name suffixes
 remain outside the final-executable byte-identity promise.
+On Motor, declared dynamic types retain their Cargo identities while rustc
+warns and drops unsupported outputs. Builds fail if no usable type remains;
+metadata-only checks can still succeed. Linux dynamic execution is unsupported.
 
 Lorry rejects explicit `[[test]]`, examples, benches,
-dynamic crate types, `harness`, `required-features`, `autotests`, unsupported
+`harness`, `required-features`, `autotests`, unsupported
 profile keys, artifact dependencies, alternative
 registries, non-crates.io patches, and
 CLI feature-selection flags for run/test.

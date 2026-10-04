@@ -2552,6 +2552,18 @@ Cache tests, compiler tests, and strict Clippy pass in
 Original failures and preserved diagnostic fixtures remain under
 `/tmp/lorry-m8-staticlib-*` and `/tmp/lorry-static-library-{21kjqt,fcDuWC}`.
 
+Motor dynamic crate declarations now retain Cargo target identities and
+compiler arguments, letting rustc issue the same dropping warnings. Mixed
+outputs use Cargo's upstream-object and unhashed-filename rules; dynamic-only
+builds fail before rustc, while metadata-only checks remain valid. Linux
+dynamic execution fails explicitly. Libraries needing upstream objects now
+use the shared ordinary graph even for one selected package, avoiding the old
+single-primary completed-profile shortcut for mixed outputs. The paired
+dropping/diagnostic/error contract and expanded static archive restoration
+contract pass in `/tmp/lorry-m8-motor-crate-types-{first-contract,static-regression}.log`.
+The Cargo source/output probe is preserved in
+`/tmp/lorry-m8-motor-dynamic-cargo-rustc-probe.log`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only
