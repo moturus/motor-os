@@ -100,6 +100,15 @@ Resolved metadata matches dependency declarations by alias, package, kind,
 and platform condition. Crates.io sparse-index positions are not manifest
 positions, since the index can interleave dependency kinds omitted by the
 build manifest reader.
+Resolved metadata uses the complete workspace lock and computes node features
+across dependency kinds and platforms. `--filter-platform` limits reachable
+package pairs, retaining all declarations of each retained pair and the
+complete feature lists. Cargo's `build.target` does not filter metadata.
+Metadata reads verified sources without reconstructing an execution admission
+record or preparing compilation units. Explicit denies and source resource
+limits still apply. Locks and admission records are never changed.
+Target `required-features` preserves absent, explicitly empty, and nonempty
+declarations in the JSON document.
 
 Debug builds must reproduce Cargo-equivalent compilation semantics but need
 not be byte-identical across hosts because paths and debug information can
@@ -306,7 +315,8 @@ repeated `--features`/`-F`, comma/space lists, qualified and weak dependency
 features, `--all-features`, and `--no-default-features`. Explicit `dep:`
 names and multiple slashes fail as in Cargo. Source-only metadata describes
 declared features regardless of selection. Commands that require resolution
-reject nondefault feature selection until workspace resolution supports it.
+other than metadata reject nondefault feature selection until their workspace
+resolution integration is implemented. Resolved metadata accepts those flags.
 Editable members use Cargo's package file discovery: Git ignores and tracked
 files, include/exclude rules, symbolic links, and nested package boundaries.
 Dependency archive size/file limits do not constrain member source trees.

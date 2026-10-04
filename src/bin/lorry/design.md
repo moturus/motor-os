@@ -197,6 +197,15 @@ rejects escaping or unresolved links and submodules before atomic publication.
 
 ## Generated dependency admission
 
+Metadata resolves the shared complete lock and projects its requested features
+without constructing a compilation plan. `dependency::workspace::PreparedSources`
+owns inspected manifests and extracted sources but carries no execution
+admission. Its policy passes enforce explicit vetoes, source identity, package
+counts, dependency depth, and artifact/transaction sizes without requiring
+build-script or proc-macro grants. `metadata::graph::workspace` filters package
+reachability separately from feature resolution. A stale execution record
+therefore does not prevent source navigation.
+
 `.lorry/dependencies-v2.toml` is committed, deterministic machine-owned state.
 It records only:
 

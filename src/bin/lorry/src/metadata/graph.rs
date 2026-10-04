@@ -2,12 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::dependency::PreparedGraph;
 use crate::diagnostic::{Error, Result};
 use crate::manifest::{Manifest, SourceWorkspace};
-use crate::resolver::{PackageKey, ResolvedEdge, selected_root_features};
+use crate::resolver::{PackageKey, ResolvedEdge};
 use crate::sparse::DependencyKind;
-use crate::unit::CompilationPlan;
 
 use super::package::{self, Identity};
 use super::wire;
@@ -42,99 +40,6 @@ pub(super) fn no_dependencies(workspace: &SourceWorkspace) -> Result<wire::Metad
     )
 }
 
-#[allow(dead_code)] // Removed after the workspace command integration is verified.
-pub(crate) fn resolved(
-    manifest: &Manifest,
-    prepared: &PreparedGraph,
-    plan: &CompilationPlan,
-    presented_roots: &BTreeMap<PackageKey, PathBuf>,
-) -> Result<wire::Metadata> {
-    let root_id = package::package_id(manifest, Identity::Root)?;
-    let mut ids = BTreeMap::new();
-    let mut dependency_roots = BTreeMap::new();
-    dependency_roots.insert(
-        fs::canonicalize(&manifest.root).map_err(path_error)?,
-        manifest.root.clone(),
-    );
-    for resolved in &prepared.resolution.packages {
-        let dependency = prepared.packages.get(&resolved.key).ok_or_else(|| {
-            Error::failure(format!(
-                "prepared graph omits resolved package `{} {}`",
-                resolved.key.name, resolved.key.version
-            ))
-        })?;
-        let root = presented_roots.get(&resolved.key).ok_or_else(|| {
-            Error::failure(format!(
-                "metadata source roots omit package `{} {}`",
-                resolved.key.name, resolved.key.version
-            ))
-        })?;
-        if ids
-            .insert(
-                resolved.key.clone(),
-                package::package_id(&dependency.manifest, Identity::Resolved(resolved))?,
-            )
-            .is_some()
-        {
-            return Err(Error::failure(
-                "metadata graph contains a duplicate package identity",
-            ));
-        }
-        dependency_roots.insert(
-            fs::canonicalize(&dependency.manifest.root).map_err(path_error)?,
-            fs::canonicalize(root).map_err(path_error)?,
-        );
-    }
-
-    let mut packages = vec![package::map(
-        manifest,
-        Identity::Root,
-        &manifest.root,
-        &dependency_roots,
-    )?];
-    for resolved in &prepared.resolution.packages {
-        let dependency = &prepared.packages[&resolved.key];
-        packages.push(package::map(
-            &dependency.manifest,
-            Identity::Resolved(resolved),
-            &presented_roots[&resolved.key],
-            &dependency_roots,
-        )?);
-    }
-    packages.sort_by(|left, right| left.id.cmp(&right.id));
-
-    let planned_features = planned_features(prepared, plan)?;
-    let mut nodes = vec![map_node(
-        &root_id,
-        &prepared.resolution.root_edges,
-        manifest,
-        selected_root_features(manifest)?,
-        &ids,
-    )?];
-    for resolved in &prepared.resolution.packages {
-        let dependency = &prepared.packages[&resolved.key];
-        nodes.push(map_node(
-            &ids[&resolved.key],
-            &resolved.edges,
-            &dependency.manifest,
-            planned_features[&resolved.key].clone(),
-            &ids,
-        )?);
-    }
-    nodes.sort_by(|left, right| left.id.cmp(&right.id));
-    finish(
-        &manifest.workspace_root,
-        vec![root_id.clone()],
-        vec![root_id.clone()],
-        packages,
-        Some(wire::Resolve {
-            nodes,
-            root: Some(root_id),
-        }),
-        manifest.workspace_metadata.clone(),
-    )
-}
-
 fn finish(
     root: &Path,
     workspace_members: Vec<String>,
@@ -156,35 +61,6 @@ fn finish(
         workspace_metadata,
         version: 1,
     })
-}
-
-fn planned_features(
-    prepared: &PreparedGraph,
-    plan: &CompilationPlan,
-) -> Result<BTreeMap<PackageKey, BTreeSet<String>>> {
-    let expected = prepared
-        .resolution
-        .packages
-        .iter()
-        .map(|package| {
-            let mut features = package.target_features.clone();
-            features.extend(package.host_features.iter().cloned());
-            (package.key.clone(), features)
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut actual = BTreeMap::<PackageKey, BTreeSet<String>>::new();
-    for key in plan.units.keys() {
-        actual
-            .entry(key.package.clone())
-            .or_default()
-            .extend(key.features.iter().cloned());
-    }
-    if actual != expected {
-        return Err(Error::failure(
-            "development compilation plan does not match resolved metadata features",
-        ));
-    }
-    Ok(actual)
 }
 
 fn map_node(
