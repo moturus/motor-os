@@ -182,7 +182,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
     let ordinary_freshness_base = (!validation.is_strict()
-        && cli.message_format() == MessageFormat::Human
         && matches!(&cli.command, Command::Build(_) | Command::Run(_)))
     .then(|| {
         trusted_freshness_base(&TrustedFreshness {
@@ -215,7 +214,9 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         )
     {
         crate::trace::event("accepted fresh root profile before dependency admission");
+        crate::check_message::replay(&artifacts.messages, cli.message_format(), color)?;
         report_finished(release, cli.verbosity, validation, &artifacts)?;
+        report_build_completion(cli, reported)?;
         return match &cli.command {
             Command::Build(_) => Ok(0),
             Command::Run(options) => {
@@ -538,6 +539,7 @@ struct BuildArtifacts {
     binaries: BTreeMap<String, PathBuf>,
     harnesses: Vec<PathBuf>,
     bundle: Option<PathBuf>,
+    messages: Vec<serde_json::Value>,
 }
 
 struct IncrementalRoots {
@@ -935,6 +937,7 @@ fn build_inner(
             build.validation,
         ) {
             crate::trace::event("validated fresh root profile");
+            crate::check_message::replay(&artifacts.messages, format, build.color)?;
             finish_build(&build, &artifacts)?;
             crate::trace::event("reported build result");
             return Ok(BuildOutcome::Artifacts(artifacts));
@@ -981,7 +984,7 @@ fn build_inner(
         )
     };
     let message_reporter = match format {
-        format if format != MessageFormat::Human => {
+        format if format != MessageFormat::Human || freshness_base.is_some() => {
             let roots =
                 crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
             Some(crate::check_message::Reporter::new(
@@ -1257,7 +1260,7 @@ fn build_inner(
         )?)?;
         crate::trace::event("revalidated dependency sources");
     }
-    let compiled = if selected_integration {
+    let mut compiled = if selected_integration {
         let (plan, outputs) = normal
             .as_ref()
             .ok_or_else(|| Error::failure("integration test has no compilation plan"))?;
@@ -1293,6 +1296,9 @@ fn build_inner(
         )?
     };
     crate::trace::event("compiled root targets");
+    compiled.messages = message_reporter
+        .as_ref()
+        .map_or_else(Vec::new, |reporter| reporter.messages());
 
     if let Some(base) = freshness_base {
         write_fresh_profile(
@@ -1313,6 +1319,7 @@ fn build_inner(
         binaries: compiled.binaries,
         harnesses: compiled.harnesses,
         bundle: compiled.bundle,
+        messages: compiled.messages,
     };
 
     crate::trace::event("published build profile");
@@ -1347,8 +1354,8 @@ fn report_finished(
     Ok(())
 }
 
-const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v3";
-const MAX_FRESH_PROFILE_BYTES: u64 = 64 * 1024;
+const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v4";
+const MAX_FRESH_PROFILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
 
 // The unit cache handles dependency compilation. This record additionally
@@ -1365,6 +1372,7 @@ struct FreshProfile {
     binaries: BTreeMap<String, FreshArtifact>,
     local_roots: Vec<PathBuf>,
     dep_info: Vec<PathBuf>,
+    messages: Vec<serde_json::Value>,
 }
 
 struct TrustedFreshness<'a> {
@@ -1528,6 +1536,31 @@ fn restore_fresh_profile(
     if record.base != base {
         return None;
     }
+    for message in &record.messages {
+        match message.get("reason")?.as_str()? {
+            "compiler-artifact" => {
+                let filenames = message.get("filenames")?.as_array()?;
+                if filenames.is_empty()
+                    || !filenames
+                        .iter()
+                        .all(|path| path.as_str().is_some_and(|path| Path::new(path).is_file()))
+                {
+                    return None;
+                }
+            }
+            "build-script-executed" => {
+                if !Path::new(message.get("out_dir")?.as_str()?).is_dir() {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+        if let Some(target) = message.get("target")
+            && !Path::new(target.get("src_path")?.as_str()?).is_file()
+        {
+            return None;
+        }
+    }
     let primary = profile.join(record.primary.path);
     let binaries = record
         .binaries
@@ -1556,6 +1589,7 @@ fn restore_fresh_profile(
         binaries,
         harnesses: Vec::new(),
         bundle: None,
+        messages: record.messages,
     })
 }
 
@@ -1589,11 +1623,14 @@ fn write_fresh_profile(
     };
     let primary_sha256 = artifact_sha256(&artifacts.primary)?;
     let mut document = format!(
-        "lorry-fresh-v3\nbase={}\ninputs={}\nprimary={}\t{}\n",
+        "lorry-fresh-v4\nbase={}\ninputs={}\nprimary={}\t{}\nmessages={}\n",
         hex(&base),
         hex(&inputs),
         hex(&primary_sha256),
         primary.display(),
+        serde_json::to_string(&artifacts.messages).map_err(|error| {
+            Error::failure(format!("failed to serialize profile messages: {error}"))
+        })?,
     );
     for (name, path) in &artifacts.binaries {
         let relative = relative_profile_path(profile, path)?;
@@ -1625,10 +1662,21 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
     }
     let document = String::from_utf8(fs::read(path).ok()?).ok()?;
     let mut lines = document.lines();
-    (lines.next()? == "lorry-fresh-v3").then_some(())?;
+    (lines.next()? == "lorry-fresh-v4").then_some(())?;
     let base = decode_hex(lines.next()?.strip_prefix("base=")?).ok()?;
     let inputs = decode_hex(lines.next()?.strip_prefix("inputs=")?).ok()?;
     let primary = parse_fresh_artifact(lines.next()?.strip_prefix("primary=")?)?;
+    let messages: Vec<serde_json::Value> =
+        serde_json::from_str(lines.next()?.strip_prefix("messages=")?).ok()?;
+    messages
+        .iter()
+        .all(|message| {
+            matches!(
+                message.get("reason").and_then(serde_json::Value::as_str),
+                Some("compiler-artifact" | "compiler-message" | "build-script-executed")
+            )
+        })
+        .then_some(())?;
     let mut binaries = BTreeMap::new();
     let mut local_roots = Vec::new();
     let mut dep_info = Vec::new();
@@ -1654,6 +1702,7 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
         binaries,
         local_roots,
         dep_info,
+        messages,
     })
 }
 
@@ -2084,6 +2133,7 @@ struct StagedArtifacts {
     harnesses: Vec<PathBuf>,
     bundle: Option<PathBuf>,
     dep_info: Vec<PathBuf>,
+    messages: Vec<serde_json::Value>,
 }
 
 struct TestOutput<'a> {
@@ -2158,6 +2208,7 @@ fn compile_root_targets(
             harnesses: Vec::new(),
             bundle: None,
             dep_info,
+            messages: Vec::new(),
         });
     }
     let library = library.ok_or_else(|| {
@@ -2172,6 +2223,7 @@ fn compile_root_targets(
         harnesses: Vec::new(),
         bundle: None,
         dep_info: vec![library.dep_info.clone()],
+        messages: Vec::new(),
     })
 }
 
@@ -2218,6 +2270,7 @@ fn compile_test_targets(
         harnesses,
         bundle: bundled,
         dep_info: Vec::new(),
+        messages: Vec::new(),
     })
 }
 
@@ -2305,6 +2358,7 @@ fn compile_planned_test_targets(
         harnesses,
         bundle: bundled,
         dep_info: Vec::new(),
+        messages: Vec::new(),
     })
 }
 
@@ -2682,6 +2736,7 @@ mod tests {
             harnesses: Vec::new(),
             bundle: None,
             dep_info: vec![dep_info],
+            messages: Vec::new(),
         };
         let base = [7; 32];
 
@@ -2770,6 +2825,7 @@ mod tests {
             harnesses: Vec::new(),
             bundle: None,
             dep_info: vec![dep_info],
+            messages: Vec::new(),
         };
         let base = [5; 32];
         let modified = fs::metadata(&source).unwrap().modified().unwrap();
@@ -3273,36 +3329,39 @@ mod tests {
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
-        let build_once = |jobs| {
-            build(Build {
-                target_root: None,
-                child_lease_fd: None,
-                manifest: &manifest,
-                global_cache_root: &manifest.root.join("global-cache"),
-                config: &config,
-                toolchain: &toolchain,
-                host: &target,
-                target: &target,
-                host_options: &target_options,
-                target_options: &target_options,
-                physical_target: None,
-                logical_target: None,
-                rustflags: &[],
-                release: false,
-                test: false,
-                test_name: None,
-                color: false,
-                verbosity: Verbosity::Quiet,
-                jobs,
-                use_cargo_registry: false,
-                source: None,
-                bundle: false,
-                validation: ValidationMode::Trusted,
-                ordinary_freshness_base: None,
-                binary_selection: None,
-            })
+        let build_once = |jobs, format| {
+            build_reported(
+                Build {
+                    target_root: None,
+                    child_lease_fd: None,
+                    manifest: &manifest,
+                    global_cache_root: &manifest.root.join("global-cache"),
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &target,
+                    target: &target,
+                    host_options: &target_options,
+                    target_options: &target_options,
+                    physical_target: None,
+                    logical_target: None,
+                    rustflags: &[],
+                    release: false,
+                    test: false,
+                    test_name: None,
+                    color: false,
+                    verbosity: Verbosity::Quiet,
+                    jobs,
+                    use_cargo_registry: false,
+                    source: None,
+                    bundle: false,
+                    validation: ValidationMode::Trusted,
+                    ordinary_freshness_base: None,
+                    binary_selection: None,
+                },
+                format,
+            )
         };
-        let artifact = build_once(2).unwrap();
+        let artifact = build_once(2, MessageFormat::Human).unwrap();
         let output = std::process::Command::new(only_binary(&artifact))
             .output()
             .unwrap();
@@ -3318,11 +3377,24 @@ mod tests {
         };
         let out_dir = output_directory();
         assert_eq!(fs::read_to_string(out_dir.join("num-jobs")).unwrap(), "2");
-        build_once(1).unwrap();
+        let modified = fs::metadata(out_dir.join("num-jobs"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        build_once(2, MessageFormat::Json).unwrap();
+        assert_eq!(
+            fs::metadata(out_dir.join("num-jobs"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified,
+            "unchanged JSON build reran the build script",
+        );
+        build_once(1, MessageFormat::Human).unwrap();
         assert_eq!(fs::read_to_string(out_dir.join("num-jobs")).unwrap(), "1");
         let updated = script.replace("build-script-ok", "build-script-new");
         fs::write(fixture.0.join("local/build.rs"), &updated).unwrap();
-        let rebuilt = build_once(1).unwrap();
+        let rebuilt = build_once(1, MessageFormat::Human).unwrap();
         assert_eq!(output_directory(), out_dir);
         assert_eq!(
             std::process::Command::new(only_binary(&rebuilt))
@@ -3339,7 +3411,7 @@ mod tests {
                 "panic!(\"intentional failure\");",
             );
         fs::write(fixture.0.join("local/build.rs"), failed).unwrap();
-        assert!(build_once(1).is_err());
+        assert!(build_once(1, MessageFormat::Human).is_err());
         assert_eq!(output_directory(), out_dir);
         assert!(
             fs::read_to_string(out_dir.join("generated.rs"))
@@ -3358,7 +3430,7 @@ mod tests {
             updated.replace("build-script-new", "build-script-final"),
         )
         .unwrap();
-        let final_artifact = build_once(1).unwrap();
+        let final_artifact = build_once(1, MessageFormat::Human).unwrap();
         assert_eq!(output_directory(), out_dir);
         assert_eq!(
             std::process::Command::new(only_binary(&final_artifact))

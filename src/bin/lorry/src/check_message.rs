@@ -28,6 +28,7 @@ struct Package {
 struct State {
     artifacts: BTreeSet<UnitKey>,
     build_scripts: BTreeSet<UnitKey>,
+    messages: Vec<Value>,
 }
 
 pub struct Reporter {
@@ -147,11 +148,25 @@ impl Reporter {
     }
 
     fn write_value(&self, value: Value) -> Result<()> {
-        let _state = self
+        let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        emit(&value, self.format, self.color)
+        self.write_locked(&mut state, value)
+    }
+
+    fn write_locked(&self, state: &mut State, value: Value) -> Result<()> {
+        emit(&value, self.format, self.color)?;
+        state.messages.push(value);
+        Ok(())
+    }
+
+    pub fn messages(&self) -> Vec<Value> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .messages
+            .clone()
     }
 }
 
@@ -200,8 +215,9 @@ impl EventReporter for Reporter {
                 Some(self.published_path(unhashed_executable)?),
             ),
         };
-        emit(
-            &json!({
+        self.write_locked(
+            &mut state,
+            json!({
                 "reason": "compiler-artifact",
                 "package_id": package.id,
                 "manifest_path": package.manifest_path,
@@ -212,8 +228,6 @@ impl EventReporter for Reporter {
                 "executable": executable,
                 "fresh": fresh,
             }),
-            self.format,
-            self.color,
         )?;
         Ok(())
     }
@@ -258,8 +272,9 @@ impl EventReporter for Reporter {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        emit(
-            &json!({
+        self.write_locked(
+            &mut state,
+            json!({
                 "reason": "build-script-executed",
                 "package_id": package.id,
                 "linked_libs": linked_libs,
@@ -268,8 +283,6 @@ impl EventReporter for Reporter {
                 "env": env,
                 "out_dir": self.published_path(&executed.out_dir)?,
             }),
-            self.format,
-            self.color,
         )?;
         Ok(())
     }
@@ -341,6 +354,17 @@ fn directives(
 
 pub fn build_finished(success: bool) -> Result<()> {
     write_line(&json!({"reason": "build-finished", "success": success}))
+}
+
+pub fn replay(messages: &[Value], format: MessageFormat, color: bool) -> Result<()> {
+    for message in messages {
+        let mut message = message.clone();
+        if message.get("reason").and_then(Value::as_str) == Some("compiler-artifact") {
+            message["fresh"] = Value::Bool(true);
+        }
+        emit(&message, format, color)?;
+    }
+    Ok(())
 }
 
 fn emit(value: &Value, format: MessageFormat, color: bool) -> Result<()> {

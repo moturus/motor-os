@@ -166,6 +166,14 @@ fi
     cd "$PROJECT"
     "$LORRY" --quiet build
     : >"$LOG"
+    "$LORRY" --quiet build --message-format=json >"$WORK/profile-fresh.json"
+    if grep -F '<--crate-name>' "$LOG" >/dev/null; then
+        echo "check-contract: JSON build compiled an unchanged profile" >&2
+        exit 1
+    fi
+    grep -F '"reason":"compiler-message"' "$WORK/profile-fresh.json" | \
+        grep -F 'deprecated' >/dev/null
+    : >"$LOG"
     "$LORRY" --quiet build
     if grep -F '<--crate-name>' "$LOG" >/dev/null; then
         echo "check-contract: same-environment build missed freshness" >&2
@@ -249,6 +257,21 @@ sed '$d' "$WORK/run-json.out" >"$WORK/run-json-prefix.json"
 CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
     --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
     -- messages "$WORK/run-json-prefix.json" "$WORK/metadata.json" success plain any
+if (
+    cd "$PROJECT"
+    "$LORRY" --quiet run --bin first --message-format=json \
+        --target-dir "$WORK/run-json"
+) >"$WORK/run-fresh.out" 2>"$WORK/run-fresh.err"; then
+    echo "check-contract: fresh run lost the program's failure status" >&2
+    exit 1
+else
+    [ "$?" -eq 7 ]
+fi
+[ "$(tail -1 "$WORK/run-fresh.out")" = 'program output' ]
+sed '$d' "$WORK/run-fresh.out" >"$WORK/run-fresh-prefix.json"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- messages "$WORK/run-fresh-prefix.json" "$WORK/metadata.json" success plain fresh
 printf 'fn main() { assert_eq!(check_fixture::old_value(), 42); }\n' \
     >"$PROJECT/src/bin/first.rs"
 

@@ -47,6 +47,17 @@ printf 'fn main() { assert_eq!(selected_cache::value(), 42); }\n' \
     "$LORRY" --verbose build >"$WORK/second.log" 2>&1
     rg -Fq 'Fresh selected-cache v0.1.0 (verified Lorry cache)' "$WORK/second.log"
     rg -Fq 'function `unused_cache_warning` is never used' "$WORK/second.log"
+    "$LORRY" --quiet build >"$WORK/profile-human.log" 2>&1
+    rg -Fq 'function `unused_cache_warning` is never used' "$WORK/profile-human.log"
+    for format in json json-diagnostic-rendered-ansi; do
+        "$LORRY" --quiet build --message-format="$format" >"$WORK/profile-$format.json"
+        rg -F '"reason":"compiler-message"' "$WORK/profile-$format.json" | \
+            rg -Fq 'function `unused_cache_warning` is never used'
+        if rg -F '"reason":"compiler-artifact"' "$WORK/profile-$format.json" | rg -Fq '"fresh":false'; then
+            echo 'selected-cache-contract: cached profile rebuilt a compiler unit' >&2
+            exit 1
+        fi
+    done
     "$LORRY" --quiet test --no-run --message-format=json >"$WORK/tests-cold.json"
     "$LORRY" --quiet test --no-run --message-format=json >"$WORK/tests-fresh.json"
     for transcript in "$WORK/tests-cold.json" "$WORK/tests-fresh.json"; do
