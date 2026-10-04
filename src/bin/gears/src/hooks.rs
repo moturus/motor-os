@@ -58,6 +58,8 @@ struct Response {
     prompt_fragments: Vec<String>,
     #[serde(default)]
     tools: Vec<ToolSpec>,
+    #[serde(default)]
+    commands: Vec<CommandSpec>,
     input: Option<String>,
     messages: Option<Vec<Message>>,
     decision: Option<Decision>,
@@ -99,6 +101,13 @@ pub struct CompactionAdvice {
 pub struct Initialize {
     pub prompt_fragments: Vec<String>,
     pub tools: Vec<ToolSpec>,
+    pub commands: Vec<CommandSpec>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub name: String,
+    pub help: String,
 }
 
 struct Hook {
@@ -111,6 +120,8 @@ pub struct Manager {
     tool_owner: HashMap<String, usize>,
     prompt_fragments: Vec<String>,
     tools: Vec<ToolSpec>,
+    commands: Vec<CommandSpec>,
+    command_owner: HashMap<String, usize>,
 }
 
 impl Manager {
@@ -162,6 +173,8 @@ impl Manager {
             tool_owner: HashMap::new(),
             prompt_fragments: Vec::new(),
             tools: Vec::new(),
+            commands: Vec::new(),
+            command_owner: HashMap::new(),
         };
         let mut names = HashSet::new();
         names.extend(reserved_names.iter().cloned());
@@ -186,6 +199,27 @@ impl Manager {
                 }
                 manager.tool_owner.insert(tool.name.clone(), index);
                 manager.tools.push(tool);
+            }
+            for command in response.commands {
+                validate_command(&command)?;
+                if crate::cli::COMMAND_NAMES.contains(&command.name.as_str())
+                    || manager.command_owner.contains_key(&command.name)
+                {
+                    return Err(format!("duplicate command name {:?}", command.name));
+                }
+                if manager.hooks[index]
+                    .config
+                    .events
+                    .as_ref()
+                    .is_some_and(|events| !events.iter().any(|event| event == "command"))
+                {
+                    return Err(format!(
+                        "hook {} registers commands but does not subscribe to command",
+                        manager.hooks[index].config.name
+                    ));
+                }
+                manager.command_owner.insert(command.name.clone(), index);
+                manager.commands.push(command);
             }
         }
         Ok(manager)
@@ -215,6 +249,7 @@ impl Manager {
         Initialize {
             prompt_fragments: self.prompt_fragments.clone(),
             tools: self.tools.clone(),
+            commands: self.commands.clone(),
         }
     }
 
@@ -222,7 +257,36 @@ impl Manager {
         serde_json::json!({
             "hooks": self.hooks.iter().map(|hook| &hook.config.name).collect::<Vec<_>>(),
             "tools": self.tools,
+            "commands": self.commands,
         })
+    }
+
+    pub fn commands(&self) -> &[CommandSpec] {
+        &self.commands
+    }
+
+    pub fn command(
+        &self,
+        name: &str,
+        argument: &str,
+        session: &mut Session,
+        cancellation: &Cancellation,
+        notice: &mut dyn FnMut(String),
+    ) -> Result<(), String> {
+        let index = self
+            .command_owner
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("unknown command /{name}"))?;
+        self.invoke(
+            index,
+            "command",
+            serde_json::json!({"name": name, "argument": argument}),
+            session,
+            cancellation,
+            notice,
+        )
+        .map(|_| ())
     }
 
     pub fn transform_input(
@@ -607,13 +671,32 @@ fn validate_tool(tool: &ToolSpec) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_command(command: &CommandSpec) -> Result<(), String> {
+    if command.name.is_empty()
+        || command.name.len() > 64
+        || !command
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        || command.help.trim().is_empty()
+        || command.help.len() > 256
+        || command.help.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "invalid hook command {:?}: expected a name and one-line help",
+            command.name
+        ));
+    }
+    Ok(())
+}
+
 fn validate_result_fields(event: &str, value: &Value) -> Result<(), String> {
     let object = value
         .as_object()
         .ok_or("hook result must be a JSON object")?;
     let mut allowed = HashSet::from(["protocol_version", "state", "context", "notice"]);
     match event {
-        "initialize" => allowed.extend(["prompt_fragments", "tools"]),
+        "initialize" => allowed.extend(["prompt_fragments", "tools", "commands"]),
         "input" => {
             allowed.insert("input");
         }
@@ -684,6 +767,63 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commands_reject_collisions_invalid_help_and_missing_subscriptions() {
+        for (case, commands, events, expected) in [
+            (
+                "builtin",
+                r#"[{"name":"help","help":"replacement"}]"#,
+                None,
+                "duplicate",
+            ),
+            (
+                "duplicate",
+                r#"[{"name":"review","help":"one"},{"name":"review","help":"two"}]"#,
+                None,
+                "duplicate",
+            ),
+            (
+                "name",
+                r#"[{"name":"/review","help":"one"}]"#,
+                None,
+                "invalid",
+            ),
+            (
+                "help",
+                r#"[{"name":"review","help":"two\nlines"}]"#,
+                None,
+                "invalid",
+            ),
+            (
+                "subscription",
+                r#"[{"name":"review","help":"one"}]"#,
+                Some(vec!["initialize".into()]),
+                "subscribe",
+            ),
+        ] {
+            let (workspace, mut session) = fixture(&format!("commands-{case}"));
+            let mut config = hook(
+                "fixture",
+                &format!("cat >/dev/null; printf '%s' '{{\"commands\":{commands}}}'"),
+                std::time::Duration::from_secs(2),
+            );
+            config.events = events;
+            let result = Manager::initialize(
+                vec![config],
+                workspace.clone(),
+                &mut session,
+                &Cancellation::new(),
+                &mut |_| {},
+            );
+            assert!(
+                matches!(result, Err(ref error) if error.contains(expected)),
+                "{case}"
+            );
+            std::fs::remove_dir_all(workspace.parent().unwrap()).unwrap();
+        }
     }
 
     #[test]

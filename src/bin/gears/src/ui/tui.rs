@@ -885,12 +885,7 @@ fn handle_command(
         .map_or((&text[1..], ""), |(name, rest)| (name, rest.trim()));
     match name {
         "quit" | "exit" => app.quit = true,
-        "help" => app.push(
-            Kind::Notice,
-            "commands: /new /resume /name /session /tree /label /fork /clone /compact /provider /model /tools /tool /permissions /permission /status /help /quit"
-                .to_string(),
-            false,
-        ),
+        "help" => app.push(Kind::Notice, super::help(runtime), false),
         "status" => app.push(
             Kind::Notice,
             format!(
@@ -950,8 +945,8 @@ fn handle_command(
                         )
                     })
                     .collect::<Vec<_>>();
-                let selected = picker(app, "Resume session", &labels)?
-                    .ok_or("session selection cancelled")?;
+                let selected =
+                    picker(app, "Resume session", &labels)?.ok_or("session selection cancelled")?;
                 sessions[selected].id.clone()
             } else {
                 argument.to_string()
@@ -983,9 +978,12 @@ fn handle_command(
                         )
                     })
                     .collect::<Vec<_>>();
-                let selected =
-                    picker(app, "Select branch (shell side effects are unchanged)", &labels)?
-                        .ok_or("tree selection cancelled")?;
+                let selected = picker(
+                    app,
+                    "Select branch (shell side effects are unchanged)",
+                    &labels,
+                )?
+                .ok_or("tree selection cancelled")?;
                 tree[selected].id.clone()
             } else {
                 argument.to_string()
@@ -1093,7 +1091,7 @@ fn handle_command(
             }
         }
         "" => {}
-        other => return Err(format!("unknown command /{other}")),
+        other => runtime.hook_command(other, argument, &mut AppObserver(app))?,
     }
     app.refresh(runtime);
     Ok(())

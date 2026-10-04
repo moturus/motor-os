@@ -46,7 +46,7 @@ Event-specific result fields are:
 
 | Event | Result fields |
 | --- | --- |
-| initialize | prompt_fragments, tools |
+| initialize | prompt_fragments, tools, commands |
 | input | input |
 | context | messages |
 | permission | decision: allow, deny, ask, or confirm |
@@ -58,6 +58,15 @@ Event-specific result fields are:
 
 A tool result is {"content":"text","is_error":false}. Registered tools use
 {"name":"tool_name","description":"...","parameters":{...JSON Schema...}}.
+Registered commands use `{"name":"review","help":"Review the last turn"}`.
+Names are 1–64 ASCII letters, digits, underscores or hyphens, without `/`;
+help is a nonempty line of at most 256 bytes. Built-in names and duplicate
+registrations are rejected. Setup replaces command registrations along with
+tools and prompt fragments. A registering hook must receive `command` events.
+Both UIs list commands in `/help` and send `{"name":"review","argument":"focus text"}`
+only to the owning hook. The command is not sent to the model. Common result
+fields apply; a successful interactive command also starts the after-turn
+command, when configured.
 A before_compact result may set cancel, focus, output_reserve_tokens,
 recent_tail_tokens, or both summary and retained_tail. Supplying a summary
 without the complete retained tail is invalid.

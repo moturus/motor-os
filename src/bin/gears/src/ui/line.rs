@@ -89,7 +89,7 @@ fn command(
     match name {
         "quit" | "exit" => Ok(Command::Quit),
         "help" => {
-            eprintln!("{}", crate::cli::USAGE);
+            eprintln!("{}", super::help(runtime));
             Ok(Command::Continue)
         }
         "status" => {
@@ -229,7 +229,10 @@ fn command(
             Ok(Command::Continue)
         }
         "" => Ok(Command::Continue),
-        other => Err(format!("unknown command /{other}; try /help")),
+        other => {
+            runtime.hook_command(other, argument, renderer)?;
+            Ok(Command::Continue)
+        }
     }
 }
 

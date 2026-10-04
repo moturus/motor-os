@@ -506,6 +506,32 @@ impl Runtime {
         self.after_turn.is_running()
     }
 
+    pub fn hook_commands(&self) -> &[crate::hooks::CommandSpec] {
+        self.hooks.commands()
+    }
+
+    pub fn hook_command(
+        &mut self,
+        name: &str,
+        argument: &str,
+        observer: &mut dyn Observer,
+    ) -> Result<(), String> {
+        self.prepare_write()?;
+        self.cancellation.reset();
+        emit_notices(observer, self.take_startup_notices())?;
+        let mut notices = Vec::new();
+        let result = self.hooks.command(
+            name,
+            argument,
+            &mut self.session,
+            &self.cancellation,
+            &mut |notice| notices.push(notice),
+        );
+        emit_notices(observer, notices)?;
+        result?;
+        self.start_after_turn(observer)
+    }
+
     /// Interfaces opt in explicitly; library and one-shot runs are unattended.
     pub fn set_interactive(&mut self, interactive: bool) -> Result<(), String> {
         self.prepare_write()?;

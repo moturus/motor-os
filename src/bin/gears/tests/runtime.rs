@@ -250,6 +250,62 @@ fn after_turn_config(script: &str, argument: &std::path::Path) -> AfterTurnConfi
     }
 }
 
+#[test]
+fn hook_commands_dispatch_to_the_owner_without_a_model_turn_then_start_after_turn() {
+    let fixture = Fixture::new("hook-command");
+    let log = fixture.root.join("command.json");
+    let config = Config {
+        hooks: vec![HookConfig {
+            name: "owner".into(), events: Some(vec!["initialize".into(), "command".into()]),
+            command: vec!["/bin/sh".into(), "-c".into(),
+                "event=$(cat); case \"$event\" in *'\"event\":\"initialize\"'*) printf '{\"commands\":[{\"name\":\"review\",\"help\":\"Review this work\"}]}' ;; *) printf '%s' \"$event\" > \"$1\"; printf '{\"notice\":\"handled\",\"state\":{\"handled\":true}}' ;; esac".into(),
+                "owner".into(), log.display().to_string()],
+            timeout: Duration::from_secs(2), max_output_bytes: 4096,
+        }],
+        after_turn: Some(after_turn_config("sleep 30 & printf '%s' $! > \"$1\"; wait", &fixture.root.join("pid"))),
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![]);
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    assert_eq!(runtime.hook_commands()[0].name, "review");
+    assert_eq!(runtime.hook_commands()[0].help, "Review this work");
+    runtime.set_interactive(true).unwrap();
+    let argument = "literal 'focus' $HOME\nsecond line";
+    let mut notices = Vec::new();
+    runtime
+        .hook_command("review", argument, &mut |event| {
+            if let Event::Notice(text) = event {
+                notices.push(text);
+            }
+            Ok(())
+        })
+        .unwrap();
+    let event: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(log).unwrap()).unwrap();
+    assert_eq!(event["event"], "command");
+    assert_eq!(event["payload"]["name"], "review");
+    assert_eq!(event["payload"]["argument"], argument);
+    assert_eq!(
+        runtime.session().hook_state("owner").unwrap()["handled"],
+        true
+    );
+    assert!(notices.iter().any(|text| text.contains("handled")));
+    assert!(runtime.after_turn_running());
+    let pid = wait_for_review_pid(&fixture.root.join("pid"));
+    runtime.new_session(false, None).unwrap();
+    assert_review_stopped(pid);
+    assert!(!runtime.after_turn_running());
+    assert_eq!(runtime.hook_commands().len(), 1);
+    assert!(
+        runtime
+            .hook_command("missing", "", &mut |_: Event| Ok(()))
+            .unwrap_err()
+            .contains("unknown command")
+    );
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert!(runtime.session().context_messages().unwrap().is_empty());
+}
+
 fn wait_for_review_pid(path: &std::path::Path) -> u32 {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {

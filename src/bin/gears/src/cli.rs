@@ -2,6 +2,28 @@
 
 use std::path::PathBuf;
 
+pub const COMMAND_NAMES: &[&str] = &[
+    "quit",
+    "exit",
+    "help",
+    "status",
+    "tools",
+    "tool",
+    "permissions",
+    "permission",
+    "session",
+    "name",
+    "new",
+    "resume",
+    "label",
+    "tree",
+    "fork",
+    "clone",
+    "compact",
+    "model",
+    "provider",
+];
+
 pub const USAGE: &str = "\
 gears - a small extensible agent harness
 

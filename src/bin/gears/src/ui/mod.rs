@@ -7,6 +7,14 @@ pub mod tui_editor;
 use crate::runtime::Runtime;
 use crate::session::ToolState;
 
+pub(crate) fn help(runtime: &Runtime) -> String {
+    let mut text = crate::cli::USAGE.to_string();
+    for command in runtime.hook_commands() {
+        text.push_str(&format!("/{} - {}\n", command.name, command.help));
+    }
+    text
+}
+
 pub(crate) fn parse_tool_action(argument: &str) -> Result<(&str, ToolState, bool), String> {
     let parts = argument.split_whitespace().collect::<Vec<_>>();
     let ([action, name] | [action, name, "--global"]) = parts.as_slice() else {
