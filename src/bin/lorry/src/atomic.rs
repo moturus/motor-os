@@ -22,6 +22,62 @@ pub struct AtomicFile {
 }
 
 impl AtomicFile {
+    /// Stages a completed executable without opening a new Linux writer.
+    pub fn from_executable(source: &Path, destination: &Path) -> Result<Self> {
+        let metadata = fs::symlink_metadata(source).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect executable `{}`: {error}",
+                source.display()
+            ))
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(Error::failure(format!(
+                "executable source `{}` is not a regular file",
+                source.display()
+            )));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let parent = destination
+                .parent()
+                .ok_or_else(|| Error::failure("executable destination has no parent"))?;
+            let label = destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("file");
+            for _ in 0..100 {
+                let path = parent.join(unique_name(label, "staging"));
+                match fs::hard_link(source, &path) {
+                    Ok(()) => {
+                        let staging = Self {
+                            path,
+                            destination: destination.to_owned(),
+                            file: None,
+                            committed: false,
+                        };
+                        // A read-only descriptor can persist the completed inode
+                        // without blocking exec if another fork inherits it.
+                        File::open(&staging.path)
+                            .and_then(|file| file.sync_all())
+                            .map_err(|error| {
+                                Error::failure(format!(
+                                    "failed to persist executable `{}`: {error}",
+                                    staging.path.display()
+                                ))
+                            })?;
+                        return Ok(staging);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    // Cargo also copies when the filesystem cannot hard-link.
+                    Err(_) => break,
+                }
+            }
+        }
+        let mut staging = Self::new(destination)?;
+        staging.copy_executable_from(source)?;
+        Ok(staging)
+    }
+
     pub fn new(destination: &Path) -> Result<Self> {
         let parent = destination.parent().ok_or_else(|| {
             Error::failure(format!(
@@ -640,6 +696,88 @@ mod tests {
         let root = std::env::temp_dir().join(unique_name(label, "test"));
         fs::create_dir(&root).unwrap();
         root
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linked_executable_runs_while_a_fork_child_is_held_before_exec() {
+        struct HeldChild(libc::pid_t);
+        impl Drop for HeldChild {
+            fn drop(&mut self) {
+                // Reap the held child even if publication or launch fails.
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                    libc::waitpid(self.0, std::ptr::null_mut(), 0);
+                }
+            }
+        }
+
+        let root = temp_root("inherited-writer");
+        let source = root.join("completed");
+        let destination = root.join("program");
+        fs::copy("/bin/true", &source).unwrap();
+        let staging = AtomicFile::from_executable(&source, &destination).unwrap();
+        // Sandbox and child-lease pre-exec hooks use this same fork window.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            // The fork child must only use async-signal-safe calls.
+            unsafe {
+                libc::raise(libc::SIGSTOP);
+                libc::_exit(0);
+            }
+        }
+        let held = HeldChild(child);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child, &mut status, libc::WUNTRACED) },
+            child
+        );
+        assert!(libc::WIFSTOPPED(status));
+        staging.commit().unwrap();
+        assert!(Command::new(&destination).status().unwrap().success());
+        drop(held);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_links_replace_atomically_and_reject_symlinks() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let root = temp_root("executable-link");
+        let source = root.join("completed");
+        let destination = root.join("program");
+        fs::copy("/bin/true", &source).unwrap();
+        fs::write(&destination, b"old").unwrap();
+        {
+            let staging = AtomicFile::from_executable(&source, &destination).unwrap();
+            assert_eq!(fs::read(&destination).unwrap(), b"old");
+            drop(staging);
+        }
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        AtomicFile::from_executable(&source, &destination)
+            .unwrap()
+            .commit()
+            .unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+        let installed = fs::metadata(&destination).unwrap();
+        assert_eq!(metadata.ino(), installed.ino());
+        assert_eq!(metadata.mode(), installed.mode());
+        assert!(Command::new(&destination).status().unwrap().success());
+
+        let alias = root.join("alias");
+        symlink(&source, &alias).unwrap();
+        assert!(AtomicFile::from_executable(&alias, &destination).is_err());
+        assert!(
+            AtomicFile::from_executable(&source, &alias)
+                .unwrap()
+                .commit()
+                .is_err()
+        );
+        assert!(fs::symlink_metadata(&alias).unwrap().is_symlink());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 3);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

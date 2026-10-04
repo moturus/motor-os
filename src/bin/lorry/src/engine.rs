@@ -2321,9 +2321,7 @@ fn unknown_integration_test(manifest: &Manifest, name: &str) -> Error {
 
 fn install_primary(source: &Path, destination: &Path, package: &PackageKey) -> Result<()> {
     crate::artifact_owner::invalidate_primary(destination)?;
-    let mut artifact = AtomicFile::new(destination)?;
-    artifact.copy_executable_from(source)?;
-    artifact.commit()?;
+    AtomicFile::from_executable(source, destination)?.commit()?;
     crate::artifact_owner::write_primary(destination, package)
 }
 

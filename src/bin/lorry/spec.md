@@ -1180,9 +1180,14 @@ or the linker. Strict mode reconstructs admission and rehashes all of those
 contents before reuse. A missing, malformed, stale, or differently-modeled
 record causes a normal rebuild. Test harnesses and bundle launchers are not
 reused by this profile-level check.
-The completed-profile record and each top-level selected binary are written
-through private file staging and atomically installed, so a failed copy or
-record write leaves the preceding complete file in place.
+The completed-profile record and each top-level selected binary use private
+file staging and atomic installation, so a failed staging or record write
+leaves the preceding complete file in place. On Linux, executable staging
+hard-links completed compiler output, preserving its permissions and sharing
+the inode with the unit artifact, as Cargo does. This avoids writable
+descriptors inherited by fork children keeping the installed executable busy.
+Filesystems that cannot hard-link fall back to a copy, as Cargo does. Motor
+uses independent copies.
 Staging names use one leading dot even when the destination is a hidden file,
 so they remain valid on Motor.
 Copied executables are made read/execute on Motor before publication.
