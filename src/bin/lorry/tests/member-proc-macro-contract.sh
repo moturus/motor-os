@@ -77,7 +77,6 @@ for platform in native motor native-release motor-release; do
     if [[ "$platform" = motor* ]]; then target=(--target x86_64-unknown-motor); profile=x86_64-unknown-motor/debug; fi
     if [[ "$platform" = *-release ]]; then release=(--release); profile="${profile%debug}release"; fi
     for command in build check; do
-        if [ "$command" = check ] && [ "${#release[@]}" != 0 ]; then continue; fi
         for selection in defaults all macro; do
             packages=()
             if [ "$selection" = all ]; then packages=(--workspace); fi

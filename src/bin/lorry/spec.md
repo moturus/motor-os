@@ -543,6 +543,8 @@ additionally supports `lto`, `strip`, and `codegen-units`.
 Debug and optimization values follow Cargo. Omitted stripping preserves debug
 information when requested, and host debug reduction requires matching
 effective runtime settings before a unit can be shared.
+`check` and `clippy` accept `--release` (or `-r`) and apply the release profile
+to metadata units while retaining the required host-tool profiles.
 
 ## Cargo configuration
 

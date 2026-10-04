@@ -95,14 +95,18 @@ for strip in default false none debuginfo symbols debug-limited debug-full debug
         profile=release
         if [[ "$strip" == dev-* ]]; then profile=debug; fi
         if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); profile=x86_64-unknown-motor/$profile; fi
-        env HOME="$WORK/home" "$LORRY" build "${mode[@]}" --workspace -j1 "${target[@]}" \
+        for command in build check; do
+        comparison=differential-script-clean-messages
+        if [ "$command" = check ]; then comparison=differential-script-clean-check-messages; fi
+        env HOME="$WORK/home" "$LORRY" "$command" "${mode[@]}" --workspace -j1 "${target[@]}" \
             --message-format=json >"$WORK/lorry-$strip-$platform.json"
-        "$LORRY_TEST_CARGO" build "${mode[@]}" --workspace -j1 "${target[@]}" --offline \
+        "$LORRY_TEST_CARGO" "$command" "${mode[@]}" --workspace -j1 "${target[@]}" --offline \
             --message-format=json >"$WORK/cargo-$strip-$platform.json"
-        cmp "target/$profile/app" "target/lorry/$profile/app"
+        if [ "$command" = build ]; then cmp "target/$profile/app" "target/lorry/$profile/app"; fi
         "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" \
-            --locked --offline -- differential-script-clean-messages \
+            --locked --offline -- "$comparison" \
             "$WORK/lorry-$strip-$platform.json" "$WORK/cargo-$strip-$platform.json"
+        done
     done
 done
 [ "$(target/lorry/release/app)" = 42 ]

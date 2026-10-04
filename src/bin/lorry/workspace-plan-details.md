@@ -2611,6 +2611,13 @@ for both keys; the shared parsers and matrix now preserve that distinction.
 The expanded dev/release value matrix, all eleven planner tests, and strict
 Clippy pass in `/tmp/lorry-m8-dev-settings-{parser-complete,unit,clippy}.log`.
 
+`check` and Clippy now accept release selection and pass it through the common
+planner. Selected macro checks cover native/cross debug and release for
+default, all, and macro-only selections. The profile fixture compares checks
+as well as builds for every supported setting, including scripts and host
+dependencies. Both paired contracts, all twenty-eight CLI tests, and strict
+Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contract,cli,clippy}.log`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only

@@ -205,7 +205,11 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             options.build.target.as_deref(),
             options.build.validation,
         ),
-        Command::Check(options) => (false, options.target.as_deref(), ValidationMode::Trusted),
+        Command::Check(options) => (
+            options.release,
+            options.target.as_deref(),
+            ValidationMode::Trusted,
+        ),
         Command::Test(options) => (
             options.build.release,
             options.build.target.as_deref(),
@@ -471,7 +475,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 physical_target: physical_target.as_deref(),
                 logical_target,
                 rustflags: &rustflags,
-                release: false,
+                release,
                 test: false,
                 test_name: None,
                 color,

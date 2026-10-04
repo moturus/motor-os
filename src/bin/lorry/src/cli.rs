@@ -142,6 +142,7 @@ pub enum MessageFormat {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckOptions {
+    pub release: bool,
     pub clippy: Option<Vec<String>>,
     pub manifest_path: Option<String>,
     pub target_dir: Option<String>,
@@ -596,6 +597,12 @@ fn check_command(name: &'static str) -> ClapCommand {
         .args(locked_offline_arguments())
         .arg(jobs_argument())
         .arg(
+            Arg::new("release")
+                .long("release")
+                .short('r')
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("target-dir")
                 .long("target-dir")
                 .value_name("DIRECTORY")
@@ -929,6 +936,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             None => unreachable!("Clap requires a cache subcommand"),
         },
         Some((name @ ("check" | "clippy"), options)) => Ok(Command::Check(CheckOptions {
+            release: options.get_flag("release"),
             clippy: (name == "clippy").then(|| {
                 let mut arguments = values(options, "arguments");
                 if options.get_flag("no-deps") {
@@ -1486,6 +1494,7 @@ mod tests {
         assert_eq!(
             check.command,
             Command::Check(CheckOptions {
+                release: false,
                 clippy: None,
                 manifest_path: Some("/project/Cargo.toml".to_owned()),
                 target_dir: Some("/project/target/rust-analyzer".to_owned()),
@@ -1504,6 +1513,7 @@ mod tests {
 
         let Command::Check(flycheck) = parse(&[
             "check",
+            "--release",
             "--workspace",
             "--message-format=json-diagnostic-rendered-ansi",
             "--all-targets",
@@ -1517,6 +1527,7 @@ mod tests {
             panic!("expected check");
         };
         assert!(flycheck.all_targets && flycheck.lib && flycheck.bins && flycheck.examples);
+        assert!(flycheck.release);
         assert_eq!(
             flycheck.message_format,
             MessageFormat::JsonDiagnosticRenderedAnsi

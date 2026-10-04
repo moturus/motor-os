@@ -64,6 +64,9 @@ fn main() {
             "differential-script-clean-messages" => {
                 compare_messages(Path::new(lorry), Path::new(cargo), true, false, true, false)
             }
+            "differential-script-clean-check-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, true, true, false)
+            }
             _ => panic!("unknown comparison command `{command}`"),
         }
         return;
