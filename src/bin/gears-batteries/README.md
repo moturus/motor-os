@@ -30,3 +30,14 @@ The installed Gears configuration does not enable the batteries hook yet.
 Run `src/tests/test-gears-batteries.sh` from the Motor OS repository root for
 the hermetic host gate. The release developer-image gate exercises the
 installed binary and rebuilds the packaged source with Lorry.
+
+Declare one check at the workspace root in `.gears/batteries.toml`:
+
+```toml
+check = ["cargo", "test", "--offline"]
+```
+
+For platform overrides, use `[check]` with `linux = [...]`, `motor = [...]`
+and an optional `common = [...]` fallback. Every item is a literal argument;
+use a program or script directly. Shell `-c` declarations are refused.
+The declaration is limited to 128 items and 8 KiB of serialized JSON.
