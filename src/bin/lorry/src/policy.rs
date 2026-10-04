@@ -206,7 +206,7 @@ fn preflight_depth(policy: &Policy, resolution: &Resolution, depth: u64) -> Resu
         if known_build_script
             && !potential_rules
                 .iter()
-                .any(|id| script_rule_authorizes(&policy.rules[id], facts.source))
+                .any(|id| script_rule_authorizes(&policy.rules[id], package))
         {
             return Err(build_script_not_admitted(package, &facts, None));
         }
@@ -219,7 +219,7 @@ fn preflight_depth(policy: &Policy, resolution: &Resolution, depth: u64) -> Resu
         if known_proc_macro
             && !potential_rules
                 .iter()
-                .any(|id| proc_macro_rule_authorizes(&policy.rules[id], facts.source))
+                .any(|id| proc_macro_rule_authorizes(&policy.rules[id], package))
         {
             return Err(proc_macro_not_admitted(package, &facts, None));
         }
@@ -282,7 +282,7 @@ pub fn inspect(
 
         let script_allows = allows
             .iter()
-            .filter(|id| script_rule_authorizes(&preflight.policy.rules[id.as_str()], source))
+            .filter(|id| script_rule_authorizes(&preflight.policy.rules[id.as_str()], package))
             .copied()
             .collect::<Vec<_>>();
         if evidence.build_script && script_allows.is_empty() {
@@ -290,7 +290,7 @@ pub fn inspect(
         }
         let proc_macro_allows = allows
             .iter()
-            .filter(|id| proc_macro_rule_authorizes(&preflight.policy.rules[id.as_str()], source))
+            .filter(|id| proc_macro_rule_authorizes(&preflight.policy.rules[id.as_str()], package))
             .copied()
             .collect::<Vec<_>>();
         if evidence.proc_macro && proc_macro_allows.is_empty() {
@@ -835,8 +835,19 @@ fn fact_definitely_matches(expected: Option<&str>, actual: &Fact) -> bool {
     }
 }
 
-fn script_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
-    if rule.action != PolicyAction::Allow || !rule.allow_build_script {
+fn script_rule_authorizes(rule: &PolicyRule, package: &ResolvedPackage) -> bool {
+    if rule.action != PolicyAction::Allow
+        || !rule.allow_build_script
+        || !member_grant_is_named(rule, package)
+    {
+        return false;
+    }
+    let source = source_kind(package);
+    if source == SourceKind::Path
+        && !rule.native_tools.is_empty()
+        && rule.source_tree_sha256.is_none()
+        && !is_editable_member(package)
+    {
         return false;
     }
     match source {
@@ -845,14 +856,30 @@ fn script_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
     }
 }
 
-fn proc_macro_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
-    if rule.action != PolicyAction::Allow || !rule.allow_proc_macro {
+fn proc_macro_rule_authorizes(rule: &PolicyRule, package: &ResolvedPackage) -> bool {
+    if rule.action != PolicyAction::Allow
+        || !rule.allow_proc_macro
+        || !member_grant_is_named(rule, package)
+    {
         return false;
     }
+    let source = source_kind(package);
     match source {
         SourceKind::CratesIo => true,
         SourceKind::Git | SourceKind::Path => rule.source.as_deref() == Some(source.policy_name()),
     }
+}
+
+fn is_editable_member(package: &ResolvedPackage) -> bool {
+    source_kind(package) == SourceKind::Path
+        && package
+            .local_manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.editable)
+}
+
+fn member_grant_is_named(rule: &PolicyRule, package: &ResolvedPackage) -> bool {
+    !is_editable_member(package) || rule.name.as_deref() == Some(&package.key.name)
 }
 
 pub(crate) fn check_evidence_identity(
@@ -1084,6 +1111,7 @@ fn exact_allow_example(
         example.push_str(&format!("checksum = \"{checksum}\"\n"));
     }
     if facts.source != SourceKind::CratesIo
+        && !is_editable_member(package)
         && let Fact::Value(digest) = &facts.source_tree_sha256
     {
         example.push_str(&format!("source-tree-sha256 = \"{digest}\"\n"));
@@ -1686,6 +1714,79 @@ mod tests {
             admission.packages[&package.key].native_tools,
             BTreeSet::from([NativeToolRole::CCompiler])
         );
+    }
+
+    #[test]
+    fn member_build_time_grants_are_named_and_unpinned_tools_stay_with_members() {
+        let mut package = path_package(Path::new("/ws/local-demo"), true, true);
+        package.local_manifest.as_mut().unwrap().editable = true;
+        let evidence = BTreeMap::from([(
+            package.key.clone(),
+            PackageEvidence {
+                license: "MIT".to_owned(),
+                build_script: true,
+                proc_macro: true,
+                newly_acquired: false,
+                archive_bytes: None,
+                extracted_bytes: 10,
+                file_count: 1,
+                source_tree_sha256: checksum(7),
+            },
+        )]);
+        let mut grant = rule(PolicyAction::Allow, None, None);
+        grant.source = Some("path".into());
+        grant.name = Some(package.key.name.clone());
+        grant.allow_build_script = true;
+        grant.allow_proc_macro = true;
+        grant.native_tools.insert(NativeToolRole::CCompiler);
+        let mut policy = Policy::default();
+        for name in [None, Some("other".to_owned()), grant.name.clone()] {
+            let mut candidate = grant.clone();
+            candidate.name = name.clone();
+            policy.rules.insert("member".into(), candidate);
+            let resolution = make_resolution(vec![package.clone()]);
+            let result = preflight(&policy, &resolution);
+            assert_eq!(result.is_ok(), name == grant.name);
+            if let Ok(pass) = result {
+                let admission = inspect(&pass, &resolution, &evidence).unwrap();
+                assert_eq!(
+                    admission.packages[&package.key].native_tools,
+                    grant.native_tools
+                );
+            }
+            // Inspection must enforce the grants even when source-only
+            // preparation had not yet discovered build-time code.
+            let mut unknown = package.clone();
+            let manifest = unknown.local_manifest.as_mut().unwrap();
+            manifest.build_script = None;
+            manifest.library = None;
+            let unknown_resolution = make_resolution(vec![unknown]);
+            let pass = preflight(&policy, &unknown_resolution).unwrap();
+            assert_eq!(
+                inspect(&pass, &unknown_resolution, &evidence).is_ok(),
+                name == grant.name
+            );
+        }
+        let resolution = make_resolution(vec![package.clone()]);
+        policy.rules.get_mut("member").unwrap().allow_proc_macro = false;
+        assert!(
+            preflight(&policy, &resolution)
+                .unwrap_err()
+                .render()
+                .contains("procedural macro")
+        );
+        policy.rules.insert("member".into(), grant.clone());
+        package.local_manifest.as_mut().unwrap().editable = false;
+        let outside = make_resolution(vec![package]);
+        assert!(
+            preflight(&policy, &outside)
+                .unwrap_err()
+                .render()
+                .contains("build script")
+        );
+        policy.rules.get_mut("member").unwrap().source_tree_sha256 = Some(hex(&checksum(7)));
+        let pass = preflight(&policy, &outside).unwrap();
+        inspect(&pass, &outside, &evidence).unwrap();
     }
 
     #[test]

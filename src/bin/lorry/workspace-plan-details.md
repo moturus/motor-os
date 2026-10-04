@@ -2405,6 +2405,14 @@ Extend the unit oracle to several selected members.
 
 ## Milestone 8: remaining targets and commands
 
+Implementation started with policy C's member identity boundary. Editable
+member scripts and macros now require named path grants. Native-tool rules may
+omit the source digest only for an actual editable workspace member; source
+inspection still rejects an unpinned same-named nonmember. These grants do not
+yet remove the selected-member execution rejection.
+All thirteen policy tests, both native-tool grant configuration tests, and
+strict Clippy pass in `/tmp/lorry-m8-member-policy-{tests,config,clippy}.log`.
+
 **Result.** Member build-time code and all required targets use the shared
 graph. Workspace `test`, `run`, `clean`, and `new` follow Cargo.
 

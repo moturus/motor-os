@@ -1112,6 +1112,11 @@ require their respective explicit allows, even under default allow.
 Policy rules express those grants with `allow-build-script = true` and
 `allow-proc-macro = true`; neither grant implies the other. Native-tool roles
 additionally require the build-script grant.
+Editable workspace members require a named `source = "path"` rule for each
+build-script or procedural-macro capability. Their native-tool grants may omit
+`source-tree-sha256`; a same-named nonmember path package still requires that pin
+before receiving native tools. Missing-grant diagnostics suggest the member's
+name, and do not suggest pinning mutable member source trees.
 
 Dependency depth has no default cap, matching Cargo. An explicitly configured
 `policy.limits.max-depth` bounds resolution, source preparation, and admission.
@@ -1428,7 +1433,8 @@ Lorry currently has only `c-compiler` and `archiver` native-tool roles. They are
 configured per target as absolute executable, fixed prefix-argument array, and
 flag array; they are never discovered from ambient `PATH`, `CC`, `CFLAGS`,
 `AR`, or `ARFLAGS`. A package rule must grant each role explicitly and pin a
-source-tree digest. Tool bytes, path, identity, arguments, environment, and
+source-tree digest unless it names an editable workspace member. Tool bytes,
+path, identity, arguments, environment, and
 outputs are build/cache/audit inputs. For a granted C compiler, Lorry exposes
 the canonical sibling `lib` directory of its `bin` directory read-only when
 present, and exposes each absolute existing directory named by an exact

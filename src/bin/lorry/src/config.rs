@@ -1090,12 +1090,13 @@ fn merge_policy_rules(
         if !native_tools.is_empty()
             && source.as_deref() != Some("crates.io")
             && source_tree_sha256.is_none()
+            && !(source.as_deref() == Some("path") && name.is_some())
         {
             return Err(Error::at(
                 path,
                 document.line_of_table(table),
                 format!("path policy rule `{id}` grants native tools without a source-tree digest"),
-                "pin `source-tree-sha256` before granting native tools",
+                "pin `source-tree-sha256`, or name an editable workspace member with source = \"path\"",
             ));
         }
         output.insert(
@@ -2775,5 +2776,28 @@ locked = [
         )
         .unwrap();
         merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap();
+    }
+
+    #[test]
+    fn unpinned_path_native_tool_grants_require_a_named_member_rule() {
+        let temp = TempDir::new();
+        let path = temp.0.join("lorry.toml");
+        for (identity, accepted) in [
+            ("source = \"path\"\nname = \"member\"\n", true),
+            ("source = \"path\"\n", false),
+            ("source = \"git\"\nname = \"member\"\n", false),
+            ("name = \"member\"\n", false),
+        ] {
+            fs::write(
+                &path,
+                format!(
+                    "config-version = 1\n[policy.rules.native]\naction = \"allow\"\n\
+                 {identity}allow-build-script = true\nnative-tools = [\"c-compiler\"]\n"
+                ),
+            )
+            .unwrap();
+            let result = merge_lorry_file(&path, LayerKind::Local, &mut Config::default());
+            assert_eq!(result.is_ok(), accepted, "{identity}: {result:?}");
+        }
     }
 }
