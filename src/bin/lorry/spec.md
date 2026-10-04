@@ -1669,7 +1669,10 @@ harness crates. Integration compilation receives Cargo-compatible
 `CARGO_BIN_EXE_<name>` and `CARGO_TARGET_TMPDIR`.
 
 Bundle mode packages each selected member's harness executables and required
-program binaries into a separate target-native self-extracting executable.
+program binaries into a separate self-extracting executable. Host-only macro
+harness bundles use the host profile, compiler/linker settings, extraction root,
+and runtime environment, even during a cross invocation. Target harness bundles
+retain their target-machine runtime rules.
 Integration compile-time program/temporary paths refer to that member's
 extraction directory. Layout identity also includes prepared build inputs,
 so feature, dependency, configuration, and tracked environment changes do not

@@ -1310,6 +1310,25 @@ fn build_inner(
         },
     )?;
     crate::trace::event("initialized dependency build cache");
+    let workspace_test_plan = if build.test && build.members.is_some() {
+        Some(prepared.workspace_test_plan(
+            &PlanOptions {
+                workspace_root: &build.manifest.workspace_root,
+                release: build.release,
+                test_profile: false,
+                panic_abort: build.manifest.panic_abort(build.release),
+                dev_profile: &build.manifest.dev,
+                release_profile: &build.manifest.release,
+                rustc: build.toolchain,
+                logical_target: build.logical_target,
+                rustflags: build.rustflags,
+            },
+            &selected_packages,
+            build.test_name,
+        )?)
+    } else {
+        None
+    };
     let bundle_inputs = (build.test && build.bundle)
         .then(|| freshness_base(&build, &prepared, &cargo))
         .transpose()?;
@@ -1317,16 +1336,44 @@ fn build_inner(
         .as_ref()
         .map(|_| bundle::CompilerIdentity::new(&cargo, &build.toolchain.rustc))
         .transpose()?;
-    let make_bundle_layout = |member: &Manifest| {
+    let bundle_kind = |package: &PackageKey| {
+        let harnesses = workspace_test_plan
+            .iter()
+            .flat_map(|plan| plan.units.keys())
+            .filter(|key| {
+                &key.package == package
+                    && matches!(
+                        key.kind,
+                        UnitKind::LibraryHarness
+                            | UnitKind::BinaryHarness
+                            | UnitKind::IntegrationHarness
+                    )
+            })
+            .collect::<Vec<_>>();
+        if !harnesses.is_empty()
+            && harnesses
+                .iter()
+                .all(|key| key.compile_kind == CompileKind::Host)
+        {
+            CompileKind::Host
+        } else {
+            CompileKind::Target
+        }
+    };
+    let make_bundle_layout = |member: &Manifest, kind: CompileKind| {
+        let target = match kind {
+            CompileKind::Host => build.host,
+            CompileKind::Target => build.target,
+        };
         bundle::Layout::new(&bundle::LayoutOptions {
-            extraction_root: build.config.test.extraction_root(&build.target.triple),
+            extraction_root: build.config.test.extraction_root(&target.triple),
             package_name: &member.name,
             package_root: &member.root,
             compiler_identity: bundle_compiler
                 .as_ref()
                 .ok_or_else(|| Error::failure("bundle layout requires compiler identity"))?,
             toolchain: build.toolchain,
-            target: build.target,
+            target,
             release: build.release,
             test_name: build.test_name,
             build_inputs: bundle_inputs
@@ -1336,18 +1383,23 @@ fn build_inner(
         })
     };
     let bundle_layout = if bundle_inputs.is_some() && build.members.is_none() {
-        Some(make_bundle_layout(build.manifest)?)
+        Some(make_bundle_layout(build.manifest, CompileKind::Target)?)
     } else {
         None
     };
     let mut bundle_layouts = BTreeMap::new();
+    let mut bundle_kinds = BTreeMap::new();
     if bundle_inputs.is_some()
         && let Some(members) = build.members
     {
         for member in members {
+            bundle_kinds.insert(
+                selected_library_key(member)?.package,
+                bundle_kind(&selected_library_key(member)?.package),
+            );
             bundle_layouts.insert(
                 selected_library_key(member)?.package,
-                make_bundle_layout(member)?,
+                make_bundle_layout(member, bundle_kind(&selected_library_key(member)?.package))?,
             );
         }
     }
@@ -1503,21 +1555,8 @@ fn build_inner(
     if build.test
         && let Some(members) = build.members
     {
-        let plan = prepared.workspace_test_plan(
-            &PlanOptions {
-                workspace_root: &build.manifest.workspace_root,
-                release: build.release,
-                test_profile: false,
-                panic_abort: build.manifest.panic_abort(build.release),
-                dev_profile: &build.manifest.dev,
-                release_profile: &build.manifest.release,
-                rustc: build.toolchain,
-                logical_target: build.logical_target,
-                rustflags: build.rustflags,
-            },
-            &selected_packages,
-            build.test_name,
-        )?;
+        let plan =
+            workspace_test_plan.ok_or_else(|| Error::failure("missing workspace test plan"))?;
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
         if build.validation.is_strict() {
             prepared.revalidate_cargo_registry_sources(source_limits)?;
@@ -1589,6 +1628,25 @@ fn build_inner(
             let bundled = if !harnesses.is_empty()
                 && let Some(layout) = bundle_layouts.get(&package)
             {
+                let kind = bundle_kinds[&package];
+                let (profile, physical_target, target_options, rustflags) = match kind {
+                    CompileKind::Target => (
+                        &destination,
+                        build.physical_target,
+                        build.target_options,
+                        build.rustflags,
+                    ),
+                    CompileKind::Host => (
+                        &host_profile,
+                        None,
+                        build.host_options,
+                        if build.logical_target.is_none() {
+                            build.rustflags
+                        } else {
+                            &[]
+                        },
+                    ),
+                };
                 let paths = harnesses
                     .iter()
                     .map(|harness| harness.executable.clone())
@@ -1598,7 +1656,7 @@ fn build_inner(
                     .iter()
                     .map(|(name, path)| (name.as_str(), path.as_path()))
                     .collect::<Vec<_>>();
-                let bundle_staging = AtomicDirectory::new_compact(&destination)?;
+                let bundle_staging = AtomicDirectory::new_compact(profile)?;
                 let staged = bundle::build(&bundle::BuildOptions {
                     child_lease_fd: build.child_lease_fd,
                     layout,
@@ -1606,23 +1664,23 @@ fn build_inner(
                     package_root: &member.root,
                     staging: bundle_staging.path(),
                     rustc: &build.toolchain.rustc,
-                    physical_target: build.physical_target,
-                    linker: build.target_options.linker.as_deref(),
-                    rustflags: build.rustflags,
+                    physical_target,
+                    linker: target_options.linker.as_deref(),
+                    rustflags,
                     release: build.release,
                     verbose: build.verbosity == Verbosity::Verbose,
                     color: build.color,
                     harnesses: &paths,
                     programs: &programs,
                 })?;
-                let executable = destination.join(
+                let executable = profile.join(
                     staged
                         .file_name()
                         .ok_or_else(|| Error::failure("bundle executable has no filename"))?,
                 );
                 install_primary(&staged, &executable, &package)?;
                 Some(TestExecutable {
-                    compile_kind: CompileKind::Target,
+                    compile_kind: kind,
                     executable,
                     environment: harnesses[0].environment.clone(),
                 })

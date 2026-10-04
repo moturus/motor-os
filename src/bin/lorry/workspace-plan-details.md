@@ -2670,6 +2670,17 @@ validated during the milestone gate. The focused workspace contract and strict
 Clippy pass in `/tmp/lorry-m8-bundle-standard-sealing-{workspace,clippy}.log`.
 The separate host-only bundle platform correction remains the next patch.
 
+Host-only macro bundles now derive their platform from the completed test plan.
+Their layout uses host target information, their compiler uses host flags/linker,
+and they publish in the host profile with the correct runtime kind. The same
+prepared plan is reused for execution. Native and cross-invocation host bundle
+execution, including runner bypass and host library-directory assertions, pass
+in `/tmp/lorry-m8-proc-macro-bundle-host-platform.log`; strict Clippy passes in
+`/tmp/lorry-m8-proc-macro-bundle-host-clippy.log`.
+The owner has been asked whether a cross selection mixing host and target
+harnesses in one member should fail explicitly or produce two bundles; that
+choice is pending and this patch handles the independent host-only case.
+
 ### Member build-time code
 
 The shared planner now has workspace harness graphs with selected dev edges,

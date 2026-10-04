@@ -171,4 +171,10 @@ printf '\nrunner = ["bash", "%s"]\n' "$WORK/target-runner.sh" >>.cargo/config.to
 host_libdir="$("$RUSTC" --print target-libdir)"
 env EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY_TEST_CARGO" test -p derive --target x86_64-unknown-motor --offline
 env HOME="$WORK/home" EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY" test -p derive --target x86_64-unknown-motor
+printf '\n[test]\nextraction-root = "%s"\n' "$WORK/extraction" >>lorry.toml
+for target in native motor; do
+    args=()
+    if [ "$target" = motor ]; then args=(--target x86_64-unknown-motor); fi
+    env HOME="$WORK/home" EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY" test -p derive --bundle "${args[@]}"
+done
 echo "PASS: selected member macros match Cargo host/cross bytes and JSON"
