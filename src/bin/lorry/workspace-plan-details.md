@@ -1710,6 +1710,12 @@ resolver tests, including the routed Cargo feature oracles, passed in
 `/tmp/lorry-m6-cli-feature-routing-unit.log`; strict Clippy passed in
 `/tmp/lorry-m6-cli-feature-routing-clippy.log`.
 
+The CLI routing oracle now adds 48 actual Cargo unit-graph comparisons:
+resolvers 1/2/3, package/virtual roots, plain and qualified/weak member
+features, default-feature suppression, all features, and an absent feature.
+The focused matrix passed in `/tmp/lorry-m6-cli-features-cargo-matrix.log`;
+strict Clippy passed in `/tmp/lorry-m6-cli-features-cargo-matrix-clippy.log`.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

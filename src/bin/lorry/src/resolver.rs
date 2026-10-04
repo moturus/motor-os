@@ -2680,6 +2680,132 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(features, cargo_unit_features(&output.stdout));
+
+        let root_source = fs::read_to_string(fixture.0.join("Cargo.toml")).unwrap();
+        fixture.package(
+            "a",
+            &root_source
+                .replace(
+                    "[workspace]\nmembers = [\"b\", \"shared\"]\nresolver = \"1\"\n",
+                    "",
+                )
+                .replace("path = \"shared\"", "path = \"../shared\""),
+        );
+        let b_source = fs::read_to_string(fixture.0.join("b/Cargo.toml")).unwrap();
+        fs::write(
+            fixture.0.join("b/Cargo.toml"),
+            format!("{b_source}[features]\ndefault = [\"extra\"]\nextra = [\"shared/other\"]\n"),
+        )
+        .unwrap();
+        let shared = fs::read_to_string(fixture.0.join("shared/Cargo.toml")).unwrap();
+        fs::write(
+            fixture.0.join("shared/Cargo.toml"),
+            format!("{shared}other = []\n"),
+        )
+        .unwrap();
+        for (version, resolver) in [
+            ("1", ResolverVersion::V1),
+            ("2", ResolverVersion::V2),
+            ("3", ResolverVersion::V3),
+        ] {
+            for virtual_root in [false, true] {
+                let source = if virtual_root {
+                    format!(
+                        "[workspace]\nmembers = [\"a\", \"b\", \"shared\"]\nresolver = \"{version}\"\n"
+                    )
+                } else {
+                    root_source.replace("resolver = \"1\"", &format!("resolver = \"{version}\""))
+                };
+                fs::write(fixture.0.join("Cargo.toml"), source).unwrap();
+                let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+                let mut catalog = Catalog::default();
+                let limits = options(resolver);
+                let complete = resolve_complete_workspace(
+                    &workspace,
+                    &mut catalog,
+                    &limits,
+                    &[],
+                    &mut |_, _, _| Ok(()),
+                )
+                .unwrap();
+                for (named, no_default, all) in [
+                    ("extra", false, false),
+                    ("extra", true, false),
+                    ("b/extra", true, false),
+                    ("b?/extra", true, false),
+                    ("", true, false),
+                    ("", false, true),
+                    ("", true, true),
+                    ("absent", false, false),
+                ] {
+                    let flags = crate::cli::FeatureSelection {
+                        features: if named.is_empty() {
+                            BTreeSet::new()
+                        } else {
+                            BTreeSet::from([named.to_owned()])
+                        },
+                        all,
+                        no_default,
+                    };
+                    let requests = workspace::features::member_requests(
+                        &workspace,
+                        &BTreeSet::from([fixture.0.join("b")]),
+                        &flags,
+                        false,
+                    );
+                    let lorry = requests.and_then(|requests| {
+                        workspace::resolve_selected_workspace(
+                            &complete, &catalog, &limits, &requests, selection,
+                        )
+                    });
+                    let mut command = std::process::Command::new(env!("CARGO"));
+                    command
+                        .env(
+                            "RUSTC",
+                            Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+                        )
+                        .args([
+                            "build",
+                            "--offline",
+                            "-p",
+                            "b",
+                            "-Z",
+                            "unstable-options",
+                            "--unit-graph",
+                            "--manifest-path",
+                        ])
+                        .arg(fixture.0.join("Cargo.toml"));
+                    if !named.is_empty() {
+                        command.args(["--features", named]);
+                    }
+                    if no_default {
+                        command.arg("--no-default-features");
+                    }
+                    if all {
+                        command.arg("--all-features");
+                    }
+                    let output = command.output().unwrap();
+                    assert_eq!(
+                        lorry.is_ok(),
+                        output.status.success(),
+                        "resolver {version}, virtual {virtual_root}, {flags:?}: {lorry:?}; {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    if let Ok(lorry) = lorry {
+                        let features = lorry
+                            .packages
+                            .into_iter()
+                            .map(|package| (package.key.name, package.target_features))
+                            .collect::<BTreeMap<_, _>>();
+                        assert_eq!(
+                            features,
+                            cargo_unit_features(&output.stdout),
+                            "resolver {version}, virtual {virtual_root}, {flags:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn checksum(version: &str) -> String {
