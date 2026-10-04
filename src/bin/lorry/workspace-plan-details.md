@@ -1372,6 +1372,9 @@ milestones (32), multi-package selection (3), procedural-macro roots (2),
 or inert badges (1). Temporary audit instrumentation was removed. The
 badges rejection is corrected in the next focused patch.
 
+Selected packages now accept the inert badges table too. The paired
+build/metadata contract passed in `/tmp/lorry-m5-badges-contract.log`.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,

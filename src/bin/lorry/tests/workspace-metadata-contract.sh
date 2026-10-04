@@ -177,6 +177,14 @@ for automatic in true false; do
         >"$WORK/named-binaries/Cargo.toml"
     agrees_with_cargo "$WORK/named-binaries/Cargo.toml" "named-binaries-$automatic"
 done
+printf '\n[badges]\nmaintenance = { status = "experimental" }\n' \
+    >>"$WORK/named-binaries/Cargo.toml"
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" generate-lockfile --offline \
+    --manifest-path "$WORK/named-binaries/Cargo.toml"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    HOME="$WORK/home" RUSTC="$LORRY_TEST_RUSTC" "$builder" build --offline \
+        --manifest-path "$WORK/named-binaries/Cargo.toml"
+done
 package "$WORK/legacy-binaries"
 printf 'fn main() {}\n' >"$WORK/legacy-binaries/src/main.rs"
 mkdir "$WORK/legacy-binaries/src/bin"

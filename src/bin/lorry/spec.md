@@ -384,6 +384,7 @@ Lorry discovers top-level `tests/*.rs` integration
 crates automatically.
 `lib.doc-scrape-examples` accepts a boolean as inert documentation metadata;
 it does not change build, check, or test units.
+The inert `[badges]` table is accepted in selected packages too.
 Dependency manifests may describe up to 1,024 integration-test targets;
 these targets are not built when that package is only a dependency.
 

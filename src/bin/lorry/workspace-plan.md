@@ -134,6 +134,14 @@ Cargo coverage. Compiler queries work at virtual and empty roots without
 selecting a package. Metadata rejects package selectors and source metadata
 always describes every member. The full milestone gate remains pending.
 
+Repeated package selectors, workspace exclusions, and shared Cargo feature
+syntax are implemented, with explicit errors for execution or feature
+resolution still assigned to later milestones. Editable member files use
+Cargo package boundaries and participate in cache and completed-profile
+freshness, including external reads and symlink retargets. The local corpus
+scan matches all 128 source-metadata projections. Build-capable loading was
+audited separately and reports the remaining target/dependency restrictions.
+
 ## Goal
 
 Make Lorry build, check, and test Cargo workspaces on Linux and on Motor.

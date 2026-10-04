@@ -997,6 +997,7 @@ fn validate_manifest_tables(
                         | "bin"
                         | "example"
                         | "bench"
+                        | "badges"
                         | "lints"
                         | "workspace"
                 ) | (
