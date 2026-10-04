@@ -814,18 +814,7 @@ impl Workspace {
         })?;
         require_table(&path, &document, item, "workspace")?;
 
-        if !document.root().contains_key("package") {
-            for (key, item) in document.root().iter() {
-                if !matches!(key, "workspace" | "profile" | "patch") {
-                    return Err(Error::at(
-                        &path,
-                        document.line_of_item(item),
-                        format!("unsupported virtual-workspace table or key `{key}`"),
-                        "keep only workspace-wide profiles and crates.io patches",
-                    ));
-                }
-            }
-        }
+        validate_virtual_workspace(&path, &document)?;
         let resolver = workspace_resolver(root, &path, &document)?;
 
         let packages = membership.load_members()?;
@@ -877,6 +866,22 @@ impl Workspace {
         manifest.warnings.extend(self.warnings.iter().cloned());
         Ok(())
     }
+}
+
+fn validate_virtual_workspace(path: &Path, document: &Document) -> Result<()> {
+    if !document.root().contains_key("package") {
+        for (key, item) in document.root().iter() {
+            if !matches!(key, "workspace" | "profile" | "patch") {
+                return Err(Error::at(
+                    path,
+                    document.line_of_item(item),
+                    format!("unsupported virtual-workspace table or key `{key}`"),
+                    "keep only workspace-wide profiles and crates.io patches",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn discover_workspace(current: &Path) -> Result<Option<Workspace>> {
@@ -3686,6 +3691,48 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert_eq!(from_root.release.lto, Lto::Thin);
         assert_eq!(from_root.release.codegen_units, Some(2));
         assert!(from_root.lock.is_some());
+        let shared = Manifest::load_selected(&root, Some("shared")).unwrap();
+        for selection in [
+            PackageSelection::default(),
+            PackageSelection {
+                workspace: true,
+                ..PackageSelection::default()
+            },
+            PackageSelection {
+                packages: vec!["app".into(), "shared".into()],
+                ..PackageSelection::default()
+            },
+        ] {
+            let (workspace, selected) =
+                SourceWorkspace::load_compilation(&root, None, &selection).unwrap();
+            assert_eq!(workspace.root, root);
+            assert_eq!(selected, [from_root.clone(), shared.clone()]);
+        }
+        let (_, selected) = SourceWorkspace::load_compilation(
+            &root.join("app"),
+            None,
+            &PackageSelection::default(),
+        )
+        .unwrap();
+        assert_eq!(selected.as_slice(), std::slice::from_ref(&from_root));
+        let (_, selected) = SourceWorkspace::load_compilation(
+            &root,
+            Some(Path::new("app/Cargo.toml")),
+            &PackageSelection::default(),
+        )
+        .unwrap();
+        assert_eq!(selected.as_slice(), std::slice::from_ref(&from_root));
+        let (_, selected) = SourceWorkspace::load_compilation(
+            &root,
+            None,
+            &PackageSelection {
+                workspace: true,
+                exclude: vec!["app".into()],
+                ..PackageSelection::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(selected, [shared]);
         assert!(Manifest::load_selected(&from_root.workspace_root, None).is_err());
         assert!(Manifest::load_selected(&from_root.workspace_root, Some("missing")).is_err());
         let selected = |packages: &[&str], workspace, exclude: &[&str]| {

@@ -20,6 +20,50 @@ pub(crate) struct SourceWorkspace {
 }
 
 impl SourceWorkspace {
+    pub(crate) fn load_compilation(
+        current: &Path,
+        manifest_path: Option<&Path>,
+        selection: &super::PackageSelection,
+    ) -> Result<(Self, Vec<Manifest>)> {
+        let mut workspace = Self::load(current, manifest_path)?;
+        let (roots, warnings) = selection.select(
+            workspace
+                .packages
+                .iter()
+                .map(|member| (member.name.as_str(), &member.version, member.root.as_path())),
+            workspace.default_members.iter().map(PathBuf::as_path),
+        )?;
+        workspace.load_locked_context()?;
+        let path = workspace.root.join(MANIFEST_NAME);
+        let document = Document::load(&path, "Cargo workspace manifest")?;
+        super::validate_virtual_workspace(&path, &document)?;
+        let mut selected = Vec::new();
+        for root in roots {
+            let source = workspace
+                .packages
+                .iter()
+                .find(|member| member.root == root)
+                .unwrap();
+            let document = Document::load(&source.path, "Cargo workspace member manifest")?;
+            let mut member =
+                Manifest::finish_root(root, source.path.clone(), document, &workspace.root, true)?;
+            member
+                .workspace_members
+                .clone_from(&source.workspace_members);
+            member.dev.clone_from(&source.dev);
+            member.release.clone_from(&source.release);
+            member.profile_errors.clone_from(&source.profile_errors);
+            member.resolver = source.resolver;
+            member.patches.clone_from(&source.patches);
+            member.warnings.extend(warnings.iter().cloned());
+            for package in &workspace.packages {
+                member.warnings.extend(package.warnings.iter().cloned());
+            }
+            selected.push(member);
+        }
+        Ok((workspace, selected))
+    }
+
     // Source-only discovery leaves the lock and execution settings untouched.
     // Dependency operations explicitly opt into the shared root context.
     pub(crate) fn load_locked_context(&mut self) -> Result<()> {

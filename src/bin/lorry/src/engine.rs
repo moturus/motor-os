@@ -56,12 +56,19 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     cli.features.require_default()?;
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = Manifest::load_selection(
+    let (_workspace, mut selected) = crate::manifest::SourceWorkspace::load_compilation(
         &current,
         cli.manifest_path.as_deref().map(Path::new),
         &cli.selection,
-        true,
     )?;
+    if selected.len() != 1 {
+        return Err(Error::failure(format!(
+            "package selection selects {} packages; multi-package execution is not yet supported",
+            selected.len()
+        ))
+        .with_help("select one workspace package with `-p NAME`"));
+    }
+    let manifest = selected.pop().unwrap();
     Manifest::report_warnings([&manifest], cli.verbosity);
     if matches!(&cli.command, Command::Check(options) if options.all_targets)
         && !manifest.described_targets.is_empty()

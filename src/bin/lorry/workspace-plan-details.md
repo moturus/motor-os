@@ -2254,6 +2254,17 @@ dependency manifest loader omits binaries; binary-only members now use selected
 package loading. Six workspace preparation/admission tests and strict Clippy
 pass in `/tmp/lorry-m7-shared-preparation-plan-{tests,clippy}.log`.
 
+Compiler manifest loading now selects all requested roots once through shared
+source discovery, then validates each selected package's compiler targets with
+the existing root loader. Root profiles, resolver, patches, membership, and
+warnings remain identical to the old selected-package loader. The engine uses
+this loading path while retaining its single-package execution guard until the
+shared executor integration. The regression compares complete manifests across
+default/all/repeated selections, member invocation and manifest paths, and
+workspace exclusion. The focused selection test, existing workspace command
+contract, and strict Clippy pass in
+`/tmp/lorry-m7-compilation-loading-{selected,workspace-contract,clippy-fixed}.log`.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 
