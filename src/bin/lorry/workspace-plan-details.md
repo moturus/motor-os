@@ -2636,6 +2636,24 @@ All twelve planner tests and strict Clippy pass in
 larger than the preferred size because its linked cycle/script/program graph
 needs the full paired oracle fixture.
 
+Workspace bundle testing now uses the shared test graph and produces one
+atomically published, owned executable per member with enabled harnesses.
+Each integration target receives its own member's extraction paths. Bundles
+retain their payload format and launcher behavior, and Lorry supplies the
+member's runtime environment when launching them. Extraction identity includes
+the existing prepared-build fingerprint, covering nondefault features and
+dependency/configuration/environment inputs. Compiler and Lorry hashes are
+computed once per invocation and shared across layouts.
+
+The first compile caught a local binding shadowing the build-fingerprint
+function (`/tmp/lorry-m8-workspace-bundle-build.log`). The first completed
+workspace contract and legacy copy/tamper test pass in
+`/tmp/lorry-m8-workspace-bundle-{first-contract,legacy-unit}.log`. Process
+inspection confirmed repeated per-member compiler hashing accounted for the
+extra CPU time; sharing those hashes removes that growth. Final workspace
+execution, CLI-feature extraction separation, package clean ownership, and
+strict Clippy pass in `/tmp/lorry-m8-workspace-bundle-{final-contract,clippy-final}.log`.
+
 The paired aborted-harness case exposed Lorry's use of program/shell signal
 status for tests: it returned 134 where Cargo returned 101. The original is
 `/tmp/lorry-m8-test-signal-original-contract.log`, with retained fixture

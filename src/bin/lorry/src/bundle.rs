@@ -15,12 +15,27 @@ pub struct LayoutOptions<'a> {
     pub extraction_root: &'a Path,
     pub package_name: &'a str,
     pub package_root: &'a Path,
-    pub lorry: &'a Path,
+    pub compiler_identity: &'a CompilerIdentity,
     pub toolchain: &'a Toolchain,
     pub target: &'a TargetInfo,
     pub release: bool,
     pub test_name: Option<&'a str>,
+    pub build_inputs: &'a [u8; 32],
     pub source_limits: TreeLimits,
+}
+
+pub struct CompilerIdentity {
+    lorry: [u8; 32],
+    rustc: [u8; 32],
+}
+
+impl CompilerIdentity {
+    pub fn new(lorry: &Path, rustc: &Path) -> Result<Self> {
+        Ok(Self {
+            lorry: sha256_file(lorry)?,
+            rustc: sha256_file(rustc)?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,8 +88,9 @@ impl Layout {
         digest.field(FORMAT_TAG);
         digest.string(options.package_name);
         digest.field(&source.manifest_bytes());
-        digest.field(&sha256_file(options.lorry)?);
-        digest.field(&sha256_file(&options.toolchain.rustc)?);
+        digest.field(options.build_inputs);
+        digest.field(&options.compiler_identity.lorry);
+        digest.field(&options.compiler_identity.rustc);
         digest.string(&options.toolchain.verbose_version);
         digest.string(&options.target.triple);
         for (name, value) in options.target.cfg.cargo_environment() {

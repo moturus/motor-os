@@ -28,6 +28,7 @@ name = "zeta"
 source = "path"
 allow-build-script = true
 EOF
+printf '\n[test]\nextraction-root = "%s"\n' "$WORK/extracted" >>"$WORK/project/lorry.toml"
 for member in alpha zeta; do
     mkdir -p "$WORK/project/$member/src" "$WORK/project/$member/tests"
     cat >"$WORK/project/$member/Cargo.toml" <<EOF
@@ -133,6 +134,22 @@ for arguments in workspace named features; do
     "$LORRY_TEST_CARGO" test "${selection[@]}" --offline >"$WORK/cargo.out"
     cmp "$WORK/lorry.out" "$WORK/cargo.out"
 done
+env HOME="$WORK/home" "$LORRY" test --workspace --bundle --no-run >"$WORK/bundles.out"
+python3 - "$WORK/bundles.out" <<'PY'
+import pathlib, sys
+paths = [pathlib.Path(line.strip()) for line in open(sys.argv[1])]
+assert [path.name for path in paths] == ['alpha-test-bundle', 'zeta-test-bundle']
+assert all(path.is_file() for path in paths)
+PY
+env HOME="$WORK/home" "$LORRY" test --workspace --bundle >"$WORK/bundle-run.out"
+"$LORRY_TEST_CARGO" test --workspace --offline >"$WORK/cargo-bundle-run.out"
+cmp "$WORK/bundle-run.out" "$WORK/cargo-bundle-run.out"
+env HOME="$WORK/home" "$LORRY" test --workspace --bundle --features alpha/manual >"$WORK/bundle-feature.out"
+"$LORRY_TEST_CARGO" test --workspace --offline --features alpha/manual >"$WORK/cargo-bundle-feature.out"
+cmp "$WORK/bundle-feature.out" "$WORK/cargo-bundle-feature.out"
+env HOME="$WORK/home" "$LORRY" clean -p alpha
+[ ! -e target/lorry/debug/alpha-test-bundle ]
+[ -e target/lorry/debug/zeta-test-bundle ]
 for policy in default all; do
     arguments=()
     expected=7

@@ -316,7 +316,8 @@ root compilation, freshness validation, and artifact publication.
 - `test --test NAME` selects matching integration tests across selected
   packages and their required library/program graph.
 - Ordinary `test --no-run` builds separate harnesses and prints deterministic
-  paths. `test --bundle --no-run` builds one bundle and prints its path.
+  paths. `test --bundle --no-run` builds one bundle for each selected package
+  with enabled harnesses and prints its path in package order.
 - Cross-target run/test uses the configured runner as an argument vector,
   never a shell command.
 - `vendor upgrade PACKAGE[@OLD_VERSION] --to VERSION` accepts one complete
@@ -1660,8 +1661,14 @@ Ordinary tests preserve separate root library, root binary, and integration
 harness crates. Integration compilation receives Cargo-compatible
 `CARGO_BIN_EXE_<name>` and `CARGO_TARGET_TMPDIR`.
 
-Bundle mode packages selected harness executables and required program
-binaries into one target-native self-extracting executable. It must verify its
+Bundle mode packages each selected member's harness executables and required
+program binaries into a separate target-native self-extracting executable.
+Integration compile-time program/temporary paths refer to that member's
+extraction directory. Layout identity also includes prepared build inputs,
+so feature, dependency, configuration, and tracked environment changes do not
+reuse another build's extraction. Compiler executable hashes are shared across
+member layouts within an invocation. Bundles compile privately, then publish
+through the atomic executable installer with package ownership. It must verify its
 embedded payload table, extract beneath a configurable absolute private root
 using race-resistant exclusive operations, reject links/unexpected files/
 tampering, invoke payloads without a shell, forward harness arguments, and

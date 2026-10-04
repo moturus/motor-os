@@ -61,7 +61,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         &cli.selection,
     )?;
     let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
-    let shared_tests = matches!(&cli.command, Command::Test(options) if !options.bundle);
+    let shared_tests = matches!(&cli.command, Command::Test(_));
     let shared = shared_tests
         || ordinary
             && (selected.len() > 1
@@ -1172,10 +1172,10 @@ fn build_inner(
     manifests.insert(selected_root.package.clone(), build.manifest.clone());
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
-    let freshness_base = (check.is_none() && !build.test && build.members.is_none())
+    let completed_freshness_base = (check.is_none() && !build.test && build.members.is_none())
         .then(|| freshness_base(&build, &prepared, &cargo))
         .transpose()?;
-    if let Some(base) = freshness_base {
+    if let Some(base) = completed_freshness_base {
         crate::trace::event("fingerprinted build inputs");
         if let Some(artifacts) = restore_fresh_profile(
             &destination,
@@ -1301,21 +1301,49 @@ fn build_inner(
         },
     )?;
     crate::trace::event("initialized dependency build cache");
-    let bundle_layout = if build.test && build.bundle {
-        Some(bundle::Layout::new(&bundle::LayoutOptions {
+    let bundle_inputs = (build.test && build.bundle)
+        .then(|| freshness_base(&build, &prepared, &cargo))
+        .transpose()?;
+    let bundle_compiler = bundle_inputs
+        .as_ref()
+        .map(|_| bundle::CompilerIdentity::new(&cargo, &build.toolchain.rustc))
+        .transpose()?;
+    let make_bundle_layout = |member: &Manifest| {
+        bundle::Layout::new(&bundle::LayoutOptions {
             extraction_root: build.config.test.extraction_root(&build.target.triple),
-            package_name: &build.manifest.name,
-            package_root: &build.manifest.root,
-            lorry: &cargo,
+            package_name: &member.name,
+            package_root: &member.root,
+            compiler_identity: bundle_compiler
+                .as_ref()
+                .ok_or_else(|| Error::failure("bundle layout requires compiler identity"))?,
             toolchain: build.toolchain,
             target: build.target,
             release: build.release,
             test_name: build.test_name,
+            build_inputs: bundle_inputs
+                .as_ref()
+                .ok_or_else(|| Error::failure("bundle layout requires build inputs"))?,
             source_limits,
-        })?)
+        })
+    };
+    let bundle_layout = if bundle_inputs.is_some() && build.members.is_none() {
+        Some(make_bundle_layout(build.manifest)?)
     } else {
         None
     };
+    let mut bundle_layouts = BTreeMap::new();
+    if bundle_inputs.is_some()
+        && let Some(members) = build.members
+    {
+        for member in members {
+            bundle_layouts.insert(
+                selected_library_key(member)?.package,
+                make_bundle_layout(member)?,
+            );
+        }
+    }
+    let layout_for_package =
+        |package: &PackageKey| bundle_layouts.get(package).or(bundle_layout.as_ref());
     let selected_integration = build.test
         && (build.test_name.is_some()
             || build
@@ -1333,6 +1361,7 @@ fn build_inner(
                 .unwrap_or_else(|| std::slice::from_ref(build.manifest))
                 .iter()
                 .map(|member| {
+                    let package = selected_library_key(member)?.package;
                     let binaries = member
                         .binaries
                         .iter()
@@ -1342,7 +1371,7 @@ fn build_inner(
                                 if check_integration {
                                     destination.join(&binary.name)
                                 } else {
-                                    bundle_layout.as_ref().map_or_else(
+                                    layout_for_package(&package).map_or_else(
                                         || destination.join(&binary.name),
                                         |layout| layout.program(&binary.name),
                                     )
@@ -1350,29 +1379,31 @@ fn build_inner(
                             )
                         })
                         .collect::<BTreeMap<_, _>>();
-                    Ok((selected_library_key(member)?.package, binaries))
+                    Ok((package, binaries))
                 })
                 .collect::<Result<BTreeMap<_, _>>>()
         })
         .transpose()?;
     let integration_temp_dirs = (selected_integration || check_integration).then(|| {
-        let directory = if check_integration {
-            destination.clone()
-        } else {
-            bundle_layout.as_ref().map_or_else(
-                || target_root.join("tmp"),
-                bundle::Layout::temporary_directory,
-            )
-        };
         selected_packages
             .iter()
             .cloned()
-            .map(|package| (package, directory.clone()))
+            .map(|package| {
+                let directory = if check_integration {
+                    destination.clone()
+                } else {
+                    layout_for_package(&package).map_or_else(
+                        || target_root.join("tmp"),
+                        bundle::Layout::temporary_directory,
+                    )
+                };
+                (package, directory)
+            })
             .collect::<BTreeMap<_, _>>()
     });
     if let Some(directories) = &integration_temp_dirs
         && !check_integration
-        && bundle_layout.is_none()
+        && !build.bundle
     {
         for directory in directories.values() {
             fs::create_dir_all(directory).map_err(|error| {
@@ -1523,10 +1554,52 @@ fn build_inner(
                     environment,
                 });
             }
+            let bundled = if !harnesses.is_empty()
+                && let Some(layout) = bundle_layouts.get(&package)
+            {
+                let paths = harnesses
+                    .iter()
+                    .map(|harness| harness.executable.clone())
+                    .collect::<Vec<_>>();
+                let programs = targets
+                    .programs
+                    .iter()
+                    .map(|(name, path)| (name.as_str(), path.as_path()))
+                    .collect::<Vec<_>>();
+                let bundle_staging = AtomicDirectory::new_compact(&destination)?;
+                let staged = bundle::build(&bundle::BuildOptions {
+                    child_lease_fd: build.child_lease_fd,
+                    layout,
+                    package_name: &member.name,
+                    package_root: &member.root,
+                    staging: bundle_staging.path(),
+                    rustc: &build.toolchain.rustc,
+                    physical_target: build.physical_target,
+                    linker: build.target_options.linker.as_deref(),
+                    rustflags: build.rustflags,
+                    release: build.release,
+                    verbose: build.verbosity == Verbosity::Verbose,
+                    color: build.color,
+                    harnesses: &paths,
+                    programs: &programs,
+                })?;
+                let executable = destination.join(
+                    staged
+                        .file_name()
+                        .ok_or_else(|| Error::failure("bundle executable has no filename"))?,
+                );
+                install_primary(&staged, &executable, &package)?;
+                Some(TestExecutable {
+                    executable,
+                    environment: harnesses[0].environment.clone(),
+                })
+            } else {
+                None
+            };
             tests.push(MemberTestArtifacts {
                 root: member.root.clone(),
                 harnesses,
-                bundle: None,
+                bundle: bundled,
             });
         }
         if build.verbosity != Verbosity::Quiet {
@@ -1724,7 +1797,7 @@ fn build_inner(
         compiled.script_inputs.dedup();
     }
 
-    if let Some(base) = freshness_base {
+    if let Some(base) = completed_freshness_base {
         write_fresh_profile(
             &destination,
             &build.manifest.workspace_root,
