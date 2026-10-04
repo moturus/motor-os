@@ -2681,6 +2681,29 @@ The owner has been asked whether a cross selection mixing host and target
 harnesses in one member should fail explicitly or produce two bundles; that
 choice is pending and this patch handles the independent host-only case.
 
+Workspace all-target and named integration checks now use the shared harness
+graph and selected dev-feature resolution. Checked roots clone the editable
+library closure as metadata units, retaining executable script/macro dependencies
+and removing test program-artifact edges. Matching named integrations can live
+in any selected member. Compile-time integration environments match Cargo's
+`placeholder:<name>` binary paths and target-root `tmp` directory.
+The legal dev-cycle/macro/script oracle now compares check and test graphs,
+native and explicit-target profiles, feature sets, and dependency wiring.
+
+The first oracle edit had an extra closing delimiter; its compiler failure is
+preserved in `/tmp/lorry-m8-workspace-harness-check-first-oracle.log`. The corrected
+oracle passes in `/tmp/lorry-m8-workspace-harness-check-parsed-oracle.log`. The first
+public paired run reached a stale early rejection guard, preserved in
+`/tmp/lorry-m8-workspace-harness-check-first-contract.log` and fixture
+`/tmp/lorry-workspace-test-LQj71b`. Removing that guard enables the connected plan.
+The final native/cross paired check/test contract, explicit/harness-free regression
+contracts, and strict Clippy pass in
+`/tmp/lorry-m8-workspace-harness-check-public-contract.log`,
+`/tmp/lorry-m8-workspace-harness-check-{explicit,free}-regression.log`, and
+`/tmp/lorry-m8-workspace-harness-check-public-clippy.log`.
+Example/bench execution and their remaining target-selection semantics still
+belong to the following milestone-8 patches.
+
 ### Member build-time code
 
 The shared planner now has workspace harness graphs with selected dev edges,

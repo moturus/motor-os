@@ -62,7 +62,10 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     )?;
     let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
     let shared_tests = matches!(&cli.command, Command::Test(_));
+    let shared_test_checks =
+        matches!(&cli.command, Command::Check(options) if options.selects_tests());
     let shared = shared_tests
+        || shared_test_checks
         || ordinary
             && (selected.len() > 1
                 || cli.features != crate::cli::FeatureSelection::default()
@@ -89,13 +92,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     }
     let manifest = selected[0].clone();
     Manifest::report_warnings(&selected, cli.verbosity);
-    if shared
-        && matches!(&cli.command, Command::Check(options) if options.all_targets || options.test.is_some() || options.examples)
-    {
-        return Err(Error::failure(
-            "workspace test, example, and bench target selection is not yet supported",
-        ));
-    }
     if matches!(&cli.command, Command::Check(options) if options.all_targets)
         && !manifest.described_targets.is_empty()
         && cli.verbosity != Verbosity::Quiet
@@ -239,8 +235,9 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
-    if (!shared_tests && matches!(&cli.command, Command::Test(_)))
-        || matches!(&cli.command, Command::Check(options) if options.all_targets || options.test.is_some() || options.examples)
+    if !shared
+        && (matches!(&cli.command, Command::Test(_))
+            || matches!(&cli.command, Command::Check(options) if options.all_targets || options.test.is_some() || options.examples))
     {
         for manifest in &selected {
             manifest.require_dev_targets_supported(&target_info)?;
@@ -346,7 +343,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 &workspace,
                 &selected.iter().map(|member| member.root.clone()).collect(),
                 &cli.features,
-                matches!(&cli.command, Command::Test(_)),
+                shared_tests || shared_test_checks,
             )
         })
         .transpose()?;
@@ -1254,18 +1251,7 @@ fn build_inner(
             rustflags: build.rustflags,
         };
         if build.members.is_some() {
-            if selection.harnesses || selection.integrations || !selection.normal {
-                return Err(Error::failure(
-                    "workspace test targets are not yet supported",
-                ));
-            }
-            prepared.workspace_plan(
-                &options,
-                &selected_packages,
-                true,
-                selection.binaries,
-                selection.binary_name,
-            )
+            prepared.workspace_check_plan(&options, &selected_packages, selection)
         } else {
             prepared.selected_check_plan(&options, build.manifest, selection)
         }
@@ -1413,7 +1399,12 @@ fn build_inner(
                 .iter()
                 .any(|member| !member.integration_tests.is_empty()));
     let check_integration = check.is_some_and(|(_, options)| {
-        options.selects_tests() && !build.manifest.integration_tests.is_empty()
+        options.selects_tests()
+            && build
+                .members
+                .unwrap_or_else(|| std::slice::from_ref(build.manifest))
+                .iter()
+                .any(|member| !member.integration_tests.is_empty())
     });
     let integration_binaries = (selected_integration || check_integration)
         .then(|| {
@@ -1430,7 +1421,7 @@ fn build_inner(
                             (
                                 binary.name.clone(),
                                 if check_integration {
-                                    destination.join(&binary.name)
+                                    PathBuf::from(format!("placeholder:{}", binary.name))
                                 } else {
                                     layout_for_package(&package).map_or_else(
                                         || destination.join(&binary.name),
@@ -1451,7 +1442,7 @@ fn build_inner(
             .cloned()
             .map(|package| {
                 let directory = if check_integration {
-                    destination.clone()
+                    target_root.join("tmp")
                 } else {
                     layout_for_package(&package).map_or_else(
                         || target_root.join("tmp"),
@@ -1516,11 +1507,12 @@ fn build_inner(
         }
         validate_member_binary_selection(members, options.bin.as_deref())?;
         if let Some(name) = options.test.as_deref()
-            && !build
-                .manifest
-                .integration_tests
-                .iter()
-                .any(|target| target.name == name)
+            && !members.iter().any(|member| {
+                member
+                    .integration_tests
+                    .iter()
+                    .any(|target| target.name == name)
+            })
         {
             return Err(unknown_integration_test(build.manifest, name));
         }

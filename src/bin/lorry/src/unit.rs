@@ -353,6 +353,101 @@ pub struct CheckTargetSelection<'a> {
     pub integration_name: Option<&'a str>,
 }
 
+pub(crate) fn workspace_check_units(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    selection: &CheckTargetSelection<'_>,
+    options: &PlanOptions<'_>,
+) -> Result<UnitGraph> {
+    let mut graph = if selection.normal {
+        workspace_units(
+            resolution,
+            manifests,
+            selected,
+            true,
+            selection.binaries,
+            selection.binary_name,
+            options.release,
+        )?
+    } else {
+        UnitGraph {
+            units: BTreeMap::new(),
+            order: Vec::new(),
+            selected_packages: selected.iter().cloned().collect(),
+        }
+    };
+    if selection.harnesses || selection.integrations {
+        let mut tests = workspace_test_units(
+            resolution,
+            manifests,
+            selected,
+            options,
+            selection.integration_name,
+        )?;
+        for unit in tests.units.values_mut() {
+            unit.dependencies
+                .retain(|edge| edge.kind != UnitEdgeKind::ArtifactDependency);
+        }
+        let mut pending = tests
+            .units
+            .keys()
+            .filter(|key| {
+                key.mode == UnitMode::Test
+                    && if key.kind == UnitKind::IntegrationHarness {
+                        selection.integrations
+                    } else {
+                        selection.harnesses
+                    }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut checked = BTreeMap::new();
+        let roots = pending
+            .iter()
+            .map(|key| UnitKey {
+                mode: UnitMode::CheckTest,
+                ..key.clone()
+            })
+            .collect::<Vec<_>>();
+        while let Some(key) = pending.pop() {
+            let mode = if key.mode == UnitMode::Test {
+                UnitMode::CheckTest
+            } else {
+                UnitMode::Check
+            };
+            let checked_key = UnitKey {
+                mode,
+                ..key.clone()
+            };
+            if checked.contains_key(&checked_key) {
+                continue;
+            }
+            let mut unit = tests.units[&key].clone();
+            unit.key = checked_key.clone();
+            unit.dependencies = unit
+                .dependencies
+                .into_iter()
+                .map(|mut edge| {
+                    if edge.kind == UnitEdgeKind::RustDependency
+                        && edge.unit.kind == UnitKind::Library
+                        && manifests[&edge.unit.package].editable
+                    {
+                        pending.push(edge.unit.clone());
+                        edge.unit.mode = UnitMode::Check;
+                    }
+                    edge
+                })
+                .collect();
+            checked.insert(checked_key, unit);
+        }
+        tests.units.extend(checked);
+        retain_unit_roots(&mut tests, roots)?;
+        graph.merge(tests)?;
+    }
+    Ok(graph)
+}
+
 pub fn selected_check_units(
     resolution: &Resolution,
     manifests: &BTreeMap<PackageKey, Manifest>,
@@ -1625,10 +1720,13 @@ fn unit_settings(
         local,
         key.profile == ProfileContext::Test,
     );
-    let test_graph = graph.units.keys().any(|key| key.mode == UnitMode::Test);
+    let test_graph = graph
+        .units
+        .keys()
+        .any(|key| matches!(key.mode, UnitMode::Test | UnitMode::CheckTest));
     let selected_macro_profile = |key: &UnitKey| {
         let selected_macro = (key.kind == UnitKind::ProcMacro
-            && !test_graph
+            && (!test_graph || key.mode == UnitMode::Check)
             && (key.profile == ProfileContext::Selected
                 || (!options.release
                     && (key.mode == UnitMode::Check
@@ -3034,7 +3132,7 @@ mod tests {
             "[workspace]\nmembers = [\"a\", \"b\", \"helper\", \"derive\"]\nresolver = \"2\"\n",
         )
         .unwrap();
-        fixture.package("helper", "[package]\nname = \"helper\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ntest = false\ndoctest = false\n[features]\nbuild = []\nnormal = []\n", false);
+        fixture.package("helper", "[package]\nname = \"helper\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ntest = false\nbench = false\ndoctest = false\n[features]\nbuild = []\nnormal = []\n", false);
         fixture.package("a", "[package]\nname = \"a\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ndoctest = false\n[features]\nnormal = []\n[dependencies]\nderive = { path = \"../derive\" }\nhelper = { path = \"../helper\", features = [\"normal\"] }\n[dev-dependencies]\nb = { path = \"../b\", features = [\"dev\"] }\n[build-dependencies]\nhelper = { path = \"../helper\", features = [\"build\"] }\n", true);
         fixture.package("b", "[package]\nname = \"b\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ndoctest = false\n[features]\ndev = []\n[dependencies]\na = { path = \"../a\", features = [\"normal\"] }\n", false);
         fixture.package("derive", "[package]\nname = \"derive\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\nproc-macro = true\ndoctest = false\n[features]\ndefault = [\"harness\"]\nharness = []\n[dependencies]\nhelper = { path = \"../helper\", features = [\"normal\"] }\n[build-dependencies]\nhelper = { path = \"../helper\", features = [\"build\"] }\n", true);
@@ -3126,23 +3224,43 @@ mod tests {
             )
             .is_err()
         );
-        for (integration_name, logical_target) in [
-            (None, None),
-            (None, Some("x86_64-unknown-linux-gnu")),
-            (Some("integration"), Some("x86_64-unknown-linux-gnu")),
-            (Some("disabled"), Some("x86_64-unknown-linux-gnu")),
+        for (integration_name, logical_target, checking) in [
+            (None, None, false),
+            (None, Some("x86_64-unknown-linux-gnu"), false),
+            (Some("integration"), Some("x86_64-unknown-linux-gnu"), false),
+            (Some("disabled"), Some("x86_64-unknown-linux-gnu"), false),
+            (None, None, true),
+            (None, Some("x86_64-unknown-linux-gnu"), true),
+            (Some("integration"), Some("x86_64-unknown-linux-gnu"), true),
         ] {
             let options = PlanOptions {
                 logical_target,
                 ..options
             };
-            let graph = workspace_test_units(
-                &resolution,
-                &manifests,
-                &selected,
-                &options,
-                integration_name,
-            )
+            let graph = if checking {
+                workspace_check_units(
+                    &resolution,
+                    &manifests,
+                    &selected,
+                    &CheckTargetSelection {
+                        normal: integration_name.is_none(),
+                        binaries: true,
+                        binary_name: None,
+                        harnesses: integration_name.is_none(),
+                        integrations: true,
+                        integration_name,
+                    },
+                    &options,
+                )
+            } else {
+                workspace_test_units(
+                    &resolution,
+                    &manifests,
+                    &selected,
+                    &options,
+                    integration_name,
+                )
+            }
             .unwrap();
             let plan = plan_dependency_units(&graph, &manifests, &options).unwrap();
             let mut command = Command::new(env!("CARGO"));
@@ -3150,7 +3268,7 @@ mod tests {
                 .args([
                     "-Z",
                     "unstable-options",
-                    "test",
+                    if checking { "check" } else { "test" },
                     "--unit-graph",
                     "--workspace",
                     "--offline",
@@ -3158,6 +3276,9 @@ mod tests {
                 .env("CARGO_HOME", fixture.0.join("cargo-home"))
                 .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
                 .current_dir(&fixture.0);
+            if checking && integration_name.is_none() {
+                command.arg("--all-targets");
+            }
             if let Some(target) = logical_target {
                 command.args(["--target", target]);
             }
@@ -3228,6 +3349,7 @@ mod tests {
                     }),
                     match key.kind {
                         UnitKind::BuildScriptRun => "run-custom-build",
+                        _ if matches!(key.mode, UnitMode::Check | UnitMode::CheckTest) => "check",
                         _ if key.mode == UnitMode::Test => "test",
                         _ => "build",
                     }

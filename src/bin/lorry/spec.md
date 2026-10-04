@@ -1397,8 +1397,12 @@ Cargo. Lorry removes the completed-profile freshness record before rebuilding
 and writes a new one last, after successful compilation and validation.
 The check planner represents selected libraries, binaries, and enabled test
 harnesses with distinct check modes. It gives integration checks test-profile
-library dependencies without program-artifact edges. Dependency libraries
-remain full-compilation units while check execution moves to the DAG.
+library dependencies without program-artifact edges. Workspace all-target and
+named integration checks use the shared harness graph, including selected dev
+edges, features, and scripts. Editable library dependencies reached from check
+roots also use metadata units; other dependency libraries still compile fully.
+Integration checks define `CARGO_BIN_EXE_<name>` as `placeholder:<name>` because
+no executable is linked, and use the target root's `tmp` directory.
 Checked units request rustc metadata and dep-info only. Their metadata output
 is a distinct artifact type, and checked dependents use `.rmeta` paths for
 their Rust externs.

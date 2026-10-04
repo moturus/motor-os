@@ -47,6 +47,27 @@ pub struct PreparedPackage {
 }
 
 impl PreparedGraph {
+    pub(crate) fn workspace_check_plan(
+        &self,
+        options: &PlanOptions<'_>,
+        selected: &[PackageKey],
+        selection: &CheckTargetSelection<'_>,
+    ) -> Result<CompilationPlan> {
+        let manifests = self
+            .packages
+            .iter()
+            .map(|(key, package)| (key.clone(), package.manifest.clone()))
+            .collect();
+        let graph = crate::unit::workspace_check_units(
+            &self.resolution,
+            &manifests,
+            selected,
+            selection,
+            options,
+        )?;
+        self.finish_plan(options, manifests, graph)
+    }
+
     pub(crate) fn workspace_test_plan(
         &self,
         options: &PlanOptions<'_>,
