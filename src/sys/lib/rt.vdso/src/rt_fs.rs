@@ -1611,11 +1611,12 @@ pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
 }
 
 pub extern "C" fn fsync(rt_fd: i32) -> moto_rt::ErrorCode {
-    moto_rt::E_OK
+    crate::posix::posix_flush(rt_fd)
 }
 
 pub extern "C" fn datasync(rt_fd: i32) -> moto_rt::ErrorCode {
-    moto_rt::E_OK
+    // The native flush also persists metadata; use that stronger operation.
+    crate::posix::posix_flush(rt_fd)
 }
 
 pub extern "C" fn rmdir(path_ptr: *const u8, path_size: usize) -> moto_rt::ErrorCode {
