@@ -115,6 +115,21 @@ can copy that snapshot into a saved or ephemeral child session.
 The CLI accepts `--fork ID --ephemeral -p 'review this work'` to read a live
 parent's usable history and run a child without saving its conversation.
 
+For machine-readable one-shot output, use `-p PROMPT --output jsonl`.
+Version 1 starts with a `session` record containing `session_id`, `path`
+(null for an ephemeral session), and `session_format_version`. Streaming
+records have types `text`, `reasoning`, `tool_start`, `tool_output`,
+`tool_result`, `permission`, `notice`, `usage`, and `turn_end`. Tool results
+include the call id, error flag, and three-state outcome. Every record is
+one flushed JSON line; embedded newlines are escaped.
+
+The last `final` record contains `success`, `answer`, `error`, and numeric
+`usage` for this run, including compaction requests. `session_usage` includes
+earlier history too. Unknown cost is null; `cost_is_partial` identifies a
+partly priced total. A failed turn produces a final error and a nonzero
+exit status. Errors before a session is ready use stderr. JSONL runs are
+unattended and follow the same permission rules as other `-p` runs.
+
 Useful startup options are --continue, --resume ID, --session ID,
 --fork ID, --ephemeral, and --name NAME. Interactive commands include /new,
 /resume, /name, /session, /tree, /label, /fork, /clone, /compact, /tools,

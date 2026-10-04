@@ -17,6 +17,7 @@ Options:
   -m, --model ID      Select a model
   --ui UI             Use auto, tui, or line
   -p, --prompt TEXT   Run one prompt
+  --output FORMAT     Use text or jsonl output for a -p run
   -c, --continue      Continue the most recent workspace session
   -r, --resume ID     Resume a session by path or partial id
   --session ID        Alias for --resume
@@ -54,6 +55,13 @@ pub enum SessionStart {
     Ephemeral,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Output {
+    #[default]
+    Text,
+    Jsonl,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub action: Action,
@@ -63,6 +71,7 @@ pub struct Args {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub prompt: Option<String>,
+    pub output: Output,
     pub ui: crate::ui::select::Requested,
     pub verbosity: u8,
     pub session: SessionStart,
@@ -79,6 +88,7 @@ impl Args {
             provider: None,
             model: None,
             prompt: None,
+            output: Output::Text,
             ui: crate::ui::select::Requested::Auto,
             verbosity: 0,
             session: SessionStart::New,
@@ -133,6 +143,17 @@ impl Args {
                         crate::ui::select::Requested::parse(value(flag, inline, &mut iterator)?)?;
                     ui_set = true;
                 }
+                "--output" => {
+                    args.output = match value(flag, inline, &mut iterator)? {
+                        "text" => Output::Text,
+                        "jsonl" => Output::Jsonl,
+                        other => {
+                            return Err(format!(
+                                "unknown output format {other:?}; use text or jsonl"
+                            ));
+                        }
+                    };
+                }
                 "-c" | "--continue" => args.set_session(SessionStart::Continue)?,
                 "-r" | "--resume" | "--session" => args.set_session(SessionStart::Resume(
                     value(flag, inline, &mut iterator)?.to_string(),
@@ -145,6 +166,14 @@ impl Args {
                     args.name = Some(value(flag, inline, &mut iterator)?.to_string())
                 }
                 _ => return Err(format!("unrecognized argument {argument:?}")),
+            }
+        }
+        if args.output == Output::Jsonl {
+            if args.action != Action::Run || args.prompt.is_none() {
+                return Err("--output jsonl requires a -p run".into());
+            }
+            if args.ui == crate::ui::select::Requested::Tui {
+                return Err("--output jsonl cannot use --ui tui".into());
             }
         }
         if args.action == Action::Ask {
@@ -243,6 +272,25 @@ mod tests {
             vec!["--fork", "parent", "--ephemeral", "--ephemeral"],
             vec!["--fork", "parent", "--ephemeral", "--fork", "other"],
             vec!["ask", "review", "--fork", "parent", "--ephemeral"],
+        ] {
+            assert!(Args::parse(&argv).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn jsonl_output_is_explicit_and_only_for_one_shot_agent_runs() {
+        assert_eq!(
+            Args::parse(&["-p", "work", "--output=jsonl"])
+                .unwrap()
+                .output,
+            Output::Jsonl
+        );
+        assert_eq!(Args::parse(&["-p", "work"]).unwrap().output, Output::Text);
+        for argv in [
+            vec!["--output", "jsonl"],
+            vec!["ask", "work", "--output", "jsonl"],
+            vec!["-p", "work", "--output", "unknown"],
+            vec!["-p", "work", "--output", "jsonl", "--ui", "tui"],
         ] {
             assert!(Args::parse(&argv).is_err(), "{argv:?}");
         }

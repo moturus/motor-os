@@ -160,6 +160,157 @@ fn one_shot_streams_from_the_hermetic_backend() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+fn jsonl_records(bytes: &[u8]) -> Vec<serde_json::Value> {
+    std::str::from_utf8(bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn jsonl_one_shot_streams_reasoning_text_and_numeric_usage() {
+    let root = fixture("jsonl-text");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let server = MockServer::start_one(sse_response(&[
+        r#"{"choices":[{"index":0,"delta":{"reasoning":"thinking\n"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"content":"hello\nmock"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13,"cost":0.01}}"#,
+    ])).unwrap();
+    let cfg = config(&root, &server);
+    let output = gears(&root, &workspace, &cfg)
+        .args(["-p", "hello", "--output", "jsonl"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = jsonl_records(&output.stdout);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["session", "reasoning", "text", "usage", "turn_end", "final"]
+    );
+    assert_eq!(records[0]["version"], 1);
+    assert_eq!(records[0]["session_format_version"], 1);
+    assert!(records[0]["session_id"].as_str().is_some());
+    assert!(records[0]["path"].is_null());
+    assert_eq!(records[1]["text"], "thinking\n");
+    assert_eq!(records[2]["text"], "hello\nmock");
+    let last = records.last().unwrap();
+    assert_eq!(last["success"], true);
+    assert_eq!(last["answer"], "hello\nmock");
+    assert_eq!(last["usage"]["total_tokens"], 13);
+    assert_eq!(last["usage"]["cost_usd"], 0.01);
+    assert!(last["error"].is_null());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn jsonl_tool_records_report_allowed_and_unattended_denied_calls() {
+    for allowed in [false, true] {
+        let root = fixture(if allowed {
+            "jsonl-tool-allow"
+        } else {
+            "jsonl-tool-deny"
+        });
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let call = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_jsonl","function":{"name":"sh","arguments":"{\"command\":\"printf 'tool output\\n'; printf 'tool error\\n' >&2\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let server = MockServer::start(vec![sse_response(&[call]), sse_response(&[
+            r#"{"choices":[{"index":0,"delta":{"content":"finished"},"finish_reason":"stop"}]}"#,
+        ])]).unwrap();
+        let cfg = config(&root, &server);
+        let mut text = std::fs::read_to_string(&cfg).unwrap();
+        text.push_str(&format!(
+            "\n[[tools]]\ndirectory = {:?}\nenabled = true\n",
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tools/sh")
+                .to_str()
+                .unwrap()
+        ));
+        if allowed {
+            text.push_str("\n[[hooks]]\nname = 'policy'\nevents = ['permission']\ncommand = ['/bin/sh', '-c', \"cat >/dev/null; printf '{\\\"decision\\\":\\\"allow\\\"}'\"]\n");
+        }
+        std::fs::write(&cfg, text).unwrap();
+        let output = gears(&root, &workspace, &cfg)
+            .args(["-p", "work", "--output", "jsonl"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let records = jsonl_records(&output.stdout);
+        let start = records
+            .iter()
+            .find(|record| record["type"] == "tool_start")
+            .unwrap();
+        let result = records
+            .iter()
+            .find(|record| record["type"] == "tool_result")
+            .unwrap();
+        assert_eq!(start["call_id"], "call_jsonl");
+        assert_eq!(result["call_id"], start["call_id"]);
+        assert_eq!(
+            result["outcome"],
+            if allowed { "completed" } else { "not_started" }
+        );
+        assert_eq!(result["is_error"], !allowed);
+        let output = records
+            .iter()
+            .filter(|record| record["type"] == "tool_output")
+            .collect::<Vec<_>>();
+        if allowed {
+            for (stream, text) in [("stdout", "tool output\n"), ("stderr", "tool error\n")] {
+                assert!(
+                    output
+                        .iter()
+                        .any(|record| record["stream"] == stream && record["text"] == text)
+                );
+            }
+        } else {
+            assert!(output.is_empty());
+        }
+        assert_eq!(records.last().unwrap()["answer"], "finished");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn jsonl_failed_turn_ends_with_a_final_error_and_nonzero_status() {
+    let root = fixture("jsonl-error");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let server =
+        MockServer::start_one(gears::mock::Script::new().write(
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad",
+        ))
+        .unwrap();
+    let cfg = config(&root, &server);
+    let output = gears(&root, &workspace, &cfg)
+        .args(["-p", "hello", "--output", "jsonl"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let records = jsonl_records(&output.stdout);
+    assert_eq!(records.first().unwrap()["type"], "session");
+    assert_eq!(records[records.len() - 2]["type"], "turn_end");
+    let last = records.last().unwrap();
+    assert_eq!(last["type"], "final");
+    assert_eq!(last["success"], false);
+    assert!(last["error"].as_str().unwrap().contains("400"));
+    assert!(last["answer"].is_null());
+    assert_eq!(last["usage"]["completions"], 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn configured_tools_are_validated_before_a_provider_request() {
     let root = fixture("tool-validation");

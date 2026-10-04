@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use gears::cancellation::Cancellation;
-use gears::cli::{Action, Args, SessionStart};
+use gears::cli::{Action, Args, Output, SessionStart};
 use gears::config::{Config, NamedProvider};
 use gears::net::EgressPolicy;
 #[cfg(unix)]
@@ -188,6 +188,13 @@ fn agent(
         )
     });
     runtime.install_provider_factory(factory);
+    if args.output == Output::Jsonl {
+        return gears::ui::jsonl::run(
+            &mut runtime,
+            args.prompt.clone().expect("JSONL requires a prompt"),
+            std::io::stdout().lock(),
+        );
+    }
     let mut provider_names = vec!["default".to_string()];
     provider_names.extend(config.providers.keys().cloned());
     let interactive = !one_shot;
