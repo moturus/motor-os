@@ -1681,6 +1681,9 @@ using race-resistant exclusive operations, reject links/unexpected files/
 tampering, invoke payloads without a shell, forward harness arguments, and
 aggregate failures. Unix platforms additionally enforce private directory,
 manifest, and executable modes.
+Motor seals each extracted executable through `File::set_permissions`, using
+the running launcher's read/execute permissions and the existing open file.
+Generated launchers require no libc permission entry point.
 
 ## Image, dependency, and licensing boundary
 

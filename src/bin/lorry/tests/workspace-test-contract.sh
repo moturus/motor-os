@@ -134,13 +134,17 @@ for arguments in workspace named features; do
     "$LORRY_TEST_CARGO" test "${selection[@]}" --offline >"$WORK/cargo.out"
     cmp "$WORK/lorry.out" "$WORK/cargo.out"
 done
-env HOME="$WORK/home" "$LORRY" test --workspace --bundle --no-run >"$WORK/bundles.out"
+for platform in native motor; do
+    target=()
+    if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); fi
+    env HOME="$WORK/home" "$LORRY" test --workspace --bundle --no-run "${target[@]}" >"$WORK/bundles.out"
 python3 - "$WORK/bundles.out" <<'PY'
 import pathlib, sys
 paths = [pathlib.Path(line.strip()) for line in open(sys.argv[1])]
 assert [path.name for path in paths] == ['alpha-test-bundle', 'zeta-test-bundle']
 assert all(path.is_file() for path in paths)
 PY
+done
 env HOME="$WORK/home" "$LORRY" test --workspace --bundle >"$WORK/bundle-run.out"
 "$LORRY_TEST_CARGO" test --workspace --offline >"$WORK/cargo-bundle-run.out"
 cmp "$WORK/bundle-run.out" "$WORK/cargo-bundle-run.out"

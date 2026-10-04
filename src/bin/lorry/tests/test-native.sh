@@ -595,6 +595,7 @@ PY
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release -- --quiet"
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release --bundle -- --quiet"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
     grep -F -- "-C panic=abort" "$NATIVE_LOG" >/dev/null ||
         fail "Motor dev profile did not pass panic=abort to rustc"

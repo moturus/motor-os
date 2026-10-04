@@ -625,16 +625,14 @@ fn set_private_executable(_file: &File, path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "motor")]
 fn set_private_executable(file: &File, _path: &Path) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
-
-    unsafe extern "C" {
-        fn fchmod(fd: i32, mode: u32) -> i32;
+    let launcher = std::env::current_exe().map_err(display("locate bundle launcher"))?;
+    let permissions = fs::metadata(launcher).map_err(display("inspect bundle launcher"))?.permissions();
+    if !permissions.readonly() {
+        return Err("bundle launcher must be sealed read/execute".to_owned());
     }
-
-    if unsafe { fchmod(file.as_raw_fd(), 0o555) } != 0 {
-        return Err(format!("set private executable permissions: {}", std::io::Error::last_os_error()));
-    }
-    Ok(())
+    // Motor exposes executable permissions through metadata. Preserve the launcher's
+    // read/execute permissions while sealing the extracted file's open descriptor.
+    file.set_permissions(permissions).map_err(display("set private executable permissions"))
 }
 
 #[cfg(not(any(unix, target_os = "motor")))]

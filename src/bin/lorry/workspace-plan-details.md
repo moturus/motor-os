@@ -2657,6 +2657,19 @@ ordinary workspace/bundle regression, and strict Clippy pass in
 `/tmp/lorry-m8-proc-macro-runtime-workspace-regression.log`, and
 `/tmp/lorry-m8-proc-macro-cross-runtime-clippy.log`.
 
+Cross-bundle diagnosis exposed a preexisting generated-launcher dependency on
+unlinked `fchmod`, preserved in
+`/tmp/lorry-m8-proc-macro-bundle-platform-original.log` and fixture
+`/tmp/lorry-member-macro-contract-E4N7w0`. Source inspection confirms standard
+Rust `File::set_permissions` already calls Motor's native descriptor API.
+The launcher now copies its own sealed read/execute permissions through that
+API, without libc, OS, or standard-library changes. The workspace contract now
+compiles both native and Motor target bundles. Native bundle execution is added
+to the existing Motor milestone driver, where extraction and sealing will be
+validated during the milestone gate. The focused workspace contract and strict
+Clippy pass in `/tmp/lorry-m8-bundle-standard-sealing-{workspace,clippy}.log`.
+The separate host-only bundle platform correction remains the next patch.
+
 ### Member build-time code
 
 The shared planner now has workspace harness graphs with selected dev edges,
