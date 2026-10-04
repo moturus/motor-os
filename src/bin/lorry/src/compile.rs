@@ -161,15 +161,14 @@ pub fn dependency_rustc_invocation_with_build_output(
     if key.kind == UnitKind::BuildScriptRun {
         return Ok(None);
     }
-    let requires_build_output = matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
-        && planned
-            .unit
-            .dependencies
-            .iter()
-            .any(|dependency| dependency.kind == UnitEdgeKind::BuildScriptOutput);
+    let requires_build_output = planned
+        .unit
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.kind == UnitEdgeKind::BuildScriptOutput);
     if requires_build_output && build_output.is_none() {
         return Err(Error::failure(format!(
-            "library unit for `{} {}` requires build-script output before its rustc command can be finalized",
+            "compiler unit for `{} {}` requires build-script output before its rustc command can be finalized",
             key.package.name, key.package.version
         )));
     }
@@ -423,7 +422,16 @@ pub fn dependency_rustc_invocation_with_build_output(
         value(&mut environment, "CARGO_PRIMARY_PACKAGE", "1");
     }
     if let Some(build_output) = build_output {
-        apply_build_output(&mut arguments, &mut environment, build_output);
+        apply_build_output(
+            &mut arguments,
+            &mut environment,
+            build_output,
+            manifest.library.is_none()
+                || matches!(
+                    key.kind,
+                    UnitKind::Library | UnitKind::ProcMacro | UnitKind::LibraryHarness
+                ),
+        );
     }
     if options.verbose {
         push(&mut arguments, "--verbose");
@@ -442,6 +450,7 @@ fn apply_build_output(
     arguments: &mut Vec<OsString>,
     environment: &mut BTreeMap<String, OsString>,
     build: BuildOutput<'_>,
+    link_libs: bool,
 ) {
     value(environment, "OUT_DIR", build.out_dir);
     for directive in &build.output.directives {
@@ -454,7 +463,7 @@ fn apply_build_output(
         }
     }
     for directive in &build.output.directives {
-        if let Directive::RustcLinkLib(library) = directive {
+        if link_libs && let Directive::RustcLinkLib(library) = directive {
             push(arguments, "-l");
             push(arguments, library);
         }

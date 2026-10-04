@@ -2452,6 +2452,22 @@ caller grants remain explicit errors until portable admission records cover
 them. Focused environment/configuration and member policy tests, plus strict
 Clippy, pass in `/tmp/lorry-m8-path-caller-env-{tests,policy,clippy}.log`.
 
+Public ordinary build/check/Clippy now execute selected member scripts through
+the shared graph. Rustc command validation and executor output forwarding use
+the graph's script-output edges for binary consumers too. Link libraries follow
+Cargo's package-library rule. The paired offline contract covers default, all,
+and single-member build/check selections, Clippy, binary byte identity, Cargo
+JSON, host build features, compiler/run primary-package variables, missing
+grants before artifacts, and caller isolation without value-bearing warnings.
+The first execution failure exposed the old library-only output validator;
+the next comparison used incompatible raw output layouts and now uses the
+existing Cargo message schema oracle. The old workspace fixture's scripted
+member remains outside its review scope, so its expected first rejection is
+admission coverage. Original and diagnostic logs are retained under
+`/tmp/lorry-m8-selected-script-*`. The complete new contract, existing workspace
+contract, compiler oracle test, and strict Clippy pass in
+`/tmp/lorry-m8-selected-script-{contract-clippy-launcher-fixed,workspace-contract-fixed,compiler-test,clippy}.log`.
+
 **Result.** Member build-time code and all required targets use the shared
 graph. Workspace `test`, `run`, `clean`, and `new` follow Cargo.
 

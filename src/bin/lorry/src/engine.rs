@@ -61,8 +61,10 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         &cli.selection,
     )?;
     let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
-    let shared =
-        ordinary && (selected.len() > 1 || cli.features != crate::cli::FeatureSelection::default());
+    let shared = ordinary
+        && (selected.len() > 1
+            || cli.features != crate::cli::FeatureSelection::default()
+            || selected.iter().any(|member| member.build_script.is_some()));
     if !ordinary {
         cli.features.require_default()?;
     }
@@ -93,7 +95,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     for manifest in &selected {
         // Compiling the selected package without its build script would quietly
         // produce a different crate, so reject it before any other work.
-        if let Some(script) = &manifest.build_script {
+        if !shared && let Some(script) = &manifest.build_script {
             return Err(Error::failure(format!(
                 "package `{}` has a build script (`{}`), and Lorry does not run build \
              scripts of the selected package",

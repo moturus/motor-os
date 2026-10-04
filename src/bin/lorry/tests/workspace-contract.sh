@@ -224,7 +224,10 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
         done
     done
     if "$LORRY" check -p 's*' --offline 2>"$WORK/selector.err"; then exit 1; fi
-    grep -F 'does not run build scripts of the selected package' "$WORK/selector.err" >/dev/null
+    grep -F 'workspace admission does not cover the requested packages or features of `scripted`' "$WORK/selector.err" >/dev/null || {
+        cat "$WORK/selector.err" >&2
+        exit 1
+    }
     "$LORRY_TEST_CARGO" check -p 's*' --offline
     for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
         if "$builder" run -p 'a*' --offline 2>"$WORK/run-selector.err"; then exit 1; fi
@@ -430,7 +433,11 @@ for command in build check test run; do
         echo "workspace-contract: $command ignored a member build script" >&2
         exit 1
     fi
-    grep -F 'package `scripted` has a build script' "$WORK/scripted.stderr" >/dev/null || {
+    case "$command" in
+        build | check) expected='workspace admission does not cover the requested packages or features of `scripted`' ;;
+        test | run) expected='package `scripted` has a build script' ;;
+    esac
+    grep -F "$expected" "$WORK/scripted.stderr" >/dev/null || {
         cat "$WORK/scripted.stderr" >&2
         exit 1
     }

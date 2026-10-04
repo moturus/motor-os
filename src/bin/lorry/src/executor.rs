@@ -590,26 +590,25 @@ fn execute_unit(
                         key.package.name, key.package.version
                     ))
                 })?;
-                let executed_build_script =
-                    if matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro) {
-                        let run = planned
-                            .unit
-                            .dependencies
-                            .iter()
-                            .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
-                            .map(|edge| &edge.unit);
-                        match run {
-                            Some(run) => Some(outputs.build_scripts.get(run).ok_or_else(|| {
-                                Error::failure(format!(
-                                    "build-script output for `{} {}` was not produced first",
-                                    key.package.name, key.package.version
-                                ))
-                            })?),
-                            None => None,
-                        }
-                    } else {
-                        None
-                    };
+                let executed_build_script = if key.kind != UnitKind::BuildScriptCompile {
+                    let run = planned
+                        .unit
+                        .dependencies
+                        .iter()
+                        .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
+                        .map(|edge| &edge.unit);
+                    match run {
+                        Some(run) => Some(outputs.build_scripts.get(run).ok_or_else(|| {
+                            Error::failure(format!(
+                                "build-script output for `{} {}` was not produced first",
+                                key.package.name, key.package.version
+                            ))
+                        })?),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 let build_output = executed_build_script.map(|output| BuildOutput {
                     output: &output.output,
                     out_dir: &output.out_dir,

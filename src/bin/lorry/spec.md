@@ -51,8 +51,9 @@ Workspace membership and inheritance, shared resolution, metadata, fetch,
 tree, and scoped root admission are implemented. Ordinary build, check, and
 Clippy compile several members together with shared CLI feature resolution.
 Run, test, and test-target checking retain their single-member default-feature
-path until remaining target support lands. Root build scripts and
-custom/build-std targets remain unsupported. `full-native-build.md` is a
+path until remaining target support lands. Ordinary build/check/Clippy execute
+selected member build scripts under named path grants. Custom/build-std targets
+remain unsupported. `full-native-build.md` is a
 non-normative audit of those and the
 other gaps exposed by the repository `Makefile`; future source-model rationale
 belongs in `design.md`.
@@ -486,7 +487,7 @@ The supported manifest surface includes:
 
 Crates.io dependencies require a version requirement. Path dependencies may
 omit one; when supplied, it must match the selected local package. Root
-build-script execution and dev-dependencies are unsupported. A
+dev-dependencies are unsupported. A
 target-conditioned root dev-dependency is inert when its selector does not
 match the selected target, and produces the unsupported-dependency diagnostic
 when it does. Lorry may compile approved transitive build-dependencies for
@@ -495,19 +496,20 @@ dependency build scripts.
 Compiler manifests now retain top-level and target-qualified build
 dependencies. The shared planner can create the member's host script compiler,
 per-target script execution, and output edges to its library and binaries,
-including binary-only members. Public member script execution remains rejected
-until its environment and sandbox policy are fully wired.
+including binary-only members. Ordinary build, check, and Clippy execute these
+units for single and multiple selections after validating admission and named
+path grants. Script outputs provide cfgs, environment, search paths, and
+`OUT_DIR` to every consuming target. Link libraries follow Cargo: the package
+library receives them when present; otherwise its other targets receive them.
 
-A selected package with a build script fails before any compilation:
-`build`, `run`, `test`, and `check` reject it, naming the script. Commands
-that only describe the package, such as `metadata`, `tree`, and `vendor`,
-accept it.
+Run and test still reject a selected package with a build script before
+compilation. Descriptive commands accept these manifests without execution.
 
-Lorry rejects root build scripts, explicit `[[test]]`, examples, benches,
+Lorry rejects explicit `[[test]]`, examples, benches,
 custom crate types, `harness`, `required-features`, `autotests`, unsupported
-profile keys, workspace inheritance, artifact dependencies, alternative
+profile keys, artifact dependencies, alternative
 registries, non-crates.io patches, selecting a
-procedural-macro package as the root, and CLI feature-selection flags.
+procedural-macro package as the root, and CLI feature-selection flags for run/test.
 Build, run, and test reject an unmaterialized crates.io Git patch and direct
 the user to `lorry vendor`; they never fetch or modify it themselves.
 Documentation tests are not run because native Motor has no `rustdoc`; the
@@ -1675,11 +1677,11 @@ their application, image-layout, and OS behavior belongs to those components.
 
 ## Deferred capabilities
 
-Deferred capabilities include workspace-wide operation and inheritance,
+Deferred capabilities include workspace-wide tests and additional target/profile modes,
 building the complete `httpd-axum` and `russhd` graphs,
-alternative-registry sources, CLI feature selection, custom targets and
+alternative-registry sources, run/test CLI feature selection, custom targets and
 build-std, broad target declarations, general C/C++/native-tool discovery,
-root build scripts, arbitrary build-script processes, Cargo wrappers, and
+arbitrary build-script processes, Cargo wrappers, and
 linked-artifact cache reuse. `design.md` holds accepted future design
 directions; `full-native-build.md` records the current repository-specific
 gap analysis without making those findings normative product commitments.

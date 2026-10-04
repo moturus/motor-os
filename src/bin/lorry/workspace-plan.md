@@ -185,6 +185,12 @@ native vendoring needed no retries. The two earlier gate failures were fixture
 mismatches: unequal Rust flags and unequal incremental-cache state. Their
 diagnoses and preserved evidence are in the details file.
 
+Milestone 8 is in progress. Named member execution grants, unpinned member
+native-tool grants, path-script caller allowlists, and read-only workspace
+script inputs are implemented. Ordinary build, check, and Clippy now execute
+selected members' scripts and host build-dependencies. Focused Cargo contracts
+cover executable bytes, JSON, primary-package variables, and caller isolation.
+
 ## Goal
 
 Make Lorry build, check, and test Cargo workspaces on Linux and on Motor.

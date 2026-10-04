@@ -61,9 +61,11 @@ A supported package has:
 The supported dependency model includes renamed and optional dependencies,
 default and forwarded features, target-conditioned dependencies, dependency
 build scripts, procedural-macro dependencies, and root crates.io patches.
-Root build scripts and root build-dependencies are not operationally
-supported. `build`, `run`, `test`, `check`, and `clippy` reject a selected package
-that has a build script, including a workspace member selected with `-p`. Alternative registries, selecting a
+Ordinary build, check, and Clippy run selected members' build scripts and
+build-dependencies through the shared graph, with named path execution grants.
+Scripts receive private output directories and package-specific `caller-env`
+allowlists; editable members can read the workspace without writing it.
+Run and test still reject selected packages with build scripts. Alternative registries, selecting a
 procedural-macro package as the root, root dev
 dependencies selected for the build target, examples, benches, explicit test
 targets, and CLI feature selection for run and test are not supported. Build,
