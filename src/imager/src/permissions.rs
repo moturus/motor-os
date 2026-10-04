@@ -106,7 +106,7 @@ impl PermissionPolicy {
             .map_err(|error| format!("image config '{}': {error}", config_path.display()))
     }
 
-    fn parse(contents: &str, source: PathBuf) -> Result<Self, String> {
+    pub(crate) fn parse(contents: &str, source: PathBuf) -> Result<Self, String> {
         let raw: RawPolicy = serde_yaml::from_str(contents)
             .map_err(|error| format!("permission policy '{}': {error}", source.display()))?;
         let default = parse_profile(&raw.default, "default", &source)?;

@@ -24,6 +24,7 @@ use std::io::{self, Seek, SeekFrom};
 
 mod chmod;
 mod permissions;
+mod publish_www;
 mod resize;
 mod set;
 mod util;
@@ -619,6 +620,8 @@ Motor OS image builder usage:
     imager set --ssh-key <PUBLIC KEY FILE> -i <IMG FILE>
     imager set --ssh-server-key <KEY FILE> -i <IMG FILE>
     imager set --ssl-keys <DIR> -i <IMG FILE>
+    imager publish-www <WWW-DIR> --ssh-password <PWD> --ssh-key <PUBLIC KEY FILE>
+        --ssl-keys <DIR> -i <IMG FILE>
 
 resize copies INPUT_IMG into a new OUTPUT_IMG (qcow2 or raw, by its .qcow2,
 .img or .raw suffix) whose data partition is X MB or GB large.
@@ -635,6 +638,11 @@ The password may appear in shell history and process arguments.
 --ssl-keys reads ssl-cert.pem and ssl-key.pem from DIR, preserving the CA store.
 Key and certificate contents are copied without cryptographic validation.
 Each command replaces only its selected credentials.
+
+publish-www replaces /user/www-home with a copy of WWW-DIR, writes /user/bin/www
+to serve it with httpd-axum on port 443, sets the password, login key and TLS
+pair as set does, and installs a newly generated Ed25519 SSH host key, all in
+one staged update. It prints the new host public key and its fingerprint.
 "
     );
     std::process::exit(1);
@@ -666,6 +674,13 @@ fn main() {
     if os_args.get(1).is_some_and(|arg| arg == "set") {
         if let Err(err) = set::run(&os_args[2..]) {
             eprintln!("imager set: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if os_args.get(1).is_some_and(|arg| arg == "publish-www") {
+        if let Err(err) = publish_www::run(&os_args[2..]) {
+            eprintln!("imager publish-www: {err}");
             std::process::exit(1);
         }
         return;

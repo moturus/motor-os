@@ -459,7 +459,9 @@ imager resize -i &lt;INPUT IMAGE&gt; -o &lt;OUTPUT IMAGE&gt; --size &lt;SIZE&gt;
 imager set --ssh-password &lt;PASSWORD&gt; -i &lt;IMAGE&gt;
 imager set --ssh-key &lt;PUBLIC KEY FILE&gt; -i &lt;IMAGE&gt;
 imager set --ssh-server-key &lt;PRIVATE KEY FILE&gt; -i &lt;IMAGE&gt;
-imager set --ssl-keys &lt;DIRECTORY&gt; -i &lt;IMAGE&gt;</code></pre>
+imager set --ssl-keys &lt;DIRECTORY&gt; -i &lt;IMAGE&gt;
+imager publish-www &lt;SITE DIRECTORY&gt; --ssh-password &lt;PASSWORD&gt; \
+    --ssh-key &lt;PUBLIC KEY FILE&gt; --ssl-keys &lt;DIRECTORY&gt; -i &lt;IMAGE&gt;</code></pre>
 
 <p>Examples below use <code>imager</code> for the host executable. Every image target in the
 Makefile installs a statically linked copy as <code>vm_images/PROFILE/tools/imager</code>, whose
@@ -699,6 +701,34 @@ key and server host key unchanged. To replace all bundled credentials, set the p
 server key, and TLS pair. These operations do not erase old secrets from freed filesystem blocks,
 snapshots, or backups, and do not change other accounts or disable unused authentication
 methods.</p>
+<h2 id="publish-a-website">Publish a website</h2>
+<pre><code>imager publish-www /path/to/site --ssh-password &#x27;your-new-password&#x27; \
+    --ssh-key /path/to/id_ed25519.pub --ssl-keys /path/to/tls -i image.qcow2</code></pre>
+<p>All options are required, each exactly once, in any order after the site directory. They mean
+the same as for <code>imager set</code>. In one staged update, the command:</p>
+<ul>
+<li>replaces <code>/user/www-home</code> with a copy of the site directory;</li>
+<li>writes <code>/user/bin/www</code>, a rush script that runs <code>httpd-axum</code> on
+<code>0.0.0.0:443</code>, serving <code>/user/www-home</code> with the TLS pair in
+<code>/system/cfg/ssl</code>;</li>
+<li>sets the login password, login public key, and TLS certificate and key;</li>
+<li>installs a newly generated Ed25519 SSH server key.</li>
+</ul>
+<p>The image must contain <code>/user/bin/httpd-axum</code>: the standard and developer images do,
+the base image does not. The site directory may contain only directories and regular files.
+Symlinks and special files are rejected, and hidden files are copied. Copied entries get the shared
+permission policy&#x27;s <code>/user</code> modes (<code>rwxrwxr-x</code> for directories,
+<code>rw-rw-r--</code> for files); host execute bits are not carried over. An existing
+<code>/user/www-home</code> is removed first, and an existing <code>/user/bin/www</code> is
+overwritten.</p>
+<p>The server private key is generated in memory from the host&#x27;s <code>/dev/urandom</code> and
+written only to the image. The command prints the matching public key and its SHA-256
+fingerprint:</p>
+<pre><code>SSH host key: ssh-ed25519 AAAA...
+SSH host key fingerprint: SHA256:...</code></pre>
+<p>Add the key to the client&#x27;s <code>known_hosts</code> as
+<code>[ADDRESS]:2222 ssh-ed25519 AAAA...</code>, or compare the fingerprint on first connect. In
+the VM, run <code>/user/bin/www</code> to start serving.</p>
 <nav class="pager">
 <a class="pager-prev" href="running.html"><span>Previous</span>Running a VM</a>
 <a class="pager-next" href="architecture.html"><span>Next</span>Architecture</a>

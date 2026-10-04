@@ -10,29 +10,50 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::Path;
 
-type Fs = motor_fs::MotorFs<AsyncFileBlockDevice>;
+pub(crate) type Fs = motor_fs::MotorFs<AsyncFileBlockDevice>;
 
-pub(super) fn update(image: &Path, credentials: &Credentials) -> io::Result<()> {
+/// Applies all `credentials` in one staged update; sshd.toml is rewritten once.
+pub(crate) fn update(image: &Path, credentials: &[Credentials]) -> io::Result<()> {
+    update_with(image, credentials, async |_| Ok(()), async |_| Ok(()))
+}
+
+/// Like `update`, with extra `write` and `verify` steps on the same staged image.
+pub(crate) fn update_with(
+    image: &Path,
+    credentials: &[Credentials],
+    write: impl AsyncFnOnce(&mut Fs) -> io::Result<()>,
+    verify: impl AsyncFnOnce(&Fs) -> io::Result<()>,
+) -> io::Result<()> {
     staged_update(image, |raw| {
         let replacements = with_fs(raw, async |fs| {
-            let replacements = match credentials {
-                Credentials::Tls { cert, key } => vec![
-                    Replacement::load(fs, TLS_CERT, false)
-                        .await?
-                        .with_bytes(cert.clone()),
-                    Replacement::load(fs, TLS_KEY, true)
-                        .await?
-                        .with_bytes(key.clone()),
-                ],
-                _ => {
-                    let old = Replacement::load(fs, SSH_CONFIG, true).await?;
-                    let bytes = credentials.update_ssh(&old.bytes)?;
-                    vec![old.with_bytes(bytes)]
+            let mut replacements = Vec::new();
+            let mut ssh: Option<Replacement> = None;
+            for credential in credentials {
+                if let Credentials::Tls { cert, key } = credential {
+                    replacements.push(
+                        Replacement::load(fs, TLS_CERT, false)
+                            .await?
+                            .with_bytes(cert.clone()),
+                    );
+                    replacements.push(
+                        Replacement::load(fs, TLS_KEY, true)
+                            .await?
+                            .with_bytes(key.clone()),
+                    );
+                    continue;
                 }
-            };
+                let config = match ssh.take() {
+                    Some(config) => config,
+                    None => Replacement::load(fs, SSH_CONFIG, true).await?,
+                };
+                let bytes = credential.update_ssh(&config.bytes)?;
+                ssh = Some(config.with_bytes(bytes));
+            }
+            replacements.extend(ssh);
             for replacement in &replacements {
                 replacement.write(fs).await?;
             }
+            write(fs).await?;
             fs.flush().await?;
             Ok(replacements)
         })?;
@@ -43,7 +64,7 @@ pub(super) fn update(image: &Path, credentials: &Credentials) -> io::Result<()> 
                     return Err(io::Error::other("image credential verification failed"));
                 }
             }
-            Ok(())
+            verify(fs).await
         })
     })
 }

@@ -15,6 +15,8 @@ imager set --ssh-password <PASSWORD> -i <IMAGE>
 imager set --ssh-key <PUBLIC KEY FILE> -i <IMAGE>
 imager set --ssh-server-key <PRIVATE KEY FILE> -i <IMAGE>
 imager set --ssl-keys <DIRECTORY> -i <IMAGE>
+imager publish-www <SITE DIRECTORY> --ssh-password <PASSWORD> \
+    --ssh-key <PUBLIC KEY FILE> --ssl-keys <DIRECTORY> -i <IMAGE>
 ```
 
 Examples below use `imager` for the host executable. Every image target in
@@ -260,3 +262,42 @@ bundled credentials, set the password, login key, server key, and TLS pair.
 These operations do not erase old secrets from freed filesystem blocks,
 snapshots, or backups, and do not change other accounts or disable unused
 authentication methods.
+
+## Publish a website
+
+```sh
+imager publish-www /path/to/site --ssh-password 'your-new-password' \
+    --ssh-key /path/to/id_ed25519.pub --ssl-keys /path/to/tls -i image.qcow2
+```
+
+All options are required, each exactly once, in any order after the site
+directory. They mean the same as for `imager set`. In one staged update,
+the command:
+
+- replaces `/user/www-home` with a copy of the site directory;
+- writes `/user/bin/www`, a rush script that runs `httpd-axum` on
+  `0.0.0.0:443`, serving `/user/www-home` with the TLS pair in
+  `/system/cfg/ssl`;
+- sets the login password, login public key, and TLS certificate and key;
+- installs a newly generated Ed25519 SSH server key.
+
+The image must contain `/user/bin/httpd-axum`: the standard and developer
+images do, the base image does not. The site directory may contain only
+directories and regular files. Symlinks and special files are rejected, and
+hidden files are copied. Copied entries get the shared permission policy's
+`/user` modes (`rwxrwxr-x` for directories, `rw-rw-r--` for files); host
+execute bits are not carried over. An existing `/user/www-home` is removed
+first, and an existing `/user/bin/www` is overwritten.
+
+The server private key is generated in memory from the host's `/dev/urandom`
+and written only to the image. The command prints the matching public key
+and its SHA-256 fingerprint:
+
+```text
+SSH host key: ssh-ed25519 AAAA...
+SSH host key fingerprint: SHA256:...
+```
+
+Add the key to the client's `known_hosts` as `[ADDRESS]:2222 ssh-ed25519 AAAA...`,
+or compare the fingerprint on first connect. In the VM, run `/user/bin/www`
+to start serving.

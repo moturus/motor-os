@@ -1,21 +1,21 @@
 //! Offline credential replacement; secrets are never included in diagnostics.
 
-mod credentials;
-mod image;
+pub(crate) mod credentials;
+pub(crate) mod image;
 mod ssh_config;
 
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 
-enum Input<'a> {
+pub(crate) enum Input<'a> {
     Password(&'a str),
     LoginKey(&'a Path),
     HostKey(&'a Path),
     Tls(&'a Path),
 }
 
-fn invalid(message: &'static str) -> io::Error {
+pub(crate) fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
@@ -64,7 +64,7 @@ pub(super) fn run(args: &[OsString]) -> io::Result<()> {
         .collect::<io::Result<Vec<_>>>()?;
     let (input, image) = parse(&args)?;
     let credentials = credentials::Credentials::read(input)?;
-    image::update(image, &credentials)
+    image::update(image, &[credentials])
 }
 
 #[cfg(test)]
