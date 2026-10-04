@@ -55,15 +55,12 @@ fn report_build_completion(cli: &Cli, reported: &mut bool) -> Result<()> {
 fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = match &cli.command {
-        Command::Check(options) => load_check_manifest(&current, options, cli.package.as_deref())?,
-        _ => Manifest::load_selected_or_manifest_path(
-            &current,
-            cli.manifest_path.as_deref().map(Path::new),
-            cli.package.as_deref(),
-            true,
-        )?,
-    };
+    let manifest = Manifest::load_selection(
+        &current,
+        cli.manifest_path.as_deref().map(Path::new),
+        &cli.selection,
+        true,
+    )?;
     Manifest::report_warnings([&manifest], cli.verbosity);
     if matches!(&cli.command, Command::Check(options) if options.all_targets)
         && !manifest.described_targets.is_empty()
@@ -788,19 +785,6 @@ fn build_reported(build: Build<'_>, format: MessageFormat) -> Result<BuildArtifa
         BuildOutcome::Artifacts(artifacts) => Ok(artifacts),
         BuildOutcome::Check(_) => unreachable!("ordinary build returned a check result"),
     }
-}
-
-fn load_check_manifest(
-    current: &Path,
-    options: &CheckOptions,
-    package: Option<&str>,
-) -> Result<Manifest> {
-    Manifest::load_selected_or_manifest_path(
-        current,
-        options.manifest_path.as_deref().map(Path::new),
-        package,
-        true,
-    )
 }
 
 fn check(build: Build<'_>, target_root: &Path, options: &CheckOptions) -> Result<i32> {

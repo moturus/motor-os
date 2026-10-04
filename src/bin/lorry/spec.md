@@ -290,11 +290,17 @@ until multi-package execution is implemented. Manifest discovery searches
 the working directory and its parents. `--manifest-path` establishes the
 workspace independently of `-p`, which may select any member. Workspace-wide
 execution remains deferred.
-Single-member selectors accept names, partial or full `name@version`, Cargo
+Package selectors accept names, partial or full `name@version`, Cargo
 file package IDs, and member-name patterns. An unmatched selector fails,
 and a pattern selecting several members fails until multi-package execution
-is implemented. Run rejects package patterns. Package IDs do not require a
-manifest-path option.
+is implemented. Repeated `-p` options are combined and deduplicated.
+Build, check, Clippy, test, and tree accept `--workspace` and repeated
+`--exclude`; clean accepts `--workspace`. Exclusions require `--workspace`.
+Cargo's workspace precedence applies: without exclusions `-p` is validated
+but all members are selected; with exclusions `-p` is ignored. Unmatched
+exclusions warn, except in quiet mode. Empty and multi-member selections
+fail explicitly until execution support lands. Run accepts one `-p` and
+rejects package patterns. Package IDs do not require a manifest-path option.
 Every manifest-reading command accepts --manifest-path. Relative paths use
 the invocation directory; package selection and configuration discovery
 remain independent of that path.

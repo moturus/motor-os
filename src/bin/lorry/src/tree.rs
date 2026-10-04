@@ -23,10 +23,10 @@ use crate::validation::ValidationMode;
 pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = Manifest::load_selected_or_manifest_path(
+    let manifest = Manifest::load_selection(
         &current,
         options.manifest_path.as_deref().map(std::path::Path::new),
-        cli.package.as_deref(),
+        &cli.selection,
         true,
     )?;
     let mut config = Config::load(&current, &manifest)?;

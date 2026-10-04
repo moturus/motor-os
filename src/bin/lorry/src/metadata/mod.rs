@@ -41,7 +41,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     let manifest = Manifest::load_selected_or_manifest_path(
         &current,
         options.manifest_path.as_deref().map(std::path::Path::new),
-        cli.package.as_deref(),
+        None,
         true,
     )?;
     warn_default_format(cli, options);

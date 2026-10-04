@@ -3,6 +3,7 @@ use clap::error::ErrorKind as ClapErrorKind;
 use clap::{Arg, ArgAction, ArgMatches, Command as ClapCommand};
 
 use crate::diagnostic::{Error, Result};
+use crate::manifest::PackageSelection;
 use crate::validation::ValidationMode;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,7 +27,7 @@ pub struct Cli {
     pub verbosity: Verbosity,
     pub use_cargo_registry: bool,
     pub lorry_messages: bool,
-    pub package: Option<String>,
+    pub selection: PackageSelection,
     pub manifest_path: Option<String>,
     pub command: Command,
 }
@@ -132,7 +133,6 @@ pub struct CheckOptions {
     pub manifest_path: Option<String>,
     pub target_dir: Option<String>,
     pub target: Option<String>,
-    pub workspace: bool,
     pub keep_going: bool,
     pub all_targets: bool,
     pub lib: bool,
@@ -289,15 +289,19 @@ impl Cli {
             Verbosity::Normal
         };
         let use_cargo_registry = matches.get_flag("use-cargo-registry");
-        let package = matches
+        let selection = matches
             .subcommand()
-            .and_then(|(_, command)| {
-                command
-                    .try_get_one::<String>("selected-package")
+            .map(|(_, command)| PackageSelection {
+                packages: optional_values(command, "selected-package"),
+                workspace: command
+                    .try_get_one::<bool>("workspace")
                     .ok()
                     .flatten()
+                    .copied()
+                    .unwrap_or(false),
+                exclude: optional_values(command, "exclude"),
             })
-            .cloned();
+            .unwrap_or_default();
         let manifest_path = matches
             .subcommand()
             .and_then(|(_, command)| {
@@ -327,9 +331,10 @@ impl Cli {
             parse_command(&matches)?
         };
         if matches!(command, Command::Run(_))
-            && package.as_ref().is_some_and(|package| {
-                !package.contains("://") && package.contains(['*', '?', '[', ']'])
-            })
+            && selection
+                .packages
+                .iter()
+                .any(|package| !package.contains("://") && package.contains(['*', '?', '[', ']']))
         {
             return Err(Error::usage(
                 "package patterns are not allowed for run",
@@ -359,7 +364,7 @@ impl Cli {
             verbosity,
             use_cargo_registry,
             lorry_messages: matches.get_flag("lorry-messages"),
-            package,
+            selection,
             manifest_path,
             command,
         })
@@ -561,11 +566,7 @@ fn check_command(name: &'static str) -> ClapCommand {
                 .action(ArgAction::Set)
                 .value_parser(NonEmptyStringValueParser::new()),
         )
-        .arg(
-            Arg::new("workspace")
-                .long("workspace")
-                .action(ArgAction::SetTrue),
-        )
+        .args(workspace_selection_arguments())
         .arg(
             Arg::new("keep-going")
                 .long("keep-going")
@@ -631,6 +632,7 @@ fn tree_command() -> ClapCommand {
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
         .arg(package_argument())
+        .args(workspace_selection_arguments())
         .arg(manifest_path_argument())
         .args(locked_offline_arguments())
         .arg(
@@ -726,7 +728,7 @@ fn build_command(name: &'static str) -> ClapCommand {
 }
 
 fn clean_command() -> ClapCommand {
-    build_command("clean")
+    build_command("clean").arg(workspace_argument())
 }
 
 fn package_argument() -> Arg {
@@ -735,7 +737,25 @@ fn package_argument() -> Arg {
         .short('p')
         .value_name("NAME")
         .num_args(1)
-        .action(ArgAction::Set)
+        .action(ArgAction::Append)
+}
+
+fn workspace_argument() -> Arg {
+    Arg::new("workspace")
+        .long("workspace")
+        .action(ArgAction::SetTrue)
+}
+
+fn workspace_selection_arguments() -> [Arg; 2] {
+    [
+        workspace_argument(),
+        Arg::new("exclude")
+            .long("exclude")
+            .value_name("SPEC")
+            .num_args(1)
+            .action(ArgAction::Append)
+            .requires("workspace"),
+    ]
 }
 
 fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
@@ -744,6 +764,13 @@ fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
             .long("strict-validation")
             .action(ArgAction::SetTrue),
     );
+    let command = if name == "run" {
+        command.mut_arg("selected-package", |argument| {
+            argument.action(ArgAction::Set)
+        })
+    } else {
+        command.args(workspace_selection_arguments())
+    };
     if supports_bin {
         command.arg(
             Arg::new("bin")
@@ -843,7 +870,6 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             manifest_path: options.get_one::<String>("manifest-path").cloned(),
             target_dir: options.get_one::<String>("target-dir").cloned(),
             target: options.get_one::<String>("target").cloned(),
-            workspace: options.get_flag("workspace"),
             keep_going: options.get_flag("keep-going"),
             all_targets: options.get_flag("all-targets"),
             lib: options.get_flag("lib"),
@@ -985,6 +1011,15 @@ fn values(matches: &ArgMatches, name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn optional_values(matches: &ArgMatches, name: &str) -> Vec<String> {
+    matches
+        .try_get_many::<String>(name)
+        .ok()
+        .flatten()
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default()
+}
+
 fn clap_error(error: clap::Error) -> Error {
     let cause = match error.kind() {
         ClapErrorKind::UnknownArgument => "unknown option or argument",
@@ -1043,7 +1078,7 @@ mod tests {
         assert_eq!(cli.verbosity, Verbosity::Verbose);
         assert_eq!(cli.color, Color::Always);
         assert!(cli.use_cargo_registry);
-        assert_eq!(cli.package.as_deref(), Some("app"));
+        assert_eq!(cli.selection.packages, ["app"]);
         assert_eq!(
             cli.command,
             Command::Build(BuildOptions {
@@ -1056,6 +1091,48 @@ mod tests {
                 jobs: None,
             })
         );
+    }
+
+    #[test]
+    fn parses_workspace_package_sets_and_command_restrictions() {
+        for command in ["build", "check", "clippy", "test", "tree"] {
+            let cli = parse(&[
+                command,
+                "--workspace",
+                "-p",
+                "app",
+                "-p",
+                "tool",
+                "--exclude",
+                "s*",
+                "--exclude",
+                "missing",
+            ])
+            .unwrap();
+            assert_eq!(cli.selection.packages, ["app", "tool"]);
+            assert!(cli.selection.workspace);
+            assert_eq!(cli.selection.exclude, ["s*", "missing"]);
+            assert!(
+                parse(&[command, "--exclude", "app"])
+                    .unwrap_err()
+                    .is_usage()
+            );
+        }
+        assert_eq!(
+            parse(&["clean", "-p", "app", "-p", "app", "--workspace"])
+                .unwrap()
+                .selection
+                .packages,
+            ["app", "app"]
+        );
+        for input in [
+            &["run", "-p", "app", "-p", "app"][..],
+            &["run", "--workspace"],
+            &["run", "-p", "a*"],
+            &["clean", "--workspace", "--exclude", "app"],
+        ] {
+            assert!(parse(input).unwrap_err().is_usage(), "{input:?}");
+        }
     }
 
     #[test]
@@ -1222,7 +1299,7 @@ mod tests {
             "--locked",
         ])
         .unwrap();
-        assert_eq!(metadata.package, None);
+        assert_eq!(metadata.selection, PackageSelection::default());
         assert!(parse(&["metadata", "-p", "app"]).unwrap_err().is_usage());
         assert_eq!(
             metadata.command,
@@ -1265,6 +1342,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(check.verbosity, Verbosity::Quiet);
+        assert!(check.selection.workspace);
         assert_eq!(
             check.command,
             Command::Check(CheckOptions {
@@ -1272,7 +1350,6 @@ mod tests {
                 manifest_path: Some("/project/Cargo.toml".to_owned()),
                 target_dir: Some("/project/target/rust-analyzer".to_owned()),
                 target: Some("x86_64-unknown-motor".to_owned()),
-                workspace: true,
                 keep_going: true,
                 all_targets: true,
                 lib: false,
@@ -1519,8 +1596,8 @@ mod tests {
             assert!(parse(input).is_err(), "{input:?}");
         }
         assert_eq!(
-            parse(&["vendor", "-p", "app"]).unwrap().package.as_deref(),
-            Some("app")
+            parse(&["vendor", "-p", "app"]).unwrap().selection.packages,
+            ["app"]
         );
     }
 

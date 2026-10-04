@@ -1362,6 +1362,16 @@ package IDs select within a discovered workspace and do not discover one.
 The selector consumes a workspace and command options; it does not reload
 configuration or resolve dependencies.
 
+Repeated `-p`, `--workspace`, and `--exclude` now use that common selector.
+Duplicate names/version aliases are deduplicated. Cargo's opt-in workspace
+selection validates `-p` but selects all members; opt-out selection ignores
+`-p`. Unmatched exclusions warn and quiet mode suppresses those warnings.
+Run accepts only one selector and rejects patterns. Empty/multi-member
+execution still fails explicitly. The focused manifest tests (23), CLI
+tests (25), strict Clippy, and paired workspace contract passed in
+`/tmp/lorry-m5-selection-set-unit-fixed.log` and
+`/tmp/lorry-m5-selection-flags-{cli-final,clippy,contract}.log`.
+
 - At a virtual root, defaults are `default-members` or all members.
 - At a package root, defaults are `default-members` or that package.
 - With a member manifest, that member is the default.

@@ -8,16 +8,16 @@ use std::path::Path;
 
 pub fn execute(
     options: &CleanOptions,
-    package: Option<&str>,
+    selection: &crate::manifest::PackageSelection,
     manifest_path: Option<&str>,
     verbosity: Verbosity,
 ) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = crate::manifest::Manifest::load_selected_or_manifest_path(
+    let manifest = crate::manifest::Manifest::load_selection(
         &current,
         manifest_path.map(Path::new),
-        package,
+        selection,
         true,
     )?;
     crate::manifest::Manifest::report_warnings([&manifest], verbosity);
@@ -35,7 +35,8 @@ pub fn execute(
     } else {
         None
     };
-    if (package.is_some() || options.build.release || target.is_some()) && artifact_root.exists() {
+    let package_selected = selection.workspace || !selection.packages.is_empty();
+    if (package_selected || options.build.release || target.is_some()) && artifact_root.exists() {
         crate::engine::migrate_artifact_layout(&artifact_root)?;
     }
     let removed = clean_manifest_artifacts(
@@ -43,7 +44,7 @@ pub fn execute(
         &target_directory,
         options.build.release,
         target.as_deref(),
-        package.is_some(),
+        package_selected,
     )?;
     if verbosity != Verbosity::Quiet {
         if removed {

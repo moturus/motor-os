@@ -45,22 +45,10 @@ pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     match &options.mode {
-        VendorMode::Sync => execute_reconcile(
-            cli,
-            &current,
-            cli.package.as_deref(),
-            options.accept_all,
-            None,
-        ),
+        VendorMode::Sync => execute_reconcile(cli, &current, options.accept_all, None),
         VendorMode::Upgrade(upgrade) => {
             let (package, version) = (&upgrade.package, &upgrade.version);
-            execute_reconcile(
-                cli,
-                &current,
-                cli.package.as_deref(),
-                options.accept_all,
-                Some((package, version)),
-            )
+            execute_reconcile(cli, &current, options.accept_all, Some((package, version)))
         }
     }
 }
@@ -68,14 +56,13 @@ pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {
 fn execute_reconcile(
     cli: &Cli,
     current: &Path,
-    selected_package: Option<&str>,
     accept_all: bool,
     requested: Option<(&str, &str)>,
 ) -> Result<i32> {
-    let manifest = Manifest::load_selected_or_manifest_path(
+    let manifest = Manifest::load_selection(
         current,
         cli.manifest_path.as_deref().map(Path::new),
-        selected_package,
+        &cli.selection,
         false,
     )?;
     Manifest::report_warnings([&manifest], cli.verbosity);

@@ -137,6 +137,34 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
 [ -x "$WORK/project/target/lorry/debug/app" ]
 [ -x "$WORK/project/target/lorry/debug/tool" ]
 (
+    cd "$WORK/project"
+    for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+        "$builder" check -p app -p app@0.1 --offline
+        "$builder" check --workspace --exclude app --exclude 's*' --offline
+        "$builder" check --workspace -p missing --exclude app --exclude 's*' --offline
+        "$builder" check --workspace --exclude app --exclude 's*' --exclude missing \
+            --offline 2>"$WORK/exclude.err"
+        [ "$(grep -Fc 'warning: excluded package' "$WORK/exclude.err")" -eq 1 ]
+        "$builder" check --quiet --workspace --exclude app --exclude 's*' --exclude missing \
+            --offline 2>"$WORK/exclude-quiet.err"
+        [ ! -s "$WORK/exclude-quiet.err" ]
+        for selectors in '--workspace -p missing' '--workspace --exclude *' '--exclude app'; do
+            # The pattern remains literal, including in Cargo's opt-out case.
+            read -r -a options <<<"$selectors"
+            if "$builder" check "${options[@]}" --offline 2>"$WORK/selection.err"; then exit 1; fi
+        done
+        if "$builder" run -p app -p app --offline 2>"$WORK/selection.err"; then exit 1; fi
+    done
+    "$LORRY" build -p app -p app@0.1
+    "$LORRY" test -p app -p app --no-run
+    for selectors in '-p app -p tool' '--workspace -p app'; do
+        read -r -a options <<<"$selectors"
+        if "$LORRY" check "${options[@]}" 2>"$WORK/selection.err"; then exit 1; fi
+        grep -F 'multi-package execution is not yet supported' "$WORK/selection.err" >/dev/null
+        "$LORRY_TEST_CARGO" check "${options[@]}" --offline
+    done
+)
+(
     cd "$WORK"
     manifest="$WORK/project/Cargo.toml"
     "$LORRY" vendor --manifest-path "$manifest" -p app --accept-all

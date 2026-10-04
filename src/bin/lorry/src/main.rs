@@ -136,7 +136,7 @@ fn run(cli: Cli) -> Result<i32> {
         Command::CacheClean => cache_clean::execute(cli.verbosity),
         Command::Clean(options) => clean::execute(
             options,
-            cli.package.as_deref(),
+            &cli.selection,
             cli.manifest_path.as_deref(),
             cli.verbosity,
         ),
