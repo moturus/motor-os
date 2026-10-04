@@ -89,3 +89,16 @@ starts with `§ ` and a one-line JSON header containing `id`, `kind`
 follows the header. A body line beginning with `§ ` is reserved. USER entries
 must have kind `user`; all headers and bodies count toward the file's
 character limit. Invalid or oversized optional memory is reported and skipped.
+
+User-wide limits come from `batteries.toml` in the Gears directory (distinct
+from the workspace's `.gears/batteries.toml` check declaration):
+
+```toml
+version = 1
+[memory]
+user_chars = 1375
+memory_chars = 2200
+```
+
+Each limit must be 1–65,536 characters. Missing settings use the shown
+defaults; `memory_chars` applies separately to global and workspace memory.

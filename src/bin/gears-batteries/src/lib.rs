@@ -11,6 +11,7 @@ pub mod file_record;
 pub mod file_write;
 pub mod instructions;
 pub mod journal;
+pub mod memory_config;
 pub mod memory_format;
 pub mod patch_match;
 pub mod paths;
