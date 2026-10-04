@@ -49,6 +49,7 @@ pub enum Directive {
 
 pub struct ParseOptions<'a> {
     pub package_root: &'a Path,
+    pub workspace_root: Option<&'a Path>,
     pub out_dir: &'a Path,
     /// The complete environment supplied after `env_clear`. A valid name not
     /// present in this map is an explicitly tracked absent value.
@@ -63,6 +64,7 @@ pub struct RunOptions<'a> {
     pub arguments: &'a [OsString],
     pub environment: &'a BTreeMap<String, OsString>,
     pub package_root: &'a Path,
+    pub workspace_root: Option<&'a Path>,
     pub out_dir: &'a Path,
     pub temp_dir: &'a Path,
     pub read_only: &'a [PathBuf],
@@ -277,6 +279,11 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
 
     let mut read_only = options.read_only.to_vec();
     read_only.push(package_root.clone());
+    let workspace_root = options
+        .workspace_root
+        .map(|root| canonical_directory(root, "workspace root"))
+        .transpose()?;
+    read_only.extend(workspace_root.iter().cloned());
     let policy = Policy {
         read_only,
         writable: vec![out_dir.clone(), temp_dir, PathBuf::from("/dev/null")],
@@ -331,6 +338,7 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
         &captured.stdout,
         &ParseOptions {
             package_root: &package_root,
+            workspace_root: workspace_root.as_deref(),
             out_dir: &out_dir,
             environment: options.environment,
             max_bytes: options.max_output_bytes,
@@ -455,6 +463,12 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
         .map_err(|_| Error::failure("build-script stdout is not valid UTF-8"))?;
     let package_root = canonical_directory(options.package_root, "package root")?;
     let out_dir = canonical_directory(options.out_dir, "OUT_DIR")?;
+    let workspace_root = options
+        .workspace_root
+        .map(|root| canonical_directory(root, "workspace root"))
+        .transpose()?;
+    let mut input_roots = vec![package_root.as_path(), out_dir.as_path()];
+    input_roots.extend(workspace_root.as_deref());
     if !out_dir.starts_with(&package_root) && package_root.starts_with(&out_dir) {
         return Err(Error::failure(
             "build-script package root may not be nested inside OUT_DIR",
@@ -512,7 +526,7 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
             "rerun-if-changed" => Directive::RerunIfChanged(resolve_existing(
                 value,
                 &package_root,
-                &[&package_root, &out_dir],
+                &input_roots,
                 "rerun-if-changed",
             )?),
             "rerun-if-env-changed" => {
@@ -697,6 +711,7 @@ mod tests {
         fn options(&self) -> ParseOptions<'_> {
             ParseOptions {
                 package_root: &self.root,
+                workspace_root: None,
                 out_dir: &self.out,
                 environment: &self.environment,
                 max_bytes: 1024,
@@ -1027,6 +1042,7 @@ mod tests {
                 arguments: &self.arguments,
                 environment: &self.environment,
                 package_root: &self.package,
+                workspace_root: None,
                 out_dir: &self.out,
                 temp_dir: &self.temp,
                 read_only: &self.read_only,
@@ -1077,6 +1093,66 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn member_scripts_can_read_workspace_inputs_without_writing_them() {
+        let fixture = RunFixture::new("workspace-read");
+        let mut options = fixture.options(Duration::from_secs(5), 64 * 1024);
+        // A dependency receives no workspace capability.
+        assert!(run(&options).is_err());
+        options.workspace_root = Some(&fixture.root);
+        let output = run(&options).unwrap();
+        assert!(
+            output
+                .directives
+                .contains(&Directive::RerunIfChanged(fixture.outside.join("secret")))
+        );
+        assert_eq!(fs::read(fixture.outside.join("secret")).unwrap(), b"secret");
+        assert_eq!(fs::read(fixture.out.join("generated")).unwrap(), b"secret");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_rerun_inputs_reject_symlink_escape_and_keep_link_search_private() {
+        use std::os::unix::fs::symlink;
+        let fixture = RunFixture::new("success");
+        let outside = Fixture::new();
+        symlink(
+            outside.root.join("build.rs"),
+            fixture.package.join("escape"),
+        )
+        .unwrap();
+        let mut options = ParseOptions {
+            package_root: &fixture.package,
+            workspace_root: Some(&fixture.root),
+            out_dir: &fixture.out,
+            environment: &fixture.environment,
+            max_bytes: 1024,
+            out_dir_limits: crate::source_tree::DEFAULT_LIMITS,
+        };
+        assert!(
+            parse(b"cargo:rerun-if-changed=escape\n", &options)
+                .unwrap_err()
+                .render()
+                .contains("escapes")
+        );
+        let input = format!("cargo:rerun-if-changed={}\n", fixture.outside.display());
+        assert!(
+            parse(input.as_bytes(), &options)
+                .unwrap()
+                .directives
+                .contains(&Directive::RerunIfChanged(fixture.outside.clone()))
+        );
+        options.workspace_root = None;
+        assert!(parse(input.as_bytes(), &options).is_err());
+        options.workspace_root = Some(&fixture.root);
+        let link = format!(
+            "cargo:rustc-link-search=native={}\n",
+            fixture.outside.display()
+        );
+        assert!(parse(link.as_bytes(), &options).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn kills_timeouts_and_rejects_combined_output_and_failures() {
         let timeout = RunFixture::new("timeout");
         assert!(
@@ -1108,12 +1184,12 @@ mod tests {
         let Ok(action) = std::env::var("LORRY_BUILD_SCRIPT_CHILD") else {
             return;
         };
+        let package = std::env::current_dir().unwrap();
+        let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+        let outside = package.parent().unwrap().join("outside/secret");
         match action.as_str() {
             "success" => {
-                let package = std::env::current_dir().unwrap();
-                let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
                 let temp = PathBuf::from(std::env::var_os("TMPDIR").unwrap());
-                let outside = package.parent().unwrap().join("outside/secret");
                 assert!(std::env::var_os("HOME").is_none());
                 assert_eq!(fs::read(package.join("build.rs")).unwrap(), b"input");
                 fs::write(out.join("generated"), b"output").unwrap();
@@ -1133,6 +1209,13 @@ mod tests {
                 eprintln!("sandbox stderr");
             }
             "timeout" => std::thread::sleep(Duration::from_secs(5)),
+            "workspace-read" => {
+                let bytes = fs::read(&outside).unwrap();
+                assert!(fs::write(&outside, b"bad").is_err());
+                assert!(fs::write(package.parent().unwrap().join("new-file"), b"bad").is_err());
+                fs::write(out.join("generated"), bytes).unwrap();
+                println!("cargo:rerun-if-changed={}", outside.display());
+            }
             "excess-output" => println!("{}", "x".repeat(4096)),
             "failure" => {
                 println!("failure stdout");

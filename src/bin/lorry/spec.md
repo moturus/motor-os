@@ -1427,6 +1427,12 @@ Every supported Linux build script runs in a mandatory sandbox that:
 - starts from a cleared environment and exposes only documented values;
 - permits only explicitly approved child tools.
 
+The script runner can also receive an explicit workspace root as a read-only
+input. In that mode, `rerun-if-changed` may name workspace files or directories;
+canonical paths still reject symlink escapes. `rustc-link-search` remains
+restricted to the script's `OUT_DIR`. The executor will supply this capability
+for editable members after workspace script-input freshness is wired.
+
 The supported directive protocol accepts both `cargo:` and `cargo::` forms of
 `rustc-cfg`, `rustc-check-cfg`, `rustc-env`, `rustc-link-lib`,
 `rustc-link-search`, `rerun-if-changed`, `rerun-if-env-changed`, `warning`,

@@ -2423,6 +2423,14 @@ and strict Clippy pass in `/tmp/lorry-m8-script-planner-{oracle-lock-fixed,manif
 Public script execution remains gated while environment and read-only workspace
 policy are implemented.
 
+The script runner now accepts an explicit read-only workspace root and validates
+workspace `rerun-if-changed` files and directories against it. Linux regressions
+prove that a hidden sibling becomes readable only with that capability, remains
+unwritable, and cannot create workspace files. Protocol tests reject symlink
+escapes and retain private link-search roots. All ten script tests and strict
+Clippy pass in `/tmp/lorry-m8-workspace-script-sandbox-{tests-fixed,clippy}.log`.
+The executor keeps the capability unset until script-input freshness is wired.
+
 **Result.** Member build-time code and all required targets use the shared
 graph. Workspace `test`, `run`, `clean`, and `new` follow Cargo.
 
