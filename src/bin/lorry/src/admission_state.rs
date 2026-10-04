@@ -131,7 +131,6 @@ fn source_digest(source: &str) -> String {
     hex(&digest.finish())
 }
 
-#[allow(unused_imports)] // Workspace command wiring consumes ReviewScope next.
 pub use review::{Capability, CompactState, Context, Review, ReviewScope};
 #[cfg(test)]
 pub use review::{ContextRegistry, LockedRegistry, RegistrySource, UnitKind};

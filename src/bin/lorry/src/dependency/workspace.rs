@@ -2,6 +2,8 @@ use super::*;
 use crate::manifest::SourceWorkspace;
 use crate::resolver::workspace::resolve_complete_workspace;
 
+pub(crate) mod admission;
+
 /// Inspected sources carry no execution admission. Metadata and fetch can use
 /// them even when build scripts and procedural macros have no allow rules.
 #[derive(Debug)]
