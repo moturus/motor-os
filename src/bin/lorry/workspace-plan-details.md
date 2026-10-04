@@ -1945,6 +1945,19 @@ The native fixture now copies the shipped exact package/version/checksum rules
 into its host policy, making cross and native self-build policy consistent.
 No product policy was relaxed and no network retry was used.
 
+The final milestone gate passed in 674 seconds on 2026-10-04, with 427 Rust
+tests, three own-message integration tests, every dedicated host contract,
+Cargo native/cross byte identity, native self-build and cross/native byte
+identity, native Clippy and output equivalence, and interrupted-child recovery.
+Host preparation took 174.115 seconds, VM startup 3.087 seconds, and the native
+self gate 340.319 seconds. Evidence is
+`/tmp/lorry-m6-full-native-policy-fixed.log` and
+`target/lorry/native-self-tests/self-20261004T170104Z-122361/summary.txt`.
+Online host and native vendoring succeeded without external retries. Strict
+Clippy passed with the depth change; the subsequent fixture-only change passed
+shell validation and exact coverage checks for all 18 self-build grants.
+Milestone 6 is complete.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.
@@ -2191,7 +2204,7 @@ Compiler tests prove two packages both receive `CARGO_PRIMARY_PACKAGE`, while
 an unselected build-script compiler receives none, and an empty selection marks
 none. Four focused compiler tests and strict Clippy pass in
 `/tmp/lorry-m7-primary-selection-{unit-fixed,clippy}.log`. M6's depth-policy
-decision is now implemented; its milestone gate has not passed.
+decision is implemented and its complete milestone gate has passed.
 
 The next foundation fixes effective dependency crate names in ordinary library,
 build-script compiler, and selected-target edges. The original Cargo unit-graph
@@ -2455,14 +2468,14 @@ milestone that touches its code.
 |---|---|---|
 | 1 | Done: `3939755d` | Reaching the package cap aborts resolution; it cannot backtrack into an older, smaller graph |
 | 2 | Done: `3939755d`, follow-up `c3ba1745`; implicit-member counting in milestone 5 | One cap error names the effective setting and its source; exclude all workspace members from the count |
-| 3 | Milestone 6 | A one-run `--max-packages N` override obeys system constraints |
+| 3 | Done: `8ae6181c` | A one-run `--max-packages N` override obeys system constraints |
 | 4 | Done: `12793598` | Reject a selected package's build script until it is actually supported |
 | 5 | Milestone 1 | Build a package inside the workspace root with Cargo's working directory, source path, package identity, and dep-info interpretation |
 | 6 | Milestone 3; build-script values in milestone 8 | Give run/test Cargo's package and script environment; preserve run's caller working directory |
 | 7 | First patches | Cap Git dependency lints as for registry dependencies |
 | 8 | Milestone 5 | Preserve package and workspace metadata tables |
 | 9 | First patches | Permit up to 1,024 described targets, retaining 64 for targets of a selected package |
-| 10 | Milestone 6 | Match resolver 3's member MSRV rules and Cargo's lock-format selection |
+| 10 | Done in milestone 6 | Match resolver 3's member MSRV rules and Cargo's lock-format selection |
 | 11 | First patches | Accept Cargo's four manifest lint levels; reject `force-warn` as a manifest error without panicking |
 | 12 | Milestone 2 | Lock the target artifact tree, retain completed units, and recover interrupted publication safely |
 | 13 | Separate measured optimization | Track observed environment inputs and propagate changed identities through dependents |

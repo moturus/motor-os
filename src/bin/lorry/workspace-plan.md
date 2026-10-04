@@ -145,7 +145,7 @@ freshness, including external reads and symlink retargets. The local corpus
 scan matches all 128 source-metadata projections. Build-capable loading was
 audited separately and reports the remaining target/dependency restrictions.
 
-Milestone 6 is in progress. The resolver can solve every member together,
+Milestone 6 is complete. The resolver can solve every member together,
 including optional, development, and platform edges, then project selected
 features without changing the chosen dependency identities. Workspace MSRV
 ranking, Cargo lock formats, and exact lock validation have focused tests;
@@ -165,7 +165,11 @@ and a compilation projection that lost member source ownership; those are
 fixed. The native gate then found complete dependency depth 20 against the
 inherited limit of 16. The owner approved Cargo's default: dependency depth has
 no cap unless `max-depth` is explicitly configured. The Cargo-paired deep-chain
-regression passes; the full milestone gate remains required.
+regression passes. The native host fixture now uses the developer image's exact
+execution grants. The complete Lorry suite passed in 674 seconds on 2026-10-04:
+427 Rust tests, three own-message tests, all host contracts, Cargo native/cross
+identity, native Motor self-build, cross/native identity, Clippy, and recovery.
+Online host and native vendoring succeeded without retries.
 
 ## Goal
 
