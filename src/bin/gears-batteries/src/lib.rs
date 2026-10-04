@@ -3,6 +3,7 @@
 pub mod check;
 pub mod check_approval;
 pub mod check_config;
+pub mod check_state;
 pub mod command_policy;
 pub mod file_patch;
 pub mod file_read;
@@ -74,12 +75,11 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
 }
 
 pub fn hook(event: Event) -> Result<Value, String> {
-    if matches!(event.event.as_str(), "turn_start" | "entry" | "turn_end") {
-        let result = paths::ToolContext::for_event(&event)
-            .and_then(|context| turns::observe(&event, &context));
-        return Ok(result.unwrap_or_else(
-            |error| json!({"notice": format!("turn record unavailable: {error}")}),
-        ));
+    if matches!(
+        event.event.as_str(),
+        "turn_start" | "entry" | "turn_end" | "before_stop"
+    ) {
+        return Ok(observe_features(event));
     }
     if event.event == "tool_execute" {
         return todo::execute(&event);
@@ -96,6 +96,38 @@ pub fn hook(event: Event) -> Result<Value, String> {
     } else {
         json!({})
     })
+}
+
+fn observe_features(mut event: Event) -> Value {
+    let context = match paths::ToolContext::for_event(&event) {
+        Ok(context) => context,
+        Err(error) => {
+            return json!({"notice": format!("batteries observations unavailable: {error}")});
+        }
+    };
+    let mut response = json!({});
+    let mut notices = Vec::new();
+    for observe in [check_state::observe, turns::observe] {
+        match observe(&event, &context) {
+            Ok(feature) => {
+                for (name, value) in feature.as_object().unwrap() {
+                    if name == "state" {
+                        event.session.state = Some(value.clone());
+                    }
+                    if name == "notice" {
+                        notices.push(value.as_str().unwrap().to_string());
+                    } else {
+                        response[name] = value.clone();
+                    }
+                }
+            }
+            Err(error) => notices.push(format!("batteries observation failed: {error}")),
+        }
+    }
+    if !notices.is_empty() {
+        response["notice"] = json!(notices.join("\n"));
+    }
+    response
 }
 
 pub fn initialize_at(event: &Event, root: &gears::state::StateRoot) -> Value {

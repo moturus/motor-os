@@ -126,6 +126,15 @@ fn record_tool(event: &Event, state: &mut Value, turn: &mut Turn) -> Result<(), 
     {
         turn.files_written.insert(path.into());
     }
+    if call.name == "check"
+        && let Some(receipt) = crate::check_state::turn_receipt(state, entry)
+    {
+        if receipt["passed"] == false && !result.is_error {
+            turn.execution_errors += 1;
+            turn.failing_tools.insert(call.name.clone());
+        }
+        turn.checks.push(receipt);
+    }
     turn.events.push(SavedTool {
         entry_id: entry.into(),
         call_id: call.id,

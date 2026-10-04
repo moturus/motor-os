@@ -41,3 +41,10 @@ For platform overrides, use `[check]` with `linux = [...]`, `motor = [...]`
 and an optional `common = [...]` fallback. Every item is a literal argument;
 use a program or script directly. Shell `-c` declarations are refused.
 The declaration is limited to 128 items and 8 KiB of serialized JSON.
+
+The check approval prompt shows the declared vector. Its first run and each
+changed declaration require fresh confirmation; a denied call does not
+record approval. Only a completed check receipt matching that request
+establishes evidence. Later calls to tools that may write make it stale.
+After workspace work, a missing, failed or stale check gets at most three
+`before_stop` reminders per turn. Review, worker and job runs are excluded.
