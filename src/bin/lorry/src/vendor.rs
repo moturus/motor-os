@@ -613,7 +613,9 @@ fn add_change_review_rules(
                 allow_build_script: true,
                 allow_proc_macro: true,
                 native_tools,
-                caller_env: Default::default(),
+                caller_env: previous.capabilities.iter()
+                    .filter(|capability| capability.package == package.key.name)
+                    .flat_map(|capability| capability.caller_env.iter().cloned()).collect(),
                 provenance: Path::new(crate::admission_state::RELATIVE_PATH).to_path_buf(),
             },
         );

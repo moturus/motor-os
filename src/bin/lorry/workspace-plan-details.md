@@ -2505,6 +2505,16 @@ Original failures and targeted source, graph, compiler-command, and ELF diagnosi
 remain in `/tmp/lorry-m8-selected-macro-*`; fixture diagnosis copies are retained
 under `/tmp/lorry-member-macro-contract-{V9K0YA,TIi4wM,lT4ku6}`.
 
+Caller-variable grants now cover registry and Git scripts as well as named path
+scripts. Sorted names round-trip through optional portable capability fields,
+bind review commitments, and reconstruct package-specific grants. Empty old
+records preserve their canonical bytes. Existing capability comparison rejects
+policy changes before compilation until vendor review records them. Human
+reviews show changed capability records; machine summaries include name-only
+allowlists. Admission round-trip/commitment/control-variable tests, generated
+registry/Git policy projection, caller-only review diffs, configuration tests,
+and strict Clippy pass in `/tmp/lorry-m8-portable-caller-{admission,review,config,clippy}.log`.
+
 ### Member build-time code
 
 Replace the current rejection of a selected package's build script only

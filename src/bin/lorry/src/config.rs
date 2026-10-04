@@ -1090,14 +1090,12 @@ fn merge_policy_rules(
                 }
             }
         }
-        if !caller_env.is_empty()
-            && (!allow_build_script || source.as_deref() != Some("path") || name.is_none())
-        {
+        if !caller_env.is_empty() && (!allow_build_script || name.is_none()) {
             return Err(Error::at(
                 path,
                 document.line_of_table(table),
-                format!("policy rule `{id}` caller-env requires a named path build-script grant"),
-                "set name, source = \"path\", and allow-build-script = true; outside-source caller grants are not yet supported",
+                format!("policy rule `{id}` caller-env requires a named build-script grant"),
+                "set name and allow-build-script = true; outside-source caller grants must be covered by portable admission",
             ));
         }
         if !native_tools.is_empty() && !allow_build_script {
@@ -2803,7 +2801,7 @@ locked = [
     }
 
     #[test]
-    fn caller_env_grants_require_named_path_scripts_and_preserve_controlled_variables() {
+    fn caller_env_grants_require_named_scripts_and_preserve_controlled_variables() {
         let temp = TempDir::new();
         let path = temp.0.join("lorry.toml");
         for (identity, variables, accepted) in [
@@ -2815,7 +2813,12 @@ locked = [
             (
                 "name = \"member\"\nsource = \"crates.io\"\nallow-build-script = true",
                 "\"PUBLIC\"",
-                false,
+                true,
+            ),
+            (
+                "name = \"member\"\nsource = \"git\"\nallow-build-script = true",
+                "\"PUBLIC\"",
+                true,
             ),
             (
                 "source = \"path\"\nallow-build-script = true",

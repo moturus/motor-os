@@ -53,6 +53,11 @@ pub fn capabilities_from(
             build_script: package_evidence.build_script,
             proc_macro: package_evidence.proc_macro,
             native_tools,
+            caller_env: admission
+                .packages
+                .get(&package.key)
+                .map(|admission| admission.caller_env.iter().cloned().collect())
+                .unwrap_or_default(),
         });
     }
     capabilities.sort_by(|a, b| {
@@ -391,6 +396,7 @@ mod review {
         pub build_script: bool,
         pub proc_macro: bool,
         pub native_tools: Vec<NativeToolRole>,
+        pub caller_env: Vec<String>,
     }
 
     #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -863,7 +869,7 @@ mod review {
                         native_tools: capability
                             .map(|capability| capability.native_tools.iter().copied().collect())
                             .unwrap_or_default(),
-                        caller_env: Default::default(),
+                        caller_env: capability.map(|value| value.caller_env.iter().cloned().collect()).unwrap_or_default(),
                         provenance: CompactState::path(root),
                     },
                 );
@@ -903,7 +909,7 @@ mod review {
                         native_tools: capability
                             .map(|capability| capability.native_tools.iter().copied().collect())
                             .unwrap_or_default(),
-                        caller_env: Default::default(),
+                        caller_env: capability.map(|value| value.caller_env.iter().cloned().collect()).unwrap_or_default(),
                         provenance: CompactState::path(root),
                     },
                 );
@@ -1448,6 +1454,15 @@ mod review {
                     "contains native-tool grants without a build-script grant",
                 ));
             }
+            ordered(&value.caller_env, "caller environment names")?;
+            for name in &value.caller_env {
+                crate::build_script::validate_caller_environment_name(name)?;
+            }
+            if !value.build_script && !value.caller_env.is_empty() {
+                return Err(invalid(
+                    "contains caller environment grants without a build-script grant",
+                ));
+            }
         }
         Ok(())
     }
@@ -1504,6 +1519,9 @@ mod review {
             writer.boolean("build-script", value.build_script)?;
             writer.boolean("proc-macro", value.proc_macro)?;
             writer.names("native-tools", &value.native_tools, native_tool_name)?;
+            if !value.caller_env.is_empty() {
+                writer.strings("caller-env", &value.caller_env)?;
+            }
         }
         Ok(())
     }
@@ -1564,7 +1582,7 @@ mod review {
                         "proc-macro",
                         "native-tools",
                     ],
-                    &[],
+                    &["caller-env"],
                 )?;
                 let native_tools = required_strings(path, table, "native-tools")?
                     .into_iter()
@@ -1600,6 +1618,9 @@ mod review {
                     build_script,
                     proc_macro,
                     native_tools,
+                    caller_env: if table.contains_key("caller-env") {
+                        required_strings(path, table, "caller-env")?
+                    } else { Vec::new() },
                 })
             })
             .collect()
@@ -2241,6 +2262,7 @@ mod review {
                 build_script: true,
                 proc_macro: false,
                 native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
+                caller_env: Vec::new(),
             }
         }
 
@@ -2310,6 +2332,87 @@ mod review {
             state.capabilities[0].native_tools.clear();
             state.capabilities[0].proc_macro = true;
             state.validate().unwrap();
+        }
+
+        #[test]
+        fn caller_grants_round_trip_and_bind_the_review_commitment() {
+            let mut state = compact_state();
+            state.capabilities.push(capability());
+            let old = String::from_utf8(state.render().unwrap()).unwrap();
+            assert!(!old.contains("caller-env"));
+            assert!(
+                CompactState::parse(Path::new("state.toml"), old)
+                    .unwrap()
+                    .capabilities[0]
+                    .caller_env
+                    .is_empty()
+            );
+            state.capabilities[0].caller_env = vec!["EMPTY".into(), "PUBLIC".into()];
+            let bytes = state.render().unwrap();
+            assert_eq!(
+                CompactState::parse(Path::new("state.toml"), String::from_utf8(bytes).unwrap())
+                    .unwrap(),
+                state
+            );
+            let mut review = registry_review();
+            review.complete(vec![capability()]).unwrap();
+            let old = review.commitment().unwrap();
+            review.capabilities[0].caller_env = vec!["PUBLIC".into()];
+            assert_ne!(old, review.commitment().unwrap());
+            let mut policy = Policy::default();
+            review
+                .apply_to_policy(&mut policy, Path::new("/workspace"))
+                .unwrap();
+            assert_eq!(
+                policy.rules["lorry-state-00000"].caller_env,
+                ["PUBLIC".into()].into()
+            );
+            let source = "git+https://example.test/repo#0123456789012345678901234567890123456789";
+            review.git_sources.push(GitSource {
+                name: "git-demo".into(),
+                version: "1.0.0".into(),
+                source: source.into(),
+                license: "MIT".into(),
+                source_tree_sha256: "22".repeat(32),
+                build_script: true,
+                proc_macro: false,
+            });
+            let mut grant = capability();
+            grant.package = "git-demo".into();
+            grant.checksum = source_digest(source);
+            grant.caller_env = vec!["GIT_INPUT".into()];
+            review.capabilities.push(grant);
+            let mut policy = Policy::default();
+            review
+                .apply_to_policy(&mut policy, Path::new("/workspace"))
+                .unwrap();
+            assert_eq!(
+                policy.rules["lorry-state-git-00000"].caller_env,
+                ["GIT_INPUT".into()].into()
+            );
+        }
+
+        #[test]
+        fn caller_grants_reject_noncanonical_or_controlled_names() {
+            let mut state = compact_state();
+            state.capabilities.push(capability());
+            for names in [
+                vec!["PUBLIC", "EMPTY"],
+                vec!["PUBLIC", "PUBLIC"],
+                vec!["PATH"],
+                vec!["9BAD"],
+                vec!["CC_TARGET"],
+                vec!["RUSTC"],
+            ] {
+                state.capabilities[0].caller_env =
+                    names.iter().map(|name| (*name).into()).collect();
+                assert!(state.validate().is_err(), "{names:?}");
+            }
+            state.capabilities[0].caller_env = vec!["PUBLIC".into()];
+            state.capabilities[0].native_tools.clear();
+            state.capabilities[0].build_script = false;
+            state.capabilities[0].proc_macro = true;
+            assert!(state.validate().is_err());
         }
 
         #[test]
@@ -2425,6 +2528,7 @@ native-tools = ["archiver", "c-compiler"]
                 build_script: true,
                 proc_macro: false,
                 native_tools: Vec::new(),
+                caller_env: Vec::new(),
             });
             review.validate().unwrap();
             review.capabilities[0].build_script = false;
@@ -2901,6 +3005,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     build_script: true,
                     proc_macro: false,
                     native_tools: Vec::new(),
+                    caller_env: Vec::new(),
                 }])
                 .unwrap();
             review
@@ -3147,6 +3252,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 build_script: true,
                 proc_macro: false,
                 native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
+                caller_env: Vec::new(),
             });
 
             let bytes = review.render().unwrap();
@@ -3356,6 +3462,7 @@ mod tests {
                 build_script: true,
                 proc_macro: false,
                 native_tools: Vec::new(),
+                caller_env: Vec::new(),
             }],
         }
     }
@@ -3399,6 +3506,7 @@ mod tests {
                 build_script: true,
                 proc_macro: false,
                 native_tools: Vec::new(),
+                caller_env: Vec::new(),
             }])
             .unwrap();
         review

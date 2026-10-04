@@ -96,6 +96,7 @@ pub(crate) fn approve_json(
                     "name": capability.package, "version": capability.version,
                     "checksum": capability.checksum, "build_script": capability.build_script,
                     "proc_macro": capability.proc_macro,
+                    "caller_env": capability.caller_env,
                     "native_tools": capability.native_tools.iter().map(|role| match role {
                         crate::config::NativeToolRole::CCompiler => "c-compiler",
                         crate::config::NativeToolRole::Archiver => "archiver",
@@ -399,6 +400,7 @@ mod tests {
                 build_script: true,
                 proc_macro: false,
                 native_tools: vec![NativeToolRole::CCompiler],
+                caller_env: Vec::new(),
             }])
             .unwrap();
         let mut next = previous.clone();
@@ -442,7 +444,7 @@ mod tests {
                         key,
                         crate::policy::PackageAdmission {
                             matching_allow_rules: vec![],
-                            caller_env: Default::default(),
+                            caller_env: ["EMPTY".into(), "PUBLIC".into()].into(),
                             native_tools: [NativeToolRole::CCompiler, NativeToolRole::Archiver]
                                 .into(),
                         },
@@ -478,10 +480,38 @@ mod tests {
         );
         assert_eq!(message["capabilities_added"][0]["checksum"], checksum);
         assert_eq!(
+            message["capabilities_removed"][0]["caller_env"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            message["capabilities_added"][0]["caller_env"],
+            serde_json::json!(["EMPTY", "PUBLIC"])
+        );
+        assert_eq!(
             message["review"],
             String::from_utf8(next.render().unwrap()).unwrap()
         );
         assert_eq!(String::from_utf8(output).unwrap().lines().count(), 1);
+        let mut caller_only = previous.clone();
+        caller_only.capabilities[0].caller_env = vec!["PUBLIC".into()];
+        let mut output = Vec::new();
+        approve_json(
+            Some(&previous),
+            None,
+            &caller_only,
+            Mode::AcceptAll,
+            false,
+            &mut std::io::Cursor::new([]),
+            &mut output,
+        )
+        .unwrap();
+        let message: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(message["capabilities_added"].as_array().unwrap().len(), 1);
+        assert_eq!(message["capabilities_removed"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            message["capabilities_added"][0]["caller_env"],
+            serde_json::json!(["PUBLIC"])
+        );
     }
 
     #[test]

@@ -795,6 +795,11 @@ least one capability. The checksum field is the registry checksum for a
 crates.io package and SHA-256 of the canonical Cargo.lock source string for a
 Git package. `native-tools` is sorted and duplicate-free, recognizes only the
 roles defined by this specification, and requires `build-script = true`.
+Optional `caller-env` names are sorted, unique, and require `build-script = true`.
+Omission means no caller grants and remains omitted in canonical output,
+preserving old empty-grant commitments. Names use the same controlled-variable
+validation as package policy. Both review and compact state bind these grants;
+human and machine change reviews show additions and removals without values.
 Every capability has explicit `build-script` and `proc-macro` booleans and at
 least one must be true. Each true value requires matching verified source
 evidence. Packages with no exceptional capability do not appear in the
@@ -1125,14 +1130,14 @@ build-script or procedural-macro capability. Their native-tool grants may omit
 `source-tree-sha256`; a same-named nonmember path package still requires that pin
 before receiving native tools. Missing-grant diagnostics suggest the member's
 name, and do not suggest pinning mutable member source trees.
-Named path build-script rules may grant `caller-env = ["NAME"]`. Only matching
+Named build-script rules may grant `caller-env = ["NAME"]`. Only matching
 script grants expose those variables, with an empty allowlist by default.
 Unset and empty values remain distinct script/cache inputs. Compiler, Cargo,
 native-tool, loader, and temporary-directory control variables cannot be
 overridden through this allowlist. If a script tracks a caller-set variable
 that was hidden, Lorry warns with its name and configuration advice, never its
-value. Caller grants for crates.io and Git are rejected until their portable
-admission representation is implemented.
+value. Crates.io and Git caller grants must match the portable capability
+record; changed grants require another vendor review before compilation.
 
 Dependency depth has no default cap, matching Cargo. An explicitly configured
 `policy.limits.max-depth` bounds resolution, source preparation, and admission.

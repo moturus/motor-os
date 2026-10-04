@@ -193,6 +193,8 @@ cover executable bytes, JSON, primary-package variables, and caller isolation.
 Selected procedural-macro members now build and check too, including separate
 root/dependency profiles and check metadata. Native and cross-Motor debug and
 release comparisons cover their artifacts and consumers.
+Registry and Git caller-variable grants now round-trip through portable
+admission and appear in capability change reviews.
 
 ## Goal
 
