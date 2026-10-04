@@ -137,6 +137,18 @@ only three missing-check reminders. No provider or Internet request is made.
   including the installed workflows, native source builds and Lorry's
   complete product suite (643 seconds). Its log is
   `/tmp/gears-batteries-host-rg-dev-release.log`.
+- The user's first native OpenRouter conversation claimed access to
+  `execute_command`, `fetch_web_page` and `view_image`, none of which are
+  shipped Gears tools. Source review and the existing provider/runtime
+  regressions confirm that enabled tool names and schemas are passed
+  through without these substitutions. The system prompt now states that
+  the request's tool definitions are the complete available list, requires
+  exact names and declared capabilities, and explains the no-tools case.
+  The user's active configuration and `/tools` output are not yet confirmed;
+  the default sample disables every directory tool. The Gears release gate
+  passes (`/tmp/gears-tool-inventory-prompt-host-gate.log`), as does the native
+  release build (`/tmp/gears-tool-inventory-prompt-motor-build.log`). This is
+  prompt hardening; the reported real-model response has not been retested.
 
 ## Validation boundaries
 
