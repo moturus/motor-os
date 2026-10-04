@@ -3,7 +3,8 @@ use crate::admission_state::ReviewScope;
 use crate::cli::{FeatureSelection, FetchOptions};
 use crate::manifest::SourceWorkspace;
 use crate::resolver::workspace::{
-    features::member_requests, resolve_complete_workspace, resolve_selected_workspace,
+    features::member_requests, resolve_complete_workspace, resolve_locked_workspace,
+    resolve_selected_workspace,
 };
 
 pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
@@ -516,11 +517,11 @@ fn resolve_locked(
         true,
     )?;
     catalog.use_fetch_hint();
-    let complete = resolve_complete_workspace(
+    let complete = resolve_locked_workspace(
         workspace,
         &mut catalog,
         options,
-        &LockedPreference::from_lockfile(Some(lock))?,
+        lock,
         &mut |name, _, catalog| acquisition.load_locked_sparse(manifest, name, catalog, offline),
     )?;
     crate::offline::validate_workspace_resolution(lock, &complete)?;

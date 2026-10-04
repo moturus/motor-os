@@ -209,6 +209,44 @@ pub(crate) fn resolve_complete_workspace(
     locked: &[LockedPreference],
     loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
+    resolve_workspace_complete(
+        workspace,
+        catalog,
+        options,
+        locked,
+        Scope::WorkspaceComplete { locked: None },
+        loader,
+    )
+}
+
+pub(crate) fn resolve_locked_workspace(
+    workspace: &SourceWorkspace,
+    catalog: &mut Catalog,
+    options: &Options,
+    lock: &Lockfile,
+    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
+) -> Result<Resolution> {
+    let edges = locked::Edges::new(lock)?;
+    resolve_workspace_complete(
+        workspace,
+        catalog,
+        options,
+        &LockedPreference::from_lockfile(Some(lock))?,
+        Scope::WorkspaceComplete {
+            locked: Some(&edges),
+        },
+        loader,
+    )
+}
+
+fn resolve_workspace_complete(
+    workspace: &SourceWorkspace,
+    catalog: &mut Catalog,
+    options: &Options,
+    locked: &[LockedPreference],
+    scope: Scope<'_>,
+    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
+) -> Result<Resolution> {
     catalog.workspace_root.clone_from(&workspace.root);
     catalog.descriptive_sources = true;
     catalog.workspace_members = workspace
@@ -290,21 +328,14 @@ pub(crate) fn resolve_complete_workspace(
             parent: None,
             parent_compile_kind: None,
             dependency_index: index,
-            context: root_context(options.resolver, Scope::WorkspaceComplete, &dependency),
+            context: root_context(options.resolver, scope, &dependency),
             compile_kind: CompileKind::Target,
             dependency,
             depth: 0,
             ancestors: BTreeSet::new(),
         });
     }
-    let resolution = solve_request(
-        queue,
-        catalog,
-        &options,
-        locked,
-        Scope::WorkspaceComplete,
-        loader,
-    )?;
+    let resolution = solve_request(queue, catalog, &options, locked, scope, loader)?;
     let packages = resolution
         .packages
         .iter()

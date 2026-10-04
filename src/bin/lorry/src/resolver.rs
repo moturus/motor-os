@@ -20,6 +20,7 @@ use crate::source_tree::{DEFAULT_LIMITS as DEFAULT_TREE_LIMITS, Exclusions, Tree
 use crate::sparse::{Dependency, DependencyKind, Record, RustVersion};
 use crate::toolchain::CfgSet;
 
+mod locked;
 mod search;
 use search::solve;
 pub(crate) mod workspace;
@@ -994,7 +995,9 @@ fn solve_request(
 #[derive(Clone, Copy)]
 enum Scope<'a> {
     Complete,
-    WorkspaceComplete,
+    WorkspaceComplete {
+        locked: Option<&'a locked::Edges>,
+    },
     Selected(TargetSelection<'a>),
     WorkspaceSelected {
         selection: TargetSelection<'a>,
@@ -1007,6 +1010,20 @@ enum Scope<'a> {
 }
 
 impl<'a> Scope<'a> {
+    fn locked_dependencies(
+        self,
+        event: &Event,
+    ) -> std::result::Result<Option<&'a BTreeSet<locked::Identity>>, Failure> {
+        match (self, &event.parent) {
+            (
+                Self::WorkspaceComplete {
+                    locked: Some(edges),
+                },
+                Some(parent),
+            ) => edges.dependencies(parent).map(Some),
+            _ => Ok(None),
+        }
+    }
     fn matches(self, compile_kind: CompileKind, selector: Option<&str>) -> Result<bool> {
         let Some(selector) = selector else {
             return Ok(true);
@@ -1659,7 +1676,9 @@ fn activate(
             .local_manifest
             .as_ref()
             .is_some_and(|manifest| match scope {
-                Scope::WorkspaceComplete | Scope::WorkspaceMetadata { .. } => manifest.editable,
+                Scope::WorkspaceComplete { .. } | Scope::WorkspaceMetadata { .. } => {
+                    manifest.editable
+                }
                 Scope::WorkspaceSelected { dev_members, .. } => {
                     dev_members.contains(&manifest.root)
                 }
@@ -1989,7 +2008,7 @@ fn root_context(
 ) -> FeatureContext {
     let context = match scope {
         Scope::WorkspaceMetadata { .. } => FeatureContext::Unified,
-        Scope::Complete | Scope::WorkspaceComplete => {
+        Scope::Complete | Scope::WorkspaceComplete { .. } => {
             FeatureContext::Target(dependency.target.clone().unwrap_or_default())
         }
         Scope::Selected(_) | Scope::WorkspaceSelected { .. } => {
@@ -2005,7 +2024,9 @@ fn child_target_context(
     selector: Option<&str>,
 ) -> FeatureContext {
     match scope {
-        Scope::Complete | Scope::WorkspaceComplete => target_dependency_context(parent, selector),
+        Scope::Complete | Scope::WorkspaceComplete { .. } => {
+            target_dependency_context(parent, selector)
+        }
         Scope::Selected(_) | Scope::WorkspaceSelected { .. } | Scope::WorkspaceMetadata { .. } => {
             parent
         }
@@ -2573,6 +2594,77 @@ mod tests {
                 assert_eq!(selected.packages.len(), 2);
             }
         }
+    }
+
+    #[test]
+    fn locked_parent_edges_match_cargo_after_broadening_a_requirement() {
+        let fixture = LocalFixture::new();
+        let root = fixture.0.join("ws");
+        fixture.package("ws/a", "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\ndemo = \"1\"\n");
+        let b = "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\ndemo = \"2\"\n";
+        fixture.package("ws/b", b);
+        for (directory, version) in [("one", "1.0.0"), ("two", "2.0.0")] {
+            fixture.package(directory, &format!("[package]\nname = \"demo\"\nversion = \"{version}\"\nedition = \"2021\"\n[workspace]\n"));
+        }
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n\
+            [patch.crates-io]\none = { package = \"demo\", path = \"../one\" }\ntwo = { package = \"demo\", path = \"../two\" }\n").unwrap();
+        let cargo = |args: &[&str]| {
+            std::process::Command::new(env!("CARGO"))
+                .args(args)
+                .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(&root)
+                .output()
+                .unwrap()
+        };
+        let generated = cargo(&["generate-lockfile", "--offline"]);
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let original = fs::read(root.join("Cargo.lock")).unwrap();
+        fs::write(
+            root.join("b/Cargo.toml"),
+            b.replace("demo = \"2\"", "demo = \"*\""),
+        )
+        .unwrap();
+        let metadata = cargo(&["metadata", "--locked", "--offline", "--format-version=1"]);
+        assert!(
+            metadata.status.success(),
+            "{}",
+            String::from_utf8_lossy(&metadata.stderr)
+        );
+        assert_eq!(fs::read(root.join("Cargo.lock")).unwrap(), original);
+        let source = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        let lock = Lockfile::load(&root.join("Cargo.lock")).unwrap();
+        let mut catalog = Catalog::default();
+        for directory in ["one", "two"] {
+            let path = fixture.0.join(directory);
+            let manifest = Manifest::load_path_dependency(&path).unwrap();
+            let digest = Tree::scan(&path, DEFAULT_TREE_LIMITS, Exclusions::GitAndTarget)
+                .unwrap()
+                .sha256;
+            catalog
+                .insert_path_patch(manifest, path.clone(), path, digest)
+                .unwrap();
+        }
+        let complete = workspace::resolve_locked_workspace(
+            &source,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &lock,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        crate::offline::validate_workspace_resolution(&lock, &complete).unwrap();
+        assert_eq!(complete.packages.len(), 4);
+        let b = complete
+            .packages
+            .iter()
+            .find(|package| package.key.name == "b")
+            .unwrap();
+        assert_eq!(b.lock_edges[0].package.version, Version::new(2, 0, 0));
     }
 
     fn cargo_unit_features(output: &[u8]) -> BTreeMap<String, BTreeSet<String>> {

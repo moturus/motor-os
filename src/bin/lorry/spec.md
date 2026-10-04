@@ -563,6 +563,9 @@ location to which its settings should move. System constraints still apply.
   authoritative, and Lorry preserves Cargo's canonical crates.io lock source.
 - A locked checksum that conflicts with the index or archive is an integrity
   failure and must never be repaired silently.
+- Locked resolution constrains every dependency to its parent package's lock
+  edges. It never substitutes an already-selected compatible version when
+  that parent names a different locked identity.
 - Git dependency references omit the commit. In Cargo lock formats 1 and 2,
   they also omit `?branch=master`, while package sources retain it. Validation
   and canonical review accept that legacy spelling only for those formats;

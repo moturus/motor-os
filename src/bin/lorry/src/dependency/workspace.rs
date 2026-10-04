@@ -1,6 +1,6 @@
 use super::*;
 use crate::manifest::SourceWorkspace;
-use crate::resolver::workspace::resolve_complete_workspace;
+use crate::resolver::workspace::resolve_locked_workspace;
 
 pub(crate) mod admission;
 
@@ -29,11 +29,11 @@ pub(crate) fn resolve_locked(
         .ok_or_else(|| Error::failure("workspace dependency preparation requires Cargo.lock"))?;
     let mut catalog = locked_catalog(context, config, source, Some(direct), true)?;
     catalog.use_fetch_hint();
-    let complete = resolve_complete_workspace(
+    let complete = resolve_locked_workspace(
         workspace,
         &mut catalog,
         options,
-        &LockedPreference::from_lockfile(Some(lock))?,
+        lock,
         &mut |_, _, _| Ok(()),
     )?;
     offline::validate_workspace_resolution(lock, &complete)?;

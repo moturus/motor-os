@@ -12,6 +12,7 @@ struct Frame {
     choices: VecDeque<Choice>,
     candidates_loaded: bool,
     locked_package: Option<PackageKey>,
+    allowed: Option<BTreeSet<locked::Identity>>,
     last_failure: Option<Failure>,
 }
 
@@ -24,6 +25,7 @@ impl Frame {
             choices: VecDeque::new(),
             candidates_loaded: false,
             locked_package: None,
+            allowed: None,
             last_failure: None,
         }
     }
@@ -41,6 +43,7 @@ impl Frame {
                 return Ok(None);
             };
             let locked_package = scope.locked_package(&event)?;
+            self.allowed = scope.locked_dependencies(&event)?.cloned();
             if event.dependency.source == RequirementSource::CratesIo {
                 loader(
                     &event.dependency.package,
@@ -67,6 +70,9 @@ impl Frame {
                             && event.dependency.matches_version(&key.version)
                             && source_matches(&node.record.source, &event.dependency.source)
                             && locked_package.is_none_or(|locked| locked == *key)
+                            && self.allowed.as_ref().is_none_or(|allowed| {
+                                allowed.contains(&locked::Identity::from_key(key))
+                            })
                     })
                     .map(|(key, _)| Choice::Selected(key.clone())),
             );
@@ -90,7 +96,13 @@ impl Frame {
                             self.locked_package
                                 .as_ref()
                                 .is_none_or(|locked| locked == &key)
-                                .then(|| Choice::New(key, Arc::new(record)))
+                                .then_some((key, record))
+                                .filter(|(key, _)| {
+                                    self.allowed.as_ref().is_none_or(|allowed| {
+                                        allowed.contains(&locked::Identity::from_key(key))
+                                    })
+                                })
+                                .map(|(key, record)| Choice::New(key, Arc::new(record)))
                         }),
                 );
                 self.candidates_loaded = true;
