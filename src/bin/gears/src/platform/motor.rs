@@ -201,6 +201,10 @@ pub fn kill_tree(child: &std::process::Child) -> bool {
     complete
 }
 
+pub fn cleanup_after_exit(child: &std::process::Child) -> bool {
+    kill_tree(child)
+}
+
 fn child_pids(parent: u64) -> Result<Vec<u64>, ()> {
     const FIRST_CAPACITY: usize = 16;
     const MAX_CAPACITY: usize = 65_536;

@@ -65,33 +65,76 @@ pub fn install_interrupt_handler() -> bool {
     }
 }
 
-/// Start `command` in a process group of its own, so that a timeout can stop
-/// everything it started. `cargo` is a tree, and killing only the process
-/// gears spawned would leave `rustc` running behind it.
-///
-/// The cost of the group is that a terminal `^C` no longer reaches the child;
-/// stopping a running tool on demand arrives through the runtime's
-/// cancellation flag, which also has to work on Motor OS — where there are no
-/// signals to deliver and a tty could not do it anyway.
-pub fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
-    use std::os::unix::process::CommandExt;
-    command.process_group(0).spawn()
+const GROUP_ENV: &str = "GEARS_PROCESS_GROUP";
+
+/// The first child discovers its new group's id after exec. Nested runners
+/// pass the numeric id onward, checking membership and the owning ancestor.
+fn inherited_group() -> io::Result<Option<libc::pid_t>> {
+    let value = match std::env::var(GROUP_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
+    };
+    let actual = unsafe { libc::getpgrp() };
+    let selected = if value == "new" {
+        actual
+    } else {
+        value.parse().unwrap_or(0)
+    };
+    if selected <= 1
+        || selected != actual
+        || (selected as u32 != std::process::id() && !process_is_descendant_of(selected as u32))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inherited Gears process group does not match its owning ancestor",
+        ));
+    }
+    Ok(Some(selected))
 }
 
-/// Kill `child` and everything in its process group. The group is the child's
-/// own (see [`spawn`]), so this can never reach gears itself.
+/// Only the outer runner creates a group. Its nested Gears and tools remain
+/// in that group so parent cancellation cannot leave a worker's tool behind.
+pub fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    match inherited_group()? {
+        Some(group) => {
+            command.env(GROUP_ENV, group.to_string());
+        }
+        None => {
+            command.env(GROUP_ENV, "new").process_group(0);
+        }
+    }
+    command.spawn()
+}
+
+/// Nested normal completion does not stop the shared group. Its outer owner
+/// cleans up when the wrapper finishes; a nested timeout stops the whole run.
+pub fn cleanup_after_exit(child: &std::process::Child) -> bool {
+    match inherited_group() {
+        Ok(Some(_)) => true,
+        Ok(None) => kill_tree(child),
+        Err(_) => false,
+    }
+}
+
 pub fn kill_tree(child: &std::process::Child) -> bool {
-    let Ok(pid @ 1..) = libc::pid_t::try_from(child.id()) else {
-        return false;
+    let group = match inherited_group() {
+        Ok(Some(group)) => group,
+        Ok(None) => match libc::pid_t::try_from(child.id()) {
+            Ok(group @ 1..) => group,
+            _ => return false,
+        },
+        Err(_) => return false,
     };
-    if unsafe { libc::killpg(pid, libc::SIGKILL) } != 0 {
+    if unsafe { libc::killpg(group, libc::SIGKILL) } != 0 {
         return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
     }
     // Signal delivery is asynchronous. A successful killpg does not yet
     // mean a grandchild has stopped before the next tool starts.
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        match process_group_has_live_members(pid) {
+        match process_group_has_live_members(group) {
             Ok(false) => return true,
             Ok(true) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(1));

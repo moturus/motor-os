@@ -154,7 +154,7 @@ pub fn run(
         match child.try_wait() {
             Ok(Some(status)) => {
                 // A wrapper can exit while its descendants still hold our pipes.
-                break (status, crate::platform::kill_tree(&child));
+                break (status, crate::platform::cleanup_after_exit(&child));
             }
             Ok(None) => {}
             Err(error) => {

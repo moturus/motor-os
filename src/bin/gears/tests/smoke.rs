@@ -312,6 +312,91 @@ fn jsonl_failed_turn_ends_with_a_final_error_and_nonzero_status() {
 }
 
 #[test]
+fn owned_nested_gears_keeps_normal_tools_alive_and_stops_all_children_on_interrupt() {
+    use gears::process::{Cancellation, Request, run};
+    for mode in ["normal", "cancel", "timeout"] {
+        let root = fixture(&format!("nested-{mode}"));
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let command = if mode == "normal" {
+            "printf nested-normal"
+        } else {
+            "printf '%s' $$ > child.pid; sleep 30 & printf '%s' $! > grandchild.pid; printf nested-ready; wait"
+        };
+        let arguments = serde_json::json!({"command": command, "timeout": if mode == "timeout" { 1 } else { 30 }}).to_string();
+        let call = serde_json::json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
+            "index": 0, "id": "nested-call", "function": {"name": "sh", "arguments": arguments}
+        }]}, "finish_reason": "tool_calls"}]})
+        .to_string();
+        let mut scripts = vec![sse_response(&[&call])];
+        if mode == "normal" {
+            scripts.push(sse_response(&[r#"{"choices":[{"index":0,"delta":{"content":"nested done"},"finish_reason":"stop"}]}"#]));
+        }
+        let server = MockServer::start(scripts).unwrap();
+        let cfg = config(&root, &server);
+        let mut text = std::fs::read_to_string(&cfg).unwrap();
+        text.push_str(&format!(
+            "\n[[tools]]\ndirectory = {:?}\nenabled = true\n",
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tools/sh")
+                .to_str()
+                .unwrap()
+        ));
+        text.push_str("\n[[hooks]]\nname = 'policy'\nevents = ['permission']\ncommand = ['/bin/sh', '-c', \"cat >/dev/null; printf '{\\\"decision\\\":\\\"allow\\\"}'\"]\n");
+        std::fs::write(&cfg, text).unwrap();
+        let cancellation = Cancellation::new();
+        let mut streamed = String::new();
+        let output = run(&Request {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec \"$1\" --config \"$2\" --workspace \"$3\" --ephemeral --output jsonl -p nested".into(),
+                "wrapper".into(), env!("CARGO_BIN_EXE_gears").into(), cfg.display().to_string(), workspace.display().to_string()],
+            cwd: workspace.clone(), stdin: None, timeout: Duration::from_secs(5), max_output_bytes: 65536,
+            env: vec![("HOME".into(), root.display().to_string()), ("OPENROUTER_API_KEY".into(), "test-key".into())],
+            remove_env: Vec::new(),
+        }, &cancellation, &mut |stream, text| {
+            if stream == gears::process::Stream::Stdout {
+                streamed.push_str(text);
+                if mode == "cancel" && streamed.lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .any(|record| record["type"] == "tool_output"
+                        && record["text"].as_str().is_some_and(|text| text.contains("nested-ready"))) {
+                    cancellation.cancel();
+                }
+            }
+        }).unwrap();
+        assert!(!output.timed_out, "{mode}: {output:?}");
+        if mode == "normal" {
+            assert_eq!(output.code, Some(0), "{output:?}");
+            assert!(output.stdout.contains("nested done"), "{output:?}");
+        } else {
+            assert!(streamed.contains("nested-ready"), "{mode}: {output:?}");
+            assert_eq!(output.cancelled, mode == "cancel");
+            assert!(
+                output.code.is_none(),
+                "{mode}: nested run was not killed: {output:?}"
+            );
+            for name in ["child.pid", "grandchild.pid"] {
+                let pid = std::fs::read_to_string(workspace.join(name)).unwrap();
+                if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                    let state = stat
+                        .rsplit_once(") ")
+                        .unwrap()
+                        .1
+                        .split_whitespace()
+                        .next()
+                        .unwrap();
+                    assert!(
+                        matches!(state, "Z" | "X" | "x"),
+                        "{mode}: {name} still running: {stat}"
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn configured_tools_are_validated_before_a_provider_request() {
     let root = fixture("tool-validation");
     let workspace = root.join("workspace");
