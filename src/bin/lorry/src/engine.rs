@@ -1482,6 +1482,21 @@ fn build_inner(
         );
         compiled.dep_info.sort();
         compiled.dep_info.dedup();
+        compiled.script_inputs = outputs
+            .build_scripts
+            .values()
+            .flat_map(|script| {
+                script.output.directives.iter().filter_map(|directive| {
+                    if let crate::build_script::Directive::RerunIfChanged(path) = directive {
+                        Some(path.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        compiled.script_inputs.sort();
+        compiled.script_inputs.dedup();
     }
 
     if let Some(base) = freshness_base {
@@ -1608,7 +1623,7 @@ fn report_finished(
     Ok(())
 }
 
-const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v5";
+const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v6";
 const MAX_FRESH_PROFILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -1626,6 +1641,8 @@ struct FreshProfile {
     binaries: BTreeMap<String, FreshArtifact>,
     local_roots: Vec<LocalSource>,
     dep_info: Vec<PathBuf>,
+    script_inputs: Vec<PathBuf>,
+    script_inputs_sha256: [u8; 32],
     messages: Vec<serde_json::Value>,
     library_paths: Vec<PathBuf>,
 }
@@ -1801,6 +1818,9 @@ fn restore_fresh_profile(
     if record.base != base {
         return None;
     }
+    if script_input_digest(&record.script_inputs).ok() != Some(record.script_inputs_sha256) {
+        return None;
+    }
     for message in &record.messages {
         match message.get("reason")?.as_str()? {
             "compiler-artifact" => {
@@ -1893,9 +1913,10 @@ fn write_fresh_profile(
     };
     let primary_sha256 = artifact_sha256(&artifacts.primary)?;
     let mut document = format!(
-        "lorry-fresh-v5\nbase={}\ninputs={}\nprimary={}\t{}\nmessages={}\n",
+        "lorry-fresh-v6\nbase={}\ninputs={}\nscript-inputs={}\nprimary={}\t{}\nmessages={}\n",
         hex(&base),
         hex(&inputs),
+        hex(&script_input_digest(&artifacts.script_inputs)?),
         hex(&primary_sha256),
         primary.display(),
         serde_json::to_string(&artifacts.messages).map_err(|error| {
@@ -1920,6 +1941,12 @@ fn write_fresh_profile(
             "local-root"
         };
         document.push_str(&format!("{kind}={}\n", hex(root.as_bytes())));
+    }
+    for path in &artifacts.script_inputs {
+        let Some(path) = path.to_str() else {
+            return Ok(());
+        };
+        document.push_str(&format!("script-input={}\n", hex(path.as_bytes())));
     }
     for path in &artifacts.library_paths {
         let path = path
@@ -1950,9 +1977,10 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
     }
     let document = String::from_utf8(fs::read(path).ok()?).ok()?;
     let mut lines = document.lines();
-    (lines.next()? == "lorry-fresh-v5").then_some(())?;
+    (lines.next()? == "lorry-fresh-v6").then_some(())?;
     let base = decode_hex(lines.next()?.strip_prefix("base=")?).ok()?;
     let inputs = decode_hex(lines.next()?.strip_prefix("inputs=")?).ok()?;
+    let script_inputs_sha256 = decode_hex(lines.next()?.strip_prefix("script-inputs=")?).ok()?;
     let primary = parse_fresh_artifact(lines.next()?.strip_prefix("primary=")?)?;
     let messages: Vec<serde_json::Value> =
         serde_json::from_str(lines.next()?.strip_prefix("messages=")?).ok()?;
@@ -1973,6 +2001,7 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
     let mut binaries = BTreeMap::new();
     let mut local_roots = Vec::new();
     let mut dep_info = Vec::new();
+    let mut script_inputs = Vec::new();
     let mut library_paths = Vec::new();
     for line in lines {
         if let Some(value) = line.strip_prefix("binary=") {
@@ -1991,6 +2020,10 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
                 root: PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?),
                 editable: line.starts_with("editable-root="),
             });
+        } else if let Some(value) = line.strip_prefix("script-input=") {
+            let path = PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?);
+            path.is_absolute().then_some(())?;
+            script_inputs.push(path);
         } else if let Some(value) = line.strip_prefix("dep-info-absolute=") {
             let path = PathBuf::from(String::from_utf8(decode_bytes(value)?).ok()?);
             path.is_absolute().then_some(())?;
@@ -2010,6 +2043,8 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
         binaries,
         local_roots,
         dep_info,
+        script_inputs,
+        script_inputs_sha256,
         messages,
         library_paths,
     })
@@ -2116,6 +2151,52 @@ fn fresh_input_digest(
     for (path, sha256) in sources {
         digest.os("source-path", path.as_os_str());
         digest.bytes("source", &sha256);
+    }
+    Ok(digest.finish())
+}
+
+fn script_input_digest(inputs: &[PathBuf]) -> Result<[u8; 32]> {
+    let mut digest = FreshDigest::new();
+    let mut pending = inputs.to_vec();
+    let mut directories = std::collections::BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        let canonical = fs::canonicalize(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to resolve build-script input `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        digest.os("script-input-path", path.as_os_str());
+        digest.os("script-input-resolved", canonical.as_os_str());
+        let metadata = fs::metadata(&canonical).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect build-script input `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.is_file() {
+            digest.file("script-input-file", &canonical)?;
+        } else if metadata.is_dir() {
+            digest.bytes("script-input-kind", b"directory");
+            // Canonical identities prevent loops without hiding link retargets.
+            if directories.insert(canonical) {
+                let mut children = fs::read_dir(&path)
+                    .map_err(|error| Error::failure(error.to_string()))?
+                    .map(|entry| {
+                        entry
+                            .map(|entry| entry.path())
+                            .map_err(|error| Error::failure(error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                children.sort();
+                pending.extend(children);
+            }
+        } else {
+            return Err(Error::failure(format!(
+                "build-script input `{}` is not a regular file or directory",
+                path.display()
+            )));
+        }
     }
     Ok(digest.finish())
 }
@@ -2456,6 +2537,7 @@ struct StagedArtifacts {
     harnesses: Vec<PathBuf>,
     bundle: Option<PathBuf>,
     dep_info: Vec<PathBuf>,
+    script_inputs: Vec<PathBuf>,
     messages: Vec<serde_json::Value>,
     library_paths: Vec<PathBuf>,
 }
@@ -2566,6 +2648,7 @@ fn compile_root_targets(
             harnesses: Vec::new(),
             bundle: None,
             dep_info,
+            script_inputs: Vec::new(),
             messages: Vec::new(),
             library_paths: Vec::new(),
         });
@@ -2582,6 +2665,7 @@ fn compile_root_targets(
         harnesses: Vec::new(),
         bundle: None,
         dep_info: vec![library.dep_info.clone()],
+        script_inputs: Vec::new(),
         messages: Vec::new(),
         library_paths: Vec::new(),
     })
@@ -2630,6 +2714,7 @@ fn compile_test_targets(
         harnesses,
         bundle: bundled,
         dep_info: Vec::new(),
+        script_inputs: Vec::new(),
         messages: Vec::new(),
         library_paths: Vec::new(),
     })
@@ -2719,6 +2804,7 @@ fn compile_planned_test_targets(
         harnesses,
         bundle: bundled,
         dep_info: Vec::new(),
+        script_inputs: Vec::new(),
         messages: Vec::new(),
         library_paths: Vec::new(),
     })
@@ -3312,6 +3398,82 @@ mod tests {
     }
 
     #[test]
+    fn completed_profiles_track_script_files_directories_and_symlink_retargets() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let profile = fixture.0.join("target/lorry/debug");
+        let directory = fixture.0.join("workspace-inputs");
+        fs::create_dir_all(&profile).unwrap();
+        fs::create_dir(&directory).unwrap();
+        let first = fixture.0.join("first-input");
+        let second = fixture.0.join("second-input");
+        let link = fixture.0.join("script-input");
+        fs::write(&first, b"same").unwrap();
+        fs::write(&second, b"same").unwrap();
+        symlink(&first, &link).unwrap();
+        let artifact = profile.join("root-bin");
+        let dep_info = profile.join("root-bin.d");
+        fs::write(&artifact, b"artifact").unwrap();
+        fs::write(
+            &dep_info,
+            format!(
+                "{}: {}\n",
+                artifact.display(),
+                fixture.0.join("src/main.rs").display()
+            ),
+        )
+        .unwrap();
+        let staged = StagedArtifacts {
+            primary: artifact.clone(),
+            binaries: BTreeMap::from([("root-bin".to_owned(), artifact)]),
+            harnesses: Vec::new(),
+            bundle: None,
+            dep_info: vec![dep_info],
+            script_inputs: vec![link.clone(), directory.clone()],
+            messages: Vec::new(),
+            library_paths: Vec::new(),
+        };
+        for validation in [ValidationMode::Trusted, ValidationMode::Strict] {
+            let base = [7; 32];
+            write_fresh_profile(
+                &profile,
+                &fixture.0,
+                &fixture.0,
+                base,
+                &staged,
+                &[],
+                validation,
+            )
+            .unwrap();
+            assert_eq!(
+                read_fresh_profile(&profile, &fixture.0)
+                    .unwrap()
+                    .script_inputs,
+                staged.script_inputs
+            );
+            let fresh = || {
+                restore_fresh_profile(&profile, &fixture.0, &fixture.0, base, validation).is_some()
+            };
+            assert!(fresh());
+            fs::write(&first, b"different").unwrap();
+            assert!(!fresh());
+            fs::write(&first, b"same").unwrap();
+            assert!(fresh());
+            let added = directory.join("new-input");
+            fs::write(&added, b"new").unwrap();
+            assert!(!fresh());
+            fs::remove_file(&added).unwrap();
+            assert!(fresh());
+            fs::remove_file(&link).unwrap();
+            symlink(&second, &link).unwrap();
+            assert!(!fresh(), "an identical-content retarget must invalidate");
+            fs::remove_file(&link).unwrap();
+            symlink(&first, &link).unwrap();
+            assert!(fresh());
+        }
+    }
+
+    #[test]
     fn ordinary_freshness_trusts_artifact_contents_but_strict_mode_does_not() {
         let fixture = Fixture::new();
         let profile = fixture.0.join("target/lorry/debug");
@@ -3331,6 +3493,7 @@ mod tests {
             harnesses: Vec::new(),
             bundle: None,
             dep_info: vec![dep_info],
+            script_inputs: Vec::new(),
             messages: Vec::new(),
             library_paths: Vec::new(),
         };
@@ -3421,6 +3584,7 @@ mod tests {
             harnesses: Vec::new(),
             bundle: None,
             dep_info: vec![dep_info],
+            script_inputs: Vec::new(),
             messages: Vec::new(),
             library_paths: Vec::new(),
         };
@@ -3906,11 +4070,26 @@ mod tests {
     fn executes_an_admitted_dependency_build_script_from_the_engine() {
         let fixture = Fixture::new();
         fixture.add_build_script();
+        let manifest_path = fixture.0.join("Cargo.toml");
+        let source = fs::read_to_string(&manifest_path).unwrap();
+        fs::write(
+            &manifest_path,
+            format!("{source}\n[workspace]\nmembers = [\"local\"]\n"),
+        )
+        .unwrap();
+        let workspace_input = fixture.0.join("workspace-input");
+        fs::write(&workspace_input, b"first").unwrap();
         let script_path = fixture.0.join("local/build.rs");
         let script = fs::read_to_string(&script_path).unwrap().replace(
             "fn main() {",
             r#"fn main() {
                 println!("cargo:rustc-link-search=native={}", std::env::var("OUT_DIR").unwrap());
+                let input = std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../workspace-input");
+                println!("cargo:rerun-if-changed={}", input.display());
+                std::fs::write(
+                    std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("workspace-input"),
+                    std::fs::read(input).unwrap(),
+                ).unwrap();
                 std::fs::write(
                     std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("num-jobs"),
                     std::env::var("NUM_JOBS").unwrap(),
@@ -3988,6 +4167,7 @@ mod tests {
                 .unwrap()
         };
         let out_dir = output_directory();
+        assert_eq!(fs::read(out_dir.join("workspace-input")).unwrap(), b"first");
         assert!(artifact.library_paths.contains(&out_dir));
         assert_eq!(fs::read_to_string(out_dir.join("num-jobs")).unwrap(), "2");
         let modified = fs::metadata(out_dir.join("num-jobs"))
@@ -4002,6 +4182,12 @@ mod tests {
                 .unwrap(),
             modified,
             "unchanged JSON build reran the build script",
+        );
+        fs::write(&workspace_input, b"second").unwrap();
+        build_once(2, MessageFormat::Human).unwrap();
+        assert_eq!(
+            fs::read(out_dir.join("workspace-input")).unwrap(),
+            b"second"
         );
         build_once(1, MessageFormat::Human).unwrap();
         assert_eq!(fs::read_to_string(out_dir.join("num-jobs")).unwrap(), "1");

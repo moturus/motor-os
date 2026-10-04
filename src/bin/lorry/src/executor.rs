@@ -518,7 +518,9 @@ fn execute_unit(
                     arguments: &[],
                     environment: &environment,
                     package_root: &manifest.root,
-                    workspace_root: None,
+                    workspace_root: manifest
+                        .editable
+                        .then_some(manifest.workspace_root.as_path()),
                     out_dir: &out_dir,
                     temp_dir: &temp_dir,
                     read_only: &read_only,

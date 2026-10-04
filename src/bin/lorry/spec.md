@@ -1430,8 +1430,11 @@ Every supported Linux build script runs in a mandatory sandbox that:
 The script runner can also receive an explicit workspace root as a read-only
 input. In that mode, `rerun-if-changed` may name workspace files or directories;
 canonical paths still reject symlink escapes. `rustc-link-search` remains
-restricted to the script's `OUT_DIR`. The executor will supply this capability
-for editable members after workspace script-input freshness is wired.
+restricted to the script's `OUT_DIR`. The executor supplies this capability
+only for editable members. Completed profiles track declared script inputs,
+including recursive directory contents and canonical identities, so edits,
+additions, removals, and symlink retargets invalidate reuse. Script directives
+retain their declared paths after validating their current canonical locations.
 
 The supported directive protocol accepts both `cargo:` and `cargo::` forms of
 `rustc-cfg`, `rustc-check-cfg`, `rustc-env`, `rustc-link-lib`,

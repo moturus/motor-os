@@ -2431,6 +2431,18 @@ escapes and retain private link-search roots. All ten script tests and strict
 Clippy pass in `/tmp/lorry-m8-workspace-script-sandbox-{tests-fixed,clippy}.log`.
 The executor keeps the capability unset until script-input freshness is wired.
 
+Workspace script reads are now connected to editable-member execution.
+Completed-profile schema 6 records declared `rerun-if-changed` inputs and checks
+their contents and canonical identities before trusted or strict reuse.
+Directory inputs are traversed deterministically, with canonical directory
+deduplication preventing symlink loops. The regression covers edits, directory
+additions/removals, and equal-content symlink retargets in both validation modes.
+The existing engine script fixture is now a workspace member: it reads a sibling
+input, proves unchanged JSON builds start no script, and observes an input edit
+on the next build. All eighteen engine tests, ten script tests, the updated
+execution regression, and strict Clippy pass in
+`/tmp/lorry-m8-workspace-script-freshness-{engine,protocol,integration,clippy-final}.log`.
+
 **Result.** Member build-time code and all required targets use the shared
 graph. Workspace `test`, `run`, `clean`, and `new` follow Cargo.
 

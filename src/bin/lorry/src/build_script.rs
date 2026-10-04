@@ -523,12 +523,11 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                     path: resolve_existing(path, &package_root, &[&out_dir], "rustc-link-search")?,
                 }
             }
-            "rerun-if-changed" => Directive::RerunIfChanged(resolve_existing(
-                value,
-                &package_root,
-                &input_roots,
-                "rerun-if-changed",
-            )?),
+            "rerun-if-changed" => {
+                resolve_existing(value, &package_root, &input_roots, "rerun-if-changed")?;
+                // Preserve the declared path so freshness detects symlink retargets.
+                Directive::RerunIfChanged(package_root.join(value))
+            }
             "rerun-if-env-changed" => {
                 validate_rerun_environment_name(value)?;
                 Directive::RerunIfEnvChanged {
