@@ -2620,6 +2620,14 @@ Clippy pass in `/tmp/lorry-m8-release-check-{first-macro-contract,profile-contra
 
 ### Member build-time code
 
+The existing workspace contract still expected dev/release `opt-level` to be
+unsupported after that capability landed. Its first run fails at the obsolete
+release assertion in `/tmp/lorry-m8-workspace-stale-profiles-original.log`.
+The test now uses Cargo's valid but still unsupported `debug-assertions` key,
+retaining both inactive acceptance and active rejection checks. The complete
+focused workspace contract passes in
+`/tmp/lorry-m8-workspace-active-profiles-fixed.log`.
+
 Library and binary targets now accept `harness = false` and compile their
 test programs with Cargo's `--cfg test` convention. The new offline contract
 compares native/cross program bytes, test and all-target check artifacts,
