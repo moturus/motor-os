@@ -41,6 +41,64 @@ pub(crate) fn resolve_locked(
     Ok((complete, catalog))
 }
 
+/// Resolve ordinary compilation without admission only for path packages or the
+/// explicit Cargo-registry mode. Source inspection refines host macro contexts;
+/// it never executes package code or grants capabilities.
+pub(crate) fn resolve_compilation(
+    inputs: &ReviewInputs<'_>,
+    workspace: &SourceWorkspace,
+    members: &[crate::resolver::workspace::MemberRequest],
+    selection: TargetSelection<'_>,
+) -> Result<Resolution> {
+    let direct = inputs
+        .direct
+        .ok_or_else(|| Error::failure("workspace compilation requires locked Git sources"))?;
+    let (complete, mut catalog) = resolve_locked(
+        workspace,
+        inputs.config,
+        inputs.source,
+        direct,
+        inputs.options,
+    )?;
+    loop {
+        let resolution = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            inputs.options,
+            members,
+            selection,
+        )?;
+        if matches!(inputs.source, RegistrySource::Lorry(_))
+            && resolution.packages.iter().any(|package| {
+                matches!(
+                    package.source,
+                    ResolvedSource::CratesIo { .. } | ResolvedSource::Git { .. }
+                )
+            })
+        {
+            return Err(Error::failure(
+                "compilation using crates.io or Git packages requires workspace admission",
+            ).with_help("run workspace-root `lorry vendor --locked [--offline]` to review and approve these sources"));
+        }
+        let inspected = prepare_sources(
+            resolution.clone(),
+            inputs.config,
+            inputs.source,
+            inputs.staging_parent,
+            direct,
+        )?;
+        let mut refined = false;
+        for (key, package) in inspected.packages {
+            if key.source == PackageSourceKey::CratesIo {
+                refined |= catalog.annotate_proc_macro(&key, package.evidence.proc_macro)?;
+            }
+        }
+        if !refined {
+            return Ok(resolution);
+        }
+    }
+}
+
 pub(crate) fn prepare_sources(
     resolution: Resolution,
     config: &Config,

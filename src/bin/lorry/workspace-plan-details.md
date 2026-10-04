@@ -2289,6 +2289,14 @@ engine tests pass in `/tmp/lorry-m7-shared-execution-engine-tests.log`. Shared
 commands currently use per-unit freshness; completed-profile selection tracking
 will be added before exposing their shortcut. Public selection wiring follows.
 
+Fresh shared resolution now preserves the existing compilation admission
+boundary: ordinary path-only projects need no record, while crates.io and Git
+compilation requires review unless explicit Cargo-registry mode is selected.
+Verified source inspection refines registry procedural-macro host contexts
+without executing code. The engine regression compares the resulting graph to
+its direct shared selection and proves resolution creates no admission or target
+artifacts.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 

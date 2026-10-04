@@ -2989,6 +2989,30 @@ mod tests {
             },
         )
         .unwrap();
+        let selected_without_admission = dependency::workspace::resolve_compilation(
+            &dependency::ReviewInputs {
+                manifest,
+                config: &config,
+                source,
+                toolchain: &toolchain,
+                options: &options,
+                staging_parent: &fixture.0,
+                direct: Some(&direct),
+                prepare_context: None,
+            },
+            &workspace,
+            &requests,
+            TargetSelection {
+                host_triple: &target.triple,
+                host_cfg: &target.cfg,
+                target_triple: &target.triple,
+                target_cfg: &target.cfg,
+            },
+        )
+        .unwrap();
+        assert_eq!(selected_without_admission, resolution);
+        assert!(!CompactState::path(&fixture.0).exists());
+        assert!(!fixture.0.join("target").exists());
         let target_options = TargetOptions::default();
         let global_cache = fixture.0.join("global-cache");
         let target_root = artifact_root(manifest);
