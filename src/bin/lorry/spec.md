@@ -279,10 +279,17 @@ root compilation, freshness validation, and artifact publication.
 
 Build, clean, run, test, vendor, and review operate on one selected package.
 The current package is selected by its `Cargo.toml`; `-p NAME` selects one
-exact member from an explicit workspace root. A member-directory invocation
-may search ancestors only for a workspace that explicitly lists that member.
+exact member from a workspace root. Builds and source metadata share the
+membership reader: a root package and recursively reached normal, build,
+dev, and target-specific path dependencies below the root are members.
+`members` may be absent or include `"."`. Exclusions are directory prefixes;
+explicitly listed members take precedence. Root `default-members` apply
+at the workspace root, while a member invocation defaults to itself.
+A singleton default can execute; larger or empty selections fail explicitly
+until multi-package execution is implemented. A member-directory invocation
+may search ancestors for its workspace.
 General upward package discovery, `--manifest-path`, workspace-wide commands,
-member globs, exclusions, default members, external/implicit members, and
+member globs, members outside the root, and
 workspace inheritance are unsupported. `new` and `cache clean` do not inspect
 a current package.
 
@@ -1063,12 +1070,10 @@ instead of succeeding without checking a target.
 
 `clippy` uses check's options, planner, and Cargo messages. It requires a
 matching sibling `clippy-driver` and uses separate `clippy` output and
-incremental directories. Listed workspace members, including dependency
+incremental directories. Workspace members, including implicit dependency
 members and their build scripts, use the driver; outside packages use
 plain rustc. `--no-deps` lints only the selected package. Arguments after
-`--` are passed through `CLIPPY_ARGS`. An unlisted path package inside the
-workspace receives a note that Clippy is skipped; implicit membership
-awaits the shared workspace model. `--fix` is unsupported.
+`--` are passed through `CLIPPY_ARGS`. `--fix` is unsupported.
 The driver discovers `.clippy.toml` and `clippy.toml`, starting at
 `CLIPPY_CONF_DIR` when set or the package directory otherwise, and walking
 parents. Lorry preserves that environment setting and fingerprints searched

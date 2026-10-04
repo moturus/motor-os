@@ -1123,6 +1123,19 @@ was removed. The corrected full developer gate passed in
 
 ## Milestone 5: workspace model and selection
 
+The first patch shares source metadata's membership reader with builds and
+applies the same default-member rules. Focused manifest tests passed (23),
+as did `/tmp/lorry-m5-membership-contract-excluded.log` and
+`/tmp/lorry-m5-implicit-clippy-contract.log`. The latter now discovers its
+linted dependency member implicitly. Two earlier contract invocations failed:
+temporary HOME hid Cargo's offline cache, and the package-limit fixture's
+unlisted namesake became an implicit member, causing duplicate-name rejection.
+The driver now preserves CARGO_HOME and explicitly excludes the intended
+nonmembers. Both Cargo and Lorry reject the duplicate when those exclusions
+are removed; the package-limit assertions are unchanged. Original logs are
+`/tmp/lorry-m5-membership-contract.log` and
+`/tmp/lorry-m5-membership-contract-fixed.log`.
+
 **Result.** Every command uses the same workspace membership and manifest
 inheritance rules. One member can be built or checked from the workspace
 root. The shared model is ready for multi-member execution.

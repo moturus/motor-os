@@ -75,19 +75,7 @@ impl SourceWorkspace {
         let directory = manifest_path.parent().unwrap();
         // Cargo applies default-members only to the root manifest. A member
         // selects itself, and a virtual root selects every member.
-        let default_members = match root.default_members {
-            Some(declared) if directory == root.root => {
-                if let Some(path) = declared.iter().find(|path| !packages.contains_key(*path)) {
-                    return Err(Error::failure(format!(
-                        "package `{}` is listed in default-members but is not a member",
-                        path.display()
-                    )));
-                }
-                declared
-            }
-            _ if directory != root.root || root.package => vec![directory.to_owned()],
-            _ => packages.keys().cloned().collect(),
-        };
+        let default_members = root.defaults(directory, packages.keys())?;
         Ok(Self {
             manifest_path,
             root: root.root,
@@ -109,8 +97,8 @@ impl SourceWorkspace {
 
 // Only membership is read from the root. Profiles, patches, and inherited
 // tables matter to builds, not to a description of source targets.
-struct WorkspaceRoot {
-    root: PathBuf,
+pub(super) struct WorkspaceRoot {
+    pub root: PathBuf,
     package: bool,
     members: Vec<PathBuf>,
     exclude: Vec<PathBuf>,
@@ -118,7 +106,7 @@ struct WorkspaceRoot {
 }
 
 impl WorkspaceRoot {
-    fn parse(root: &Path, path: &Path, document: &Document) -> Result<Self> {
+    pub fn parse(root: &Path, path: &Path, document: &Document) -> Result<Self> {
         let item = document.root().get("workspace").unwrap();
         let table = require_table(path, document, item, "workspace")?;
         let paths = |key: &str| {
@@ -158,13 +146,13 @@ impl WorkspaceRoot {
     }
 
     // An explicit member path takes precedence over `exclude`, as in Cargo.
-    fn excludes(&self, directory: &Path) -> bool {
+    pub fn excludes(&self, directory: &Path) -> bool {
         self.exclude.iter().any(|path| directory.starts_with(path))
             && !self.members.iter().any(|path| directory.starts_with(path))
     }
 
     // Path dependencies below the root are implicit members in Cargo.
-    fn load_members(&self) -> Result<BTreeMap<PathBuf, Manifest>> {
+    pub fn load_members(&self) -> Result<BTreeMap<PathBuf, Manifest>> {
         let mut pending = self.members.clone();
         if self.package {
             pending.push(self.root.clone());
@@ -200,10 +188,34 @@ impl WorkspaceRoot {
         }
         Ok(packages)
     }
+
+    pub fn defaults<'a>(
+        &self,
+        current: &Path,
+        members: impl Iterator<Item = &'a PathBuf>,
+    ) -> Result<Vec<PathBuf>> {
+        let members = members.collect::<BTreeSet<_>>();
+        if current == self.root
+            && let Some(declared) = &self.default_members
+        {
+            if let Some(path) = declared.iter().find(|path| !members.contains(path)) {
+                return Err(Error::failure(format!(
+                    "package `{}` is listed in default-members but is not a member",
+                    path.display()
+                )));
+            }
+            return Ok(declared.clone());
+        }
+        if current != self.root || self.package {
+            Ok(vec![current.to_owned()])
+        } else {
+            Ok(members.into_iter().cloned().collect())
+        }
+    }
 }
 
 // Cargo uses the nearest enclosing workspace that does not exclude the package.
-fn nearest_workspace(directory: &Path) -> Result<Option<WorkspaceRoot>> {
+pub(super) fn nearest_workspace(directory: &Path) -> Result<Option<WorkspaceRoot>> {
     for ancestor in directory.ancestors() {
         let path = ancestor.join(MANIFEST_NAME);
         if !path.is_file() {

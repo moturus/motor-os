@@ -22,7 +22,7 @@ mkdir -p "$WORK/home/.config/lorry" "$PROJECT/app/src" \
 printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
 export HOME="$WORK/home"
-printf '[workspace]\nmembers = ["app", "shared"]\nresolver = "2"\n' \
+printf '[workspace]\nmembers = ["app"]\nresolver = "2"\n' \
     >"$PROJECT/Cargo.toml"
 for package in app shared; do
     printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2024"\n' \

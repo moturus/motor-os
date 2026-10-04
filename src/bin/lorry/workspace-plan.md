@@ -118,6 +118,11 @@ warning in the failing binary's prerequisite and retains exact comparisons.
 has the evidence, the contract of each milestone, the list of defects, the
 policy choices, the decisions, and the reason for each revision.
 
+Milestone 5 is in progress. Builds and source metadata now share membership
+discovery and default-member rules. Implicit path members receive Clippy
+coverage. Focused Cargo contracts prove implicit membership, duplicate-name
+rejection, exclusions, singleton defaults, and package-limit accounting.
+
 ## Goal
 
 Make Lorry build, check, and test Cargo workspaces on Linux and on Motor.

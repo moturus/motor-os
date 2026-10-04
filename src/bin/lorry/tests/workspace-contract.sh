@@ -18,6 +18,7 @@ export RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-workspace-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project/app/src" \
     "$WORK/project/tool/src" "$WORK/project/shared/src" "$WORK/project/scripted/src"
 printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
@@ -26,7 +27,8 @@ export HOME="$WORK/home"
 
 printf '%s\n' \
     '[workspace]' \
-    'members = ["app", "tool", "shared", "scripted"]' \
+    'members = ["app", "tool", "scripted"]' \
+    'default-members = ["tool"]' \
     'resolver = "2"' \
     '' \
     '[profile.dev]' \
@@ -82,6 +84,13 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
 
 (
     cd "$WORK/project"
+    # Both readers discover shared through tool's path dependency, and the
+    # singleton default selects tool without silently reducing a larger set.
+    "$LORRY" metadata --no-deps --format-version 1 >"$WORK/members.lorry.json"
+    "$LORRY_TEST_CARGO" metadata --no-deps --format-version 1 --offline >"$WORK/members.cargo.json"
+    "$LORRY_TEST_CARGO" run --quiet --locked --offline \
+        --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- compare-projection \
+        "$WORK/members.lorry.json" "$WORK/members.cargo.json"
     "$LORRY" vendor -p app --accept-all
     "$LORRY" review -p app >/dev/null
     "$LORRY" -v build -j2 -p app 2>"$WORK/app-build.stderr"
@@ -90,6 +99,7 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
     "$LORRY" test -p app -- --quiet
     "$LORRY" build --jobs=-1 -p app
     "$LORRY" build --jobs 1 -p tool 2>"$WORK/tool-build.stderr"
+    [ "$("$LORRY" run)" = tool ]
     grep -F 'Verifying dependency state' "$WORK/tool-build.stderr" >/dev/null
     grep -F 'Preparing dependency graph' "$WORK/tool-build.stderr" >/dev/null
     grep -F 'Compiling shared v0.1.0' "$WORK/tool-build.stderr" >/dev/null
@@ -232,6 +242,7 @@ LIMITED="$WORK/limited"
 mkdir -p "$LIMITED/app/src" "$LIMITED/one/src" "$LIMITED/three/src" \
     "$LIMITED/vendored/one/src" "$LIMITED/two/src"
 printf '%s\n' '[workspace]' 'members = ["app", "one", "three"]' 'resolver = "2"' \
+    'exclude = ["vendored", "two"]' \
     >"$LIMITED/Cargo.toml"
 printf '%s\n' '[package]' 'name = "app"' 'version = "0.1.0"' 'edition = "2024"' \
     '[dependencies]' 'one = { path = "../vendored/one" }' 'two = { path = "../two" }' \
@@ -251,6 +262,19 @@ printf '%s\n' 'version = 4' \
     '[[package]]' 'name = "three"' 'version = "0.1.0"' \
     '[[package]]' 'name = "two"' 'version = "0.1.0"' >"$LIMITED/Cargo.lock"
 cp "$WORK/home/.config/lorry/lorry.toml" "$WORK/config.backup"
+cp "$LIMITED/Cargo.toml" "$WORK/limited.manifest"
+sed '/^exclude = /d' "$WORK/limited.manifest" >"$LIMITED/Cargo.toml"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    if "$builder" metadata --no-deps --format-version 1 --offline \
+        --manifest-path "$LIMITED/Cargo.toml" >"$WORK/duplicate.json" 2>"$WORK/duplicate.err"; then
+        echo "workspace-contract: accepted duplicate implicit member names" >&2
+        exit 1
+    fi
+    grep -E 'two packages named `one`|duplicate package name `one`' "$WORK/duplicate.err" >/dev/null
+done
+cp "$WORK/limited.manifest" "$LIMITED/Cargo.toml"
+"$LORRY_TEST_CARGO" metadata --no-deps --format-version 1 --offline \
+    --manifest-path "$LIMITED/Cargo.toml" >"$WORK/limited.cargo.json"
 limited_vendor() {
     cp "$WORK/config.backup" "$WORK/home/.config/lorry/lorry.toml"
     printf '%s\n' '[policy.limits]' "max-packages = $1" >>"$WORK/home/.config/lorry/lorry.toml"

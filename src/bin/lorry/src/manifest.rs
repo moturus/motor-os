@@ -24,7 +24,7 @@ const MAX_WORKSPACE_MEMBERS: usize = 64;
 pub struct Manifest {
     pub root: PathBuf,
     pub workspace_root: PathBuf,
-    /// Explicit workspace members by name, with their canonical directories.
+    /// Workspace members by name, with their canonical directories.
     pub workspace_members: BTreeMap<String, PathBuf>,
     pub path: PathBuf,
     pub name: String,
@@ -353,7 +353,7 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo manifest")?;
-        let Some(workspace) = discover_workspace(&root, &path, &document)? else {
+        let Some(workspace) = discover_workspace(&root)? else {
             let mut manifest =
                 Self::finish_root(root.clone(), path, document, &root, require_current_lock)?;
             if let Some(requested) = package
@@ -651,6 +651,7 @@ fn canonical_manifest(manifest_path: &Path) -> Result<PathBuf> {
 struct Workspace {
     root: PathBuf,
     members: BTreeMap<String, PathBuf>,
+    defaults: Vec<PathBuf>,
     dev: DevProfile,
     release: ReleaseProfile,
     resolver: Resolver,
@@ -658,44 +659,23 @@ struct Workspace {
 }
 
 impl Workspace {
-    fn parse(root: &Path, path: &Path, document: &Document) -> Result<Self> {
+    fn parse(current: &Path, membership: source::WorkspaceRoot) -> Result<Self> {
+        let root = &membership.root;
+        let path = root.join(MANIFEST_NAME);
+        let document = Document::load(&path, "Cargo workspace manifest")?;
         let item = document.root().get("workspace").ok_or_else(|| {
             Error::failure(format!(
                 "workspace manifest `{}` has no `[workspace]`",
                 path.display()
             ))
         })?;
-        let table = require_table(path, document, item, "workspace")?;
-        for (key, item) in table.iter() {
-            if !matches!(key, "members" | "resolver") {
-                return Err(Error::at(
-                    path,
-                    document.line_of_item(item),
-                    format!("workspace.{key} is outside selected-member workspace support"),
-                    "use explicit members without workspace inheritance, exclusions, or defaults",
-                ));
-            }
-        }
-        let declared = table.get("members").ok_or_else(|| {
-            Error::at(
-                path,
-                document.line_of_table(table),
-                "workspace.members is required",
-                "list each member with an explicit relative path",
-            )
-        })?;
-        let declared = string_array(path, document, declared, "workspace.members")?;
-        if declared.len() > MAX_WORKSPACE_MEMBERS {
-            return Err(Error::failure(format!(
-                "workspace declares more than {MAX_WORKSPACE_MEMBERS} members"
-            )));
-        }
+        let table = require_table(&path, &document, item, "workspace")?;
 
         if !document.root().contains_key("package") {
             for (key, item) in document.root().iter() {
                 if !matches!(key, "workspace" | "profile" | "patch") {
                     return Err(Error::at(
-                        path,
+                        &path,
                         document.line_of_item(item),
                         format!("unsupported virtual-workspace table or key `{key}`"),
                         "keep only workspace-wide profiles and crates.io patches",
@@ -704,51 +684,30 @@ impl Workspace {
             }
         }
         let resolver = if let Some(item) = table.get("resolver") {
-            parse_resolver(path, document, Some(item), Edition::E2015, 1)?
+            parse_resolver(&path, &document, Some(item), Edition::E2015, 1)?
         } else if let Some(package) = document.root().get("package") {
-            let package = require_table(path, document, package, "package")?;
-            let edition = parse_edition(path, document, package.get("edition"), 1, None)?;
-            parse_resolver(path, document, package.get("resolver"), edition, 1)?
+            let package = require_table(&path, &document, package, "package")?;
+            let edition = parse_edition(&path, &document, package.get("edition"), 1, None)?;
+            parse_resolver(&path, &document, package.get("resolver"), edition, 1)?
         } else {
             Resolver::V1
         };
 
-        let mut roots = declared
+        let packages = membership.load_members()?;
+        let defaults = membership.defaults(current, packages.keys())?;
+        let members = packages
             .into_iter()
-            .map(|member| workspace_member_root(root, path, document, &member))
-            .collect::<Result<Vec<_>>>()?;
-        if document.root().contains_key("package") {
-            roots.push(root.to_owned());
-        }
-        roots.sort();
-        roots.dedup();
-        let mut members = BTreeMap::new();
-        for member in roots {
-            let member_path = member.join(MANIFEST_NAME);
-            let member_document = Document::load(&member_path, "Cargo workspace member manifest")?;
-            let package = member_document.root().get("package").ok_or_else(|| {
-                Error::failure(format!(
-                    "workspace member `{}` has no `[package]`",
-                    member.display()
-                ))
-            })?;
-            let package = require_table(&member_path, &member_document, package, "package")?;
-            let name = required_string(&member_path, &member_document, package, "package", "name")?;
-            validate_package_name(&member_path, member_document.line_of_table(package), &name)?;
-            if members.insert(name.clone(), member).is_some() {
-                return Err(Error::failure(format!(
-                    "workspace contains duplicate package name `{name}`"
-                )));
-            }
-        }
-        let (dev, release) = parse_profiles(path, document)?;
+            .map(|(directory, manifest)| (manifest.name, directory))
+            .collect();
+        let (dev, release) = parse_profiles(&path, &document)?;
         Ok(Self {
             root: root.to_owned(),
             members,
+            defaults,
             dev,
             release,
             resolver,
-            patches: parse_patches(path, document, root)?,
+            patches: parse_patches(&path, &document, root)?,
         })
     }
 
@@ -763,11 +722,17 @@ impl Workspace {
                 )
             });
         }
-        if let Some((_, member)) = self.members.iter().find(|(_, root)| *root == current) {
+        if let [member] = self.defaults.as_slice() {
             return Ok(member.clone());
         }
-        Err(Error::failure("a virtual workspace has no current package")
-            .with_help("select one exact workspace package with `-p NAME`"))
+        Err(Error::failure(format!(
+            "workspace defaults select {} packages; multi-package execution is not yet supported",
+            self.defaults.len()
+        ))
+        .with_help(format!(
+            "select one workspace package with `-p NAME` from `{}`",
+            current.display()
+        )))
     }
 
     fn apply(&self, manifest: &mut Manifest) -> Result<()> {
@@ -808,24 +773,12 @@ impl Workspace {
     }
 }
 
-fn discover_workspace(
-    current: &Path,
-    path: &Path,
-    document: &Document,
-) -> Result<Option<Workspace>> {
-    if document.root().contains_key("workspace") {
-        return Workspace::parse(current, path, document).map(Some);
-    }
-    for parent in current.ancestors().skip(1) {
-        let candidate = parent.join(MANIFEST_NAME);
-        if !candidate.is_file() {
-            continue;
+fn discover_workspace(current: &Path) -> Result<Option<Workspace>> {
+    if let Some(membership) = source::nearest_workspace(current)? {
+        let workspace = Workspace::parse(current, membership)?;
+        if workspace.root == current {
+            return Ok(Some(workspace));
         }
-        let candidate_document = Document::load(&candidate, "possible Cargo workspace manifest")?;
-        if !candidate_document.root().contains_key("workspace") {
-            continue;
-        }
-        let workspace = Workspace::parse(parent, &candidate, &candidate_document)?;
         if workspace.members.values().any(|member| member == current) {
             return Ok(Some(workspace));
         }
@@ -3533,7 +3486,12 @@ unsafe_code = { level = "forbid", priority = 1 }
             "[workspace]\nmembers = [\"app\", \"shared\"]\ndefault-members = [\"app\"]\n",
         )
         .unwrap();
-        assert!(Manifest::load_selected(&from_root.workspace_root, Some("app")).is_err());
+        assert_eq!(
+            Manifest::load_selected(&from_root.workspace_root, None)
+                .unwrap()
+                .name,
+            "app"
+        );
         fs::remove_dir_all(from_root.workspace_root).unwrap();
     }
 

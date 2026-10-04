@@ -929,26 +929,6 @@ fn build_inner(
         "prepared and verified {} dependency packages",
         prepared.packages.len()
     ));
-    if build.toolchain.clippy.is_some() && build.verbosity != Verbosity::Quiet {
-        for (key, package) in &prepared.packages {
-            if matches!(key.source, crate::resolver::PackageSourceKey::Path(_))
-                && package
-                    .manifest
-                    .root
-                    .starts_with(&build.manifest.workspace_root)
-                && !build
-                    .manifest
-                    .workspace_members
-                    .values()
-                    .any(|root| root == &package.manifest.root)
-            {
-                eprintln!(
-                    "note: package `{}` is not listed as a workspace member; Clippy is skipped for it",
-                    package.manifest.name
-                );
-            }
-        }
-    }
     let mut manifests = prepared
         .packages
         .iter()
