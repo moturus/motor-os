@@ -108,7 +108,9 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
     "$LORRY_TEST_CARGO" run --quiet --locked --offline \
         --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- compare-projection \
         "$WORK/members.lorry.json" "$WORK/members.cargo.json"
-    "$LORRY" vendor -p app --accept-all
+    # The root record must cover every member compiled below, while leaving
+    # the scripted member outside this ordinary execution contract.
+    "$LORRY" vendor -p app -p tool -p shared --accept-all
     "$LORRY" review -p app >/dev/null
     "$LORRY" -v build -j2 -p app 2>"$WORK/app-build.stderr"
     grep -F 'panic=abort' "$WORK/app-build.stderr" >/dev/null
@@ -181,7 +183,7 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
 (
     cd "$WORK"
     manifest="$WORK/project/Cargo.toml"
-    "$LORRY" vendor --manifest-path "$manifest" -p app --accept-all
+    "$LORRY" vendor --manifest-path "$manifest" -p app -p tool -p shared --accept-all
     "$LORRY" review --manifest-path "$manifest" -p app >/dev/null
     "$LORRY" build --manifest-path "$manifest" -p app
     [ "$("$LORRY" run --manifest-path "$manifest" -p app)" = app ]
@@ -288,7 +290,8 @@ printf 'fn main() { println!("{}|{}", shared::VALUE, shared::LINK); }\n' \
     done
     "$LORRY" -v build -p tool 2>"$WORK/member-first-build.err"
     "$LORRY" -v build -p tool 2>"$WORK/member-warm.err"
-    if grep -E 'Verifying dependency state|Compiling ' "$WORK/member-warm.err"; then
+    grep -F 'Verifying dependency state' "$WORK/member-warm.err" >/dev/null
+    if grep -E 'Preparing dependency graph|Compiling ' "$WORK/member-warm.err"; then
         echo 'workspace-contract: unchanged member build missed completed-profile freshness' >&2
         exit 1
     fi

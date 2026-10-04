@@ -1890,6 +1890,20 @@ Clippy contract, and strict Clippy pass in
 `/tmp/lorry-m6-source-identity-{fixed,contract,clippy}.log`; the original focused
 failure is in `/tmp/lorry-m6-source-identity-original.log`.
 
+The following gate passed Clippy and native/cross Cargo byte identity, then
+stopped in the older workspace contract. Its captured `tool` error confirms
+that the fixture reviewed only `app` before compiling other members. That
+fixture now reviews `app`, `tool`, and `shared`, leaving its unused scripted
+member outside the scope. Its next focused run exposed an obsolete freshness
+assertion: the trace proves completed-profile reuse succeeded after mandatory
+admission verification, with no dependency preparation or compiler. The
+contract now requires that verification and still rejects preparation or
+compilation on the warm shortcut. Original evidence is
+`/tmp/lorry-m6-full-source-identity-fixed.log` and
+`/tmp/lorry-m6-workspace-{original,scope-fixed}-trace.log`. The full focused
+workspace contract passes in
+`/tmp/lorry-m6-workspace-scope-and-freshness-fixed.log`.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.
