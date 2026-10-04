@@ -105,7 +105,13 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             return Err(unknown_integration_test(&manifest, name));
         }
     }
-    let compact_state = CompactState::load(&manifest.root)?;
+    if manifest.root != manifest.workspace_root && CompactState::path(&manifest.root).exists() {
+        return Err(
+            Error::failure("per-member admission must be migrated to the workspace root")
+                .with_help("run workspace-root `lorry vendor --locked` to review the workspace"),
+        );
+    }
+    let compact_state = CompactState::load(&manifest.workspace_root)?;
     let mut config = Config::load(&current, &manifest)?;
     config.apply_max_packages(cli.max_packages)?;
     let requested_target_directory = match &cli.command {
@@ -202,6 +208,15 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
     let ordinary_freshness_base = (!validation.is_strict()
+        && !compact_state
+            .as_ref()
+            .is_some_and(|state| state.scope.is_some())
+        && !(compact_state.is_none()
+            && manifest
+                .lock
+                .iter()
+                .flat_map(|lock| &lock.packages)
+                .any(|package| package.source.is_some()))
         && matches!(&cli.command, Command::Build(_) | Command::Run(_)))
     .then(|| {
         trusted_freshness_base(&TrustedFreshness {

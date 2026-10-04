@@ -1,6 +1,7 @@
 use super::*;
 use crate::admission_state::ReviewScope;
 use crate::cli::FeatureSelection;
+use crate::resolver::CompileKind;
 use crate::resolver::workspace::{
     MemberRequest, features::member_requests, resolve_selected_workspace,
 };
@@ -111,6 +112,153 @@ pub(crate) fn reconstruct(
         complete,
         catalog,
     })
+}
+
+pub(crate) fn verify(
+    inputs: &ReviewInputs<'_>,
+    compact: &CompactState,
+) -> Result<VerifiedAdmission> {
+    let mut reconstructed = reconstruct(inputs, compact)?;
+    let resolution = if let Some(context) = &inputs.prepare_context {
+        compact.require_context(&context.host, &context.target)?;
+        let current = reconstructed
+            .workspace
+            .packages
+            .iter()
+            .find(|member| member.root == inputs.manifest.root)
+            .ok_or_else(|| Error::failure("requested package is not a workspace member"))?;
+        let scope = compact.scope.as_ref().unwrap();
+        if !scope.packages.is_empty() && !scope.packages.contains(&current.name) {
+            return Err(uncovered(&current.name));
+        }
+        let members = member_requests(
+            &reconstructed.workspace,
+            &[current.root.clone()].into(),
+            &FeatureSelection::default(),
+            false,
+        )?;
+        let host = inputs.toolchain.target_info(Some(&context.host))?;
+        let target = inputs.toolchain.target_info(Some(&context.target))?;
+        let selected = resolve_selected_workspace(
+            &reconstructed.complete,
+            &reconstructed.catalog,
+            inputs.options,
+            &members,
+            TargetSelection {
+                host_triple: &host.triple,
+                host_cfg: &host.cfg,
+                target_triple: &target.triple,
+                target_cfg: &target.cfg,
+            },
+        )?;
+        cover(&reconstructed.review, context, &selected)?;
+        Some(legacy_dependency_graph(selected, &inputs.manifest.root)?)
+    } else {
+        None
+    };
+    Ok(VerifiedAdmission {
+        review: std::mem::take(&mut reconstructed.review),
+        resolution,
+    })
+}
+
+fn uncovered(package: &str) -> Error {
+    Error::failure(format!("workspace admission does not cover the requested packages or features of `{package}`"))
+        .with_help("review a covering scope with workspace-root `lorry vendor --locked --workspace --all-features`")
+}
+
+fn cover(review: &Review, context: &Context, selected: &Resolution) -> Result<()> {
+    for package in &selected.packages {
+        let kinds = package
+            .compile_kinds
+            .iter()
+            .map(|kind| match kind {
+                CompileKind::Host => crate::admission_state::UnitKind::Host,
+                CompileKind::Target => crate::admission_state::UnitKind::Target,
+            })
+            .collect::<Vec<_>>();
+        let admitted = match &package.source {
+            ResolvedSource::Path { .. } => continue,
+            ResolvedSource::CratesIo { checksum } => review
+                .context_registry
+                .iter()
+                .find(|admitted| {
+                    admitted.host == context.host
+                        && admitted.target == context.target
+                        && admitted.name == package.key.name
+                        && admitted.version == package.key.version.to_string()
+                        && admitted.checksum == hex(checksum)
+                })
+                .map(|admitted| {
+                    (
+                        &admitted.compile_kinds,
+                        &admitted.host_features,
+                        &admitted.target_features,
+                    )
+                }),
+            ResolvedSource::Git { cargo_source, .. } => review
+                .context_git
+                .iter()
+                .find(|admitted| {
+                    admitted.host == context.host
+                        && admitted.target == context.target
+                        && admitted.name == package.key.name
+                        && admitted.version == package.key.version.to_string()
+                        && admitted.source == *cargo_source
+                })
+                .map(|admitted| {
+                    (
+                        &admitted.compile_kinds,
+                        &admitted.host_features,
+                        &admitted.target_features,
+                    )
+                }),
+        };
+        let Some((admitted_kinds, host, target)) = admitted else {
+            return Err(uncovered(&package.key.name));
+        };
+        if !kinds.iter().all(|kind| admitted_kinds.contains(kind))
+            || !package
+                .host_features
+                .iter()
+                .all(|feature| host.contains(feature))
+            || !package
+                .target_features
+                .iter()
+                .all(|feature| target.contains(feature))
+        {
+            return Err(uncovered(&package.key.name));
+        }
+    }
+    Ok(())
+}
+
+// The existing single-package compiler consumes dependency roots. Milestone 7
+// consumes member roots directly and removes this transitional projection.
+fn legacy_dependency_graph(mut selected: Resolution, root: &Path) -> Result<Resolution> {
+    let position = selected
+        .packages
+        .iter()
+        .position(|package| package.key.source == PackageSourceKey::Path(root.to_owned()))
+        .ok_or_else(|| Error::failure("requested member is absent from selected resolution"))?;
+    let member = selected.packages.remove(position);
+    selected.root_edges = member
+        .edges
+        .into_iter()
+        .filter(|edge| edge.kind != crate::sparse::DependencyKind::Dev)
+        .map(|mut edge| {
+            edge.parent_compile_kind = None;
+            edge
+        })
+        .collect();
+    for package in &mut selected.packages {
+        if let Some(manifest) = &package.local_manifest {
+            let mut compilation = Manifest::load_path_dependency(&manifest.root)?;
+            compilation.editable = manifest.editable;
+            package.local_manifest = Some(compilation);
+        }
+    }
+    Ok(selected)
 }
 
 pub(crate) fn requests(

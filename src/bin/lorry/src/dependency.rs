@@ -396,6 +396,27 @@ pub fn prepare_locked_source(
             resolution,
         );
     }
+    if matches!(source.registry, RegistrySource::Lorry(_))
+        && CompactState::load(&manifest.workspace_root)?.is_none()
+    {
+        let catalog = locked_catalog(manifest, config, source.registry, Some(source.direct))?;
+        let resolution = resolve_selected(
+            manifest,
+            &catalog,
+            options,
+            &LockedPreference::from_lockfile(manifest.lock.as_ref())?,
+            selection,
+        )?;
+        if resolution.packages.iter().any(|package| {
+            matches!(
+                package.source,
+                ResolvedSource::CratesIo { .. } | ResolvedSource::Git { .. }
+            )
+        }) {
+            return Err(Error::failure("compilation using crates.io or Git packages requires workspace admission")
+                .with_help("run workspace-root `lorry vendor --locked [--offline]` to review and approve these sources"));
+        }
+    }
     prepare_locked_with(
         manifest,
         config,
@@ -803,6 +824,9 @@ pub fn verify_compact_admission(
     inputs: &ReviewInputs<'_>,
     compact: &CompactState,
 ) -> Result<VerifiedAdmission> {
+    if compact.scope.is_some() {
+        return workspace::admission::verify(inputs, compact);
+    }
     let verified = reconstruct_review(inputs, &compact.contexts, compact.capabilities.clone())?;
     if verified.review.commitment()? != compact.review_sha256 {
         return Err(Error::failure(

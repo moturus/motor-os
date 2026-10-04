@@ -6,7 +6,16 @@ LORRY="$(realpath "${1:?usage: fetch-contract.sh LORRY}")"
 source "$SCRIPT_DIR/current-toolchain.sh"
 lorry_load_current_toolchain
 WORK="$(mktemp -d /tmp/lorry-fetch-contract-XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+cleanup() {
+    local status="$?"
+    if [ "$status" -ne 0 ]; then
+        for log in "$WORK"/*.err; do
+            [ ! -f "$log" ] || cat "$log" >&2
+        done
+    fi
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
 HOST_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export CARGO_HOME="$HOST_CARGO_HOME"
@@ -28,6 +37,8 @@ edition = "2021"
 cfg-if = { version = "=1.0.4", optional = true }
 [target.'cfg(windows)'.dependencies]
 equivalent = "=1.0.2"
+[features]
+default = ["dep:cfg-if"]
 EOF
 echo 'compile_error!("fetch must never compile this package");' >"$PROJECT/app/src/lib.rs"
 "$LORRY_TEST_CARGO" generate-lockfile --manifest-path "$PROJECT/Cargo.toml" --offline
@@ -83,13 +94,23 @@ cmp Cargo.lock "$WORK/original.lock"
 cmp "$WORK/requests" "$WORK/requests.before"
 cp .lorry/dependencies-v2.toml "$WORK/original.admission"
 cat >>app/Cargo.toml <<'EOF'
-[features]
 unused = []
 EOF
 "$LORRY" -q --lorry-messages vendor --locked --offline >"$WORK/repeated.out" 2>"$WORK/repeated.err"
 test ! -s "$WORK/repeated.out"
 test ! -s "$WORK/repeated.err"
 cmp .lorry/dependencies-v2.toml "$WORK/original.admission"
+echo 'pub fn fixture() { cfg_if::cfg_if! { if #[cfg(unix)] {} else {} } }' >app/src/lib.rs
+"$LORRY" -q build -p app >"$WORK/build.out" 2>"$WORK/build.err"
+"$LORRY" -q build -p app >"$WORK/cached.out" 2>"$WORK/cached.err"
+cmp Cargo.lock "$WORK/original.lock"
+rm .lorry/dependencies-v2.toml
+if "$LORRY" -q build -p app >"$WORK/unadmitted.out" 2>"$WORK/unadmitted.err"; then
+    echo 'cached build accepted outside sources after admission was removed' >&2
+    exit 1
+fi
+grep -F 'requires' "$WORK/unadmitted.err" >/dev/null
+cp "$WORK/original.admission" .lorry/dependencies-v2.toml
 cat >>app/Cargo.toml <<'EOF'
 [dependencies.semver]
 version = "=1.0.27"

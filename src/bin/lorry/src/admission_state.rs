@@ -131,9 +131,9 @@ fn source_digest(source: &str) -> String {
     hex(&digest.finish())
 }
 
-pub use review::{Capability, CompactState, Context, Review, ReviewScope};
+pub use review::{Capability, CompactState, Context, Review, ReviewScope, UnitKind};
 #[cfg(test)]
-pub use review::{ContextRegistry, LockedRegistry, RegistrySource, UnitKind};
+pub use review::{ContextRegistry, LockedRegistry, RegistrySource};
 
 #[allow(dead_code)]
 mod review {
