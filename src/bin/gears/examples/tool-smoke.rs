@@ -8,6 +8,7 @@ use gears::process::{Cancellation, Output};
 use gears::tools::{ExecutionContext, Registry};
 use serde_json::{Value, json};
 
+#[cfg(not(test))]
 fn main() -> Result<(), String> {
     let directory = std::env::args_os()
         .nth(1)
