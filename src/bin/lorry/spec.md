@@ -303,7 +303,10 @@ Readme discovery and boolean forms match Cargo; an explicit false suppresses
 discovery, and inheriting a disabled workspace readme is an error. Metadata
 preserves publish's boolean/array meaning. Include/exclude arrays are retained
 for member file selection. Inherited type errors identify the workspace
-value's source line. Dependency and lint inheritance follow in later patches.
+value's source line. `[lints] workspace = true` inherits the root's
+`workspace.lints` and rejects additional member lint tables. Rust, Clippy,
+and rustdoc namespaces retain Cargo's lint flags and priorities, even when
+the corresponding lint tool is not active. Dependency inheritance follows.
 `new` and `cache clean` do not inspect
 a current package.
 

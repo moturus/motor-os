@@ -2,7 +2,7 @@ use std::path::{Component, Path, PathBuf};
 
 use toml_edit::{Item, Table, Value};
 
-use super::{InheritedPackage, string_array, type_error};
+use super::{InheritedPackage, require_table, string_array, type_error};
 use crate::diagnostic::{Error, Result};
 use crate::toml::Document;
 
@@ -17,6 +17,61 @@ pub(super) struct Field<'a> {
     pub path: &'a Path,
     pub document: &'a Document,
     pub item: &'a Item,
+}
+
+pub(super) fn lint_table<'a>(
+    path: &'a Path,
+    document: &'a Document,
+    inherited: Option<&'a InheritedPackage>,
+) -> Result<Option<Field<'a>>> {
+    let Some(item) = document.root().get("lints") else {
+        return Ok(None);
+    };
+    let table = require_table(path, document, item, "lints")?;
+    let Some(workspace) = table.get("workspace") else {
+        return Ok(Some(Field {
+            path,
+            document,
+            item,
+        }));
+    };
+    let value = workspace.as_bool().ok_or_else(|| {
+        type_error(
+            path,
+            document.line_of_item(workspace),
+            "lints.workspace",
+            "a boolean",
+        )
+    })?;
+    if !value {
+        return Ok(Some(Field {
+            path,
+            document,
+            item,
+        }));
+    }
+    if table.len() != 1 {
+        return Err(Error::at(
+            path,
+            document.line_of_item(item),
+            "inherited workspace lints cannot have member overrides",
+            "remove the member lint tables or lints.workspace = true",
+        ));
+    }
+    let inherited =
+        inherited.ok_or_else(|| Error::failure("lints inherit from a missing workspace"))?;
+    let item = inherited
+        .document
+        .root()
+        .get("workspace")
+        .and_then(Item::as_table)
+        .and_then(|table| table.get("lints"))
+        .ok_or_else(|| Error::failure("inherited workspace.lints is not defined"))?;
+    Ok(Some(Field {
+        path: &inherited.path,
+        document: &inherited.document,
+        item,
+    }))
 }
 
 impl<'a> PackageFields<'a> {

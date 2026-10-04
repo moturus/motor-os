@@ -55,6 +55,7 @@ pub struct Manifest {
     #[allow(dead_code)]
     pub rust_lints: BTreeMap<String, Lint>,
     pub clippy_lints: BTreeMap<String, Lint>,
+    pub rustdoc_lints: BTreeMap<String, Lint>,
     #[allow(dead_code)]
     pub lock: Option<Lockfile>,
     unsupported_target_dev_dependencies: Vec<UnsupportedTargetDevDependency>,
@@ -597,8 +598,10 @@ impl Manifest {
         } else {
             Vec::new()
         };
-        let rust_lints = parse_lint_namespace(path, document, mode, "rust")?;
-        let clippy_lints = parse_lint_namespace(path, document, mode, "clippy")?;
+        let lint_table = inheritance::lint_table(path, document, inherited)?;
+        let rust_lints = parse_lint_namespace(lint_table.as_ref(), mode, "rust")?;
+        let clippy_lints = parse_lint_namespace(lint_table.as_ref(), mode, "clippy")?;
+        let rustdoc_lints = parse_lint_namespace(lint_table.as_ref(), mode, "rustdoc")?;
         let (dev, release) = if mode == ManifestMode::Root {
             parse_profiles(path, document)?
         } else {
@@ -629,6 +632,7 @@ impl Manifest {
             patches,
             rust_lints,
             clippy_lints,
+            rustdoc_lints,
             lock: None,
             unsupported_target_dev_dependencies,
         })
@@ -2137,22 +2141,24 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
 }
 
 fn parse_lint_namespace(
-    path: &Path,
-    document: &Document,
+    field: Option<&inheritance::Field<'_>>,
     mode: ManifestMode,
     namespace: &str,
 ) -> Result<BTreeMap<String, Lint>> {
-    let Some(item) = document.root().get("lints") else {
+    let Some(field) = field else {
         return Ok(BTreeMap::new());
     };
-    let lints = require_table(path, document, item, "lints")?;
+    let path = field.path;
+    let document = field.document;
+    let lints = require_table(path, document, field.item, "lints")?;
     for (key, item) in lints.iter() {
-        if !matches!(key, "rust" | "clippy") && mode == ManifestMode::Root {
+        if !matches!(key, "rust" | "clippy" | "rustdoc" | "workspace") && mode == ManifestMode::Root
+        {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
                 format!("lint namespace `lints.{key}` is not supported in Stage 2"),
-                "configure lints under `[lints.rust]` or `[lints.clippy]`",
+                "configure lints under rust, clippy, or rustdoc namespaces",
             ));
         }
     }

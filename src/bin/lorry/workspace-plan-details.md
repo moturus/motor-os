@@ -1167,6 +1167,12 @@ question mark, ranges and negated classes, explicit exclusion overrides,
 matching files, missing manifests, unmatched patterns, and empty virtual
 workspaces. Recursive `**` is rejected explicitly.
 
+Workspace lint inheritance and rustdoc lint flags passed the 23 focused
+manifest tests, the paired Clippy contract, and strict Clippy in
+`/tmp/lorry-m5-inherited-lints-{unit,contract,clippy}.log`. The fixture inherits
+all three namespaces, including lint priorities, in explicit and implicit
+members. Both Cargo and Lorry reject a member override alongside inheritance.
+
 **Result.** Every command uses the same workspace membership and manifest
 inheritance rules. One member can be built or checked from the workspace
 root. The shared model is ready for multi-member execution.

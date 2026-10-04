@@ -24,10 +24,12 @@ printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
 export HOME="$WORK/home"
 printf '[workspace]\nmembers = ["app"]\nresolver = "2"\n' \
     >"$PROJECT/Cargo.toml"
+printf '[workspace.lints.rust]\nunused_imports = { level = "warn", priority = -1 }\n[workspace.lints.clippy]\nneedless_return = "warn"\n[workspace.lints.rustdoc]\nbroken_intra_doc_links = { level = "warn", priority = 1 }\n' \
+    >>"$PROJECT/Cargo.toml"
 for package in app shared; do
     printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2024"\n' \
         "$package" >"$PROJECT/$package/Cargo.toml"
-    printf '[lints.clippy]\nneedless_return = "warn"\n' \
+    printf '[lints]\nworkspace = true\n' \
         >>"$PROJECT/$package/Cargo.toml"
 done
 printf '[dependencies]\nshared = { path = "../shared" }\nexternal = { path = "../../external" }\n' \
@@ -153,4 +155,16 @@ printf 'disallowed-names = ["configured"]\n' >"$WORK/override/clippy.toml"
 export CLIPPY_CONF_DIR=../override
 configuration_case override 'app shared'
 unset CLIPPY_CONF_DIR
+cp "$PROJECT/app/Cargo.toml" "$WORK/app.inherited"
+printf '\n[lints.rust]\nunused_imports = "deny"\n' >>"$PROJECT/app/Cargo.toml"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    if CARGO_HOME="$HOST_CARGO_HOME" "$builder" clippy -p app --lib --offline \
+        --message-format=json >"$WORK/override.json" 2>"$WORK/override.err"; then
+        echo "clippy-contract: accepted member overrides of inherited workspace lints" >&2
+        exit 1
+    fi
+    grep -E 'cannot override `workspace.lints`|inherited workspace lints cannot have member overrides' \
+        "$WORK/override.err" >/dev/null
+done
+cp "$WORK/app.inherited" "$PROJECT/app/Cargo.toml"
 echo "PASS: Clippy member coverage, no-deps, cached warnings, and lint arguments match Cargo"

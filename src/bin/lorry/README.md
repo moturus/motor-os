@@ -258,7 +258,9 @@ All 16 Cargo package fields can inherit from `workspace.package`; inherited
 readme and license-file paths are relative to the member. Explicit
 `readme = false` disables discovery. Members and default-members accept
 component globs `*`, `?`, and `[...]`; recursive `**` is rejected.
-Dependency and lint inheritance and example and bench targets follow later.
+`[lints] workspace = true` inherits Rust, Clippy, and rustdoc settings from
+`workspace.lints`; member overrides alongside inheritance are rejected.
+Dependency inheritance and example and bench targets follow later.
 
 `locate-project` emits `{"root":"/absolute/path/Cargo.toml"}`, or the path
 alone with `--message-format plain`. The manifest must currently be in the

@@ -854,6 +854,12 @@ pub(crate) fn lint_arguments(manifest: &Manifest) -> Vec<OsString> {
                 .iter()
                 .map(|(name, lint)| ("clippy", name, lint)),
         )
+        .chain(
+            manifest
+                .rustdoc_lints
+                .iter()
+                .map(|(name, lint)| ("rustdoc", name, lint)),
+        )
         .map(|(namespace, name, lint)| {
             let flag = match lint.level.as_str() {
                 "forbid" => "--forbid",
