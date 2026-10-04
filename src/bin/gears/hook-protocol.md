@@ -5,6 +5,8 @@ starts the configured argument vector directly for each event, writes one JSON
 object to stdin, closes stdin, and reads one bounded JSON object from stdout.
 Stderr is shown as a diagnostic. Hooks inherit the user's authority and the
 selected workspace, but never inherit the provider credential.
+The bare program `gears-batteries` resolves beside the running executable,
+for hooks and every other shared-runner role. It does not search `PATH`.
 
 A hook configuration may select `events = [...]`. Omission receives all events;
 an empty list receives none. Unknown or duplicate event names are rejected.

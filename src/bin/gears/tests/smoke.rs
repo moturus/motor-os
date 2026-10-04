@@ -47,6 +47,51 @@ fn gears(root: &Path, workspace: &Path, config: &Path) -> Command {
 }
 
 #[test]
+fn batteries_hook_uses_the_gears_sibling_even_when_path_contains_another_program() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = fixture("batteries-sibling");
+    let workspace = root.join("workspace");
+    let binaries = root.join("bin");
+    let other = root.join("other");
+    for path in [&workspace, &binaries, &other] {
+        std::fs::create_dir(path).unwrap();
+    }
+    std::fs::copy(env!("CARGO_BIN_EXE_gears"), binaries.join("gears")).unwrap();
+    for (directory, label) in [(&binaries, "sibling-hook-ran"), (&other, "path-hook-ran")] {
+        let path = directory.join("gears-batteries");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{{\"notice\":\"{label}\"}}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let server = MockServer::start_one(sse_response(&[
+        r#"{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}"#,
+    ]))
+    .unwrap();
+    let cfg = config(&root, &server);
+    let mut file = std::fs::OpenOptions::new().append(true).open(&cfg).unwrap();
+    writeln!(file, "\n[[hooks]]\nname = 'batteries'\nevents = ['initialize']\ncommand = ['gears-batteries', 'hook']").unwrap();
+    let output = Command::new(binaries.join("gears"))
+        .env("HOME", &root)
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env("PATH", format!("{}:/usr/bin:/bin", other.display()))
+        .args(["--ui", "line", "--ephemeral", "--config"])
+        .arg(cfg)
+        .arg("--workspace")
+        .arg(workspace)
+        .args(["-p", "hello"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("sibling-hook-ran"), "{stderr}");
+    assert!(!stderr.contains("path-hook-ran"), "{stderr}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn hook_questions_and_commands_work_in_line_ui_and_never_prompt_in_one_shots() {
     for mode in ["interactive", "text", "jsonl"] {
         let root = fixture(&format!("hook-question-{mode}"));

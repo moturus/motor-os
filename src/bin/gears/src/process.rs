@@ -130,7 +130,17 @@ pub fn run(
         detail,
         started: false,
     })?;
-    let mut command = Command::new(&request.program);
+    let program = if request.program == "gears-batteries" {
+        std::env::current_exe()
+            .map_err(|error| RunError {
+                detail: format!("cannot locate Gears executable: {error}"),
+                started: false,
+            })?
+            .with_file_name("gears-batteries")
+    } else {
+        PathBuf::from(&request.program)
+    };
+    let mut command = Command::new(program);
     command
         .args(&request.args)
         .current_dir(&request.cwd)
