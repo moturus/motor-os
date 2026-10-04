@@ -541,6 +541,9 @@ location to which its settings should move. System constraints still apply.
 - Resolver versions 1, 2, and 3 must follow Cargo-compatible feature,
   target, yanked-version, candidate-ordering/backtracking, and Rust-version
   behavior for the supported single-root model.
+- An omitted path/Git version accepts any source package version, including
+  prereleases. An explicit `version = "*"` keeps Cargo's semver prerelease
+  exclusion. Inherited dependencies retain that distinction.
 - Resolver 1 unifies selected requests across host/target kinds, inactive
   platforms, and workspace member development dependencies before filtering
   the units to build. A unified feature change reaches dependencies in every

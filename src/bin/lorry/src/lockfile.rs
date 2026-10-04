@@ -278,7 +278,7 @@ fn preserve_inactive_dependencies(
 fn dependency_matches(dependency: &crate::manifest::Dependency, locked: &LockedPackage) -> bool {
     if dependency.package != locked.name
         || !Version::parse(&locked.version.original)
-            .is_ok_and(|version| dependency.requirement.matches(&version))
+            .is_ok_and(|version| dependency.matches_version(&version))
     {
         return false;
     }

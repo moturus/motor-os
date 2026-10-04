@@ -102,6 +102,7 @@ fn resolve_workspace_request(
                 ))
             })?;
         let dependency = CandidateDependency {
+            any_version: false,
             dependency: Dependency {
                 alias: package.key.name.clone(),
                 package: package.key.name.clone(),
@@ -271,6 +272,7 @@ pub(crate) fn resolve_complete_workspace(
             },
         );
         let dependency = CandidateDependency {
+            any_version: false,
             dependency: Dependency {
                 alias: member.name.clone(),
                 package: member.name.clone(),

@@ -195,12 +195,19 @@ pub struct Dependency {
     pub alias: String,
     pub package: String,
     pub requirement: VersionReq,
+    pub version_specified: bool,
     pub source: DependencySource,
     pub optional: bool,
     pub default_features: bool,
     pub features: Vec<String>,
     pub target: Option<String>,
     pub kind: DependencyKind,
+}
+
+impl Dependency {
+    pub(crate) fn matches_version(&self, version: &semver::Version) -> bool {
+        !self.version_specified || self.requirement.matches(version)
+    }
 }
 
 #[allow(dead_code)]
@@ -1887,6 +1894,7 @@ fn parse_dependency(
             alias: alias.to_owned(),
             package: alias.to_owned(),
             requirement: parse_requirement(path, document.line_of_item(item), alias, requirement)?,
+            version_specified: true,
             source: DependencySource::CratesIo,
             optional: false,
             default_features: true,
@@ -2064,6 +2072,7 @@ fn parse_dependency(
         alias: alias.to_owned(),
         package,
         requirement,
+        version_specified: lookup.get("version").is_some(),
         source,
         optional: lookup_bool(path, document, &lookup, alias, "optional")?.unwrap_or(false),
         default_features: lookup_bool(path, document, &lookup, alias, "default-features")?

@@ -94,6 +94,7 @@ impl Catalog {
                 .map(|dependency| CandidateDependency {
                     dependency,
                     source: RequirementSource::CratesIo,
+                    any_version: false,
                 })
                 .collect(),
             source: ResolvedSource::CratesIo {
@@ -251,7 +252,7 @@ impl Catalog {
             RequirementSource::CratesIo => return self.prepare_registry(dependency),
             RequirementSource::Git(git) => {
                 if self.records(&dependency.package).iter().any(|candidate| {
-                    dependency.requirement.matches(&candidate.version)
+                    dependency.matches_version(&candidate.version)
                         && source_matches(&candidate.source, &dependency.source)
                 }) {
                     return Ok(());
@@ -328,13 +329,13 @@ impl Catalog {
             .get(&dependency.package)
             .into_iter()
             .flatten()
-            .filter(|package| dependency.requirement.matches(&package.version))
+            .filter(|package| dependency.matches_version(&package.version))
             .cloned()
             .collect::<Vec<_>>();
         let source = repository.source.clone();
 
         let has_patch_candidate = self.records(&dependency.package).iter().any(|candidate| {
-            dependency.requirement.matches(&candidate.version)
+            dependency.matches_version(&candidate.version)
                 && matches!(
                     candidate.source,
                     ResolvedSource::Path {
@@ -510,6 +511,7 @@ fn local_candidate(
         .iter()
         .map(|dependency| {
             Ok(CandidateDependency {
+                any_version: !dependency.version_specified,
                 dependency: Dependency {
                     alias: dependency.alias.clone(),
                     package: dependency.package.clone(),
@@ -591,6 +593,13 @@ impl std::ops::Deref for Candidate {
 struct CandidateDependency {
     dependency: Dependency,
     source: RequirementSource,
+    any_version: bool,
+}
+
+impl CandidateDependency {
+    fn matches_version(&self, version: &Version) -> bool {
+        self.any_version || self.requirement.matches(version)
+    }
 }
 
 impl std::ops::Deref for CandidateDependency {
@@ -1165,6 +1174,7 @@ fn root_requirements_and_features(
         output.push(RootRequirement {
             index,
             dependency: CandidateDependency {
+                any_version: !dependency.version_specified,
                 dependency: Dependency {
                     alias: dependency.alias.clone(),
                     package: dependency.package.clone(),
@@ -1363,7 +1373,7 @@ impl State {
                         .iter()
                         .filter(|(key, source)| {
                             key.name == dependency.package
-                                && dependency.requirement.matches(&key.version)
+                                && dependency.matches_version(&key.version)
                                 && source_matches(source, &dependency.source)
                         })
                         .max_by(|left, right| left.0.version.cmp(&right.0.version))
@@ -1517,7 +1527,7 @@ fn solve(
         .iter()
         .filter(|(key, node)| {
             key.name == event.dependency.package
-                && event.dependency.requirement.matches(&key.version)
+                && event.dependency.matches_version(&key.version)
                 && source_matches(&node.record.source, &event.dependency.source)
                 && locked_package.is_none_or(|locked| locked == *key)
         })
@@ -1960,7 +1970,7 @@ fn candidates(
         .records(&event.dependency.package)
         .iter()
         .filter(|candidate| source_matches(&candidate.source, &event.dependency.source))
-        .filter(|record| event.dependency.requirement.matches(&record.version))
+        .filter(|record| event.dependency.matches_version(&record.version))
         .filter(|candidate| !registry_candidate_is_patched(catalog, event, candidate))
         .filter(|record| {
             !record.yanked
@@ -2545,6 +2555,78 @@ mod tests {
             .to_string()
             .contains("dependency cycle")
         );
+    }
+
+    #[test]
+    fn prerelease_path_requirements_match_cargo() {
+        let fixture = LocalFixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fixture.package(
+            "b",
+            "[package]\nname = \"b\"\nversion = \"1.0.0-pre.1\"\nedition = \"2021\"\n",
+        );
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        for requirement in ["", ", version = \"*\"", ", version = \"=1.0.0-pre.1\""] {
+            fixture.package(
+                "a",
+                &format!(
+                    "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                 [dependencies]\nb = {{ path = \"../b\"{requirement} }}\n"
+                ),
+            );
+            let _ = fs::remove_file(fixture.0.join("Cargo.lock"));
+            let cargo = std::process::Command::new(env!("CARGO"))
+                .args(["generate-lockfile", "--offline"])
+                .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                .current_dir(&fixture.0)
+                .output()
+                .unwrap();
+            let source = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+            let mut catalog = Catalog::default();
+            let limits = options(ResolverVersion::V2);
+            let complete =
+                resolve_complete_workspace(&source, &mut catalog, &limits, &[], &mut |_, _, _| {
+                    Ok(())
+                });
+            assert_eq!(
+                complete.is_ok(),
+                cargo.status.success(),
+                "requirement {requirement:?}: {complete:?}; {}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+            if let Ok(complete) = complete {
+                assert_eq!(
+                    crate::lockfile::render_workspace(&complete, crate::lockfile::Format::V4)
+                        .unwrap(),
+                    fs::read(fixture.0.join("Cargo.lock")).unwrap()
+                );
+                let member = workspace::MemberRequest {
+                    root: fixture.0.join("a"),
+                    features: BTreeSet::new(),
+                    default_features: true,
+                    dev: false,
+                    selected: true,
+                };
+                let selected = workspace::resolve_selected_workspace(
+                    &complete,
+                    &catalog,
+                    &limits,
+                    &[member],
+                    TargetSelection {
+                        host_triple: "x86_64-unknown-linux-gnu",
+                        host_cfg: &cfg,
+                        target_triple: "x86_64-unknown-linux-gnu",
+                        target_cfg: &cfg,
+                    },
+                )
+                .unwrap();
+                assert_eq!(selected.packages.len(), 2);
+            }
+        }
     }
 
     fn cargo_unit_features(output: &[u8]) -> BTreeMap<String, BTreeSet<String>> {
