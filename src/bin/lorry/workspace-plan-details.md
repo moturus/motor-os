@@ -2196,6 +2196,15 @@ covers effective profiles and graph wiring.
 
 ## Milestone 7: workspace builds
 
+Status: complete. The final component gate passed in 633 seconds on
+2026-10-04, with 434 Rust tests, three own-message tests, every host contract,
+Cargo native/cross identity, and native Motor self-build, workspace binary/JSON
+identity, Clippy, and recovery. Host preparation took 171.546 seconds, VM startup
+3.092 seconds, and the native gate 283.694 seconds. Online host and native
+vendoring succeeded without retries. Full log:
+`/tmp/lorry-m7-full-cold-check-fixed.log`; native summary:
+`target/lorry/native-self-tests/self-20261004T185447Z-233562/summary.txt`.
+
 The first independent foundation accepts a slice of selected package identities
 in compiler and executor options. Primary-package environment, Clippy
 configuration, and cache input roles now use membership in that slice; the

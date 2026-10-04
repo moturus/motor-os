@@ -171,13 +171,19 @@ execution grants. The complete Lorry suite passed in 674 seconds on 2026-10-04:
 identity, native Motor self-build, cross/native identity, Clippy, and recovery.
 Online host and native vendoring succeeded without retries.
 
-Milestone 7 is in progress. Compiler and executor options accept several
+Milestone 7 is complete. Compiler and executor options accept several
 primary packages. The ordinary shared unit planner matches Cargo for build and
 check across default selection, all members, repeated package selectors, and
 exclusions. The engine now executes shared ordinary graphs, verifies admission
 for all selected roots and features, publishes each binary with its package
-owner, and supports workspace build, check, and Clippy selection. Collision
-warnings, keep-going, and milestone identity coverage remain in progress.
+owner, and supports workspace build, check, and Clippy selection. Cargo-style
+binary collision warnings and build/check keep-going are covered. The complete
+Lorry suite passed in 633 seconds on 2026-10-04: 434 Rust tests, three own-message
+tests, all host contracts, Cargo native/cross identity, and native Motor
+self-build, shared workspace identity, Clippy, and recovery. Online host and
+native vendoring needed no retries. The two earlier gate failures were fixture
+mismatches: unequal Rust flags and unequal incremental-cache state. Their
+diagnoses and preserved evidence are in the details file.
 
 ## Goal
 

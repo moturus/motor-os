@@ -88,6 +88,7 @@ Cargo.lock, so it is immediately buildable without Cargo.
 
 ```text
 lorry build [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation]
+             [--keep-going]
 lorry run   [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]
 lorry test  [NAME] [--release|-r] [--target TRIPLE] [--strict-validation]
             [--test NAME] [--no-run] [--bundle] [-- ARGS...]
@@ -96,8 +97,8 @@ lorry test  [NAME] [--release|-r] [--target TRIPLE] [--strict-validation]
 Package commands accept Cargo names, package IDs, versions, and member-name
 patterns. A member invocation defaults to itself; workspace-root invocations
 use Cargo's default members. Repeated `-p`, `--workspace`, and `--exclude`
-select members, but compilation still requires exactly one until multi-member
-execution lands. Members share the root lockfile, resolver, profiles, patches,
+select members for ordinary build, check, and Clippy. Run and test currently
+require exactly one member. Members share the root lockfile, resolver, profiles, patches,
 and target ownership. Membership, package/dependency/lint inheritance, and
 component globs follow the rules below. External members remain unsupported.
 
