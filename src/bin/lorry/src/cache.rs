@@ -192,6 +192,41 @@ impl BuildCache {
         {
             digest.os("clippy-driver-path", driver.path.as_os_str(), &[]);
             digest.bytes("clippy-driver-sha256", &driver.sha256);
+            for path in crate::clippy::configuration_candidates(
+                &input.manifest.root,
+                &input.invocation.current_dir,
+                &driver.arguments,
+                input.selected,
+            ) {
+                digest.os("clippy-config-candidate", path.as_os_str(), &[]);
+                match fs::metadata(&path) {
+                    Ok(metadata) if metadata.is_file() => {
+                        let resolved = fs::canonicalize(&path).map_err(|error| {
+                            Error::failure(format!(
+                                "failed to resolve Clippy configuration `{}`: {error}",
+                                path.display()
+                            ))
+                        })?;
+                        digest.os("clippy-config-resolved", resolved.as_os_str(), &[]);
+                        digest.file_contents("clippy-config-content", &resolved)?;
+                    }
+                    Ok(_) => digest.bytes("clippy-config-nonfile", b""),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        digest.bytes("clippy-config-absent", b"");
+                    }
+                    Err(error) => {
+                        return Err(Error::failure(format!(
+                            "failed to inspect Clippy configuration `{}`: {error}",
+                            path.display()
+                        )));
+                    }
+                }
+            }
         }
         digest.string("package-name", &input.key.package.name);
         digest.string("package-version", &input.key.package.version.to_string());

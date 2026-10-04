@@ -604,6 +604,23 @@ fn execute_unit(
                         .environment
                         .insert("CLIPPY_ARGS".to_owned(), driver.arguments.clone().into());
                 }
+                let mut clippy_inputs = Vec::new();
+                if let Some(driver) = driver {
+                    clippy_inputs.extend([
+                        planned_invocation.current_dir.join("Cargo.toml"),
+                        driver.path.clone(),
+                    ]);
+                    clippy_inputs.extend(
+                        crate::clippy::configuration_candidates(
+                            &manifest.root,
+                            &planned_invocation.current_dir,
+                            &driver.arguments,
+                            options.selected_package == Some(&key.package),
+                        )
+                        .into_iter()
+                        .filter(|path| path.is_file()),
+                    );
+                }
                 let output_dir = unit_output_directory(planned, commands);
                 let unit_dir = output_dir
                     .parent()
@@ -811,12 +828,7 @@ fn execute_unit(
                     selected,
                     executed_build_script.map(|build| build.out_dir.as_path()),
                     planned.source_remap.as_ref(),
-                    &driver.map_or_else(Vec::new, |driver| {
-                        vec![
-                            planned_invocation.current_dir.join("Cargo.toml"),
-                            driver.path.clone(),
-                        ]
-                    }),
+                    &clippy_inputs,
                 )?;
                 if restorable && let (Some(caches), Some(cache_key)) = (options.cache, cache_key) {
                     caches.for_unit(planned).store(

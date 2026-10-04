@@ -116,7 +116,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         && let Some(arguments) = &options.clippy
         && let Some(driver) = &mut toolchain.clippy
     {
-        driver.arguments = arguments.join("__CLIPPY_HACKERY__");
+        driver.arguments = arguments.join(crate::clippy::ARG_SEPARATOR);
     }
     check_rust_version(&manifest, &toolchain)?;
     crate::trace::event("discovered rustc toolchain");

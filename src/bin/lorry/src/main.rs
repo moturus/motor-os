@@ -12,6 +12,7 @@ mod change_review;
 mod check_message;
 mod clean;
 mod cli;
+mod clippy;
 mod compatibility;
 mod compile;
 mod config;

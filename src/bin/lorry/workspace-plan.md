@@ -95,7 +95,10 @@ content hash binds member compiler caches. `clippy` now uses the check path,
 with separate outputs and incremental state. The paired Cargo contract covers
 member dependencies and build scripts, external-package exclusion, fresh
 warnings, `--no-deps`, and denied trailing lint arguments. Configuration
-freshness, native driver/image integration, and the full milestone gate follow.
+freshness also tracks parent-directory files and absent candidates. Cargo
+comparisons prove edits, nearer-file creation/removal, and a relative
+`CLIPPY_CONF_DIR` override. Native driver/image integration and the full
+milestone gate follow.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

@@ -1069,6 +1069,12 @@ plain rustc. `--no-deps` lints only the selected package. Arguments after
 `--` are passed through `CLIPPY_ARGS`. An unlisted path package inside the
 workspace receives a note that Clippy is skipped; implicit membership
 awaits the shared workspace model. `--fix` is unsupported.
+The driver discovers `.clippy.toml` and `clippy.toml`, starting at
+`CLIPPY_CONF_DIR` when set or the package directory otherwise, and walking
+parents. Lorry preserves that environment setting and fingerprints searched
+candidates, including absent files, resolved symlink paths, and file contents.
+Member dependencies may read the discovered configuration above their package;
+those external inputs are validated on cache hits too.
 
 `build` and `check` share the Cargo message writer. Both accept
 `--message-format json` and `json-diagnostic-rendered-ansi`, including the

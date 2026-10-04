@@ -116,4 +116,35 @@ assert any(message['reason'] == 'compiler-message'
            and (message['message'].get('code') or {}).get('code') == 'clippy::needless_return'
            for message in messages)
 PY
+for package in app shared; do
+    printf 'pub fn named(configured: u8) -> u8 { configured + 1 }\n' \
+        >>"$PROJECT/$package/src/lib.rs"
+done
+configuration_case() {
+    local name="$1" expected="$2"
+    "$LORRY" clippy -p app --lib --message-format=json >"$WORK/$name.lorry.json"
+    CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" clippy -p app --lib \
+        --target-dir "$WORK/cargo-$name" --message-format=json >"$WORK/$name.cargo.json"
+    compare "$WORK/$name.lorry.json" "$WORK/$name.cargo.json"
+    python3 - "$WORK/$name.lorry.json" "$expected" <<'PY'
+import json, sys
+names = {message['target']['name'] for message in map(json.loads, open(sys.argv[1]))
+         if message['reason'] == 'compiler-message'
+         and (message['message'].get('code') or {}).get('code') == 'clippy::disallowed_names'}
+assert names == set(sys.argv[2].split()), names
+PY
+}
+printf 'disallowed-names = ["configured"]\n' >"$WORK/clippy.toml"
+configuration_case above 'app shared'
+printf 'disallowed-names = []\n' >"$WORK/clippy.toml"
+configuration_case edited ''
+printf 'disallowed-names = ["configured"]\n' >"$PROJECT/app/.clippy.toml"
+configuration_case nearer app
+rm "$PROJECT/app/.clippy.toml"
+configuration_case removed ''
+mkdir "$WORK/override"
+printf 'disallowed-names = ["configured"]\n' >"$WORK/override/clippy.toml"
+export CLIPPY_CONF_DIR=../override
+configuration_case override 'app shared'
+unset CLIPPY_CONF_DIR
 echo "PASS: Clippy member coverage, no-deps, cached warnings, and lint arguments match Cargo"
