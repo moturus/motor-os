@@ -109,6 +109,10 @@ record or preparing compilation units. Explicit denies and source resource
 limits still apply. Locks and admission records are never changed.
 Target `required-features` preserves absent, explicitly empty, and nonempty
 declarations in the JSON document.
+Outside path packages retain their development declarations and all described
+targets in metadata, without activating development edges for resolution.
+Targets follow Cargo's library, binary, example, test, bench, and build-script
+ordering.
 
 Debug builds must reproduce Cargo-equivalent compilation semantics but need
 not be byte-identical across hosts because paths and debug information can

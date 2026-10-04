@@ -160,6 +160,25 @@ mod tests {
                 "[package]\nname = {name:?}\nversion = \"1.0.0\"\nedition = \"2021\"\n{declarations}")).unwrap();
         }
         fs::write(root.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("windows-only/src/main.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(root.join("windows-only/examples")).unwrap();
+        fs::create_dir_all(root.join("windows-only/benches")).unwrap();
+        fs::write(root.join("windows-only/benches/speed.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("windows-only/build.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("windows-only/examples/demo.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            root.join("windows-only/src/integration.rs"),
+            "#[test] fn test() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("windows-only/Cargo.toml"),
+            "[package]\nname = \"windows-only\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             [lib]\ncrate-type = [\"staticlib\"]\n\
+             [dev-dependencies]\nshared = { path = \"../shared\", features = [\"dev\"] }\n\
+             [[test]]\nname = \"integration\"\npath = \"src/integration.rs\"\n",
+        )
+        .unwrap();
         let cargo = |platform: Option<&str>| {
             let mut command = Command::new(env!("CARGO"));
             command

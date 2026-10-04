@@ -420,7 +420,7 @@ pub(super) fn nearest_workspace(directory: &Path) -> Result<Option<WorkspaceRoot
     Ok(None)
 }
 
-fn load_package(directory: &Path, root: &Path) -> Result<Manifest> {
+pub(super) fn load_package(directory: &Path, root: &Path) -> Result<Manifest> {
     let path = directory.join(MANIFEST_NAME);
     let document = Document::load(&path, "Cargo source manifest")?;
     if directory != root && document.root().contains_key("workspace") {

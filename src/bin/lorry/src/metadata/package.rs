@@ -206,6 +206,16 @@ pub(crate) fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::
             doc: target.doc,
         });
     }
+    // Cargo constructs targets in this category order, sorting names within
+    // each category during discovery.
+    targets.sort_by_key(|target| match target.kind[0].as_str() {
+        "bin" => 1,
+        "example" => 2,
+        "test" => 3,
+        "bench" => 4,
+        "custom-build" => 5,
+        _ => 0,
+    });
     Ok(targets)
 }
 

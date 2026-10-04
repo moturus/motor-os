@@ -181,6 +181,7 @@ pub(crate) fn resolve_complete_workspace(
     loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
     catalog.workspace_root.clone_from(&workspace.root);
+    catalog.descriptive_sources = true;
     catalog.workspace_members = workspace
         .packages
         .iter()

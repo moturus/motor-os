@@ -301,12 +301,8 @@ fn compare(lorry: &Path, cargo: &Path) {
     let cargo = fs::read_to_string(cargo).expect("read Cargo metadata");
     let _: Metadata = parse(&lorry);
     let _: Metadata = parse(&cargo);
-    let mut lorry: Value = serde_json::from_str(&lorry).unwrap();
-    let mut cargo: Value = serde_json::from_str(&cargo).unwrap();
-    // Cargo omits an empty target required-features array while Lorry emits
-    // the schema field explicitly. No other field is normalized here.
-    add_empty_required_features(&mut lorry);
-    add_empty_required_features(&mut cargo);
+    let lorry: Value = serde_json::from_str(&lorry).unwrap();
+    let cargo: Value = serde_json::from_str(&cargo).unwrap();
     assert_eq!(lorry, cargo);
 }
 

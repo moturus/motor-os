@@ -27,6 +27,7 @@ use workspace::resolve_complete_workspace;
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
     fetch_hint: bool,
+    descriptive_sources: bool,
     records: BTreeMap<String, Vec<Candidate>>,
     paths: BTreeMap<PathBuf, PackageKey>,
     locked_repository: Option<LockedRepository>,
@@ -276,7 +277,11 @@ impl Catalog {
             return Ok(());
         }
 
-        let mut manifest = Manifest::load_path_dependency(&canonical)?;
+        let mut manifest = if self.descriptive_sources {
+            Manifest::load_source_dependency(&canonical)?
+        } else {
+            Manifest::load_path_dependency(&canonical)?
+        };
         manifest.editable = self
             .workspace_members
             .values()

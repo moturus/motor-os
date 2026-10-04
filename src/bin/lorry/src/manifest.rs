@@ -503,6 +503,18 @@ impl Manifest {
         Ok(manifest)
     }
 
+    pub(crate) fn load_source_dependency(root: &Path) -> Result<Self> {
+        let root = fs::canonicalize(root).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize source package `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        let mut manifest = source::load_package(&root, &root)?;
+        manifest.editable = false;
+        Ok(manifest)
+    }
+
     #[cfg(test)]
     pub(crate) fn parse(root: &Path, path: &Path, source: &str) -> Result<Self> {
         let document = Document::parse(path, "Cargo manifest", source.to_owned())?;
