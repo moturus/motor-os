@@ -112,6 +112,7 @@ impl RustcCommand<'_> {
         let mut command = Command::new(self.program);
         command
             .args(self.arguments)
+            .env_remove("CARGO_PRIMARY_PACKAGE")
             .envs(self.environment)
             .current_dir(self.current_dir);
         crate::artifact_lock::configure_child_lease(&mut command, self.child_lease_fd);

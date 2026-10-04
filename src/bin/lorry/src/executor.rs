@@ -582,7 +582,7 @@ fn execute_unit(
                     output: &output.output,
                     out_dir: &output.out_dir,
                 });
-                let planned_invocation = match build_output {
+                let mut planned_invocation = match build_output {
                     Some(output) => dependency_rustc_invocation_with_build_output(
                         plan,
                         manifests,
@@ -593,6 +593,17 @@ fn execute_unit(
                     None => dependency_rustc_invocation(plan, manifests, key, commands)?,
                 }
                 .ok_or_else(|| Error::failure("rustc invocation unexpectedly missing"))?;
+                let driver = options.toolchain.clippy.as_ref().filter(|_| {
+                    options
+                        .workspace_members
+                        .values()
+                        .any(|root| root == &manifest.root)
+                });
+                if let Some(driver) = driver {
+                    planned_invocation
+                        .environment
+                        .insert("CLIPPY_ARGS".to_owned(), driver.arguments.clone().into());
+                }
                 let output_dir = unit_output_directory(planned, commands);
                 let unit_dir = output_dir
                     .parent()
@@ -608,7 +619,7 @@ fn execute_unit(
                 AtomicDirectory::discard_abandoned_staging(unit_dir)?;
                 let dependencies = cache_dependencies(planned, outputs)?;
                 let selected = options.selected_package == Some(&key.package);
-                let selected_inputs = selected.then_some(SelectedInputs {
+                let selected_inputs = (selected || driver.is_some()).then_some(SelectedInputs {
                     package_root: &manifest.root,
                     working_dir: &planned_invocation.current_dir,
                     source_remap: planned.source_remap.as_ref(),
@@ -766,17 +777,7 @@ fn execute_unit(
                 }
                 let rustc_output = RustcCommand {
                     child_lease_fd: options.child_lease_fd,
-                    program: options
-                        .toolchain
-                        .clippy
-                        .as_ref()
-                        .filter(|_| {
-                            options
-                                .workspace_members
-                                .values()
-                                .any(|root| root == &manifest.root)
-                        })
-                        .map_or(&options.toolchain.rustc, |driver| &driver.path),
+                    program: driver.map_or(&options.toolchain.rustc, |driver| &driver.path),
                     arguments: &invocation.arguments,
                     environment: &invocation.environment,
                     current_dir: &invocation.current_dir,
@@ -810,6 +811,12 @@ fn execute_unit(
                     selected,
                     executed_build_script.map(|build| build.out_dir.as_path()),
                     planned.source_remap.as_ref(),
+                    &driver.map_or_else(Vec::new, |driver| {
+                        vec![
+                            planned_invocation.current_dir.join("Cargo.toml"),
+                            driver.path.clone(),
+                        ]
+                    }),
                 )?;
                 if restorable && let (Some(caches), Some(cache_key)) = (options.cache, cache_key) {
                     caches.for_unit(planned).store(
@@ -970,6 +977,7 @@ fn validate_dep_info(
     selected: bool,
     build_out_dir: Option<&Path>,
     source_remap: Option<&crate::unit::SourceRemap>,
+    allowed_inputs: &[PathBuf],
 ) -> Result<()> {
     const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
     let dep_info = match output {
@@ -1014,6 +1022,17 @@ fn validate_dep_info(
             })
         })
         .transpose()?;
+    let allowed_inputs = allowed_inputs
+        .iter()
+        .map(|path| {
+            fs::canonicalize(path).map_err(|error| {
+                Error::failure(format!(
+                    "failed to resolve Clippy input `{}`: {error}",
+                    path.display()
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     for path in parse_dep_info_paths(&bytes)? {
         let path = source_remap
             .and_then(|remap| remap.restore_physical_path(&path))
@@ -1032,6 +1051,7 @@ fn validate_dep_info(
         })?;
         if !selected
             && !canonical.starts_with(&root)
+            && !allowed_inputs.contains(&canonical)
             && !out_dir
                 .as_ref()
                 .is_some_and(|out_dir| canonical.starts_with(out_dir))

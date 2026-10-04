@@ -275,6 +275,7 @@ impl BuildCache {
         );
         rustc_arguments_digest(&mut digest, &input.invocation.arguments, &replacements)?;
         let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+        environment.remove(OsStr::new("CARGO_PRIMARY_PACKAGE"));
         for (name, value) in &input.invocation.environment {
             environment.insert(name.into(), value.clone());
         }

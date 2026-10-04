@@ -20,6 +20,7 @@ pub struct Toolchain {
 pub struct ClippyDriver {
     pub path: PathBuf,
     pub sha256: [u8; 32],
+    pub arguments: String,
 }
 
 #[derive(Clone, Debug)]
@@ -156,7 +157,11 @@ fn discover_clippy_driver(rustc: &Path, rustc_version: &str) -> Result<ClippyDri
         .with_help("select rustc and clippy-driver from the same toolchain"));
     }
     let sha256 = crate::hash::sha256_file(&path)?;
-    Ok(ClippyDriver { path, sha256 })
+    Ok(ClippyDriver {
+        path,
+        sha256,
+        arguments: String::new(),
+    })
 }
 
 fn resolve_rustup_proxy(rustc: PathBuf) -> Result<PathBuf> {

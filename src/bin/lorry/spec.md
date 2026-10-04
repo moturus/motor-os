@@ -1061,6 +1061,15 @@ the first observed failure.
 Until example targets are implemented, `check --examples` fails explicitly
 instead of succeeding without checking a target.
 
+`clippy` uses check's options, planner, and Cargo messages. It requires a
+matching sibling `clippy-driver` and uses separate `clippy` output and
+incremental directories. Listed workspace members, including dependency
+members and their build scripts, use the driver; outside packages use
+plain rustc. `--no-deps` lints only the selected package. Arguments after
+`--` are passed through `CLIPPY_ARGS`. An unlisted path package inside the
+workspace receives a note that Clippy is skipped; implicit membership
+awaits the shared workspace model. `--fix` is unsupported.
+
 `build` and `check` share the Cargo message writer. Both accept
 `--message-format json` and `json-diagnostic-rendered-ansi`, including the
 comma-separated combination and equals option form. The stream identifies

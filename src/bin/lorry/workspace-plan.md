@@ -89,6 +89,14 @@ it unchanged in JSON mode, and replays only stderr. The enhanced procedural
 macro contract proves cold output and fresh stderr-only replay. The original
 failure and diagnosis are retained in the milestone evidence below.
 
+Milestone 4 is in progress. Clippy manifest lints and sibling-driver
+discovery are committed. The driver must embed the selected rustc, and its
+content hash binds member compiler caches. `clippy` now uses the check path,
+with separate outputs and incremental state. The paired Cargo contract covers
+member dependencies and build scripts, external-package exclusion, fresh
+warnings, `--no-deps`, and denied trailing lint arguments. Configuration
+freshness, native driver/image integration, and the full milestone gate follow.
+
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the
 policy choices, the decisions, and the reason for each revision.

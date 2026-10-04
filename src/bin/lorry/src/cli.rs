@@ -127,6 +127,7 @@ pub enum MessageFormat {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckOptions {
+    pub clippy: Option<Vec<String>>,
     pub manifest_path: Option<String>,
     pub target_dir: Option<String>,
     pub target: Option<String>,
@@ -182,6 +183,10 @@ pub struct UpgradeOptions {
 }
 
 impl Cli {
+    pub fn is_clippy(&self) -> bool {
+        matches!(&self.command, Command::Check(options) if options.clippy.is_some())
+    }
+
     /// Parse errors must honor the option before Clap can return a command.
     pub fn lorry_messages_requested(arguments: &[String]) -> bool {
         arguments
@@ -255,12 +260,12 @@ impl Cli {
             .map_err(clap_error)?;
         if !matches!(
             matches.subcommand_name(),
-            Some("run") | Some("rustc") | Some("test")
+            Some("run") | Some("rustc") | Some("test") | Some("clippy")
         ) && arguments.iter().any(|argument| argument == "--")
         {
             return Err(Error::usage(
                 "this command does not accept arguments after `--`",
-                "only `run` and executable `test` commands accept child arguments",
+                "use `run`, `test`, or `clippy` for trailing arguments",
             ));
         }
         let color = match matches.get_one::<String>("color").map(String::as_str) {
@@ -412,7 +417,16 @@ fn command_line() -> ClapCommand {
                         .dont_delimit_trailing_values(true),
                 ),
         )
-        .subcommand(check_command())
+        .subcommand(check_command("check"))
+        .subcommand(
+            check_command("clippy")
+                .arg(
+                    Arg::new("no-deps")
+                        .long("no-deps")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(child_arguments()),
+        )
         .subcommand(clean_command().dont_delimit_trailing_values(true))
         .subcommand(locate_project_command())
         .subcommand(metadata_command())
@@ -444,6 +458,7 @@ fn command_line() -> ClapCommand {
                             "build",
                             "cache",
                             "check",
+                            "clippy",
                             "clean",
                             "locate-project",
                             "metadata",
@@ -500,8 +515,8 @@ fn locked_offline_arguments() -> [Arg; 3] {
     ["locked", "offline", "frozen"].map(|name| Arg::new(name).long(name).action(ArgAction::SetTrue))
 }
 
-fn check_command() -> ClapCommand {
-    ClapCommand::new("check")
+fn check_command(name: &'static str) -> ClapCommand {
+    ClapCommand::new(name)
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
         .arg(package_argument())
@@ -792,7 +807,14 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             Some((name, _)) => unreachable!("unexpected cache subcommand {name}"),
             None => unreachable!("Clap requires a cache subcommand"),
         },
-        Some(("check", options)) => Ok(Command::Check(CheckOptions {
+        Some((name @ ("check" | "clippy"), options)) => Ok(Command::Check(CheckOptions {
+            clippy: (name == "clippy").then(|| {
+                let mut arguments = values(options, "arguments");
+                if options.get_flag("no-deps") {
+                    arguments.insert(0, "--no-deps".to_owned());
+                }
+                arguments
+            }),
             manifest_path: options.get_one::<String>("manifest-path").cloned(),
             target_dir: options.get_one::<String>("target-dir").cloned(),
             target: options.get_one::<String>("target").cloned(),
@@ -1222,6 +1244,7 @@ mod tests {
         assert_eq!(
             check.command,
             Command::Check(CheckOptions {
+                clippy: None,
                 manifest_path: Some("/project/Cargo.toml".to_owned()),
                 target_dir: Some("/project/target/rust-analyzer".to_owned()),
                 target: Some("x86_64-unknown-motor".to_owned()),
@@ -1260,8 +1283,46 @@ mod tests {
     }
 
     #[test]
+    fn clippy_reuses_check_options_and_preserves_lint_arguments() {
+        let cli = parse(&[
+            "clippy",
+            "--lib",
+            "--no-deps",
+            "--manifest-path",
+            "/project/Cargo.toml",
+            "--message-format=json",
+            "--",
+            "-D",
+            "clippy::needless_return",
+            "--color=always",
+        ])
+        .unwrap();
+        assert!(cli.is_clippy());
+        let Command::Check(options) = cli.command else {
+            panic!("expected the shared check path")
+        };
+        assert!(options.lib);
+        assert_eq!(
+            options.clippy.unwrap(),
+            [
+                "--no-deps",
+                "-D",
+                "clippy::needless_return",
+                "--color=always"
+            ]
+        );
+        assert_eq!(
+            options.manifest_path.as_deref(),
+            Some("/project/Cargo.toml")
+        );
+        assert!(parse(&["clippy", "--fix"]).is_err());
+        assert!(parse(&["check", "--no-deps"]).is_err());
+        assert!(parse(&["check", "--", "-D", "warnings"]).is_err());
+    }
+
+    #[test]
     fn parses_shared_build_and_check_message_formats() {
-        for command in ["build", "check", "run", "test"] {
+        for command in ["build", "check", "clippy", "run", "test"] {
             for (value, expected) in [
                 ("json", MessageFormat::Json),
                 (

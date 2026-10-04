@@ -111,7 +111,13 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
     migrate_artifact_layout(&target_root)?;
     crate::trace::event("loaded manifest, admission state, and configuration");
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
+    let mut toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, cli.is_clippy())?;
+    if let Command::Check(options) = &cli.command
+        && let Some(arguments) = &options.clippy
+        && let Some(driver) = &mut toolchain.clippy
+    {
+        driver.arguments = arguments.join("__CLIPPY_HACKERY__");
+    }
     check_rust_version(&manifest, &toolchain)?;
     crate::trace::event("discovered rustc toolchain");
     if cli.verbosity == Verbosity::Verbose {
@@ -554,7 +560,10 @@ struct IncrementalRoots {
 }
 
 fn incremental_roots_in(build: &Build<'_>, target_root: &Path) -> IncrementalRoots {
-    let root = target_root.join(".incremental");
+    let mut root = target_root.join(".incremental");
+    if build.toolchain.clippy.is_some() {
+        root.push("clippy");
+    }
     IncrementalRoots {
         host: root.join(&build.host.triple),
         target: root.join(&build.target.triple),
@@ -853,7 +862,11 @@ fn build_inner(
         if let Some(target) = build.physical_target {
             destination.push(target);
         }
-        destination.join("check")
+        destination.join(if build.toolchain.clippy.is_some() {
+            "clippy"
+        } else {
+            "check"
+        })
     } else {
         profile_destination(target_root, build.physical_target, build.release)
     };
@@ -916,6 +929,26 @@ fn build_inner(
         "prepared and verified {} dependency packages",
         prepared.packages.len()
     ));
+    if build.toolchain.clippy.is_some() && build.verbosity != Verbosity::Quiet {
+        for (key, package) in &prepared.packages {
+            if matches!(key.source, crate::resolver::PackageSourceKey::Path(_))
+                && package
+                    .manifest
+                    .root
+                    .starts_with(&build.manifest.workspace_root)
+                && !build
+                    .manifest
+                    .workspace_members
+                    .values()
+                    .any(|root| root == &package.manifest.root)
+            {
+                eprintln!(
+                    "note: package `{}` is not listed as a workspace member; Clippy is skipped for it",
+                    package.manifest.name
+                );
+            }
+        }
+    }
     let mut manifests = prepared
         .packages
         .iter()

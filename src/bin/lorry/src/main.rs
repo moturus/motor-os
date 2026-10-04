@@ -111,6 +111,7 @@ fn report_error(error: diagnostic::Error, messages: bool) -> i32 {
 fn run(cli: Cli) -> Result<i32> {
     let command = match &cli.command {
         Command::Build(_) => Some("build started"),
+        Command::Check(_) if cli.is_clippy() => Some("clippy started"),
         Command::Check(_) => Some("check started"),
         Command::Run(_) => Some("run started"),
         Command::Test(_) => Some("test started"),
@@ -161,6 +162,9 @@ fn print_help(topic: Option<&str>) {
         Some("check") => println!(
             "Check a package without linking\n\nUsage: lorry [+toolchain] [GLOBAL] check [-p NAME|PACKAGE_ID] [--manifest-path PATH] [--target-dir DIRECTORY] [--target TRIPLE] [--workspace] [-q|--quiet] [--keep-going] [--all-targets|--lib|--bins|--bin NAME|--test NAME|--examples] [--message-format FORMAT]"
         ),
+        Some("clippy") => println!(
+            "Lint a package with Clippy\n\nUsage: lorry [+toolchain] [GLOBAL] clippy [CHECK OPTIONS] [--no-deps] [-- LINT OPTIONS...]"
+        ),
         Some("metadata") => println!(
             "Describe a package graph\n\nUsage: lorry [+toolchain] [GLOBAL] metadata [-p NAME] [--format-version 1] [--manifest-path PATH] [--no-deps] [--filter-platform TRIPLE] [--locked|--offline|--frozen]"
         ),
@@ -203,6 +207,7 @@ fn print_help(topic: Option<&str>) {
              build                       Build the package\n  \
              cache                       Manage the global Lorry cache\n  \
              check                       Check a package without linking\n  \
+             clippy                      Lint a package with Clippy\n  \
              clean                       Remove generated Lorry artifacts\n  \
              locate-project              Locate a manifest\n  \
              metadata                    Describe a package graph\n  \
