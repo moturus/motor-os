@@ -9,5 +9,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "second"
+version = "0.1.0"
+dependencies = [
+ "shared",
+]
+
+[[package]]
 name = "shared"
 version = "0.1.0"

@@ -1,5 +1,6 @@
 [workspace]
-members = ["app", "shared"]
+members = ["app", "second", "shared"]
+default-members = ["app", "second"]
 resolver = "2"
 
 [profile.release]

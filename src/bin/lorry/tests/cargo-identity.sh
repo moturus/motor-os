@@ -50,6 +50,35 @@ compare_workspace_harnesses() {
     done
 }
 
+compare_shared_workspace() {
+    local platform="$1" rustc="$2" label="$3" selectors member directory
+    local -a target_arguments=() selection_arguments
+    if [ -n "$platform" ]; then target_arguments=(--target "$platform"); fi
+    for selectors in '' '-p app -p second' '--workspace' '--workspace --exclude second'; do
+        read -r -a selection_arguments <<<"$selectors"
+        directory="$WORK/cargo-workspace-$label-shared"
+        (
+            cd "$WORKSPACE"
+            HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" RUSTC="$rustc" \
+                "$LORRY" build --release "${target_arguments[@]}" "${selection_arguments[@]}" \
+                --target-dir "$WORK/lorry-workspace-$label-shared" --message-format=json \
+                >"$WORK/workspace-$label.lorry.json"
+            RUSTC="$rustc" "$CARGO" build --release --locked --offline \
+                "${target_arguments[@]}" "${selection_arguments[@]}" --target-dir "$directory" \
+                --message-format=json >"$WORK/workspace-$label.cargo.json"
+        )
+        for member in app second; do
+            if [ "$member" = second ] && [[ "$selectors" == *'--exclude second'* ]]; then continue; fi
+            cmp "$WORK/lorry-workspace-$label-shared/lorry/${platform:+$platform/}release/$member" \
+                "$directory/${platform:+$platform/}release/$member" ||
+                fail "$label shared workspace executable '$member' differs from Cargo ($selectors)"
+        done
+        "$CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" \
+            --locked --offline -- differential-workspace-messages \
+            "$WORK/workspace-$label.lorry.json" "$WORK/workspace-$label.cargo.json"
+    done
+}
+
 NATIVE_RUSTC="$LORRY_TEST_RUSTC"
 MOTOR_RUSTC="$LORRY_TEST_RUSTC"
 CARGO="$LORRY_TEST_CARGO"
@@ -107,7 +136,7 @@ echo "== Comparing selected workspace member with Cargo =="
 (
     cd "$WORKSPACE"
     HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
-        RUSTC="$NATIVE_RUSTC" "$LORRY" vendor -p app --accept-all
+        RUSTC="$NATIVE_RUSTC" "$LORRY" vendor --workspace --accept-all
     HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
         RUSTC="$NATIVE_RUSTC" "$LORRY" build -p app --release
     RUSTC="$NATIVE_RUSTC" "$CARGO" build -p app --locked --offline --release \
@@ -132,6 +161,12 @@ compare_workspace_harnesses \
 cmp "$WORKSPACE/target/lorry/release/app" \
     "$WORK/cargo-workspace-native-test/release/app" ||
     fail "native integration-test program differs from Cargo"
+
+echo "== Comparing shared workspace selections and Cargo JSON =="
+compare_shared_workspace "" "$NATIVE_RUSTC" native
+[ "$("$WORK/lorry-workspace-native-shared/lorry/release/second")" = \
+    "second/src/main.rs shared/src/lib.rs true true" ] ||
+    fail "selected members did not share their dependency feature union"
 
 echo "== Comparing native dev panic-abort artifacts with Cargo =="
 (
@@ -220,6 +255,8 @@ compare_workspace_harnesses \
 cmp "$WORKSPACE/target/lorry/$MOTOR_TARGET/release/app" \
     "$WORK/cargo-workspace-motor-test/$MOTOR_TARGET/release/app" ||
     fail "Motor integration-test program differs from Cargo"
+
+compare_shared_workspace "$MOTOR_TARGET" "$MOTOR_RUSTC" Motor
 
 echo "== Cleaning the package-independent global Lorry cache =="
 [ -d "$GLOBAL_CACHE/v1/units/sha256" ] ||

@@ -42,13 +42,16 @@ fn main() {
             "compare" => compare(Path::new(lorry), Path::new(cargo)),
             "compare-projection" => compare_projection(Path::new(lorry), Path::new(cargo)),
             "differential-messages" => {
-                compare_messages(Path::new(lorry), Path::new(cargo), false, false)
+                compare_messages(Path::new(lorry), Path::new(cargo), false, false, true)
             }
             "differential-success-messages" => {
-                compare_messages(Path::new(lorry), Path::new(cargo), true, false)
+                compare_messages(Path::new(lorry), Path::new(cargo), true, false, true)
             }
             "differential-check-messages" => {
-                compare_messages(Path::new(lorry), Path::new(cargo), true, true)
+                compare_messages(Path::new(lorry), Path::new(cargo), true, true, true)
+            }
+            "differential-workspace-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, false, false)
             }
             _ => panic!("unknown comparison command `{command}`"),
         }
@@ -88,7 +91,7 @@ fn main() {
     assert_eq!(no_deps.workspace_packages().len(), 1);
 }
 
-fn compare_messages(lorry: &Path, cargo: &Path, success: bool, checking: bool) {
+fn compare_messages(lorry: &Path, cargo: &Path, success: bool, checking: bool, scripted: bool) {
     let lorry = read_messages(lorry);
     let cargo = read_messages(cargo);
     for messages in [&lorry, &cargo] {
@@ -133,7 +136,14 @@ fn compare_messages(lorry: &Path, cargo: &Path, success: bool, checking: bool) {
             _ => None,
         })
         .collect::<BTreeSet<String>>();
-    assert!(levels.contains("warning"));
+    if scripted {
+        assert!(levels.contains("warning"));
+    } else {
+        assert!(
+            levels.is_empty(),
+            "ordinary workspace fixture must emit no diagnostics"
+        );
+    }
     if success {
         assert!(!levels.contains("error"));
         let artifacts = |messages: &[Message]| {
@@ -190,7 +200,14 @@ fn compare_messages(lorry: &Path, cargo: &Path, success: bool, checking: bool) {
             .collect::<BTreeSet<_>>()
     };
     let lorry_scripts = scripts(&lorry);
-    assert!(!lorry_scripts.is_empty());
+    if scripted {
+        assert!(!lorry_scripts.is_empty());
+    } else {
+        assert!(
+            lorry_scripts.is_empty(),
+            "ordinary workspace fixture must execute no scripts"
+        );
+    }
     assert_eq!(lorry_scripts, scripts(&cargo));
 }
 

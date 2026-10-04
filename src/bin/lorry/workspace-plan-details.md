@@ -2321,6 +2321,17 @@ published artifacts and JSON package identities. Quiet builds suppress the
 warning; check units do not install executable names. The paired collision
 contract covers both tools, successful artifacts, and quiet behavior.
 
+The Cargo byte-identity workspace fixture now has two default binary members
+requesting different features of one shared library. Native and cross-Motor
+comparisons cover defaults, repeated selectors, all members (including the shared
+library as a root), and workspace exclusion. Each case compares executables and
+Cargo JSON, and the native result must expose the combined red/blue features.
+The first run reached byte equality, then stopped at the existing message
+oracle's scripted-warning fixture requirements. A separate ordinary-workspace
+oracle mode now requires no diagnostics or scripts and retains all existing
+scripted assertions. The original failure is preserved in
+`/tmp/lorry-m7-shared-cargo-identity.log`.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 
