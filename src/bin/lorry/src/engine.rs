@@ -984,20 +984,14 @@ fn build_inner(
         format if format != MessageFormat::Human => {
             let roots =
                 crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
-            let metadata_plan = dependency_plan(false, false, false, false)?;
-            let metadata = crate::metadata::graph::resolved(
-                build.manifest,
-                &prepared,
-                &metadata_plan,
-                &roots,
-            )?;
             Some(crate::check_message::Reporter::new(
                 build.manifest,
                 &prepared,
-                metadata,
+                &roots,
                 &destination,
                 &destination,
                 format,
+                build.color,
             )?)
         }
         _ => None,

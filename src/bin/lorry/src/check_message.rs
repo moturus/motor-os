@@ -36,7 +36,8 @@ pub struct Reporter {
     packages: BTreeMap<PackageKey, Package>,
     staging: PathBuf,
     destination: PathBuf,
-    ansi: bool,
+    format: MessageFormat,
+    color: bool,
     state: Mutex<State>,
 }
 
@@ -44,37 +45,26 @@ impl Reporter {
     pub fn new(
         root_manifest: &Manifest,
         prepared: &PreparedGraph,
-        metadata: wire::Metadata,
+        roots: &BTreeMap<PackageKey, PathBuf>,
         staging: &Path,
         destination: &Path,
         format: MessageFormat,
+        color: bool,
     ) -> Result<Self> {
-        let mut descriptions = metadata
-            .packages
-            .into_iter()
-            .map(|package| (package.id.clone(), package))
-            .collect::<BTreeMap<_, _>>();
-        let root_id = package::package_id(root_manifest, Identity::Root)?;
-        let root = descriptions
-            .remove(&root_id)
-            .ok_or_else(|| Error::failure("check metadata omits the selected package"))?;
-        let root = Package::from_wire(root);
+        let root = Package::from_manifest(root_manifest, Identity::Root, &root_manifest.root)?;
         let mut packages = BTreeMap::new();
         for resolved in &prepared.resolution.packages {
             let manifest = &prepared.packages[&resolved.key].manifest;
-            let id = package::package_id(manifest, Identity::Resolved(resolved))?;
-            let description = descriptions.remove(&id).ok_or_else(|| {
+            let root = roots.get(&resolved.key).ok_or_else(|| {
                 Error::failure(format!(
-                    "check metadata omits package `{} {}`",
+                    "message source roots omit package `{} {}`",
                     resolved.key.name, resolved.key.version
                 ))
             })?;
-            packages.insert(resolved.key.clone(), Package::from_wire(description));
-        }
-        if !descriptions.is_empty() {
-            return Err(Error::failure(
-                "check metadata contains an unexpected package",
-            ));
+            packages.insert(
+                resolved.key.clone(),
+                Package::from_manifest(manifest, Identity::Resolved(resolved), root)?,
+            );
         }
         Ok(Self {
             root,
@@ -82,7 +72,8 @@ impl Reporter {
             packages,
             staging: staging.to_owned(),
             destination: destination.to_owned(),
-            ansi: format == MessageFormat::JsonDiagnosticRenderedAnsi,
+            format,
+            color,
             state: Mutex::new(State::default()),
         })
     }
@@ -112,10 +103,10 @@ impl Reporter {
                 if line.is_empty() {
                     continue;
                 }
-                let mut message: Value = serde_json::from_slice(line).map_err(|error| {
+                let message: Value = serde_json::from_slice(line).map_err(|error| {
                     Error::failure(format!("rustc emitted a non-JSON check message: {error}"))
                 })?;
-                let object = message.as_object_mut().ok_or_else(|| {
+                let object = message.as_object().ok_or_else(|| {
                     Error::failure("rustc emitted a non-object JSON check message")
                 })?;
                 if object.contains_key("artifact") || object.contains_key("unused_extern_names") {
@@ -129,12 +120,6 @@ impl Reporter {
                     || text.ends_with("warnings emitted")
                 {
                     continue;
-                }
-                if !self.ansi
-                    && let Some(rendered) = object.get_mut("rendered")
-                    && let Some(text) = rendered.as_str()
-                {
-                    *rendered = Value::String(crate::process::strip_ansi(text));
                 }
                 self.write_value(json!({
                     "reason": "compiler-message",
@@ -166,7 +151,7 @@ impl Reporter {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        write_line(&value)
+        emit(&value, self.format, self.color)
     }
 }
 
@@ -215,17 +200,21 @@ impl EventReporter for Reporter {
                 Some(self.published_path(unhashed_executable)?),
             ),
         };
-        write_line(&json!({
-            "reason": "compiler-artifact",
-            "package_id": package.id,
-            "manifest_path": package.manifest_path,
-            "target": target,
-            "profile": dependency_profile(planned),
-            "features": key.features,
-            "filenames": filenames,
-            "executable": executable,
-            "fresh": fresh,
-        }))?;
+        emit(
+            &json!({
+                "reason": "compiler-artifact",
+                "package_id": package.id,
+                "manifest_path": package.manifest_path,
+                "target": target,
+                "profile": dependency_profile(planned),
+                "features": key.features,
+                "filenames": filenames,
+                "executable": executable,
+                "fresh": fresh,
+            }),
+            self.format,
+            self.color,
+        )?;
         Ok(())
     }
 
@@ -269,26 +258,34 @@ impl EventReporter for Reporter {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        write_line(&json!({
-            "reason": "build-script-executed",
-            "package_id": package.id,
-            "linked_libs": linked_libs,
-            "linked_paths": linked_paths,
-            "cfgs": cfgs,
-            "env": env,
-            "out_dir": self.published_path(&executed.out_dir)?,
-        }))?;
+        emit(
+            &json!({
+                "reason": "build-script-executed",
+                "package_id": package.id,
+                "linked_libs": linked_libs,
+                "linked_paths": linked_paths,
+                "cfgs": cfgs,
+                "env": env,
+                "out_dir": self.published_path(&executed.out_dir)?,
+            }),
+            self.format,
+            self.color,
+        )?;
         Ok(())
     }
 }
 
 impl Package {
-    fn from_wire(package: wire::Package) -> Self {
-        Self {
-            id: package.id,
-            manifest_path: package.manifest_path,
-            targets: package.targets,
-        }
+    fn from_manifest(manifest: &Manifest, identity: Identity<'_>, root: &Path) -> Result<Self> {
+        Ok(Self {
+            id: package::package_id(manifest, identity)?,
+            manifest_path: root
+                .join("Cargo.toml")
+                .to_str()
+                .ok_or_else(|| Error::failure("message manifest path is not Unicode"))?
+                .to_owned(),
+            targets: package::map_targets(manifest, root)?,
+        })
     }
 
     fn dependency_target(&self, kind: UnitKind, name: Option<&str>) -> Result<&wire::Target> {
@@ -344,6 +341,33 @@ fn directives(
 
 pub fn build_finished(success: bool) -> Result<()> {
     write_line(&json!({"reason": "build-finished", "success": success}))
+}
+
+fn emit(value: &Value, format: MessageFormat, color: bool) -> Result<()> {
+    if format == MessageFormat::Human {
+        if let Some(rendered) = value
+            .get("message")
+            .and_then(|message| message.get("rendered"))
+            .and_then(Value::as_str)
+        {
+            if color {
+                eprint!("{rendered}");
+            } else {
+                eprint!("{}", crate::process::strip_ansi(rendered));
+            }
+        }
+        return Ok(());
+    }
+    let mut value = value.clone();
+    if format != MessageFormat::JsonDiagnosticRenderedAnsi
+        && let Some(rendered) = value
+            .get_mut("message")
+            .and_then(|message| message.get_mut("rendered"))
+        && let Some(text) = rendered.as_str()
+    {
+        *rendered = Value::String(crate::process::strip_ansi(text));
+    }
+    write_line(&value)
 }
 
 fn write_line(value: &Value) -> Result<()> {

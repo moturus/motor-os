@@ -139,7 +139,7 @@ fn validate_aliases(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::Target>> {
+pub(crate) fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::Target>> {
     let mut targets = Vec::new();
     if let Some(library) = &manifest.library {
         targets.push(wire::Target {
