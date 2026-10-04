@@ -760,6 +760,23 @@ plain_http_allowlist = ["192.168.4.1"]"#,
     }
 
     #[test]
+    fn shipped_batteries_config_loads_both_providers_and_hook() {
+        let config = Config::parse_at(
+            include_str!("../config/gears-batteries.toml"),
+            Path::new("/user/cfg/gears/gears-batteries.toml"),
+        )
+        .unwrap();
+        assert_eq!(config.default_provider, "openrouter");
+        assert!(config.providers["local"].plain_http);
+        assert_eq!(
+            config.providers["local"].key_file,
+            Some(PathBuf::from("/user/cfg/gears/local.key"))
+        );
+        assert_eq!(config.hooks[0].command, ["gears-batteries", "hook"]);
+        assert!(config.tools.iter().all(|tool| tool.enabled));
+    }
+
+    #[test]
     fn named_providers_are_validated_and_have_a_selected_default() {
         let path = Path::new("/tmp/gears-test-config/gears.toml");
         let config = Config::parse_at(

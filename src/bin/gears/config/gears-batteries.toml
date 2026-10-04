@@ -10,8 +10,10 @@ key_file = "openrouter.key"
 # Set this URL and select --provider local --model MODEL for a local server.
 [providers.local]
 base_url = "http://127.0.0.1:11434/v1"
+key_file = "local.key"
 
 [net]
+egress_allowlist = ["127.0.0.1", "openrouter.ai"]
 plain_http_allowlist = ["127.0.0.1"]
 
 [[hooks]]

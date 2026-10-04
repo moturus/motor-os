@@ -91,6 +91,9 @@ On Linux, use `~/.gears/gears-batteries.toml` as the configuration path.
 The sample selects OpenRouter and reads `openrouter.key` beside the config.
 For a local OpenAI-compatible server, set `providers.local.base_url` and
 select `--provider local --model MODEL`. Only loopback HTTP is enabled.
+Put the local server's key in `local.key` beside the config; for a server
+that ignores authentication, that file can contain a placeholder such as
+`local`. Explicit keys are required for HTTP providers.
 The sample registers project instructions and `todo`, enables the six
 batteries tools plus shell, Gix, Lorry and curl, and applies the batteries
 approval policy. Declare a literal check vector in the workspace's
