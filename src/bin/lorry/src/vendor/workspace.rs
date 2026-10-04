@@ -71,6 +71,9 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
         &mut acquisition,
         options.offline,
     )?;
+    if !options.offline {
+        acquisition.stage_resolution_inputs(&complete)?;
+    }
     let selected = acquisition_resolution(
         &workspace,
         &complete,
@@ -240,6 +243,9 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         let staged_lock = stage_lockfile(&workspace.root.join("Cargo.lock"), &lock)?;
         (complete, catalog, staged_lock)
     };
+    if !options.offline {
+        acquisition.stage_resolution_inputs(&complete)?;
+    }
     let requests = dependency::workspace::admission::requests(&workspace, &scope)?;
     let (resolutions, selected, evidence) = loop {
         let resolutions = contexts

@@ -92,6 +92,28 @@ if grep -F 'https://static.crates.io/crates/equivalent/' "$WORK/requests"; then
 fi
 cmp Cargo.lock "$WORK/original.lock"
 cmp .lorry/dependencies-v2.toml "$WORK/original.admission"
+# Targeted acquisition must retain resolution inputs for inactive lock nodes.
+cp "$WORK/requests" "$WORK/targeted.requests"
+"$LORRY" -q fetch --offline --target x86_64-unknown-linux-gnu \
+    >"$WORK/targeted-offline.out" 2>"$WORK/targeted-offline.err"
+cmp "$WORK/requests" "$WORK/targeted.requests"
+"$LORRY" -q tree -p app --target x86_64-unknown-linux-gnu >"$WORK/targeted.tree" 2>"$WORK/targeted-tree.err"
+if "$LORRY" -q --lorry-messages metadata --format-version 1 \
+    >"$WORK/incomplete-metadata.out" 2>"$WORK/incomplete-metadata.err"; then
+    echo 'metadata gave a partial answer after a targeted fetch' >&2
+    exit 1
+fi
+grep -F 'lorry fetch' "$WORK/incomplete-metadata.err" >/dev/null
+cmp Cargo.lock "$WORK/original.lock"
+cmp .lorry/dependencies-v2.toml "$WORK/original.admission"
+rm .lorry/dependencies-v2.toml
+"$LORRY" -q vendor --locked --offline --accept-all >"$WORK/targeted-admission.out" 2>"$WORK/targeted-admission.err"
+echo 'pub fn fixture() { cfg_if::cfg_if! { if #[cfg(unix)] {} else {} } }' >app/src/lib.rs
+"$LORRY" -q build -p app --target x86_64-unknown-linux-gnu >"$WORK/targeted-build.out" 2>"$WORK/targeted-build.err"
+echo 'compile_error!("fetch must never compile this package");' >app/src/lib.rs
+cp "$WORK/original.admission" .lorry/dependencies-v2.toml
+cmp "$WORK/requests" "$WORK/targeted.requests"
+cmp Cargo.lock "$WORK/original.lock"
 "$LORRY" fetch --locked >"$WORK/full.out" 2>"$WORK/full.err"
 grep -F 'Downloading equivalent v1.0.2' "$WORK/full.err"
 test "$(find "$WORK/repository/objects/crates-io/sha256" -name package.toml | wc -l)" -eq 2

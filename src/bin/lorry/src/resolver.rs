@@ -370,21 +370,22 @@ impl Catalog {
             }
             let record = match &source {
                 LockedRegistrySource::Lorry(repositories) => {
-                    let Some(object) = repositories.lookup_registry(&package.checksum)? else {
+                    let Some(record) = repositories.lookup_registry_record(&package.checksum)?
+                    else {
                         missing.push(package);
                         continue;
                     };
-                    if object.name != dependency.package || object.version != package.version {
+                    if record.name != dependency.package || record.version != package.version {
                         return Err(Error::failure(format!(
                             "repository object `{}` identifies `{} {}`, but Cargo.lock selects `{} {}`",
                             package.checksum,
-                            object.name,
-                            object.version,
+                            record.name,
+                            record.version,
                             dependency.package,
                             package.version
                         )));
                     }
-                    object.index
+                    record
                 }
                 LockedRegistrySource::Cargo(registry) => {
                     let package = if self.descriptive_sources {

@@ -952,10 +952,10 @@ fn registry_package_evidence(
             let checksum = hex(checksum);
             let object = repositories.lookup_registry(&checksum)?.ok_or_else(|| {
                 Error::failure(format!(
-                    "locked crates.io package `{} {}` became unavailable while preparing its source",
+                    "locked crates.io package `{} {}` has no verified source object in the configured repositories",
                     package.key.name, package.key.version
                 ))
-                .with_help("run `lorry vendor [--accept-all]` to acquire the missing package")
+                .with_help("run `lorry fetch` to acquire the missing locked sources")
             })?;
             let (source_root, extracted) = if object.retained_source {
                 (object.root.join("source"), None)

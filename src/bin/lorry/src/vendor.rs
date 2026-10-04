@@ -800,18 +800,24 @@ impl<'a> Acquisition<'a> {
         )?;
         let mut records = BTreeMap::new();
         for (name, version, checksum) in locked {
-            let Some(object) = objects[&checksum].clone() else {
-                continue;
+            let record = match &objects[&checksum] {
+                Some(object) => object.index.clone(),
+                None => {
+                    let Some(record) = repositories.lookup_registry_record(&checksum)? else {
+                        continue;
+                    };
+                    record
+                }
             };
-            if object.name != name || object.version != version {
+            if record.name != name || record.version != version {
                 return Err(Error::failure(format!(
                     "repository object `{checksum}` does not match locked package `{} {}`",
                     name, version
                 )));
             }
-            let key = (object.name.clone(), object.version.clone());
-            if let Some(existing) = records.insert(key, object.index.clone())
-                && existing != object.index
+            let key = (record.name.clone(), record.version.clone());
+            if let Some(existing) = records.insert(key, record.clone())
+                && existing != record
             {
                 return Err(Error::failure(format!(
                     "repositories disagree about locked package `{} {}`",
@@ -946,6 +952,42 @@ impl<'a> Acquisition<'a> {
             }
         }
         self.fetched.insert(expected);
+        Ok(())
+    }
+
+    fn stage_resolution_inputs(&mut self, resolution: &Resolution) -> Result<()> {
+        let mut total = 0_u64;
+        for package in &resolution.packages {
+            let ResolvedSource::CratesIo { checksum } = &package.source else {
+                continue;
+            };
+            if self
+                .repositories
+                .lookup_registry_record(&hex(checksum))?
+                .is_some()
+            {
+                continue;
+            }
+            let record = self
+                .records
+                .get(&(package.key.name.clone(), package.key.version.clone()))
+                .ok_or_else(|| Error::failure("resolved package has no acquired index record"))?
+                .clone();
+            if record.checksum != *checksum {
+                return Err(Error::failure(
+                    "resolved index record disagrees with the source checksum",
+                ));
+            }
+            total = total
+                .checked_add(record.exact_bytes.len() as u64)
+                .ok_or_else(|| Error::failure("resolution input byte count overflowed"))?;
+            if total > self.config.policy.limits.max_transaction_bytes {
+                return Err(Error::failure(
+                    "resolution inputs exceed the policy transaction byte limit",
+                ));
+            }
+            self.state()?.transaction.stage_index_record(&record)?;
+        }
         Ok(())
     }
 

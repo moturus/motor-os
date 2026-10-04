@@ -582,6 +582,14 @@ host-independent logical paths without changing their physical storage:
 no source remapping, including for path dependencies. The root package is not
 remapped.
 
+Locked acquisition retains digest-protected sparse resolution inputs for the
+complete lock independently of downloaded source objects. This lets an offline
+selected build or tree use a targeted fetch without downloading inactive
+platform archives. Index records are checked against locked names, versions,
+and checksums; they supply no source evidence or execution approval. Resolved
+metadata still requires every reachable package's verified sources and errors
+with an explicit `lorry fetch` instruction if those sources are missing.
+
 `tree` resolves selected members against the complete workspace lock and reads
 verified source descriptions. It accepts feature selection, remains offline,
 and does not require or reconstruct admission. Explicit source vetoes and
