@@ -1601,6 +1601,14 @@ editor behavior. Milestone 9 owns that integration gate.
 
 ## Milestone 6: shared resolution, metadata, and admission
 
+The resolver foundation records root declarations with their solver events.
+Projecting the solved graph no longer needs one privileged manifest. The
+existing single-root callers retain their behavior, and the snapshot test
+also checks independent root declarations. Twenty-seven focused resolver
+tests passed in `/tmp/lorry-m6-root-declarations-unit-fixed.log`. An initial
+new assertion indexed the snapshot fixture's empty dependency list; the
+fixture now supplies the declaration whose independence it checks.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

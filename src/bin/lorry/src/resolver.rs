@@ -937,7 +937,7 @@ fn resolve_with_scope(
             Error::failure(format!("dependency resolution failed: {}", failure.message))
         }
     })?;
-    Ok(state.into_resolution(manifest))
+    Ok(state.into_resolution())
 }
 
 #[derive(Clone, Copy)]
@@ -1220,10 +1220,11 @@ struct State {
     nodes: BTreeMap<PackageKey, Node>,
     links: BTreeMap<String, PackageKey>,
     root_edges: BTreeMap<(CompileKind, FeatureContext, usize), PackageKey>,
+    root_declarations: BTreeMap<usize, CandidateDependency>,
 }
 
 impl State {
-    fn into_resolution(self, manifest: &Manifest) -> Resolution {
+    fn into_resolution(self) -> Resolution {
         let selected = self
             .nodes
             .iter()
@@ -1327,7 +1328,7 @@ impl State {
             .root_edges
             .into_iter()
             .map(|((compile_kind, context, dependency_index), package)| {
-                let dependency = &manifest.dependencies[dependency_index];
+                let dependency = &self.root_declarations[&dependency_index];
                 ResolvedEdge {
                     dependency_index,
                     alias: dependency.alias.clone(),
@@ -1578,6 +1579,12 @@ fn fulfill(
             )));
         }
     } else {
+        // Root declarations belong to the resolution request, so package
+        // projection does not depend on one privileged selected manifest.
+        state
+            .root_declarations
+            .entry(event.dependency_index)
+            .or_insert_with(|| event.dependency.clone());
         let edge = (
             event.compile_kind,
             event.context.clone(),
@@ -2030,7 +2037,7 @@ mod tests {
 
     #[test]
     fn snapshots_share_candidates_but_keep_selection_state_independent() {
-        let manifest = manifest("", "extra = []", "2");
+        let manifest = manifest("child = \"1\"", "extra = []", "2");
         let candidate = local_candidate(
             manifest.clone(),
             PathBuf::from("/fixture"),
@@ -2091,6 +2098,9 @@ mod tests {
             (CompileKind::Target, FeatureContext::Unified, 0),
             key.clone(),
         );
+        branch
+            .root_declarations
+            .insert(0, changed.record.dependencies[0].clone());
         let activation = &original.activations[&FeatureContext::Unified];
         assert!(activation.active.is_empty());
         assert!(activation.enabled_optional.is_empty());
@@ -2104,12 +2114,13 @@ mod tests {
         assert!(original.edges.is_empty());
         assert!(state.links.is_empty());
         assert!(state.root_edges.is_empty());
+        assert!(state.root_declarations.is_empty());
 
         // Resolution must retain local source data with or without surviving snapshots.
-        let shared = state.clone().into_resolution(&manifest);
+        let shared = state.clone().into_resolution();
         drop(branch);
         assert_eq!(Arc::strong_count(&state.nodes[&key].record), 1);
-        let owned = state.into_resolution(&manifest);
+        let owned = state.into_resolution();
         for resolution in [shared, owned] {
             let package = &resolution.packages[0];
             assert_eq!(package.key, key);
