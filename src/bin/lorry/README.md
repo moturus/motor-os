@@ -390,6 +390,8 @@ need sources outside that target closure.
 The ordinary complete-graph limit is 64 outside packages. The developer image
 uses 384; `--max-packages N` overrides it for one command subject to system
 constraints. A scoped review does not reduce complete resolution or its cap.
+Dependency depth has no default cap, matching Cargo. An explicit
+`policy.limits.max-depth` imposes an optional bound on resolution and review.
 
 ## Compact dependency review
 

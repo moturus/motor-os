@@ -1496,7 +1496,7 @@ mod tests {
                     incompatible_rust_versions: None,
                     rust_versions: vec![Version::parse("1.99.0").unwrap()],
                     package_limit: crate::policy::PackageLimit::with_max(16),
-                    max_depth: 8,
+                    max_depth: Some(8),
                 },
                 &[],
                 TargetSelection {
@@ -1566,7 +1566,7 @@ mod tests {
                 incompatible_rust_versions: None,
                 rust_versions: vec![Version::parse("1.98.0").unwrap()],
                 package_limit: crate::policy::PackageLimit::with_max(16),
-                max_depth: 8,
+                max_depth: Some(8),
             },
             &[],
             TargetSelection {
@@ -1814,7 +1814,7 @@ mod tests {
                 incompatible_rust_versions: None,
                 rust_versions: vec![Version::parse("1.99.0").unwrap()],
                 package_limit: crate::policy::PackageLimit::with_max(16),
-                max_depth: 8,
+                max_depth: Some(8),
             },
             &[],
             TargetSelection {
@@ -2017,7 +2017,7 @@ mod tests {
                 incompatible_rust_versions: None,
                 rust_versions: vec![Version::parse("1.98.0").unwrap()],
                 package_limit: crate::policy::PackageLimit::with_max(16),
-                max_depth: 8,
+                max_depth: Some(8),
             },
             &[],
             TargetSelection {
@@ -2248,7 +2248,7 @@ mod tests {
                 incompatible_rust_versions: None,
                 rust_versions: vec![Version::parse("1.98.0").unwrap()],
                 package_limit: crate::policy::PackageLimit::with_max(16),
-                max_depth: 8,
+                max_depth: Some(8),
             },
             &[],
             TargetSelection {

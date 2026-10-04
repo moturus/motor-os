@@ -176,7 +176,7 @@ impl Default for Policy {
 pub struct PolicyLimits {
     pub max_packages: u64,
     pub max_packages_source: LimitSource,
-    pub max_depth: u64,
+    pub max_depth: Option<u64>,
     pub max_package_bytes: u64,
     pub max_extracted_package_bytes: u64,
     pub max_package_files: u64,
@@ -198,7 +198,7 @@ impl Default for PolicyLimits {
         Self {
             max_packages: 64,
             max_packages_source: LimitSource::Default,
-            max_depth: 16,
+            max_depth: None,
             max_package_bytes: 16 * 1024 * 1024,
             max_extracted_package_bytes: 128 * 1024 * 1024,
             max_package_files: 20_000,
@@ -937,7 +937,7 @@ fn merge_policy_limits(
                 limits.max_packages = value;
                 limits.max_packages_source = LimitSource::File(path.to_owned());
             }
-            "max-depth" => limits.max_depth = value,
+            "max-depth" => limits.max_depth = Some(value),
             "max-package-bytes" => limits.max_package_bytes = value,
             "max-extracted-package-bytes" => limits.max_extracted_package_bytes = value,
             "max-package-files" => limits.max_package_files = value,
@@ -2386,6 +2386,7 @@ locked = [
         let mut config = Config::default();
         merge_lorry_file(&config_path, LayerKind::LinuxBase, &mut config).unwrap();
         assert_eq!(config.vendor.targets.len(), 2);
+        assert_eq!(config.policy.limits.max_depth, Some(16));
         assert_eq!(config.policy.rules.len(), 1);
         assert_eq!(config.constraints.len(), 2);
         assert_eq!(

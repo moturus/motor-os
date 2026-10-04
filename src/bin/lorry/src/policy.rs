@@ -163,10 +163,11 @@ pub(crate) fn preflight_workspace(policy: &Policy, resolution: &Resolution) -> R
 }
 
 fn preflight_depth(policy: &Policy, resolution: &Resolution, depth: u64) -> Result<Preflight> {
-    if depth > policy.limits.max_depth {
+    if let Some(limit) = policy.limits.max_depth
+        && depth > limit
+    {
         return Err(Error::failure(format!(
-            "selected dependency depth {depth} exceeds policy limit {}",
-            policy.limits.max_depth
+            "selected dependency depth {depth} exceeds policy limit {limit}"
         )));
     }
 
@@ -390,10 +391,11 @@ pub(crate) fn preflight_sources(policy: &Policy, resolution: &Resolution) -> Res
     }
     .check(resolution)?;
     let depth = graph_depth(resolution, true)?;
-    if depth > policy.limits.max_depth {
+    if let Some(limit) = policy.limits.max_depth
+        && depth > limit
+    {
         return Err(Error::failure(format!(
-            "complete dependency depth {depth} exceeds policy limit {}",
-            policy.limits.max_depth
+            "complete dependency depth {depth} exceeds policy limit {limit}"
         )));
     }
     let mut keys = BTreeSet::new();
@@ -1479,17 +1481,17 @@ mod tests {
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
         };
-        policy.limits.max_depth = 1;
+        policy.limits.max_depth = Some(1);
         policy.limits.max_packages = 1;
         preflight_sources(&policy, &resolution).unwrap();
-        policy.limits.max_depth = 0;
+        policy.limits.max_depth = Some(0);
         assert!(
             preflight_sources(&policy, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("depth 1")
         );
-        policy.limits.max_depth = 1;
+        policy.limits.max_depth = Some(1);
         policy.limits.max_packages = 0;
         assert!(preflight_sources(&policy, &resolution).is_err());
         resolution.packages.truncate(1);
@@ -1719,7 +1721,7 @@ mod tests {
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
         };
-        policy.limits.max_depth = 1;
+        policy.limits.max_depth = Some(1);
         assert!(
             preflight(&policy, &resolution)
                 .unwrap_err()
@@ -1727,7 +1729,7 @@ mod tests {
                 .contains("depth")
         );
 
-        policy.limits.max_depth = 2;
+        policy.limits.max_depth = Some(2);
         policy.limits.max_package_bytes = 99;
         let pass = preflight(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([

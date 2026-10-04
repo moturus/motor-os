@@ -107,8 +107,9 @@ behavior contains no Cargo invocation at runtime.
 `resolver.rs` implements the supported Cargo resolver behavior. The catalog
 contains crates.io records and local candidates. Lockfile identities are
 preferences, not unconditional choices: requirements, target predicates,
-features, Rust versions, checksums, patches, links uniqueness, graph depth,
-and package limits still apply.
+features, Rust versions, checksums, patches, links uniqueness, an optional
+configured graph-depth bound, and package limits still apply. Dependency depth
+has no default cap, matching Cargo.
 
 Every package has a logical identity independent of its installation path:
 
@@ -203,7 +204,7 @@ Metadata resolves the shared complete lock and projects its requested features
 without constructing a compilation plan. `dependency::workspace::PreparedSources`
 owns inspected manifests and extracted sources but carries no execution
 admission. Its policy passes enforce explicit vetoes, source identity, package
-counts, dependency depth, and artifact/transaction sizes without requiring
+counts, explicitly configured dependency depth, and artifact/transaction sizes without requiring
 build-script or proc-macro grants. `metadata::graph::workspace` filters package
 reachability separately from feature resolution. A stale execution record
 therefore does not prevent source navigation.

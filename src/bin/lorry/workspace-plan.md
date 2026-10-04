@@ -160,9 +160,12 @@ reuse. The approved isolated `src/sys` fetch and offline metadata now pass
 with unchanged lock bytes and no admission. Diagnosed fixes cover prerelease
 paths, resolver stack use, exact parent edges, weak feature references, and
 missing unused target files. Whole-workspace metadata also passes the offline
-Cargo projection comparison. Gate failures exposed stale metadata fixture
-setup and discovery expectations; those are fixed and the full gate is running
-again.
+Cargo projection comparison. Gate failures exposed stale fixture expectations
+and a compilation projection that lost member source ownership; those are
+fixed. The native gate then found complete dependency depth 20 against the
+inherited limit of 16. The owner approved Cargo's default: dependency depth has
+no cap unless `max-depth` is explicitly configured. The Cargo-paired deep-chain
+regression passes; the full milestone gate remains required.
 
 ## Goal
 

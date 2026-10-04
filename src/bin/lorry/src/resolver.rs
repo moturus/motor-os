@@ -700,7 +700,7 @@ pub struct Options {
     pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
     pub rust_versions: Vec<Version>,
     pub package_limit: PackageLimit,
-    pub max_depth: u64,
+    pub max_depth: Option<u64>,
 }
 
 impl Options {
@@ -2249,7 +2249,7 @@ mod tests {
             .unwrap();
         let mut limits = options(ResolverVersion::V2);
         limits.package_limit = PackageLimit::with_max(384);
-        limits.max_depth = 2;
+        limits.max_depth = Some(2);
         let graph =
             resolve_dynamic(&manifest, &mut catalog, &limits, &[], &mut |_, _, _| Ok(())).unwrap();
         assert_eq!(graph.packages.len(), 321);
@@ -2347,6 +2347,91 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn default_dependency_depth_matches_cargo_and_explicit_limits_still_apply() {
+        let fixture = LocalFixture::new();
+        fixture.package("app", "[package]\nname = \"app\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[dependencies]\nnode0 = { path = \"../node0\" }\n");
+        for index in 0..32 {
+            let dependency = if index < 31 {
+                format!(
+                    "[dependencies]\nnode{} = {{ path = \"../node{}\" }}\n",
+                    index + 1,
+                    index + 1
+                )
+            } else {
+                String::new()
+            };
+            fixture.package(
+                &format!("node{index}"),
+                &format!("[package]\nname = \"node{index}\"\nversion = \"1.0.0\"\nedition = \"2024\"\n{dependency}"),
+            );
+        }
+        let root = fixture.0.join("app");
+        let cargo = std::process::Command::new(env!("CARGO"))
+            .args(["generate-lockfile", "--offline"])
+            .env("CARGO_HOME", fixture.0.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            cargo.status.success(),
+            "{}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+        let source = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        let lock = Lockfile::load(&root.join("Cargo.lock")).unwrap();
+        let policy = crate::config::Policy {
+            default: crate::config::PolicyDefault::Allow,
+            path_roots: vec![fixture.0.clone()],
+            ..Default::default()
+        };
+        let mut limits = options(ResolverVersion::V3);
+        limits.max_depth = policy.limits.max_depth;
+        let mut catalog = Catalog::default();
+        let complete = workspace::resolve_locked_workspace(
+            &source,
+            &mut catalog,
+            &limits,
+            &lock,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(complete.packages.len(), 33);
+        assert_eq!(
+            crate::lockfile::render_workspace(&complete, crate::lockfile::Format::V4).unwrap(),
+            fs::read(root.join("Cargo.lock")).unwrap()
+        );
+        crate::policy::preflight_sources(&policy, &complete).unwrap();
+        crate::policy::preflight_workspace(&policy, &complete).unwrap();
+
+        let mut capped = policy.clone();
+        capped.limits.max_depth = Some(16);
+        for error in [
+            crate::policy::preflight_sources(&capped, &complete).unwrap_err(),
+            crate::policy::preflight_workspace(&capped, &complete).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("dependency depth 32 exceeds policy limit 16")
+            );
+        }
+        limits.max_depth = capped.limits.max_depth;
+        assert!(
+            workspace::resolve_locked_workspace(
+                &source,
+                &mut catalog,
+                &limits,
+                &lock,
+                &mut |_, _, _| Ok(())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds dependency depth 16")
+        );
     }
 
     #[test]
@@ -3433,7 +3518,7 @@ dev = ["dep:leaf"]
             incompatible_rust_versions: None,
             rust_versions: vec![Version::parse("1.70.0").unwrap()],
             package_limit: PackageLimit::with_max(64),
-            max_depth: 16,
+            max_depth: Some(16),
         }
     }
 
@@ -4704,7 +4789,7 @@ dev = ["dep:leaf"]
                 incompatible_rust_versions: None,
                 rust_versions: vec![Version::parse("1.98.0").unwrap()],
                 package_limit: PackageLimit::with_max(16),
-                max_depth: 8,
+                max_depth: Some(8),
             },
             &locked,
         )
@@ -4845,7 +4930,7 @@ dev = ["dep:leaf"]
             .unwrap();
         let root = manifest("shared = \"1\"\na = \"1\"", "", "2");
         let mut limits = options(ResolverVersion::V2);
-        limits.max_depth = 2;
+        limits.max_depth = Some(2);
         assert!(
             resolve(&root, &catalog, &limits, &[])
                 .unwrap_err()
@@ -4871,7 +4956,7 @@ dev = ["dep:leaf"]
             incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
             rust_versions: vec![Version::parse("1.98.0").unwrap()],
             package_limit: PackageLimit::with_max(64),
-            max_depth: 16,
+            max_depth: Some(16),
         };
         let complete = resolve(&manifest, &catalog, &options, &locked).unwrap();
         crate::offline::validate_resolution(&manifest, &complete).unwrap();
@@ -4989,7 +5074,7 @@ dev = ["dep:leaf"]
                 incompatible_rust_versions: None,
                 rust_versions: vec![Version::parse("1.98.0").unwrap()],
                 package_limit: PackageLimit::with_max(64),
-                max_depth: 16,
+                max_depth: Some(16),
             },
             &locked,
         )
@@ -5050,7 +5135,7 @@ dev = ["dep:leaf"]
                 incompatible_rust_versions: None,
                 rust_versions: vec![Version::parse("1.98.0").unwrap()],
                 package_limit: PackageLimit::with_max(64),
-                max_depth: 16,
+                max_depth: Some(16),
             },
             &locked,
             TargetSelection {

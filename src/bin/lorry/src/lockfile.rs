@@ -589,7 +589,7 @@ mod tests {
                 incompatible_rust_versions: None,
                 rust_versions: vec![Version::new(1, 99, 0)],
                 package_limit: crate::policy::PackageLimit::with_max(1),
-                max_depth: 16,
+                max_depth: Some(16),
             },
             &[],
             &mut |_, _, _| Ok(()),

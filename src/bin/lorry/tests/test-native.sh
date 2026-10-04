@@ -156,7 +156,6 @@ write_host_config() {
         '' \
         '[policy.limits]' \
         'max-packages = 384' \
-        'max-depth = 16' \
         'max-package-bytes = 16777216' \
         'max-extracted-package-bytes = 134217728' \
         'max-package-files = 20000' \

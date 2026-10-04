@@ -76,10 +76,12 @@ impl Frame {
             catalog
                 .prepare(&mut event.dependency)
                 .map_err(|error| Failure::from_error(error, false))?;
-            if event.depth > options.max_depth {
+            if let Some(limit) = options.max_depth
+                && event.depth > limit
+            {
                 return Err(Failure::new(format!(
                     "`{}` exceeds dependency depth {}",
-                    event.dependency.package, options.max_depth
+                    event.dependency.package, limit
                 )));
             }
             let reused = self

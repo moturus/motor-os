@@ -363,8 +363,7 @@ Editable members use Cargo's package file discovery: Git ignores and tracked
 files, include/exclude rules, symbolic links, and nested package boundaries.
 Dependency archive size/file limits do not constrain member source trees.
 Git file discovery calls Cargo's `gix-dir` walker directly with gix's index,
-ignore stack, pathspecs, and filesystem capabilities. This retains the
-configured dependency-depth bound for Lorry's own graph.
+ignore stack, pathspecs, and filesystem capabilities.
 Compiler dep-info permits member reads outside their directories and tracks
 those inputs through unit-cache restores and completed-profile reuse.
 Completed profiles also track the workspace manifest and member compiler
@@ -569,8 +568,8 @@ location to which its settings should move. System constraints still apply.
   build dependencies are evaluated against the host.
 - Resolution creates the complete all-target Cargo-compatible lock graph.
   Search stores queued-edge continuation and backtracking state on the heap;
-  a wide graph cannot exhaust the process stack within the dependency-depth
-  limit. Forced choices do not retain unnecessary backtracking frames.
+  a wide graph cannot exhaust the process stack through queued-edge recursion.
+  Forced choices do not retain unnecessary backtracking frames.
   Vendor acquisition includes its normalized review scope's feature closure
   selected by the union of `[vendor].targets` and, by default, the current host.
 - Default vendor targets are `x86_64-unknown-linux-musl` and
@@ -1103,7 +1102,9 @@ Policy rules express those grants with `allow-build-script = true` and
 `allow-proc-macro = true`; neither grant implies the other. Native-tool roles
 additionally require the build-script grant.
 
-Default limits are 64 selected packages, depth 16, 16 MiB compressed and
+Dependency depth has no default cap, matching Cargo. An explicitly configured
+`policy.limits.max-depth` bounds resolution, source preparation, and admission.
+Default limits are 64 outside packages, 16 MiB compressed and
 128 MiB/20,000 files extracted per package, 256 MiB compressed and 1 GiB
 extracted per transaction, and 300 seconds/8 MiB captured output per build
 script. The package limit counts packages from outside the workspace; the

@@ -952,7 +952,7 @@ mod tests {
             incompatible_rust_versions: None,
             rust_versions: vec![semver::Version::parse("1.85.0").unwrap()],
             package_limit: crate::policy::PackageLimit::with_max(16),
-            max_depth: 8,
+            max_depth: Some(8),
         };
         let resolution = crate::resolver::resolve(&manifest, &catalog, &options, &[]).unwrap();
         assert!(resolution.packages.iter().any(|package| {

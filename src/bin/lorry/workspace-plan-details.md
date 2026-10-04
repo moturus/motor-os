@@ -1918,9 +1918,19 @@ The current offline Cargo build unit graph instead has maximum package depth
 16, with the inactive defmt branch absent; evidence is
 `/tmp/lorry-m6-depth-current-cargo-unit-graph.{json,log}`. This is a real
 complete-graph bound failure, not transient networking or a depth-calculation
-error. No retry or raised limit was used. Guidance is requested on whether
-`max-depth` should retain its reviewed/build scope or also constrain complete
-lock resolution. M6 remains incomplete, and no depth-policy change is applied.
+error. No retry or raised limit was used.
+
+The owner approved Cargo's dependency-depth policy. The pinned Cargo resolver
+(`src/resolver/mod.rs`, main resolution loop) uses explicit work stacks and has
+no fixed dependency-depth cap. Lorry now defaults to no depth cap, while an
+explicit `policy.limits.max-depth` still constrains resolution and review.
+The shipped developer configuration and native test configuration omit the
+inherited bound. The offline Cargo-paired regression constructs a 32-edge path
+chain, compares exact lock bytes, verifies source and execution preflight, and
+proves an explicit bound of 16 still rejects the graph. Its original rejection
+and passing result are preserved in
+`/tmp/lorry-m6-cargo-depth-default-{original,fixed}.log`. M6 remains incomplete
+until its full milestone gate passes.
 
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
@@ -2168,7 +2178,7 @@ Compiler tests prove two packages both receive `CARGO_PRIMARY_PACKAGE`, while
 an unselected build-script compiler receives none, and an empty selection marks
 none. Four focused compiler tests and strict Clippy pass in
 `/tmp/lorry-m7-primary-selection-{unit-fixed,clippy}.log`. M6's depth-policy
-question remains pending and its milestone gate has not passed.
+decision is now implemented; its milestone gate has not passed.
 
 The next foundation fixes effective dependency crate names in ordinary library,
 build-script compiler, and selected-target edges. The original Cargo unit-graph
