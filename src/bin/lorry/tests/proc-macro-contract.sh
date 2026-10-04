@@ -76,6 +76,7 @@ printf '%s\n' \
     '#[proc_macro]' \
     'pub fn add_one(input: TokenStream) -> TokenStream {' \
     '    println!("proc-macro stdout is preserved");' \
+    '    eprintln!("proc-macro stderr is preserved");' \
     '    format!("({input} + 1)").parse().unwrap()' \
     '}' \
     '#[proc_macro_attribute]' \
@@ -118,6 +119,17 @@ printf '%s\n' \
     RUSTC="$NATIVE_RUSTC" "$LORRY" vendor --accept-all >/dev/null
     RUSTC="$NATIVE_RUSTC" "$LORRY" build >"$WORK/proc-macro.stdout" 2>&1
     grep -F "proc-macro stdout is preserved" "$WORK/proc-macro.stdout" >/dev/null
+    RUSTC="$NATIVE_RUSTC" "$LORRY" build --message-format=json \
+        --target-dir "$WORK/json-target" >"$WORK/macro-cold.json" 2>"$WORK/macro-cold.err"
+    grep -Fx 'proc-macro stdout is preserved' "$WORK/macro-cold.json" >/dev/null
+    grep -Fx 'proc-macro stderr is preserved' "$WORK/macro-cold.err" >/dev/null
+    RUSTC="$NATIVE_RUSTC" "$LORRY" build --message-format=json \
+        --target-dir "$WORK/json-target" >"$WORK/macro-fresh.json" 2>"$WORK/macro-fresh.err"
+    if grep -F 'proc-macro stdout is preserved' "$WORK/macro-fresh.json" >/dev/null; then
+        echo 'proc-macro-contract: fresh build replayed compiler stdout' >&2
+        exit 1
+    fi
+    grep -Fx 'proc-macro stderr is preserved' "$WORK/macro-fresh.err" >/dev/null
     [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 84 ]
     RUSTC="$NATIVE_RUSTC" "$LORRY" clean
     RUSTC="$NATIVE_RUSTC" "$LORRY" build

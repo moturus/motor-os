@@ -1614,10 +1614,8 @@ fn restore_fresh_profile(
                     return None;
                 }
             }
-            "build-script-executed" => {
-                if !Path::new(message.get("out_dir")?.as_str()?).is_dir() {
-                    return None;
-                }
+            "build-script-executed" if !Path::new(message.get("out_dir")?.as_str()?).is_dir() => {
+                return None;
             }
             _ => {}
         }
@@ -1746,7 +1744,12 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
         .all(|message| {
             matches!(
                 message.get("reason").and_then(serde_json::Value::as_str),
-                Some("compiler-artifact" | "compiler-message" | "build-script-executed")
+                Some(
+                    "compiler-artifact"
+                        | "compiler-message"
+                        | "build-script-executed"
+                        | "rustc-stderr"
+                )
             )
         })
         .then_some(())?;

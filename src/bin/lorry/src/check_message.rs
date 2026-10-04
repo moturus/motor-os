@@ -101,39 +101,60 @@ impl Reporter {
         stderr: &[u8],
         source_paths: &[(PathBuf, PathBuf)],
     ) -> Result<()> {
-        for bytes in [stdout, stderr] {
-            for line in bytes.split(|byte| *byte == b'\n') {
-                let line = line.strip_suffix(b"\r").unwrap_or(line);
-                if line.is_empty() {
-                    continue;
-                }
-                let mut message: Value = serde_json::from_slice(line).map_err(|error| {
-                    Error::failure(format!("rustc emitted a non-JSON check message: {error}"))
-                })?;
-                let object = message.as_object().ok_or_else(|| {
-                    Error::failure("rustc emitted a non-object JSON check message")
-                })?;
-                if object.contains_key("artifact") || object.contains_key("unused_extern_names") {
-                    continue;
-                }
-                let Some(text) = object.get("message").and_then(Value::as_str) else {
-                    continue;
-                };
-                if text.starts_with("aborting due to")
-                    || text.ends_with("warning emitted")
-                    || text.ends_with("warnings emitted")
-                {
-                    continue;
-                }
-                restore_diagnostic_paths(&mut message, source_paths);
-                self.write_value(json!({
-                    "reason": "compiler-message",
-                    "package_id": package.id,
-                    "manifest_path": package.manifest_path,
-                    "target": target,
-                    "message": message,
-                }))?;
+        {
+            let _state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.format == MessageFormat::Human {
+                crate::process::RustcCommand::render_messages(stdout, b"", self.color);
+            } else {
+                let mut output = io::stdout().lock();
+                output
+                    .write_all(stdout)
+                    .and_then(|()| output.flush())
+                    .map_err(|error| {
+                        Error::failure(format!("failed to forward rustc stdout: {error}"))
+                    })?;
             }
+        }
+        for line in stderr.split(|byte| *byte == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.is_empty() {
+                continue;
+            }
+            let message = serde_json::from_slice::<Value>(line).ok();
+            if message.as_ref().is_some_and(|message| {
+                message.get("artifact").is_some() || message.get("unused_extern_names").is_some()
+            }) {
+                continue;
+            }
+            let Some(mut message) =
+                message.filter(|message| message.get("message").and_then(Value::as_str).is_some())
+            else {
+                self.write_value(json!({
+                    "reason": "rustc-stderr",
+                    "text": format!("{}\n", String::from_utf8_lossy(line)),
+                }))?;
+                continue;
+            };
+            let text = message["message"]
+                .as_str()
+                .expect("diagnostic text was checked");
+            if text.starts_with("aborting due to")
+                || text.ends_with("warning emitted")
+                || text.ends_with("warnings emitted")
+            {
+                continue;
+            }
+            restore_diagnostic_paths(&mut message, source_paths);
+            self.write_value(json!({
+                "reason": "compiler-message",
+                "package_id": package.id,
+                "manifest_path": package.manifest_path,
+                "target": target,
+                "message": message,
+            }))?;
         }
         Ok(())
     }
@@ -447,6 +468,10 @@ pub fn replay(messages: &[Value], format: MessageFormat, color: bool) -> Result<
 }
 
 fn emit(value: &Value, format: MessageFormat, color: bool) -> Result<()> {
+    if value.get("reason").and_then(Value::as_str) == Some("rustc-stderr") {
+        eprint!("{}", value["text"].as_str().unwrap_or_default());
+        return Ok(());
+    }
     if format == MessageFormat::Human {
         if let Some(rendered) = value
             .get("message")

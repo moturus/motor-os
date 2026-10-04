@@ -206,8 +206,9 @@ errors on stderr. Successful commands need not emit an own-message event.
 Build, check, run, and test accept `json`, `json-diagnostic-rendered-ansi`, and
 their comma-separated combination. Each stream ends with one `build-finished`
 event. On run and test it describes compilation, before the child starts;
-the child's exit status remains the command's result. Use `test --no-run` when
-stdout must contain only Cargo events. Fresh units and completed build profiles
+the child's exit status remains the command's result. Use `test --no-run` to
+avoid harness output. As under Cargo, procedural macros can still print text
+on stdout during JSON compilation. Fresh units and completed build profiles
 replay their warnings and report artifacts with `fresh: true`. Diagnostic
 spans and rendered locations refer to actual source files, including the
 persistent source views used for immutable dependencies.

@@ -789,8 +789,8 @@ fn execute_unit(
                 }
                 verify_outputs(&invocation.output)?;
                 let diagnostics = (
-                    RustcCommand::diagnostic_messages(&rustc_output.stdout)?,
-                    RustcCommand::diagnostic_messages(&rustc_output.stderr)?,
+                    Vec::new(),
+                    RustcCommand::diagnostic_messages(&rustc_output.stderr),
                 );
                 validate_dep_info(
                     &invocation.output,

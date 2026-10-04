@@ -134,23 +134,23 @@ impl RustcCommand<'_> {
         render_rustc_output(stderr, color);
     }
 
-    pub fn diagnostic_messages(bytes: &[u8]) -> Result<Vec<u8>> {
+    pub fn diagnostic_messages(bytes: &[u8]) -> Vec<u8> {
         let mut diagnostics = Vec::new();
         for line in bytes
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
         {
-            let message: serde_json::Value = serde_json::from_slice(line).map_err(|error| {
-                Error::failure(format!("rustc emitted a non-JSON message: {error}"))
-            })?;
+            let message = serde_json::from_slice::<serde_json::Value>(line).ok();
             // Artifact notifications contain temporary output paths, and are
             // reported from the validated outputs rather than replayed.
-            if message.get("message").is_some() {
+            if message.as_ref().is_none_or(|message| {
+                message.get("artifact").is_none() && message.get("unused_extern_names").is_none()
+            }) {
                 diagnostics.extend_from_slice(line);
                 diagnostics.push(b'\n');
             }
         }
-        Ok(diagnostics)
+        diagnostics
     }
 
     pub fn require_success(output: &Output) -> Result<()> {
@@ -431,10 +431,14 @@ mod tests {
     fn stored_diagnostics_omit_temporary_artifact_notifications() {
         let captured = b"{\"artifact\":\"/staging/library.rlib\"}\n{\"message\":\"warning\",\"rendered\":\"warning\\n\"}\n";
         assert_eq!(
-            RustcCommand::diagnostic_messages(captured).unwrap(),
+            RustcCommand::diagnostic_messages(captured),
             b"{\"message\":\"warning\",\"rendered\":\"warning\\n\"}\n"
         );
-        assert!(RustcCommand::diagnostic_messages(b"not JSON\n").is_err());
+        assert_eq!(
+            RustcCommand::diagnostic_messages(b"not JSON\n"),
+            b"not JSON\n"
+        );
+        assert_eq!(RustcCommand::diagnostic_messages(b"42\n"), b"42\n");
     }
 
     #[test]
