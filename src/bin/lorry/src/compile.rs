@@ -14,7 +14,7 @@ use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind,
 pub struct CommandOptions<'a> {
     pub cargo: &'a Path,
     pub workspace_root: &'a Path,
-    pub selected_package: Option<&'a PackageKey>,
+    pub selected_packages: &'a [PackageKey],
     pub host_profile: &'a Path,
     pub target_profile: &'a Path,
     pub host_incremental: &'a Path,
@@ -419,7 +419,7 @@ pub fn dependency_rustc_invocation_with_build_output(
                 .ok_or_else(|| Error::failure("integration harness has no temporary directory"))?,
         );
     }
-    if options.selected_package == Some(&key.package) {
+    if options.selected_packages.contains(&key.package) {
         value(&mut environment, "CARGO_PRIMARY_PACKAGE", "1");
     }
     if let Some(build_output) = build_output {
@@ -1210,7 +1210,7 @@ mod tests {
         let command_options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
-            selected_package: None,
+            selected_packages: &[],
             host_profile: host,
             target_profile: host,
             host_incremental: Path::new("/incremental/host"),
@@ -1228,6 +1228,35 @@ mod tests {
             .iter()
             .find(|key| key.package == version_check && key.kind == UnitKind::Library)
             .unwrap();
+        let selected = [version_check.clone(), typenum.clone()];
+        for selected_packages in [selected.as_slice(), &[]] {
+            let options = CommandOptions {
+                selected_packages,
+                ..command_options
+            };
+            for (package, kind) in [
+                (&version_check, UnitKind::Library),
+                (&typenum, UnitKind::Library),
+                (&generic_array, UnitKind::BuildScriptCompile),
+            ] {
+                let key = plan
+                    .order
+                    .iter()
+                    .find(|key| &key.package == package && key.kind == kind)
+                    .unwrap();
+                let invocation = dependency_rustc_invocation(&plan, &manifests, key, &options)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    invocation.environment.get("CARGO_PRIMARY_PACKAGE"),
+                    selected_packages
+                        .contains(package)
+                        .then_some(&OsString::from("1")),
+                    "primary-package environment for {}",
+                    package.name
+                );
+            }
+        }
         let invocation =
             dependency_rustc_invocation(&plan, &manifests, version_key, &command_options)
                 .unwrap()
@@ -1512,7 +1541,7 @@ mod tests {
         let cross_options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
-            selected_package: None,
+            selected_packages: &[],
             host_profile: Path::new("/target/release"),
             target_profile: Path::new("/target/x86_64-unknown-motor/release"),
             host_incremental: Path::new("/incremental/host"),
@@ -1661,7 +1690,7 @@ mod tests {
         let options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
-            selected_package: None,
+            selected_packages: &[],
             host_profile: Path::new("/target/debug/.host"),
             target_profile: Path::new("/target/debug"),
             host_incremental: Path::new("/incremental/host"),

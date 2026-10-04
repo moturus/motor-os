@@ -1114,7 +1114,7 @@ fn build_inner(
         child_lease_fd: build.child_lease_fd,
         workspace_root: &build.manifest.workspace_root,
         workspace_members: &build.manifest.workspace_members,
-        selected_package: Some(&selected_root.package),
+        selected_packages: std::slice::from_ref(&selected_root.package),
         toolchain: build.toolchain,
         host: build.host,
         target: build.target,

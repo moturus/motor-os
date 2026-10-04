@@ -2160,6 +2160,16 @@ covers effective profiles and graph wiring.
 
 ## Milestone 7: workspace builds
 
+The first independent foundation accepts a slice of selected package identities
+in compiler and executor options. Primary-package environment, Clippy
+configuration, and cache input roles now use membership in that slice; the
+existing engine still supplies one package until workspace execution lands.
+Compiler tests prove two packages both receive `CARGO_PRIMARY_PACKAGE`, while
+an unselected build-script compiler receives none, and an empty selection marks
+none. Four focused compiler tests and strict Clippy pass in
+`/tmp/lorry-m7-primary-selection-{unit-fixed,clippy}.log`. M6's depth-policy
+question remains pending and its milestone gate has not passed.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 

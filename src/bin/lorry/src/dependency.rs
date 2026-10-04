@@ -1558,7 +1558,7 @@ mod tests {
         let command_options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
-            selected_package: Some(&library.package),
+            selected_packages: std::slice::from_ref(&library.package),
             host_profile: Path::new("/target/release"),
             target_profile: Path::new("/target/release"),
             host_incremental: Path::new("/incremental/host"),

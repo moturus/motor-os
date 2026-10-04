@@ -1583,7 +1583,7 @@ mod tests {
             &CommandOptions {
                 cargo: Path::new("/cargo"),
                 workspace_root: &fixture.0,
-                selected_package: Some(&selected.package),
+                selected_packages: std::slice::from_ref(&selected.package),
                 host_profile: Path::new("/target/debug"),
                 target_profile: Path::new("/target/debug"),
                 host_incremental: Path::new("/incremental/host"),
@@ -1609,7 +1609,7 @@ mod tests {
             &CommandOptions {
                 cargo: Path::new("/cargo"),
                 workspace_root: &fixture.0,
-                selected_package: Some(&selected.package),
+                selected_packages: std::slice::from_ref(&selected.package),
                 host_profile: Path::new("/target/debug"),
                 target_profile: Path::new("/target/debug"),
                 host_incremental: Path::new("/incremental/host"),

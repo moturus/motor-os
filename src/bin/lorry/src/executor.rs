@@ -51,7 +51,7 @@ pub struct Options<'a> {
     pub cargo: &'a Path,
     pub workspace_root: &'a Path,
     pub workspace_members: &'a BTreeMap<String, PathBuf>,
-    pub selected_package: Option<&'a PackageKey>,
+    pub selected_packages: &'a [PackageKey],
     pub toolchain: &'a Toolchain,
     pub host: &'a TargetInfo,
     pub target: &'a TargetInfo,
@@ -209,7 +209,7 @@ fn execute_inner(
     let commands = CommandOptions {
         cargo: options.cargo,
         workspace_root: options.workspace_root,
-        selected_package: options.selected_package,
+        selected_packages: options.selected_packages,
         host_profile: options.host_profile,
         target_profile: options.target_profile,
         host_incremental: options.host_incremental,
@@ -615,7 +615,7 @@ fn execute_unit(
                             &manifest.root,
                             &planned_invocation.current_dir,
                             &driver.arguments,
-                            options.selected_package == Some(&key.package),
+                            options.selected_packages.contains(&key.package),
                         )
                         .into_iter()
                         .filter(|path| path.is_file()),
@@ -635,7 +635,7 @@ fn execute_unit(
                 AtomicDirectory::recover_previous(unit_dir)?;
                 AtomicDirectory::discard_abandoned_staging(unit_dir)?;
                 let dependencies = cache_dependencies(planned, outputs)?;
-                let selected = options.selected_package == Some(&key.package);
+                let selected = options.selected_packages.contains(&key.package);
                 let selected_inputs =
                     (manifest.editable || driver.is_some()).then_some(SelectedInputs {
                         package_root: &manifest.root,
@@ -1406,7 +1406,7 @@ mod tests {
                 child_lease_fd: None,
                 workspace_root: &fixture.0,
                 workspace_members: &BTreeMap::new(),
-                selected_package: None,
+                selected_packages: &[],
                 toolchain: &toolchain,
                 host: &target,
                 target: &target,
