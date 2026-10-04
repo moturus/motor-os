@@ -55,7 +55,7 @@ gate covers both fixes and executable publication.
 Published check units retain and replay compiler messages, keeping
 rust-analyzer flycheck diagnostics visible when those units are reused.
 
-Milestone 3 has begun in independent small patches. Build, check, run, and
+Milestone 3 is complete. Build, check, run, and
 test share Cargo JSON reporting and approved format combinations. Run and
 test finish the build stream before starting children; `test --no-run`
 reports harness executables. Programs and harnesses receive Cargo package
@@ -75,8 +75,19 @@ harnesses receive Cargo runtime library search paths. The paired Cargo
 contracts cover cold and fresh build/check/test streams and failed builds.
 They found and fixed the build-script artifact's `executable` field; Cargo
 reports null there. Check comparisons explicitly account for the plan's
-deferred metadata-only dependency checking. Focused contracts pass. The
-full milestone gate remains before milestone 3 can be marked complete.
+deferred metadata-only dependency checking. The complete Lorry suite passed
+in 629 seconds on 2026-10-03: 371 Rust tests, 3 own-message integration
+tests, the dedicated contracts, Cargo native/cross identity, and native
+Motor self-build, cross/native identity, and child-recovery checks. Online
+vendoring succeeded without retries. Strict Clippy validation also passed.
+The first milestone run failed when a procedural macro printed plain text:
+the newly shared reporter incorrectly parsed compiler stdout as JSON.
+Diagnosis against the pinned Cargo source and an actual Cargo build showed
+that stdout is forwarded without caching, while plain stderr is replayed.
+Lorry now preserves compiler stdout's existing human presentation, forwards
+it unchanged in JSON mode, and replays only stderr. The enhanced procedural
+macro contract proves cold output and fresh stderr-only replay. The original
+failure and diagnosis are retained in the milestone evidence below.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

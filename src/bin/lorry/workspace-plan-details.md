@@ -927,6 +927,39 @@ Compare each command's JSON with Cargo's on fixtures, using the existing
 warnings, and `test --no-run`. Prove that Lorry's own messages appear
 only with their option.
 
+### Completed milestone, 2026-10-03
+
+The final gate at commit `430fa0a5` passed `tests/test-all.sh --warm` in
+629 seconds. It passed 371 regular Rust tests and 3 own-message integration
+tests; 10 intentionally ignored Rust contracts ran in their dedicated
+driver. The host contracts, paired Cargo native/cross artifact checks,
+native Motor self-build and command equivalence, cross/native byte identity,
+and interrupted-child recovery all passed. Online host and native vendoring
+succeeded without external-failure retries. Strict offline Clippy validation
+passed with `-D warnings`. No main-image or developer-image full OS gate was
+run, because all milestone changes were confined to Lorry.
+
+The first run failed after 203 seconds in the procedural-macro contract.
+Its macro printed `proc-macro stdout is preserved`; the shared reporter
+mistook that plain compiler stdout for JSON and failed after rustc succeeded.
+The original log is `/tmp/lorry-m3-full.log`. Targeted tracing retained the
+fixture and failure in `/tmp/lorry-m3-proc-macro-diagnosis.log`. Inspection
+of the pinned Cargo compiler callbacks and an actual Cargo build confirmed
+that Cargo forwards compiler stdout without caching it and retains plain
+stderr. A diagnostic rerun also caught a human-output routing regression:
+`run` command substitution received the macro's stdout before the program's
+value. The final fix preserves existing human routing, forwards raw stdout
+in JSON mode, and caches/replays stderr alone. The procedural-macro contract
+now asserts these cold and fresh output boundaries. Temporary diagnostics
+were removed before validation and commit.
+
+Final full-suite evidence is `/tmp/lorry-m3-full-fixed.log`; native evidence
+is under `target/lorry/native-self-tests/self-20261004T022044Z-3597527/`.
+The focused verified regression and strict Clippy logs are
+`/tmp/lorry-m3-proc-output-contract-verified.log` and
+`/tmp/lorry-m3-clippy-verified.log`. The original failure was diagnosed and
+fixed, rather than resolved by a passing rerun alone.
+
 ## Milestone 4: `lorry clippy`
 
 **Result.** `lorry clippy` lints a package the way `cargo clippy` does, on
