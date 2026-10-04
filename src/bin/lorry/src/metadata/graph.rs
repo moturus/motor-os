@@ -30,7 +30,14 @@ pub(super) fn no_dependencies(workspace: &SourceWorkspace) -> Result<wire::Metad
         .map(|package| package::package_id(package, Identity::Root))
         .collect::<Result<Vec<_>>>()?;
     default_members.sort();
-    finish(&workspace.root, members, default_members, packages, None)
+    finish(
+        &workspace.root,
+        members,
+        default_members,
+        packages,
+        None,
+        workspace.metadata.clone(),
+    )
 }
 
 pub(crate) fn resolved(
@@ -121,6 +128,7 @@ pub(crate) fn resolved(
             nodes,
             root: Some(root_id),
         }),
+        manifest.workspace_metadata.clone(),
     )
 }
 
@@ -130,6 +138,7 @@ fn finish(
     workspace_default_members: Vec<String>,
     packages: Vec<wire::Package>,
     resolve: Option<wire::Resolve>,
+    workspace_metadata: serde_json::Value,
 ) -> Result<wire::Metadata> {
     let workspace_root = package::path_utf8(root, "workspace root")?;
     let target_directory = package::path_utf8(&root.join("target"), "metadata target directory")?;
@@ -141,7 +150,7 @@ fn finish(
         workspace_root,
         target_directory: target_directory.clone(),
         build_directory: target_directory,
-        workspace_metadata: serde_json::Value::Null,
+        workspace_metadata,
         version: 1,
     })
 }

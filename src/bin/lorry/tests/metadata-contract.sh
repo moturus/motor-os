@@ -70,6 +70,9 @@ printf '%s\n' \
     '' \
     '[features]' \
     'extra = []' >"$DEPENDENCY/Cargo.toml"
+printf '\n[package.metadata.editor]\ncommands = ["build", "check"]\n[workspace.metadata]\nname = "resolved fixture"\n' \
+    >>"$PROJECT/Cargo.toml"
+printf '\n[package.metadata.source]\nrole = "dependency"\n' >>"$DEPENDENCY/Cargo.toml"
 printf '%s\n' \
     'version = 4' \
     '[[package]]' \

@@ -97,7 +97,7 @@ pub(super) fn map(
         homepage: nonempty(&manifest.metadata.homepage),
         documentation: nonempty(&manifest.metadata.documentation),
         edition: edition(manifest.edition).to_owned(),
-        metadata: serde_json::Value::Null,
+        metadata: manifest.metadata.custom.clone(),
         links: manifest.links.clone(),
         publish: manifest.metadata.publish.clone(),
         default_run: manifest.default_run.clone(),

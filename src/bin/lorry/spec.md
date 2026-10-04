@@ -297,6 +297,8 @@ implies a newer default. Root replacements and package.workspace are rejected.
 Unused profiles may contain additional Cargo settings. Unsupported keys in
 the selected dev or release profile, or an explicit test-profile override,
 fail before compilation. Known profile values still receive type validation.
+Package and workspace custom metadata are preserved in metadata JSON,
+including nested tables, arrays, and Cargo's TOML datetime serialization.
 Members and default-members accept component globs `*`, `?`, and `[...]`,
 including negated character classes. `**` and paths outside the root are
 rejected. Matching files are ignored; matching directories need manifests,

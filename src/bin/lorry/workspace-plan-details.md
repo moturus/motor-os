@@ -1364,6 +1364,16 @@ Early fix 8 lands here: `metadata` prints `[package.metadata]` and
 count, also a member found through a path dependency (the open part of
 early fix 2).
 
+Early fix 8 is implemented. Package, dependency, and workspace metadata
+retain nested tables, inline tables, arrays, scalar values, nonfinite floats,
+and Cargo's TOML datetime wrapper. Empty virtual workspaces retain their
+metadata too. Eight focused metadata tests, strict Clippy, and exact paired
+source/resolved metadata comparisons passed in
+`/tmp/lorry-m5-custom-metadata-unit.log`,
+`/tmp/lorry-m5-custom-metadata-clippy.log`,
+`/tmp/lorry-m5-custom-metadata-source-contract.log`, and
+`/tmp/lorry-m5-custom-metadata-resolved-fixture-contract.log`.
+
 Rerun the local 124-manifest scan after inheritance and descriptive loading
 are complete. Also exercise the build-capable loader: unsupported
 compilation must not be hidden behind a metadata-only success.

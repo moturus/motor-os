@@ -13,6 +13,43 @@ pub const DOCUMENT_LIMITS: Limits = Limits {
     max_nodes: 100_000,
 };
 
+// Cargo serializes TOML metadata directly, including datetime's private
+// serde wrapper. Parsed documents already bound recursion and node counts.
+pub fn json(item: &Item) -> serde_json::Value {
+    fn table(table: &Table) -> serde_json::Value {
+        serde_json::Value::Object(
+            table
+                .iter()
+                .map(|(key, item)| (key.to_owned(), json(item)))
+                .collect(),
+        )
+    }
+    fn json_value(value: &Value) -> serde_json::Value {
+        match value {
+            Value::String(value) => value.value().clone().into(),
+            Value::Integer(value) => (*value.value()).into(),
+            Value::Float(value) => (*value.value()).into(),
+            Value::Boolean(value) => (*value.value()).into(),
+            Value::Datetime(value) => {
+                serde_json::json!({ "$__toml_private_datetime": value.value().to_string() })
+            }
+            Value::Array(array) => serde_json::Value::Array(array.iter().map(json_value).collect()),
+            Value::InlineTable(table) => serde_json::Value::Object(
+                table
+                    .iter()
+                    .map(|(key, item)| (key.to_owned(), json_value(item)))
+                    .collect(),
+            ),
+        }
+    }
+    match item {
+        Item::None => serde_json::Value::Null,
+        Item::Value(item) => json_value(item),
+        Item::Table(item) => table(item),
+        Item::ArrayOfTables(items) => serde_json::Value::Array(items.iter().map(table).collect()),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     pub max_bytes: usize,

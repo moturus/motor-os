@@ -22,6 +22,20 @@ resolver = "2"
 version = "9.9.9"
 [workspace.dependencies]
 unprepared = "1"
+[workspace.metadata]
+title = "editor tools"
+enabled = true
+count = 7
+ratio = 0.5
+nan = nan
+date = 2026-10-03
+time = 12:34:56
+timestamp = 2026-10-03T12:34:56Z
+values = [1, "two", { three = false }]
+[[workspace.metadata.commands]]
+name = "check"
+[[workspace.metadata.commands]]
+name = "test"
 [profile.custom]
 inherits = "release"
 debug = 1
@@ -31,6 +45,10 @@ cat >"$PROJECT/app/Cargo.toml" <<'EOF'
 name = "app"
 version = "0.1.0"
 edition = "2021"
+[package.metadata.editor]
+name = "app"
+values = ["build", "check"]
+settings = { enabled = true, amount = 3 }
 [dependencies]
 shared = { path = "../shared" }
 helper = { path = "../tools/helper" }
@@ -280,6 +298,7 @@ if source_metadata "$GLOB/Cargo.toml" >"$WORK/recursive.json" 2>"$WORK/recursive
 grep -F 'unsupported workspace member pattern' "$WORK/recursive.err" >/dev/null
 mkdir "$WORK/empty-virtual"
 printf '[workspace]\n' >"$WORK/empty-virtual/Cargo.toml"
+printf '[workspace.metadata]\nempty = true\n' >>"$WORK/empty-virtual/Cargo.toml"
 agrees_with_cargo "$WORK/empty-virtual/Cargo.toml" empty-virtual
 echo "PASS: Cargo member globs, exclusions, file matches, and empty workspaces"
 

@@ -34,6 +34,7 @@ pub struct Manifest {
     pub version: Version,
     pub edition: Edition,
     pub metadata: PackageMetadata,
+    pub workspace_metadata: serde_json::Value,
     pub default_run: Option<String>,
     pub dev: DevProfile,
     pub release: ReleaseProfile,
@@ -96,6 +97,7 @@ pub struct Version {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PackageMetadata {
+    pub custom: serde_json::Value,
     pub authors: Vec<String>,
     pub keywords: Vec<String>,
     pub categories: Vec<String>,
@@ -639,6 +641,9 @@ impl Manifest {
             version,
             edition,
             metadata,
+            workspace_metadata: workspace_metadata(
+                inherited.map_or(document, |values| &values.document),
+            ),
             default_run: optional_string(path, document, package, "package", "default-run")?,
             dev,
             release,
@@ -921,6 +926,16 @@ fn workspace_resolver(root: &Path, path: &Path, document: &Document) -> Result<R
     parse_resolver(path, document, package.get("resolver"), edition, 1)
 }
 
+fn workspace_metadata(document: &Document) -> serde_json::Value {
+    document
+        .root()
+        .get("workspace")
+        .and_then(Item::as_table)
+        .and_then(|workspace| workspace.get("metadata"))
+        .map(crate::toml::json)
+        .unwrap_or_default()
+}
+
 fn validate_manifest_tables(
     path: &Path,
     document: &Document,
@@ -1079,6 +1094,10 @@ fn parse_package_metadata(
 ) -> Result<PackageMetadata> {
     let fields = inheritance::PackageFields::new(path, document, package, inherited);
     Ok(PackageMetadata {
+        custom: package
+            .get("metadata")
+            .map(crate::toml::json)
+            .unwrap_or_default(),
         authors: fields.array("authors")?.unwrap_or_default(),
         keywords: fields.array("keywords")?.unwrap_or_default(),
         categories: fields.array("categories")?.unwrap_or_default(),
