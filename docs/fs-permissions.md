@@ -21,7 +21,7 @@ None ⊆ Interactive ⊆ System
 ```
 
 Directory `x` controls listing, traversal, and lookup. Directory `w` controls
-creation, deletion, and rename of children. A non-writable file can therefore
+creation, deletion, rename, and permission changes of children. A non-writable file can therefore
 still be replaced when its parent directory is writable. The modes below are
 the image's initial permissions; runtime changes follow the authority rules
 described below.
@@ -254,14 +254,44 @@ every component grants None traversal; `/user/cfg` would not be suitable.
   executables with `rw-` → `r-x` after all writes succeed. A process may also
   change its own role from `r-x` → `rwx`, restoring write access. These two
   transitions and ordinary narrowing are allowed for every role, on files
-  and directories. Direct `rw-` → `rwx` remains denied; editable executables
+  and directories whose current parent grants that role `w`. Direct
+  `rw-` → `rwx` remains denied; editable executables
   can use `rw-` → `r-x` → `rwx`.
+- Every runtime permission change requires `CAP_FS_WRITE` and the calling
+  role's `w` on the entry's immediate parent, including narrowing, changes to
+  lower roles, and unchanged-mode requests. Entry-ID operations need parent
+  `w` but not `x`; pathname lookup still needs `x`. Only System may change
+  `/`. A file's own `w` still permits editing its contents when its parent
+  denies permission changes. For example, Interactive can write to
+  `/devtools/bin/www` in place but cannot chmod it.
+- An SFTP upload onto an existing file replaces its contents in place and
+  keeps its installed mode: OPEN's mode is a creation hint. The exception is
+  an upload whose mode excludes a lower role that can currently read the
+  file: those roles lose access before the contents change, and under a
+  protected parent such an upload is refused. `put -p` and `scp -p` install
+  their mode at close and are refused before writing when the parent denies
+  it. A mode request on an open upload (SETSTAT or FSETSTAT) is authorized
+  immediately and removes lower-role access before further writes;
+  finalization at close may remove the uploader's write access or grant access
+  to lower roles. New uploads start private until close; if
+  another process seals the parent before close, the final chmod fails and
+  the file stays private until an authorized role can restore the parent's
+  write access.
+- `std::fs::copy` means contents plus mode: the destination takes the
+  source's permissions, so copying needs the caller's `w` on the
+  destination's parent even when the destination file itself is writable and
+  already has that mode. Where the parent denies it, or the finished mode
+  exceeds a higher role's byte (an executable copied onto a file that System
+  holds at `rw-`), the copy is refused before truncation. Replacing such a
+  file's contents in place takes an ordinary write, not a copy.
 - Every change must stay within the immediately higher role's permissions;
   System has no higher role. Narrowing cascades to lower roles, while
   widening does not automatically restore their removed permissions. Thus
   `r-x` is not a permanent seal: System can make a shipped ELF writable, and a
-  lower role can make an `r-x` directory writable if its ceiling is `rwx`.
-  Image directory modes alone do not prevent these explicit changes.
+  lower role can make an `r-x` directory writable if its ceiling is `rwx`
+  and its parent grants that role `w`. Thus None cannot chmod `/user` or
+  `/user/tmp`, but can chmod entries inside `/user/tmp` when their own modes
+  allow the change.
 - A role at `r--` or `---` still cannot widen its own permissions. The
   `std::fs::Permissions::set_readonly(true)` transition to `r--` remains
   irreversible for that role; replacing the file still requires a writable
@@ -280,6 +310,9 @@ every component grants None traversal; `/user/cfg` would not be suitable.
 - Non-writable files can be replaced where their parent directory is
   writable. A permanent System seal requires `r--` or `---`, which also
   removes execute or directory traversal permission.
+- Copying onto an existing writable file whose parent denies permission
+  changes is refused, because the copy could not give it the source's
+  permissions. Its contents can still be replaced by writing to it.
 
 ## Non-obvious implementation decisions
 

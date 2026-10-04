@@ -499,9 +499,9 @@ nothing. Each triplet is one of <code>rwx</code>, <code>rw-</code>, <code>r-x</c
 <pre><code>None &sube; Interactive &sube; System</code></pre>
 <ul>
   <li>On a directory, <code>x</code> controls listing, traversal, and lookup, and
-  <code>w</code> controls creating, deleting, and renaming children. A non-writable file
-  can therefore still be replaced when its parent directory is writable. Runtime
-  permission changes can make an initially read-only directory writable.</li>
+  <code>w</code> controls creating, deleting, renaming, and changing the permissions
+  of children. A non-writable file can therefore still be replaced when its parent
+  directory is writable.</li>
   <li>On a file, <code>x</code> is a hint enforced by the program loader, which refuses
   to run a file the caller's role cannot execute. It is enforced cooperatively: a process
   with <code>CAP_SPAWN</code> could build a child by hand from a readable file. The
@@ -557,21 +557,46 @@ not parse.</p>
   <li>A process can narrow its own role's permissions on an entry, and lower roles are
   narrowed with it. It may also change <code>rw-</code> to <code>r-x</code>, or
   <code>r-x</code> to <code>rwx</code>. These rules apply to files and directories,
-  for every role. Direct <code>rw-</code> to <code>rwx</code> remains denied; use
+  for every role when the parent permits the change. Direct <code>rw-</code> to <code>rwx</code> remains denied; use
   <code>rw-</code> &rarr; <code>r-x</code> &rarr; <code>rwx</code> for an editable
   executable. Exact-permissions creation is also available.</li>
+  <li>Every runtime permission change, including narrowing or an unchanged mode,
+  requires the calling role's <code>w</code> on the entry's current parent and
+  <code>CAP_FS_WRITE</code>. Only System may change <code>/</code>. Entry-ID changes
+  need parent <code>w</code> but not <code>x</code>; pathname lookup still needs
+  <code>x</code>. A file's own <code>w</code> still permits editing its contents
+  under a protected parent. Interactive can write to <code>/devtools/bin/www</code>
+  in place but cannot chmod it.</li>
+  <li>An SFTP upload onto an existing file replaces its contents in place and keeps
+  its installed mode: OPEN's mode is a creation hint. An upload whose mode excludes
+  a lower role that can currently read the file first takes that role's access
+  away, and is refused under a protected parent. <code>put -p</code> and
+  <code>scp -p</code> install their mode at close and are refused before writing
+  when the parent denies it. A mode request on an open upload is authorized
+  immediately and removes lower-role access before further writes; finalization
+  at close may remove the uploader's write access or grant lower roles access.
+  New uploads start private until close; if another process seals the parent
+  first, the final chmod fails and the file stays private until an authorized role
+  restores parent write access.</li>
   <li>Every change must fit within the immediately higher role's permissions; System
   has no higher role. Widening does not automatically restore lower-role permissions.
   <strong><code>r-x</code> is not a permanent seal:</strong> System can make a shipped
   ELF writable, and a lower role can make an <code>r-x</code> directory writable when
-  its higher-role ceiling is <code>rwx</code>.</li>
+  its higher-role ceiling is <code>rwx</code> and its parent grants <code>w</code>.
+  None cannot chmod <code>/user/tmp</code> itself, but can chmod entries inside it.</li>
   <li>A role at <code>r--</code> or <code>---</code> still cannot widen itself. The std
   readonly round-trip (<code>rw-</code> &rarr; <code>r--</code> &rarr; <code>rw-</code>)
   therefore fails on its second step. Replacing such a file requires reading it,
   writing a new file, and renaming it into place under a writable parent.
-  <code>std::fs::copy</code> preserves source permissions.</li>
+  <code>std::fs::copy</code> means contents plus mode: the destination takes the
+  source's permissions, so a copy needs the caller's <code>w</code> on the
+  destination's parent even when the destination file is writable and already has
+  that mode. Where the parent denies it, or the mode would exceed a higher role's
+  byte, the copy is refused before truncation; replacing such a file's contents in
+  place takes an ordinary write.</li>
   <li><code>chmod MODE PATH...</code> takes the nine-character mode in System,
-  Interactive, None order; <code>cp</code> preserves file permissions.</li>
+  Interactive, None order; <code>cp</code> preserves file permissions the same
+  way.</li>
 </ul>
 
 <p>For offline changes, see <a href="imager.html#change-guest-permissions">imager chmod</a>

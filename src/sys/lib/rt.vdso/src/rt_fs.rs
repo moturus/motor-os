@@ -561,28 +561,22 @@ impl AsyncFsClient {
         self.blocking_run(move |fs_client| async move { fs_client.resize(file_id, new_size).await })
     }
 
-    /// Authorize the overwrite, hide private source data, then truncate.
-    /// Returns the mode the finished copy installs, or None when the
-    /// destination keeps its installed mode.
+    /// A copy installs the source's mode, so it needs the caller's chmod
+    /// authority over the destination even when only the contents change.
+    /// Authorize that, hide the source from the lower roles that may not read
+    /// it, then truncate. Returns the mode the finished copy installs.
     fn prepare_copy(
         &self,
         entry_id: EntryId,
         source: RolePermissions,
         created: bool,
-    ) -> Result<Option<RolePermissions>> {
+    ) -> Result<RolePermissions> {
         self.blocking_run(move |fs_client| async move {
             let destination = fs_client.metadata(entry_id).await?.permissions()?;
             let caller = current_fs_role();
             if !destination.get(caller).can_write() {
                 return Err(moto_rt::Error::NotAllowed);
             }
-            let exposes_private = [Role::System, Role::Interactive, Role::None]
-                .into_iter()
-                .any(|role| {
-                    (role as u8) < caller as u8
-                        && destination.get(role).can_read()
-                        && !source.get(role).can_read()
-                });
             // A finished mode the higher roles' bytes cannot hold is refused
             // before any data moves, not after the copy.
             let completed = copied_permissions(destination, source);
@@ -608,19 +602,15 @@ impl AsyncFsClient {
                 }
                 Role::None => staging.none = AccessPermissions::Rw,
             }
-            let staged = match fs_client.set_all_permissions(entry_id, staging).await {
-                Ok(()) => true,
-                Err(moto_rt::Error::NotAllowed) if !created && !exposes_private => false,
-                Err(error) => return Err(error),
-            };
+            // Motor FS refuses this when the parent denies the caller `w`: the
+            // copy fails here, with the destination untouched.
+            fs_client.set_all_permissions(entry_id, staging).await?;
             if !created && let Err(error) = fs_client.resize(entry_id, 0).await {
                 // Nothing was copied: the destination gets its mode back.
-                if staged {
-                    restore_permissions(&fs_client, entry_id, destination).await;
-                }
+                restore_permissions(&fs_client, entry_id, destination).await;
                 return Err(error);
             }
-            Ok(staged.then_some(completed))
+            Ok(completed)
         })
     }
 
@@ -660,9 +650,7 @@ impl AsyncFsClient {
             offset += copied;
         }
 
-        if let Some(permissions) = completed {
-            self.set_all_permissions(dst.entry_id, permissions)?;
-        }
+        self.set_all_permissions(dst.entry_id, completed)?;
         Ok(offset)
     }
 

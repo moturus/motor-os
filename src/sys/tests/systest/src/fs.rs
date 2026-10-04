@@ -459,23 +459,27 @@ fn copy_test() {
     assert_eq!(copied, 0);
     assert_eq!(std::fs::metadata(&empty_dst).unwrap().len(), 0);
 
-    // A writable file under a protected parent can still be copied over; its
-    // installed mode remains intact because chmod is forbidden there.
+    // A copy installs the source's mode, so a parent that denies the caller
+    // `w` refuses it before truncation even though the file itself is
+    // writable and already has that mode. The file's own `w` still permits
+    // ordinary writes.
     let protected = root.join("protected");
     std::fs::create_dir(&protected).unwrap();
     let protected_dst = protected.join("existing");
     std::fs::write(&protected_dst, b"before copy").unwrap();
     crate::set_directory_access(&protected, AccessPermissions::Rx).unwrap();
-    let before_mode = std::fs::metadata(&protected_dst).unwrap().permissions();
-    assert_eq!(LEN as u64, std::fs::copy(&src, &protected_dst).unwrap());
+    let before = std::fs::metadata(&protected_dst).unwrap();
     assert_eq!(
-        std::fs::read(&protected_dst).unwrap().as_slice(),
-        bytes.as_slice()
+        std::io::ErrorKind::PermissionDenied,
+        std::fs::copy(&src, &protected_dst).unwrap_err().kind()
     );
     assert_eq!(
-        before_mode,
-        std::fs::metadata(&protected_dst).unwrap().permissions()
+        b"before copy",
+        std::fs::read(&protected_dst).unwrap().as_slice()
     );
+    let after = std::fs::metadata(&protected_dst).unwrap();
+    assert_eq!(before.permissions(), after.permissions());
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
     std::fs::write(&protected_dst, b"ordinary write").unwrap();
     assert_eq!(
         b"ordinary write",
@@ -511,6 +515,7 @@ fn copy_test() {
     assert_eq!(before.permissions(), after.permissions());
     assert_eq!(before.modified().unwrap(), after.modified().unwrap());
 
+    // Under a writable parent the copy installs the source's private mode.
     crate::set_directory_access(&protected, AccessPermissions::Rwx).unwrap();
     assert_eq!(16, std::fs::copy(&private, &protected_dst).unwrap());
     moto_async::LocalRuntime::new().block_on(async {
@@ -526,9 +531,13 @@ fn copy_test() {
                 .unwrap()
         );
     });
-    // A protected destination that is already private remains usable.
+    // Sealing the parent again refuses the next copy although the destination
+    // already carries the source's mode.
     crate::set_directory_access(&protected, AccessPermissions::Rx).unwrap();
-    assert_eq!(16, std::fs::copy(&private, &protected_dst).unwrap());
+    assert_eq!(
+        std::io::ErrorKind::PermissionDenied,
+        std::fs::copy(&private, &protected_dst).unwrap_err().kind()
+    );
     crate::set_directory_access(&protected, AccessPermissions::Rwx).unwrap();
 
     let expected = [
