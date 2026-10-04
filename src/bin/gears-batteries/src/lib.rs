@@ -1,6 +1,7 @@
 //! Optional coding workflows using Gears' command-hook protocol.
 
 pub mod instructions;
+pub mod paths;
 pub mod snapshot;
 
 use std::io::Read;
