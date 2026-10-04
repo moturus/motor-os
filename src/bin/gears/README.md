@@ -77,6 +77,28 @@ Important optional fields are:
     output_reserve_tokens = 16384
     recent_tail_tokens = 20000
 
+The optional batteries coding workflow has a separate sample configuration,
+[`config/gears-batteries.toml`](config/gears-batteries.toml). Install it in
+your Gears directory with the contents of both `gears/tools/` and
+`gears-batteries/tools/`, and install `gears-batteries` beside `gears`.
+The developer image supplies those files. Start from your workspace with:
+
+```sh
+gears --config /user/cfg/gears/gears-batteries.toml --model MODEL
+```
+
+On Linux, use `~/.gears/gears-batteries.toml` as the configuration path.
+The sample selects OpenRouter and reads `openrouter.key` beside the config.
+For a local OpenAI-compatible server, set `providers.local.base_url` and
+select `--provider local --model MODEL`. Only loopback HTTP is enabled.
+The sample registers project instructions and `todo`, enables the six
+batteries tools plus shell, Gix, Lorry and curl, and applies the batteries
+approval policy. Declare a literal check vector in the workspace's
+`.gears/batteries.toml`, for example `check = ["lorry", "test"]` on Motor OS
+or `check = ["cargo", "test", "--offline"]` on Linux.
+See the [batteries README](../gears-batteries/README.md) for check evidence,
+file-read requirements and policy limits.
+
 Hooks are listed in execution order:
 
     [[hooks]]

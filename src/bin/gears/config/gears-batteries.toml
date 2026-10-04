@@ -1,0 +1,63 @@
+# Install this file and both crates' tools/ directories in your Gears directory.
+# Use gears --config PATH/gears-batteries.toml --model MODEL from your workspace.
+version = 1
+default_provider = "openrouter"
+
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+key_file = "openrouter.key"
+
+# Set this URL and select --provider local --model MODEL for a local server.
+[providers.local]
+base_url = "http://127.0.0.1:11434/v1"
+
+[net]
+plain_http_allowlist = ["127.0.0.1"]
+
+[[hooks]]
+name = "batteries"
+command = ["gears-batteries", "hook"]
+events = ["initialize", "permission", "tool_execute", "tool_result",
+          "turn_start", "entry", "before_stop", "turn_end"]
+timeout_seconds = 30
+max_output_bytes = 1048576
+
+[[tools]]
+directory = "tools/read_file"
+enabled = true
+
+[[tools]]
+directory = "tools/write_file"
+enabled = true
+
+[[tools]]
+directory = "tools/patch"
+enabled = true
+
+[[tools]]
+directory = "tools/search_files"
+enabled = true
+
+[[tools]]
+directory = "tools/check"
+enabled = true
+
+[[tools]]
+directory = "tools/session_search"
+enabled = true
+
+[[tools]]
+directory = "tools/sh"
+enabled = true
+
+[[tools]]
+directory = "tools/gix"
+enabled = true
+
+[[tools]]
+directory = "tools/lorry"
+enabled = true
+
+[[tools]]
+directory = "tools/curl"
+enabled = true
