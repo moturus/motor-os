@@ -132,6 +132,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         );
     }
     let scope = review_scope(cli, &workspace, previous.as_ref())?;
+    let migration = migration::Records::collect(&workspace, &scope)?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     let mut manifest = workspace.packages[0].clone();
     let refreshes = if options.locked {
@@ -295,7 +296,8 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
             && previous.contexts == recorded
             && previous.capabilities == capabilities
     });
-    if !unchanged || direct.materialized_sources().next().is_some() {
+    if !unchanged || !migration.is_empty() || direct.materialized_sources().next().is_some() {
+        migration.report(cli.lorry_messages, false)?;
         let stdin = io::stdin();
         let mut output = io::stderr().lock();
         if !cli.lorry_messages {
@@ -336,7 +338,10 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
             .map(|reconstructed| reconstructed.review);
         let mode = if options.accept_all {
             change_review::Mode::AcceptAll
-        } else if options.locked || direct.materialized_sources().next().is_some() {
+        } else if options.locked
+            || !migration.is_empty()
+            || direct.materialized_sources().next().is_some()
+        {
             change_review::Mode::Forced
         } else {
             change_review::Mode::Change
@@ -376,6 +381,8 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         capabilities,
     }
     .write(&workspace.root)?;
+    migration.remove()?;
+    migration.report(cli.lorry_messages, true)?;
     progress.report("Verified Cargo.lock and workspace admission")?;
     Ok(0)
 }

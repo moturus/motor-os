@@ -43,6 +43,7 @@ use crate::toolchain::{TargetInfo, Toolchain};
 use crate::upgrade;
 use crate::vendor_lock::ProjectVendorLock;
 
+mod migration;
 pub(crate) mod workspace;
 
 pub fn execute(cli: &Cli, options: &VendorOptions) -> Result<i32> {

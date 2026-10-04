@@ -607,6 +607,19 @@ paths, installed-tool paths, or other host observations. Keys, ordering,
 string encoding, and duplicate rejection are canonical and bounded. Unknown
 format versions or keys are hard errors.
 
+### Workspace migration
+
+A successful workspace review writes one root record with review format 4.
+Old per-member records require explicit review with workspace-root
+`vendor --locked`; their presence never supplies workspace approval.
+Before confirmation, vendor names the selected members' records that the
+new scope replaces. After publishing root approval, it removes those exact
+records and reports their paths. Unselected members, nonmembers, and unrelated
+state files remain untouched. Symlinks, invalid records, and records changed
+during review fail closed. With `--lorry-messages`, proposed and completed
+migration reports use `reason = "lorry-admission-migration"`, `stage`, and
+`replaced_records` fields on stderr.
+
 ### Compact admission format 3
 
 The compact file is UTF-8 TOML. Its allowed top-level keys are exactly

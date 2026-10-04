@@ -103,6 +103,57 @@ cmp Cargo.lock "$WORK/reconciled.lock"
 test ! -e app/.lorry/dependencies-v2.toml
 test ! -e shared/.lorry/dependencies-v2.toml
 echo 'PASS: ordinary workspace vendor matches Cargo locks and excludes members from package caps'
+# Migration replaces only selected members after approval; nonmembers survive.
+mkdir -p app/.lorry shared/.lorry outside/.lorry
+python3 - "$WORK/original.admission" "$WORK/member.admission" <<'PYCODE'
+import re, sys
+source = open(sys.argv[1]).read().replace('review-format-version = 4', 'review-format-version = 3')
+source = re.sub(r'\[review-scope\].*?(?=\[\[context\]\])', '', source, flags=re.S)
+open(sys.argv[2], 'w').write(source)
+PYCODE
+for package in app shared outside; do
+    cp "$WORK/member.admission" "$package/.lorry/dependencies-v2.toml"
+done
+echo 'unrelated state' >app/.lorry/sentinel
+cp .lorry/dependencies-v2.toml "$WORK/before-migration.admission"
+if "$LORRY" -q --max-packages 2 --lorry-messages vendor --locked --offline -p app \
+    >"$WORK/declined-migration.out" 2>"$WORK/declined-migration.err"; then
+    echo 'migration removed member approval without confirmation' >&2
+    exit 1
+fi
+cmp .lorry/dependencies-v2.toml "$WORK/before-migration.admission"
+cmp app/.lorry/dependencies-v2.toml "$WORK/member.admission"
+"$LORRY" -q --max-packages 2 --lorry-messages vendor --locked --offline -p app --accept-all \
+    >"$WORK/migration.out" 2>"$WORK/migration.json"
+test ! -e app/.lorry/dependencies-v2.toml
+grep -F 'unrelated state' app/.lorry/sentinel >/dev/null
+cmp shared/.lorry/dependencies-v2.toml "$WORK/member.admission"
+cmp outside/.lorry/dependencies-v2.toml "$WORK/member.admission"
+python3 - "$WORK/migration.json" "$PROJECT/app/.lorry/dependencies-v2.toml" <<'PYCODE'
+import json, sys
+messages = [json.loads(line) for line in open(sys.argv[1])]
+assert [m['reason'] for m in messages] == ['lorry-admission-migration', 'lorry-vendor-change', 'lorry-admission-migration']
+assert [m['stage'] for m in messages if 'stage' in m] == ['proposed', 'completed']
+assert all(m['replaced_records'] == [sys.argv[2]] for m in messages if 'stage' in m)
+PYCODE
+mv shared/.lorry shared/saved-lorry
+ln -s ../outside/.lorry shared/.lorry
+cp .lorry/dependencies-v2.toml "$WORK/scoped-migration.admission"
+if "$LORRY" -q --max-packages 2 --lorry-messages vendor --locked --offline --workspace --accept-all \
+    >"$WORK/link-migration.out" 2>"$WORK/link-migration.err"; then
+    echo 'migration followed a symbolic member state directory' >&2
+    exit 1
+fi
+grep -F 'not a real directory' "$WORK/link-migration.err" >/dev/null
+cmp .lorry/dependencies-v2.toml "$WORK/scoped-migration.admission"
+cmp outside/.lorry/dependencies-v2.toml "$WORK/member.admission"
+rm shared/.lorry
+mv shared/saved-lorry shared/.lorry
+"$LORRY" -q --max-packages 2 --lorry-messages vendor --locked --offline --workspace --accept-all \
+    >"$WORK/all-migration.out" 2>"$WORK/all-migration.json"
+test ! -e shared/.lorry/dependencies-v2.toml
+cmp outside/.lorry/dependencies-v2.toml "$WORK/member.admission"
+echo 'PASS: workspace review migrates only selected real member records after approval'
 cat >>outside/Cargo.toml <<'TOML'
 [dependencies]
 cfg-if = "=1.0.3"
