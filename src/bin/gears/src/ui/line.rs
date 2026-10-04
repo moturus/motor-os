@@ -599,6 +599,7 @@ fn parse_approval(answer: Option<&str>) -> Approval {
 struct Input {
     raw: Option<crate::platform::TerminalInput>,
     queued: VecDeque<u8>,
+    skip_lf: bool,
 }
 
 impl Input {
@@ -611,6 +612,7 @@ impl Input {
         Ok(Self {
             raw,
             queued: VecDeque::new(),
+            skip_lf: false,
         })
     }
 
@@ -627,7 +629,12 @@ impl Input {
                     Err(error) => Err(error.to_string()),
                 }
             }
-            Some(raw) => read_raw_line(raw, &mut self.queued),
+            Some(raw) => read_raw_line(
+                &mut self.queued,
+                &mut self.skip_lf,
+                |buffer| raw.read(buffer, None),
+                &mut io::stdout().lock(),
+            ),
         }
     }
 
@@ -658,50 +665,57 @@ impl Input {
 }
 
 fn read_raw_line(
-    input: &mut crate::platform::TerminalInput,
     queued: &mut VecDeque<u8>,
+    skip_lf: &mut bool,
+    mut read: impl FnMut(&mut [u8]) -> io::Result<Option<usize>>,
+    echo: &mut impl Write,
 ) -> Result<Option<String>, String> {
     let mut bytes = Vec::new();
     loop {
-        let mut buffer = [0_u8; 256];
-        let count = if queued.is_empty() {
-            match input.read(&mut buffer, None) {
+        if queued.is_empty() {
+            let mut buffer = [0_u8; 256];
+            match read(&mut buffer) {
                 Ok(Some(0)) => return Ok(None),
-                Ok(Some(count)) => count,
+                Ok(Some(count)) => queued.extend(&buffer[..count]),
                 Ok(None) => continue,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(None),
                 Err(error) => return Err(error.to_string()),
             }
-        } else {
-            let count = queued.len().min(buffer.len());
-            for destination in &mut buffer[..count] {
-                *destination = queued.pop_front().expect("queued byte exists");
+        }
+        let byte = queued.pop_front().expect("input byte exists");
+        let after_cr = std::mem::take(skip_lf);
+        if after_cr && byte == b'\n' {
+            continue;
+        }
+        match byte {
+            b'\r' | b'\n' => {
+                *skip_lf = byte == b'\r';
+                writeln!(echo).map_err(|error| error.to_string())?;
+                return Ok(Some(String::from_utf8_lossy(&bytes).into_owned()));
             }
-            count
-        };
-        for byte in &buffer[..count] {
-            match *byte {
-                b'\r' | b'\n' => {
-                    println!();
-                    return Ok(Some(String::from_utf8_lossy(&bytes).into_owned()));
-                }
-                3 => {
-                    crate::platform::note_interrupt();
-                    return Ok(None);
-                }
-                4 if bytes.is_empty() => return Ok(None),
-                8 | 127 if !bytes.is_empty() => {
-                    bytes.pop();
-                    print!("\x08 \x08");
-                    io::stdout().flush().map_err(|error| error.to_string())?;
-                }
-                byte if !byte.is_ascii_control() => {
-                    bytes.push(byte);
-                    print!("{}", char::from(byte));
-                    io::stdout().flush().map_err(|error| error.to_string())?;
-                }
-                _ => {}
+            3 => {
+                crate::platform::note_interrupt();
+                return Ok(None);
             }
+            4 if bytes.is_empty() => return Ok(None),
+            8 | 127 if !bytes.is_empty() => {
+                let mut byte = bytes.pop().unwrap();
+                while byte & 0xc0 == 0x80 {
+                    let Some(previous) = bytes.pop() else {
+                        break;
+                    };
+                    byte = previous;
+                }
+                echo.write_all(b"\x08 \x08")
+                    .map_err(|error| error.to_string())?;
+                echo.flush().map_err(|error| error.to_string())?;
+            }
+            byte if !byte.is_ascii_control() => {
+                bytes.push(byte);
+                echo.write_all(&[byte]).map_err(|error| error.to_string())?;
+                echo.flush().map_err(|error| error.to_string())?;
+            }
+            _ => {}
         }
     }
 }
@@ -721,6 +735,81 @@ fn fold(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_input_preserves_later_lines_from_the_same_read() {
+        let mut queued = VecDeque::new();
+        let mut skip_lf = false;
+        let mut echo = Vec::new();
+        let bytes = b"first\nsecond\n";
+        let first = read_raw_line(
+            &mut queued,
+            &mut skip_lf,
+            |buffer| {
+                buffer[..bytes.len()].copy_from_slice(bytes);
+                Ok(Some(bytes.len()))
+            },
+            &mut echo,
+        )
+        .unwrap();
+        assert_eq!(first.as_deref(), Some("first"));
+        assert_eq!(queued.iter().copied().collect::<Vec<_>>(), b"second\n");
+        let second = read_raw_line(
+            &mut queued,
+            &mut skip_lf,
+            |_| panic!("queued line required another read"),
+            &mut echo,
+        )
+        .unwrap();
+        assert_eq!(second.as_deref(), Some("second"));
+        assert_eq!(echo, b"first\nsecond\n");
+    }
+
+    #[test]
+    fn raw_input_echoes_utf8_and_backspace_removes_a_complete_character() {
+        let mut queued = VecDeque::from("éλ\u{7f}!\n".as_bytes().to_vec());
+        let mut echo = Vec::new();
+        let text = read_raw_line(
+            &mut queued,
+            &mut false,
+            |_| panic!("unexpected read"),
+            &mut echo,
+        )
+        .unwrap();
+        assert_eq!(text.as_deref(), Some("é!"));
+        assert_eq!(String::from_utf8(echo).unwrap(), "éλ\u{8} \u{8}!\n");
+    }
+
+    #[test]
+    fn raw_input_collapses_crlf_even_across_reads() {
+        let mut queued = VecDeque::new();
+        let mut skip_lf = false;
+        let mut echo = Vec::new();
+        let mut chunks = VecDeque::from([b"one\r".as_slice(), b"\ntwo\r\n".as_slice()]);
+        let mut read = |buffer: &mut [u8]| {
+            let bytes = chunks.pop_front().unwrap_or_default();
+            buffer[..bytes.len()].copy_from_slice(bytes);
+            Ok(Some(bytes.len()))
+        };
+        assert_eq!(
+            read_raw_line(&mut queued, &mut skip_lf, &mut read, &mut echo)
+                .unwrap()
+                .as_deref(),
+            Some("one")
+        );
+        assert_eq!(
+            read_raw_line(&mut queued, &mut skip_lf, &mut read, &mut echo)
+                .unwrap()
+                .as_deref(),
+            Some("two")
+        );
+        assert!(
+            read_raw_line(&mut queued, &mut skip_lf, &mut read, &mut echo)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(echo, b"one\ntwo\n");
+    }
 
     #[test]
     fn all_six_approval_answers_are_distinct() {
