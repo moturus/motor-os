@@ -1,6 +1,6 @@
 # Gears batteries implementation record
 
-Updated 2026-10-03. The design in [gears-batteries.md](gears-batteries.md)
+Updated 2026-10-04. The design in [gears-batteries.md](gears-batteries.md)
 remains authoritative. Work proceeds in small patches with one-line commits.
 All Gears defects found during implementation are in scope.
 
@@ -123,6 +123,20 @@ only three missing-check reminders. No provider or Internet request is made.
   timeouts. Original failure:
   `/tmp/gears-batteries-config-complete-host-gate.log`; fixed component gate:
   `/tmp/gears-batteries-sibling-isolated-host-gate.log`.
+- The batteries host gate assumed `rg` was installed. The earlier passing
+  run found Codex's bundled binary; the user's ordinary host PATH failed
+  with `cannot run rg: No such file or directory`. The same failure is
+  reproduced in `/tmp/gears-batteries-missing-rg-original.log`. The gate now
+  builds a Linux binary offline from the existing sibling ripgrep checkout,
+  stores it under Motor OS `build/`, and supplies it to the test processes.
+  Full-test preparation builds it before the timed suite. The standalone
+  release gate passes without Codex's PATH
+  (`/tmp/gears-batteries-provisioned-rg-host-gate.log`). This changes no
+  ripgrep source or batteries runtime behavior. The corrected full release
+  developer-image gate passes in the same ordinary host environment,
+  including the installed workflows, native source builds and Lorry's
+  complete product suite (643 seconds). Its log is
+  `/tmp/gears-batteries-host-rg-dev-release.log`.
 
 ## Validation boundaries
 
@@ -153,6 +167,13 @@ Lorry, and Lorry's complete product suite (649 seconds). Its log is
 transitively in `full-test.sh` when testing the developer image. The gate
 covers all production changes and the fixture fix. The final setup and
 progress documentation was updated afterward.
+
+The corrected release developer-image gate also passes without Codex's
+tool directory on PATH, after provisioning the batteries' host `rg` in
+the test preparation and component gate. Its log is
+`/tmp/gears-batteries-host-rg-dev-release.log`. This supersedes the earlier
+host-dependency assumption; the original missing-`rg` failure is preserved
+above.
 
 The atomic lock-publication race remains recorded separately in
 `docs/plans/future-work.md`, as requested. Do not hide diagnostic failures

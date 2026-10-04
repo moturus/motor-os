@@ -40,9 +40,16 @@ and explicit key files. The bare batteries program name resolves beside the
 Gears executable for tools, hooks and after-turn commands.
 
 Run `src/tests/test-gears-batteries.sh` from the Motor OS repository root for
-the hermetic host gate. The release developer-image gate exercises the
-installed binary and rebuilds the packaged source with Lorry. The portable
-workflow fixture uses a scripted provider to drive real file tools, a Rust
+the hermetic host gate. It builds Linux `rg` offline from the sibling
+`../ripgrep` checkout into `build/gears-batteries-host-rg`, then supplies it
+to the tests and workflow through their PATH. A system-installed `rg` is not
+required for this gate. `--prepare` builds that dependency without running
+tests; the full-test preparation phase invokes it before timing the suite.
+Direct `cargo test` and ordinary Linux use still need `rg` on PATH.
+
+The release developer-image gate exercises the installed binary and rebuilds
+the packaged source with Lorry. The portable workflow fixture uses a scripted
+provider to drive real file tools, a Rust
 compiler check, task branching and the bounded missing-check reminder.
 It also verifies saved approval details and the mechanical turn journal.
 The host and native workflow tests make no provider or Internet requests.
