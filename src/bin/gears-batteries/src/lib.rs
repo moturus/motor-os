@@ -25,6 +25,7 @@ pub mod snapshot;
 pub mod todo;
 pub mod tool;
 pub mod turns;
+pub mod workspace_memory;
 
 use std::io::Read;
 use std::path::PathBuf;
