@@ -324,7 +324,18 @@ fn rebase_path(manifest: &Manifest, root: &Path, path: &Path, what: &str) -> Res
             path.display()
         ))
     })?;
-    canonical_utf8(&root.join(relative), what)
+    // Cargo normalizes components without resolving a target's symbolic links.
+    let mut normalized = PathBuf::new();
+    for component in root.join(relative).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    path_utf8(&normalized, what)
 }
 
 fn canonical_utf8(path: &Path, what: &str) -> Result<String> {

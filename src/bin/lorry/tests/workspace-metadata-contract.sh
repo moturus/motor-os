@@ -160,6 +160,50 @@ path = "src/main.rs"
 EOF
 agrees_with_cargo "$WORK/renamed-binaries/Cargo.toml" renamed-and-shared-paths
 echo "PASS: explicit binary names and paths suppress inferred targets"
+package "$WORK/named-binaries"
+mkdir -p "$WORK/named-binaries/src/bin/group"
+printf 'fn main() {}\n' >"$WORK/named-binaries/src/bin/tool.rs"
+printf 'fn main() {}\n' >"$WORK/named-binaries/src/bin/group/main.rs"
+printf 'fn main() {}\n' >"$WORK/named-binaries/src/bin/.hidden.rs"
+cat >>"$WORK/named-binaries/Cargo.toml" <<'EOF'
+[[bin]]
+name = "tool"
+[[bin]]
+name = "group"
+EOF
+cp "$WORK/named-binaries/Cargo.toml" "$WORK/named-binaries.baseline"
+for automatic in true false; do
+    sed "/^\[package\]$/a autobins = $automatic" "$WORK/named-binaries.baseline" \
+        >"$WORK/named-binaries/Cargo.toml"
+    agrees_with_cargo "$WORK/named-binaries/Cargo.toml" "named-binaries-$automatic"
+done
+package "$WORK/legacy-binaries"
+printf 'fn main() {}\n' >"$WORK/legacy-binaries/src/main.rs"
+mkdir "$WORK/legacy-binaries/src/bin"
+printf 'compile_error!("edition 2015 must not infer this binary");\n' \
+    >"$WORK/legacy-binaries/src/bin/unused.rs"
+sed -i 's/edition = "2021"/edition = "2015"/' "$WORK/legacy-binaries/Cargo.toml"
+cat >>"$WORK/legacy-binaries/Cargo.toml" <<'EOF'
+[[bin]]
+name = "legacy-command"
+EOF
+agrees_with_cargo "$WORK/legacy-binaries/Cargo.toml" legacy-binaries
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" generate-lockfile --offline \
+    --manifest-path "$WORK/legacy-binaries/Cargo.toml"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    HOME="$WORK/home" RUSTC="$LORRY_TEST_RUSTC" "$builder" build --offline \
+        --manifest-path "$WORK/legacy-binaries/Cargo.toml"
+done
+sed -i '/^\[package\]$/a autobins = true' "$WORK/legacy-binaries/Cargo.toml"
+agrees_with_cargo "$WORK/legacy-binaries/Cargo.toml" legacy-opt-in
+package "$WORK/linked-targets"
+mkdir -p "$WORK/linked-targets/src/bin" "$WORK/linked-targets/examples"
+printf 'fn main() {}\n' >"$WORK/linked-targets/program.rs"
+ln -s ../../program.rs "$WORK/linked-targets/src/bin/linked.rs"
+ln -s ../program.rs "$WORK/linked-targets/examples/linked.rs"
+ln -s ../../program.rs "$WORK/linked-targets/src/bin/.hidden.rs"
+agrees_with_cargo "$WORK/linked-targets/Cargo.toml" linked-targets
+echo "PASS: named binary paths, legacy discovery, and symbolic target paths"
 source_files=("$PROJECT/Cargo.toml" "$PROJECT/app/Cargo.toml" "$PROJECT/shared/Cargo.toml"
     "$PROJECT/app/src/main.rs" "$PROJECT/shared/src/lib.rs" "$PROJECT/tools/helper/Cargo.toml")
 sha256sum "${source_files[@]}" >"$WORK/sources.before"

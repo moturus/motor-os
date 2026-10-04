@@ -564,8 +564,21 @@ impl Manifest {
         let links = optional_string(path, document, package, "package", "links")?;
         let build_script = parse_build_script(path, document, package, root)?;
         let library = parse_library(path, document, root, &name, mode)?;
+        let mut warnings = Vec::new();
         let binaries = if matches!(mode, ManifestMode::Root | ManifestMode::Source) {
-            parse_binaries(path, document, root, package, &name, mode)?
+            parse_binaries(
+                path,
+                document,
+                root,
+                package,
+                BinaryPackage {
+                    name: &name,
+                    edition,
+                    has_library: library.is_some(),
+                },
+                mode,
+                &mut warnings,
+            )?
         } else {
             Vec::new()
         };
@@ -574,7 +587,6 @@ impl Manifest {
         } else {
             Vec::new()
         };
-        let mut warnings = Vec::new();
         let mut described_targets = targets::parse(
             root,
             path,
@@ -1374,21 +1386,30 @@ fn parse_library(
     }))
 }
 
+struct BinaryPackage<'a> {
+    name: &'a str,
+    edition: Edition,
+    has_library: bool,
+}
+
 fn parse_binaries(
     path: &Path,
     document: &Document,
     root: &Path,
     package: &Table,
-    package_name: &str,
+    defaults: BinaryPackage<'_>,
     mode: ManifestMode,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<BinaryTarget>> {
+    let discovered = discover_binaries(root, defaults.name)?;
     let mut binaries = if package.get("autobins").and_then(Item::as_bool) == Some(false) {
         BTreeMap::new()
     } else {
-        discover_binaries(root, package_name)?
+        discovered.clone()
     };
     if let Some(item) = document.root().get("bin") {
         let mut explicit_names = BTreeSet::new();
+        let mut explicit_paths = BTreeSet::new();
         let mut explicit_targets = Vec::new();
         let tables = item.as_array_of_tables().ok_or_else(|| {
             type_error(
@@ -1426,14 +1447,42 @@ fn parse_binaries(
                 }
             }
             let name = optional_string(path, document, table, "bin", "name")?
-                .unwrap_or_else(|| package_name.to_owned());
+                .unwrap_or_else(|| defaults.name.to_owned());
             validate_package_name(path, document.line_of_table(table), &name)?;
-            let relative = optional_string(path, document, table, "bin", "path")?
-                .unwrap_or_else(|| "src/main.rs".to_owned());
-            validate_relative_path(path, document.line_of_table(table), "bin.path", &relative)?;
+            let source = match optional_string(path, document, table, "bin", "path")? {
+                Some(relative) => {
+                    validate_relative_path(
+                        path,
+                        document.line_of_table(table),
+                        "bin.path",
+                        &relative,
+                    )?;
+                    let source = root.join(relative);
+                    explicit_paths.insert(source.clone());
+                    source
+                }
+                None => match discovered.get(&name) {
+                    Some(target) => target.path.clone(),
+                    None => {
+                        let legacy = (defaults.edition == Edition::E2015)
+                            .then(|| legacy_binary_path(root, &name, defaults.has_library))
+                            .flatten()
+                            .ok_or_else(|| {
+                                Error::failure(format!(
+                                    "cannot infer source path for binary `{name}`; specify `bin.path`"
+                                ))
+                            })?;
+                        warnings.push(format!(
+                            "path `{}` was erroneously implicitly accepted for binary `{name}`,\nplease set bin.path in Cargo.toml",
+                            legacy.strip_prefix(root).unwrap().display()
+                        ));
+                        legacy
+                    }
+                },
+            };
             let target = BinaryTarget {
                 name,
-                path: root.join(relative),
+                path: source,
                 test: optional_bool(path, document, table, "bin", "test")?.unwrap_or(true),
                 doc: optional_bool(path, document, table, "bin", "doc")?.unwrap_or(true),
                 required_features: optional_string_array(
@@ -1457,13 +1506,17 @@ fn parse_binaries(
         }
         // Cargo suppresses inferred targets by either explicit name or path.
         // Keep explicit targets distinct even when they share a source file.
-        let explicit_paths: BTreeSet<_> = explicit_targets
-            .iter()
-            .map(|target| target.path.clone())
-            .collect();
         binaries.retain(|name, target| {
             !explicit_names.contains(name) && !explicit_paths.contains(&target.path)
         });
+        if defaults.edition == Edition::E2015 && package.get("autobins").is_none() {
+            if !binaries.is_empty() {
+                warnings.push(
+                    "An explicit [[bin]] section is specified in Cargo.toml which currently disables automatically inferring other binary targets in edition 2015; set `autobins` explicitly".to_owned(),
+                );
+            }
+            binaries.clear();
+        }
         binaries.extend(
             explicit_targets
                 .into_iter()
@@ -1476,6 +1529,16 @@ fn parse_binaries(
         )));
     }
     Ok(binaries.into_values().collect())
+}
+
+fn legacy_binary_path(root: &Path, name: &str, has_library: bool) -> Option<PathBuf> {
+    let named = root.join("src").join(format!("{name}.rs"));
+    if !has_library && named.is_file() {
+        return Some(named);
+    }
+    [root.join("src/main.rs"), root.join("src/bin/main.rs")]
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String, BinaryTarget>> {
@@ -1514,13 +1577,20 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
         })?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with('.'))
+        {
+            continue;
+        }
         let metadata = entry.file_type().map_err(|error| {
             Error::failure(format!(
                 "failed to inspect binary target `{}`: {error}",
                 entry.path().display()
             ))
         })?;
-        let (name, source) = if metadata.is_file()
+        let (name, source) = if !metadata.is_dir()
             && entry.path().extension().and_then(|value| value.to_str()) == Some("rs")
         {
             (

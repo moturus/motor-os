@@ -1356,6 +1356,22 @@ metadata/run contract passed in `/tmp/lorry-m5-renamed-bins-contract.log`.
 The new scan matches all 128 projections, recorded in
 `/tmp/lorry-m5-corpus-source-scan-fixed.log` and `/tmp/lorry-m5-corpus-fixed/`.
 
+Focused target probes retained in `/tmp/lorry-m5-binary-discovery-diagnosis/`
+also showed incorrect named-bin path inference, edition-2015 auto-discovery,
+and rejection of symlinked Rust binary files. The reader now follows Cargo's
+named inferred paths, legacy edition defaults and warnings, and non-dotfile
+discovery. Metadata normalizes source components without resolving links.
+The paired contract and strict Clippy passed in
+`/tmp/lorry-m5-target-discovery-{contract,clippy}.log`; the contract also
+builds an edition-2015 package whose uninferred binary cannot compile.
+
+The read-only build-capable audit is retained in
+`/tmp/lorry-m5-build-loader-scan-fixed.log`: 90 of 128 manifests load.
+The other 38 explicitly reject dependency/target features assigned to later
+milestones (32), multi-package selection (3), procedural-macro roots (2),
+or inert badges (1). Temporary audit instrumentation was removed. The
+badges rejection is corrected in the next focused patch.
+
 ### Configuration
 
 Cargo configuration comes from the invocation directory and its parents,

@@ -375,7 +375,12 @@ explicit `[[bin]]` targets, and honors `package.autobins = false`.
 Explicit binary names and source paths suppress matching inferred binaries;
 several explicit binaries may still share a source file. `[lib]` and
 `[[bin]]` accept the Cargo-defaulted `name`, `path`, and `test` fields needed
-by the supported packages. Lorry discovers top-level `tests/*.rs` integration
+by the supported packages. An explicit binary without a path uses the
+matching inferred file or directory target, even with `autobins = false`.
+Edition 2015 retains Cargo's explicit-table discovery default and warned
+legacy paths. Hidden binary files are not inferred. Source target paths are
+normalized without resolving symbolic links, as Cargo presents them.
+Lorry discovers top-level `tests/*.rs` integration
 crates automatically.
 `lib.doc-scrape-examples` accepts a boolean as inert documentation metadata;
 it does not change build, check, or test units.
