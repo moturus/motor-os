@@ -127,6 +127,13 @@ the conversation branch; it does not undo commands or filesystem changes.
 Only one process may write a saved session. A partial final record is ignored
 after a crash, while earlier corruption is reported.
 
+Gears also locks its user directory for the lifetime of the run. A second
+independent Gears is refused; nested runs share their checked ancestor's lock.
+Stale locks are replaced when their owner is gone or identified as another
+program. Motor OS exposes a short command name rather than an executable
+identity, so a live owner with a truncated or unreadable name keeps its lock
+until it exits.
+
 Library callers can use `session::read_snapshot(path)` or `Store::read(id)`
 while the owning process writes. The immutable snapshot includes the usable
 complete prefix, omits unfinished records and tool rounds, and leaves the

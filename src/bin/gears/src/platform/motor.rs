@@ -127,9 +127,10 @@ pub fn process_is_gears(pid: u32) -> bool {
     match process_info(u64::from(pid)) {
         Ok(Some(info)) => {
             info.active != 0
-                && std::path::Path::new(info.debug_name())
-                    .file_name()
-                    .is_some_and(|name| name == "gears")
+                && super::debug_name_may_be_gears(
+                    info.debug_name(),
+                    moto_sys::stats::ProcessInfoV1::MAX_DEBUG_NAME_BYTES,
+                )
         }
         Ok(None) => false,
         Err(()) => true, // Unknown identity must not break a live lock.

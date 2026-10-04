@@ -29,6 +29,48 @@ pub use motor::{
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(any(not(unix), test))]
+fn debug_name_may_be_gears(name: &str, limit: usize) -> bool {
+    // Native names contain the path plus unquoted arguments. A truncated or
+    // unreadable name cannot prove that a live lock belongs to another program.
+    if name.is_empty() || name.ends_with('…') || name.len() >= limit {
+        return true;
+    }
+    // Any space can end the executable path, including one containing spaces.
+    name.match_indices(' ')
+        .map(|(end, _)| end)
+        .chain(std::iter::once(name.len()))
+        .any(|end| {
+            std::path::Path::new(&name[..end])
+                .file_name()
+                .is_some_and(|file| file == "gears")
+        })
+}
+
+#[cfg(test)]
+#[test]
+fn native_command_names_preserve_gears_and_unknown_live_owners() {
+    for name in [
+        "gears",
+        "/devtools/bin/gears",
+        "/devtools/bin/gears --ui line",
+        "/user/my tools/gears -p hi",
+        "/user/long-executable-path/gea…",
+        "",
+        "/12345678901234567890123456789012",
+    ] {
+        assert!(debug_name_may_be_gears(name, 32), "{name}");
+    }
+    for name in [
+        "/system/bin/sysbox sleep 30",
+        "/system/bin/rush -c hi",
+        "/devtools/bin/gears-other",
+        "not-gears",
+    ] {
+        assert!(!debug_name_may_be_gears(name, 32), "{name}");
+    }
+}
+
 /// The one pending-interrupt flag (^C). Delivery only sets it — on the Unix
 /// host from a SIGINT handler and on Motor OS from an explicit Ctrl+C handler
 /// — and the REPL consumes it at safe points.
