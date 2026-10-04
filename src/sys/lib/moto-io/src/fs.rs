@@ -28,6 +28,7 @@ use moto_sys_io::api_fs;
 use async_fs::BLOCK_SIZE;
 pub use async_fs::{
     AccessPermissions, EntryId, EntryKind, Metadata, ROOT_ID, Role, RolePermissions,
+    perms_monotonic,
 };
 
 pub struct FsClient {

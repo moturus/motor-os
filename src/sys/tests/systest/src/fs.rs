@@ -358,7 +358,11 @@ pub fn move_noreplace_child(args: &[String]) {
 fn copy_test() {
     use moto_io::fs::{AccessPermissions, EntryKind, FsClient, Role, RolePermissions};
 
-    let root = temp_dir();
+    // A panic aborts systest without cleanup. Keep this fixture outside the
+    // shared test directory, where a sealed leftover would break other
+    // tests, and heal whatever an earlier run left before starting over.
+    let root = crate::temp_path("systest-copy");
+    let _ = crate::set_directory_access(&root.join("protected"), AccessPermissions::Rwx);
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
 
@@ -398,10 +402,24 @@ fn copy_test() {
 
     // Copying over an existing file must truncate/overwrite it: first write a
     // smaller file at the destination, then copy a larger one over it.
-    /*
     let small = b"small contents";
     std::fs::write(&dst, small).unwrap();
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), small.len() as u64);
+    moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        let (destination, EntryKind::File) = client.stat(dst.to_str().unwrap()).await.unwrap()
+        else {
+            panic!("copy destination is not a file")
+        };
+        client
+            .set_permissions(destination, AccessPermissions::Rx)
+            .await
+            .unwrap();
+        client
+            .set_permissions(destination, AccessPermissions::Rwx)
+            .await
+            .unwrap();
+    });
 
     let copied = std::fs::copy(&src, &dst).unwrap();
     assert_eq!(copied, LEN as u64);
@@ -411,7 +429,20 @@ fn copy_test() {
         moto_rt::fnv1a_hash_64(bytes.as_slice()),
         moto_rt::fnv1a_hash_64(dst_bytes.as_slice())
     );
-    */
+    // Under a writable parent the destination takes the source's mode: the
+    // executable became a plain `Rw` file like `src`.
+    moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        let (destination, _) = client.stat(dst.to_str().unwrap()).await.unwrap();
+        let permissions = client
+            .metadata(destination)
+            .await
+            .unwrap()
+            .permissions()
+            .unwrap();
+        assert_eq!(AccessPermissions::Rw, permissions.interactive);
+        assert_eq!(AccessPermissions::R, permissions.none);
+    });
 
     // Copying a non-existent source must fail with NotFound.
     let missing = root.join("does_not_exist");
@@ -427,6 +458,78 @@ fn copy_test() {
     let copied = std::fs::copy(&empty_src, &empty_dst).unwrap();
     assert_eq!(copied, 0);
     assert_eq!(std::fs::metadata(&empty_dst).unwrap().len(), 0);
+
+    // A writable file under a protected parent can still be copied over; its
+    // installed mode remains intact because chmod is forbidden there.
+    let protected = root.join("protected");
+    std::fs::create_dir(&protected).unwrap();
+    let protected_dst = protected.join("existing");
+    std::fs::write(&protected_dst, b"before copy").unwrap();
+    crate::set_directory_access(&protected, AccessPermissions::Rx).unwrap();
+    let before_mode = std::fs::metadata(&protected_dst).unwrap().permissions();
+    assert_eq!(LEN as u64, std::fs::copy(&src, &protected_dst).unwrap());
+    assert_eq!(
+        std::fs::read(&protected_dst).unwrap().as_slice(),
+        bytes.as_slice()
+    );
+    assert_eq!(
+        before_mode,
+        std::fs::metadata(&protected_dst).unwrap().permissions()
+    );
+    std::fs::write(&protected_dst, b"ordinary write").unwrap();
+    assert_eq!(
+        b"ordinary write",
+        std::fs::read(&protected_dst).unwrap().as_slice()
+    );
+    let private = root.join("private");
+    std::fs::write(&private, b"private contents").unwrap();
+    moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        let (id, _) = client.stat(private.to_str().unwrap()).await.unwrap();
+        client
+            .set_all_permissions(
+                id,
+                RolePermissions::new(
+                    AccessPermissions::Rwx,
+                    AccessPermissions::Rw,
+                    AccessPermissions::None,
+                ),
+            )
+            .await
+            .unwrap();
+    });
+    let before = std::fs::metadata(&protected_dst).unwrap();
+    assert_eq!(
+        std::io::ErrorKind::PermissionDenied,
+        std::fs::copy(&private, &protected_dst).unwrap_err().kind()
+    );
+    assert_eq!(
+        b"ordinary write",
+        std::fs::read(&protected_dst).unwrap().as_slice()
+    );
+    let after = std::fs::metadata(&protected_dst).unwrap();
+    assert_eq!(before.permissions(), after.permissions());
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+
+    crate::set_directory_access(&protected, AccessPermissions::Rwx).unwrap();
+    assert_eq!(16, std::fs::copy(&private, &protected_dst).unwrap());
+    moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        let (id, _) = client.stat(protected_dst.to_str().unwrap()).await.unwrap();
+        assert_eq!(
+            AccessPermissions::None,
+            client
+                .metadata(id)
+                .await
+                .unwrap()
+                .access(Role::None)
+                .unwrap()
+        );
+    });
+    // A protected destination that is already private remains usable.
+    crate::set_directory_access(&protected, AccessPermissions::Rx).unwrap();
+    assert_eq!(16, std::fs::copy(&private, &protected_dst).unwrap());
+    crate::set_directory_access(&protected, AccessPermissions::Rwx).unwrap();
 
     let expected = [
         (
@@ -528,6 +631,92 @@ fn copy_test() {
     assert!(!std::fs::exists(&root).unwrap());
 
     println!("    ---- FS: copy_test PASS");
+}
+
+/// A copy whose finished mode a higher role's byte cannot hold is refused
+/// before the destination changes, not after its contents were replaced.
+fn copy_ceiling_test() {
+    use moto_io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
+
+    let root = crate::temp_path("systest-copy-ceiling");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("executable");
+    let destination = root.join("plain");
+    let script = b"#!/system/bin/rush\nexit 0\n";
+    std::fs::write(&source, script).unwrap();
+    std::fs::write(&destination, b"before copy").unwrap();
+    moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        let (source_id, EntryKind::File) = client.stat(source.to_str().unwrap()).await.unwrap()
+        else {
+            panic!("copy source is not a file")
+        };
+        let executable = RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rx,
+            AccessPermissions::Rx,
+        );
+        client
+            .set_all_permissions(source_id, executable)
+            .await
+            .unwrap();
+        let (destination_id, EntryKind::File) =
+            client.stat(destination.to_str().unwrap()).await.unwrap()
+        else {
+            panic!("copy destination is not a file")
+        };
+        let plain = RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rw,
+            AccessPermissions::Rw,
+        );
+        client
+            .set_all_permissions(destination_id, plain)
+            .await
+            .unwrap();
+    });
+
+    // A None copy would make the None byte `Rx`, which Interactive's `Rw`
+    // cannot hold.
+    let before = std::fs::metadata(&destination).unwrap();
+    let output = std::process::Command::new("/system/bin/sysbox")
+        .args([
+            "cp",
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+        ])
+        .env(
+            moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+            format!("0x{:x}", crate::IO_CAPS),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "ceiling copy succeeded: {output:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("NotAllowed"),
+        "ceiling copy: {output:?}"
+    );
+    assert_eq!(
+        b"before copy",
+        std::fs::read(&destination).unwrap().as_slice()
+    );
+    let after = std::fs::metadata(&destination).unwrap();
+    assert_eq!(before.permissions(), after.permissions());
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+
+    // Interactive's `Rx` fits under System's `Rwx`: the same copy succeeds.
+    assert_eq!(
+        script.len() as u64,
+        std::fs::copy(&source, &destination).unwrap()
+    );
+    assert_eq!(script, std::fs::read(&destination).unwrap().as_slice());
+
+    std::fs::remove_dir_all(&root).unwrap();
+    println!("    ---- FS: copy_ceiling_test PASS");
 }
 
 fn directory_data_requests_test() {
@@ -1396,6 +1585,7 @@ pub fn run_tests() {
     smoke_test();
     hot_cache_read_test();
     copy_test();
+    copy_ceiling_test();
     directory_data_requests_test();
     readdir_error_exhausts_stream_test();
     remove_dir_all_test();
