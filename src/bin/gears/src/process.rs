@@ -276,6 +276,12 @@ pub fn run(
         });
     }
     let (stdout_text, stdout_dropped) = stdout.finish();
+    if was_cancelled || timed_out {
+        crate::platform::finish_interrupted_run().map_err(|error| RunError {
+            detail: format!("cannot end the interrupted owned run: {error}"),
+            started: true,
+        })?;
+    }
     let (stderr_text, stderr_dropped) = stderr.finish();
     let status_text = if was_cancelled {
         crate::platform::cancellation_text(cleanup_complete).to_string()

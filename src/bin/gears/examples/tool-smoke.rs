@@ -8,14 +8,32 @@ use gears::process::{Cancellation, Output};
 use gears::tools::{ExecutionContext, Registry};
 use serde_json::{Value, json};
 
+#[path = "tool-smoke/owned_work.rs"]
+mod owned_work;
+
 #[cfg(not(test))]
 fn main() -> Result<(), String> {
     let directory = std::env::args_os()
         .nth(1)
         .map(std::path::PathBuf::from)
-        .ok_or("usage: tool-smoke GEARS_DIRECTORY")?;
+        .ok_or("usage: tool-smoke GEARS_DIRECTORY [GEARS_EXECUTABLE]")?;
     let config = Config::load_user(Some(&directory.join("gears.toml")))?;
     smoke(&directory, &config)?;
+    #[cfg(unix)]
+    let gears = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("gears");
+    #[cfg(not(unix))]
+    let gears = std::path::PathBuf::from("/devtools/bin/gears");
+    let gears = std::env::args_os()
+        .nth(2)
+        .map(std::path::PathBuf::from)
+        .unwrap_or(gears);
+    owned_work::smoke(&gears, &directory.join("tools/sh"))?;
     println!("gears shipped tools ALL PASS");
     Ok(())
 }
@@ -224,4 +242,13 @@ fn shipped_tools_follow_their_manifests() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
     let config = Config::load_user(Some(&directory.join("config/gears.toml"))).unwrap();
     smoke(directory, &config).unwrap();
+}
+
+#[test]
+fn nested_work_stops_on_cancellation_and_nested_timeouts() {
+    owned_work::smoke(
+        Path::new(env!("CARGO_BIN_EXE_gears")),
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+    )
+    .unwrap();
 }

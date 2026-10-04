@@ -118,6 +118,11 @@ pub fn cleanup_after_exit(child: &std::process::Child) -> bool {
     }
 }
 
+pub fn finish_interrupted_run() -> io::Result<()> {
+    // A nested interruption already killed this process with its owned group.
+    Ok(())
+}
+
 pub fn kill_tree(child: &std::process::Child) -> bool {
     let group = match inherited_group() {
         Ok(Some(group)) => group,
