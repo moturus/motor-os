@@ -13,8 +13,8 @@ use crate::identity::{
 };
 use crate::manifest::{Lto as ManifestLto, Manifest, ReleaseProfile, Strip as ManifestStrip};
 use crate::resolver::{
-    CompileKind, FeatureContext, PackageKey, PackageSourceKey, Resolution, ResolvedPackage,
-    selected_root_features,
+    CompileKind, FeatureContext, PackageKey, PackageSourceKey, Resolution, ResolvedEdge,
+    ResolvedPackage, selected_root_features,
 };
 use crate::source_tree::Exclusions;
 use crate::sparse::DependencyKind;
@@ -496,7 +496,11 @@ pub fn dependency_units(
                         &parent,
                         child,
                         UnitEdgeKind::RustDependency,
-                        Some(edge.alias.clone()),
+                        Some(dependency_alias(
+                            edge,
+                            manifest,
+                            &manifests[&dependency.key],
+                        )),
                     )?;
                 }
                 DependencyKind::Build => {
@@ -531,7 +535,11 @@ pub fn dependency_units(
                             &compile,
                             child.clone(),
                             UnitEdgeKind::RustDependency,
-                            Some(edge.alias.clone()),
+                            Some(dependency_alias(
+                                edge,
+                                manifest,
+                                &manifests[&dependency.key],
+                            )),
                         )?;
                     }
                 }
@@ -564,7 +572,7 @@ pub fn add_selected_library(
         ));
     }
     insert_unit(&mut graph.units, key.clone());
-    add_selected_normal_edges(graph, resolution, manifests, &key, false)?;
+    add_selected_normal_edges(graph, resolution, manifests, manifest, &key, false)?;
     graph.order = topological_order(&graph.units)?;
     Ok(key)
 }
@@ -612,7 +620,7 @@ pub fn add_selected_binaries(
         key.kind = UnitKind::Binary;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, &key, false)?;
+        add_selected_normal_edges(graph, resolution, manifests, manifest, &key, false)?;
         if let Some(library) = &library {
             add_edge(
                 &mut graph.units,
@@ -646,7 +654,7 @@ pub fn add_selected_harnesses(
         key.mode = UnitMode::Test;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, &key, false)?;
+        add_selected_normal_edges(graph, resolution, manifests, manifest, &key, false)?;
         harnesses.push(key);
     }
     for target in manifest.binaries.iter().filter(|target| target.test) {
@@ -655,7 +663,7 @@ pub fn add_selected_harnesses(
         key.mode = UnitMode::Test;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, &key, false)?;
+        add_selected_normal_edges(graph, resolution, manifests, manifest, &key, false)?;
         if let Some(library) = &library {
             add_edge(
                 &mut graph.units,
@@ -698,7 +706,7 @@ pub fn add_selected_integration_harnesses(
         key.mode = UnitMode::Test;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, &key, panic_abort)?;
+        add_selected_normal_edges(graph, resolution, manifests, manifest, &key, panic_abort)?;
         if let Some(library) = &library {
             add_edge(
                 &mut graph.units,
@@ -732,6 +740,7 @@ fn add_selected_normal_edges(
     graph: &mut UnitGraph,
     resolution: &Resolution,
     manifests: &BTreeMap<PackageKey, Manifest>,
+    manifest: &Manifest,
     parent: &UnitKey,
     panic_abort: bool,
 ) -> Result<()> {
@@ -769,10 +778,29 @@ fn add_selected_normal_edges(
             parent,
             child,
             UnitEdgeKind::RustDependency,
-            Some(edge.alias.clone()),
+            Some(dependency_alias(edge, manifest, child_manifest)),
         )?;
     }
     Ok(())
+}
+
+fn dependency_alias(edge: &ResolvedEdge, parent: &Manifest, child: &Manifest) -> String {
+    let renamed = edge.alias != edge.package.name
+        || parent.dependencies.iter().any(|dependency| {
+            dependency.alias == edge.alias
+                && dependency.package == edge.package.name
+                && dependency.kind == edge.kind
+                && dependency.target == edge.target
+                && dependency.renamed
+        });
+    if renamed {
+        edge.alias.clone()
+    } else {
+        child
+            .library
+            .as_ref()
+            .map_or_else(|| edge.alias.clone(), |library| library.name.clone())
+    }
 }
 
 fn library_unit_kind(manifest: &Manifest) -> UnitKind {
@@ -1401,6 +1429,112 @@ mod tests {
             release: "1.98.0-nightly".to_owned(),
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
+        }
+    }
+
+    #[test]
+    fn custom_library_dependency_names_match_cargo() {
+        let fixture = Fixture::new();
+        fixture.package(
+            "shared",
+            "[package]\nname = \"shared\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\
+             [lib]\nname = \"shared_crate\"\n",
+            false,
+        );
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        for (declaration, expected) in [
+            ("shared = { path = \"shared\" }", "shared_crate"),
+            (
+                "renamed = { package = \"shared\", path = \"shared\" }",
+                "renamed",
+            ),
+            (
+                "shared = { package = \"shared\", path = \"shared\" }",
+                "shared",
+            ),
+        ] {
+            fs::write(
+                fixture.0.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"root\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\
+                         [dependencies]\n{declaration}\n"
+                ),
+            )
+            .unwrap();
+            let cargo = Command::new(env!("CARGO"))
+                .current_dir(&fixture.0)
+                .env(
+                    "RUSTC",
+                    Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+                )
+                .args([
+                    "-Z",
+                    "unstable-options",
+                    "build",
+                    "--unit-graph",
+                    "--offline",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                cargo.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+            let cargo: Value = serde_json::from_slice(&cargo.stdout).unwrap();
+            let root_index = cargo["roots"][0].as_u64().unwrap() as usize;
+            let cargo_alias = cargo["units"][root_index]["dependencies"][0]["extern_crate_name"]
+                .as_str()
+                .unwrap();
+            assert_eq!(cargo_alias, expected);
+            let root = Manifest::load(&fixture.0).unwrap();
+            let resolution = resolve_selected(
+                &root,
+                &Catalog::default(),
+                &Options {
+                    resolver: root.resolver,
+                    incompatible_rust_versions: None,
+                    rust_versions: vec![Version::parse("1.99.0").unwrap()],
+                    package_limit: crate::policy::PackageLimit::with_max(16),
+                    max_depth: 8,
+                },
+                &[],
+                TargetSelection {
+                    target_triple: "x86_64-unknown-linux-gnu",
+                    target_cfg: &cfg,
+                    host_triple: "x86_64-unknown-linux-gnu",
+                    host_cfg: &cfg,
+                },
+            )
+            .unwrap();
+            let manifests = resolution
+                .packages
+                .iter()
+                .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+                .collect::<BTreeMap<_, _>>();
+            let mut graph = dependency_units(&resolution, &manifests).unwrap();
+            let library = add_selected_library(&mut graph, &resolution, &manifests, &root).unwrap();
+            let edge = graph.units[&library].dependencies.iter().next().unwrap();
+            assert_eq!(edge.alias.as_deref(), Some(cargo_alias), "{declaration}");
+            // The same crate name is needed when this root is a dependency.
+            let mut resolved_root = resolution.packages[0].clone();
+            resolved_root.key = library.package.clone();
+            resolved_root.local_manifest = Some(root.clone());
+            resolved_root.edges = resolution.root_edges.clone();
+            for edge in &mut resolved_root.edges {
+                edge.parent_compile_kind = Some(CompileKind::Target);
+            }
+            let mut complete = resolution.clone();
+            complete.packages.push(resolved_root);
+            let mut manifests = manifests.clone();
+            manifests.insert(library.package.clone(), root);
+            let graph = dependency_units(&complete, &manifests).unwrap();
+            let edge = graph.units[&library].dependencies.iter().next().unwrap();
+            assert_eq!(
+                edge.alias.as_deref(),
+                Some(cargo_alias),
+                "dependency {declaration}"
+            );
         }
     }
 

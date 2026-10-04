@@ -166,9 +166,9 @@ mod tests {
             fs::create_dir_all(root.join(name).join("src")).unwrap();
             fs::write(root.join(name).join("src/lib.rs"), "pub fn package() {}\n").unwrap();
             let declarations = if name == "app" {
-                "[dependencies]\nshared = { path = \"../shared\" }\n\
-                 [dev-dependencies]\nshared = { path = \"../shared\", features = [\"dev\"] }\n\
-                 [target.'cfg(all( target_os=\"windows\",))'.dependencies]\nshared = { path = \"../shared\", features = [\"windows\"] }\n\
+                "[dependencies]\nshared = { package = \"shared\", path = \"../shared\" }\n\
+                 [dev-dependencies]\nshared = { package = \"shared\", path = \"../shared\", features = [\"dev\"] }\n\
+                 [target.'cfg(all( target_os=\"windows\",))'.dependencies]\nshared = { package = \"shared\", path = \"../shared\", features = [\"windows\"] }\n\
                  windows-only = { path = \"../windows-only\" }\n\
                  [[bin]]\nname = \"app\"\nrequired-features = []\n"
             } else {

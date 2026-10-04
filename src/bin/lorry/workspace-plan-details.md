@@ -2170,6 +2170,19 @@ none. Four focused compiler tests and strict Clippy pass in
 `/tmp/lorry-m7-primary-selection-{unit-fixed,clippy}.log`. M6's depth-policy
 question remains pending and its milestone gate has not passed.
 
+The next foundation fixes effective dependency crate names in ordinary library,
+build-script compiler, and selected-target edges. The original Cargo unit-graph
+oracle fails with Lorry passing `shared` where Cargo passes the library name
+`shared_crate` (`/tmp/lorry-m7-library-alias-original.log`). Plain dependencies,
+renamed dependencies, and an explicit `package` key equal to the alias now match
+Cargo for selected and dependency library units. Manifest loading retains that
+explicit alias, and metadata reports it correctly too. The paired workspace
+metadata oracle includes equal-name explicit aliases across normal, development,
+and target dependencies. Nine unit-planner tests, twelve metadata tests, and
+strict Clippy pass in `/tmp/lorry-m7-library-alias-{units-final,metadata,clippy}.log`.
+Raw renamed aliases remain in graph edges; compiler rendering retains its
+existing hyphen normalization.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 

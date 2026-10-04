@@ -96,7 +96,7 @@ fn map_node(
                 manifest.name, edge.package.name, edge.package.version
             ))
         })?;
-        let name = if dependency.alias == dependency.package {
+        let name = if !dependency.renamed {
             crate_names
                 .get(&edge.package)
                 .cloned()

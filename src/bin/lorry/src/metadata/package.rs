@@ -273,7 +273,7 @@ fn map_dependency(
             .as_deref()
             .map(crate::toolchain::canonical_selector)
             .transpose()?,
-        rename: (dependency.alias != dependency.package).then(|| dependency.alias.clone()),
+        rename: dependency.renamed.then(|| dependency.alias.clone()),
         registry: None,
         path,
     })

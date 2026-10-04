@@ -199,6 +199,8 @@ pub struct IntegrationTestTarget {
 pub struct Dependency {
     pub alias: String,
     pub package: String,
+    /// An explicit package key supplies a Cargo alias even if the names agree.
+    pub renamed: bool,
     pub requirement: VersionReq,
     pub version_specified: bool,
     pub git_path_source: Option<String>,
@@ -1944,6 +1946,7 @@ fn parse_dependency(
         return Ok(Dependency {
             alias: alias.to_owned(),
             package: alias.to_owned(),
+            renamed: false,
             requirement: parse_requirement(path, document.line_of_item(item), alias, requirement)?,
             version_specified: true,
             git_path_source: None,
@@ -2123,6 +2126,7 @@ fn parse_dependency(
     Ok(Dependency {
         alias: alias.to_owned(),
         package,
+        renamed: lookup.get("package").is_some(),
         requirement,
         version_specified: lookup.get("version").is_some(),
         git_path_source: None,
