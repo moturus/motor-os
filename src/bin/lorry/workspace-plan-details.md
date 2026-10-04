@@ -1609,6 +1609,16 @@ tests passed in `/tmp/lorry-m6-root-declarations-unit-fixed.log`. An initial
 new assertion indexed the snapshot fixture's empty dependency list; the
 fixture now supplies the declaration whose independence it checks.
 
+The multi-root API now seeds every member into one solver, with all member
+features, optional dependencies, development edges, and platform edges.
+Members remain ordinary packages, including path patches, and all are
+excluded from the outside-package cap. A final cycle check omits development
+edges but rejects ordinary cycles that independently seeded roots can hide
+from event ancestry. Command integration follows in separate patches.
+Twenty-nine resolver tests passed in `/tmp/lorry-m6-multi-root-unit.log`;
+strict Clippy passed in `/tmp/lorry-m6-multi-root-clippy-fixed.log` after
+correcting the new API's unused import.
+
 **Result.** A workspace has one Cargo-compatible lock and one admission
 record. Exact metadata is available offline after explicit acquisition.
 Reviewing an existing lock need not update it.

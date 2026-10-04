@@ -47,6 +47,11 @@ impl PackageLimit {
         !matches!(&key.source, PackageSourceKey::Path(path) if self.members.contains(path))
     }
 
+    pub(crate) fn with_members(mut self, members: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.members = members.into_iter().collect();
+        self
+    }
+
     pub fn check(&self, resolution: &Resolution) -> Result<()> {
         let counted = resolution
             .packages

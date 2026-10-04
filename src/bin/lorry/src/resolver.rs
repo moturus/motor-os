@@ -20,6 +20,10 @@ use crate::source_tree::{DEFAULT_LIMITS as DEFAULT_TREE_LIMITS, Exclusions, Tree
 use crate::sparse::{Dependency, DependencyKind, Record, RustVersion};
 use crate::toolchain::CfgSet;
 
+pub(crate) mod workspace;
+#[cfg(test)]
+use workspace::resolve_complete_workspace;
+
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
     records: BTreeMap<String, Vec<Candidate>>,
@@ -921,6 +925,17 @@ fn resolve_with_scope(
             ancestors: BTreeSet::new(),
         });
     }
+    solve_request(queue, catalog, options, locked, scope, loader)
+}
+
+fn solve_request(
+    queue: VecDeque<Event>,
+    catalog: &mut Catalog,
+    options: &Options,
+    locked: &[LockedPreference],
+    scope: Scope<'_>,
+    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
+) -> Result<Resolution> {
     let state = solve(
         State::default(),
         queue,
@@ -943,6 +958,7 @@ fn resolve_with_scope(
 #[derive(Clone, Copy)]
 enum Scope<'a> {
     Complete,
+    WorkspaceComplete,
     Selected(TargetSelection<'a>),
 }
 
@@ -1729,7 +1745,12 @@ fn activate(
     }
 
     for (index, dependency) in record.dependencies.iter().enumerate() {
-        if dependency.kind == DependencyKind::Dev
+        let include_dev = matches!(scope, Scope::WorkspaceComplete)
+            && record
+                .local_manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.editable);
+        if (dependency.kind == DependencyKind::Dev && !include_dev)
             || (dependency.optional && !activation.enabled_optional.contains(&dependency.alias))
         {
             continue;
@@ -1742,17 +1763,15 @@ fn activate(
         }
         let child_compile_kind = match dependency.kind {
             DependencyKind::Build => CompileKind::Host,
-            DependencyKind::Normal => event.compile_kind,
-            DependencyKind::Dev => unreachable!(),
+            DependencyKind::Normal | DependencyKind::Dev => event.compile_kind,
         };
         let child_context = match options.resolver {
             ResolverVersion::V1 => FeatureContext::Unified,
             ResolverVersion::V2 | ResolverVersion::V3 => match dependency.kind {
                 DependencyKind::Build => FeatureContext::Host,
-                DependencyKind::Normal => {
+                DependencyKind::Normal | DependencyKind::Dev => {
                     child_target_context(scope, event.context.clone(), dependency.target.as_deref())
                 }
-                DependencyKind::Dev => unreachable!(),
             },
         };
         let mut features = dependency.features.iter().cloned().collect::<BTreeSet<_>>();
@@ -1770,8 +1789,14 @@ fn activate(
         activation.sent.insert(sent_key, sent.clone());
         let mut dependency = dependency.clone();
         dependency.dependency.features = sent.features.into_iter().collect();
-        let mut ancestors = event.ancestors.clone();
-        ancestors.insert(key.clone());
+        // Cargo's package-cycle prohibition excludes development edges.
+        let ancestors = if dependency.kind == DependencyKind::Dev {
+            BTreeSet::new()
+        } else {
+            let mut ancestors = event.ancestors.clone();
+            ancestors.insert(key.clone());
+            ancestors
+        };
         queue.push_back(Event {
             parent: Some(key.clone()),
             parent_compile_kind: Some(event.compile_kind),
@@ -1959,7 +1984,9 @@ fn root_context(
     dependency: &CandidateDependency,
 ) -> FeatureContext {
     let context = match scope {
-        Scope::Complete => FeatureContext::Target(dependency.target.clone().unwrap_or_default()),
+        Scope::Complete | Scope::WorkspaceComplete => {
+            FeatureContext::Target(dependency.target.clone().unwrap_or_default())
+        }
         Scope::Selected(_) => FeatureContext::Target(String::new()),
     };
     normalize_context(resolver, context)
@@ -1971,7 +1998,7 @@ fn child_target_context(
     selector: Option<&str>,
 ) -> FeatureContext {
     match scope {
-        Scope::Complete => target_dependency_context(parent, selector),
+        Scope::Complete | Scope::WorkspaceComplete => target_dependency_context(parent, selector),
         Scope::Selected(_) => parent,
     }
 }
@@ -2156,6 +2183,108 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn complete_workspace_resolves_unselected_constraints_and_optional_members_once() {
+        let fixture = LocalFixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fixture.package("a", "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nshared = \"1\"\noptional = { version = \"1\", optional = true }\n[features]\nextra = [\"dep:optional\"]\n");
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nshared = \"=1.0.0\"\n");
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let mut catalog = Catalog::default();
+        for (name, version) in [
+            ("shared", "1.0.0"),
+            ("shared", "1.1.0"),
+            ("optional", "1.0.0"),
+        ] {
+            catalog
+                .insert(record(name, version, "[]", "{}", ""))
+                .unwrap();
+        }
+        let mut limits = options(ResolverVersion::V2);
+        limits.package_limit = PackageLimit::with_max(2);
+        let complete =
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(complete.root_edges.len(), 2);
+        assert_eq!(complete.packages.len(), 4);
+        let shared = complete
+            .packages
+            .iter()
+            .filter(|package| package.key.name == "shared")
+            .collect::<Vec<_>>();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].key.version, Version::parse("1.0.0").unwrap());
+        let a = complete
+            .packages
+            .iter()
+            .find(|package| package.key.name == "a")
+            .unwrap();
+        assert!(a.target_features.contains("extra"));
+        assert!(a.edges.iter().any(|edge| edge.package.name == "optional"));
+        limits.package_limit = PackageLimit::with_max(1);
+        assert!(
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| Ok(
+                ()
+            ))
+            .unwrap_err()
+            .to_string()
+            .contains("limit of 1")
+        );
+    }
+
+    #[test]
+    fn complete_workspace_includes_development_edges_but_rejects_normal_cycles() {
+        let fixture = LocalFixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        let a = "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dev-dependencies]\nb = { path = \"../b\" }\n";
+        fixture.package("a", a);
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\na = { path = \"../a\" }\n");
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let limits = options(ResolverVersion::V2);
+        let complete = resolve_complete_workspace(
+            &workspace,
+            &mut Catalog::default(),
+            &limits,
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let a_node = complete
+            .packages
+            .iter()
+            .find(|package| package.key.name == "a")
+            .unwrap();
+        assert_eq!(a_node.edges[0].kind, DependencyKind::Dev);
+        fs::write(
+            fixture.0.join("a/Cargo.toml"),
+            a.replace("dev-dependencies", "dependencies"),
+        )
+        .unwrap();
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        assert!(
+            resolve_complete_workspace(
+                &workspace,
+                &mut Catalog::default(),
+                &limits,
+                &[],
+                &mut |_, _, _| Ok(())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("dependency cycle")
+        );
     }
 
     fn checksum(version: &str) -> String {
