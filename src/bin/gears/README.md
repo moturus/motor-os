@@ -154,6 +154,12 @@ the conversation branch; it does not undo commands or filesystem changes.
 Only one process may write a saved session. A partial final record is ignored
 after a crash, while earlier corruption is reported.
 
+Interactive UIs display the saved active branch when a session is opened or
+selected, including messages from before compaction. The full-screen UI
+keeps the latest 1 MiB of display text; Page Up and Page Down scroll it.
+Displaying history does not rerun tools or request a model response.
+One-shot text and JSONL output contain only the new run's output.
+
 Gears also locks its user directory for the lifetime of the run. A second
 independent Gears is refused; nested runs share their checked ancestor's lock.
 Stale locks are replaced when their owner is gone or identified as another

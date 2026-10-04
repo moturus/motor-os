@@ -153,6 +153,20 @@ only three missing-check reminders. No provider or Internet request is made.
   passes (`/tmp/gears-tool-inventory-prompt-host-gate.log`), as does the native
   release build (`/tmp/gears-tool-inventory-prompt-motor-build.log`). This is
   prompt hardening; the reported real-model response has not been retested.
+- The user's resume trial found a blank screen. Sessions restored model
+  context, but neither interactive UI displayed saved messages; the TUI also
+  kept stale transcript text when changing sessions or branches. Saved
+  active-branch history now loads on interactive startup and session/branch
+  selection, preserving older visible messages across compaction. Displaying
+  it neither runs tools nor changes model context. Full-screen history keeps
+  the existing 1 MiB limit, including the end of an oversized reply; one-shot
+  output does not replay history. The original regressions are preserved in
+  `/tmp/gears-resume-blank-original.log` and
+  `/tmp/gears-resume-line-valid-original.log`. The complete Gears host gate
+  passes (`/tmp/gears-resume-validated-host-gate.log`), as do host/Motor Clippy
+  with warnings denied, formatting and the native release build. New screen
+  and real-binary CLI regressions run transitively in `full-test.sh` through
+  the Gears gate. A visual retry on the user's updated VM remains pending.
 
 ## Validation boundaries
 

@@ -22,6 +22,9 @@ pub fn run(
         hint: runtime.hint().map(str::to_string),
         ..Renderer::default()
     };
+    if interactive {
+        show_history(runtime)?;
+    }
     for notice in runtime.take_startup_notices() {
         renderer.event(Event::Notice(notice))?;
     }
@@ -154,6 +157,7 @@ fn command(
         }
         "new" => {
             runtime.new_session(argument == "--ephemeral", None)?;
+            show_history(runtime)?;
             show_runtime_notices(runtime, renderer)?;
             show_session(runtime);
             Ok(Command::Continue)
@@ -165,6 +169,7 @@ fn command(
                 argument.to_string()
             };
             runtime.resume(&selector)?;
+            show_history(runtime)?;
             show_runtime_notices(runtime, renderer)?;
             show_session(runtime);
             Ok(Command::Continue)
@@ -186,7 +191,9 @@ fn command(
                 argument.to_string()
             };
             eprintln!("note: changing the conversation branch does not undo shell side effects");
-            match runtime.select_entry(&id)? {
+            let draft = runtime.select_entry(&id)?;
+            show_history(runtime)?;
+            match draft {
                 Some(draft) => Ok(Command::Draft(draft)),
                 None => Ok(Command::Continue),
             }
@@ -199,6 +206,7 @@ fn command(
             };
             eprintln!("note: forking the conversation does not undo shell side effects");
             let draft = runtime.fork_at(&id)?;
+            show_history(runtime)?;
             show_runtime_notices(runtime, renderer)?;
             show_session(runtime);
             Ok(Command::Draft(draft))
@@ -206,6 +214,7 @@ fn command(
         "clone" => {
             eprintln!("note: cloning the conversation does not undo shell side effects");
             runtime.clone_session()?;
+            show_history(runtime)?;
             show_runtime_notices(runtime, renderer)?;
             show_session(runtime);
             Ok(Command::Continue)
@@ -273,6 +282,37 @@ fn show_runtime_notices(runtime: &mut Runtime, renderer: &mut Renderer) -> Resul
     }
     renderer.hint = runtime.hint().map(str::to_string);
     Ok(())
+}
+
+fn show_history(runtime: &Runtime) -> Result<(), String> {
+    use super::history::Kind;
+
+    let mut output = io::stdout().lock();
+    super::history::replay(runtime.session(), |kind, text| {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let label = match kind {
+            Kind::User => "you",
+            Kind::Assistant => "agent",
+            Kind::Reasoning => "think",
+            Kind::Tool | Kind::ToolOutput => "tool",
+            Kind::Notice => "gears",
+            Kind::Error => "error",
+        };
+        let text: String = text
+            .chars()
+            .map(|character| {
+                if character.is_control() && !matches!(character, '\n' | '\t') {
+                    '�'
+                } else {
+                    character
+                }
+            })
+            .collect();
+        writeln!(output, "{label}> {text}").map_err(|error| error.to_string())
+    })?;
+    output.flush().map_err(|error| error.to_string())
 }
 
 fn show_session(runtime: &Runtime) {

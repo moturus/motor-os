@@ -32,7 +32,7 @@ pub fn run(
 ) -> Result<(), String> {
     runtime.set_interactive(interactive)?;
     let mut screen = Screen::enter()?;
-    let mut app = App::new(runtime)?;
+    let mut app = App::new(runtime, interactive)?;
     let result = (|| {
         for notice in runtime.take_startup_notices() {
             app.apply(Event::Notice(notice));
@@ -224,7 +224,7 @@ fn screen_layout(height: usize, editor_rows: usize, approval: bool) -> Layout {
 }
 
 impl App {
-    fn new(runtime: &Runtime) -> Result<Self, String> {
+    fn new(runtime: &Runtime, interactive: bool) -> Result<Self, String> {
         let mut app = Self {
             transcript: VecDeque::new(),
             bytes: 0,
@@ -239,7 +239,9 @@ impl App {
             quit: false,
             last_frame: None,
         };
-        app.restore_history(runtime)?;
+        if interactive {
+            app.restore_history(runtime)?;
+        }
         Ok(app)
     }
 
@@ -1495,8 +1497,8 @@ mod tests {
         let (runtime, root) = saved_runtime("resume-history");
         let before = std::fs::read(runtime.session().path().unwrap()).unwrap();
         let context = runtime.session().context_messages().unwrap();
-        let app = App::new(&runtime).unwrap();
-        let visible = visible(&app);
+        let app = App::new(&runtime, true).unwrap();
+        let frame = visible(&app);
         for text in [
             "saved question",
             "saved answer",
@@ -1506,11 +1508,13 @@ mod tests {
             "saved failure",
             "latest answer",
         ] {
-            assert!(visible.contains(text), "missing {text:?}: {visible}");
+            assert!(frame.contains(text), "missing {text:?}: {frame}");
         }
-        assert!(!visible.contains("abandoned answer"));
-        assert!(!visible.contains('\x1b'));
+        assert!(!frame.contains("abandoned answer"));
+        assert!(!frame.contains('\x1b'));
         assert!(!root.join("must-not-run").exists());
+        let one_shot = App::new(&runtime, false).unwrap();
+        assert!(!visible(&one_shot).contains("saved answer"));
         assert_eq!(runtime.session().context_messages().unwrap(), context);
         assert_eq!(
             std::fs::read(runtime.session().path().unwrap()).unwrap(),
@@ -1541,7 +1545,7 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        let mut app = App::new(&runtime).unwrap();
+        let mut app = App::new(&runtime, true).unwrap();
         app.scroll = 100;
         handle_command(&mut runtime, &mut app, "/new", &[], &[]).unwrap();
         assert!(!visible(&app).contains("saved answer"));
