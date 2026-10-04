@@ -128,6 +128,79 @@ copy_native_fixture() {
         "$source/fixture-motor-target-dependency" "$destination/"
 }
 
+# The same ordinary workspace backs Cargo and cross/native byte comparisons.
+workspace_selection() {
+    case "$1" in
+        default) WORKSPACE_ARGUMENTS=() ;;
+        packages) WORKSPACE_ARGUMENTS=(-p app -p second) ;;
+        all) WORKSPACE_ARGUMENTS=(--workspace) ;;
+        exclude) WORKSPACE_ARGUMENTS=(--workspace --exclude second) ;;
+        *) fail "unknown workspace selection '$1'" ;;
+    esac
+}
+
+prepare_workspace_identity() {
+    local host_home="$1" rustc="$2" selection command member
+    local fixture="$WORK/workspace-cross"
+    local -a WORKSPACE_ARGUMENTS
+    rm -rf "$WORK/workspace-fixture" "$fixture"
+    cp -R "$SCRIPT_DIR/fixtures/cargo-identity-workspace" "$WORK/workspace-fixture"
+    cp -R "$WORK/workspace-fixture" "$fixture"
+    mkdir "$fixture/.cargo"
+    printf '[target.%s]\nlinker = "%s"\nrustflags = ["-Clink-self-contained=no", "-Cdefault-linker-libraries=yes"]\n' \
+        "$MOTOR_TARGET" "$MOTOR_LINKER" >"$fixture/.cargo/config.toml"
+    (
+        cd "$fixture"
+        HOME="$host_home" RUSTC="$rustc" "$WORK/lorry-seed" vendor \
+            --workspace --locked --offline --accept-all
+        for selection in default packages all exclude; do
+            workspace_selection "$selection"
+            for command in build check; do
+                local -a profile_arguments=()
+                if [ "$command" = build ]; then profile_arguments=(--release); fi
+                HOME="$host_home" RUSTC="$rustc" "$WORK/lorry-seed" "$command" \
+                    "${profile_arguments[@]}" "${WORKSPACE_ARGUMENTS[@]}" --target "$MOTOR_TARGET" \
+                    --message-format=json >"$WORK/equivalence-workspace-$selection-$command.host"
+            done
+            for member in app second; do
+                if [ "$selection" = exclude ] && [ "$member" = second ]; then continue; fi
+                cp "$fixture/target/lorry/$MOTOR_TARGET/release/$member" \
+                    "$WORK/workspace-$selection-$member.cross"
+            done
+        done
+    )
+}
+
+run_workspace_identity() {
+    local fixture="$REMOTE_ROOT/workspace-fixture"
+    local selection command member arguments profile_arguments
+    local -a WORKSPACE_ARGUMENTS
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native vendor --workspace --locked --offline --accept-all"
+    for selection in default packages all exclude; do
+        workspace_selection "$selection"
+        arguments="${WORKSPACE_ARGUMENTS[*]}"
+        for command in build check; do
+            profile_arguments=""
+            if [ "$command" = build ]; then profile_arguments="--release"; fi
+            remote_command "cd $fixture && $REMOTE_ROOT/lorry-native $command $profile_arguments $arguments --target $MOTOR_TARGET --message-format=json > $REMOTE_ROOT/equivalence-workspace-$selection-$command.native"
+            download_file "$REMOTE_ROOT/equivalence-workspace-$selection-$command.native" \
+                "$WORK/equivalence-workspace-$selection-$command.native"
+            compare_equivalence_output "workspace-$selection-$command" set
+        done
+        for member in app second; do
+            if [ "$selection" = exclude ] && [ "$member" = second ]; then continue; fi
+            download_file "$fixture/target/lorry/$MOTOR_TARGET/release/$member" \
+                "$WORK/workspace-$selection-$member.native"
+            cmp "$WORK/workspace-$selection-$member.cross" "$WORK/workspace-$selection-$member.native" ||
+                fail "cross/native workspace '$selection' executable '$member' differs"
+        done
+    done
+    remote_command "$fixture/target/lorry/$MOTOR_TARGET/release/second > $REMOTE_ROOT/workspace-features.out"
+    download_file "$REMOTE_ROOT/workspace-features.out" "$WORK/workspace-features.out"
+    [ "$(cat "$WORK/workspace-features.out")" = "second/src/main.rs shared/src/lib.rs true true" ] ||
+        fail "native workspace dependency feature union is incorrect"
+}
+
 write_host_config() {
     local host_home="$1"
     local host_curl="$2"
@@ -218,6 +291,8 @@ normalize_equivalence_output() {
     local line
     : >"$output"
     while IFS= read -r line || [ -n "$line" ]; do
+        line="${line//"$WORK/workspace-cross"/<workspace>}"
+        line="${line//"$REMOTE_ROOT/workspace-fixture"/<workspace>}"
         line="${line//"$WORK/native-fixture"/<fixture>}"
         line="${line//"$REMOTE_ROOT/native-fixture"/<fixture>}"
         line="${line//"$WORK/native-equivalence-target"/<target>}"
@@ -367,6 +442,7 @@ prepare_host() {
             --target-dir "$target" --manifest-path "$fixture/Cargo.toml" \
             >"$WORK/equivalence-messages.host"
     )
+    prepare_workspace_identity "$host_home" "$motor_rustc"
 }
 
 start_vm() {
@@ -429,6 +505,11 @@ run_native() {
         done
     fi
     upload_tree "$WORK/native-fixture" "$fixture"
+    if [ "$WARM" -eq 1 ]; then
+        remote_command "[ ! -d $REMOTE_ROOT/workspace-fixture ] || /system/bin/rm -r $REMOTE_ROOT/workspace-fixture"
+    fi
+    remote_command "[ -d $REMOTE_ROOT/workspace-fixture ] || /system/bin/mkdir $REMOTE_ROOT/workspace-fixture"
+    upload_tree "$WORK/workspace-fixture" "$REMOTE_ROOT/workspace-fixture"
     remote_command "[ -d $proc_macro_fixture ] || /system/bin/mkdir $proc_macro_fixture"
     upload_tree "$WORK/proc-macro-fixture" "$proc_macro_fixture"
     remote_command "[ -d $clippy_fixture ] || /system/bin/mkdir $clippy_fixture"
@@ -499,6 +580,7 @@ PY
         compare_equivalence_output "$output"
     done
     compare_equivalence_output messages set
+    run_workspace_identity
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release -- --quiet"

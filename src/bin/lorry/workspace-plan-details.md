@@ -2332,6 +2332,12 @@ oracle mode now requires no diagnostics or scripts and retains all existing
 scripted assertions. The original failure is preserved in
 `/tmp/lorry-m7-shared-cargo-identity.log`.
 
+The native milestone driver now uses that same ordinary workspace for cross
+and native builds and checks. It compares JSON event sets for default, repeated,
+workspace, and excluded selections; compares every selected executable byte for
+byte; and runs the second binary to verify its shared red/blue feature union.
+Workspace vendoring is locked and offline because the fixture is path-only.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 
