@@ -2315,6 +2315,12 @@ retains the same behavior. Run and test reject the option. The paired contract
 uses one job and two independent members: the first fails, the second must
 publish its library, and both tools must end their JSON stream with failure.
 
+Ordinary builds now warn when selected binaries share a top-level output name,
+using Cargo's collision explanation and suggestion. Both units retain separate
+published artifacts and JSON package identities. Quiet builds suppress the
+warning; check units do not install executable names. The paired collision
+contract covers both tools, successful artifacts, and quiet behavior.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 

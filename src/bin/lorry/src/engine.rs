@@ -1356,6 +1356,11 @@ fn build_inner(
         } else {
             dependency_plan(false, !build.test, !build.test, false)?
         };
+        if build.verbosity != Verbosity::Quiet {
+            for warning in binary_collision_warnings(&plan, &selected_packages, &destination) {
+                eprintln!("{warning}");
+            }
+        }
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
         crate::trace::event(format_args!(
             "executed {} normal dependency units",
@@ -2482,6 +2487,40 @@ impl CheckOptions {
     }
 }
 
+fn binary_collision_warnings(
+    plan: &CompilationPlan,
+    selected: &[PackageKey],
+    profile: &Path,
+) -> Vec<String> {
+    let mut names = BTreeMap::new();
+    let mut warnings = Vec::new();
+    let describe = |package: &PackageKey| match &package.source {
+        crate::resolver::PackageSourceKey::Path(root) => {
+            format!("{} v{} ({})", package.name, package.version, root.display())
+        }
+        _ => format!("{} v{}", package.name, package.version),
+    };
+    for key in plan.order.iter().filter(|key| {
+        key.kind == UnitKind::Binary
+            && key.mode == crate::unit::UnitMode::Build
+            && selected.contains(&key.package)
+    }) {
+        let Some(name) = key.target.as_deref() else {
+            continue;
+        };
+        if let Some(previous) = names.insert(name, &key.package) {
+            warnings.push(format!(
+                "warning: output filename collision at {}\n\
+                 note: the bin target `{name}` in package `{}` has the same output filename as the bin target `{name}` in package `{}`\n\
+                 note: this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>\n\
+                 help: consider changing their names to be unique or compiling them separately",
+                profile.join(name).display(), describe(&key.package), describe(previous),
+            ));
+        }
+    }
+    warnings
+}
+
 fn compile_root_targets(
     manifest: &Manifest,
     staging: &Path,
@@ -3227,6 +3266,16 @@ mod tests {
             assert!(!crate::artifact_owner::matches_primary(binary, &unselected));
         }
         assert!(!destination.join(&unselected.name).exists());
+        let selection = [first.clone(), second.clone()];
+        assert!(binary_collision_warnings(&plan, &selection, &destination).is_empty());
+        plan.order[1].target = Some(first.name.clone());
+        let warnings = binary_collision_warnings(&plan, &selection, &destination);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("output filename collision"));
+        assert!(warnings[0].contains(&format!("package `{} v", first.name)));
+        assert!(warnings[0].contains(&format!("package `{} v", second.name)));
+        plan.order[1].mode = crate::unit::UnitMode::Check;
+        assert!(binary_collision_warnings(&plan, &selection, &destination).is_empty());
     }
 
     #[test]

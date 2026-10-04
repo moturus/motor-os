@@ -363,6 +363,10 @@ Run and test still reject nondefault CLI features. Several selected members use
 one unit graph, package-specific primary compiler roles and Cargo JSON IDs,
 and binary owner records. Shared execution currently reuses individual units;
 single-member default-feature builds retain completed-profile reuse.
+Selected binaries with the same top-level output name produce Cargo's collision
+warning before compilation, unless quiet mode is selected. Each unit retains its
+own published executable and package identity; the shared top-level path is
+replaced as binaries are installed.
 `build --keep-going` and `check --keep-going` continue independent units after a
 compiler failure, retain successful per-unit artifacts, and still return failure.
 Run and test reject `--keep-going`, matching Cargo's command option boundaries.

@@ -535,4 +535,38 @@ for path in sys.argv[1:]:
     assert messages[-1] == {'reason': 'build-finished', 'success': False}, messages[-1]
 PY_KEEP_GOING
 
+# Cargo warns about equal top-level binary names while compiling both owners.
+mkdir -p "$WORK/collision/"{first,second}/src
+printf '[workspace]\nmembers = ["first", "second"]\nresolver = "2"\n' \
+    >"$WORK/collision/Cargo.toml"
+for package in first second; do
+    printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2024"\n[[bin]]\nname = "same"\npath = "src/main.rs"\n' \
+        "$package" >"$WORK/collision/$package/Cargo.toml"
+    printf 'fn main() { println!("%s"); }\n' "$package" >"$WORK/collision/$package/src/main.rs"
+done
+(
+    cd "$WORK/collision"
+    "$LORRY_TEST_CARGO" generate-lockfile --offline
+    for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+        label="$(basename "$builder")"
+        "$builder" build --workspace --offline --message-format=json \
+            >"$WORK/collision.$label.json" 2>"$WORK/collision.$label.err"
+        grep -F 'output filename collision' "$WORK/collision.$label.err" >/dev/null
+        grep -F 'package `first v0.1.0' "$WORK/collision.$label.err" >/dev/null
+        grep -F 'package `second v0.1.0' "$WORK/collision.$label.err" >/dev/null
+        "$builder" build --workspace --offline --quiet 2>"$WORK/collision.quiet.err"
+        test ! -s "$WORK/collision.quiet.err"
+    done
+)
+python3 - "$WORK/collision.lorry.json" "$WORK/collision.cargo.json" <<'PY_COLLISION'
+import json, os, sys
+for path in sys.argv[1:]:
+    messages = [json.loads(line) for line in open(path)]
+    artifacts = [message for message in messages if message['reason'] == 'compiler-artifact']
+    assert len(artifacts) == 2, (path, messages)
+    assert len({message['package_id'] for message in artifacts}) == 2
+    assert all(os.path.isfile(message['executable']) for message in artifacts)
+    assert messages[-1] == {'reason': 'build-finished', 'success': True}
+PY_COLLISION
+
 echo "PASS: selected members build, run, test, and clean; unsupported lint levels and member build scripts fail; the package limit matches members by directory"
