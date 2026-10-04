@@ -79,3 +79,13 @@ record approval. Only a completed check receipt matching that request
 establishes evidence. Later calls to tools that may write make it stale.
 After workspace work, a missing, failed or stale check gets at most three
 `before_stop` reminders per turn. Review, worker and job runs are excluded.
+
+Memory storage is being implemented in phase 6; the memory tool is not yet
+registered. `batteries/USER.md`, `batteries/MEMORY.md` and workspace
+`.gears/MEMORY.md` use `# Gears memory v1` followed by entries. Each entry
+starts with `§ ` and a one-line JSON header containing `id`, `kind`
+(`user`, `observed`, `inferred`), `scope`, `source` (session and entry ids),
+`date_ms` (Unix epoch milliseconds) and optional `applies_to`. Plain Markdown
+follows the header. A body line beginning with `§ ` is reserved. USER entries
+must have kind `user`; all headers and bodies count toward the file's
+character limit. Invalid or oversized optional memory is reported and skipped.
