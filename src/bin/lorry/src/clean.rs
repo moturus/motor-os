@@ -6,10 +6,20 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-pub fn execute(options: &CleanOptions, package: Option<&str>, verbosity: Verbosity) -> Result<i32> {
+pub fn execute(
+    options: &CleanOptions,
+    package: Option<&str>,
+    manifest_path: Option<&str>,
+    verbosity: Verbosity,
+) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = crate::manifest::Manifest::load_selected(&current, package)?;
+    let manifest = crate::manifest::Manifest::load_selected_or_manifest_path(
+        &current,
+        manifest_path.map(Path::new),
+        package,
+        true,
+    )?;
     crate::manifest::Manifest::report_warnings([&manifest], verbosity);
     let config = Config::load(&current, &manifest)?;
     let target_directory = config.target_directory(

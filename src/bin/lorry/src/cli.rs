@@ -27,6 +27,7 @@ pub struct Cli {
     pub use_cargo_registry: bool,
     pub lorry_messages: bool,
     pub package: Option<String>,
+    pub manifest_path: Option<String>,
     pub command: Command,
 }
 
@@ -297,6 +298,15 @@ impl Cli {
                     .flatten()
             })
             .cloned();
+        let manifest_path = matches
+            .subcommand()
+            .and_then(|(_, command)| {
+                command
+                    .try_get_one::<String>("manifest-path")
+                    .ok()
+                    .flatten()
+            })
+            .cloned();
         let command = if matches.get_flag("help") {
             if matches.subcommand().is_some() {
                 return Err(Error::usage(
@@ -350,6 +360,7 @@ impl Cli {
             use_cargo_registry,
             lorry_messages: matches.get_flag("lorry-messages"),
             package,
+            manifest_path,
             command,
         })
     }
@@ -450,7 +461,8 @@ fn command_line() -> ClapCommand {
             ClapCommand::new("review")
                 .disable_help_flag(true)
                 .dont_delimit_trailing_values(true)
-                .arg(package_argument()),
+                .arg(package_argument())
+                .arg(manifest_path_argument()),
         )
         .subcommand(run_command())
         .subcommand(rustc_query_command())
@@ -491,6 +503,7 @@ fn manifest_path_argument() -> Arg {
         .num_args(1)
         .action(ArgAction::Set)
         .value_parser(NonEmptyStringValueParser::new())
+        .global(true)
 }
 
 fn metadata_command() -> ClapCommand {
@@ -654,6 +667,7 @@ fn locate_project_command() -> ClapCommand {
 fn rustc_query_command() -> ClapCommand {
     ClapCommand::new("rustc")
         .disable_help_flag(true)
+        .arg(manifest_path_argument())
         .arg(
             Arg::new("unstable-options")
                 .short('Z')
@@ -685,6 +699,7 @@ fn rustc_query_command() -> ClapCommand {
 fn build_command(name: &'static str) -> ClapCommand {
     ClapCommand::new(name)
         .disable_help_flag(true)
+        .arg(manifest_path_argument())
         .args_override_self(false)
         .args(locked_offline_arguments())
         .arg(
@@ -781,6 +796,7 @@ fn vendor_command() -> ClapCommand {
         .dont_delimit_trailing_values(true)
         .args_override_self(false)
         .arg(package_argument())
+        .arg(manifest_path_argument())
         .arg(
             Arg::new("accept-all")
                 .long("accept-all")

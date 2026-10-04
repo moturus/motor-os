@@ -72,7 +72,12 @@ fn execute_reconcile(
     accept_all: bool,
     requested: Option<(&str, &str)>,
 ) -> Result<i32> {
-    let manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
+    let manifest = Manifest::load_selected_or_manifest_path(
+        current,
+        cli.manifest_path.as_deref().map(Path::new),
+        selected_package,
+        false,
+    )?;
     Manifest::report_warnings([&manifest], cli.verbosity);
     let config = Config::load(current, &manifest)?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);

@@ -137,6 +137,22 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
 [ -x "$WORK/project/target/lorry/debug/app" ]
 [ -x "$WORK/project/target/lorry/debug/tool" ]
 (
+    cd "$WORK"
+    manifest="$WORK/project/Cargo.toml"
+    "$LORRY" vendor --manifest-path "$manifest" -p app --accept-all
+    "$LORRY" review --manifest-path "$manifest" -p app >/dev/null
+    "$LORRY" build --manifest-path "$manifest" -p app
+    [ "$("$LORRY" run --manifest-path "$manifest" -p app)" = app ]
+    "$LORRY" test --manifest-path "$manifest" -p app --no-run
+    "$LORRY" clean --manifest-path "$manifest" -p app
+    "$LORRY" build --manifest-path "$manifest" -p app
+    host="$("$RUSTC" -vV | sed -n 's/^host: //p')"
+    "$LORRY" rustc -Z unstable-options --print cfg --target "$host" \
+        --manifest-path "$manifest" >"$WORK/query.lorry"
+    "$RUSTC" --print cfg -O --target "$host" >"$WORK/query.rustc"
+    cmp "$WORK/query.lorry" "$WORK/query.rustc"
+)
+(
     cd "$WORK/project/app"
     [ "$("$LORRY" run)" = app ]
 )

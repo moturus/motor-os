@@ -326,7 +326,7 @@ impl Manifest {
         require_current_lock: bool,
     ) -> Result<Self> {
         match manifest_path {
-            Some(path) => Self::load_manifest_path(path, package, require_current_lock),
+            Some(path) => Self::load_manifest_path(&root.join(path), package, require_current_lock),
             None => Self::load_project(root, package, require_current_lock),
         }
     }
@@ -3462,6 +3462,16 @@ unsafe_code = { level = "forbid", priority = 1 }
         .unwrap();
         assert_eq!(from_root, from_member);
         assert_eq!(from_root, from_path);
+        assert_eq!(
+            from_root,
+            Manifest::load_selected_or_manifest_path(
+                &root,
+                Some(Path::new("app/Cargo.toml")),
+                Some("app"),
+                true
+            )
+            .unwrap()
+        );
         assert_eq!(from_root.root, root.join("app"));
         assert_eq!(from_root.workspace_root, root);
         assert_eq!(from_root.resolver, Resolver::V2);

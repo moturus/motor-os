@@ -295,6 +295,9 @@ file package IDs, and member-name patterns. An unmatched selector fails,
 and a pattern selecting several members fails until multi-package execution
 is implemented. Run rejects package patterns. Package IDs do not require a
 manifest-path option.
+Every manifest-reading command accepts --manifest-path. Relative paths use
+the invocation directory; package selection and configuration discovery
+remain independent of that path.
 Member profiles, patches, and replacements are ignored with Cargo-style
 warnings. An explicit conflicting member resolver also warns. A virtual
 workspace without a resolver uses version 1 and warns when a member's edition

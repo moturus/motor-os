@@ -57,7 +57,12 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = match &cli.command {
         Command::Check(options) => load_check_manifest(&current, options, cli.package.as_deref())?,
-        _ => Manifest::load_selected(&current, cli.package.as_deref())?,
+        _ => Manifest::load_selected_or_manifest_path(
+            &current,
+            cli.manifest_path.as_deref().map(Path::new),
+            cli.package.as_deref(),
+            true,
+        )?,
     };
     Manifest::report_warnings([&manifest], cli.verbosity);
     if matches!(&cli.command, Command::Check(options) if options.all_targets)

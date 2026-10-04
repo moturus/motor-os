@@ -45,8 +45,8 @@ self-host generations likewise belong to the test harness under `tests/` and
 ## Package requirements
 
 Lorry finds the nearest `Cargo.toml` in the working directory or its parents.
-Use `-p NAME` to select a workspace member. `metadata`, `check`, and `tree`
-also accept `--manifest-path`; it establishes the workspace independently
+Use `-p NAME` to select a workspace member. Manifest-reading commands
+accept `--manifest-path`; it establishes the workspace independently
 of the member selected by `-p`.
 
 A supported package has:

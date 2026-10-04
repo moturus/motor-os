@@ -1317,6 +1317,14 @@ must work without selecting a package.
 
 Support `--manifest-path` on every command that reads a manifest.
 
+Every manifest-reading command now accepts the option, including build,
+run, test, clean, vendor/upgrade, review, and rustc configuration queries.
+Relative paths resolve against the supplied invocation directory. The
+23 manifest tests, 24 CLI tests, strict Clippy, and workspace contract passed
+in `/tmp/lorry-m5-all-manifest-paths-{unit,cli,clippy}.log` and
+`/tmp/lorry-m5-all-manifest-paths-contract.log`. The contract invokes these
+commands from outside the workspace and compares query output with rustc.
+
 ### Package and feature selection
 
 The common single-member selector now accepts names, partial/full versions,
