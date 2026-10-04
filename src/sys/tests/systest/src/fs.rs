@@ -530,6 +530,35 @@ fn copy_test() {
     println!("    ---- FS: copy_test PASS");
 }
 
+fn directory_data_requests_test() {
+    use moto_io::fs::{EntryKind, FsClient};
+
+    let root = temp_dir();
+    std::fs::create_dir_all(&root).unwrap();
+    moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        let (directory, EntryKind::Directory) = client.stat(root.to_str().unwrap()).await.unwrap()
+        else {
+            panic!("filesystem test root is not a directory")
+        };
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            Err(moto_rt::Error::InvalidArgument),
+            client.read(directory, 0, &mut byte).await
+        );
+        assert_eq!(
+            Err(moto_rt::Error::InvalidArgument),
+            client.write(directory, 0, &byte).await
+        );
+        assert_eq!(
+            Err(moto_rt::Error::InvalidArgument),
+            client.resize(directory, 1).await
+        );
+        client.stat(root.to_str().unwrap()).await.unwrap();
+    });
+    println!("    ---- FS: directory_data_requests_test PASS");
+}
+
 pub fn smoke_test() {
     let source_path = crate::temp_path("systest-fs-foo");
     let target_path = crate::temp_path("systest-fs-bar");
@@ -1367,6 +1396,7 @@ pub fn run_tests() {
     smoke_test();
     hot_cache_read_test();
     copy_test();
+    directory_data_requests_test();
     readdir_error_exhausts_stream_test();
     remove_dir_all_test();
     resize_test();
