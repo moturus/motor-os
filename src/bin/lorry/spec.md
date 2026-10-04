@@ -363,6 +363,9 @@ Run and test still reject nondefault CLI features. Several selected members use
 one unit graph, package-specific primary compiler roles and Cargo JSON IDs,
 and binary owner records. Shared execution currently reuses individual units;
 single-member default-feature builds retain completed-profile reuse.
+`build --keep-going` and `check --keep-going` continue independent units after a
+compiler failure, retain successful per-unit artifacts, and still return failure.
+Run and test reject `--keep-going`, matching Cargo's command option boundaries.
 Editable members use Cargo's package file discovery: Git ignores and tracked
 files, include/exclude rules, symbolic links, and nested package boundaries.
 Dependency archive size/file limits do not constrain member source trees.

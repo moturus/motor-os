@@ -2310,6 +2310,11 @@ The complete workspace contract passes in
 `/tmp/lorry-m7-public-workspace-contract-fixed.log`; the original is preserved
 in `/tmp/lorry-m7-public-workspace-contract.log`.
 
+Build now accepts `--keep-going` and passes it to the shared executor; check
+retains the same behavior. Run and test reject the option. The paired contract
+uses one job and two independent members: the first fails, the second must
+publish its library, and both tools must end their JSON stream with failure.
+
 **Result.** Ordinary libraries and binaries in several selected members
 build and check together. This is the first working multi-member build.
 

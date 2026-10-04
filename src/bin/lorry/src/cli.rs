@@ -77,6 +77,7 @@ pub enum RustcQueryKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildOptions {
     pub release: bool,
+    pub keep_going: bool,
     pub target: Option<String>,
     pub target_dir: Option<String>,
     pub bin: Option<String>,
@@ -457,6 +458,11 @@ fn command_line() -> ClapCommand {
         )
         .subcommand(
             compile_command("build", true)
+                .arg(
+                    Arg::new("keep-going")
+                        .long("keep-going")
+                        .action(ArgAction::SetTrue),
+                )
                 .arg(message_format_argument())
                 .dont_delimit_trailing_values(true),
         )
@@ -1060,6 +1066,12 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
 fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOptions {
     BuildOptions {
         release: matches.get_flag("release"),
+        keep_going: matches
+            .try_get_one::<bool>("keep-going")
+            .ok()
+            .flatten()
+            .copied()
+            .unwrap_or(false),
         target: matches.get_one::<String>("target").cloned(),
         target_dir: matches.get_one::<String>("target-dir").cloned(),
         bin: matches.try_get_one::<String>("bin").ok().flatten().cloned(),
@@ -1152,6 +1164,7 @@ mod tests {
             cli.command,
             Command::Build(BuildOptions {
                 release: true,
+                keep_going: false,
                 target: Some("x86_64-unknown-motor".to_owned()),
                 target_dir: None,
                 bin: Some("server".to_owned()),
@@ -1160,6 +1173,20 @@ mod tests {
                 jobs: None,
             })
         );
+    }
+
+    #[test]
+    fn parses_build_keep_going_without_adding_it_to_run_or_test() {
+        let Command::Build(options) = parse(&["build", "--workspace", "--keep-going"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected build");
+        };
+        assert!(options.keep_going);
+        for command in ["run", "test"] {
+            assert!(parse(&[command, "--keep-going"]).unwrap_err().is_usage());
+        }
     }
 
     #[test]
@@ -1262,6 +1289,7 @@ mod tests {
             Command::Clean(CleanOptions {
                 build: BuildOptions {
                     release: true,
+                    keep_going: false,
                     target: Some("x86_64-unknown-motor".to_owned()),
                     target_dir: Some("/tmp/editor-target".to_owned()),
                     bin: None,

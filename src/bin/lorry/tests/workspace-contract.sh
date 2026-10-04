@@ -496,4 +496,43 @@ limited_vendor 2 || {
 }
 cp "$WORK/config.backup" "$WORK/home/.config/lorry/lorry.toml"
 
+# Keep-going must finish an independent member after a deterministic failure.
+mkdir -p "$WORK/keep-going/"{a-fails,b-good}/src
+printf '[workspace]\nmembers = ["a-fails", "b-good"]\nresolver = "2"\n' \
+    >"$WORK/keep-going/Cargo.toml"
+for package in a-fails b-good; do
+    printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2024"\n' \
+        "$package" >"$WORK/keep-going/$package/Cargo.toml"
+done
+printf 'compile_error!("expected member failure");\n' >"$WORK/keep-going/a-fails/src/lib.rs"
+printf 'pub fn value() -> u8 { 42 }\n' >"$WORK/keep-going/b-good/src/lib.rs"
+(
+    cd "$WORK/keep-going"
+    "$LORRY_TEST_CARGO" generate-lockfile --offline
+    for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+        label="$(basename "$builder")"
+        if "$builder" build --workspace --keep-going -j1 --offline --message-format=json \
+            >"$WORK/keep-going.$label.json" 2>"$WORK/keep-going.$label.err"; then
+            echo 'workspace-contract: keep-going ignored a failed member' >&2
+            exit 1
+        fi
+        grep -F 'expected member failure' "$WORK/keep-going.$label.json" >/dev/null
+    done
+)
+python3 - "$WORK/keep-going.lorry.json" "$WORK/keep-going.cargo.json" <<'PY_KEEP_GOING'
+import json, sys
+for path in sys.argv[1:]:
+    messages = [json.loads(line) for line in open(path)]
+    good = [message for message in messages if message['reason'] == 'compiler-artifact'
+            and message['target']['name'] == 'b_good']
+    assert len(good) == 1, (path, messages)
+    assert all(__import__('os').path.isfile(name) for name in good[0]['filenames'])
+    if path.endswith('lorry.json'):
+        failure = next(i for i, message in enumerate(messages)
+                       if message['reason'] == 'compiler-message'
+                       and 'expected member failure' in message['message']['message'])
+        assert failure < messages.index(good[0]), messages
+    assert messages[-1] == {'reason': 'build-finished', 'success': False}, messages[-1]
+PY_KEEP_GOING
+
 echo "PASS: selected members build, run, test, and clean; unsupported lint levels and member build scripts fail; the package limit matches members by directory"
