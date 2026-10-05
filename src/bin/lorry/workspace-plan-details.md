@@ -2727,6 +2727,20 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+The existing workspace driver still expected test feature selection and selected
+member scripts to be rejected, despite their earlier milestone-8 implementation.
+Its original failure is preserved in
+`/tmp/lorry-m8-auxiliary-check-workspace-contract.log` and fixture
+`/tmp/lorry-workspace-contract-ijVeaX`; shell tracing in
+`/tmp/lorry-m8-auxiliary-check-workspace-diagnostic.log` identifies the deliberate
+exit after a successful feature-selecting test. The next stale diagnostic
+expectation is preserved in
+`/tmp/lorry-m8-auxiliary-check-workspace-feature-fixed.log` and fixture
+`/tmp/lorry-workspace-contract-qnch5j`. The driver now compares that test with Cargo
+and expects missing admission coverage for the unreviewed scripted member.
+Failed fixtures are retained. Those cases and the complete workspace driver pass
+in `/tmp/lorry-m8-auxiliary-check-workspace-final-contract.log`.
+
 Binary example and benchmark compiler units now have Cargo target identities,
 per-target editions, compiler environments, harness flags, cache kinds, and JSON
 target lookup. Their planner includes dev dependencies and ordinary library

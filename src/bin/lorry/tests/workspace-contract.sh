@@ -17,7 +17,7 @@ fi
 export RUSTC="$LORRY_TEST_RUSTC"
 export PATH="$(dirname "$RUSTC"):$PATH"
 WORK="$(mktemp -d /tmp/lorry-workspace-contract-XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained failed fixture: $WORK" >&2; fi' EXIT
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project/app/src" \
@@ -174,8 +174,8 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
         "$LORRY" "$command" -p app --no-default-features
         "$LORRY_TEST_CARGO" "$command" -p app --no-default-features --offline
     done
-    if "$LORRY" test -p app --no-default-features 2>"$WORK/features.err"; then exit 1; fi
-    grep -F 'feature selection is not yet supported by workspace resolution' "$WORK/features.err" >/dev/null
+    "$LORRY" test -p app --no-default-features
+    "$LORRY_TEST_CARGO" test -p app --no-default-features --offline
     for selectors in '-p app -p tool' '--workspace -p app --exclude scripted'; do
         read -r -a options <<<"$selectors"
         for command in check build clippy; do
@@ -434,8 +434,8 @@ for command in build check test run; do
         exit 1
     fi
     case "$command" in
-        build | check) expected='workspace admission does not cover the requested packages or features of `scripted`' ;;
-        test | run) expected='package `scripted` has a build script' ;;
+        build | check | test) expected='workspace admission does not cover the requested packages or features of `scripted`' ;;
+        run) expected='package `scripted` has a build script' ;;
     esac
     grep -F "$expected" "$WORK/scripted.stderr" >/dev/null || {
         cat "$WORK/scripted.stderr" >&2
