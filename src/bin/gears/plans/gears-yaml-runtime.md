@@ -89,6 +89,11 @@ log is `/tmp/gears-strlen-runtime-assembly.log`.
 
 ## Toolchain follow-up
 
+Here, "SDK rollout" means updating the repository-selected Motor OS
+compiler toolchain and its target standard libraries through the managed
+build procedure. The relevant part is Rust std's bundled runtime dependency:
+ordinary native builds must obtain the fixed `strlen` automatically.
+
 The installed Rust std selects published crates.io moto-rt 0.17.6 through
 the Rust fork's library lock. It does not select this working tree. Merely
 rebuilding the current declared toolchain would reuse that published crate
@@ -102,10 +107,48 @@ and building/selecting the corresponding new toolchain tuple. Follow
 That release and fork update are separate from the approved in-tree fix;
 no toolchain or external dependency source has been changed.
 
-After the toolchain update, rerun the batteries native release build and
-`src/tests/full-test-dev.sh --release`. Native skills validation remains
-incomplete for the installed build until its runtime dependency also contains
-the fix.
+### Exact proposed external Rust-fork change
+
+The external checkout is `/home/posk/motor-dev/toolchain-src/rust`, backed
+by `https://github.com/moturus/rust`. Its `library/std/Cargo.toml` already
+declares `moto-rt` version `0.17` with `rustc-dep-of-std`, which enables the
+runtime's `libc` exports. That declaration accepts the proposed 0.17.7
+release. The only planned external source edit is the moto-rt entry in
+`library/Cargo.lock`:
+
+```diff
+ name = "moto-rt"
+-version = "0.17.6"
++version = "0.17.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f8e7200c0150f580541a80917e0ade7f91c0e76d2d9f81e3735ebdb7a3862bef"
++checksum = "<checksum of the final published 0.17.7 package>"
+```
+
+The checksum above is a placeholder. Updating this lock entry selects the
+existing Motor OS runtime fix; it requires no Rust compiler, LLVM or std
+implementation changes. The external fork gets a new commit because the
+dependency selection changed. Its branch must be pushed before the managed
+SDK build, which requires a declared commit reachable from the published
+source ref. Compiled SDK binaries are built locally, not published.
+
+### Rollout sequence after approval
+
+1. Bump and commit the in-tree moto-rt version to 0.17.7, verify the final
+   package, then publish it with the approved `strlen` fix.
+2. Update only the external fork's runtime lock entry with the published
+   version and checksum, then commit and push that fork change.
+3. Update Motor OS `src/toolchain-versions.sh` with the new Rust revision,
+   library lock hash and toolchain lineage identifiers.
+4. Run `src/build-motor-os.sh` and select its new toolchain name in
+   `rust-toolchain.toml`. Rebuilding the old declaration keeps using 0.17.6.
+5. Validate the batteries native release build, all three debug and three
+   release main-image full gates, and `src/tests/full-test-dev.sh --release`.
+
+These publication and external-fork actions remain proposed. The temporary
+package and native checks below establish that the fix works, while native
+skills validation with the installed SDK remains incomplete until this
+dependency selection is updated and the installed-image gate passes.
 
 ## Release candidate and native skills evidence
 

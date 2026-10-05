@@ -4,6 +4,34 @@ Status: proposed; needs the user's choice before phase 7 implementation.
 This supplements [phase 7](gears-batteries.md), which records explicit user
 acceptance alongside the check state, commit and uncommitted-change hash.
 
+## Why repository inspection is needed
+
+Phase 7 makes `/accept` a record that the user accepted a particular task
+result. The session id identifies the conversation; repository evidence
+identifies the code state at acceptance. Recording the last check alongside
+that state also shows whether the check was still current. This gives later
+session reviews and memory or skill proposals evidence about which result
+was accepted, without claiming that a passing test proves acceptance or
+that a proposed lesson improves future performance.
+
+A commit id alone misses work that has not been committed. For example, the
+user accepts an edited `parser.rs` at HEAD `abc123`, with change hash `H1`.
+A later edit leaves HEAD at `abc123` but produces `H2`. The old acceptance
+still refers to the earlier result. New untracked source files must also
+affect that hash; ignored build output should not.
+
+Motor OS's Git implementation is Gix, so the proposal reuses its repository
+handling to obtain this metadata. The binary and library alternatives are
+two interfaces to the same inspection operation. This dependency is for
+acceptance evidence, not a prerequisite for ordinary Gears conversations.
+Acceptance remains available outside a repository, with repository evidence
+recorded as unavailable.
+
+The operation reads the repository and computes a fingerprint. It does not
+initialize a repository, stage files, commit or push. The proposed name
+`snapshot` refers to that fingerprint; it does not save a restorable copy
+of the files.
+
 ## Finding
 
 Motor OS `gix log` prints abbreviated commit ids. Its `status` prints
