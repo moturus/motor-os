@@ -312,7 +312,7 @@ The native release link fails with undefined `strlen` from libyaml-rs:
 `/tmp/gears-batteries-skills-motor-build.log`. An independent 15-line Rust
 program without YAML reproduces the issue: debug links, release fails when
 LLVM replaces a byte-scanning loop with `strlen`. Rust core documents this
-symbol as a runtime requirement; the current moto-rt memory exports omit it.
+symbol as a runtime requirement; the runtime exports originally omitted it.
 The sources and logs are `/tmp/gears-yaml-strlen-probe.rs`,
 `/tmp/gears-yaml-strlen-probe-debug.log` and
 `/tmp/gears-yaml-strlen-probe-release.log`.
@@ -321,18 +321,45 @@ A temporary probe with the missing Rust export links in release, and its
 assembly contains a loop with no recursive strlen call. Logs:
 `/tmp/gears-yaml-strlen-probe-with-runtime-symbol.log` and
 `/tmp/gears-yaml-strlen-probe-with-runtime-symbol-assembly.log`.
-A proposed weak moto-rt export and system regression are prepared in
-`/tmp/gears-yaml-strlen-moto-rt.patch`; no core source has changed. See
-[the runtime fix proposal](gears-yaml-runtime.md). Applying it needs the
-runtime review required by root AGENTS.md, the embedded toolchain runtime
-update and the three debug/three release core gates before committing.
+A proposed weak moto-rt export and system regression were prepared in
+`/tmp/gears-yaml-strlen-moto-rt.patch`. The user approved the runtime change;
+the implementation and native regression are complete, and the final patch
+passed the full core gate three times each in debug and release. See
+[the runtime fix record](gears-yaml-runtime.md).
+Systest explicitly enables the in-tree runtime's libc feature to test the
+new export. Formatting, runtime and focused systest Clippy with warnings
+denied, and the native release systest build pass. The release strlen
+regression also passes in a native VM. The initial full debug gate failed
+in a preexisting test isolation bug: a global channel baseline of six fell
+to three while earlier connections finished cleanup. The unchanged exact
+channel assertion now runs in systest's initial checks, after logging
+verifies stats readiness and before networking fixtures. Original and
+diagnostic failures are preserved in
+`/tmp/gears-strlen-full-debug-1.log` and
+`/tmp/gears-strlen-full-debug-diagnostic.log`; final gates use the
+`/tmp/gears-strlen-full-*-ready.log` names. The first fresh-VM invocation
+passed a complete debug gate but failed before stats registration in
+release; the final placement uses the existing logging metric assertions
+as its readiness prerequisite, without adding waits or retries. All six
+final gates include passing channel and strlen regressions. The broader systest lint
+invocation reported existing dependency lints, including a RefCell warning
+despite an explicit drop before await; its original output is preserved in
+`/tmp/gears-strlen-systest-clippy.log`.
+
+The selected toolchain embeds published moto-rt 0.17.6, not the local tree.
+Rebuilding it alone will not update that dependency. A runtime release,
+Rust library lock update and new toolchain tuple are separate follow-up work;
+no external source or installed toolchain has changed. This corrects the
+initial suggestion of simply rebuilding the embedded runtime.
 The full release developer-image gate is not rerun while that link is known
 to fail. Native phase 6.5 validation remains incomplete.
 
 ## Next steps
 
-Resolve the diagnosed runtime gap and finish native/rebuilt-image skills
-validation. Then continue phase 7 after choosing the repository evidence
+Release and select the fixed runtime in the SDK, then finish native skills
+validation. The in-tree runtime gap is fixed and core-tested; rebuilding
+the current SDK tuple alone will not update std's locked dependency.
+Then continue phase 7 after choosing the repository evidence
 interface in [the acceptance proposal](gears-acceptance-vcs.md). Gix's current
 human-readable reports do not identify complete commit/binary/untracked
 contents. The recommendation is a read-only versioned Gix command; sharing
