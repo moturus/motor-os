@@ -2727,6 +2727,25 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Examples owned by a selected procedural-macro member now retain their target
+resolution context while their macro library remains on the host. A selected
+example treats that library as a host dependency; ordinary macro library roots
+retain their distinct selected profile. The expanded native/Motor check contract
+covers examples and all targets with an optimized dev profile and compares JSON
+and macro bytes with Cargo.
+
+The original absent build-script unit is preserved in
+`/tmp/lorry-m8-macro-example-original-contract.log` and fixture
+`/tmp/lorry-member-macro-contract-ZOeMEY`. Retaining the target context exposed
+a separate host profile mismatch, diagnosed in
+`/tmp/lorry-m8-macro-example-target-context-diagnostic.log`: Lorry compiled the
+example's macro dependency at opt-level 2, while Cargo used 0. Ordinary macro
+roots now distinguish that profile from auxiliary selections. The final contract,
+existing legal dev-cycle harness oracle, and strict Clippy pass in
+`/tmp/lorry-m8-macro-example-platform-and-profile-contract.log`,
+`/tmp/lorry-m8-macro-example-harness-oracle.log`, and
+`/tmp/lorry-m8-macro-example-clippy.log`.
+
 Library examples now use Cargo's example-library identity and their declared
 `lib`, `rlib`, and `staticlib` compiler types, including mixed archives. Ordinary
 library artifact handling is shared, and LTO classifies examples by their crate

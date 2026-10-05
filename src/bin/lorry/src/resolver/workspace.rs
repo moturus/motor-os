@@ -9,6 +9,7 @@ pub(crate) struct MemberRequest {
     pub default_features: bool,
     pub dev: bool,
     pub selected: bool,
+    pub target_units: bool,
 }
 
 /// Recompute features and reachability while retaining every complete-graph
@@ -163,6 +164,19 @@ fn retain_selected_roots(resolution: &mut Resolution, members: &[MemberRequest])
         .iter()
         .map(|edge| (edge.package.clone(), edge.compile_kind))
         .collect::<Vec<_>>();
+    pending.extend(
+        resolution
+            .packages
+            .iter()
+            .filter(|package| {
+                members.iter().any(|member| {
+                    member.selected
+                        && member.target_units
+                        && package.key.source == PackageSourceKey::Path(member.root.clone())
+                })
+            })
+            .map(|package| (package.key.clone(), CompileKind::Target)),
+    );
     let mut reachable = BTreeMap::<PackageKey, BTreeSet<CompileKind>>::new();
     while let Some((key, kind)) = pending.pop() {
         if !reachable.entry(key.clone()).or_default().insert(kind) {

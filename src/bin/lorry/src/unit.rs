@@ -136,6 +136,8 @@ pub struct UnitGraph {
     pub units: BTreeMap<UnitKey, Unit>,
     pub order: Vec<UnitKey>,
     pub selected_packages: BTreeSet<PackageKey>,
+    // Selecting an example still treats its owning macro library as a host dependency.
+    pub primary_macros: BTreeSet<PackageKey>,
 }
 
 impl UnitGraph {
@@ -162,6 +164,7 @@ impl UnitGraph {
 
     pub fn merge(&mut self, other: Self) -> Result<()> {
         self.selected_packages.extend(other.selected_packages);
+        self.primary_macros.extend(other.primary_macros);
         for (key, unit) in other.units {
             if let Some(existing) = self.units.get(&key) {
                 if existing != &unit {
@@ -536,6 +539,7 @@ pub(crate) fn workspace_check_units(
             units: BTreeMap::new(),
             order: Vec::new(),
             selected_packages: selected.iter().cloned().collect(),
+            primary_macros: BTreeSet::new(),
         }
     };
     if selection.harnesses || selection.integrations {
@@ -656,6 +660,7 @@ pub fn selected_check_units(
             units: BTreeMap::new(),
             order: Vec::new(),
             selected_packages: BTreeSet::new(),
+            primary_macros: BTreeSet::new(),
         }
     };
     if selection.harnesses || selection.integrations {
@@ -723,6 +728,7 @@ fn dependency_units_with_selected(
             let library = manifest
                 .library
                 .as_ref()
+                .filter(|library| !library.proc_macro || *compile_kind == CompileKind::Host)
                 .map(|_| unit_key(package, kind, *compile_kind, &features));
             if let Some(library) = &library {
                 insert_unit(&mut units, library.clone());
@@ -771,6 +777,11 @@ fn dependency_units_with_selected(
                             package.key.name, package.key.version
                         ))
                     })?;
+                    if manifest.library.as_ref().unwrap().proc_macro
+                        && parent_compile_kind == CompileKind::Target
+                    {
+                        continue;
+                    }
                     let parent = unit_key(
                         package,
                         library_unit_kind(manifest),
@@ -855,6 +866,7 @@ fn dependency_units_with_selected(
         units,
         order,
         selected_packages: BTreeSet::new(),
+        primary_macros: BTreeSet::new(),
     })
 }
 
@@ -871,6 +883,17 @@ pub(crate) fn workspace_units(
 ) -> Result<UnitGraph> {
     let mut graph = dependency_units_with_selected(resolution, manifests, selected)?;
     graph.selected_packages.extend(selected.iter().cloned());
+    graph.primary_macros.extend(
+        selected
+            .iter()
+            .filter(|key| {
+                manifests[*key]
+                    .library
+                    .as_ref()
+                    .is_some_and(|library| library.proc_macro)
+            })
+            .cloned(),
+    );
     for key in selected {
         let package = resolution
             .packages
@@ -1981,6 +2004,7 @@ fn unit_settings(
         .any(|key| matches!(key.mode, UnitMode::Test | UnitMode::CheckTest));
     let selected_macro_profile = |key: &UnitKey| {
         let selected_macro = (key.kind == UnitKind::ProcMacro
+            && graph.primary_macros.contains(&key.package)
             && (!test_graph || key.mode == UnitMode::Check)
             && (key.profile == ProfileContext::Selected
                 || (!options.release
@@ -3114,6 +3138,7 @@ mod tests {
                 default_features: true,
                 dev: true,
                 selected: true,
+                target_units: true,
             }],
             TargetSelection {
                 host_triple: "x86_64-unknown-linux-gnu",
@@ -3299,6 +3324,7 @@ mod tests {
                     default_features: true,
                     dev: false,
                     selected: true,
+                    target_units: false,
                 })
                 .collect::<Vec<_>>();
             let resolution = crate::resolver::workspace::resolve_selected_workspace(

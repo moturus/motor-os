@@ -1543,8 +1543,8 @@ fn fulfill(
     {
         if event.parent.is_none() && matches!(scope, Scope::WorkspaceSelected { .. }) {
             // Cargo also activates a selected macro's normal feature context.
-            // Only its host unit is reachable, but shared target dependencies
-            // retain features introduced by this additional activation.
+            // Its library stays on the host; selected auxiliary targets may
+            // also compile the dependencies activated in the target context.
             activate(state, queue, key, &event, options, scope)?;
         }
         event.compile_kind = CompileKind::Host;
@@ -2497,6 +2497,7 @@ mod tests {
             default_features: false,
             dev: false,
             selected: true,
+            target_units: false,
         };
         // A completed locked identity remains usable if the index marks it yanked.
         catalog
@@ -2598,6 +2599,7 @@ mod tests {
             default_features: true,
             dev: true,
             selected: true,
+            target_units: false,
         };
         let selected_graph = workspace::resolve_selected_workspace(
             &complete,
@@ -2691,6 +2693,7 @@ mod tests {
                     default_features: true,
                     dev: false,
                     selected: true,
+                    target_units: false,
                 };
                 let selected = workspace::resolve_selected_workspace(
                     &complete,
@@ -4500,6 +4503,7 @@ dev = ["dep:leaf"]
                 default_features: true,
                 dev: false,
                 selected: true,
+                target_units: false,
             }];
             let build = workspace::resolve_selected_workspace(
                 &complete,

@@ -33,6 +33,11 @@ pub(crate) fn member_requests(
                 default_features: !features.no_default || (legacy && !is_current),
                 dev: dev && selected.contains(&member.root),
                 selected: selected.contains(&member.root),
+                target_units: selected.contains(&member.root)
+                    && (!member.binaries.is_empty()
+                        || dev
+                            && (!member.integration_tests.is_empty()
+                                || !member.described_targets.is_empty())),
             },
         );
     }

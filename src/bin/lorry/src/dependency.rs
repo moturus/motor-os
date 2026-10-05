@@ -213,6 +213,7 @@ impl PreparedGraph {
                 units: BTreeMap::new(),
                 order: Vec::new(),
                 selected_packages: BTreeSet::new(),
+                primary_macros: BTreeSet::new(),
             }
         };
         if let Some((selected, binary_name, include_binaries, include_harnesses)) = selected {

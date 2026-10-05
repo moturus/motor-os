@@ -203,4 +203,25 @@ for target in native motor; do
     if [ "$target" = motor ]; then args=(--target x86_64-unknown-motor); fi
     env HOME="$WORK/home" EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY" test -p derive --bundle "${args[@]}"
 done
+mkdir derive/examples
+printf 'fn main() { assert_eq!(derive::answer!(), 41); }\n' >derive/examples/selected.rs
+for platform in native motor; do
+    args=()
+    if [ "$platform" = motor ]; then args=(--target x86_64-unknown-motor); fi
+    for selection in --examples --all-targets; do
+        env HOME="$WORK/home" "$LORRY" check -p derive "$selection" "${args[@]}" --message-format=json >"$WORK/lorry-example.json"
+        "$LORRY_TEST_CARGO" check -p derive "$selection" "${args[@]}" --offline --message-format=json >"$WORK/cargo-example.json"
+        "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \
+            differential-script-clean-check-messages "$WORK/lorry-example.json" "$WORK/cargo-example.json"
+        python3 - "$WORK/lorry-example.json" "$WORK/cargo-example.json" <<'PYEXAMPLE'
+import json, pathlib, sys
+def macros(path):
+    return sorted(pathlib.Path(file).read_bytes() for line in open(path) for event in [json.loads(line)]
+                  if event['reason'] == 'compiler-artifact' and event['target']['kind'] == ['proc-macro']
+                  for file in event['filenames'] if pathlib.Path(file).suffix == '.so')
+lorry, cargo = map(macros, sys.argv[1:])
+assert lorry and lorry == cargo
+PYEXAMPLE
+    done
+done
 echo "PASS: selected member macros match Cargo host/cross bytes and JSON"
