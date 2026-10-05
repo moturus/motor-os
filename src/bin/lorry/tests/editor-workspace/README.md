@@ -20,3 +20,5 @@ save diagnostic. The application view proves navigation into generated netstack
 constants, which intentionally have handwritten definitions under cfg(test).
 The helper restores the admission record and edited source on a test failure,
 checks unchanged lock bytes on success, and retains every Cargo invocation.
+All views use one Cargo wrapper path so their compiler inputs stay stable;
+the generated view also requires fresh compiler artifacts from the admitted pass.

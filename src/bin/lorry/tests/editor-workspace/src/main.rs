@@ -341,13 +341,18 @@ fn validate_calls(
 
 fn wrapper() -> io::Result<()> {
     let directory = env::current_exe()?.parent().unwrap().to_owned();
+    let record_directory = match fs::read_to_string(directory.join("record-directory")) {
+        Ok(path) => PathBuf::from(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => directory.clone(),
+        Err(error) => return Err(error),
+    };
     let args = env::args_os().skip(1).collect::<Vec<_>>();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let stdout = directory.join(format!("stdout-{}-{nonce:x}", std::process::id()));
-    let stderr = directory.join(format!("stderr-{}-{nonce:x}", std::process::id()));
+    let stdout = record_directory.join(format!("stdout-{}-{nonce:x}", std::process::id()));
+    let stderr = record_directory.join(format!("stderr-{}-{nonce:x}", std::process::id()));
     let output = Command::new(fs::read_to_string(directory.join("lorry-path"))?)
         .args(&args)
         .output()?;
@@ -356,7 +361,7 @@ fn wrapper() -> io::Result<()> {
     let record = json!({"argv": args.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>(),
         "cwd": env::current_dir()?.to_string_lossy(), "stdout": stdout, "stderr": stderr});
     fs::write(
-        directory
+        record_directory
             .join("invocations")
             .join(format!("{}-{nonce:x}.json", std::process::id())),
         serde_json::to_vec(&record)?,

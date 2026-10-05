@@ -24,17 +24,23 @@ pub(super) fn run(
     let admission = root.join(".lorry/dependencies-v2.toml");
     let saved_admission = work.join("sys-admission.toml");
     let lock = fs::read(root.join("Cargo.lock"))?;
+    let cargo_wrapper = work.join("sys-cargo-wrapper");
+    fs::create_dir(&cargo_wrapper)?;
+    fs::copy(env::current_exe()?, cargo_wrapper.join("cargo"))?;
+    fs::write(
+        cargo_wrapper.join("lorry-path"),
+        lorry.to_string_lossy().as_bytes(),
+    )?;
     fs::rename(&admission, &saved_admission)?;
-    let fetched_result = std::panic::catch_unwind(|| {
-        phase(lorry, toolchain, work, shipped, &root, &home, "fetched")
-    });
+    let fetched_result =
+        std::panic::catch_unwind(|| phase(toolchain, work, shipped, &root, &home, "fetched"));
     fs::rename(&saved_admission, &admission)?;
     match fetched_result {
         Ok(result) => result?,
         Err(panic) => std::panic::resume_unwind(panic),
     }
     for view in ["admitted", "generated"] {
-        phase(lorry, toolchain, work, shipped, &root, &home, view)?;
+        phase(toolchain, work, shipped, &root, &home, view)?;
     }
     assert_eq!(fs::read(root.join("Cargo.lock"))?, lock);
     println!(
@@ -44,7 +50,6 @@ pub(super) fn run(
 }
 
 fn phase(
-    lorry: &Path,
     toolchain: &Toolchain,
     work: &Path,
     shipped: &Value,
@@ -57,11 +62,13 @@ fn phase(
     let wrappers = work.join(view);
     let calls = wrappers.join("invocations");
     fs::create_dir_all(&calls)?;
-    let cargo = wrappers.join("cargo");
-    fs::copy(env::current_exe()?, &cargo)?;
+    // Keep compiler inputs stable as editor views change. Only the wrapper's
+    // log destination varies; PATH and CARGO use the same executable throughout.
+    let cargo_wrapper = work.join("sys-cargo-wrapper");
+    let cargo = cargo_wrapper.join("cargo");
     fs::write(
-        wrappers.join("lorry-path"),
-        lorry.to_string_lossy().as_bytes(),
+        cargo_wrapper.join("record-directory"),
+        wrappers.to_string_lossy().as_bytes(),
     )?;
     let mut options = shipped.clone();
     options["cargo"]["buildScripts"]["overrideCommand"][0] = json!(cargo);
@@ -74,7 +81,7 @@ fn phase(
     if !admitted || generated {
         options["checkOnSave"] = json!(false);
     }
-    let mut paths = vec![wrappers.clone(), toolchain.sysroot.join("bin")];
+    let mut paths = vec![cargo_wrapper, toolchain.sysroot.join("bin")];
     paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
     let mut server = Command::new(&toolchain.rust_analyzer);
     server
@@ -157,6 +164,13 @@ fn phase(
             events.last().unwrap(),
             &json!({"reason":"build-finished", "success":true})
         );
+        if generated {
+            assert!(
+                events.iter().all(|event| {
+                    event["reason"] != "compiler-artifact" || event["fresh"] == true
+                })
+            );
+        }
         if !generated {
             let sysbox_id = format!("path+{}#0.1.0", file_uri(&root.join("tools/sysbox")));
             assert!(
