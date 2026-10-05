@@ -39,6 +39,7 @@ pub mod skill_manage;
 pub mod skill_observation;
 pub mod skill_pending;
 pub mod skill_snapshot;
+pub mod skill_sources;
 pub mod skill_store;
 pub mod skill_view;
 pub mod snapshot;

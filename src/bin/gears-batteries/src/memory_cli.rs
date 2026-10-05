@@ -36,9 +36,8 @@ impl Item {
                 json!({"version": 1, "id": id, "kind": "entry", "change": proposal, "sources": evidence})
             }
             Self::Skill(id, proposal) => {
-                let sources =
-                    crate::memory_sources::describe_with(context, &proposal.source, |_| Ok(false))
-                        .unwrap_or_else(|error| json!({"unavailable": error}));
+                let sources = crate::skill_sources::describe(context, proposal)
+                    .unwrap_or_else(|error| json!({"unavailable": error}));
                 json!({"version": 1, "id": id, "kind": "skill", "change": proposal, "sources": sources})
             }
             Self::ImportedSkill(id, name, content) => {
