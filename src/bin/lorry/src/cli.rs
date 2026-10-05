@@ -414,6 +414,20 @@ impl Cli {
                 "select one package by name, version, or package ID",
             ));
         }
+        if let Command::Run(options) = &command
+            && options
+                .build
+                .targets
+                .bin
+                .iter()
+                .chain(&options.build.targets.example)
+                .any(|name| name.contains(['*', '?', '[', ']']))
+        {
+            return Err(Error::usage(
+                "target patterns are not allowed for run",
+                "select one binary or executable example by name",
+            ));
+        }
         if use_cargo_registry
             && matches!(
                 command,
@@ -923,13 +937,25 @@ fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
         return command.args(target_selection_arguments());
     }
     if supports_bin {
-        command.arg(
+        let command = command.arg(
             Arg::new("bin")
                 .long("bin")
                 .value_name("NAME")
                 .num_args(1)
                 .action(ArgAction::Set),
-        )
+        );
+        if name == "run" {
+            command.arg(
+                Arg::new("example")
+                    .long("example")
+                    .value_name("NAME")
+                    .action(ArgAction::Set)
+                    .conflicts_with("bin")
+                    .value_parser(NonEmptyStringValueParser::new()),
+            )
+        } else {
+            command
+        }
     } else {
         command
     }
@@ -1857,6 +1883,25 @@ mod tests {
                         .is_usage()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn run_selects_one_example_and_rejects_target_patterns() {
+        let Command::Run(options) = parse(&["run", "--example", "demo", "--", "--bin", "arg"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected run");
+        };
+        assert_eq!(options.build.targets.example, ["demo"]);
+        assert_eq!(options.arguments, ["--bin", "arg"]);
+        for args in [
+            &["run", "--example", "demo", "--bin", "app"][..],
+            &["run", "--example", "d*"],
+            &["run", "--bin", "a?"],
+        ] {
+            assert!(parse(args).unwrap_err().is_usage());
         }
     }
 

@@ -171,7 +171,7 @@ lorry [+toolchain] [GLOBAL] metadata [--format-version 1]
                                     [--manifest-path PATH] [--no-deps]
                                     [--filter-platform TRIPLE]
 lorry [+toolchain] [GLOBAL] review [-p NAME]
-lorry [+toolchain] [GLOBAL] run    [-p NAME] [--bin NAME]
+lorry [+toolchain] [GLOBAL] run    [-p NAME] [--bin NAME|--example NAME]
                                   [--release|-r] [--target TRIPLE]
                                   [--target-dir DIRECTORY] [--strict-validation] [-- ARGS...]
 lorry [+toolchain] [GLOBAL] test   [NAME] [-p NAME]
@@ -298,6 +298,9 @@ root compilation, freshness validation, and artifact publication.
   match exactly one target. Ambiguous selections report the available binaries.
   Run forwards arguments after `--`, preserves the caller's working directory,
   and executes with the selected member's package and build-script environment.
+  `--example NAME` selects exactly one executable example and enables its
+  dev-dependencies. Library examples cannot be executed. Run rejects target
+  glob patterns and simultaneous binary/example selectors, as Cargo does.
 - `-p NAME`/`--package NAME` selects one exact explicit workspace member for
   build, clean, run, test, vendor, and review.
 - `review` is offline and non-mutating. It reconstructs and verifies the

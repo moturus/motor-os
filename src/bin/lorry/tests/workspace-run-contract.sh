@@ -84,4 +84,33 @@ compare_run -p app
 sed -i '/name = "other"/a default-run = "other"' other/Cargo.toml
 reject_run 'could not determine which binary to run'
 compare_run -p other
+mkdir -p app/examples other/examples
+cat >>app/Cargo.toml <<'EOF'
+[dev-dependencies]
+library = { path = "../library" }
+[features]
+example-feature = []
+[[example]]
+name = "demo"
+required-features = ["example-feature"]
+[[example]]
+name = "archive"
+crate-type = ["rlib"]
+EOF
+cat >app/examples/demo.rs <<'EOF'
+fn main() {
+    assert_eq!(library::value(), 42);
+    println!("{}|{}", env!("CARGO_PKG_NAME"), std::env::args().skip(1).collect::<Vec<_>>().join("|"));
+}
+EOF
+printf 'pub fn example() {}\n' >app/examples/archive.rs
+"$LORRY_TEST_CARGO" generate-lockfile --offline
+reject_run 'requires the features' --example demo
+compare_run --example demo --features app/example-feature -- example 'two words'
+compare_run -p app --example demo --features example-feature -- explicit
+reject_run 'is a library and cannot be executed' --example archive
+reject_run 'no example target named' --example missing
+cp app/src/main.rs other/examples/demo.rs
+reject_run 'can run at most one executable' --example demo --features app/example-feature
+compare_run -p other --example demo -- other-example
 echo 'PASS: Cargo default-member run selection, default-run, ambiguity, and selected runtime metadata'

@@ -141,12 +141,17 @@ fn main() {
 EOF
 mkdir -p a/src/bin
 printf 'compile_error!("run must only build the selected binary");\n' >a/src/bin/unselected.rs
+mkdir -p a/examples
+cp a/src/main.rs a/examples/scripted.rs
+for selection in bin example; do
+name=a
+if [ "$selection" = example ]; then name=scripted; fi
 for pass in cold fresh json; do
     format=()
     if [ "$pass" = json ]; then format=(--message-format=json); fi
-    env HOME="$WORK/home" SCRIPT_INPUT=visible "$LORRY" run -p a --bin a --features builder/build \
+    env HOME="$WORK/home" SCRIPT_INPUT=visible "$LORRY" run -p a "--$selection" "$name" --features builder/build \
         "${format[@]}" -- argument 'two words' >"$WORK/lorry-run.out"
-    SCRIPT_INPUT=visible "$LORRY_TEST_CARGO" run -p a --bin a --features builder/build --offline \
+    SCRIPT_INPUT=visible "$LORRY_TEST_CARGO" run -p a "--$selection" "$name" --features builder/build --offline \
         "${format[@]}" -- argument 'two words' >"$WORK/cargo-run.out"
     if [ "$pass" = json ]; then
         python3 - "$WORK/lorry-run.out" "$WORK/cargo-run.out" <<'PY'
@@ -163,6 +168,7 @@ PY
         cmp "$WORK/lorry-run.out" "$WORK/cargo-run.out"
         [ "$(cat "$WORK/lorry-run.out")" = visible ]
     fi
+done
 done
 rm a/src/bin/unselected.rs
 echo "PASS: selected member scripts match Cargo binaries and JSON with package-specific caller grants"

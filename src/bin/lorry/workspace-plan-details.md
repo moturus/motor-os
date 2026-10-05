@@ -2727,6 +2727,26 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Run also supports executable examples through common Build-mode target selection
+and dev-feature resolution. It locates the executable in the retained compiler
+events, rejects library examples and duplicate matches, and rejects Run target
+patterns and simultaneous binary/example selectors. The member-script contract
+proves cold/fresh/JSON example runs preserve OUT_DIR, script variables, arguments,
+and caller cwd while excluding an unrelated failing binary. The paired run
+contract covers dev-dependencies, required features, explicit package selection,
+missing examples, and duplicate example names.
+The first parallel validation rebuilt the exact executable used by the running
+contracts. Its deleted self-identity path failure remains in
+`/tmp/lorry-m8-run-example-script-contract.log`; compiler rebuilds must run
+separately from contracts using that binary. The run fixture also added a dev
+dependency without updating its lock; its original resolution failure remains
+in `/tmp/lorry-m8-run-example-stable-binary-contract.log`. Updating that fixture's
+lock resolves the setup issue. Final run/script/parser/strict Clippy checks pass
+in `/tmp/lorry-m8-run-example-complete-lock-contract.log`,
+`/tmp/lorry-m8-run-example-stable-binary-script-contract.log`,
+`/tmp/lorry-m8-run-example-parser.log`, and
+`/tmp/lorry-m8-run-example-clippy.log`.
+
 Run now searches the selected default members for exactly one binary. A unique
 default-run filters those members by its name, matching pinned Cargo's command
 and execution source; duplicate names remain ambiguous. Runtime configuration

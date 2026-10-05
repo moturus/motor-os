@@ -64,10 +64,13 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         &cli.command,
         Command::Build(_) | Command::Check(_) | Command::Run(_)
     );
+    let run_example =
+        matches!(&cli.command, Command::Run(options) if !options.build.targets.example.is_empty());
     let shared_tests = matches!(&cli.command, Command::Test(_));
     let shared_auxiliary_builds = matches!(&cli.command, Command::Build(options) if options.targets.has_target_selector() && options.targets.single_binary().is_none());
     let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.targets.selects_dev_targets() || options.targets.bin.len() > 1);
     let shared = shared_tests
+        || run_example
         || shared_auxiliary_builds
         || shared_test_checks
         || ordinary
@@ -97,7 +100,14 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let run_selection = match &cli.command {
         Command::Run(options) => Some(select_run_member(
             &selected,
-            options.build.targets.bin.first().map(String::as_str),
+            options
+                .build
+                .targets
+                .bin
+                .first()
+                .or_else(|| options.build.targets.example.first())
+                .map(String::as_str),
+            run_example,
         )?),
         _ => None,
     };
@@ -247,11 +257,20 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let run_binary = run_selection.map(|(_, name)| name);
     let binary_selection = match &cli.command {
         Command::Build(options) => options.targets.single_binary(),
-        Command::Run(_) if manifest.binaries.len() > 1 => run_binary,
+        Command::Run(_) if !run_example && manifest.binaries.len() > 1 => run_binary,
         _ => None,
     };
     let run_targets = crate::cli::TargetSelection {
-        bin: run_binary.into_iter().map(str::to_owned).collect(),
+        bin: run_binary
+            .filter(|_| !run_example)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        example: run_binary
+            .filter(|_| run_example)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         ..Default::default()
     };
     let physical_target = config.selected_target(command_target)?;
@@ -364,7 +383,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 &workspace,
                 &selected.iter().map(|member| member.root.clone()).collect(),
                 &cli.features,
-                shared_tests || shared_test_checks || matches!(&cli.command, Command::Build(options) if options.targets.selects_dev_targets()),
+                shared_tests || shared_test_checks || run_example || matches!(&cli.command, Command::Build(options) if options.targets.selects_dev_targets()),
             )
         })
         .transpose()?;
@@ -424,9 +443,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         return match &cli.command {
             Command::Build(_) => Ok(0),
             Command::Run(options) => {
-                let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
-                    Error::failure("selected binary is absent from the fresh build profile")
-                })?;
+                let artifact = selected_run_artifact(&artifacts, run_binary.unwrap(), run_example)?;
                 drop(artifact_lock);
                 crate::trace::event("starting program");
                 let status = run_artifact(
@@ -556,9 +573,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 },
                 options.build.message_format,
             )?;
-            let artifact = artifacts.binaries.get(run_binary.unwrap()).ok_or_else(|| {
-                Error::failure("selected binary is absent from the completed build")
-            })?;
+            let artifact = selected_run_artifact(&artifacts, run_binary.unwrap(), run_example)?;
             report_build_completion(cli, reported)?;
             drop(artifact_lock);
             crate::trace::event("starting program");
@@ -978,9 +993,11 @@ fn validate_binary_selection<'a>(
 fn select_run_member<'a>(
     members: &'a [Manifest],
     requested: Option<&str>,
+    example: bool,
 ) -> Result<(&'a Manifest, &'a str)> {
     let defaults = members
         .iter()
+        .filter(|_| !example)
         .filter_map(|member| member.default_run.as_deref())
         .collect::<Vec<_>>();
     let requested = requested.or(match defaults.as_slice() {
@@ -993,14 +1010,38 @@ fn select_run_member<'a>(
             member
                 .binaries
                 .iter()
+                .filter(|_| !example)
                 .filter(move |target| requested.is_none_or(|name| name == target.name))
-                .map(move |target| (member, target.name.as_str()))
+                .map(move |target| (member, target.name.as_str(), false))
+                .chain(
+                    member
+                        .described_targets
+                        .iter()
+                        .filter(move |target| {
+                            example
+                                && target.kind == "example"
+                                && requested == Some(target.name.as_str())
+                        })
+                        .map(move |target| {
+                            (
+                                member,
+                                target.name.as_str(),
+                                !target.crate_types.iter().any(|kind| kind == "bin"),
+                            )
+                        }),
+                )
         })
         .collect::<Vec<_>>();
     match binaries.as_slice() {
-        [binary] => Ok(*binary),
+        [(member, name, false)] => Ok((*member, *name)),
+        [(_, name, true)] => Err(Error::failure(format!(
+            "example target `{name}` is a library and cannot be executed"
+        ))),
         [] => Err(Error::failure(match requested {
-            Some(name) => format!("no bin target named `{name}` in selected packages"),
+            Some(name) => format!(
+                "no {} target named `{name}` in selected packages",
+                if example { "example" } else { "bin" }
+            ),
             None => "a bin target must be available for `lorry run`".to_owned(),
         })),
         _ => Err(Error::failure(if requested.is_some() {
@@ -1012,11 +1053,36 @@ fn select_run_member<'a>(
             "use `-p NAME`, `--bin NAME`, or `package.default-run`; available binaries: {}",
             binaries
                 .iter()
-                .map(|(member, name)| format!("{name} in {}", member.name))
+                .map(|(member, name, _)| format!("{name} in {}", member.name))
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
     }
+}
+
+fn selected_run_artifact<'a>(
+    artifacts: &'a BuildArtifacts,
+    name: &str,
+    example: bool,
+) -> Result<&'a Path> {
+    if !example {
+        return artifacts
+            .binaries
+            .get(name)
+            .map(PathBuf::as_path)
+            .ok_or_else(|| Error::failure("selected binary is absent from the completed build"));
+    }
+    artifacts
+        .messages
+        .iter()
+        .find_map(|message| {
+            (message["reason"] == "compiler-artifact"
+                && message["target"]["name"] == name
+                && message["target"]["kind"] == serde_json::json!(["example"]))
+            .then(|| message["executable"].as_str().map(Path::new))
+            .flatten()
+        })
+        .ok_or_else(|| Error::failure("selected example is absent from the completed build"))
 }
 
 fn unknown_binary(manifest: &Manifest, name: &str) -> Error {
@@ -4429,9 +4495,12 @@ mod tests {
         fixture.add_multiple_binaries();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let members = std::slice::from_ref(&manifest);
-        assert_eq!(select_run_member(members, None).unwrap().1, "worker");
-        assert_eq!(select_run_member(members, Some("tool")).unwrap().1, "tool");
-        assert!(select_run_member(members, Some("missing")).is_err());
+        assert_eq!(select_run_member(members, None, false).unwrap().1, "worker");
+        assert_eq!(
+            select_run_member(members, Some("tool"), false).unwrap().1,
+            "tool"
+        );
+        assert!(select_run_member(members, Some("missing"), false).is_err());
 
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
