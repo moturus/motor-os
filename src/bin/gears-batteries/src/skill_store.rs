@@ -53,7 +53,15 @@ pub fn parse(context: &ToolContext, name: &str, content: &Content) -> Result<Met
 }
 
 pub fn approved(context: &ToolContext, name: &str, hash: &str) -> Result<bool, String> {
-    let mut found = false;
+    let mut versions = vec![(name.to_string(), hash.to_string(), false)];
+    approvals(context, &mut versions)?;
+    Ok(versions[0].2)
+}
+
+pub fn approvals(
+    context: &ToolContext,
+    versions: &mut [(String, String, bool)],
+) -> Result<(), String> {
     crate::journal::visit(
         &context.state,
         Path::new("batteries/changes.jsonl"),
@@ -63,14 +71,14 @@ pub fn approved(context: &ToolContext, name: &str, hash: &str) -> Result<bool, S
             {
                 return Err("unsupported or malformed decision record".into());
             }
-            found |= record["kind"] == "skill"
-                && record["name"] == name
-                && record["content_hash"] == hash
-                && record["decision"] == "approve";
+            if record["kind"] == "skill" && record["decision"] == "approve" {
+                for (name, hash, approved) in &mut *versions {
+                    *approved |= record["name"] == *name && record["content_hash"] == *hash;
+                }
+            }
             Ok(())
         },
-    )?;
-    Ok(found)
+    )
 }
 
 pub fn admit(

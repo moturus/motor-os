@@ -94,6 +94,7 @@ impl Content {
         if description.trim().is_empty() || description.chars().count() > 1024 {
             return Err("skill description must contain 1–1024 characters".into());
         }
+        bounded(description, 1024)?;
         string("license")?;
         string("allowed-tools")?; // Descriptive metadata never grants tool authority.
         if let Some(compatibility) = string("compatibility")?
@@ -111,6 +112,8 @@ impl Content {
                 let value = value
                     .as_str()
                     .ok_or("skill metadata values must be strings")?;
+                bounded(key, 65536)?;
+                bounded(value, 65536)?;
                 metadata.insert(key.into(), value.into());
             }
         }
@@ -203,6 +206,7 @@ mod tests {
             "name: rust-checks\ndescription: checks\nmetadata: {platforms: [motor]}",
             "name: rust-checks\ndescription: checks\nmetadata: {version: 1}",
             "name: rust-checks\ndescription: [checks]",
+            "name: rust-checks\ndescription: \"\\e[31mchecks\"",
             "name: ../escape\ndescription: checks",
             "name: rust-checks\ndescription: checks\ncompatibility: ''",
             "name: rust-checks\ndescription: checks\nlicense: [MIT]",
