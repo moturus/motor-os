@@ -406,8 +406,23 @@ for wrong in "${PACKAGE_ID%0.1.0}9.9.9" "${PACKAGE_ID/check-fixture/other-name}"
 done
 (cd "$PROJECT" && "$LORRY" check -p "$PACKAGE_ID" --quiet --target-dir "$TARGET")
 for selector in bin test; do
-    reject_check_selector --"$selector" missing --all-targets --manifest-path "$PROJECT/Cargo.toml"
+    reject_check_selector --"$selector" missing --manifest-path "$PROJECT/Cargo.toml"
 done
+
+for driver in lorry cargo; do
+    executable="$LORRY"
+    [ "$driver" != cargo ] || executable="$LORRY_TEST_CARGO"
+    (
+        cd "$PROJECT"
+        CARGO_HOME="$HOST_CARGO_HOME" "$executable" check --all-targets \
+            --bin missing --test missing --example missing --bench missing \
+            --offline --message-format=json --target-dir "$WORK/all-$driver" \
+            >"$WORK/all-$driver.json"
+    )
+done
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- differential-check-messages "$WORK/all-lorry.json" "$WORK/all-cargo.json"
 
 "$LORRY" check --all-targets --keep-going --quiet --message-format=json \
     --manifest-path "$PROJECT/Cargo.toml" --target-dir "$JSON_TARGET" \

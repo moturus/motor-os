@@ -2727,6 +2727,23 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Check and Clippy now accept repeated binary, integration-test, example, and
+benchmark names and merge their graphs before planning compiler settings.
+Named integration tests validate across every selected member. Named binaries
+retain only their requested roots and dependencies, while `--all-targets` and
+plural filters take Cargo's precedence over their corresponding named filters.
+The old rejection test for missing names combined with all targets failed in
+`/tmp/lorry-m8-repeated-check-targets-existing-contract.log`; offline Cargo on
+that retained fixture confirms acceptance in
+`/tmp/lorry-m8-all-targets-cargo-selector-diagnostic.log`. The driver still rejects
+missing names without all targets and now compares the combined selection with
+Cargo. All 30 parser tests, native/Motor comparisons selecting two targets of
+each kind, the existing check contract, and strict Clippy pass in
+`/tmp/lorry-m8-repeated-check-targets-parser.log`,
+`/tmp/lorry-m8-repeated-check-targets-complete-contract.log`,
+`/tmp/lorry-m8-repeated-check-targets-cargo-policy-contract.log`, and
+`/tmp/lorry-m8-repeated-check-targets-final-clippy.log`.
+
 An expanded Cargo comparison exposed a preexisting integration-target parser bug:
 adding a differently named explicit test on the same source file removed the
 original test. Cargo retains both names. The mismatch is preserved in

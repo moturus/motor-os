@@ -419,7 +419,9 @@ benchmarks compile through the shared graph under `check --all-targets`,
 including their dev-dependencies, target editions, required features, and
 script outputs. `check --examples` checks binary, `lib`, `rlib`, and `staticlib`
 examples, including packages with only example targets. `--example NAME` and
-`--bench NAME` check named targets across the selected members. Dynamic/procedural-macro
+`--bench NAME` check named targets across the selected members. Named check
+selectors can be repeated and combined; `--all-targets` takes precedence over
+their names. Dynamic/procedural-macro
 example types and explicit build/test/run example/benchmark selectors remain
 deferred and fail explicitly. Default tests compile enabled examples, run
 examples and benchmarks marked `test = true`, and include those test targets

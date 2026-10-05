@@ -380,6 +380,7 @@ pub struct PlanOptions<'a> {
     pub rustflags: &'a [String],
 }
 
+#[derive(Default)]
 pub struct CheckTargetSelection<'a> {
     pub normal: bool,
     pub binaries: bool,
@@ -520,6 +521,90 @@ pub(crate) fn workspace_auxiliary_units(
         })?;
     }
     retain_unit_roots(&mut graph, roots)?;
+    Ok(graph)
+}
+
+pub(crate) fn workspace_check_targets(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    targets: &crate::cli::TargetSelection,
+    options: &PlanOptions<'_>,
+) -> Result<UnitGraph> {
+    let default = !targets.has_target_selector();
+    let mut graph = workspace_check_units(
+        resolution,
+        manifests,
+        selected,
+        &CheckTargetSelection {
+            normal: targets.all_targets || targets.lib || targets.bins || default,
+            binaries: targets.all_targets || targets.bins || default,
+            harnesses: targets.all_targets,
+            integrations: targets.all_targets,
+            examples: targets.all_targets || targets.examples,
+            benches: targets.all_targets,
+            ..CheckTargetSelection::default()
+        },
+        options,
+    )?;
+    if targets.bins && !targets.selects_library() {
+        let roots = graph
+            .units
+            .keys()
+            .filter(|key| {
+                selected.contains(&key.package)
+                    && (key.kind == UnitKind::Binary
+                        || matches!(key.kind, UnitKind::Example | UnitKind::Bench))
+            })
+            .cloned()
+            .collect();
+        graph.primary_macros.clear();
+        retain_unit_roots(&mut graph, roots)?;
+    }
+    for (kind, names, all) in [
+        ("bin", &targets.bin, targets.bins),
+        ("test", &targets.test, false),
+        ("example", &targets.example, targets.examples),
+        ("bench", &targets.bench, false),
+    ] {
+        if targets.all_targets || all {
+            continue;
+        }
+        for name in names {
+            let mut selection = CheckTargetSelection::default();
+            match kind {
+                "bin" => {
+                    selection.normal = true;
+                    selection.binaries = true;
+                    selection.binary_name = Some(name);
+                }
+                "test" => {
+                    selection.integrations = true;
+                    selection.integration_name = Some(name);
+                }
+                "example" => selection.example_name = Some(name),
+                "bench" => selection.bench_name = Some(name),
+                _ => unreachable!(),
+            }
+            let mut part =
+                workspace_check_units(resolution, manifests, selected, &selection, options)?;
+            if kind == "bin" {
+                let roots = part
+                    .units
+                    .keys()
+                    .filter(|key| {
+                        key.kind == UnitKind::Binary
+                            && selected.contains(&key.package)
+                            && key.target.as_deref() == Some(name)
+                    })
+                    .cloned()
+                    .collect();
+                part.primary_macros.clear();
+                retain_unit_roots(&mut part, roots)?;
+            }
+            graph.merge(part)?;
+        }
+    }
     Ok(graph)
 }
 

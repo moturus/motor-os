@@ -78,7 +78,9 @@ one executable for each member with enabled harnesses, using that member's
 program/extraction paths and script environment. Workspace `check --all-targets`
 includes examples and benchmarks; `check --examples` checks binary, `lib`,
 `rlib`, and `staticlib` examples with their dev-dependencies. Named `--example NAME` and `--bench NAME`
-checks also select targets across the chosen members. Example/benchmark
+checks also select targets across the chosen members. Named build/check target
+selectors can be repeated where supported; `--all-targets` selects everything
+and takes precedence over named check filters. Example/benchmark
 build/test/run selectors remain deferred. Default tests compile enabled examples,
 run examples and benchmarks marked `test = true`, and include those test targets
 in member bundles. Ordinary build/check accepts

@@ -62,8 +62,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     )?;
     let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
     let shared_tests = matches!(&cli.command, Command::Test(_));
-    let shared_test_checks =
-        matches!(&cli.command, Command::Check(options) if options.targets.selects_dev_targets());
+    let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.targets.selects_dev_targets() || options.targets.bin.len() > 1);
     let shared = shared_tests
         || shared_test_checks
         || ordinary
@@ -110,6 +109,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     }
     if let Command::Check(options) = &cli.command
         && options.targets.lib
+        && !options.targets.all_targets
         && selected.iter().all(|member| member.library.is_none())
     {
         return Err(Error::failure(format!(
@@ -117,15 +117,23 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             manifest.name
         )));
     }
-    if let Command::Check(options) = &cli.command {
-        validate_member_binary_selection(&selected, options.targets.bin.as_deref())?;
-        if let Some(name) = &options.targets.test
-            && !manifest
-                .integration_tests
-                .iter()
-                .any(|target| target.name == *name)
-        {
-            return Err(unknown_integration_test(&manifest, name));
+    if let Command::Check(options) = &cli.command
+        && !options.targets.all_targets
+    {
+        if !options.targets.bins {
+            for name in &options.targets.bin {
+                validate_member_binary_selection(&selected, Some(name))?;
+            }
+        }
+        for name in &options.targets.test {
+            if !selected.iter().any(|member| {
+                member
+                    .integration_tests
+                    .iter()
+                    .any(|target| target.name == *name)
+            }) {
+                return Err(unknown_integration_test(&manifest, name));
+            }
         }
     }
     for manifest in &selected {
@@ -1225,7 +1233,7 @@ fn build_inner(
             prepared.dependency_plan(&options)
         }
     };
-    let selected_check_plan = |selection: &CheckTargetSelection<'_>| {
+    let selected_check_plan = |targets: &crate::cli::TargetSelection| {
         let options = PlanOptions {
             workspace_root: &build.manifest.workspace_root,
             release: build.release,
@@ -1238,9 +1246,22 @@ fn build_inner(
             rustflags: build.rustflags,
         };
         if build.members.is_some() {
-            prepared.workspace_check_plan(&options, &selected_packages, selection)
+            prepared.workspace_check_targets(&options, &selected_packages, targets)
         } else {
-            prepared.selected_check_plan(&options, build.manifest, selection)
+            prepared.selected_check_plan(
+                &options,
+                build.manifest,
+                &CheckTargetSelection {
+                    normal: targets.selects_library() || targets.selects_binaries(),
+                    binaries: targets.selects_binaries(),
+                    binary_name: if targets.all_targets || targets.bins {
+                        None
+                    } else {
+                        targets.bin.first().map(String::as_str)
+                    },
+                    ..CheckTargetSelection::default()
+                },
+            )
         }
     };
     let roots = crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
@@ -1384,7 +1405,7 @@ fn build_inner(
                             .any(|target| target.kind == "bench" && target.test)
                 }));
     let check_integration = check.is_some_and(|(_, options)| {
-        (options.targets.selects_tests() || options.targets.bench.is_some())
+        (options.targets.selects_tests() || !options.targets.bench.is_empty())
             && build
                 .members
                 .unwrap_or_else(|| std::slice::from_ref(build.manifest))
@@ -1493,40 +1514,13 @@ fn build_inner(
         let members = build
             .members
             .unwrap_or_else(|| std::slice::from_ref(build.manifest));
-        if options.targets.lib && members.iter().all(|member| member.library.is_none()) {
+        if options.targets.lib
+            && !options.targets.all_targets
+            && members.iter().all(|member| member.library.is_none())
+        {
             return Err(Error::failure("selected package has no library target"));
         }
-        validate_member_binary_selection(members, options.targets.bin.as_deref())?;
-        if let Some(name) = options.targets.test.as_deref()
-            && !members.iter().any(|member| {
-                member
-                    .integration_tests
-                    .iter()
-                    .any(|target| target.name == name)
-            })
-        {
-            return Err(unknown_integration_test(build.manifest, name));
-        }
-        let plan = selected_check_plan(&CheckTargetSelection {
-            normal: options.targets.selects_library() || options.targets.selects_binaries(),
-            binaries: options.targets.selects_binaries(),
-            binary_name: if options.targets.all_targets || options.targets.bins {
-                None
-            } else {
-                options.targets.bin.as_deref()
-            },
-            harnesses: options.targets.all_targets,
-            integrations: options.targets.selects_tests(),
-            integration_name: if options.targets.all_targets {
-                None
-            } else {
-                options.targets.test.as_deref()
-            },
-            examples: options.targets.all_targets || options.targets.examples,
-            example_name: options.targets.example.as_deref(),
-            benches: options.targets.all_targets,
-            bench_name: options.targets.bench.as_deref(),
-        })?;
+        let plan = selected_check_plan(&options.targets)?;
         executor::execute(&plan, &manifests, &executor_options)?;
         if build.validation.is_strict() {
             prepared.revalidate_cargo_registry_sources(repository_tree_limits(

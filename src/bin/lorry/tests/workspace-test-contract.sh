@@ -247,6 +247,14 @@ crate-type = ["rlib", "staticlib"]
 [[bench]]
 name = "measured"
 harness = false
+[[test]]
+name = "second"
+path = "tests/integration.rs"
+harness = false
+[[bench]]
+name = "second"
+path = "benches/measured.rs"
+harness = false
 EOF
 python3 - <<'PY'
 from pathlib import Path
@@ -257,12 +265,13 @@ PY
 for platform in native motor; do
     target=()
     if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); fi
-    for selection in all named examples example bench; do
+    for selection in all named examples example bench repeated; do
         args=(--workspace --all-targets)
-        if [ "$selection" = named ]; then args=(-p zeta -p alpha --test integration); fi
+        if [ "$selection" = named ]; then args=(-p zeta -p alpha --test second); fi
         if [ "$selection" = examples ]; then args=(--workspace --examples); fi
         if [ "$selection" = example ]; then args=(--workspace --example demo); fi
         if [ "$selection" = bench ]; then args=(-p alpha --bench measured); fi
+        if [ "$selection" = repeated ]; then args=(--workspace --bin alpha --bin zeta --test integration --test second --example demo --example library --bench measured --bench second); fi
         env HOME="$WORK/home" "$LORRY" check "${args[@]}" "${target[@]}" --message-format=json >"$WORK/lorry-check.json"
         "$LORRY_TEST_CARGO" check "${args[@]}" "${target[@]}" --offline --message-format=json >"$WORK/cargo-check.json"
         "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \

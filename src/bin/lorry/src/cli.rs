@@ -158,11 +158,11 @@ pub struct TargetSelection {
     pub all_targets: bool,
     pub lib: bool,
     pub bins: bool,
-    pub bin: Option<String>,
-    pub test: Option<String>,
+    pub bin: Vec<String>,
+    pub test: Vec<String>,
     pub examples: bool,
-    pub example: Option<String>,
-    pub bench: Option<String>,
+    pub example: Vec<String>,
+    pub bench: Vec<String>,
 }
 
 impl TargetSelection {
@@ -170,11 +170,11 @@ impl TargetSelection {
         self.all_targets
             || self.lib
             || self.bins
-            || self.bin.is_some()
-            || self.test.is_some()
+            || !self.bin.is_empty()
+            || !self.test.is_empty()
             || self.examples
-            || self.example.is_some()
-            || self.bench.is_some()
+            || !self.example.is_empty()
+            || !self.bench.is_empty()
     }
 
     pub(crate) fn selects_library(&self) -> bool {
@@ -182,15 +182,15 @@ impl TargetSelection {
     }
 
     pub(crate) fn selects_binaries(&self) -> bool {
-        self.all_targets || self.bins || self.bin.is_some() || !self.has_target_selector()
+        self.all_targets || self.bins || !self.bin.is_empty() || !self.has_target_selector()
     }
 
     pub(crate) fn selects_tests(&self) -> bool {
-        self.all_targets || self.test.is_some()
+        self.all_targets || !self.test.is_empty()
     }
 
     pub(crate) fn selects_dev_targets(&self) -> bool {
-        self.selects_tests() || self.examples || self.example.is_some() || self.bench.is_some()
+        self.selects_tests() || self.examples || !self.example.is_empty() || !self.bench.is_empty()
     }
 }
 
@@ -671,6 +671,7 @@ fn target_selection_arguments() -> [Arg; 8] {
         Arg::new(name)
             .long(name)
             .value_name("NAME")
+            .action(ArgAction::Append)
             .value_parser(NonEmptyStringValueParser::new())
     };
     [
@@ -690,11 +691,11 @@ fn target_selection(options: &ArgMatches) -> TargetSelection {
         all_targets: options.get_flag("all-targets"),
         lib: options.get_flag("lib"),
         bins: options.get_flag("bins"),
-        bin: options.get_one::<String>("bin").cloned(),
-        test: options.get_one::<String>("test").cloned(),
+        bin: values(options, "bin"),
+        test: values(options, "test"),
         examples: options.get_flag("examples"),
-        example: options.get_one::<String>("example").cloned(),
-        bench: options.get_one::<String>("bench").cloned(),
+        example: values(options, "example"),
+        bench: values(options, "bench"),
     }
 }
 
@@ -1617,12 +1618,42 @@ mod tests {
             else {
                 panic!("expected check");
             };
-            assert_eq!(options.targets.example.as_deref(), Some("demo"));
-            assert_eq!(options.targets.bench.as_deref(), Some("measure"));
+            assert_eq!(options.targets.example, ["demo"]);
+            assert_eq!(options.targets.bench, ["measure"]);
             for selector in ["--example", "--bench"] {
                 assert!(parse(&[command, selector]).is_err());
                 assert!(parse(&[command, selector, ""]).is_err());
             }
+        }
+    }
+
+    #[test]
+    fn check_targets_accept_repeated_names() {
+        for command in ["check", "clippy"] {
+            let Command::Check(options) = parse(&[
+                command,
+                "--bin",
+                "one",
+                "--bin=two",
+                "--test",
+                "first",
+                "--test=second",
+                "--example",
+                "demo",
+                "--example=library",
+                "--bench",
+                "a",
+                "--bench=b",
+            ])
+            .unwrap()
+            .command
+            else {
+                panic!("expected check");
+            };
+            assert_eq!(options.targets.bin, ["one", "two"]);
+            assert_eq!(options.targets.test, ["first", "second"]);
+            assert_eq!(options.targets.example, ["demo", "library"]);
+            assert_eq!(options.targets.bench, ["a", "b"]);
         }
     }
 
