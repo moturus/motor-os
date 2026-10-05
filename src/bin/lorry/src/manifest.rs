@@ -1828,9 +1828,7 @@ fn parse_integration_tests(
                 ));
             }
             let target_path = root.join(relative);
-            targets.retain(|_, target| {
-                target.path != target_path && target.name.replace('-', "_") != crate_name
-            });
+            targets.retain(|_, target| target.name.replace('-', "_") != crate_name);
             targets.insert(
                 name.clone(),
                 IntegrationTestTarget {
@@ -4371,6 +4369,43 @@ members = ["ignored-member"]
             manifest.integration_tests[0].path,
             root.join("tests/a-b.rs")
         );
+
+        let path = root.join("Cargo.toml");
+        let source = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("{source}\n[[test]]\nname = \"z\"\npath = \"tests/z.rs\"\n[[test]]\nname = \"extra\"\npath = \"tests/z.rs\"\n")).unwrap();
+        let manifest = Manifest::load(&root).unwrap();
+        let cargo = std::process::Command::new(env!("CARGO"))
+            .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
+            .env("CARGO_HOME", root.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            cargo.status.success(),
+            "{}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+        let cargo: serde_json::Value = serde_json::from_slice(&cargo.stdout).unwrap();
+        let cargo_tests = cargo["packages"][0]["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|target| target["kind"] == serde_json::json!(["test"]))
+            .map(|target| {
+                (
+                    target["name"].as_str().unwrap(),
+                    PathBuf::from(target["src_path"].as_str().unwrap()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let tests = manifest
+            .integration_tests
+            .iter()
+            .map(|target| (target.name.as_str(), target.path.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(tests.len(), 4);
+        assert_eq!(tests, cargo_tests);
 
         fs::write(root.join("tests/a_b.rs"), "").unwrap();
         assert!(Manifest::load(&root).is_err());

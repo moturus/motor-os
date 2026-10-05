@@ -2727,6 +2727,16 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+An expanded Cargo comparison exposed a preexisting integration-target parser bug:
+adding a differently named explicit test on the same source file removed the
+original test. Cargo retains both names. The mismatch is preserved in
+`/tmp/lorry-m8-repeated-check-targets-contract.log` and fixture
+`/tmp/lorry-workspace-test-jkeEWI`. Integration declarations now replace targets
+by name rather than source path, preserving distinct targets on a shared source.
+The focused parser regression compares names and paths with offline Cargo
+metadata and passes in `/tmp/lorry-m8-shared-integration-source-parser.log`.
+This fix is committed separately from repeated CLI selections.
+
 Check and Clippy now store target flags and names in a reusable CLI target
 selector with one argument definition and selection policy. This preserves
 existing command behavior while preparing the other compiler commands to share
