@@ -2727,6 +2727,17 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Build/check/test now expand named target globs over the selected members before
+planning and validation. Matching names are deduplicated; unmatched patterns
+fail explicitly. Plural/all-targets selectors retain Cargo precedence. Run
+continues to reject patterns. Pinned Cargo's unit generator treats glob matches
+as explicit selections, including required-feature checks. The expanded native
+and Motor target contract covers star, question-mark, character/negated classes,
+overlapping exact/pattern selections, build/test/check JSON and executable/archive
+identity, and unmatched patterns for all four target kinds. It and strict Clippy
+pass in `/tmp/lorry-m8-target-pattern-first-contract.log` and
+`/tmp/lorry-m8-target-pattern-clippy.log`.
+
 Run also supports executable examples through common Build-mode target selection
 and dev-feature resolution. It locates the executable in the retained compiler
 events, rejects library examples and duplicate matches, and rejects Run target

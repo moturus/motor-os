@@ -60,6 +60,14 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         cli.manifest_path.as_deref().map(Path::new),
         &cli.selection,
     )?;
+    let mut expanded_cli = cli.clone();
+    match &mut expanded_cli.command {
+        Command::Build(options) => options.targets.expand_patterns(&selected)?,
+        Command::Check(options) => options.targets.expand_patterns(&selected)?,
+        Command::Test(options) => options.build.targets.expand_patterns(&selected)?,
+        _ => {}
+    }
+    let cli = &expanded_cli;
     let ordinary = matches!(
         &cli.command,
         Command::Build(_) | Command::Check(_) | Command::Run(_)

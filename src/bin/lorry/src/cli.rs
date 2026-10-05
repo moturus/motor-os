@@ -168,6 +168,67 @@ pub struct TargetSelection {
 }
 
 impl TargetSelection {
+    pub(crate) fn expand_patterns(&mut self, members: &[crate::manifest::Manifest]) -> Result<()> {
+        if self.all_targets {
+            return Ok(());
+        }
+        for (kind, names, all) in [
+            ("bin", &mut self.bin, self.bins),
+            ("test", &mut self.test, self.tests),
+            ("example", &mut self.example, self.examples),
+            ("bench", &mut self.bench, self.benches),
+        ] {
+            if all || !names.iter().any(|name| name.contains(['*', '?', '[', ']'])) {
+                continue;
+            }
+            let available = members
+                .iter()
+                .flat_map(|member| match kind {
+                    "bin" => member
+                        .binaries
+                        .iter()
+                        .map(|target| target.name.as_str())
+                        .collect::<Vec<_>>(),
+                    "test" => member
+                        .integration_tests
+                        .iter()
+                        .map(|target| target.name.as_str())
+                        .collect(),
+                    _ => member
+                        .described_targets
+                        .iter()
+                        .filter(|target| target.kind == kind)
+                        .map(|target| target.name.as_str())
+                        .collect(),
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut expanded = std::collections::BTreeSet::new();
+            for name in std::mem::take(names) {
+                if !name.contains(['*', '?', '[', ']']) {
+                    expanded.insert(name);
+                    continue;
+                }
+                let pattern = crate::glob::Pattern::parse(&name).map_err(Error::failure)?;
+                let matching = available
+                    .iter()
+                    .filter(|target| pattern.matches(target))
+                    .collect::<Vec<_>>();
+                if matching.is_empty() {
+                    return Err(Error::failure(format!(
+                        "no {kind} target matches pattern `{name}`"
+                    ))
+                    .with_help(format!(
+                        "available {kind} targets: {}",
+                        available.iter().copied().collect::<Vec<_>>().join(", ")
+                    )));
+                }
+                expanded.extend(matching.into_iter().map(|target| (*target).to_owned()));
+            }
+            *names = expanded.into_iter().collect();
+        }
+        Ok(())
+    }
+
     pub(crate) fn single_binary(&self) -> Option<&str> {
         if self.bin.len() == 1 && !self.lib && !self.bins && !self.selects_dev_targets() {
             Some(&self.bin[0])

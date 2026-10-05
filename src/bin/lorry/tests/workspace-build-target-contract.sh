@@ -62,14 +62,18 @@ cd "$WORK/project"
 for platform in native motor; do
     target=()
     if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); fi
-    for selection in lib bins tests examples benches named repeated all groups release-library; do
+    for selection in lib bins tests examples benches named repeated patterns overlap all groups release-library; do
         args=(--workspace "--$selection")
         if [ "$selection" = named ]; then args=(--workspace --example library); fi
         if [ "$selection" = release-library ]; then args=(--workspace --example library --release); fi
         if [ "$selection" = repeated ]; then args=(--workspace --bin a --bin b --test first --test second --example demo --example library --bench first --bench second); fi
+        if [ "$selection" = patterns ]; then args=(--workspace --bin '[ab]' --test 'f*' --test 's?cond' --example 'd*' --example 'libra[!x]y' --bench '*'); fi
+        if [ "$selection" = overlap ]; then args=(--workspace --bin 'a*' --bin a --test 'first*' --test first --example 'demo*' --example demo --bench 'second*' --bench second); fi
         if [ "$selection" = all ]; then args=(--workspace --all-targets); fi
         if [ "$selection" = groups ]; then args=(--workspace --lib --bins --tests --examples --benches --bin missing --test missing --example missing --bench missing); fi
-        for command in build test; do
+        commands=(build test)
+        if [ "$selection" = patterns ] || [ "$selection" = overlap ]; then commands+=(check); fi
+        for command in "${commands[@]}"; do
         execution=()
         if [ "$command" = test ]; then execution=(--no-run); fi
         env HOME="$WORK/home" "$LORRY" "$command" "${execution[@]}" "${args[@]}" "${target[@]}" --message-format=json >"$WORK/lorry.json"
@@ -122,6 +126,17 @@ for key, actual in lorry.items():
                 else:
                     assert archive(a[0]) == archive(b[0]), (key, extension)
 PY
+        done
+    done
+done
+for command in build check test; do
+    for kind in bin test example bench; do
+        for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+            if env HOME="$WORK/home" "$builder" "$command" --workspace "--$kind" 'missing-*' --offline >"$WORK/missing.out" 2>"$WORK/missing.err"; then
+                echo "unmatched target pattern succeeded: $builder $command $kind" >&2
+                exit 1
+            fi
+            rg -F 'matches pattern `missing-*`' "$WORK/missing.err"
         done
     done
 done

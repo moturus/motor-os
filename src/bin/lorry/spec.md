@@ -323,6 +323,10 @@ root compilation, freshness validation, and artifact publication.
   `--`. As with Cargo, `--no-run` accepts those arguments without running a harness.
 - `test --test NAME` selects matching integration tests across selected
   packages and their required library/program graph.
+- Named binary/test/example/bench selectors for build/check/test accept Cargo
+  glob patterns across the selected members. Each pattern must match a target;
+  overlaps are compiled once. Plural groups and all-targets take precedence
+  over names and patterns for the corresponding target kinds.
 - Ordinary `test --no-run` builds separate harnesses and prints deterministic
   paths. `test --bundle --no-run` builds one bundle for each selected package
   with enabled harnesses and prints its path in package order.
