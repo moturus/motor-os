@@ -6,7 +6,7 @@ parameters = "parameters.json"
 display = "{command}"
 
 [motor]
-description = "Run a rush command; directory and exports persist within this session. Use rg instead of grep; sysbox has head, tail, diff, find, wc, cat, and less (no tail -f). Use gix instead of git; sed is on the developer image. For missing commands use sed or rg -o/-r for awk, : > FILE for touch, shell parameter expansion for basename or dirname, redirection for tee, the tool timeout for timeout, and a fixed path under /user/tmp for mktemp. Commands are not sandboxed."
+description = "Run a rush command; directory and exports persist within this session. Use rg instead of grep; sysbox has head, tail, diff, find, wc, cat, less (no tail -f), and mkdir -p. Use gix instead of git; sed is on the developer image. For missing commands use sed or rg -o/-r for awk, : > FILE for touch, shell parameter expansion for basename or dirname, redirection for tee, the tool timeout for timeout, and a fixed path under /user/tmp for mktemp. Commands are not sandboxed."
 
 [process]
 timeout_seconds = 120

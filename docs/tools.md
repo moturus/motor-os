@@ -63,6 +63,9 @@ The shell is somewhat barebones now (contributions are welcome!).
 - `ls /system/bin` and `ls /user/bin` show the standard commands; the
   development image also places `/devtools/bin` on `PATH`;
 - `free`, `kill`, `ping`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
+- `mkdir [-p | --parents] [--] DIRECTORY...` creates directories. With `-p`,
+  it creates missing parents and accepts directories that already exist;
+  files blocking a directory are errors. Other creation flags are refused;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
   numeric IPv4 and IPv6 addresses, `localhost`, and DNS names;
 - `head [-n [-]NUM | -c [-]NUM] [-q | -v] [-z] [FILE]...` prints the first 10

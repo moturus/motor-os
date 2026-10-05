@@ -55,6 +55,7 @@ mod sysbox_find;
 mod sysbox_head;
 mod sysbox_less;
 mod sysbox_ls;
+mod sysbox_mkdir;
 mod sysbox_tail;
 mod sysbox_wc;
 mod sysbox_which;
@@ -1399,6 +1400,10 @@ fn main() {
         vsock_outgoing::run(&args[2..]);
         return;
     }
+    if args.len() == 2 && args[1] == "test-sysbox-mkdir" {
+        sysbox_mkdir::run_test();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-disconnect-before-rx-ready" {
         tcp::test_disconnect_before_rx_ready_releases_channels();
         return;
@@ -1768,6 +1773,7 @@ fn main() {
     sysbox_head::run_test();
     sysbox_less::run_test();
     sysbox_ls::run_test();
+    sysbox_mkdir::run_test();
     sysbox_tail::run_test();
     sysbox_wc::run_test();
     sysbox_which::run_test();
