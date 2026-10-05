@@ -26,6 +26,7 @@ impl Scripted {
             call("session_search", json!({"query": label})),
             call("write_file", json!({"path": "notes/a file*", "content": "literal fixture\n"})),
             call("patch", json!({"path": "src/lib.rs", "old_text": "== 3", "new_text": "== 2"})),
+            call("memory", json!({"action": "add", "target": "workspace", "text": "The fixture uses a compile-time assertion.", "kind": "inferred"})),
             call("check", json!({})), answer("repaired and checked"),
             call("todo", json!({"items": [{"id": "compile", "text": "Repair and compile the crate", "status": "completed"}]})),
             answer("task list updated"),
@@ -80,6 +81,19 @@ fn answer(text: &str) -> Completion {
 #[derive(Default)]
 pub struct Approvals(pub Vec<Permission>);
 impl Approver for Approvals {
+    fn answer(&mut self, question: &gears::hooks::Question) -> Result<Option<String>, String> {
+        if question
+            .choices
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>()
+            != ["approve", "deny", "postpone"]
+        {
+            return Err("unexpected workflow question".into());
+        }
+        Ok(Some("postpone".into()))
+    }
+
     fn approve(&mut self, permission: &Permission) -> Approval {
         self.0.push(permission.clone());
         Approval::Once

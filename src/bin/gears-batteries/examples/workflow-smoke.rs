@@ -35,9 +35,14 @@ fn run() -> Result<(), String> {
         fixture.workspace.display()
     );
     let mut approvals = scenario::Approvals::default();
+    let mut memory_notices = 0;
     let mut observer = |event| {
         if let Event::Notice(text) = event {
-            return Err(format!("unexpected workflow notice: {text}"));
+            let prefix = format!("hook {}: Memory proposal ", fixture.hook);
+            if text.starts_with(&prefix) && (text.contains("\"text\": \"The fixture uses a compile-time assertion.\"")
+                || text.ends_with("postponed; still pending. Approval admits future use and does not prove usefulness.")) {
+                memory_notices += 1;
+            } else { return Err(format!("unexpected workflow notice: {text}")); }
         }
         Ok(())
     };
@@ -83,7 +88,7 @@ fn run() -> Result<(), String> {
             recorded.execution_errors,
             recorded.checks.len()
         ),
-        (7, 0, 1)
+        (8, 0, 1)
     );
     assert_eq!(recorded.checks[0]["passed"], true);
     assert!(
@@ -92,6 +97,7 @@ fn run() -> Result<(), String> {
             .contains(std::path::Path::new("src/lib.rs"))
     );
     runtime.turn("update task list".into(), &mut approvals, &mut observer)?;
+    assert_eq!(memory_notices, 2);
     let selected = runtime
         .session()
         .entries()
@@ -140,7 +146,27 @@ fn run() -> Result<(), String> {
         3
     );
     let requests = provider.requests.lock().unwrap();
-    assert_eq!(requests.len(), 16);
+    assert_eq!(requests.len(), 17);
+    let pending = gears_batteries::pending::list(
+        &context,
+        gears_batteries::memory_format::Target::Workspace,
+    )?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].1.source.session, sessions[0]);
+    assert!(pending[0].1.source.entries.iter().all(|id| {
+        gears::session::read_snapshot(&group.join(format!("{}.jsonl", sessions[0])))
+            .unwrap()
+            .entries()
+            .iter()
+            .any(|entry| entry.id == *id)
+    }));
+    assert!(!fixture.workspace.join(".gears/MEMORY.md").exists());
+    assert!(requests.iter().any(|request| {
+        request
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("postponed; still pending"))
+    }));
     let reminders = requests
         .last()
         .unwrap()
