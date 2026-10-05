@@ -15,6 +15,7 @@ pub mod memory;
 pub mod memory_config;
 pub mod memory_context;
 pub mod memory_format;
+pub mod memory_history;
 pub mod memory_question;
 pub mod memory_snapshot;
 pub mod memory_tool;
