@@ -62,8 +62,10 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     )?;
     let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
     let shared_tests = matches!(&cli.command, Command::Test(_));
+    let shared_auxiliary_builds = matches!(&cli.command, Command::Build(options) if options.targets.has_target_selector() && options.targets.single_binary().is_none());
     let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.targets.selects_dev_targets() || options.targets.bin.len() > 1);
     let shared = shared_tests
+        || shared_auxiliary_builds
         || shared_test_checks
         || ordinary
             && (selected.len() > 1
@@ -107,9 +109,14 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             ));
         }
     }
-    if let Command::Check(options) = &cli.command
-        && options.targets.lib
-        && !options.targets.all_targets
+    let requested_targets = match &cli.command {
+        Command::Check(options) => Some(&options.targets),
+        Command::Build(options) => Some(&options.targets),
+        _ => None,
+    };
+    if let Some(targets) = requested_targets
+        && targets.lib
+        && !targets.all_targets
         && selected.iter().all(|member| member.library.is_none())
     {
         return Err(Error::failure(format!(
@@ -117,16 +124,16 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             manifest.name
         )));
     }
-    if let Command::Check(options) = &cli.command
-        && !options.targets.all_targets
+    if let Some(targets) = requested_targets
+        && !targets.all_targets
     {
-        if !options.targets.bins {
-            for name in &options.targets.bin {
+        if !targets.bins {
+            for name in &targets.bin {
                 validate_member_binary_selection(&selected, Some(name))?;
             }
         }
-        if !options.targets.tests {
-            for name in &options.targets.test {
+        if !targets.tests {
+            for name in &targets.test {
                 if !selected.iter().any(|member| {
                     member
                         .integration_tests
@@ -225,14 +232,14 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         manifest.require_profile(release, matches!(cli.command, Command::Test(_)))?;
     }
     let binary_selection = match &cli.command {
-        Command::Build(options) => {
-            validate_member_binary_selection(&selected, options.bin.as_deref())?
-        }
-        Command::Check(_) | Command::Run(_) | Command::Test(_) => None,
-        _ => unreachable!(),
+        Command::Build(options) => options.targets.single_binary(),
+        _ => None,
     };
     let run_binary = match &cli.command {
-        Command::Run(options) => Some(select_run_binary(&manifest, options.build.bin.as_deref())?),
+        Command::Run(options) => Some(select_run_binary(
+            &manifest,
+            options.build.targets.bin.first().map(String::as_str),
+        )?),
         _ => None,
     };
     let physical_target = config.selected_target(command_target)?;
@@ -345,7 +352,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 &workspace,
                 &selected.iter().map(|member| member.root.clone()).collect(),
                 &cli.features,
-                shared_tests || shared_test_checks,
+                shared_tests || shared_test_checks || matches!(&cli.command, Command::Build(options) if options.targets.selects_dev_targets()),
             )
         })
         .transpose()?;
@@ -440,6 +447,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         Command::Build(options) => {
             build_inner(
                 Build {
+                    target_selection: Some(&options.targets),
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
@@ -475,6 +483,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         }
         Command::Check(options) => check(
             Build {
+                target_selection: None,
                 target_root: Some(&target_root),
                 child_lease_fd: artifact_lock.child_lease_fd(),
                 manifest: &manifest,
@@ -509,6 +518,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         Command::Run(options) => {
             let artifacts = build_reported(
                 Build {
+                    target_selection: None,
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
@@ -571,6 +581,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             }
             let outcome = build_inner(
                 Build {
+                    target_selection: None,
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
@@ -749,6 +760,7 @@ struct Build<'a> {
     ordinary_freshness_base: Option<[u8; 32]>,
     /// `None` builds every binary; `Some` builds exactly that target.
     binary_selection: Option<&'a str>,
+    target_selection: Option<&'a crate::cli::TargetSelection>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1216,6 +1228,16 @@ fn build_inner(
                     "workspace test targets are not yet supported",
                 ));
             }
+            if let Some(targets) = build.target_selection
+                && targets.has_target_selector()
+            {
+                return prepared.workspace_compiler_targets(
+                    &options,
+                    &selected_packages,
+                    targets,
+                    crate::unit::UnitMode::Build,
+                );
+            }
             prepared.workspace_plan(
                 &options,
                 &selected_packages,
@@ -1398,7 +1420,10 @@ fn build_inner(
     }
     let layout_for_package =
         |package: &PackageKey| bundle_layouts.get(package).or(bundle_layout.as_ref());
-    let selected_integration = build.test
+    let selected_integration = (build.test
+        || build.target_selection.is_some_and(|targets| {
+            targets.selects_tests() || targets.benches || !targets.bench.is_empty()
+        }))
         && (build.test_name.is_some()
             || build
                 .members
@@ -1685,7 +1710,7 @@ fn build_inner(
     let needs_normal_plan =
         !build.test || (selected_integration && !build.manifest.binaries.is_empty());
     let normal = if needs_normal_plan || selected_integration {
-        let plan = if selected_integration {
+        let plan = if selected_integration && build.test {
             if let Some(name) = build.test_name
                 && !build
                     .manifest
@@ -1804,7 +1829,7 @@ fn build_inner(
         )?)?;
         crate::trace::event("revalidated dependency sources");
     }
-    let mut compiled = if selected_integration {
+    let mut compiled = if selected_integration && build.test {
         let (plan, outputs) = normal
             .as_ref()
             .ok_or_else(|| Error::failure("integration test has no compilation plan"))?;
@@ -3020,18 +3045,42 @@ fn compile_root_targets(
             library_paths: Vec::new(),
         });
     }
-    let library = library.ok_or_else(|| {
-        Error::failure(format!(
-            "package `{}` has no supported root target",
-            manifest.name
-        ))
-    })?;
+    let (primary, dep_info) = if let Some(library) = library {
+        (library.extern_path.clone(), library.dep_info.clone())
+    } else {
+        let output = plan
+            .order
+            .iter()
+            .filter(|key| selected.contains(&key.package))
+            .find_map(|key| {
+                outputs
+                    .artifacts
+                    .get(key)
+                    .filter(|_| key.kind != UnitKind::BuildScriptCompile)
+            })
+            .ok_or_else(|| {
+                Error::failure(format!(
+                    "package `{}` has no supported root target",
+                    manifest.name
+                ))
+            })?;
+        let primary = match output {
+            crate::compile::RustcOutput::Binary { executable, .. } => executable,
+            crate::compile::RustcOutput::StaticLibrary { archive, .. } => archive,
+            crate::compile::RustcOutput::Library { rlib, .. } => rlib,
+            crate::compile::RustcOutput::ProcMacro {
+                dynamic_library, ..
+            } => dynamic_library,
+            _ => return Err(Error::failure("build produced no linked target artifact")),
+        };
+        (primary.clone(), output.dep_info().to_owned())
+    };
     Ok(StagedArtifacts {
-        primary: library.extern_path.clone(),
+        primary,
         binaries,
         harnesses: Vec::new(),
         bundle: None,
-        dep_info: vec![library.dep_info.clone()],
+        dep_info: vec![dep_info],
         script_inputs: Vec::new(),
         messages: Vec::new(),
         library_paths: Vec::new(),
@@ -3655,6 +3704,7 @@ mod tests {
         let build_once = |check_options| {
             build_inner(
                 Build {
+                    target_selection: None,
                     manifest,
                     members: Some(&members),
                     target_root: Some(&target_root),
@@ -4090,6 +4140,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let build_once = || {
             build(Build {
+                target_selection: None,
                 target_root: None,
                 child_lease_fd: None,
                 manifest: &manifest,
@@ -4217,6 +4268,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifact = build(Build {
+            target_selection: None,
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
@@ -4269,6 +4321,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let build_with = |binary_selection| {
             build(Build {
+                target_selection: None,
                 target_root: None,
                 child_lease_fd: None,
                 manifest: &manifest,
@@ -4332,6 +4385,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
+            target_selection: None,
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
@@ -4378,6 +4432,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
+            target_selection: None,
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
@@ -4448,6 +4503,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let build_once = || {
             build(Build {
+                target_selection: None,
                 target_root: None,
                 child_lease_fd: None,
                 manifest: &manifest,
@@ -4551,6 +4607,7 @@ mod tests {
         let build_once = |jobs, format| {
             build_reported(
                 Build {
+                    target_selection: None,
                     target_root: None,
                     child_lease_fd: None,
                     manifest: &manifest,
@@ -4713,6 +4770,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let build_once = || {
             build(Build {
+                target_selection: None,
                 target_root: None,
                 child_lease_fd: None,
                 manifest: &manifest,
@@ -4826,6 +4884,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let build_bundle = || {
             build(Build {
+                target_selection: None,
                 target_root: None,
                 child_lease_fd: None,
                 manifest: &manifest,
@@ -4970,6 +5029,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let artifacts = build(Build {
+            target_selection: None,
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
@@ -5015,6 +5075,7 @@ mod tests {
         );
 
         let bundled = build(Build {
+            target_selection: None,
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,
@@ -5097,6 +5158,7 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let error = build(Build {
+            target_selection: None,
             target_root: None,
             child_lease_fd: None,
             manifest: &manifest,

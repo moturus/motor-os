@@ -80,7 +80,7 @@ pub struct BuildOptions {
     pub keep_going: bool,
     pub target: Option<String>,
     pub target_dir: Option<String>,
-    pub bin: Option<String>,
+    pub targets: TargetSelection,
     pub validation: ValidationMode,
     pub message_format: MessageFormat,
     pub jobs: Option<Jobs>,
@@ -168,6 +168,14 @@ pub struct TargetSelection {
 }
 
 impl TargetSelection {
+    pub(crate) fn single_binary(&self) -> Option<&str> {
+        if self.bin.len() == 1 && !self.lib && !self.bins && !self.selects_dev_targets() {
+            Some(&self.bin[0])
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn has_target_selector(&self) -> bool {
         self.all_targets
             || self.lib
@@ -697,16 +705,24 @@ fn target_selection_arguments() -> [Arg; 10] {
 }
 
 fn target_selection(options: &ArgMatches) -> TargetSelection {
+    let flag = |name| {
+        options
+            .try_get_one::<bool>(name)
+            .ok()
+            .flatten()
+            .copied()
+            .unwrap_or(false)
+    };
     TargetSelection {
-        all_targets: options.get_flag("all-targets"),
-        lib: options.get_flag("lib"),
-        bins: options.get_flag("bins"),
+        all_targets: flag("all-targets"),
+        lib: flag("lib"),
+        bins: flag("bins"),
         bin: values(options, "bin"),
-        tests: options.get_flag("tests"),
+        tests: flag("tests"),
         test: values(options, "test"),
-        examples: options.get_flag("examples"),
+        examples: flag("examples"),
         example: values(options, "example"),
-        benches: options.get_flag("benches"),
+        benches: flag("benches"),
         bench: values(options, "bench"),
     }
 }
@@ -905,6 +921,9 @@ fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
         command.args(workspace_selection_arguments())
     };
     if supports_bin {
+        if name == "build" {
+            return command.args(target_selection_arguments());
+        }
         command.arg(
             Arg::new("bin")
                 .long("bin")
@@ -1155,7 +1174,7 @@ fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOption
             .unwrap_or(false),
         target: matches.get_one::<String>("target").cloned(),
         target_dir: matches.get_one::<String>("target-dir").cloned(),
-        bin: matches.try_get_one::<String>("bin").ok().flatten().cloned(),
+        targets: target_selection(matches),
         message_format: message_format(matches),
         jobs: matches.try_get_one::<Jobs>("jobs").ok().flatten().copied(),
         validation: if supports_validation && matches.get_flag("strict-validation") {
@@ -1168,7 +1187,9 @@ fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOption
 
 fn values(matches: &ArgMatches, name: &str) -> Vec<String> {
     matches
-        .get_many::<String>(name)
+        .try_get_many::<String>(name)
+        .ok()
+        .flatten()
         .map(|values| values.cloned().collect())
         .unwrap_or_default()
 }
@@ -1248,7 +1269,10 @@ mod tests {
                 keep_going: false,
                 target: Some("x86_64-unknown-motor".to_owned()),
                 target_dir: None,
-                bin: Some("server".to_owned()),
+                targets: TargetSelection {
+                    bin: vec!["server".to_owned()],
+                    ..Default::default()
+                },
                 validation: ValidationMode::Strict,
                 message_format: MessageFormat::Human,
                 jobs: None,
@@ -1373,7 +1397,7 @@ mod tests {
                     keep_going: false,
                     target: Some("x86_64-unknown-motor".to_owned()),
                     target_dir: Some("/tmp/editor-target".to_owned()),
-                    bin: None,
+                    targets: TargetSelection::default(),
                     validation: ValidationMode::Trusted,
                     message_format: MessageFormat::Human,
                     jobs: None,
@@ -1637,6 +1661,44 @@ mod tests {
                 assert!(parse(&[command, selector, ""]).is_err());
             }
         }
+    }
+
+    #[test]
+    fn build_uses_common_repeated_and_plural_target_selectors() {
+        let Command::Build(options) = parse(&[
+            "build",
+            "--lib",
+            "--bin",
+            "one",
+            "--bin",
+            "two",
+            "--tests",
+            "--test",
+            "integration",
+            "--examples",
+            "--example",
+            "demo",
+            "--benches",
+            "--bench",
+            "measure",
+            "--all-targets",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected build")
+        };
+        assert!(
+            options.targets.lib
+                && options.targets.all_targets
+                && options.targets.tests
+                && options.targets.examples
+                && options.targets.benches
+        );
+        assert_eq!(options.targets.bin, ["one", "two"]);
+        assert_eq!(options.targets.test, ["integration"]);
+        assert_eq!(options.targets.example, ["demo"]);
+        assert_eq!(options.targets.bench, ["measure"]);
     }
 
     #[test]

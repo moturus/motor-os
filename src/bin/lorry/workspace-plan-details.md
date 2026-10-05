@@ -2727,6 +2727,34 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Build now exposes common target flags, plural groups, repeated names, and
+all-targets precedence. Harness groups compile without execution, and auxiliary
+outputs are named in JSON. Exact single-bin selections retain the existing
+completed-profile path. The compact native/Motor contract compares JSON,
+executable bytes, every auxiliary archive member, and exact release archive
+bytes. It also exercises a legal dev cycle. Focused parser tests, the contract,
+completed-profile reuse, and strict Clippy pass in
+`/tmp/lorry-m8-build-targets-final-parser.log`,
+`/tmp/lorry-m8-build-targets-final-contract.log`,
+`/tmp/lorry-m8-build-targets-cache-contract.log`, and
+`/tmp/lorry-m8-build-targets-final-clippy.log`.
+
+The first tests-group failure used the legacy single-package planner; the fix
+limits both legacy integration branches to test commands. The initial example
+uplift lacked its directory; stable example publication and clean are a separate
+follow-up. Those failures remain in
+`/tmp/lorry-m8-build-targets-first-contract.log` and
+`/tmp/lorry-m8-build-targets-workspace-route-contract.log`. An archive comparison
+then encountered shared Cargo output names and the already documented random
+incremental object suffix. The collision-free fixture still reproduced the
+suffix; extracted object bytes, DWARF, and rmeta matched exactly. Pinned rustc
+`rustc_interface::util` creates that random suffix whenever incremental is on.
+Debug archive comparisons normalize only its names and the rmeta-link string
+table references; release keeps exact full archive comparisons. Original logs
+are `/tmp/lorry-m8-build-targets-example-directory-contract.log` and
+`/tmp/lorry-m8-build-targets-distinct-output-contract.log`; extracted evidence
+is `/tmp/lorry-m8-libexample-{cargo,lorry}-objects/`.
+
 The common compiler-target planner now retains ordinary build harnesses and
 their program dependencies as well as the existing check graph projection.
 Build/check all-targets graphs agree with Cargo on units, edges, features, and

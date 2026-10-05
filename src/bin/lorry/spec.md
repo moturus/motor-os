@@ -488,7 +488,13 @@ The inert `[badges]` table is accepted in selected packages too.
 Dependency manifests may describe up to 1,024 integration-test targets;
 these targets are not built when that package is only a dependency.
 
-`build` builds all binaries unless one exact `--bin NAME` is selected. `run`
+`build` defaults to libraries and binaries. It shares check's target selectors:
+`--lib`, `--bins`, `--tests`, `--examples`, `--benches`, `--all-targets`, and repeated
+named `--bin`, `--test`, `--example`, and `--bench` selections. Plural groups and
+all-targets override corresponding named filters. Test/benchmark groups compile
+harnesses without running them. Development dependencies use the shared graph.
+Auxiliary outputs are published in their unit directories and named in JSON.
+A single exact `--bin` retains the completed-profile fast path where applicable. `run`
 selects an explicit `--bin`, then `package.default-run`, then a sole binary;
 an unknown or ambiguous selection fails. `test` builds every enabled binary
 harness and defines `CARGO_BIN_EXE_<name>` for every program while compiling

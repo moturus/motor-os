@@ -81,7 +81,8 @@ marked for those groups. `check --examples` checks binary, `lib`,
 `rlib`, and `staticlib` examples with their dev-dependencies. Named `--example NAME` and `--bench NAME`
 checks also select targets across the chosen members. Named check target selectors can be repeated; `--all-targets` selects everything
 and takes precedence over named check filters. Example/benchmark
-build/test/run selectors remain deferred. Default tests compile enabled examples,
+build selectors use the same target groups and repeated names, compiling harnesses
+without running them. Example/benchmark test/run selectors remain deferred. Default tests compile enabled examples,
 run examples and benchmarks marked `test = true`, and include those test targets
 in member bundles. Ordinary build/check accepts
 root dev-dependencies without activating their features.
@@ -102,7 +103,9 @@ It leaves the workspace manifest and lockfile unchanged.
 ## Build, run, and test
 
 ```text
-lorry build [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation]
+lorry build [--release|-r] [--target TRIPLE] [--strict-validation]
+            [--lib|--bins|--tests|--examples|--benches|--all-targets]
+            [--bin NAME] [--test NAME] [--example NAME] [--bench NAME]
              [--keep-going]
 lorry run   [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]
 lorry test  [NAME] [--release|-r] [--target TRIPLE] [--strict-validation]
