@@ -1735,7 +1735,7 @@ fn build_inner(
         }
         drop(prepared);
         if build.verbosity != Verbosity::Quiet {
-            eprintln!("Finished `check` profile");
+            eprintln!("Finished `{}` profile", active_profile_name(&build));
         }
         return Ok(BuildOutcome::Check(0));
     }
@@ -1875,7 +1875,7 @@ fn build_inner(
             });
         }
         if build.verbosity != Verbosity::Quiet {
-            eprintln!("Finished `test` profile");
+            eprintln!("Finished `{}` profile", active_profile_name(&build));
         }
         return Ok(BuildOutcome::Tests(tests));
     }
@@ -1920,10 +1920,7 @@ fn build_inner(
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
         if plan.units.is_empty() && !build.test {
             if build.verbosity != Verbosity::Quiet {
-                eprintln!(
-                    "Finished `{}` profile",
-                    if build.release { "release" } else { "dev" }
-                );
+                eprintln!("Finished `{}` profile", active_profile_name(&build));
             }
             return Ok(BuildOutcome::NoTargets);
         }
@@ -2105,15 +2102,25 @@ fn build_inner(
 
 fn finish_build(build: &Build<'_>, artifacts: &BuildArtifacts) -> Result<()> {
     report_finished(
-        build
-            .manifest
-            .profile_name
-            .as_deref()
-            .unwrap_or(if build.release { "release" } else { "dev" }),
+        active_profile_name(build),
         build.verbosity,
         build.validation,
         artifacts,
     )
+}
+
+fn active_profile_name<'a>(build: &'a Build<'_>) -> &'a str {
+    build
+        .manifest
+        .profile_name
+        .as_deref()
+        .unwrap_or(if build.release {
+            "release"
+        } else if build.test {
+            "test"
+        } else {
+            "dev"
+        })
 }
 
 fn runtime_library_paths(

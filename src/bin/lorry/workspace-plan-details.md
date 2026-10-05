@@ -3555,6 +3555,18 @@ proved version-4 migration with unchanged lock bytes, and compiled every Motor
 test harness successfully in
 `/tmp/lorry-m8-native-legacy-admission-migration-diagnosis.log`.
 
+The profile audit confirmed two Lorry defects against the pinned Cargo:
+named check/test completion messages used command names, and test/bench panic
+settings bypassed value/type validation before being ignored. Lorry now names
+the active profile on every completion path and validates ignored panic values.
+Original paired human-output evidence is in
+`/tmp/lorry-m8-named-profile-isolated-human-diagnosis.log`; the invalid-panic
+fixture is `/tmp/lorry-m8-ignored-panic-diagnosis-ynh_s3nz` (the final isolated
+cases show Lorry succeeding and Cargo rejecting both an unknown value and a
+boolean). Three profile unit tests, the complete paired native/Motor profile
+contract with completion-label and negative-panic assertions, and strict Clippy
+pass in `/tmp/lorry-m8-profile-label-panic-{unit,contract,clippy}.log`.
+
 ## Milestone 9: editor integration and native acceptance
 
 **Result.** rust-analyzer works on a workspace as it does under Cargo. The

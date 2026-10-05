@@ -171,9 +171,15 @@ EOF
         comparison=differential-script-clean-messages
         if [ "$command" = check ]; then comparison=differential-script-clean-check-messages; fi
         env HOME="$WORK/home" "${profile_environment[@]}" "$LORRY" "$command" "${execution[@]}" "${mode[@]}" --workspace -j1 "${target[@]}" \
-            --message-format=json >"$WORK/lorry-$strip-$platform.json"
+            --message-format=json >"$WORK/lorry-$strip-$platform.json" 2>"$WORK/lorry-profile.err"
         env "${profile_environment[@]}" "$LORRY_TEST_CARGO" "$command" "${execution[@]}" "${mode[@]}" --workspace -j1 "${target[@]}" --offline \
-            --message-format=json >"$WORK/cargo-$strip-$platform.json"
+            --message-format=json >"$WORK/cargo-$strip-$platform.json" 2>"$WORK/cargo-profile.err"
+        profile_name=dev
+        if [ "${mode[0]:-}" = --release ]; then profile_name=release; fi
+        if [ "${mode[0]:-}" = --profile ]; then profile_name="${mode[1]}"; fi
+        for builder in lorry cargo; do
+            rg -F "Finished \`$profile_name\` profile" "$WORK/$builder-profile.err" >/dev/null
+        done
         if [ "$command" = build ]; then cmp "target/$profile/app" "target/lorry/$profile/app"; fi
         if [ "$command" = test ]; then
             python3 - "$WORK/lorry-$strip-$platform.json" "$WORK/cargo-$strip-$platform.json" <<'PY'
@@ -197,6 +203,18 @@ PY
         fi
     done
 done
+for ignored_profile in test bench; do
+    for invalid_panic in '"bogus"' true; do
+        cp "$WORK/manifest.toml" Cargo.toml
+        printf '\n[profile.%s]\npanic = %s\n' "$ignored_profile" "$invalid_panic" >>Cargo.toml
+        for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+            if env HOME="$WORK/home" "$builder" build --profile "$ignored_profile" --workspace --offline \
+                >"$WORK/invalid-panic.out" 2>"$WORK/invalid-panic.err"; then exit 1; fi
+            rg -F 'panic' "$WORK/invalid-panic.err" >/dev/null
+        done
+    done
+done
+cp "$WORK/manifest.toml" Cargo.toml
 if env HOME="$WORK/home" CARGO_PROFILE_DEV_RPATH=true "$LORRY" check --workspace 2>"$WORK/unsupported.err"; then exit 1; fi
 rg -F 'unsupported selected profile environment variable `CARGO_PROFILE_DEV_RPATH`' "$WORK/unsupported.err"
 for builder in "$LORRY" "$LORRY_TEST_CARGO"; do

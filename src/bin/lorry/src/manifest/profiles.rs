@@ -123,6 +123,12 @@ impl SelectedProfile {
                     continue;
                 }
                 if key == "panic" && matches!(profile.as_str(), "test" | "bench") {
+                    super::parse_panic_abort(
+                        path,
+                        document,
+                        &table,
+                        &format!("profile.{profile}"),
+                    )?;
                     warnings.push(format!(
                         "`panic` setting is ignored for `{profile}` profile"
                     ));
@@ -328,6 +334,17 @@ mod tests {
             );
         }
         assert!(parse("[profile.unused]\nrpath = true", "dev").is_ok());
+        for name in ["test", "bench"] {
+            for value in ["'invalid'", "true", "1"] {
+                assert!(
+                    parse(&format!("[profile.{name}]\npanic = {value}"), name)
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains(&format!("profile.{name}.panic"))
+                );
+            }
+        }
         assert!(parse("", "../escape").is_err());
     }
 }
