@@ -77,6 +77,7 @@ echo "== Release Lorry and offline review contract =="
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$RUSTC" "$CARGO" build \
     --manifest-path "$LORRY_DIR/Cargo.toml" --locked --offline --release
 LORRY="$LORRY_DIR/target/release/lorry"
+bash "$SCRIPT_DIR/dependency-defaults-contract.sh" "$LORRY"
 "$SCRIPT_DIR/review-contract.sh" "$LORRY"
 "$SCRIPT_DIR/git-patch-contract.sh" "$LORRY"
 

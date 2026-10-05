@@ -60,7 +60,7 @@ pub(super) fn dependency(
     for (key, value) in member.entries() {
         if !matches!(
             key,
-            "workspace" | "features" | "optional" | "default-features"
+            "workspace" | "features" | "optional" | "default-features" | "default_features"
         ) {
             return Err(Error::at(
                 path,
@@ -107,11 +107,19 @@ pub(super) fn dependency(
     )?;
     // Edition 2024 permits disabling inherited defaults. Older editions keep
     // the workspace defaults and report Cargo's compatibility warning.
-    if let Some(defaults) = lookup_bool(path, document, member, alias, "default-features")? {
+    // Cargo folds member aliases into the canonical field before validating
+    // the merged dependency; the root declaration keeps its edition checks.
+    let modern = lookup_bool(path, document, member, alias, "default-features")?;
+    let legacy = lookup_bool(path, document, member, alias, "default_features")?;
+    if let Some(defaults) = modern.or(legacy) {
         if fields.edition != Edition::E2024 && !defaults && dependency.default_features {
             let specified = match item {
-                Item::Table(table) => table.contains_key("default-features"),
-                Item::Value(Value::InlineTable(table)) => table.contains_key("default-features"),
+                Item::Table(table) => {
+                    table.contains_key("default-features") || table.contains_key("default_features")
+                }
+                Item::Value(Value::InlineTable(table)) => {
+                    table.contains_key("default-features") || table.contains_key("default_features")
+                }
                 _ => false,
             };
             fields.warnings.push(format!(

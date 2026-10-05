@@ -3572,6 +3572,14 @@ pass in `/tmp/lorry-m8-profile-label-panic-{unit,contract,clippy}.log`.
 **Result.** rust-analyzer works on a workspace as it does under Cargo. The
 acceptance cases in the plan pass on Motor.
 
+The combined milestone-8/editor gate passed in 1,154 seconds, preserved in
+`/tmp/lorry-m8-m9-workspace-editor-full-gate.log`: 471 Rust tests, three own-message
+tests, all dedicated contracts, Cargo native/Motor byte comparisons, native
+self-build and cross/native workspace identity, tests/bundles, Clippy, and
+interrupted-child recovery. All three actual native editor cases passed.
+Host and native online vendoring needed no retries. Real-project acceptance
+and the mixed-host/target bundle policy choice remain outstanding.
+
 ### The compile-time pass
 
 The common compilation plan now filters to build-script runs, executable
@@ -3715,6 +3723,28 @@ Document this editor limitation; do not secretly load member
 configuration for root-started commands or change the real build's flags.
 
 ### `src/sys` and the real projects
+
+The existing isolated fetched `src/sys` copy now proves both sides of the
+compile-time admission boundary. Before admission it emitted only a failed
+build-finished record and the admission requirement, with no script/compiler
+events. Exact locked-version dependency grants and named member-script grants
+then enabled offline workspace admission. The Motor-target compile-time check
+succeeded with 20 script events and 51 compiler artifacts; the lock hash stayed
+`9647a45eeab3611b6f1c14c855b6172b2d201f01f72bf3f59ce5f010fe76888b`.
+Evidence: `/tmp/lorry-m9-sys-{unadmitted,admitted}-compile-time.{json,err}`
+and `/tmp/lorry-m9-sys-exact-grants-corrected-admission.{out,err}`.
+
+Real acceptance uses `/tmp/lorry-m9-real-projects/{sed,ripgrep,helix}` copies;
+the original external checkouts are unchanged. The first sed locked fetch
+failed on approx 0.5.1's legacy `default_features` spelling. Pinned Cargo source
+and isolated command comparisons prove pre-2024 acceptance, canonical-key
+precedence, 2024 rejection, and inherited-member normalization. Lorry now
+follows those rules, validating both field types. The new 24-case offline
+contract is in the complete suite; the focused unit, contract, and strict
+Clippy pass in `/tmp/lorry-m9-dependency-defaults-{corrected-unit,contract,clippy}.log`.
+The initial unit fixture accidentally used an inline-table comma in a regular
+table; correcting the fixture's newline restored the intended type check.
+The original failure is `/tmp/lorry-m9-dependency-defaults-unit.log`.
 
 For `src/sys`, ignore local `.lorry/` state and keep admission
 local initially. Under policy C, add named script grants in

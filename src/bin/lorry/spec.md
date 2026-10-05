@@ -458,8 +458,12 @@ documentation, edition, exclude, homepage, include, keywords, license,
 license-file, publish, readme, repository, rust-version, and version.
 Inherited readme and license-file paths are normalized relative to the member.
 Workspace dependencies inherit sources relative to the workspace root and
-add member features. Only member declarations may make them optional. Edition
-2024 members may override inherited default-features; older editions warn
+add member features. Only member declarations may make them optional.
+Legacy `default_features` dependency fields follow Cargo: editions before 2024
+accept them with a compatibility warning, preferring `default-features` when
+both are present; edition 2024 rejects the old spelling. Inherited member
+aliases are normalized before merged-dependency validation, as in Cargo.
+Edition 2024 members may override inherited default-features; older editions warn
 and ignore false unless the workspace already disabled defaults. Manifest
 warnings are collected and reported once, outside compiler JSON output.
 Readme discovery and boolean forms match Cargo; an explicit false suppresses

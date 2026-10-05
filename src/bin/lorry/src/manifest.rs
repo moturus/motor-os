@@ -2086,6 +2086,7 @@ fn parse_dependency(
         "package",
         "optional",
         "default-features",
+        "default_features",
         "features",
     ];
     for (key, value) in lookup.entries() {
@@ -2233,8 +2234,7 @@ fn parse_dependency(
         git_path_source: None,
         source,
         optional: lookup_bool(path, document, &lookup, alias, "optional")?.unwrap_or(false),
-        default_features: lookup_bool(path, document, &lookup, alias, "default-features")?
-            .unwrap_or(true),
+        default_features: dependency_default_features(fields, &lookup, alias)?.unwrap_or(true),
         features: match lookup.get("features") {
             Some(value) => node_string_array(
                 path,
@@ -2247,6 +2247,55 @@ fn parse_dependency(
         target: target.map(str::to_owned),
         kind,
     })
+}
+
+fn dependency_default_features(
+    fields: &mut DependencyFields<'_>,
+    lookup: &DependencyTable<'_>,
+    alias: &str,
+) -> Result<Option<bool>> {
+    let modern = lookup_bool(
+        fields.path,
+        fields.document,
+        lookup,
+        alias,
+        "default-features",
+    )?;
+    let legacy = lookup_bool(
+        fields.path,
+        fields.document,
+        lookup,
+        alias,
+        "default_features",
+    )?;
+    if legacy.is_some() {
+        if fields.edition == Edition::E2024 {
+            return Err(Error::at(
+                fields.path,
+                lookup
+                    .get("default_features")
+                    .unwrap()
+                    .line(fields.document),
+                format!(
+                    "`default_features` is unsupported as of the 2024 edition (in the `{alias}` dependency)"
+                ),
+                "use `default-features` instead",
+            ));
+        }
+        let message = if modern.is_some() {
+            format!(
+                "`default_features` is redundant with `default-features`, preferring `default-features` in the `{alias}` dependency"
+            )
+        } else {
+            format!(
+                "`default_features` is deprecated in favor of `default-features` and will not work in the 2024 edition (in the `{alias}` dependency)"
+            )
+        };
+        fields
+            .warnings
+            .push(format!("{}: {message}", fields.path.display()));
+    }
+    Ok(modern.or(legacy))
 }
 
 fn validate_git_url(path: &Path, line: usize, url: &str) -> Result<()> {
@@ -3596,6 +3645,53 @@ codegen-units = 1
         assert_eq!(manifest.release.lto, Lto::Fat);
         assert_eq!(manifest.release.strip, Strip::Symbols);
         assert_eq!(manifest.release.codegen_units, Some(1));
+    }
+
+    #[test]
+    fn legacy_dependency_defaults_follow_cargo_editions_and_precedence() {
+        for edition in ["2015", "2018", "2021", "2024"] {
+            for (keys, expected) in [
+                ("default_features = false", false),
+                ("default_features = false, default-features = true", true),
+            ] {
+                let source = format!(
+                    "[package]\nname = 'probe'\nversion = '1.0.0'\nedition = '{edition}'\n\
+                     [dependencies]\ndep = {{ version = '1', {keys} }}\n"
+                );
+                let result = parsed(&source);
+                if edition == "2024" {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .render()
+                            .contains("unsupported as of the 2024 edition")
+                    );
+                } else {
+                    let manifest = result.unwrap();
+                    assert_eq!(manifest.dependencies[0].default_features, expected);
+                    assert_eq!(manifest.warnings.len(), 1);
+                    assert!(manifest.warnings[0].contains(if expected {
+                        "redundant"
+                    } else {
+                        "deprecated"
+                    }));
+                }
+            }
+        }
+        for keys in [
+            "default_features = 'false'",
+            "default_features = 0\ndefault-features = true",
+        ] {
+            assert!(
+                parsed(&format!(
+                    "[package]\nname = 'probe'\nversion = '1.0.0'\nedition = '2021'\n\
+                 [dependencies.dep]\nversion = '1'\n{keys}\n"
+                ))
+                .unwrap_err()
+                .render()
+                .contains("a boolean")
+            );
+        }
     }
 
     #[test]
