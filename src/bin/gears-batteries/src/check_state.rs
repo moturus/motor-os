@@ -29,7 +29,11 @@ pub fn observe(event: &Event, context: &ToolContext) -> Result<Value, String> {
                 .map_err(|error| error.to_string())?;
             let outcome: ToolOutcome = serde_json::from_value(event.payload["outcome"].clone())
                 .map_err(|error| error.to_string())?;
-            if call.name != "todo" && event.payload["tool"]["read_only"] != true {
+            if !matches!(
+                call.name.as_str(),
+                "todo" | "memory" | "skill_view" | "skill_manage"
+            ) && event.payload["tool"]["read_only"] != true
+            {
                 if let Some(mut latest) = latest(&state)? {
                     latest.current = false;
                     state["last_check"] = serde_json::to_value(latest).unwrap();
@@ -215,6 +219,14 @@ mod tests {
         );
         event.payload = json!({"id": "r1", "role": "tool", "tool_call": ToolCall::new("c3", "read_file", "{}"), "outcome": "completed", "tool": {"read_only": true}});
         assert!(observe(&event, &context).unwrap().get("state").is_none());
+        for name in ["memory", "skill_view", "skill_manage"] {
+            event.event = "entry".into();
+            event.payload = json!({"id": "state-call", "role": "tool", "tool_call": ToolCall::new("state-caller", name, "{}"), "outcome": "completed"});
+            assert!(
+                observe(&event, &context).unwrap().get("state").is_none(),
+                "{name} must preserve check evidence"
+            );
+        }
         event.event = "before_stop".into();
         assert!(observe(&event, &context).unwrap().get("message").is_none());
         event.event = "entry".into();
