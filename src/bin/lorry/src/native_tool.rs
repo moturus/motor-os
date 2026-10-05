@@ -42,6 +42,7 @@ pub fn project(
 
         let (program_variable, flags_variable) = match role {
             NativeToolRole::CCompiler => ("CC", "CFLAGS"),
+            NativeToolRole::CxxCompiler => ("CXX", "CXXFLAGS"),
             NativeToolRole::Archiver => ("AR", "ARFLAGS"),
         };
         projection.environment.insert(
@@ -49,8 +50,10 @@ pub fn project(
             command_value(program.as_os_str(), &tool.prefix_args),
         );
         let mut flags = tool.flags.iter().map(OsString::from).collect::<Vec<_>>();
-        if *role == NativeToolRole::CCompiler
-            && let Some(remap) = source_remap
+        if matches!(
+            role,
+            NativeToolRole::CCompiler | NativeToolRole::CxxCompiler
+        ) && let Some(remap) = source_remap
         {
             flags.push(native_remap_argument(remap)?);
         }
@@ -61,7 +64,10 @@ pub fn project(
             path: program.clone(),
             argument_prefix: tool.prefix_args.iter().map(OsString::from).collect(),
         });
-        if *role == NativeToolRole::CCompiler {
+        if matches!(
+            role,
+            NativeToolRole::CCompiler | NativeToolRole::CxxCompiler
+        ) {
             projection
                 .read_only
                 .extend(compiler_read_only(program, &tool.flags)?);
@@ -82,7 +88,7 @@ fn compiler_read_only(program: &Path, flags: &[String]) -> Result<Vec<PathBuf>> 
     {
         paths.push(fs::canonicalize(&resources).map_err(|error| {
             Error::failure(format!(
-                "failed to resolve native C compiler resources `{}`: {error}",
+                "failed to resolve native compiler resources `{}`: {error}",
                 resources.display()
             ))
         })?);
@@ -94,13 +100,13 @@ fn compiler_read_only(program: &Path, flags: &[String]) -> Result<Vec<PathBuf>> 
         let path = PathBuf::from(path);
         if !path.is_absolute() || !path.is_dir() {
             return Err(Error::failure(format!(
-                "configured native C compiler sysroot `{}` is not an absolute directory",
+                "configured native compiler sysroot `{}` is not an absolute directory",
                 path.display()
             )));
         }
         paths.push(fs::canonicalize(&path).map_err(|error| {
             Error::failure(format!(
-                "failed to resolve native C compiler sysroot `{}`: {error}",
+                "failed to resolve native compiler sysroot `{}`: {error}",
                 path.display()
             ))
         })?);
@@ -198,6 +204,7 @@ fn missing_tool(target: &str, role: NativeToolRole) -> Error {
 fn role_name(role: NativeToolRole) -> &'static str {
     match role {
         NativeToolRole::CCompiler => "c-compiler",
+        NativeToolRole::CxxCompiler => "cxx-compiler",
         NativeToolRole::Archiver => "archiver",
     }
 }
@@ -277,45 +284,102 @@ mod tests {
     }
 
     #[test]
+    fn projects_cxx_only_with_its_explicit_grant() {
+        let target = "x86_64-unknown-motor";
+        let compiler = NativeTool {
+            program: Some(executable()),
+            prefix_args: vec!["clang++".into()],
+            flags: vec!["--target=x86_64-unknown-motor".into()],
+        };
+        let configured = BTreeMap::from([(
+            (target.into(), NativeToolRole::CxxCompiler),
+            compiler.clone(),
+        )]);
+        let projection = project(
+            &configured,
+            &BTreeSet::from([NativeToolRole::CxxCompiler]),
+            target,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            projection.environment["CXX_x86_64_unknown_motor"],
+            command_value(
+                compiler.program.as_ref().unwrap().as_os_str(),
+                &compiler.prefix_args
+            )
+        );
+        assert_eq!(
+            projection.environment["CXXFLAGS_x86_64_unknown_motor"],
+            "--target=x86_64-unknown-motor"
+        );
+        assert_eq!(projection.environment.len(), 2);
+        assert_eq!(projection.executables.len(), 1);
+        assert_eq!(
+            projection.executables[0].argument_prefix,
+            [OsString::from("clang++")]
+        );
+        assert!(
+            project(&configured, &BTreeSet::new(), target, None)
+                .unwrap()
+                .environment
+                .is_empty()
+        );
+        assert!(
+            project(
+                &configured,
+                &BTreeSet::from([NativeToolRole::CCompiler]),
+                target,
+                None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn exposes_only_the_granted_compiler_resources_and_sysroot() {
         let root =
             std::env::temp_dir().join(format!("lorry-native-sysroot-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir(&root).unwrap();
         let target = "x86_64-unknown-motor";
-        let configured = BTreeMap::from([(
-            (target.to_owned(), NativeToolRole::CCompiler),
-            NativeTool {
-                program: Some(executable()),
-                prefix_args: Vec::new(),
-                flags: vec![format!("--sysroot={}", root.display())],
-            },
-        )]);
-        let projection = project(
-            &configured,
-            &BTreeSet::from([NativeToolRole::CCompiler]),
-            target,
-            None,
-        )
-        .unwrap();
-        assert!(
-            projection
-                .read_only
-                .contains(&fs::canonicalize(&root).unwrap())
-        );
+        for role in [NativeToolRole::CCompiler, NativeToolRole::CxxCompiler] {
+            let configured = BTreeMap::from([(
+                (target.to_owned(), role),
+                NativeTool {
+                    program: Some(executable()),
+                    prefix_args: Vec::new(),
+                    flags: vec![format!("--sysroot={}", root.display())],
+                },
+            )]);
+            let projection = project(&configured, &BTreeSet::from([role]), target, None).unwrap();
+            assert!(
+                projection
+                    .read_only
+                    .contains(&fs::canonicalize(&root).unwrap())
+            );
 
-        let ungranted = project(&configured, &BTreeSet::new(), target, None).unwrap();
-        assert!(ungranted.read_only.is_empty());
+            let ungranted = project(&configured, &BTreeSet::new(), target, None).unwrap();
+            assert!(ungranted.read_only.is_empty());
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn adds_scoped_file_prefix_mapping_only_to_c_compiler_flags() {
+    fn adds_scoped_file_prefix_mapping_only_to_compiler_flags() {
         let target = "x86_64-unknown-linux-gnu";
         let executable = executable();
         let configured = BTreeMap::from([
             (
                 (target.to_owned(), NativeToolRole::CCompiler),
+                NativeTool {
+                    program: Some(executable.clone()),
+                    prefix_args: Vec::new(),
+                    flags: vec!["-O2".to_owned()],
+                },
+            ),
+            (
+                (target.to_owned(), NativeToolRole::CxxCompiler),
                 NativeTool {
                     program: Some(executable.clone()),
                     prefix_args: Vec::new(),
@@ -341,13 +405,21 @@ mod tests {
         expected_flags.push(remap.rustc_argument());
         let projection = project(
             &configured,
-            &BTreeSet::from([NativeToolRole::CCompiler, NativeToolRole::Archiver]),
+            &BTreeSet::from([
+                NativeToolRole::CCompiler,
+                NativeToolRole::CxxCompiler,
+                NativeToolRole::Archiver,
+            ]),
             target,
             Some(&remap),
         )
         .unwrap();
         assert_eq!(
             projection.environment["CFLAGS_x86_64_unknown_linux_gnu"],
+            expected_flags
+        );
+        assert_eq!(
+            projection.environment["CXXFLAGS_x86_64_unknown_linux_gnu"],
             expected_flags
         );
         assert_eq!(

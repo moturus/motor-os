@@ -134,6 +134,7 @@ impl TestConfig {
 pub enum NativeToolRole {
     CCompiler,
     Archiver,
+    CxxCompiler,
 }
 
 #[allow(dead_code)]
@@ -1931,12 +1932,13 @@ fn native_arguments(
 fn parse_native_role(path: &Path, line: usize, value: &str) -> Result<NativeToolRole> {
     match value {
         "c-compiler" => Ok(NativeToolRole::CCompiler),
+        "cxx-compiler" => Ok(NativeToolRole::CxxCompiler),
         "archiver" => Ok(NativeToolRole::Archiver),
         _ => Err(Error::at(
             path,
             line,
             format!("unsupported native-tool role `{value}`"),
-            "Stage 2 supports only c-compiler and archiver",
+            "supported roles are c-compiler, cxx-compiler, and archiver",
         )),
     }
 }
@@ -2423,6 +2425,42 @@ locked = [
                 .unwrap()
                 .prefix_args,
             ["clang"]
+        );
+    }
+
+    #[test]
+    fn parses_explicit_cxx_compiler_configuration_and_grants() {
+        let temp = TempDir::new();
+        let path = temp.0.join("lorry.toml");
+        let compiler = temp.0.join("clang++");
+        fs::write(&compiler, "fixture compiler").unwrap();
+        fs::write(
+            &path,
+            format!(
+                r#"config-version = 1
+[native-tools."x86_64-unknown-motor".cxx-compiler]
+program = "{}"
+flags = ["--target=x86_64-unknown-motor"]
+[policy.rules.grammar]
+action = "allow"
+name = "grammar"
+source = "path"
+allow-build-script = true
+native-tools = ["cxx-compiler"]
+"#,
+                compiler.display()
+            ),
+        )
+        .unwrap();
+        let mut config = Config::default();
+        merge_lorry_file(&path, LayerKind::Local, &mut config).unwrap();
+        let tool =
+            &config.native_tools[&("x86_64-unknown-motor".into(), NativeToolRole::CxxCompiler)];
+        assert_eq!(tool.program.as_deref(), Some(compiler.as_path()));
+        assert_eq!(tool.flags, ["--target=x86_64-unknown-motor"]);
+        assert_eq!(
+            config.policy.rules["grammar"].native_tools,
+            BTreeSet::from([NativeToolRole::CxxCompiler])
         );
     }
 

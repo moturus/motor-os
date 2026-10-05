@@ -932,7 +932,7 @@ are `true` or `false`.
 
 Inline arrays use comma-space separation. Set-valued arrays are sorted by
 UTF-8 bytes and reject duplicates, except that compile kinds use `host` before
-`target`, native tools use `archiver` before `c-compiler`, and dependency
+`target`, native tools use `archiver`, `c-compiler`, then `cxx-compiler`, and dependency
 references sort by `(source, name, version)` with `crates.io` before `git`
 before `path`.
 Repeated tables reject duplicate complete keys. Semantic versions and version
@@ -1551,18 +1551,20 @@ Common link arguments reach every target of the emitting package, preserving
 their order after link libraries. Target-specific `rustc-link-arg-*` forms
 remain unsupported.
 
-Lorry currently has only `c-compiler` and `archiver` native-tool roles. They are
+Lorry supports `c-compiler`, `cxx-compiler`, and `archiver` native-tool roles. They are
 configured per target as absolute executable, fixed prefix-argument array, and
 flag array; they are never discovered from ambient `PATH`, `CC`, `CFLAGS`,
-`AR`, or `ARFLAGS`. A package rule must grant each role explicitly and pin a
+`CXX`, `CXXFLAGS`, `AR`, or `ARFLAGS`. A package rule must grant each role explicitly and pin a
 source-tree digest unless it names an editable workspace member. Tool bytes,
 path, identity, arguments, environment, and
-outputs are build/cache/audit inputs. For a granted C compiler, Lorry exposes
+outputs are build/cache/audit inputs. For a granted C or C++ compiler, Lorry exposes
 the canonical sibling `lib` directory of its `bin` directory read-only when
 present, and exposes each absolute existing directory named by an exact
 `--sysroot=<path>` flag read-only. These are the only implicit compiler
 resource roots; an invalid configured sysroot fails before the build script
-runs. Neither root is exposed when the package lacks the `c-compiler` grant.
+runs. Neither root is exposed without the corresponding compiler grant. The C++ role
+projects target-qualified `CXX` and `CXXFLAGS`, and receives the same scoped
+source-path remapping as the C compiler.
 Undeclared helpers must be denied. Linux acceptance must include a native tool
 that exists in target configuration but is absent from the package grant: it
 receives neither an environment entry nor execute permission. This

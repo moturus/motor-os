@@ -42,10 +42,7 @@ pub fn capabilities_from(
             .get(&package.key)
             .map(|admission| admission.native_tools.iter().copied().collect::<Vec<_>>())
             .unwrap_or_default();
-        native_tools.sort_by_key(|role| match role {
-            NativeToolRole::Archiver => "archiver",
-            NativeToolRole::CCompiler => "c-compiler",
-        });
+        native_tools.sort_by_key(|role| native_tool_name(*role));
         capabilities.push(Capability {
             package: package.key.name.clone(),
             version: package.key.version.to_string(),
@@ -130,6 +127,7 @@ fn required_strings(path: &Path, table: &Table, key: &str) -> Result<Vec<String>
 fn native_tool_name(role: NativeToolRole) -> &'static str {
     match role {
         NativeToolRole::CCompiler => "c-compiler",
+        NativeToolRole::CxxCompiler => "cxx-compiler",
         NativeToolRole::Archiver => "archiver",
     }
 }
@@ -1589,6 +1587,7 @@ mod review {
                     .map(|value| match value.as_str() {
                         "archiver" => Ok(NativeToolRole::Archiver),
                         "c-compiler" => Ok(NativeToolRole::CCompiler),
+                        "cxx-compiler" => Ok(NativeToolRole::CxxCompiler),
                         _ => Err(Error::failure(format!(
                             "compact dependency state `{}` has unsupported native-tool role `{value}`",
                             path.display()
@@ -2332,6 +2331,27 @@ mod review {
             state.capabilities[0].native_tools.clear();
             state.capabilities[0].proc_macro = true;
             state.validate().unwrap();
+        }
+
+        #[test]
+        fn cxx_tool_grants_round_trip_and_bind_the_review() {
+            let mut state = compact_state();
+            let mut grant = capability();
+            grant.native_tools.push(NativeToolRole::CxxCompiler);
+            state.capabilities.push(grant.clone());
+            let text = String::from_utf8(state.render().unwrap()).unwrap();
+            assert!(
+                text.contains("native-tools = [\"archiver\", \"c-compiler\", \"cxx-compiler\"]")
+            );
+            assert_eq!(
+                CompactState::parse(Path::new("state.toml"), text).unwrap(),
+                state
+            );
+            let mut review = registry_review();
+            review.capabilities.push(grant);
+            let before = review.commitment().unwrap();
+            review.capabilities[0].native_tools.pop();
+            assert_ne!(before, review.commitment().unwrap());
         }
 
         #[test]

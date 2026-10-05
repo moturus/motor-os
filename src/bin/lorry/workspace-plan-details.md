@@ -2727,6 +2727,26 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+The native-tool model now has an explicit `cxx-compiler` role, configured and
+granted separately from the C compiler. It projects target-qualified `CXX` and
+`CXXFLAGS`, compiler resource/sysroot reads, and scoped source remapping only
+when granted. Compact admission records and Lorry review messages preserve that
+role; its grant affects the review commitment. Helix's static grammar source
+uses `cc::Build::cpp(true)` and requires this role. Standard-library configuration
+and the real script/compiler contract follow in a separate patch.
+
+The first compile omitted the review-message match and used a nonexistent test
+layer (`/tmp/lorry-m8-cxx-tool-role-unit.log`). The configuration fixture then
+correctly hit the existing missing-build-script-grant guard and canonicalized
+compiler-path behavior, preserved in
+`/tmp/lorry-m8-cxx-tool-role-complete-unit.log` and
+`/tmp/lorry-m8-cxx-tool-role-granted-unit.log`. The fixture now uses an explicit
+script grant and a local compiler path. All three C++-specific tests, five native
+projection tests covering C/C++ resource grants and remapping, and strict Clippy
+pass in `/tmp/lorry-m8-cxx-tool-role-fixture-unit.log`,
+`/tmp/lorry-m8-cxx-tool-role-complete-projection-unit.log`, and
+`/tmp/lorry-m8-cxx-tool-role-final-clippy.log`.
+
 Check and Clippy now accept `--tests` and `--benches`, including combinations
 with binary and named selections. Test and benchmark flags filter every relevant
 target kind independently; examples may have ordinary and harness checks in the

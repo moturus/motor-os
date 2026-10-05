@@ -99,6 +99,7 @@ pub(crate) fn approve_json(
                     "caller_env": capability.caller_env,
                     "native_tools": capability.native_tools.iter().map(|role| match role {
                         crate::config::NativeToolRole::CCompiler => "c-compiler",
+                        crate::config::NativeToolRole::CxxCompiler => "cxx-compiler",
                         crate::config::NativeToolRole::Archiver => "archiver",
                     }).collect::<Vec<_>>(),
                 })
