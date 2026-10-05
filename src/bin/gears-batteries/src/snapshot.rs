@@ -9,70 +9,117 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::Event;
+use crate::memory_snapshot::Stored;
+use crate::paths::ToolContext;
 
-const MAX_BYTES: usize = 128 * 1024;
+const MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
-struct Snapshot {
-    version: u32,
-    fragments: Vec<String>,
+pub(crate) struct Snapshot {
+    pub version: u32,
+    pub fragments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory: Vec<Stored>,
+}
+
+pub(crate) fn load(root: &StateRoot, hash: &str) -> Result<Snapshot, String> {
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid prompt snapshot hash".into());
+    }
+    let relative = format!("batteries/snapshots/{hash}.json");
+    let path = root
+        .existing_file(Path::new(&relative))?
+        .ok_or("saved prompt snapshot is unavailable")?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|error| error.to_string())?
+        .take(MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_BYTES || digest(&bytes) != hash {
+        return Err("saved prompt snapshot is oversized or its hash changed".into());
+    }
+    let snapshot: Snapshot = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid prompt snapshot: {error}"))?;
+    if !matches!(snapshot.version, 1 | 2) || (snapshot.version == 1 && !snapshot.memory.is_empty())
+    {
+        return Err("unsupported prompt snapshot version".into());
+    }
+    crate::memory_snapshot::changes(&snapshot.memory, &snapshot.memory)?;
+    Ok(snapshot)
+}
+
+pub(crate) fn save(root: &StateRoot, snapshot: &Snapshot) -> Result<String, String> {
+    let bytes = serde_json::to_vec(snapshot).map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_BYTES {
+        return Err("prompt snapshot exceeds 1 MiB".into());
+    }
+    let hash = digest(&bytes);
+    root.replace_file(
+        Path::new(&format!("batteries/snapshots/{hash}.json")),
+        &bytes,
+    )?;
+    Ok(hash)
 }
 
 pub fn initialize(event: &Event, root: &StateRoot) -> Result<Value, String> {
-    let mut state = event.session.state.clone().unwrap_or_else(|| json!({}));
-    if !state.is_object() {
-        return Err("batteries hook state is not an object".into());
-    }
-    let refresh = event.payload["reason"] == "compaction";
-    let (hash, snapshot) = match state.get("prompt_snapshot") {
-        Some(hash) if !refresh => {
-            let hash = hash
-                .as_str()
-                .filter(|hash| {
-                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
-                .ok_or("invalid prompt snapshot hash")?;
-            let relative = format!("batteries/snapshots/{hash}.json");
-            let path = root
-                .existing_file(Path::new(&relative))?
-                .ok_or("saved prompt snapshot is unavailable")?;
-            let mut bytes = Vec::new();
-            std::fs::File::open(path)
-                .map_err(|error| error.to_string())?
-                .take(MAX_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|error| error.to_string())?;
-            if bytes.len() > MAX_BYTES || digest(&bytes) != hash {
-                return Err("saved prompt snapshot is oversized or its hash changed".into());
+    let mut state = crate::hook_state(event)?;
+    let saved = state
+        .get("prompt_snapshot")
+        .map(|hash| load(root, hash.as_str().ok_or("invalid prompt snapshot hash")?))
+        .transpose()?;
+    let context = ToolContext::new(
+        event.workspace.clone(),
+        root.path().to_path_buf(),
+        event.session.id.clone(),
+        event.session.path.as_deref(),
+    )?;
+    let (live, mut notices) = crate::memory_snapshot::load(&context);
+    let refresh = event.payload["reason"] == "compaction" || saved.is_none();
+    let mut rewrite = refresh;
+    let snapshot = if refresh {
+        let fragments = match crate::instructions::load(&event.workspace) {
+            Ok(fragment) => fragment.into_iter().collect(),
+            Err(error) => {
+                notices.push(format!("project instructions unavailable: {error}"));
+                saved
+                    .as_ref()
+                    .map(|snapshot| snapshot.fragments.clone())
+                    .unwrap_or_default()
             }
-            let snapshot: Snapshot = serde_json::from_slice(&bytes)
-                .map_err(|error| format!("invalid prompt snapshot: {error}"))?;
-            if snapshot.version != 1 {
-                return Err("unsupported prompt snapshot version".into());
-            }
-            (hash.to_string(), snapshot)
+        };
+        Snapshot {
+            version: 2,
+            fragments,
+            memory: live,
         }
-        _ => {
-            let fragments = crate::instructions::load(&event.workspace)?
-                .into_iter()
-                .collect();
-            let snapshot = Snapshot {
-                version: 1,
-                fragments,
-            };
-            let bytes = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?;
-            let hash = digest(&bytes);
-            root.replace_file(
-                Path::new(&format!("batteries/snapshots/{hash}.json")),
-                &bytes,
-            )?;
-            (hash, snapshot)
-        }
+    } else {
+        let mut saved = saved.unwrap();
+        let memory = crate::memory_snapshot::reconcile(&saved.memory, &live)?;
+        rewrite = saved.memory != memory;
+        saved.memory = memory;
+        saved
     };
+    let hash = if rewrite {
+        save(root, &snapshot)?
+    } else {
+        state["prompt_snapshot"].as_str().unwrap().to_string()
+    };
+    if state["prompt_snapshot"] != hash || refresh {
+        state
+            .as_object_mut()
+            .unwrap()
+            .remove("memory_view_snapshot");
+    }
     state["prompt_snapshot"] = json!(hash);
-    let mut response = json!({"prompt_fragments": snapshot.fragments});
+    let mut fragments = snapshot.fragments;
+    fragments.extend(snapshot.memory.iter().map(Stored::prompt));
+    let mut response = json!({"prompt_fragments": fragments});
     if event.session.state.as_ref() != Some(&state) {
         response["state"] = state;
+    }
+    if !notices.is_empty() {
+        response["notice"] = json!(notices.join("\n"));
     }
     Ok(response)
 }
@@ -168,6 +215,32 @@ mod tests {
             initialize(&event, &state)
                 .unwrap_err()
                 .contains("invalid prompt snapshot hash")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn legacy_project_only_snapshots_keep_their_hash_and_prompt() {
+        let (root, mut event, state) = fixture("legacy");
+        let bytes = br#"{"version":1,"fragments":["legacy project text"]}"#;
+        let hash = digest(bytes);
+        state
+            .replace_file(
+                Path::new(&format!("batteries/snapshots/{hash}.json")),
+                bytes,
+            )
+            .unwrap();
+        event.session.state = Some(json!({"prompt_snapshot": hash}));
+        let response = initialize(&event, &state).unwrap();
+        assert_eq!(response["prompt_fragments"], json!(["legacy project text"]));
+        assert!(response.get("state").is_none());
+        assert_eq!(
+            std::fs::read(
+                state
+                    .path()
+                    .join(format!("batteries/snapshots/{hash}.json"))
+            )
+            .unwrap(),
+            bytes
         );
         std::fs::remove_dir_all(root).unwrap();
     }

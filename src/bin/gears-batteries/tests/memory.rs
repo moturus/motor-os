@@ -151,6 +151,24 @@ fn the_real_hook_delivers_all_admission_answers_without_asking_in_unattended_run
                 .any(|text| text.contains("Prefer small Rust patches."))
         );
         drop(requests);
+        let original_entries = runtime.session().entries().to_vec();
+        let original_id = runtime.session().id().to_string();
+        runtime.new_session(false, None).unwrap();
+        runtime
+            .turn("Start another session.".into(), &mut answers, &mut |_| {
+                Ok(())
+            })
+            .unwrap();
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[2]
+                .system
+                .iter()
+                .any(|text| text.contains("Prefer small Rust patches.")),
+            choice == Some("approve")
+        );
+        drop(requests);
         let live = gears_batteries::memory::load(&context, Target::User).unwrap();
         assert_eq!(live.entries.len(), usize::from(choice == Some("approve")));
         let pending = gears_batteries::pending::list(&context, Target::User).unwrap();
@@ -173,14 +191,14 @@ fn the_real_hook_delivers_all_admission_answers_without_asking_in_unattended_run
             decisions,
             usize::from(matches!(choice, Some("approve" | "deny")))
         );
-        let entries = runtime.session().entries();
+        let entries = &original_entries;
         let source = live
             .entries
             .first()
             .map(|entry| &entry.metadata.source)
             .or_else(|| pending.first().map(|(_, proposal)| &proposal.source));
         if let Some(source) = source {
-            assert_eq!(source.session, runtime.session().id());
+            assert_eq!(source.session, original_id);
             assert!(
                 source
                     .entries
