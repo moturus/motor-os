@@ -3383,6 +3383,14 @@ archive member bytes, final executables, JSON, and restoration pass in
 `/tmp/lorry-m8-static-lto-fixed-contract.log`. All eleven planner tests and
 strict Clippy pass in `/tmp/lorry-m8-static-lto-{unit,clippy}.log`.
 
+The first milestone-8 gate stopped after 35 seconds with two Rust assertions
+in `/tmp/lorry-m8-full-first-gate.log`. The registry-description test still
+expected static-library loading to fail after that capability had landed.
+It now proves successful static-library loading and the distinction between
+compiler dependency inputs and source metadata's development dependencies.
+The focused regression passes in `/tmp/lorry-m8-registry-static-capability-test.log`.
+The separate historical stage-one identity failure is diagnosed below.
+
 Active profile settings now include Cargo's shared dev/release compiler keys,
 named inheritance, default test settings, and named-profile output directories.
 Build, check, test, run, and clean accept `--profile`; the legacy

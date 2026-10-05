@@ -727,7 +727,12 @@ mod tests {
         let checksum = hex(&crate::hash::sha256_file(&archive).unwrap());
         let registry = fixture.registry();
         let version = Version::parse("1.2.3").unwrap();
-        assert!(registry.load("demo", &version, &checksum).is_err());
+        let compiled = registry.load("demo", &version, &checksum).unwrap();
+        assert_eq!(
+            compiled.manifest.library.as_ref().unwrap().crate_types,
+            ["staticlib"]
+        );
+        assert!(compiled.manifest.dependencies.is_empty());
         let described = registry
             .load_description("demo", &version, &checksum)
             .unwrap();
