@@ -2727,6 +2727,16 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Cargo's parser source distinguishes explicit targets sharing a source from
+inferred targets at that path. The first shared-source correction retained an
+inferred target that Cargo suppresses; the expanded offline metadata oracle
+reproduces this in `/tmp/lorry-m8-inferred-integration-source-original-parser.log`.
+The parser now preserves earlier explicit declarations while suppressing
+inferred name/path conflicts. The oracle compares both explicit declaration
+orders and the inferred conflict; it and strict Clippy pass in
+`/tmp/lorry-m8-inferred-integration-source-corrected-parser.log` and
+`/tmp/lorry-m8-inferred-integration-source-clippy.log`.
+
 Check and Clippy now accept repeated binary, integration-test, example, and
 benchmark names and merge their graphs before planning compiler settings.
 Named integration tests validate across every selected member. Named binaries
