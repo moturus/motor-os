@@ -193,7 +193,7 @@ mod tests {
             assert!(
                 current(&context, "checks")
                     .unwrap_err()
-                    .contains("symbolic link")
+                    .contains("expected regular file, found symlink")
             );
             assert!(write(&context, "checks", Some(&content)).is_err());
         }
