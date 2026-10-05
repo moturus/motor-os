@@ -73,6 +73,60 @@ pub fn decide(context: &ToolContext, hash: &str, decision: Decision) -> Result<(
     crate::journal::append_at(&context.state, &path, &record)
 }
 
+pub fn question(
+    event: &crate::Event,
+    context: &ToolContext,
+    state: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let Some((hash, text)) = current(context)? else {
+        return Ok(json!({}));
+    };
+    if approved(context, &hash)? {
+        return Ok(json!({}));
+    }
+    let limit = crate::memory_config::load(&context.state)?.for_target(Target::Workspace);
+    Document::parse(&text, Target::Workspace, limit)?;
+    let mut state = state.clone();
+    state["awaiting_workspace_memory"] = json!(hash);
+    let mut response = json!({"notice": format!("Unapproved workspace .gears/MEMORY.md (hash {hash}):\n{text}"),
+        "question": {"id": hash, "text": "Approve these exact workspace memory contents for future sessions?",
+        "choices": [{"value": "approve", "label": "Approve"}, {"value": "deny", "label": "Deny"},
+            {"value": "postpone", "label": "Postpone"}]}});
+    if event.session.state.as_ref() != Some(&state) {
+        response["state"] = state;
+    }
+    Ok(response)
+}
+
+pub fn answer(event: &crate::Event, context: &ToolContext) -> Result<serde_json::Value, String> {
+    let mut state = crate::hook_state(event)?;
+    let hash = state["awaiting_workspace_memory"]
+        .as_str()
+        .ok_or("no workspace memory question is waiting")?
+        .to_string();
+    if event.payload["id"] != hash {
+        return Err("workspace memory answer has the wrong hash".into());
+    }
+    let decision = crate::memory_question::decision(event)?;
+    if let Err(error) = decide(context, &hash, decision) {
+        let text = format!(
+            "Workspace memory decision failed: {error}. The displayed version has not been admitted."
+        );
+        return Ok(json!({"notice": text, "context": gears::provider::Message::user(text)}));
+    }
+    state
+        .as_object_mut()
+        .unwrap()
+        .remove("awaiting_workspace_memory");
+    let outcome = match decision {
+        Decision::Approve => "approved; available at the next new session or compaction",
+        Decision::Deny => "denied; not used",
+        Decision::Postpone => "postponed; not used",
+    };
+    let text = format!("Workspace memory {hash}: {outcome}. Approval admits use, not usefulness.");
+    Ok(json!({"state": state, "notice": text, "context": gears::provider::Message::user(text)}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,7 +170,52 @@ mod tests {
         decide(&context, &hash, Decision::Postpone).unwrap();
         decide(&context, &hash, Decision::Deny).unwrap();
         assert!(!approved(&context, &hash).unwrap());
-        decide(&context, &hash, Decision::Approve).unwrap();
+        let mut event = crate::Event {
+            protocol_version: 1,
+            event: "initialize".into(),
+            workspace: context.workspace.clone(),
+            session: crate::Session {
+                id: "s1".into(),
+                path: None,
+                state: None,
+            },
+            payload: json!({"reason": "startup"}),
+        };
+        let temporary = context.workspace.join(".gears/pending/.gears-tmp-crashed");
+        std::fs::create_dir_all(temporary.parent().unwrap()).unwrap();
+        std::fs::write(&temporary, "partial").unwrap();
+        let response = crate::initialize_at(&event, &context.state);
+        assert_eq!(response["question"]["id"], hash);
+        assert!(!temporary.exists());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+        assert!(
+            response["notice"]
+                .as_str()
+                .unwrap()
+                .contains("Project fact from another machine.")
+        );
+        assert!(
+            !response["prompt_fragments"]
+                .to_string()
+                .contains("Project fact from another machine.")
+        );
+        event.session.state = Some(response["state"].clone());
+        event.event = "answer".into();
+        event.payload =
+            json!({"id": hash, "answer": "approve", "attended": true, "cancelled": false});
+        let answer = answer(&event, &context).unwrap();
+        assert!(answer["context"].to_string().contains("approved"));
+        assert!(answer["state"].get("awaiting_workspace_memory").is_none());
+        event.session.state = None;
+        event.event = "initialize".into();
+        event.payload = json!({"reason": "new"});
+        let next = crate::initialize_at(&event, &context.state);
+        assert!(
+            next["prompt_fragments"]
+                .to_string()
+                .contains("Project fact from another machine.")
+        );
+        assert!(next.get("question").is_none());
         require_approved(&context).unwrap();
         std::fs::write(&file, text.replace("another machine", "a hand edit")).unwrap();
         assert!(require_approved(&context).is_err());

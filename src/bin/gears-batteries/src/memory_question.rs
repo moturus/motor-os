@@ -69,16 +69,7 @@ pub fn answer(event: &Event, context: &ToolContext) -> Result<Value, String> {
     if awaiting.version != 1 || event.payload["id"] != awaiting.id {
         return Err("memory answer does not match the pending question".into());
     }
-    let decision = if event.payload["attended"] != true || event.payload["cancelled"] == true {
-        Decision::Postpone
-    } else {
-        match event.payload["answer"].as_str() {
-            Some("approve") => Decision::Approve,
-            Some("deny") => Decision::Deny,
-            None | Some("postpone") => Decision::Postpone,
-            _ => return Err("invalid memory approval answer".into()),
-        }
-    };
+    let decision = decision(event)?;
     if let Err(error) = crate::memory::decide(context, awaiting.target, &awaiting.id, decision) {
         let text = format!(
             "Memory proposal {} decision failed: {error}. It remains pending.",
@@ -97,6 +88,21 @@ pub fn answer(event: &Event, context: &ToolContext) -> Result<Value, String> {
         awaiting.id
     );
     Ok(json!({"state": state, "notice": text, "context": Message::user(text)}))
+}
+
+pub(crate) fn decision(event: &Event) -> Result<Decision, String> {
+    Ok(
+        if event.payload["attended"] != true || event.payload["cancelled"] == true {
+            Decision::Postpone
+        } else {
+            match event.payload["answer"].as_str() {
+                Some("approve") => Decision::Approve,
+                Some("deny") => Decision::Deny,
+                None | Some("postpone") => Decision::Postpone,
+                _ => return Err("invalid memory approval answer".into()),
+            }
+        },
+    )
 }
 
 #[cfg(test)]

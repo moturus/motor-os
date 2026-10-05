@@ -109,8 +109,16 @@ pub fn hook(event: Event) -> Result<Value, String> {
         return Ok(response);
     }
     if event.event == "answer" {
-        return paths::ToolContext::for_event(&event)
-            .and_then(|context| memory_question::answer(&event, &context));
+        return paths::ToolContext::for_event(&event).and_then(|context| {
+            if event.session.state.as_ref().is_some_and(|state| {
+                state["awaiting_workspace_memory"] == event.payload["id"]
+                    && event.payload["id"].is_string()
+            }) {
+                workspace_memory::answer(&event, &context)
+            } else {
+                memory_question::answer(&event, &context)
+            }
+        });
     }
     if matches!(
         event.event.as_str(),
@@ -173,7 +181,41 @@ fn observe_features(mut event: Event) -> Value {
 }
 
 pub fn initialize_at(event: &Event, root: &gears::state::StateRoot) -> Value {
-    with_tools(snapshot::initialize(event, root).unwrap_or_else(initialization_notice))
+    let mut response = snapshot::initialize(event, root).unwrap_or_else(initialization_notice);
+    let state = response
+        .get("state")
+        .cloned()
+        .or_else(|| event.session.state.clone())
+        .unwrap_or_else(|| json!({}));
+    if state.is_object() {
+        merge_optional(
+            &mut response,
+            paths::ToolContext::new(
+                event.workspace.clone(),
+                root.path().to_path_buf(),
+                event.session.id.clone(),
+                event.session.path.as_deref(),
+            )
+            .and_then(|context| {
+                let workspace_state =
+                    gears::state::StateRoot::new(context.workspace.join(".gears"))?;
+                let discarded = workspace_state.cleanup_temporary_files()?;
+                let mut feature = workspace_memory::question(event, &context, &state)?;
+                if discarded != 0 {
+                    let notice =
+                        format!("discarded {discarded} temporary batteries workspace files");
+                    let prefix = feature
+                        .get("notice")
+                        .and_then(Value::as_str)
+                        .map(|text| format!("{text}\n"))
+                        .unwrap_or_default();
+                    feature["notice"] = json!(format!("{prefix}{notice}"));
+                }
+                Ok(feature)
+            }),
+        );
+    }
+    with_tools(response)
 }
 
 fn with_tools(mut response: Value) -> Value {
