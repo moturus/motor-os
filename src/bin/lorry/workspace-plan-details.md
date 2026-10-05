@@ -2727,6 +2727,33 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Default workspace tests now compile enabled examples, run example and benchmark
+targets marked `test = true`, and include their executables in member bundles.
+Compile-only examples remain outside execution and bundles. Test profiles clear
+panic settings even for compile-only examples. Targets follow Cargo's order,
+including benches and library/binary examples. Empty auxiliary groups skip graph
+construction so ordinary test selection does not add planning work.
+
+The expanded oracle's first failure omitted library harnesses from its node
+mapping (`/tmp/lorry-m8-default-test-auxiliary-first-oracle.log`). Including mode
+in node identity exposed that its fixture still enabled unsupported doctests
+(`/tmp/lorry-m8-default-test-auxiliary-mode-oracle.log`). The fixture now explicitly
+disables doctests, as the existing harness oracle does.
+The first runtime contract incorrectly required identical bytes for executables
+embedding physical `OUT_DIR` and program paths; that assertion and the retained
+fixture remain in `/tmp/lorry-m8-default-test-auxiliary-contract.log` and
+`/tmp/lorry-workspace-test-iZ5dwf`. Exact target hashes and embedded paths in
+`/tmp/lorry-m8-default-test-auxiliary-byte-diagnostic.log` isolate the differing
+Lorry/Cargo artifact directories. Runtime assertions still prove those paths;
+a separate source variant without embedded artifact paths proves identical
+bytes for all four new example/benchmark executables on native and Motor.
+Both ordinary and bundled execution, ordering, required-feature skips, JSON,
+and existing workspace regressions pass in
+`/tmp/lorry-m8-default-test-auxiliary-runtime-and-bytes-contract.log`.
+The final auxiliary oracle, existing harness oracle covering empty auxiliary
+groups, and strict Clippy pass in
+`/tmp/lorry-m8-default-test-auxiliary-{final-oracle,empty-group-oracle,final-clippy}.log`.
+
 Named example and benchmark checks now select across the chosen members,
 resolve dev features, reject missing names and unmet required features, and use
 the shared compiler plan. Benchmark checks receive Cargo's placeholder program

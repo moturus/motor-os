@@ -1313,15 +1313,7 @@ fn build_inner(
         let harnesses = workspace_test_plan
             .iter()
             .flat_map(|plan| plan.units.keys())
-            .filter(|key| {
-                &key.package == package
-                    && matches!(
-                        key.kind,
-                        UnitKind::LibraryHarness
-                            | UnitKind::BinaryHarness
-                            | UnitKind::IntegrationHarness
-                    )
-            })
+            .filter(|key| &key.package == package && key.is_harness())
             .collect::<Vec<_>>();
         if !harnesses.is_empty()
             && harnesses
@@ -1384,7 +1376,13 @@ fn build_inner(
                 .members
                 .unwrap_or_else(|| std::slice::from_ref(build.manifest))
                 .iter()
-                .any(|member| !member.integration_tests.is_empty()));
+                .any(|member| {
+                    !member.integration_tests.is_empty()
+                        || member
+                            .described_targets
+                            .iter()
+                            .any(|target| target.kind == "bench" && target.test)
+                }));
     let check_integration = check.is_some_and(|(_, options)| {
         (options.selects_tests() || options.bench.is_some())
             && build
@@ -1554,14 +1552,7 @@ fn build_inner(
         for kind in plan
             .units
             .keys()
-            .filter(|key| {
-                matches!(
-                    key.kind,
-                    UnitKind::LibraryHarness
-                        | UnitKind::BinaryHarness
-                        | UnitKind::IntegrationHarness
-                )
-            })
+            .filter(|key| key.is_harness())
             .map(|key| key.compile_kind)
             .collect::<std::collections::BTreeSet<_>>()
         {
@@ -1579,7 +1570,7 @@ fn build_inner(
         let mut tests = Vec::new();
         for member in members {
             let package = selected_library_key(member)?.package;
-            let targets = collect_test_targets(&package, &destination, &plan, &outputs)?;
+            let targets = collect_test_targets(&package, member, &destination, &plan, &outputs)?;
             let mut harnesses = Vec::new();
             for harness in targets.harnesses {
                 let script = plan.units[&harness.key]
@@ -3134,6 +3125,7 @@ struct CollectedTestTargets {
 
 fn collect_test_targets(
     selected: &PackageKey,
+    manifest: &Manifest,
     destination: &Path,
     plan: &CompilationPlan,
     outputs: &executor::Outputs,
@@ -3151,7 +3143,16 @@ fn collect_test_targets(
                 UnitKind::LibraryHarness => 0,
                 UnitKind::BinaryHarness => 1,
                 UnitKind::IntegrationHarness => 2,
-                _ => 3,
+                UnitKind::Bench => 3,
+                UnitKind::Example
+                    if key
+                        .auxiliary_target(manifest)
+                        .is_some_and(|target| target.crate_types != ["bin"]) =>
+                {
+                    4
+                }
+                UnitKind::Example => 5,
+                _ => 6,
             },
             &key.target,
         )
@@ -3174,7 +3175,7 @@ fn collect_test_targets(
                 install_primary(executable, &primary, selected)?;
                 programs.insert(name.clone(), primary);
             }
-            UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness => {
+            _ if key.mode == crate::unit::UnitMode::Test => {
                 let Some(crate::compile::RustcOutput::Binary { executable, .. }) =
                     outputs.artifacts.get(key)
                 else {
@@ -3207,7 +3208,7 @@ fn compile_planned_test_targets(
     let CollectedTestTargets {
         programs,
         harnesses,
-    } = collect_test_targets(&selected, staging, plan, outputs)?;
+    } = collect_test_targets(&selected, build.manifest, staging, plan, outputs)?;
     let harnesses = harnesses
         .into_iter()
         .map(|harness| harness.executable)

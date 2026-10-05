@@ -118,6 +118,53 @@ printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s
     "$LORRY_MOTOR_LINKER" "$LORRY_MOTOR_SYSROOT" >"$WORK/project/.cargo/config.toml"
 cd "$WORK/project"
 "$LORRY_TEST_CARGO" generate-lockfile --offline
+cp alpha/Cargo.toml "$WORK/alpha-default-targets.toml"
+mkdir -p alpha/examples alpha/benches
+cat >>alpha/Cargo.toml <<'EOF'
+[[example]]
+name = "compiled"
+[[example]]
+name = "tested"
+test = true
+harness = false
+[[example]]
+name = "library-tested"
+crate-type = ["rlib"]
+test = true
+harness = false
+[[example]]
+name = "disabled-test"
+path = "examples/tested.rs"
+test = true
+harness = false
+required-features = ["manual"]
+[[bench]]
+name = "optin"
+test = true
+harness = false
+EOF
+cat >alpha/examples/compiled.rs <<'EOF'
+fn main() { panic!("compile-only example must never run"); }
+EOF
+for name in tested library-tested; do
+    cat >"alpha/examples/$name.rs" <<EOF
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/assert-runtime.rs"));
+fn main() {
+    assert_eq!(alpha::value(), zeta::value());
+    assert_runtime("$name");
+}
+EOF
+done
+cat >alpha/benches/optin.rs <<'EOF'
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/assert-runtime.rs"));
+fn main() {
+    assert_eq!(alpha::value(), zeta::value());
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_alpha")).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"alpha");
+    assert_runtime("bench");
+}
+EOF
 for platform in native motor; do
     target=()
     if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); fi
@@ -126,6 +173,36 @@ for platform in native motor; do
     "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \
         differential-script-clean-messages "$WORK/lorry.json" "$WORK/cargo.json"
 done
+for mode in ordinary bundle; do
+    args=()
+    if [ "$mode" = bundle ]; then args=(--bundle); fi
+    env HOME="$WORK/home" "$LORRY" test --workspace "${args[@]}" >"$WORK/default-lorry.out"
+    "$LORRY_TEST_CARGO" test --workspace --offline >"$WORK/default-cargo.out"
+    cmp "$WORK/default-lorry.out" "$WORK/default-cargo.out"
+done
+# Prove compiler bytes separately from runtime assertions embedding artifact paths.
+for source in alpha/examples/tested.rs alpha/examples/library-tested.rs alpha/benches/optin.rs; do
+    printf 'fn main() { assert_eq!(alpha::value(), zeta::value()); }\n' >"$source"
+done
+for platform in native motor; do
+    target=()
+    if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); fi
+    env HOME="$WORK/home" "$LORRY" test --workspace --no-run "${target[@]}" --message-format=json >"$WORK/lorry-bytes.json"
+    "$LORRY_TEST_CARGO" test --workspace --no-run "${target[@]}" --offline --message-format=json >"$WORK/cargo-bytes.json"
+    python3 - "$WORK/lorry-bytes.json" "$WORK/cargo-bytes.json" <<'PYBYTES'
+import json, pathlib, sys
+def executables(path):
+    return {event['target']['name']: pathlib.Path(event['executable']).read_bytes()
+            for line in open(path) for event in [json.loads(line)]
+            if event['reason'] == 'compiler-artifact' and event.get('executable')
+            and event['target']['kind'] in [['example'], ['bench']]}
+lorry, cargo = map(executables, sys.argv[1:])
+assert set(lorry) == {'compiled', 'tested', 'library-tested', 'optin'}
+assert lorry == cargo
+PYBYTES
+done
+cp "$WORK/alpha-default-targets.toml" alpha/Cargo.toml
+rm -r alpha/examples alpha/benches
 for member in alpha zeta; do
     cp "$member/tests/integration.rs" "$WORK/$member-integration.rs"
     cat >>"$member/tests/integration.rs" <<EOF

@@ -420,8 +420,11 @@ including their dev-dependencies, target editions, required features, and
 script outputs. `check --examples` checks binary, `lib`, `rlib`, and `staticlib`
 examples, including packages with only example targets. `--example NAME` and
 `--bench NAME` check named targets across the selected members. Dynamic/procedural-macro
-example types and build/test/run example/benchmark selectors remain deferred
-and fail explicitly.
+example types and explicit build/test/run example/benchmark selectors remain
+deferred and fail explicitly. Default tests compile enabled examples, run
+examples and benchmarks marked `test = true`, and include those test targets
+in the owning member's bundle. Named integration-test selections omit examples
+and benchmarks.
 Members and default-members accept component globs `*`, `?`, and `[...]`,
 including negated character classes. `**` and paths outside the root are
 rejected. Matching files are ignored; matching directories need manifests,
@@ -523,8 +526,9 @@ path grants. Script outputs provide cfgs, environment, search paths, and
 `OUT_DIR` to every consuming target. Link libraries follow Cargo: the package
 library receives them when present; otherwise its other targets receive them.
 
-Run and test still reject a selected package with a build script before
-compilation. Descriptive commands accept these manifests without execution.
+Run still rejects a selected package with a build script before compilation.
+Workspace tests execute member scripts after validating their grants.
+Descriptive commands accept these manifests without execution.
 
 Libraries support `lib`, `rlib`, `staticlib`, and mixed `rlib`/`staticlib`
 outputs. Static archives consume upstream object code and participate in

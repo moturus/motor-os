@@ -79,7 +79,9 @@ program/extraction paths and script environment. Workspace `check --all-targets`
 includes examples and benchmarks; `check --examples` checks binary, `lib`,
 `rlib`, and `staticlib` examples with their dev-dependencies. Named `--example NAME` and `--bench NAME`
 checks also select targets across the chosen members. Example/benchmark
-build/test/run selection remains deferred. Ordinary build/check accepts
+build/test/run selectors remain deferred. Default tests compile enabled examples,
+run examples and benchmarks marked `test = true`, and include those test targets
+in member bundles. Ordinary build/check accepts
 root dev-dependencies without activating their features.
 
 ## Create a package

@@ -397,6 +397,8 @@ pub(crate) struct AuxiliarySelection<'a> {
     pub kind: &'static str,
     pub name: Option<&'a str>,
     pub mode: UnitMode,
+    pub tested: Option<bool>,
+    pub test_profile: bool,
 }
 
 pub(crate) fn workspace_auxiliary_units(
@@ -430,7 +432,9 @@ pub(crate) fn workspace_auxiliary_units(
         let manifest = &manifests[&package.key];
         let features = features_for(package, CompileKind::Target);
         for target in manifest.described_targets.iter().filter(|target| {
-            target.kind == selection.kind && selection.name.is_none_or(|name| name == target.name)
+            target.kind == selection.kind
+                && selection.name.is_none_or(|name| name == target.name)
+                && selection.tested.is_none_or(|tested| tested == target.test)
         }) {
             if !target_enabled(
                 resolution,
@@ -467,7 +471,7 @@ pub(crate) fn workspace_auxiliary_units(
             roots.push(key);
         }
     }
-    if matches!(selection.mode, UnitMode::Test | UnitMode::CheckTest) {
+    if selection.test_profile || matches!(selection.mode, UnitMode::Test | UnitMode::CheckTest) {
         graph = graph.with_profile(ProfileContext::Test, options.panic_abort);
         roots = roots
             .into_iter()
@@ -637,6 +641,8 @@ pub(crate) fn workspace_check_units(
                     kind,
                     name: if enabled { None } else { name },
                     mode,
+                    tested: None,
+                    test_profile: false,
                 },
             )?)?;
         }
@@ -1069,14 +1075,44 @@ pub(crate) fn workspace_test_units(
     options: &PlanOptions<'_>,
     integration_name: Option<&str>,
 ) -> Result<UnitGraph> {
-    workspace_harness_units(
+    let mut graph = workspace_harness_units(
         resolution,
         manifests,
         selected,
         options,
         integration_name,
         false,
-    )
+    )?;
+    if integration_name.is_none() {
+        for (kind, tested, mode) in [
+            ("example", false, UnitMode::Build),
+            ("example", true, UnitMode::Test),
+            ("bench", true, UnitMode::Test),
+        ] {
+            if !selected.iter().any(|key| {
+                manifests[key]
+                    .described_targets
+                    .iter()
+                    .any(|target| target.kind == kind && target.test == tested)
+            }) {
+                continue;
+            }
+            graph.merge(workspace_auxiliary_units(
+                resolution,
+                manifests,
+                selected,
+                options,
+                &AuxiliarySelection {
+                    kind,
+                    name: None,
+                    mode,
+                    tested: Some(tested),
+                    test_profile: true,
+                },
+            )?)?;
+        }
+    }
+    Ok(graph)
 }
 
 fn workspace_harness_units(
@@ -2988,13 +3024,19 @@ mod tests {
                     .unwrap();
                 let kind = unit["target"]["kind"][0].as_str().unwrap();
                 let name = unit["target"]["name"].as_str().unwrap();
-                (package.to_owned(), kind.to_owned(), name.to_owned())
+                (
+                    package.to_owned(),
+                    kind.to_owned(),
+                    name.to_owned(),
+                    unit["mode"].as_str().unwrap().to_owned(),
+                )
             })
             .collect::<Vec<_>>();
         let lorry_node = |key: &UnitKey| {
             let kind = match key.kind {
-                UnitKind::Library => "lib",
-                UnitKind::Binary => "bin",
+                UnitKind::Library | UnitKind::LibraryHarness => "lib",
+                UnitKind::Binary | UnitKind::BinaryHarness => "bin",
+                UnitKind::IntegrationHarness => "test",
                 UnitKind::Example => "example",
                 UnitKind::Bench => "bench",
                 _ => panic!("unexpected unit in build oracle: {:?}", key.kind),
@@ -3007,7 +3049,17 @@ mod tests {
                     .name
                     .as_str()
             });
-            (key.package.name.clone(), kind.to_owned(), name.to_owned())
+            (
+                key.package.name.clone(),
+                kind.to_owned(),
+                name.to_owned(),
+                match key.mode {
+                    UnitMode::Build => "build",
+                    UnitMode::Test => "test",
+                    UnitMode::Check | UnitMode::CheckTest => "check",
+                }
+                .to_owned(),
+            )
         };
         let lorry_nodes = plan.units.keys().map(lorry_node).collect::<Vec<_>>();
         assert_eq!(
@@ -3104,7 +3156,7 @@ mod tests {
             "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
         )
         .unwrap();
-        fixture.package("a", "[package]\nname = \"a\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[dev-dependencies]\nb = { path = \"../b\", features = [\"dev\"] }\n", false);
+        fixture.package("a", "[package]\nname = \"a\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ndoctest = false\n[dev-dependencies]\nb = { path = \"../b\", features = [\"dev\"] }\n", false);
         fixture.package("b", "[package]\nname = \"b\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[features]\ndev = []\n[dependencies]\na = { path = \"../a\" }\n", false);
         for directory in ["examples", "benches"] {
             fs::create_dir(fixture.0.join("a").join(directory)).unwrap();
@@ -3191,27 +3243,39 @@ mod tests {
             ("bench", "selected", "build", UnitMode::Test),
             ("bench", "selected", "check", UnitMode::CheckTest),
             ("bench", "selected", "test", UnitMode::Test),
+            ("default", "", "test", UnitMode::Test),
         ] {
-            let graph = workspace_auxiliary_units(
-                &resolution,
-                &manifests,
-                &selected,
-                &options,
-                &AuxiliarySelection {
-                    kind,
-                    name: Some(name),
-                    mode,
-                },
-            )
+            let graph = if kind == "default" {
+                workspace_test_units(&resolution, &manifests, &selected, &options, None)
+            } else {
+                workspace_auxiliary_units(
+                    &resolution,
+                    &manifests,
+                    &selected,
+                    &options,
+                    &AuxiliarySelection {
+                        kind,
+                        name: Some(name),
+                        mode,
+                        tested: None,
+                        test_profile: false,
+                    },
+                )
+            }
             .unwrap();
             let roots = graph
                 .units
                 .keys()
-                .filter(|key| matches!(key.kind, UnitKind::Example | UnitKind::Bench))
+                .filter(|key| {
+                    key.package.name == "a"
+                        && (key.is_harness()
+                            || matches!(key.kind, UnitKind::Example | UnitKind::Bench))
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             let plan = plan_dependency_units(&graph, &manifests, &options).unwrap();
-            let output = Command::new(env!("CARGO"))
+            let mut cargo_command = Command::new(env!("CARGO"));
+            cargo_command
                 .current_dir(&fixture.0)
                 .args([
                     "-Z",
@@ -3222,10 +3286,11 @@ mod tests {
                     "-p",
                     "a",
                 ])
-                .args([&format!("--{kind}"), name])
-                .env("CARGO_NET_OFFLINE", "true")
-                .output()
-                .unwrap();
+                .env("CARGO_NET_OFFLINE", "true");
+            if kind != "default" {
+                cargo_command.args([&format!("--{kind}"), name]);
+            }
+            let output = cargo_command.output().unwrap();
             assert!(
                 output.status.success(),
                 "{}",
