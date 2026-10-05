@@ -1398,11 +1398,17 @@ fn main() {
         vsock_outgoing::run(&args[2..]);
         return;
     }
+    if args.len() == 2 && args[1] == "test-disconnect-before-rx-ready" {
+        tcp::test_disconnect_before_rx_ready_releases_channels();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-native-net-cancellation" {
+        tcp::test_disconnect_before_rx_ready_releases_channels();
         tcp::test_native_net_cancellation();
         return;
     }
     if args.len() == 2 && args[1] == "test-native-net" {
+        tcp::test_disconnect_before_rx_ready_releases_channels();
         net_driver::run_all_tests();
         tcp::run_all_tests();
         udp::run_all_tests();
@@ -1678,6 +1684,9 @@ fn main() {
     // Run the service logging test before later tests emit through its logger.
     logging::run_all_tests();
 
+    // Logging checked stats readiness; run this exact global channel-count
+    // check before later networking fixtures leave channels still draining.
+    tcp::test_disconnect_before_rx_ready_releases_channels();
     mem_blocks::run_all_tests();
     pressure::run_all_tests();
     test_invalid_memory_map_options();

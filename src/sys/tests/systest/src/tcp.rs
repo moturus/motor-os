@@ -1027,7 +1027,9 @@ fn test_disconnect_discards_queued_control() {
     println!("test_disconnect_discards_queued_control() PASS");
 }
 
-fn test_disconnect_before_rx_ready_releases_channels() {
+// Run after stats are ready, before other networking tests: their closing
+// sockets can retain channels whose release changes this global baseline.
+pub fn test_disconnect_before_rx_ready_releases_channels() {
     use moto_sys_io::api_net;
 
     let clients_before = read_sys_io_metric("net.active_clients");
@@ -1859,7 +1861,6 @@ pub fn test_native_net_cancellation() {
     test_inline_tcp_data_flood_yields_to_other_clients();
     test_resolved_listener_bind_conflicts();
     test_disconnect_discards_queued_control();
-    test_disconnect_before_rx_ready_releases_channels();
     test_stale_cross_connection_accept_is_requeued();
     test_pending_accept_queue_is_bounded_and_canceled();
     test_failed_tcp_setup_rolls_back_socket();
