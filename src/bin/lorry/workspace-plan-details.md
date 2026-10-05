@@ -3633,6 +3633,12 @@ The actual shipped-config contract and strict Clippy pass in
 `/tmp/lorry-m9-shipped-editor-{contract,clippy}.log`. Native validation remains
 part of the milestone gate. `docs/helix.md` documents fetch versus admission,
 the complete project override, and root-started member-config limitations.
+The native Lorry driver now cross-builds the same editor test, verifies the
+installed Helix configuration matches the shipped source, and runs the default,
+custom-feature, and member-linked LSP cases with the freshly self-built Lorry.
+The helper selects the installed native toolchain directly and disables the
+server's terminal-input relay. Its Motor release build and host strict Clippy
+pass in `/tmp/lorry-m9-native-editor-{cross-build,host-clippy}.log`.
 
 Projects that change `cargo.features`, `cargo.noDefaultFeatures`,
 `cargo.target`, `cargo.targetDir`, or other relevant arguments must also

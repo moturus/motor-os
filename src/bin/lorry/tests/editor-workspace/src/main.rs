@@ -25,7 +25,7 @@ fn main() -> io::Result<()> {
     let repo = Path::new(&args[1]).canonicalize()?;
     let work = Path::new(&args[2]).canonicalize()?;
     let shipped: Value = serde_json::from_slice(&fs::read(&args[3])?)?;
-    let toolchain = Toolchain::discover(&repo)?;
+    let toolchain = toolchain(&repo)?;
     for (custom, member) in [(false, false), (true, false), (true, true)] {
         run(&lorry, &toolchain, &work, &shipped, custom, member)?;
     }
@@ -33,6 +33,22 @@ fn main() -> io::Result<()> {
         "PASS: actual editor commands share workspace features, generated code, target directories, and save diagnostics"
     );
     Ok(())
+}
+
+#[cfg(not(target_os = "motor"))]
+fn toolchain(repo: &Path) -> io::Result<Toolchain> {
+    Toolchain::discover(repo)
+}
+
+#[cfg(target_os = "motor")]
+fn toolchain(_repo: &Path) -> io::Result<Toolchain> {
+    let sysroot = PathBuf::from("/devtools/rust").canonicalize()?;
+    Ok(Toolchain {
+        name: sysroot.to_string_lossy().into_owned(),
+        sysroot_src: sysroot.join("lib/rustlib/src/rust/library"),
+        rust_analyzer: sysroot.join("bin/rust-analyzer").canonicalize()?,
+        sysroot,
+    })
 }
 
 fn run(
@@ -132,6 +148,7 @@ fn run(
         .env("HOME", &home)
         .env("CARGO_HOME", home.join(".cargo"))
         .env("CARGO_NET_OFFLINE", "true")
+        .env("MOTURUS_STDIO_NO_TERMINAL", "true")
         .env("PATH", env::join_paths(paths).unwrap())
         .env("RA_LOG", "project_model=info,flycheck=info");
     let mut case = SemanticCase::start_command(

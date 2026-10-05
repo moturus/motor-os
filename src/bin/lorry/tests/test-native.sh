@@ -384,6 +384,19 @@ prepare_host() {
         --locked --offline --release
     cp "$LORRY_DIR/target/release/lorry" "$WORK/lorry-seed"
     write_host_config "$host_home" "$host_curl" "$host_ca_bundle"
+    CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$motor_rustc" \
+        RUSTFLAGS='-Clink-self-contained=no -Cdefault-linker-libraries=yes' \
+        "$cargo" build --manifest-path "$SCRIPT_DIR/editor-workspace/Cargo.toml" \
+        --locked --offline --release --target "$MOTOR_TARGET" \
+        --target-dir "$WORK/editor-target" \
+        --config "target.$MOTOR_TARGET.linker=\"$MOTOR_LINKER\""
+    cp "$WORK/editor-target/$MOTOR_TARGET/release/lorry-editor-workspace" "$WORK/editor-workspace"
+    python3 - "$ROOT_DIR" "$WORK/editor-config.json" <<'PY'
+import json, pathlib, sys, tomllib
+source = pathlib.Path(sys.argv[1]) / 'img_files/motor-os-dev/user/.config/helix/languages.toml'
+config = tomllib.loads(source.read_text())['language-server']['rust-analyzer']['config']
+pathlib.Path(sys.argv[2]).write_text(json.dumps(config))
+PY
 
     for tree in "$host_tree" "$guest_tree"; do
         copy_package "$LORRY_DIR" "$tree/src/bin/lorry"
@@ -499,6 +512,8 @@ run_native() {
     fi
     upload_file "$WORK/lorry-cross" "$REMOTE_ROOT/lorry-cross"
     upload_file "$WORK/cancel-probe" "$REMOTE_ROOT/cancel-probe"
+    upload_file "$WORK/editor-workspace" "$REMOTE_ROOT/editor-workspace"
+    upload_file "$WORK/editor-config.json" "$REMOTE_ROOT/editor-config.json"
 
     remote_command "$REMOTE_ROOT/lorry-cross --version"
     remote_command "[ -d $destination ] || /system/bin/mkdir $destination"
@@ -592,6 +607,11 @@ PY
     done
     compare_equivalence_output messages set
     run_workspace_identity
+    download_file /user/.config/helix/languages.toml "$WORK/native-editor-config.toml"
+    cmp "$ROOT_DIR/img_files/motor-os-dev/user/.config/helix/languages.toml" "$WORK/native-editor-config.toml" ||
+        fail "native editor configuration differs from the tested shipped configuration"
+    remote_command "[ ! -d $REMOTE_ROOT/editor-evidence ] || /system/bin/rm -r $REMOTE_ROOT/editor-evidence"
+    remote_command "/system/bin/mkdir $REMOTE_ROOT/editor-evidence && $REMOTE_ROOT/editor-workspace $REMOTE_ROOT/lorry-native $REMOTE_ROOT $REMOTE_ROOT/editor-evidence $REMOTE_ROOT/editor-config.json"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
     # The checked-in legacy record still covers ordinary commands; shared test
