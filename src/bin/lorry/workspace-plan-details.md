@@ -3830,8 +3830,12 @@ Four acceptance issues remain under discussion rather than being treated as
 passing cases. Native sed's locked uucore 0.12.0 script emits a watch directive
 for the consumer's workspace `Cargo.lock`, found by walking `OUT_DIR` ancestors.
 Cargo accepts that directive; Lorry's registry-script watch-root policy rejects
-it. The proposed narrow capability is tracking that exact workspace lock file,
-without granting access to the whole workspace. Evidence:
+it. The approved capability now allows reading and tracking that exact workspace
+lock file without granting access to the whole workspace. The script sandbox
+test proves read-only lock access, denial of sibling files and directory watches,
+and rejection of a lock symlink that escapes the workspace. Build-script unit
+tests and strict Clippy pass in
+`/tmp/lorry-m9-workspace-lock-{unit,clippy}.log`. Original evidence:
 `/tmp/lorry-m9-native-acceptance/sed.build.{json,err}`.
 
 Native Helix's locked cc 1.2.29 has an explicit unsupported-platform

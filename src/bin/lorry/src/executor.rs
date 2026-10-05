@@ -524,6 +524,7 @@ fn execute_unit(
                         manifest.root.display()
                     );
                 }
+                let workspace_lock = options.workspace_root.join("Cargo.lock");
                 let build_output = build_script::run(&RunOptions {
                     child_lease_fd: options.child_lease_fd,
                     executable,
@@ -533,6 +534,7 @@ fn execute_unit(
                     workspace_root: manifest
                         .editable
                         .then_some(manifest.workspace_root.as_path()),
+                    workspace_lock: workspace_lock.exists().then_some(workspace_lock.as_path()),
                     out_dir: &out_dir,
                     temp_dir: &temp_dir,
                     read_only: &read_only,

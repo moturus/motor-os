@@ -1602,7 +1602,9 @@ The script runner can also receive an explicit workspace root as a read-only
 input. In that mode, `rerun-if-changed` may name workspace files or directories;
 canonical paths still reject symlink escapes. `rustc-link-search` remains
 restricted to the script's `OUT_DIR`. The executor supplies this capability
-only for editable members. Completed profiles track declared script inputs,
+only for editable members. Dependency scripts may additionally read and track
+the exact workspace `Cargo.lock`; they receive no additional workspace directory
+access. A lock symlink must stay within the workspace. Completed profiles track declared script inputs,
 including recursive directory contents and canonical identities, so edits,
 additions, removals, and symlink retargets invalidate reuse. Script directives
 retain their declared paths after validating their current canonical locations.

@@ -51,6 +51,7 @@ pub enum Directive {
 pub struct ParseOptions<'a> {
     pub package_root: &'a Path,
     pub workspace_root: Option<&'a Path>,
+    pub workspace_lock: Option<&'a Path>,
     pub out_dir: &'a Path,
     /// The complete environment supplied after `env_clear`. A valid name not
     /// present in this map is an explicitly tracked absent value.
@@ -66,6 +67,7 @@ pub struct RunOptions<'a> {
     pub environment: &'a BTreeMap<String, OsString>,
     pub package_root: &'a Path,
     pub workspace_root: Option<&'a Path>,
+    pub workspace_lock: Option<&'a Path>,
     pub out_dir: &'a Path,
     pub temp_dir: &'a Path,
     pub read_only: &'a [PathBuf],
@@ -352,6 +354,8 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
         .map(|root| canonical_directory(root, "workspace root"))
         .transpose()?;
     read_only.extend(workspace_root.iter().cloned());
+    let workspace_lock = canonical_workspace_lock(options.workspace_lock)?;
+    read_only.extend(workspace_lock.iter().cloned());
     let policy = Policy {
         read_only,
         writable: vec![out_dir.clone(), temp_dir, PathBuf::from("/dev/null")],
@@ -407,6 +411,7 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
         &ParseOptions {
             package_root: &package_root,
             workspace_root: workspace_root.as_deref(),
+            workspace_lock: workspace_lock.as_deref(),
             out_dir: &out_dir,
             environment: options.environment,
             max_bytes: options.max_output_bytes,
@@ -537,6 +542,8 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
         .transpose()?;
     let mut input_roots = vec![package_root.as_path(), out_dir.as_path()];
     input_roots.extend(workspace_root.as_deref());
+    let workspace_lock = canonical_workspace_lock(options.workspace_lock)?;
+    input_roots.extend(workspace_lock.as_deref());
     if !out_dir.starts_with(&package_root) && package_root.starts_with(&out_dir) {
         return Err(Error::failure(
             "build-script package root may not be nested inside OUT_DIR",
@@ -637,6 +644,30 @@ fn canonical_directory(path: &Path, description: &str) -> Result<PathBuf> {
         )));
     }
     Ok(canonical)
+}
+
+fn canonical_workspace_lock(path: Option<&Path>) -> Result<Option<PathBuf>> {
+    path.map(|path| {
+        let root = canonical_directory(
+            path.parent()
+                .ok_or_else(|| Error::failure("workspace lock has no parent directory"))?,
+            "workspace lock parent",
+        )?;
+        let canonical = fs::canonicalize(path).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize workspace lock `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if !canonical.is_file() || !canonical.starts_with(&root) {
+            return Err(Error::failure(format!(
+                "workspace lock `{}` is not a file within its workspace",
+                path.display()
+            )));
+        }
+        Ok(canonical)
+    })
+    .transpose()
 }
 
 fn resolve_existing(
@@ -780,6 +811,7 @@ mod tests {
             ParseOptions {
                 package_root: &self.root,
                 workspace_root: None,
+                workspace_lock: None,
                 out_dir: &self.out,
                 environment: &self.environment,
                 max_bytes: 1024,
@@ -1154,6 +1186,7 @@ mod tests {
                 environment: &self.environment,
                 package_root: &self.package,
                 workspace_root: None,
+                workspace_lock: None,
                 out_dir: &self.out,
                 temp_dir: &self.temp,
                 read_only: &self.read_only,
@@ -1204,6 +1237,60 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn dependency_scripts_can_read_and_track_only_the_workspace_lock() {
+        let fixture = RunFixture::new("workspace-lock");
+        let lock = fixture.root.join("Cargo.lock");
+        fs::write(&lock, b"version = 4\n").unwrap();
+        let mut options = fixture.options(Duration::from_secs(5), 64 * 1024);
+        assert!(run(&options).is_err());
+        options.workspace_lock = Some(&lock);
+        let output = run(&options).unwrap();
+        assert!(
+            output
+                .directives
+                .contains(&Directive::RerunIfChanged(lock.clone()))
+        );
+        assert_eq!(fs::read(&lock).unwrap(), b"version = 4\n");
+        assert_eq!(
+            fs::read(fixture.out.join("generated")).unwrap(),
+            b"version = 4\n"
+        );
+
+        let parse_options = ParseOptions {
+            package_root: &fixture.package,
+            workspace_root: None,
+            workspace_lock: Some(&lock),
+            out_dir: &fixture.out,
+            environment: &fixture.environment,
+            max_bytes: 1024,
+            out_dir_limits: crate::source_tree::DEFAULT_LIMITS,
+        };
+        for path in [
+            &fixture.root,
+            &fixture.outside,
+            &fixture.outside.join("secret"),
+        ] {
+            let input = format!("cargo:rerun-if-changed={}\n", path.display());
+            assert!(parse(input.as_bytes(), &parse_options).is_err());
+        }
+        let link = format!("cargo:rustc-link-search={}\n", lock.display());
+        assert!(parse(link.as_bytes(), &parse_options).is_err());
+
+        use std::os::unix::fs::symlink;
+        let outside = Fixture::new();
+        fs::remove_file(&lock).unwrap();
+        symlink(outside.root.join("build.rs"), &lock).unwrap();
+        assert!(
+            run(&options)
+                .unwrap_err()
+                .render()
+                .contains("within its workspace")
+        );
+        assert!(parse(b"cargo:rerun-if-changed=../Cargo.lock\n", &parse_options).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn member_scripts_can_read_workspace_inputs_without_writing_them() {
         let fixture = RunFixture::new("workspace-read");
         let mut options = fixture.options(Duration::from_secs(5), 64 * 1024);
@@ -1234,6 +1321,7 @@ mod tests {
         let mut options = ParseOptions {
             package_root: &fixture.package,
             workspace_root: Some(&fixture.root),
+            workspace_lock: None,
             out_dir: &fixture.out,
             environment: &fixture.environment,
             max_bytes: 1024,
@@ -1326,6 +1414,14 @@ mod tests {
                 assert!(fs::write(package.parent().unwrap().join("new-file"), b"bad").is_err());
                 fs::write(out.join("generated"), bytes).unwrap();
                 println!("cargo:rerun-if-changed={}", outside.display());
+            }
+            "workspace-lock" => {
+                let lock = package.parent().unwrap().join("Cargo.lock");
+                let bytes = fs::read(&lock).unwrap();
+                assert!(fs::write(&lock, b"bad").is_err());
+                assert!(fs::read(&outside).is_err());
+                fs::write(out.join("generated"), bytes).unwrap();
+                println!("cargo:rerun-if-changed={}", lock.display());
             }
             "excess-output" => println!("{}", "x".repeat(4096)),
             "failure" => {
