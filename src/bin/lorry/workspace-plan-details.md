@@ -3567,6 +3567,16 @@ boolean). Three profile unit tests, the complete paired native/Motor profile
 contract with completion-label and negative-panic assertions, and strict Clippy
 pass in `/tmp/lorry-m8-profile-label-panic-{unit,contract,clippy}.log`.
 
+Mixed-platform member bundles are rejected during cross compilation. A macro
+member may have a host library harness and target integration harnesses; select
+`--lib` or `--test NAME` separately, or omit `--bundle`. Native selections still
+bundle both kinds when their platform is the same. This preserves the existing
+one-bundle-per-member contract without adding another bundle model.
+The member-macro contract verifies rejection without compiler artifacts or a
+published bundle, separate host and Motor selections, and a native combined
+selection. It and strict Clippy pass in
+`/tmp/lorry-m8-mixed-bundle-{contract,clippy}.log`.
+
 ## Milestone 9: editor integration and native acceptance
 
 **Result.** rust-analyzer works on a workspace as it does under Cargo. The

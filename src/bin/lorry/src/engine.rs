@@ -1527,20 +1527,34 @@ fn build_inner(
         .as_ref()
         .map(|_| bundle::CompilerIdentity::new(&cargo, &build.toolchain.rustc))
         .transpose()?;
-    let bundle_kind = |package: &PackageKey| {
+    let bundle_kind = |package: &PackageKey| -> Result<CompileKind> {
         let harnesses = workspace_test_plan
             .iter()
             .flat_map(|plan| plan.units.keys())
             .filter(|key| &key.package == package && key.is_harness())
             .collect::<Vec<_>>();
+        if build.host.triple != build.target.triple
+            && harnesses
+                .iter()
+                .any(|key| key.compile_kind == CompileKind::Host)
+            && harnesses
+                .iter()
+                .any(|key| key.compile_kind == CompileKind::Target)
+        {
+            return Err(Error::failure(format!(
+                "cannot bundle tests for `{}` across host `{}` and target `{}`",
+                package.name, build.host.triple, build.target.triple
+            ))
+            .with_help("select compatible tests with --lib or --test NAME, or omit --bundle"));
+        }
         if !harnesses.is_empty()
             && harnesses
                 .iter()
                 .all(|key| key.compile_kind == CompileKind::Host)
         {
-            CompileKind::Host
+            Ok(CompileKind::Host)
         } else {
-            CompileKind::Target
+            Ok(CompileKind::Target)
         }
     };
     let make_bundle_layout = |member: &Manifest, kind: CompileKind| {
@@ -1576,14 +1590,10 @@ fn build_inner(
         && let Some(members) = build.members
     {
         for member in members {
-            bundle_kinds.insert(
-                selected_library_key(member)?.package,
-                bundle_kind(&selected_library_key(member)?.package),
-            );
-            bundle_layouts.insert(
-                selected_library_key(member)?.package,
-                make_bundle_layout(member, bundle_kind(&selected_library_key(member)?.package))?,
-            );
+            let package = selected_library_key(member)?.package;
+            let kind = bundle_kind(&package)?;
+            bundle_kinds.insert(package.clone(), kind);
+            bundle_layouts.insert(package, make_bundle_layout(member, kind)?);
         }
     }
     let layout_for_package =

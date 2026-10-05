@@ -203,6 +203,23 @@ for target in native motor; do
     if [ "$target" = motor ]; then args=(--target x86_64-unknown-motor); fi
     env HOME="$WORK/home" EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY" test -p derive --bundle "${args[@]}"
 done
+mkdir derive/tests
+printf '#[test]\nfn imported_macro() { assert_eq!(derive::answer!(), 41); }\n' >derive/tests/imported.rs
+if env HOME="$WORK/home" "$LORRY" test -p derive --bundle --no-run \
+    --target x86_64-unknown-motor --target-dir "$WORK/mixed-bundle" \
+    --message-format=json >"$WORK/mixed-bundle.json" 2>"$WORK/mixed-bundle.err"; then exit 1; fi
+rg -F 'cannot bundle tests for `derive` across host' "$WORK/mixed-bundle.err" >/dev/null
+rg -F -- '--lib or --test NAME, or omit --bundle' "$WORK/mixed-bundle.err" >/dev/null
+python3 - "$WORK/mixed-bundle" "$WORK/mixed-bundle.json" <<'PYBUNDLE'
+import json, pathlib, sys
+assert not list(pathlib.Path(sys.argv[1]).rglob('*-test-bundle'))
+assert [json.loads(line) for line in open(sys.argv[2])] == [
+    {'reason': 'build-finished', 'success': False}]
+PYBUNDLE
+env HOME="$WORK/home" EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY" test -p derive --bundle
+env HOME="$WORK/home" EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY" test -p derive --bundle --lib --target x86_64-unknown-motor
+env HOME="$WORK/home" "$LORRY" test -p derive --bundle --test imported --no-run --target x86_64-unknown-motor
+rm -rf derive/tests
 mkdir derive/examples
 printf 'fn main() { assert_eq!(derive::answer!(), 41); }\n' >derive/examples/selected.rs
 for platform in native motor; do

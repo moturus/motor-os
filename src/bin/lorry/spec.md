@@ -1771,7 +1771,10 @@ Bundle mode packages each selected member's harness executables and required
 program binaries into a separate self-extracting executable. Host-only macro
 harness bundles use the host profile, compiler/linker settings, extraction root,
 and runtime environment, even during a cross invocation. Target harness bundles
-retain their target-machine runtime rules.
+retain their target-machine runtime rules. A member's selection that mixes host
+and target harnesses during cross compilation is rejected before compilation;
+select `--lib` or `--test NAME` separately, or use ordinary tests. Harnesses for
+the same platform may share a bundle.
 Integration compile-time program/temporary paths refer to that member's
 extraction directory. Layout identity also includes prepared build inputs,
 so feature, dependency, configuration, and tracked environment changes do not
