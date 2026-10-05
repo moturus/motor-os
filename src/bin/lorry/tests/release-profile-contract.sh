@@ -68,10 +68,11 @@ printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s
 cd "$WORK/project"
 cp "$WORK/manifest.toml" Cargo.toml
 "$LORRY_TEST_CARGO" generate-lockfile --offline
-for strip in default false none debuginfo symbols debug-limited debug-full debug-lines debug-off dev-abort dev-limited dev-full dev-off dev-settings release-settings named-opt named-dev named-test named-builtin-test; do
+for strip in default false none debuginfo symbols debug-limited debug-full debug-lines debug-off dev-abort dev-limited dev-full dev-off dev-settings release-settings named-opt named-dev named-test named-builtin-test env-dev env-release env-custom env-inherited; do
     cp "$WORK/manifest.toml" Cargo.toml
     mode=(--release)
-    if [[ "$strip" == named-* ]]; then
+    profile_environment=()
+    if [[ "$strip" == named-* || "$strip" == env-custom || "$strip" == env-inherited ]]; then
         mode=(--profile "${strip#named-}")
         cat >>Cargo.toml <<'EOF'
 [profile.release]
@@ -91,12 +92,26 @@ EOF
         if [ "$strip" = named-dev ]; then mode=(--profile developer); fi
         if [ "$strip" = named-test ]; then mode=(--profile integration); fi
         if [ "$strip" = named-builtin-test ]; then mode=(--profile test); fi
+        if [ "$strip" = env-custom ]; then
+            mode=(--profile opt)
+            profile_environment=(CARGO_PROFILE_RELEASE_OPT_LEVEL=0 CARGO_PROFILE_OPT_OPT_LEVEL=1 CARGO_PROFILE_OPT_LTO=off CARGO_PROFILE_UNUSED_RPATH=true)
+        fi
+        if [ "$strip" = env-inherited ]; then
+            mode=(--profile opt)
+            profile_environment=(CARGO_PROFILE_RELEASE_OPT_LEVEL=1 CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_LTO=off)
+        fi
         cat >>Cargo.toml <<'EOF'
 [profile.integration]
 inherits = "test"
 debug = false
 opt-level = 1
 EOF
+    elif [ "$strip" = env-dev ]; then
+        mode=()
+        printf '\n[profile.dev]\nopt-level = 3\ndebug = true\n' >>Cargo.toml
+        profile_environment=(CARGO_PROFILE_DEV_OPT_LEVEL=1 CARGO_PROFILE_DEV_DEBUG=false CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false CARGO_PROFILE_DEV_OVERFLOW_CHECKS=false CARGO_PROFILE_DEV_INCREMENTAL=false)
+    elif [ "$strip" = env-release ]; then
+        profile_environment=(CARGO_PROFILE_RELEASE_OPT_LEVEL=z CARGO_PROFILE_RELEASE_DEBUG=true CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_CODEGEN_UNITS=2)
     elif [ "$strip" = dev-settings ]; then
         mode=()
         cat >>Cargo.toml <<'EOF'
@@ -144,7 +159,8 @@ EOF
         target=()
         profile=release
         if [[ "$strip" == dev-* ]]; then profile=debug; fi
-        if [[ "$strip" == named-* ]]; then profile="${mode[1]}"; fi
+        if [ "$strip" = env-dev ]; then profile=debug; fi
+        if [[ "$strip" == named-* || "$strip" == env-custom || "$strip" == env-inherited ]]; then profile="${mode[1]}"; fi
         if [ "$profile" = test ]; then profile=debug; fi
         if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); profile=x86_64-unknown-motor/$profile; fi
         commands=(build check)
@@ -154,9 +170,9 @@ EOF
         if [ "$command" = test ]; then execution=(--no-run); fi
         comparison=differential-script-clean-messages
         if [ "$command" = check ]; then comparison=differential-script-clean-check-messages; fi
-        env HOME="$WORK/home" "$LORRY" "$command" "${execution[@]}" "${mode[@]}" --workspace -j1 "${target[@]}" \
+        env HOME="$WORK/home" "${profile_environment[@]}" "$LORRY" "$command" "${execution[@]}" "${mode[@]}" --workspace -j1 "${target[@]}" \
             --message-format=json >"$WORK/lorry-$strip-$platform.json"
-        "$LORRY_TEST_CARGO" "$command" "${execution[@]}" "${mode[@]}" --workspace -j1 "${target[@]}" --offline \
+        env "${profile_environment[@]}" "$LORRY_TEST_CARGO" "$command" "${execution[@]}" "${mode[@]}" --workspace -j1 "${target[@]}" --offline \
             --message-format=json >"$WORK/cargo-$strip-$platform.json"
         if [ "$command" = build ]; then cmp "target/$profile/app" "target/lorry/$profile/app"; fi
         if [ "$command" = test ]; then
@@ -180,6 +196,11 @@ PY
             done
         fi
     done
+done
+if env HOME="$WORK/home" CARGO_PROFILE_DEV_RPATH=true "$LORRY" check --workspace 2>"$WORK/unsupported.err"; then exit 1; fi
+rg -F 'unsupported selected profile environment variable `CARGO_PROFILE_DEV_RPATH`' "$WORK/unsupported.err"
+for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+    if env HOME="$WORK/home" CARGO_PROFILE_RELEASE_INCREMENTAL=invalid "$builder" build --release --workspace --offline 2>"$WORK/invalid.err"; then exit 1; fi
 done
 [ "$(target/lorry/release/app)" = 42 ]
 echo "PASS: release stripping, debug information, optimization, and host tools match Cargo native/cross bytes and JSON"

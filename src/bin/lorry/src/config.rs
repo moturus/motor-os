@@ -470,7 +470,6 @@ fn default_cache_directory(environment: &BTreeMap<String, String>, motor: bool) 
 fn reject_environment(environment: &BTreeMap<String, String>) -> Result<()> {
     for variable in environment.keys() {
         let unsupported = variable == "CARGO_INCREMENTAL"
-            || variable.starts_with("CARGO_PROFILE_")
             || variable.starts_with("CARGO_UNSTABLE_")
             || (variable.starts_with("CARGO_BUILD_")
                 && !matches!(
@@ -2700,7 +2699,6 @@ native-tools = ["cxx-compiler"]
         let home = temp.0.join("home").display().to_string();
         for variable in [
             "CARGO_INCREMENTAL",
-            "CARGO_PROFILE_RELEASE_LTO",
             "CARGO_UNSTABLE_BUILD_STD",
             "CARGO_BUILD_JOBS",
             "CARGO_BUILD_TARGET_DIR",

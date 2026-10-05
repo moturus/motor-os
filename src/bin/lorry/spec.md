@@ -625,6 +625,10 @@ Custom build/run/test outputs publish beneath the named profile directory;
 dev/test map to debug and bench maps to release. Build-script PROFILE reflects
 the inherited dev/release root. Profile names follow Cargo's reserved-name and
 path-character rules.
+Supported `CARGO_PROFILE_<NAME>_<KEY>` settings override the corresponding
+manifest profile layer before inheritance. Profile/key hyphens map to
+underscores and names are uppercased as in Cargo. Unsupported active variables
+fail explicitly; inactive profile variables do not alter the build.
 `clean --profile NAME` removes the named profile, with package ownership when
 combined with package/workspace selectors. It preserves other profile outputs
 and accepts deferred build-only profile settings because it does not compile.

@@ -3383,6 +3383,26 @@ archive member bytes, final executables, JSON, and restoration pass in
 `/tmp/lorry-m8-static-lto-fixed-contract.log`. All eleven planner tests and
 strict Clippy pass in `/tmp/lorry-m8-static-lto-{unit,clippy}.log`.
 
+Active profile settings now include Cargo's shared dev/release compiler keys,
+named inheritance, default test settings, and named-profile output directories.
+Build, check, test, run, and clean accept `--profile`; the legacy
+`check --profile test` form checks harnesses. Paired native/Motor contracts
+compare compiler messages and executable bytes for named and inherited profiles.
+Named clean preserves other profiles and other packages' owned outputs.
+
+Supported `CARGO_PROFILE_<NAME>_<KEY>` environment values overlay each active
+manifest layer before inheritance. Inactive overrides stay inactive; unsupported
+active variables fail with their names. Environment-only profile inheritance
+has a focused unit test. The expanded profile contract, three profile tests,
+configuration rejection regression, and strict Clippy pass in
+`/tmp/lorry-m8-profile-environment-{contract,first-unit,config-current-test,clippy}.log`.
+
+Workspace run now selects unique binaries across default members, honors
+`default-run`, and supports executable examples with their development inputs
+and script environments. Build, check, and test expand Cargo target patterns
+across selected members and diagnose unmatched patterns explicitly. Focused
+Cargo contracts and strict Clippy pass; the milestone gate remains outstanding.
+
 Replace the current rejection of a selected package's build script only
 when that script actually runs through the common planner and executor.
 Support build-dependencies on other members and on outside packages.

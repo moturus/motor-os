@@ -2,9 +2,11 @@ use super::{DevProfile, Manifest, ReleaseProfile, parse_release, require_table};
 use crate::diagnostic::{Error, Result};
 use crate::identity::CargoDebugInfo;
 use crate::toml::Document;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::Path;
 use toml_edit::Table;
+mod environment;
 
 pub(crate) const KEYS: &[&str] = &[
     "panic",
@@ -38,10 +40,22 @@ impl SelectedProfile {
     fn load_checked(root: &Path, name: &str, building: bool) -> Result<Self> {
         let path = root.join("Cargo.toml");
         let document = Document::load(&path, "workspace profiles")?;
-        Self::parse(&path, &document, name, building)
+        Self::parse(
+            &path,
+            &document,
+            name,
+            building,
+            &std::env::vars_os().collect(),
+        )
     }
 
-    fn parse(path: &Path, document: &Document, name: &str, building: bool) -> Result<Self> {
+    fn parse(
+        path: &Path,
+        document: &Document,
+        name: &str,
+        building: bool,
+        environment: &BTreeMap<OsString, OsString>,
+    ) -> Result<Self> {
         validate_name(name)?;
         let profiles = document
             .root()
@@ -57,12 +71,18 @@ impl SelectedProfile {
                     "profile inheritance cycle involving `{current}`"
                 )));
             }
-            let table = profiles
+            let declared = profiles
                 .and_then(|profiles| profiles.get(&current))
                 .map(|item| require_table(path, document, item, &format!("profile.{current}")))
                 .transpose()?;
+            let overrides = environment::overrides(environment, &current, building)?;
+            let defined = declared.is_some() || !overrides.is_empty();
+            let mut table = declared.cloned().unwrap_or_default();
+            for (key, item) in overrides.iter() {
+                table.insert(key, item.clone());
+            }
             chain.push((current.clone(), table));
-            let parent = table.and_then(|table| table.get("inherits"));
+            let parent = chain.last().unwrap().1.get("inherits");
             if matches!(current.as_str(), "dev" | "release") {
                 if let Some(parent) = parent {
                     return Err(Error::at(
@@ -82,7 +102,7 @@ impl SelectedProfile {
                 None => match current.as_str() {
                     "test" | "debug" | "doc" => "dev".to_owned(),
                     "bench" => "release".to_owned(),
-                    _ if table.is_none() => {
+                    _ if !defined => {
                         return Err(Error::failure(format!(
                             "profile `{current}` is not defined"
                         )));
@@ -98,7 +118,7 @@ impl SelectedProfile {
         let mut merged = Table::new();
         let mut warnings = Vec::new();
         for (profile, table) in chain.into_iter().rev() {
-            for (key, item) in table.into_iter().flat_map(Table::iter) {
+            for (key, item) in table.iter() {
                 if key == "inherits" {
                     continue;
                 }
@@ -224,6 +244,7 @@ mod tests {
             &Document::parse(path, "profiles", text.to_owned())?,
             name,
             true,
+            &BTreeMap::new(),
         )
     }
 
@@ -243,6 +264,37 @@ mod tests {
         assert_eq!(
             ignored.warnings,
             ["`panic` setting is ignored for `test` profile"]
+        );
+    }
+
+    #[test]
+    fn environment_overrides_active_inheritance_layers() {
+        let path = Path::new("Cargo.toml");
+        let document = Document::parse(path, "profiles", "[profile.release]\nopt-level = 3\n[profile.custom]\ninherits = 'release'\nopt-level = 2\n".to_owned()).unwrap();
+        let environment = BTreeMap::from([
+            ("CARGO_PROFILE_RELEASE_OPT_LEVEL".into(), "1".into()),
+            ("CARGO_PROFILE_CUSTOM_OPT_LEVEL".into(), "z".into()),
+            ("CARGO_PROFILE_UNUSED_RPATH".into(), "true".into()),
+        ]);
+        let selected =
+            SelectedProfile::parse(path, &document, "custom", true, &environment).unwrap();
+        assert!(selected.release);
+        assert_eq!(selected.settings.opt_level, "z");
+        let environment = BTreeMap::from([
+            ("CARGO_PROFILE_ENV_PROFILE_INHERITS".into(), "dev".into()),
+            ("CARGO_PROFILE_ENV_PROFILE_OPT_LEVEL".into(), "1".into()),
+        ]);
+        let selected =
+            SelectedProfile::parse(path, &document, "env-profile", true, &environment).unwrap();
+        assert!(!selected.release);
+        assert_eq!(selected.settings.opt_level, "1");
+        let invalid = BTreeMap::from([("CARGO_PROFILE_CUSTOM_RPATH".into(), "true".into())]);
+        assert!(
+            SelectedProfile::parse(path, &document, "custom", true, &invalid)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("CARGO_PROFILE_CUSTOM_RPATH")
         );
     }
 
