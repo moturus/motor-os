@@ -2727,6 +2727,17 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Binary/library example builds now publish stable unqualified example paths,
+including rlib/staticlib combinations. Default test compile-only examples use
+the same publication. Unit artifacts remain independently published and named
+in JSON. Owner sidecars also cover these files, and selected clean scans the
+profile's examples directory after validating that it is a real directory.
+Native/Motor artifact and clean contracts preserve another member's binary;
+focused clean tests and strict Clippy pass in
+`/tmp/lorry-m8-example-publication-first-contract.log`,
+`/tmp/lorry-m8-example-publication-clean-tests.log`, and
+`/tmp/lorry-m8-example-publication-clippy.log`.
+
 Run now shares member feature resolution, grants, and build scripts. Its common
 planner selects only the requested binary, excluding an unrelated failing
 binary. Program environments derive the member's OUT_DIR and script variables

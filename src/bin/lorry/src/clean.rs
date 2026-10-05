@@ -144,32 +144,37 @@ fn clean_package_artifacts(
                 }
             }
         }
-        for child in fs::read_dir(&profile)
-            .map_err(|error| Error::failure(format!("failed to list profile: {error}")))?
-        {
-            let child = child
-                .map_err(|error| Error::failure(format!("failed to read profile: {error}")))?;
-            let name = child.file_name();
-            let Some(primary_name) = name
-                .to_str()
-                .and_then(|name| name.strip_suffix(crate::artifact_owner::PRIMARY_SUFFIX))
-            else {
+        for directory in [profile.clone(), profile.join("examples")] {
+            if !real_directory(&directory, "published artifact directory")? {
                 continue;
-            };
-            let primary = profile.join(primary_name);
-            if crate::artifact_owner::matches_primary(&primary, package) {
-                if primary.exists() {
-                    fs::remove_file(&primary).map_err(|error| {
-                        Error::failure(format!(
-                            "failed to remove primary artifact `{}`: {error}",
-                            primary.display()
-                        ))
+            }
+            for child in fs::read_dir(&directory)
+                .map_err(|error| Error::failure(format!("failed to list profile: {error}")))?
+            {
+                let child = child
+                    .map_err(|error| Error::failure(format!("failed to read profile: {error}")))?;
+                let name = child.file_name();
+                let Some(primary_name) = name
+                    .to_str()
+                    .and_then(|name| name.strip_suffix(crate::artifact_owner::PRIMARY_SUFFIX))
+                else {
+                    continue;
+                };
+                let primary = directory.join(primary_name);
+                if crate::artifact_owner::matches_primary(&primary, package) {
+                    if primary.exists() {
+                        fs::remove_file(&primary).map_err(|error| {
+                            Error::failure(format!(
+                                "failed to remove primary artifact `{}`: {error}",
+                                primary.display()
+                            ))
+                        })?;
+                    }
+                    fs::remove_file(child.path()).map_err(|error| {
+                        Error::failure(format!("failed to remove primary owner: {error}"))
                     })?;
+                    removed = true;
                 }
-                fs::remove_file(child.path()).map_err(|error| {
-                    Error::failure(format!("failed to remove primary owner: {error}"))
-                })?;
-                removed = true;
             }
         }
         let freshness = crate::engine::fresh_record_path(&profile, &manifest.root);

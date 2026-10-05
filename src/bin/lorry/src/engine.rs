@@ -1587,6 +1587,7 @@ fn build_inner(
         let plan =
             workspace_test_plan.ok_or_else(|| Error::failure("missing workspace test plan"))?;
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
+        publish_examples(&destination, &selected_packages, &plan, &outputs)?;
         if build.validation.is_strict() {
             prepared.revalidate_cargo_registry_sources(source_limits)?;
         }
@@ -3010,6 +3011,47 @@ fn binary_collision_warnings(
     warnings
 }
 
+fn publish_examples(
+    profile: &Path,
+    selected: &[PackageKey],
+    plan: &CompilationPlan,
+    outputs: &executor::Outputs,
+) -> Result<()> {
+    for key in plan.order.iter().filter(|key| {
+        selected.contains(&key.package)
+            && key.kind == UnitKind::Example
+            && key.mode == crate::unit::UnitMode::Build
+    }) {
+        let name = key
+            .target
+            .as_deref()
+            .ok_or_else(|| Error::failure("example unit has no target name"))?;
+        let crate_name = name.replace('-', "_");
+        let files = match outputs.artifacts.get(key) {
+            Some(crate::compile::RustcOutput::Binary { executable, .. }) => {
+                vec![(name.to_owned(), executable)]
+            }
+            Some(crate::compile::RustcOutput::StaticLibrary { archive, .. }) => {
+                vec![(format!("lib{crate_name}.a"), archive)]
+            }
+            Some(crate::compile::RustcOutput::Library { rlib, archive, .. }) => {
+                let mut files = vec![(format!("lib{crate_name}.rlib"), rlib)];
+                if let Some(archive) = archive {
+                    files.push((format!("lib{crate_name}.a"), archive));
+                }
+                files
+            }
+            _ => return Err(Error::failure("example unit produced no linked artifact")),
+        };
+        let directory = profile.join("examples");
+        create_published_profile(&directory)?;
+        for (name, path) in files {
+            install_primary(path, &directory.join(name), &key.package)?;
+        }
+    }
+    Ok(())
+}
+
 fn compile_root_targets(
     manifest: &Manifest,
     staging: &Path,
@@ -3018,6 +3060,7 @@ fn compile_root_targets(
     outputs: &executor::Outputs,
     library: Option<&RootLibraryArtifact>,
 ) -> Result<StagedArtifacts> {
+    publish_examples(staging, selected, plan, outputs)?;
     let mut binaries = BTreeMap::new();
     let mut binary_dep_info = Vec::new();
     for key in plan

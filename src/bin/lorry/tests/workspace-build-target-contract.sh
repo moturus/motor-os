@@ -125,4 +125,16 @@ PY
         done
     done
 done
+for profile in debug x86_64-unknown-motor/debug; do
+    [ -f "target/lorry/$profile/examples/demo" ]
+    [ -f "target/lorry/$profile/examples/liblibrary.rlib" ]
+    [ -f "target/lorry/$profile/examples/liblibrary.a" ]
+    target=()
+    if [ "$profile" != debug ]; then target=(--target x86_64-unknown-motor); fi
+    env HOME="$WORK/home" "$LORRY" clean -p a "${target[@]}"
+    [ ! -e "target/lorry/$profile/examples/demo" ]
+    [ ! -e "target/lorry/$profile/examples/liblibrary.rlib" ]
+    [ ! -e "target/lorry/$profile/examples/liblibrary.a" ]
+    [ -e "target/lorry/$profile/b" ]
+done
 echo "PASS: workspace build/test target groups, repeated names, dev cycle, JSON, and native/Motor Cargo artifact bytes"

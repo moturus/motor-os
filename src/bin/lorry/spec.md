@@ -494,6 +494,10 @@ named `--bin`, `--test`, `--example`, and `--bench` selections. Plural groups an
 all-targets override corresponding named filters. Test/benchmark groups compile
 harnesses without running them. Development dependencies use the shared graph.
 Auxiliary outputs are published in their unit directories and named in JSON.
+Ordinary binary and library examples also publish unqualified output names under
+the profile's `examples/` directory. Default compile-only test examples do too.
+These files have package owner records, and `clean -p` removes only the selected
+owners' examples while preserving other members' outputs.
 A single exact `--bin` retains the completed-profile fast path where applicable. `run`
 selects an explicit `--bin`, then `package.default-run`, then a sole binary;
 an unknown or ambiguous selection fails. `test` builds every enabled binary
