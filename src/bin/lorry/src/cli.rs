@@ -1679,7 +1679,6 @@ mod tests {
         for input in [
             &["metadata", "--format-version", "2"][..],
             &["check", "--message-format=short"],
-            &["check", "--example", "demo"],
             &["check", "--target-dir="],
             &["tree", "--target-dir", "out"],
             &["tree", "--manifest-path="],

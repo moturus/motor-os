@@ -2727,6 +2727,13 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+The complete CLI parser group found one stale rejection for the newly supported
+`check --example NAME`. The failure is preserved in
+`/tmp/lorry-m8-common-check-selectors-parser.log`; the positive named-selector
+coverage already validates acceptance. Removing the stale rejection lets all
+29 parser tests pass in `/tmp/lorry-m8-common-check-selectors-current-parser.log`.
+This small test-only correction is committed separately from selector refactoring.
+
 Default workspace tests now compile enabled examples, run example and benchmark
 targets marked `test = true`, and include their executables in member bundles.
 Compile-only examples remain outside execution and bundles. Test profiles clear
