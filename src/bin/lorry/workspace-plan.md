@@ -204,17 +204,27 @@ paired native/Motor Cargo coverage for scripts, macros, and skipped ordinary
 sources. Editor integration and native project acceptance remain outstanding.
 
 Milestone 9's synthetic editor cases pass on both Linux and Motor, including
-custom features and target directories. The complete Lorry gate passed in
-1,154 seconds. Real-project acceptance subsequently found and fixed Cargo's
-legacy dependency-default spelling and dev-only procedural-macro host selection.
-Focused Cargo comparisons and strict Clippy passed for both fixes. Ripgrep's
-native release build passes; its full workspace tests require external test
-and path ports. Helix is blocked by its locked cc dependency's native platform
-guard, and sed needs a decision about tracking the workspace lock file from a
-registry script. The actual `src/sys` editor acceptance also needs a decision
-about testing generated code and save checks in separate analyzer views.
-Those diagnoses and preserved failures are in the details file. Milestones
-8 and 9 remain open, including the mixed-platform bundle decision.
+custom features and target directories. The last complete Lorry gate passed in
+1,154 seconds. The subsequent Cargo dependency-default spelling, dev-only macro
+host selection, mixed-platform bundle rejection, and exact workspace-lock
+capability fixes passed their focused checks. A fresh milestone gate is pending.
+
+The actual system workspace's fetched navigation, generated application view,
+and default sysbox save checks pass on Linux. The manual fixture is committed.
+Native fetched navigation passes; admitted editor acceptance remains open.
+Its original deadline failures have compiler/linker thread snapshots. Later
+checks also exhausted the isolated eight-GiB data image; those failures are
+preserved separately and do not resolve the original stalls.
+
+Native ripgrep and sed release builds pass. Ripgrep's tests expose an external
+ignore path-matching defect beyond the integration helper; sed's tests are
+blocked by errno's platform guard. The shipped native cc wrapper compiles and
+runs C successfully; Helix is blocked by the locked Rust cc crate's platform
+guard. No product port in those external projects has been made.
+A separate interrupted-build bug can mistake a PID reused after reboot for an
+old artifact owner. Fixing it safely needs a stable native boot identity;
+wall-clock values cannot serve that purpose. That scope decision is pending.
+Milestones 8 and 9 remain open pending the gate and native acceptance.
 
 ## Goal
 

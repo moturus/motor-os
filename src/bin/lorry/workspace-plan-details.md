@@ -3588,7 +3588,8 @@ tests, all dedicated contracts, Cargo native/Motor byte comparisons, native
 self-build and cross/native workspace identity, tests/bundles, Clippy, and
 interrupted-child recovery. All three actual native editor cases passed.
 Host and native online vendoring needed no retries. Real-project acceptance
-and the mixed-host/target bundle policy choice remain outstanding.
+remains outstanding. The approved mixed-platform bundle rejection is implemented;
+the subsequent compatibility fixes still need a fresh full milestone gate.
 
 ### The compile-time pass
 
@@ -3826,8 +3827,9 @@ before anchored matching on Motor. This is product behavior outside Lorry;
 the failing assertion is retained pending discussion of a scoped ripgrep port.
 The library-only diagnostic does not replace the required workspace acceptance.
 
-Four acceptance issues remain under discussion rather than being treated as
-passing cases. Native sed's locked uucore 0.12.0 script emits a watch directive
+The owner approved Cargo-compatible bundle rejection, exact workspace-lock
+access, and separate default/application editor views. Native acceptance still
+has the following diagnosed failures. Native sed's locked uucore 0.12.0 script emits a watch directive
 for the consumer's workspace `Cargo.lock`, found by walking `OUT_DIR` ancestors.
 Cargo accepts that directive; Lorry's registry-script watch-root policy rejects
 it. The approved capability now allows reading and tracking that exact workspace
@@ -3838,23 +3840,86 @@ tests and strict Clippy pass in
 `/tmp/lorry-m9-workspace-lock-{unit,clippy}.log`. Original evidence:
 `/tmp/lorry-m9-native-acceptance/sed.build.{json,err}`.
 
-Native Helix's locked cc 1.2.29 has an explicit unsupported-platform
+Native Helix's locked Rust cc 1.2.29 has an explicit unsupported-platform
 `compile_error!` in `src/tempfile.rs`: Motor is neither Unix, Windows, nor Wasm.
-The producer's Linux-hosted cross build does not exercise this branch. This
-is outside Lorry, and no cc or external-project source has been changed.
-Evidence: `/tmp/lorry-m9-native-acceptance/helix.build.{json,err}`.
+This is a crate guard before it invokes a C compiler. The shipped
+`/devtools/bin/cc` wrapper over LLVM compiled and ran the image's hello-world C
+source successfully, in `/tmp/lorry-m9-native-acceptance/cc-wrapper-probe.{out,err}`.
+The Linux-hosted cross build does not exercise the crate's native branch.
+No cc or external-project product source has been changed. Original evidence:
+`/tmp/lorry-m9-native-acceptance/helix.build.{json,err}`.
 
 The actual fetched `src/sys` editor copy supports member and Git-source
-navigation with the expected admission warning. Admitted generated-constant
-navigation succeeds in the application view (`cfg.setTest = false`); the
-default test view deliberately uses netstack's handwritten constants. In the
-application view the pinned rust-analyzer emits `--lib --bins --examples` for
-the binary-only sysbox save check. Both Cargo and Lorry reject the nonexistent
-library target. The proposed acceptance separates application-view generated
-navigation from default-view save checking; changing rust-analyzer itself
-requires discussion under the root contributor instructions. Evidence:
+navigation with the expected admission warning. Generated-constant navigation
+uses the application view (`cfg.setTest = false`); the default test view uses
+netstack's handwritten constants. In the application view the pinned analyzer
+emits `--lib --bins --examples` for binary-only sysbox save checking, which both
+Cargo and Lorry reject. The approved fixture therefore separates generated
+navigation from save checking with the analyzer's default test configuration.
+All three real host views pass in `/tmp/lorry-m9-real-editor-final-contract.log`;
+strict Clippy passes in `/tmp/lorry-m9-real-editor-final-clippy.log`.
+The hermetic three-case regression also passed in
+`/tmp/lorry-m9-editor-default-regression-contract.log`. The optional real-workspace
+entry point is documented in `tests/editor-workspace/README.md`; regular tests
+continue to use hermetic fixtures. Original application-view failure evidence:
 `/tmp/lorry-m9-sys-editor-production-cfg/admitted` and
 `/tmp/lorry-m9-sys-editor-cargo-save-diagnosis.{json,err}`.
+
+Native sed builds after the exact workspace-lock fix, in
+`/tmp/lorry-m9-native-acceptance/sed.lock-watch.build.{json,err}`. Its tests now
+reach errno 0.3.14's unsupported-platform guard in `src/sys.rs`, through the
+tempfile/rustix development dependency chain. Preserve
+`/tmp/lorry-m9-native-acceptance/sed.lock-watch.test.{out,err}`; no errno source
+has been changed and no test assertion was relaxed.
+
+### Actual native editor diagnosis
+
+Fetched native navigation and the expected admission denial passed. The
+admitted view originally exceeded its fixed 180-second deadline. The invocation
+wrapper records only completed children, so its missing compile-time record
+alone did not identify the blocked stage. Preserve
+`/tmp/lorry-m9-native-acceptance/sys.native-editor.err` and
+`/tmp/lorry-m9-native-sys-editor-evidence`.
+
+The exact standalone compile-time pass using the image compiler launcher
+finished in 31.851 seconds. Direct RUSTC with the editor environment stalled,
+and direct RUSTC alone also stalled; a one-job diagnostic passed in 55.775
+seconds. These are diagnostic comparisons, not accepted concurrency limits.
+Eight standalone serde compilers and a mix of eight actual macro invocations
+with their captured environments and directories all passed. Temporary stage
+logging also let the full graph pass in 32.217 seconds; it was removed, and
+that pass is not treated as resolving the original failure. A clean command
+in a fresh target directory passed in 22.626 seconds. Evidence is retained as
+`sys.{standalone-compile-time,editor-env-compile-time,direct-rustc-only,
+ direct-rustc-one-job,compiler-stage-diagnosis,observed-fresh-compiler}.{json,err}`
+and `{serde-parallel-compiler-probe,mixed-macro-probe}.{out,err}` under
+`/tmp/lorry-m9-native-acceptance`.
+
+An external observer reproduced the editor deadline and captured compiler and
+Lorry stacks in `sys.observed-editor.err` and `editor-thread-snapshot.log` there.
+Memory use was 1.5 GiB of 8 GiB with no admission pressure. Unfinished compiler
+children remained alive, with linker children or filesystem waits. The exact
+shared wait is unresolved. A detached observer still cannot attach to sys-io:
+the debugger retains original process ancestry even for detached processes.
+That attempt subsequently reported ENOSPC, rather than a deadline, preserved in
+`sys.detached-observed-editor.err` and `detached-admitted-evidence`. The isolated
+eight-GiB data image has filled during the accumulated acceptance/diagnostic
+builds. The earlier four-GiB image is separately retained as
+`vm_images/release/motor-os-dev.m9-enospc-retained.qcow2`. These capacity failures
+are separate evidence; they do not establish the cause of the original stalls.
+
+The observer also exposed a Lorry artifact-owner bug before compilation:
+a persisted PID from a previous boot was reused by the observer, and its Lorry
+child waited on itself as the supposed old owner's child. The command failed
+at the existing 30-second barrier, in `sys.observed-clean-compiler.err`.
+PID-only records cannot distinguish boots. A draft using the shared-page KVM
+wall-clock epoch was discarded: that value is recomputed from clocks affected
+by NTP and cannot safely authorize touching interrupted artifacts. See the
+[KVM implementation](https://linux.googlesource.com/virt/kvm/kvm/+/e503f539dc113ce74347d9b1ce1f7b83f68f5fe0/arch/x86/kvm/x86.c).
+The removed draft is retained only in
+`/tmp/lorry-m9-unsafe-boot-clock-draft.patch`; it is not in the product or image.
+A stable boot-identity API would require kernel/moto-sys scope and the core test
+gates. That decision is pending. No OS source or acceptance deadline was changed.
 
 For `src/sys`, ignore local `.lorry/` state and keep admission
 local initially. Under policy C, add named script grants in
