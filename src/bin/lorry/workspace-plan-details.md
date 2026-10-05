@@ -3542,6 +3542,19 @@ Inside a workspace, `lorry new` must not create an unused member
 lockfile. Tell the user how to add the package to `members`; retain
 Lorry's rule against silently rewriting an existing manifest.
 
+The third milestone-8 gate passed all host contracts, native self-build byte
+identity, native Clippy, and ordinary workspace identity, then stopped before
+the native fixture's tests in 911 seconds. The original failure is retained in
+`/tmp/lorry-m8-full-cargo-profile-count-gate.log` and native evidence directory
+`target/lorry/native-self-tests/self-20261005T040450Z-839226`.
+The checked-in native fixture has a version-3 single-package admission record.
+Shared test planning correctly requires workspace-scoped admission. The driver
+now explicitly migrates that fixture with locked, offline workspace vendoring
+before tests. An isolated hermetic copy reproduced the original rejection,
+proved version-4 migration with unchanged lock bytes, and compiled every Motor
+test harness successfully in
+`/tmp/lorry-m8-native-legacy-admission-migration-diagnosis.log`.
+
 ## Milestone 9: editor integration and native acceptance
 
 **Result.** rust-analyzer works on a workspace as it does under Cargo. The

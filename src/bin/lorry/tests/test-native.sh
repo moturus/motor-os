@@ -594,6 +594,9 @@ PY
     run_workspace_identity
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
+    # The checked-in legacy record still covers ordinary commands; shared test
+    # planning requires an explicit workspace review without changing the lock.
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native vendor --workspace --locked --offline --accept-all"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release -- --quiet"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release --bundle -- --quiet"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
