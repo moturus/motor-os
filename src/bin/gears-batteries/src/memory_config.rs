@@ -42,21 +42,11 @@ impl Limits {
 }
 
 pub fn load(root: &StateRoot) -> Result<Limits, String> {
-    let Some(path) = root.existing_file(Path::new("batteries.toml"))? else {
+    let Some(text) = read(root)? else {
         return Ok(Limits::default());
     };
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|error| error.to_string())?
-        .take(65537)
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    if bytes.len() > 65536 {
-        return Err("user batteries.toml exceeds 64 KiB".into());
-    }
-    let text = std::str::from_utf8(&bytes).map_err(|_| "user batteries.toml is not UTF-8")?;
     let config: Configuration =
-        toml::from_str(text).map_err(|error| format!("invalid user batteries.toml: {error}"))?;
+        toml::from_str(&text).map_err(|error| format!("invalid user batteries.toml: {error}"))?;
     if config.version != 1 {
         return Err("unsupported user batteries.toml version".into());
     }
@@ -67,6 +57,23 @@ pub fn load(root: &StateRoot) -> Result<Limits, String> {
         return Err("memory character limits must be between 1 and 65536".into());
     }
     Ok(config.memory)
+}
+
+pub(crate) fn read(root: &StateRoot) -> Result<Option<String>, String> {
+    let Some(path) = root.existing_file(Path::new("batteries.toml"))? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|error| error.to_string())?
+        .take(65537)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > 65536 {
+        return Err("user batteries.toml exceeds 64 KiB".into());
+    }
+    let text = String::from_utf8(bytes).map_err(|_| "user batteries.toml is not UTF-8")?;
+    Ok(Some(text))
 }
 
 #[cfg(test)]

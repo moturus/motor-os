@@ -31,6 +31,7 @@ pub mod provenance;
 pub mod search;
 pub mod session_search;
 pub mod shell_words;
+pub mod skill_config;
 pub mod skill_format;
 pub mod snapshot;
 pub mod todo;
