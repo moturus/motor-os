@@ -285,10 +285,10 @@ fn stage_one_profile<'a>(input: &'a IdentityInput<'a>) -> CargoProfile<'a> {
             codegen_units: input.release_profile.codegen_units,
             debuginfo: input.release_profile.debug.unwrap_or(CargoDebugInfo::None),
             split_debuginfo: None,
-            debug_assertions: false,
-            overflow_checks: false,
+            debug_assertions: input.release_profile.debug_assertions,
+            overflow_checks: input.release_profile.overflow_checks,
             rpath: false,
-            incremental: false,
+            incremental: input.release_profile.incremental,
             panic: if input.test_profile || !input.panic_abort {
                 CargoPanicStrategy::Unwind
             } else {
@@ -365,6 +365,7 @@ pub fn root_lto(
     target_kind: RootTargetKind,
     test: bool,
 ) -> CargoUnitLto<'static> {
+    let release = release || profile_lto != ManifestLto::Default;
     if target_kind == RootTargetKind::Library && !test {
         return if release {
             match profile_lto {

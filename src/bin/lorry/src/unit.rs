@@ -2412,7 +2412,11 @@ fn unit_settings(
                 key,
                 key.library_types(manifest).is_some(),
                 options.release,
-                options.release_profile.lto,
+                if options.release {
+                    options.release_profile.lto
+                } else {
+                    options.dev_profile.lto
+                },
             )
         },
         logical_target,
@@ -2425,10 +2429,13 @@ fn library_lto(
     types: &[String],
     options: &PlanOptions<'_>,
 ) -> CargoUnitLto<'static> {
-    let configured = options.release_profile.lto;
+    let configured = if options.release {
+        options.release_profile.lto
+    } else {
+        options.dev_profile.lto
+    };
     let ordinary = unit_lto(key, true, options.release, configured);
-    if !options.release
-        || key.compile_kind == CompileKind::Host
+    if key.compile_kind == CompileKind::Host
         || matches!(configured, ManifestLto::Default | ManifestLto::Off)
     {
         return ordinary;
@@ -2459,9 +2466,9 @@ fn base_profile(
             lto: profile_lto(configured.lto),
             codegen_units: configured.codegen_units,
             debuginfo: configured.debug.unwrap_or(CargoDebugInfo::None),
-            debug_assertions: false,
-            overflow_checks: false,
-            incremental: false,
+            debug_assertions: configured.debug_assertions,
+            overflow_checks: configured.overflow_checks,
+            incremental: local && configured.incremental,
             panic: if panic_abort && !test_profile {
                 CargoPanicStrategy::Abort
             } else {
@@ -2475,19 +2482,19 @@ fn base_profile(
     } else {
         UnitProfile {
             opt_level: dev.opt_level,
-            lto: CargoProfileLto::Bool(false),
-            codegen_units: None,
+            lto: profile_lto(dev.lto),
+            codegen_units: dev.codegen_units,
             debuginfo: dev.debug.unwrap_or(CargoDebugInfo::Full),
-            debug_assertions: true,
-            overflow_checks: true,
-            incremental: local,
+            debug_assertions: dev.debug_assertions,
+            overflow_checks: dev.overflow_checks,
+            incremental: local && dev.incremental,
             panic: if panic_abort && !test_profile {
                 CargoPanicStrategy::Abort
             } else {
                 CargoPanicStrategy::Unwind
             },
             strip: crate::identity::manifest_strip(
-                crate::manifest::Strip::Default,
+                dev.strip,
                 dev.debug.unwrap_or(CargoDebugInfo::Full),
             ),
         }
@@ -2535,8 +2542,25 @@ fn shared_native_library(
                 matches!(key.package.source, PackageSourceKey::Path(_)),
                 key.profile == ProfileContext::Test,
             )
-        && unit_lto(key, true, options.release, options.release_profile.lto)
-            == unit_lto(&target, true, options.release, options.release_profile.lto)
+        && unit_lto(
+            key,
+            true,
+            options.release,
+            if options.release {
+                options.release_profile.lto
+            } else {
+                options.dev_profile.lto
+            },
+        ) == unit_lto(
+            &target,
+            true,
+            options.release,
+            if options.release {
+                options.release_profile.lto
+            } else {
+                options.dev_profile.lto
+            },
+        )
 }
 
 fn profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
@@ -2555,6 +2579,7 @@ fn unit_lto(
     release: bool,
     configured: ManifestLto,
 ) -> CargoUnitLto<'static> {
+    let release = release || configured != ManifestLto::Default;
     if key.is_harness() {
         return root_lto(release, configured, RootTargetKind::Binary, true);
     }

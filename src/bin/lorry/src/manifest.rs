@@ -138,6 +138,12 @@ pub struct DevProfile {
     pub panic_abort: bool,
     pub opt_level: &'static str,
     pub debug: Option<CargoDebugInfo>,
+    pub lto: Lto,
+    pub strip: Strip,
+    pub codegen_units: Option<u32>,
+    pub debug_assertions: bool,
+    pub overflow_checks: bool,
+    pub incremental: bool,
 }
 
 impl Default for DevProfile {
@@ -146,6 +152,12 @@ impl Default for DevProfile {
             panic_abort: false,
             opt_level: "0",
             debug: None,
+            lto: Lto::Default,
+            strip: Strip::Default,
+            codegen_units: None,
+            debug_assertions: true,
+            overflow_checks: true,
+            incremental: true,
         }
     }
 }
@@ -158,6 +170,9 @@ pub struct ReleaseProfile {
     pub lto: Lto,
     pub strip: Strip,
     pub codegen_units: Option<u32>,
+    pub debug_assertions: bool,
+    pub overflow_checks: bool,
+    pub incremental: bool,
 }
 
 impl Default for ReleaseProfile {
@@ -169,6 +184,9 @@ impl Default for ReleaseProfile {
             lto: Lto::Default,
             strip: Strip::Default,
             codegen_units: None,
+            debug_assertions: false,
+            overflow_checks: false,
+            incremental: false,
         }
     }
 }
@@ -2629,12 +2647,27 @@ fn parse_profiles(path: &Path, document: &Document) -> Result<ParsedProfiles> {
             path,
             document,
             require_table(path, document, release, "profile.release")?,
+            "profile.release",
+            "3",
         )?,
         None => ReleaseProfile::default(),
     };
     let mut errors = BTreeMap::new();
     for (name, allowed) in [
-        ("dev", &["panic", "debug", "opt-level"][..]),
+        (
+            "dev",
+            &[
+                "panic",
+                "debug",
+                "opt-level",
+                "lto",
+                "strip",
+                "codegen-units",
+                "debug-assertions",
+                "overflow-checks",
+                "incremental",
+            ][..],
+        ),
         (
             "release",
             &[
@@ -2644,6 +2677,9 @@ fn parse_profiles(path: &Path, document: &Document) -> Result<ParsedProfiles> {
                 "codegen-units",
                 "debug",
                 "opt-level",
+                "debug-assertions",
+                "overflow-checks",
+                "incremental",
             ][..],
         ),
         ("test", &[][..]),
@@ -2669,15 +2705,28 @@ fn parse_profiles(path: &Path, document: &Document) -> Result<ParsedProfiles> {
 }
 
 fn parse_dev(path: &Path, document: &Document, table: &Table) -> Result<DevProfile> {
+    let profile = parse_release(path, document, table, "profile.dev", "0")?;
     Ok(DevProfile {
-        panic_abort: parse_panic_abort(path, document, table, "profile.dev")?,
-        opt_level: parse_opt_level(path, document, table, "profile.dev", "0")?,
-        debug: parse_profile_debug(path, document, table, "profile.dev")?,
+        panic_abort: profile.panic_abort,
+        opt_level: profile.opt_level,
+        debug: profile.debug,
+        lto: profile.lto,
+        strip: profile.strip,
+        codegen_units: profile.codegen_units,
+        debug_assertions: profile.debug_assertions,
+        overflow_checks: profile.overflow_checks,
+        incremental: profile.incremental,
     })
 }
 
-fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<ReleaseProfile> {
-    let panic_abort = parse_panic_abort(path, document, table, "profile.release")?;
+fn parse_release(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    profile: &str,
+    default_opt: &'static str,
+) -> Result<ReleaseProfile> {
+    let panic_abort = parse_panic_abort(path, document, table, profile)?;
     let lto = match table.get("lto") {
         None => Lto::Default,
         Some(item) if item.as_bool() == Some(false) => Lto::Default,
@@ -2689,7 +2738,7 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                "unsupported value for `profile.release.lto`",
+                format!("unsupported value for `{profile}.lto`"),
                 "choose false, true, `fat`, `thin`, or `off`",
             ));
         }
@@ -2705,7 +2754,7 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                "unsupported value for `profile.release.strip`",
+                format!("unsupported value for `{profile}.strip`"),
                 "choose false, true, `none`, `debuginfo`, or `symbols`",
             ));
         }
@@ -2718,19 +2767,27 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
                 return Err(Error::at(
                     path,
                     document.line_of_item(item),
-                    "`profile.release.codegen-units` must be an integer from 1 through 4294967295",
+                    format!(
+                        "`{profile}.codegen-units` must be an integer from 1 through 4294967295"
+                    ),
                     "use a positive codegen unit count",
                 ));
             }
         },
     };
     Ok(ReleaseProfile {
-        opt_level: parse_opt_level(path, document, table, "profile.release", "3")?,
-        debug: parse_profile_debug(path, document, table, "profile.release")?,
+        opt_level: parse_opt_level(path, document, table, profile, default_opt)?,
+        debug: parse_profile_debug(path, document, table, profile)?,
         panic_abort,
         lto,
         strip,
         codegen_units,
+        debug_assertions: optional_bool(path, document, table, profile, "debug-assertions")?
+            .unwrap_or(default_opt == "0"),
+        overflow_checks: optional_bool(path, document, table, profile, "overflow-checks")?
+            .unwrap_or(default_opt == "0"),
+        incremental: optional_bool(path, document, table, profile, "incremental")?
+            .unwrap_or(default_opt == "0"),
     })
 }
 

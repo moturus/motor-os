@@ -1164,7 +1164,11 @@ fn build_inner(
         |(root, _)| root,
     );
     let incremental = incremental_roots_in(&build, target_root);
-    if !build.release {
+    if if build.release {
+        build.manifest.release.incremental
+    } else {
+        build.manifest.dev.incremental
+    } {
         fs::create_dir_all(&incremental.host).map_err(|error| {
             Error::failure(format!(
                 "failed to create incremental directory `{}`: {error}",

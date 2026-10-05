@@ -2727,6 +2727,17 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Dev/release profiles now share supported LTO, stripping, codegen-unit, assertion,
+overflow-check, and incremental settings, in addition to debug/optimization and
+panic. Editable release units may explicitly enable incremental compilation;
+immutable units remain non-incremental. Dev LTO follows the existing graph-wide
+link/bitcode rules. Script run profiles retain their Cargo reductions. The
+paired profile contract includes dev thin-LTO/stripping/codegen and disabled
+assertions/incremental, plus enabled release assertions/overflow/incremental.
+Native/Motor build/check bytes and JSON and strict Clippy pass in
+`/tmp/lorry-m8-common-profile-first-contract.log` and
+`/tmp/lorry-m8-common-profile-clippy.log`.
+
 Build/check/test now expand named target globs over the selected members before
 planning and validation. Matching names are deduplicated; unmatched patterns
 fail explicitly. Plural/all-targets selectors retain Cargo precedence. Run

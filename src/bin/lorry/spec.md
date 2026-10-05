@@ -143,8 +143,9 @@ the final-executable identity promise.
 
 Debug root crates and mutable path dependency units must pass stable
 target-specific directories below `target/lorry/.incremental/` to rustc on
-Linux and Motor. Release units and immutable registry dependency units must
-not use incremental compilation. Incremental state is a disposable compiler
+Linux and Motor. Release units default to non-incremental compilation;
+explicit profile settings may enable it for editable packages. Immutable
+dependency units remain non-incremental. Incremental state is a disposable compiler
 cache, is never an integrity authority, and is removed by `lorry clean`.
 
 ## Command-line interface
@@ -604,11 +605,11 @@ publication/metadata, or unsupported build semantics. Unknown or unsupported
 behavioral keys must name their source location and a supported rewrite or
 deferred capability when possible.
 
-Dev and release profiles support `debug` and `opt-level`; numeric strings are
-rejected just as in Cargo. `profile.dev.panic` accepts `unwind` and `abort`. The selected strategy enters
+Dev and release profiles support `debug`, `opt-level`, `lto`, `strip`,
+`codegen-units`, `debug-assertions`, `overflow-checks`, and `incremental`.
+Numeric strings are rejected just as in Cargo. `panic` accepts `unwind` and `abort`. The selected strategy enters
 unit identity and rustc arguments for ordinary target crates, while test,
-build-script, and procedural-macro units use unwind. `profile.release`
-additionally supports `lto`, `strip`, and `codegen-units`.
+build-script, and procedural-macro units use unwind.
 Debug and optimization values follow Cargo. Omitted stripping preserves debug
 information when requested, and host debug reduction requires matching
 effective runtime settings before a unit can be shared.

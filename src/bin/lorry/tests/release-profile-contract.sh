@@ -7,7 +7,7 @@ source "$SCRIPT_DIR/current-toolchain.sh"
 lorry_load_current_toolchain
 export RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-release-profile-contract-XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained profile fixture: $WORK" >&2; fi' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project"/{app,shared,builder}/src "$WORK/project/.cargo"
 printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" >"$WORK/home/.config/lorry/lorry.toml"
 cat >"$WORK/manifest.toml" <<'EOF'
@@ -63,10 +63,29 @@ printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s
 cd "$WORK/project"
 cp "$WORK/manifest.toml" Cargo.toml
 "$LORRY_TEST_CARGO" generate-lockfile --offline
-for strip in default false none debuginfo symbols debug-limited debug-full debug-lines debug-off dev-abort dev-limited dev-full dev-off; do
+for strip in default false none debuginfo symbols debug-limited debug-full debug-lines debug-off dev-abort dev-limited dev-full dev-off dev-settings release-settings; do
     cp "$WORK/manifest.toml" Cargo.toml
     mode=(--release)
-    if [ "$strip" = dev-abort ]; then
+    if [ "$strip" = dev-settings ]; then
+        mode=()
+        cat >>Cargo.toml <<'EOF'
+[profile.dev]
+opt-level = 1
+lto = "thin"
+strip = "symbols"
+codegen-units = 2
+debug-assertions = false
+overflow-checks = false
+incremental = false
+EOF
+    elif [ "$strip" = release-settings ]; then
+        cat >>Cargo.toml <<'EOF'
+[profile.release]
+debug-assertions = true
+overflow-checks = true
+incremental = true
+EOF
+    elif [ "$strip" = dev-abort ]; then
         mode=()
         printf '\n[profile.dev]\npanic = "abort"\n' >>Cargo.toml
     elif [[ "$strip" == dev-* ]]; then
