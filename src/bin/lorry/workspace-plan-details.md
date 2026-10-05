@@ -3949,7 +3949,8 @@ An external observer reproduced the editor deadline and captured compiler and
 Lorry stacks in `sys.observed-editor.err` and `editor-thread-snapshot.log` there.
 Memory use was 1.5 GiB of 8 GiB with no admission pressure. Unfinished compiler
 children remained alive, with linker children or filesystem waits. The exact
-shared wait is unresolved. A detached observer still cannot attach to sys-io:
+shared wait was unresolved at this stage; the filesystem diagnosis below now
+establishes the deadlock. A detached observer still cannot attach to sys-io:
 the debugger retains original process ancestry even for detached processes.
 That attempt subsequently reported ENOSPC, rather than a deadline, preserved in
 `sys.detached-observed-editor.err` and `detached-admitted-evidence`. The isolated
@@ -3971,7 +3972,104 @@ The removed draft is retained only in
 A stable boot-identity API would require kernel/moto-sys scope and the core test
 gates. That decision is pending. No OS source or acceptance deadline was changed.
 
-### Native filesystem wait evidence
+### Native filesystem deadlock: cause and repair options
+
+The reproduced native editor stall is a resource-order deadlock in `sys-io`,
+not a compiler operation still waiting for the host disk. The filesystem
+service uses one fair read/write lock for filesystem operations. Each client
+connection has a separate pool of 64 server response pages. In
+`src/sys/sys-io/src/runtime/fs.rs`, `on_cmd_metadata` completes its metadata
+lookup, then awaits `sender.alloc_page` while still holding the global read
+guard. In contrast, `on_cmd_read` and `on_cmd_read_multi` reserve response
+pages before awaiting that guard.
+
+The cycle is:
+
+1. Metadata holds the filesystem read lock and waits for a free response page.
+2. Reads have reserved response pages but cannot acquire the filesystem lock.
+   They are behind a queued writer; the FIFO policy in
+   `src/sys/lib/moto-async/src/rwlock.rs` prevents readers bypassing that writer.
+3. The writer cannot acquire the filesystem lock until metadata releases its
+   read guard. The reads therefore cannot finish and free their response pages,
+   so metadata cannot progress either.
+
+Because the lock is global, unrelated filesystem operations also queue behind
+the writer. This explains why the editor helper's source restoration stalls
+along with the compilers. Completed host disk requests cannot break this cycle.
+
+**Recommended repair:** drop the filesystem read guard immediately after
+copying the metadata, before awaiting the response page. The metadata value
+is already an owned snapshot, so preparing its IPC response needs no guard.
+This is a small change to `on_cmd_metadata` that removes the resource cycle
+without changing IPC limits, lock fairness, Cargo concurrency, or deadlines.
+
+**Alternative:** allocate the response page before taking the filesystem read
+lock, matching the read handlers' order. This also removes the cycle but holds
+a scarce response page throughout the metadata lookup. Releasing the guard
+first avoids that extra page residency and is the smaller change.
+
+Changing the lock to allow readers to bypass writers could let the blocked
+reads drain, but would change fairness and risk writer starvation. Enlarging
+the page pool or reducing compiler concurrency would only change how easily
+the existing cycle is reached. Neither is a proposed repair.
+
+The diagnosis is complete for the reproduced runtime stall. No permanent core
+fix has been made. The repository rule for a preexisting non-Lorry bug requires
+discussion before repair; milestone 9 remains open. If the recommended fix is
+approved, add a native regression that fills one connection's response-page
+pool and verifies a writer on another connection can finish while metadata
+remains pending. Include it transitively in `src/tests/full-test.sh`, run the
+required three debug and three release core gates, and rerun native editor
+acceptance with its original limits. A subsequent Lorry milestone gate is
+still needed for the outstanding acceptance work.
+
+### Confirming service traces and controlled reproduction
+
+Temporary instrumentation was confined to an isolated source copy under
+`/tmp/lorry-m9-fs-trace`; repository system code and external dependency source
+were untouched. It records task IDs, filesystem lock acquisition/release,
+response-page allocation, and block completions in a bounded in-memory ring.
+Host monitor snapshots read that ring without periodic guest network output.
+Diagnostic images are overlays; the original failed image remains unchanged.
+
+The first instrumented native run passed all three editor views. That pass is
+not a resolution. A second run, with eight guest CPUs sharing four host CPUs
+to expose the scheduling window, reproduced the stall and reached the original
+SSH and evidence-transfer limits. A third run added targeted page-allocation
+records and reproduced the cycle during sysbox save checking. Preserve
+`/tmp/lorry-m9-fs-trace/trace-v{2,3}-third.{bin,txt}` and the corresponding
+`/tmp/lorry-m9-native-acceptance/fs-trace-v{2,3}-gate.log` files.
+
+In `trace-v3-third.txt`, task 5365837 acquires the filesystem read lock at
+sequence 46220093, finishes its metadata lookup at 46220094, and waits for
+one response page at 46220095. The server-page mask is
+`0xffffffffffffffff`: all 64 pages are occupied. Four read tasks, 5365851
+through 5365854, had each reserved 12 pages and then waited for the same
+filesystem lock. Writer 5365838 also waits with one read guard still held.
+Metadata neither releases that guard nor completes its request in subsequent
+snapshots. Block completions have drained, while the service continues waking
+and accepting requests. This identifies the resources and tasks in the cycle;
+it does not require a lost disk interrupt or lost executor wake to explain it.
+
+The third run's unpaused caller samples through 240 seconds are retained in
+`/tmp/lorry-m9-fs-trace/v3-callers.err`. After preserving the decisive trace,
+the diagnostic VM was explicitly stopped before the outer SSH limit; see
+`v3-termination-note.txt` there. This is a diagnosed failure, not an acceptance
+pass. The second run separately preserves the unchanged outer-limit failures.
+
+A final controlled probe used the unmodified shipped image on a fresh overlay,
+with no service instrumentation or CPU pinning. The native Rust program under
+`/tmp/lorry-m9-page-pool-probe` retains all 64 metadata response pages, submits
+another metadata request, and completes a later read-only barrier. A create
+request on another connection then remains pending for the one-second
+diagnostic observation. Freeing exactly one retained page immediately allows
+both the pending metadata and the unrelated writer to finish. The program
+releases the remaining pages and removes its temporary file. Its clean exit
+confirms the expected defect and successful diagnostic cleanup, not product
+acceptance. Preserve `build.log`, `execution.log`, and `probe.err` there. This
+controlled intervention confirms the lock/page coupling on shipped code.
+
+### Earlier caller observations and separate image failure
 
 On the isolated 16-GiB image, one real editor run completed admitted checks,
 then timed out in the generated pass; a later stable-wrapper run timed out
@@ -4015,10 +4113,11 @@ evidence transfer reached their existing limits; see
 `silent-stack-observed-download.log`. The stopped image is preserved as
 `vm_images/release/lorry-m9-acceptance-silent-stack-stall.qcow2`, including the
 unrestored isolated source edit. No main-repository source was edited by the
-fixture. The shared guest filesystem wait is now located; its exact mechanism
-remains unresolved. Periodic output is not a proven cause or an accepted fix.
-Any needed native filesystem fix extends beyond Lorry and requires the core
-scope and test gates. Do not mark milestone 9 complete on the observed passes.
+fixture. These caller observations located the shared guest filesystem wait;
+the later service traces above establish its mechanism. Periodic output is
+not a proven cause or an accepted fix. A native filesystem repair extends
+beyond Lorry and requires the core scope and test gates. Do not mark milestone
+9 complete on the observed passes.
 
 Separately, resizing the full eight-GiB image with `/tmp` scratch failed when
 the destination filesystem reread a newly created parent directory as not in

@@ -216,11 +216,15 @@ and default sysbox save checks pass on Linux. All views now share one Cargo
 wrapper path; the generated pass reuses all 51 compiler artifacts. The helper
 and a Linux sandbox descriptor-lifetime fix are committed.
 Native editor acceptance remains open. Two observed native runs passed all
-three views, but silent observations reproduced the stall. Unpaused stacks
-show compiler reads, writes, and metadata lookups waiting in Motor's filesystem
-runtime; the helper's source restoration also waits there. The host block
-device has completed every submitted request. The guest filesystem mechanism
-is unresolved. Retained disk-capacity failures are separate evidence.
+three views, but silent observations reproduced the stall. Targeted service
+traces now establish a filesystem deadlock: metadata holds the global read
+lock while waiting for a response page; reads holding response pages wait
+behind a writer that needs metadata to release the lock. A controlled probe
+on the unmodified image confirms that releasing one page unblocks metadata
+and a writer on another connection. The proposed minimal repair releases the
+metadata lock before allocating its response page. It requires discussion
+and core validation before implementation; see the detailed plan's native
+filesystem diagnosis. Retained disk-capacity failures are separate evidence.
 
 Native ripgrep and sed release builds pass. Ripgrep's tests expose an external
 ignore path-matching defect beyond the integration helper; sed's tests are
