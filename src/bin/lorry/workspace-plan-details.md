@@ -3746,6 +3746,56 @@ The initial unit fixture accidentally used an inline-table comma in a regular
 table; correcting the fixture's newline restored the intended type check.
 The original failure is `/tmp/lorry-m9-dependency-defaults-unit.log`.
 
+Offline admission and native vendoring now succeed for all three isolated
+projects. Native ripgrep's release build succeeded, but workspace tests failed
+before compilation: the binary harness required an absent `serde_derive`
+procedural-macro unit. A path-only binary fixture reproduced the same error;
+Cargo's unit graph places that dev-only macro on the compiler host. Lorry's
+resolver converted only normal macro edges to host edges, leaving dev edges
+on the target. The conversion now applies to every procedural-macro edge.
+The regression first failed with `{Target}` instead of `{Host}`, then passed
+for resolvers 1, 2, and 3, including host-only child dependencies. The existing
+member-macro contract now compares Cargo JSON and exact native/Motor artifacts
+for binary and integration-test consumers of a dev-only, unselected member
+macro. The initial contract fixture copied an undeclared feature branch into
+its helper; Cargo and Lorry emitted the same warning. The corrected fixture
+declares only its required host feature. A subsequent external-path byte
+comparison encountered Lorry's documented content-based path-source remapping;
+the byte oracle now uses workspace members, where source identities match.
+Both original contract failures remain in
+`/tmp/lorry-m9-dev-macro-{contract,corrected-contract}.log`.
+Original evidence: `/tmp/lorry-m9-native-acceptance/ripgrep.test.err` and
+`/tmp/lorry-m9-dev-macro-diagnosis/lorry.err`. Resolver evidence:
+`/tmp/lorry-m9-dev-macro-{regression-before-fix,resolver-unit}.log`.
+The focused Cargo contract and strict Clippy passed in
+`/tmp/lorry-m9-dev-macro-{workspace-contract,clippy}.log`.
+
+Three acceptance issues remain under discussion rather than being treated as
+passing cases. Native sed's locked uucore 0.12.0 script emits a watch directive
+for the consumer's workspace `Cargo.lock`, found by walking `OUT_DIR` ancestors.
+Cargo accepts that directive; Lorry's registry-script watch-root policy rejects
+it. The proposed narrow capability is tracking that exact workspace lock file,
+without granting access to the whole workspace. Evidence:
+`/tmp/lorry-m9-native-acceptance/sed.build.{json,err}`.
+
+Native Helix's locked cc 1.2.29 has an explicit unsupported-platform
+`compile_error!` in `src/tempfile.rs`: Motor is neither Unix, Windows, nor Wasm.
+The producer's Linux-hosted cross build does not exercise this branch. This
+is outside Lorry, and no cc or external-project source has been changed.
+Evidence: `/tmp/lorry-m9-native-acceptance/helix.build.{json,err}`.
+
+The actual fetched `src/sys` editor copy supports member and Git-source
+navigation with the expected admission warning. Admitted generated-constant
+navigation succeeds in the application view (`cfg.setTest = false`); the
+default test view deliberately uses netstack's handwritten constants. In the
+application view the pinned rust-analyzer emits `--lib --bins --examples` for
+the binary-only sysbox save check. Both Cargo and Lorry reject the nonexistent
+library target. The proposed acceptance separates application-view generated
+navigation from default-view save checking; changing rust-analyzer itself
+requires discussion under the root contributor instructions. Evidence:
+`/tmp/lorry-m9-sys-editor-production-cfg/admitted` and
+`/tmp/lorry-m9-sys-editor-cargo-save-diagnosis.{json,err}`.
+
 For `src/sys`, ignore local `.lorry/` state and keep admission
 local initially. Under policy C, add named script grants in
 `src/sys/lorry.toml`, starting with `moto-io` for `sysbox`.

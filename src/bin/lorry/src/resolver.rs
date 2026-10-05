@@ -1535,11 +1535,11 @@ fn fulfill(
     scope: Scope<'_>,
 ) -> std::result::Result<(), Failure> {
     let mut event = event.clone();
-    if event.dependency.kind == DependencyKind::Normal
-        && state
-            .nodes
-            .get(key)
-            .is_some_and(|node| node.record.proc_macro)
+    // Macros execute in rustc even when a test's dev-dependency selects them.
+    if state
+        .nodes
+        .get(key)
+        .is_some_and(|node| node.record.proc_macro)
     {
         if event.parent.is_none() && matches!(scope, Scope::WorkspaceSelected { .. }) {
             // Cargo also activates a selected macro's normal feature context.
@@ -4441,6 +4441,80 @@ dev = ["dep:leaf"]
         );
         assert_eq!(helper.host_features, ["macro-context".to_owned()].into());
         assert_eq!(helper.target_features, ["target-context".to_owned()].into());
+    }
+
+    #[test]
+    fn dev_only_proc_macro_uses_host_context() {
+        let fixture = LocalFixture::new();
+        fixture.package("app", "[package]\nname = \"app\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[workspace]\n[dev-dependencies]\nderive = { path = \"../derive\" }\n");
+        fixture.package("derive", "[package]\nname = \"derive\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\nproc-macro = true\n[target.'cfg(unix)'.dependencies]\nhelper = { path = \"../helper\", features = [\"host\"] }\n");
+        fixture.package("helper", "[package]\nname = \"helper\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[features]\nhost = []\n");
+        let root = fixture.0.join("app");
+        let source = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        let host_cfg = CfgSet::parse("unix\n").unwrap();
+        let target_cfg = CfgSet::parse("target_os=\"motor\"\n").unwrap();
+        for resolver in [
+            ResolverVersion::V1,
+            ResolverVersion::V2,
+            ResolverVersion::V3,
+        ] {
+            let options = options(resolver);
+            let mut catalog = Catalog::default();
+            let complete = workspace::resolve_complete_workspace(
+                &source,
+                &mut catalog,
+                &options,
+                &[],
+                &mut |_, _, _| Ok(()),
+            )
+            .unwrap();
+            for dev in [false, true] {
+                let resolution = workspace::resolve_selected_workspace(
+                    &complete,
+                    &catalog,
+                    &options,
+                    &[workspace::MemberRequest {
+                        root: root.clone(),
+                        features: BTreeSet::new(),
+                        default_features: true,
+                        dev,
+                        selected: true,
+                        target_units: false,
+                    }],
+                    TargetSelection {
+                        host_triple: "x86_64-unknown-linux-gnu",
+                        host_cfg: &host_cfg,
+                        target_triple: "x86_64-unknown-motor",
+                        target_cfg: &target_cfg,
+                    },
+                )
+                .unwrap();
+                let derive = resolution
+                    .packages
+                    .iter()
+                    .find(|package| package.key.name == "derive");
+                assert_eq!(derive.is_some(), dev);
+                if let Some(derive) = derive {
+                    assert_eq!(derive.compile_kinds, BTreeSet::from([CompileKind::Host]));
+                    let app = resolution
+                        .packages
+                        .iter()
+                        .find(|package| package.key.name == "app")
+                        .unwrap();
+                    let edge = app.edges.first().unwrap();
+                    assert_eq!(edge.kind, DependencyKind::Dev);
+                    assert_eq!(edge.compile_kind, CompileKind::Host);
+                    assert_eq!(edge.parent_compile_kind, Some(CompileKind::Target));
+                    let helper = resolution
+                        .packages
+                        .iter()
+                        .find(|package| package.key.name == "helper")
+                        .unwrap();
+                    assert_eq!(helper.compile_kinds, BTreeSet::from([CompileKind::Host]));
+                    assert_eq!(helper.host_features, BTreeSet::from(["host".to_owned()]));
+                }
+            }
+        }
     }
 
     #[test]

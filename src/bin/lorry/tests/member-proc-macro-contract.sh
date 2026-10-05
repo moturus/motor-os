@@ -224,4 +224,96 @@ assert lorry and lorry == cargo
 PYEXAMPLE
     done
 done
-echo "PASS: selected member macros match Cargo host/cross bytes and JSON"
+
+# A binary-only consumer must also put a dev-only, unselected macro on the host.
+mkdir -p "$WORK/dev-only"/{app,derive,helper}/src "$WORK/dev-only/app/.cargo"
+cp .cargo/config.toml "$WORK/dev-only/app/.cargo/config.toml"
+cd "$WORK/dev-only/app"
+cat >../Cargo.toml <<'EOF'
+[workspace]
+members = ["app", "derive", "helper"]
+default-members = ["app"]
+resolver = "3"
+EOF
+cat >Cargo.toml <<'EOF'
+[package]
+name = "dev-app"
+version = "1.0.0"
+edition = "2024"
+[dev-dependencies]
+derive = { path = "../derive" }
+EOF
+cat >src/main.rs <<'EOF'
+fn main() {}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn dev_macro() { assert_eq!(derive::answer!(), 41); }
+}
+EOF
+mkdir tests
+printf '#[test]\nfn dev_macro() { assert_eq!(derive::answer!(), 41); }\n' >tests/integration.rs
+cat >../derive/Cargo.toml <<'EOF'
+[package]
+name = "derive"
+version = "1.0.0"
+edition = "2024"
+[lib]
+proc-macro = true
+[target.'cfg(unix)'.dependencies]
+helper = { path = "../helper", features = ["host"] }
+EOF
+cp "$WORK/project/derive/src/lib.rs" ../derive/src/lib.rs
+# This fixture needs only the expansion, with no member script or harness.
+sed -i '/#\[test\]/,$d' ../derive/src/lib.rs
+cat >../helper/Cargo.toml <<'EOF'
+[package]
+name = "helper"
+version = "1.0.0"
+edition = "2024"
+[features]
+host = []
+EOF
+cat >../helper/src/lib.rs <<'EOF'
+#[cfg(not(feature = "host"))]
+compile_error!("macro helper must activate its host feature");
+pub fn expansion() -> &'static str { "41" }
+EOF
+printf 'config-version = 1\n[policy]\npath-roots = ["%s"]\n[policy.rules.dev-macro]\naction = "allow"\nname = "derive"\nversion = "=1.0.0"\nsource = "path"\nallow-proc-macro = true\n' \
+    "$WORK/dev-only" >../lorry.toml
+"$LORRY_TEST_CARGO" generate-lockfile --offline
+cp ../Cargo.lock "$WORK/dev-only.lock"
+for platform in native motor; do
+    args=()
+    if [ "$platform" = motor ]; then args=(--target x86_64-unknown-motor); fi
+    for command in test check; do
+        selection=(--no-run)
+        comparison=differential-workspace-messages
+        if [ "$command" = check ]; then
+            selection=(--all-targets)
+            comparison=differential-workspace-check-messages
+        fi
+        env HOME="$WORK/home" "$LORRY" "$command" "${selection[@]}" "${args[@]}" --locked --offline \
+            --message-format=json >"$WORK/dev-lorry.json"
+        "$LORRY_TEST_CARGO" "$command" "${selection[@]}" "${args[@]}" --locked --offline \
+            --message-format=json >"$WORK/dev-cargo.json"
+        "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \
+            "$comparison" "$WORK/dev-lorry.json" "$WORK/dev-cargo.json"
+        if [ "$command" = test ]; then
+            python3 - "$WORK/dev-lorry.json" "$WORK/dev-cargo.json" <<'PYDEV'
+import json, pathlib, sys
+def artifacts(path):
+    return sorted(pathlib.Path(file).read_bytes() for line in open(path) for event in [json.loads(line)]
+                  if event['reason'] == 'compiler-artifact' and
+                     (event['profile']['test'] or event['target']['kind'] == ['proc-macro'])
+                  for file in event['filenames'])
+lorry, cargo = map(artifacts, sys.argv[1:])
+assert len(lorry) == 3 and lorry == cargo
+PYDEV
+        fi
+        cmp ../Cargo.lock "$WORK/dev-only.lock"
+    done
+done
+env HOME="$WORK/home" "$LORRY" test --locked --offline
+"$LORRY_TEST_CARGO" test --locked --offline
+echo "PASS: selected member and dev-only macros match Cargo host/cross bytes and JSON"

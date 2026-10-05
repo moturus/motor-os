@@ -1569,7 +1569,9 @@ and artifact names.
 A dependency manifest with `[lib] proc-macro = true` produces a first-class
 procedural-macro unit. Lorry must compile it with `--crate-type proc-macro`
 for the compiler host, compile its normal and build dependency closure for
-that host, and pass the host artifact through `--extern`. On Linux that
+that host, and pass the host artifact through `--extern`. This applies equally
+when a test, example, or benchmark selects the macro through a dev-dependency.
+On Linux that
 artifact is rustc's ordinary dynamic library. On Motor it is a static PIE
 executable carrying rustc's registration metadata and private stdio protocol
 entry point. Resolver 2
