@@ -12,6 +12,9 @@ use gears::session::Store;
 #[path = "workflow-smoke/scenario.rs"]
 mod scenario;
 
+#[path = "workflow-smoke/memory.rs"]
+mod memory;
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let binary =
@@ -181,6 +184,7 @@ fn run() -> Result<(), String> {
     assert_eq!(reminders, 3);
     assert_eq!(approvals.0.len(), 4);
     drop(runtime);
+    memory::run(&binary, &fixture.root)?;
     fixture.cleanup(&group, &sessions, &snapshots)?;
     println!("gears batteries workflow ALL PASS");
     Ok(())
