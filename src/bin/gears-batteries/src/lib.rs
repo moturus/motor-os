@@ -35,6 +35,7 @@ pub mod skill_catalog;
 pub mod skill_config;
 pub mod skill_format;
 pub mod skill_pending;
+pub mod skill_snapshot;
 pub mod skill_store;
 pub mod snapshot;
 pub mod todo;
