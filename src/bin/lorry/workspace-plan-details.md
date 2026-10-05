@@ -2727,6 +2727,26 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Test now uses the common target selection model and planner, including repeated
+names, combined groups, examples, and benchmarks. Explicit library/bin/example
+selections ignore the test flag as Cargo does; plural tests and benches filter
+their respective manifest flags. Selections bind bundle layout freshness.
+The auxiliary Cargo graph oracle now covers test all-targets. The paired build
+contract also exercises every test group natively and for Motor, including
+test=false library/bin targets, JSON, exact harness bytes, archive contents, and
+exact release archives. Named and combined ordinary/bundled example, library
+example, benchmark, and integration executions match Cargo stdout and preserve
+member runtime script environments.
+
+Two parser expectations still rejected the newly supported test bin/repeated
+selectors; the original failure is `/tmp/lorry-m8-test-targets-first-parser.log`.
+Updated positive coverage passes in `/tmp/lorry-m8-test-targets-current-parser.log`.
+The graph, native/Motor artifact, runtime/workspace regression contracts, and
+strict Clippy pass in `/tmp/lorry-m8-common-test-mode-first-oracle.log`,
+`/tmp/lorry-m8-test-targets-first-contract.log`,
+`/tmp/lorry-m8-test-targets-runtime-contract.log`, and
+`/tmp/lorry-m8-test-targets-final-clippy.log`.
+
 Build now exposes common target flags, plural groups, repeated names, and
 all-targets precedence. Harness groups compile without execution, and auxiliary
 outputs are named in JSON. Exact single-bin selections retain the existing

@@ -82,7 +82,8 @@ marked for those groups. `check --examples` checks binary, `lib`,
 checks also select targets across the chosen members. Named check target selectors can be repeated; `--all-targets` selects everything
 and takes precedence over named check filters. Example/benchmark
 build selectors use the same target groups and repeated names, compiling harnesses
-without running them. Example/benchmark test/run selectors remain deferred. Default tests compile enabled examples,
+without running them. Test accepts the same selectors, repeats, and combinations,
+with ordinary execution, `--no-run`, or `--bundle`. Run example selection remains deferred. Default tests compile enabled examples,
 run examples and benchmarks marked `test = true`, and include those test targets
 in member bundles. Ordinary build/check accepts
 root dev-dependencies without activating their features.

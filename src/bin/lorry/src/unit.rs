@@ -386,6 +386,7 @@ pub(crate) enum HarnessFilter {
     All,
     Tests,
     Benches,
+    Any,
 }
 
 impl HarnessFilter {
@@ -394,6 +395,7 @@ impl HarnessFilter {
             Self::All => tested || benched,
             Self::Tests => tested,
             Self::Benches => benched,
+            Self::Any => true,
         }
     }
 }
@@ -609,6 +611,14 @@ pub(crate) fn workspace_compiler_targets(
                     && (key.kind == UnitKind::Binary
                         || key.is_harness()
                         || matches!(key.kind, UnitKind::Example | UnitKind::Bench))
+                    && (mode != UnitMode::Test
+                        || key.kind != UnitKind::LibraryHarness
+                        || manifests[&key.package]
+                            .library
+                            .as_ref()
+                            .is_some_and(|library| {
+                                testing && library.test || benching && library.bench
+                            }))
             })
             .cloned()
             .collect();
@@ -669,7 +679,12 @@ pub(crate) fn workspace_compiler_targets(
                     .units
                     .keys()
                     .filter(|key| {
-                        key.kind == UnitKind::Binary
+                        key.kind
+                            == if mode == UnitMode::Test {
+                                UnitKind::BinaryHarness
+                            } else {
+                                UnitKind::Binary
+                            }
                             && selected.contains(&key.package)
                             && key.target.as_deref() == Some(name)
                     })
@@ -709,7 +724,51 @@ fn workspace_target_units(
     options: &PlanOptions<'_>,
     mode: UnitMode,
 ) -> Result<UnitGraph> {
-    let mut graph = if selection.normal {
+    let mut graph = if selection.normal && mode == UnitMode::Test {
+        if let Some(name) = selection.binary_name {
+            for package in resolution
+                .packages
+                .iter()
+                .filter(|package| selected.contains(&package.key))
+            {
+                let manifest = &manifests[&package.key];
+                if let Some(binary) = manifest.binaries.iter().find(|binary| binary.name == name) {
+                    target_enabled(
+                        resolution,
+                        manifest,
+                        &features_for(package, CompileKind::Target),
+                        name,
+                        binary.required_features.as_deref(),
+                        true,
+                    )?;
+                }
+            }
+        }
+        let mut tests = workspace_harness_units(
+            resolution,
+            manifests,
+            selected,
+            options,
+            None,
+            HarnessFilter::Any,
+        )?;
+        let roots = tests
+            .units
+            .keys()
+            .filter(|key| {
+                selected.contains(&key.package)
+                    && (key.kind == UnitKind::LibraryHarness
+                        || key.kind == UnitKind::BinaryHarness
+                            && selection.binaries
+                            && selection
+                                .binary_name
+                                .is_none_or(|name| key.target.as_deref() == Some(name)))
+            })
+            .cloned()
+            .collect();
+        retain_unit_roots(&mut tests, roots)?;
+        tests
+    } else if selection.normal {
         workspace_units(
             resolution,
             manifests,
@@ -3447,6 +3506,7 @@ mod tests {
             ("default", "", "test", UnitMode::Test),
             ("all", "", "build", UnitMode::Build),
             ("all", "", "check", UnitMode::Check),
+            ("all", "", "test", UnitMode::Test),
         ] {
             let graph = if kind == "default" {
                 workspace_test_units(&resolution, &manifests, &selected, &options, None)
@@ -3484,7 +3544,7 @@ mod tests {
                 .keys()
                 .filter(|key| {
                     key.package.name == "a"
-                        && (kind == "all" && key.kind == UnitKind::Library
+                        && (kind == "all" && key.kind == UnitKind::Library && command != "test"
                             || key.is_harness()
                             || matches!(key.kind, UnitKind::Example | UnitKind::Bench))
                 })

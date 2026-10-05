@@ -112,6 +112,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let requested_targets = match &cli.command {
         Command::Check(options) => Some(&options.targets),
         Command::Build(options) => Some(&options.targets),
+        Command::Test(options) => Some(&options.build.targets),
         _ => None,
     };
     if let Some(targets) = requested_targets
@@ -581,7 +582,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             }
             let outcome = build_inner(
                 Build {
-                    target_selection: None,
+                    target_selection: Some(&options.build.targets),
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
@@ -598,7 +599,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     rustflags: &rustflags,
                     release,
                     test: true,
-                    test_name: options.test.as_deref(),
+                    test_name: None,
                     color,
                     verbosity: cli.verbosity,
                     jobs,
@@ -1334,21 +1335,31 @@ fn build_inner(
     )?;
     crate::trace::event("initialized dependency build cache");
     let workspace_test_plan = if build.test && build.members.is_some() {
-        Some(prepared.workspace_test_plan(
-            &PlanOptions {
-                workspace_root: &build.manifest.workspace_root,
-                release: build.release,
-                test_profile: false,
-                panic_abort: build.manifest.panic_abort(build.release),
-                dev_profile: &build.manifest.dev,
-                release_profile: &build.manifest.release,
-                rustc: build.toolchain,
-                logical_target: build.logical_target,
-                rustflags: build.rustflags,
+        let options = PlanOptions {
+            workspace_root: &build.manifest.workspace_root,
+            release: build.release,
+            test_profile: false,
+            panic_abort: build.manifest.panic_abort(build.release),
+            dev_profile: &build.manifest.dev,
+            release_profile: &build.manifest.release,
+            rustc: build.toolchain,
+            logical_target: build.logical_target,
+            rustflags: build.rustflags,
+        };
+        Some(
+            if let Some(targets) = build.target_selection
+                && targets.has_target_selector()
+            {
+                prepared.workspace_compiler_targets(
+                    &options,
+                    &selected_packages,
+                    targets,
+                    crate::unit::UnitMode::Test,
+                )?
+            } else {
+                prepared.workspace_test_plan(&options, &selected_packages, build.test_name)?
             },
-            &selected_packages,
-            build.test_name,
-        )?)
+        )
     } else {
         None
     };
@@ -1431,10 +1442,15 @@ fn build_inner(
                 .iter()
                 .any(|member| {
                     !member.integration_tests.is_empty()
-                        || member
-                            .described_targets
-                            .iter()
-                            .any(|target| target.kind == "bench" && target.test)
+                        || member.described_targets.iter().any(|target| {
+                            target.kind == "bench"
+                                && (target.test
+                                    || build.target_selection.is_some_and(|targets| {
+                                        targets.benches
+                                            || !targets.bench.is_empty()
+                                            || targets.all_targets
+                                    }))
+                        })
                 }));
     let check_integration = check.is_some_and(|(_, options)| {
         (options.targets.selects_tests()
@@ -2155,6 +2171,7 @@ fn freshness_base(
     digest.debug("cargo-registry", &build.use_cargo_registry);
     digest.debug("bundle", &build.bundle);
     digest.debug("binary-selection", &build.binary_selection);
+    digest.debug("target-selection", &build.target_selection);
     digest.debug("jobs", &build.jobs);
     if build.validation.is_strict() {
         digest.file("lorry", cargo)?;

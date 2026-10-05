@@ -225,7 +225,6 @@ pub struct RunOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestOptions {
     pub build: BuildOptions,
-    pub test: Option<String>,
     pub no_run: bool,
     pub no_fail_fast: bool,
     pub bundle: bool,
@@ -920,10 +919,10 @@ fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
     } else {
         command.args(workspace_selection_arguments())
     };
+    if matches!(name, "build" | "test") {
+        return command.args(target_selection_arguments());
+    }
     if supports_bin {
-        if name == "build" {
-            return command.args(target_selection_arguments());
-        }
         command.arg(
             Arg::new("bin")
                 .long("bin")
@@ -956,13 +955,6 @@ fn test_command() -> ClapCommand {
     compile_command("test", false)
         .arg(message_format_argument())
         .arg(Arg::new("filter").value_name("NAME").num_args(0..=1))
-        .arg(
-            Arg::new("test")
-                .long("test")
-                .value_name("NAME")
-                .num_args(1)
-                .action(ArgAction::Set),
-        )
         .arg(Arg::new("no-run").long("no-run").action(ArgAction::SetTrue))
         .arg(
             Arg::new("no-fail-fast")
@@ -1085,7 +1077,6 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             }
             Ok(Command::Test(TestOptions {
                 build: build_options(options, true),
-                test: options.get_one::<String>("test").cloned(),
                 no_run: options.get_flag("no-run"),
                 no_fail_fast: options.get_flag("no-fail-fast"),
                 bundle: options.get_flag("bundle"),
@@ -1493,7 +1484,7 @@ mod tests {
             let Command::Test(options) = parse(&input).unwrap().command else {
                 panic!("expected test command");
             };
-            assert_eq!(options.test.as_deref(), Some("integration"));
+            assert_eq!(options.build.targets.test, ["integration"]);
             assert_eq!(options.arguments, ["matching", "--exact"]);
             assert_eq!(options.no_run, no_run);
             assert!(!options.no_fail_fast);
@@ -1702,6 +1693,50 @@ mod tests {
     }
 
     #[test]
+    fn test_uses_common_repeated_and_plural_target_selectors() {
+        let Command::Test(options) = parse(&[
+            "test",
+            "--lib",
+            "--bin",
+            "one",
+            "--bin",
+            "two",
+            "--tests",
+            "--test",
+            "first",
+            "--test",
+            "second",
+            "--examples",
+            "--example",
+            "demo",
+            "--benches",
+            "--bench",
+            "measure",
+            "--all-targets",
+            "filter",
+            "--",
+            "--nocapture",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected test")
+        };
+        assert!(
+            options.build.targets.lib
+                && options.build.targets.all_targets
+                && options.build.targets.tests
+                && options.build.targets.examples
+                && options.build.targets.benches
+        );
+        assert_eq!(options.build.targets.bin, ["one", "two"]);
+        assert_eq!(options.build.targets.test, ["first", "second"]);
+        assert_eq!(options.build.targets.example, ["demo"]);
+        assert_eq!(options.build.targets.bench, ["measure"]);
+        assert_eq!(options.arguments, ["filter", "--nocapture"]);
+    }
+
+    #[test]
     fn check_targets_accept_repeated_names() {
         for command in ["check", "clippy"] {
             let Command::Check(options) = parse(&[
@@ -1893,7 +1928,6 @@ mod tests {
         };
         assert_eq!(run.arguments, ["--release", "two words", ""]);
         assert_eq!(run.build.validation, ValidationMode::Strict);
-        assert!(parse(&["test", "--bin", "server"]).is_err());
     }
 
     #[test]
@@ -1911,7 +1945,7 @@ mod tests {
         let Command::Test(test) = cli.command else {
             panic!("expected test");
         };
-        assert_eq!(test.test.as_deref(), Some("cli"));
+        assert_eq!(test.build.targets.test, ["cli"]);
         assert!(test.bundle);
         assert!(test.build.release);
         assert_eq!(test.build.validation, ValidationMode::Strict);
@@ -2026,7 +2060,6 @@ mod tests {
             &["new"],
             &["new", "one", "two"],
             &["new", "example", "--lib"],
-            &["test", "--test=x", "--test", "y"],
             &["test", "first", "second"],
         ] {
             assert!(parse(input).unwrap_err().is_usage(), "{input:?}");

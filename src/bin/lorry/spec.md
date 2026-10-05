@@ -368,7 +368,7 @@ Excluded destinations remain standalone packages with their own lockfiles.
 Cargo's workspace precedence applies: without exclusions `-p` is validated
 but all members are selected; with exclusions `-p` is ignored. Unmatched
 exclusions warn, except in quiet mode. Empty selections fail explicitly.
-Workspace test-target execution remains deferred. Run accepts one `-p` and
+Workspace test targets execute through the shared graph. Run accepts one `-p` and
 rejects package patterns. Package IDs do not require a manifest-path option.
 Build, check, Clippy, run, test, tree, metadata, vendor, and review share
 repeated `--features`/`-F`, comma/space lists, qualified and weak dependency
@@ -377,7 +377,7 @@ names and multiple slashes fail as in Cargo. Source-only metadata describes
 declared features regardless of selection. Metadata, tree, and vendor resolve
 those flags. Ordinary build, check, and Clippy also resolve those flags across
 selected members, retaining feature unions when a member is a dependency too.
-Run and test still reject nondefault CLI features. Several selected members use
+Run still rejects nondefault CLI features. Test resolves them across selected members. Several selected members use
 one unit graph, package-specific primary compiler roles and Cargo JSON IDs,
 and binary owner records. Shared execution currently reuses individual units;
 single-member default-feature builds retain completed-profile reuse.
@@ -499,6 +499,11 @@ selects an explicit `--bin`, then `package.default-run`, then a sole binary;
 an unknown or ambiguous selection fails. `test` builds every enabled binary
 harness and defines `CARGO_BIN_EXE_<name>` for every program while compiling
 integration tests.
+Test uses those same target selectors, including repeated names and combined
+groups. Explicit library, binary, and example selections run harnesses even
+when their `test` flag is false. Plural tests/benches filter the corresponding
+manifest flags; default tests retain compile-only examples. Each selection
+supports no-run and per-member bundles, and participates in bundle layout identity.
 
 The supported manifest surface includes:
 

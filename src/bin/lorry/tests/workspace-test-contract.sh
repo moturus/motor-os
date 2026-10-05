@@ -181,6 +181,20 @@ for mode in ordinary bundle; do
     cmp "$WORK/default-lorry.out" "$WORK/default-cargo.out"
 done
 # Prove compiler bytes separately from runtime assertions embedding artifact paths.
+for selection in example library bench integration combined; do
+    args=(--example tested)
+    if [ "$selection" = library ]; then args=(--example library-tested); fi
+    if [ "$selection" = bench ]; then args=(--bench optin); fi
+    if [ "$selection" = integration ]; then args=(--test integration); fi
+    if [ "$selection" = combined ]; then args=(--test integration --example tested --example library-tested --bench optin); fi
+    for mode in ordinary bundle; do
+        bundle=()
+        if [ "$mode" = bundle ]; then bundle=(--bundle); fi
+        env HOME="$WORK/home" "$LORRY" test -p alpha "${args[@]}" "${bundle[@]}" >"$WORK/selected-lorry.out"
+        "$LORRY_TEST_CARGO" test -p alpha "${args[@]}" --offline >"$WORK/selected-cargo.out"
+        cmp "$WORK/selected-lorry.out" "$WORK/selected-cargo.out"
+    done
+done
 for source in alpha/examples/tested.rs alpha/examples/library-tested.rs alpha/benches/optin.rs; do
     printf 'fn main() { assert_eq!(alpha::value(), zeta::value()); }\n' >"$source"
 done

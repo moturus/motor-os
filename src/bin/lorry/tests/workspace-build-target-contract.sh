@@ -28,7 +28,11 @@ EOF
     printf 'pub fn value() -> u32 { 42 }\n' >"$WORK/project/$member/src/lib.rs"
     printf 'fn main() { assert_eq!(%s::value(), 42); }\n' "$member" >"$WORK/project/$member/src/main.rs"
     if [ "$member" = b ]; then continue; fi
+    sed -i '/\[lib\]/a test = false' "$WORK/project/$member/Cargo.toml"
     cat >>"$WORK/project/$member/Cargo.toml" <<'EOF'
+[[bin]]
+name = "a"
+test = false
 [[example]]
 name = "library"
 crate-type = ["rlib", "staticlib"]
@@ -65,8 +69,11 @@ for platform in native motor; do
         if [ "$selection" = repeated ]; then args=(--workspace --bin a --bin b --test first --test second --example demo --example library --bench first --bench second); fi
         if [ "$selection" = all ]; then args=(--workspace --all-targets); fi
         if [ "$selection" = groups ]; then args=(--workspace --lib --bins --tests --examples --benches --bin missing --test missing --example missing --bench missing); fi
-        env HOME="$WORK/home" "$LORRY" build "${args[@]}" "${target[@]}" --message-format=json >"$WORK/lorry.json"
-        "$LORRY_TEST_CARGO" build "${args[@]}" "${target[@]}" --offline --message-format=json >"$WORK/cargo.json"
+        for command in build test; do
+        execution=()
+        if [ "$command" = test ]; then execution=(--no-run); fi
+        env HOME="$WORK/home" "$LORRY" "$command" "${execution[@]}" "${args[@]}" "${target[@]}" --message-format=json >"$WORK/lorry.json"
+        "$LORRY_TEST_CARGO" "$command" "${execution[@]}" "${args[@]}" "${target[@]}" --offline --message-format=json >"$WORK/cargo.json"
         "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \
             differential-workspace-messages "$WORK/lorry.json" "$WORK/cargo.json"
         python3 - "$WORK/lorry.json" "$WORK/cargo.json" <<'PY'
@@ -115,6 +122,7 @@ for key, actual in lorry.items():
                 else:
                     assert archive(a[0]) == archive(b[0]), (key, extension)
 PY
+        done
     done
 done
-echo "PASS: workspace build target groups, repeated names, dev cycle, JSON, and native/Motor Cargo artifact bytes"
+echo "PASS: workspace build/test target groups, repeated names, dev cycle, JSON, and native/Motor Cargo artifact bytes"
