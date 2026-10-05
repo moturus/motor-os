@@ -10,7 +10,7 @@ edition = "2024"
 virtio-task-tests = { path = "../virtio-task-tests" }
 virtio-async = { path = "../../lib/virtio-async", features = ["test-support"] }
 moto-async   = { path = "../../lib/moto-async"  }
-moto-rt      = { path = "../../lib/moto-rt"     }
+moto-rt      = { path = "../../lib/moto-rt", features = ["libc"] }
 moto-ipc     = { path = "../../lib/moto-ipc"    , features = ["stdio-pipe"]}
 moto-io      = { path = "../../lib/moto-io"     , features = ["netdev"] }
 moto-log     = { path = "../../lib/moto-log"    , features = ["test-support"] }

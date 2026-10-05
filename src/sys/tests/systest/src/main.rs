@@ -43,6 +43,7 @@ mod stdio_file_input;
 mod stdio_file_relay;
 mod stdio_peek;
 mod stdio_terminal;
+mod strlen;
 mod subcommand;
 mod swap_cancel;
 mod sys_io_self_test;
@@ -1687,6 +1688,7 @@ fn main() {
     // Logging checked stats readiness; run this exact global channel-count
     // check before later networking fixtures leave channels still draining.
     tcp::test_disconnect_before_rx_ready_releases_channels();
+    strlen::run_all_tests();
     mem_blocks::run_all_tests();
     pressure::run_all_tests();
     test_invalid_memory_map_options();
