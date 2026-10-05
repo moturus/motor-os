@@ -15,6 +15,9 @@ mod scenario;
 #[path = "workflow-smoke/memory.rs"]
 mod memory;
 
+#[path = "workflow-smoke/skills.rs"]
+mod skills;
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let binary =
@@ -186,6 +189,7 @@ fn run() -> Result<(), String> {
     drop(runtime);
     memory::run(&binary, &fixture.root)?;
     fixture.cleanup(&group, &sessions, &snapshots)?;
+    skills::run(&binary, &compiler)?;
     println!("gears batteries workflow ALL PASS");
     Ok(())
 }

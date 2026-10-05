@@ -18,6 +18,13 @@ pub struct Scripted {
 }
 
 impl Scripted {
+    pub fn from_responses(responses: Vec<Completion>) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(responses.into()),
+        }
+    }
+
     pub fn new(label: &str) -> Self {
         Self { requests: Mutex::new(Vec::new()), responses: Mutex::new(vec![
             call("todo", json!({"items": [{"id": "compile", "text": "Repair and compile the crate", "status": "pending"}]})),
@@ -58,7 +65,7 @@ impl Provider for Scripted {
     }
 }
 
-fn call(name: &str, arguments: Value) -> Completion {
+pub fn call(name: &str, arguments: Value) -> Completion {
     Completion {
         tool_calls: vec![ToolCall::new(
             format!("fixture-{}", NEXT_CALL.fetch_add(1, Ordering::Relaxed)),
@@ -70,7 +77,7 @@ fn call(name: &str, arguments: Value) -> Completion {
     }
 }
 
-fn answer(text: &str) -> Completion {
+pub fn answer(text: &str) -> Completion {
     Completion {
         content: text.into(),
         finish_reason: Some(FinishReason::Stop),
