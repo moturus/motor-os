@@ -1816,6 +1816,8 @@ mod tests {
                     harnesses: false,
                     integrations: true,
                     integration_name: Some("integration"),
+                    examples: false,
+                    benches: false,
                 },
             )
             .unwrap();
@@ -1873,6 +1875,8 @@ mod tests {
                     harnesses: true,
                     integrations: true,
                     integration_name: None,
+                    examples: false,
+                    benches: false,
                 },
             )
             .unwrap();

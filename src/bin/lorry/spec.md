@@ -414,9 +414,12 @@ Package and workspace custom metadata are preserved in metadata JSON,
 including nested tables, arrays, and Cargo's TOML datetime serialization.
 Examples and benches are described from explicit tables and automatic file
 or directory discovery. Explicit names and paths override inferred targets;
-auto flags and edition 2015's defaults follow Cargo. Compilation of these
-targets remains deferred. `check --all-targets` prints one omission note;
-`check --examples` fails explicitly.
+auto flags and edition 2015's defaults follow Cargo. Binary examples and
+benchmarks compile through the shared graph under `check --all-targets`,
+including their dev-dependencies, target editions, required features, and
+script outputs. `check --examples` checks binary examples, including packages
+with only example targets. Library example compilation and build/test/run
+example/benchmark selectors remain deferred and fail explicitly.
 Members and default-members accept component globs `*`, `?`, and `[...]`,
 including negated character classes. `**` and paths outside the root are
 rejected. Matching files are ignored; matching directories need manifests,
@@ -544,10 +547,11 @@ feature list. Dependency-qualified requirements use the resolved dependency
 features. A build with every implicit target disabled succeeds without compiler
 units or artifact messages.
 
-Lorry rejects examples, benches, unsupported
+Lorry rejects library example compilation, example/benchmark build/test/run
+selectors, unsupported
 profile keys, artifact dependencies, alternative
 registries, non-crates.io patches, and
-CLI feature-selection flags for run/test.
+CLI feature-selection flags for run.
 Build, run, and test reject an unmaterialized crates.io Git patch and direct
 the user to `lorry vendor`; they never fetch or modify it themselves.
 Documentation tests are not run because native Motor has no `rustdoc`; the

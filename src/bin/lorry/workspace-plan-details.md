@@ -2727,6 +2727,24 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Public shared checks now include binary examples and benchmarks under
+`--all-targets`; `--examples` selects example checks. Dev features are resolved
+for these selections, benchmark compiler environments use Cargo's placeholder
+program paths and target-root temporary directory, and example-only packages
+can be loaded for compilation. The paired native/Motor contract covers a dev
+cycle, member scripts, explicit target editions, disabled required-feature
+examples, and harness-free benchmarks. Existing check and workspace contracts
+also exercise empty and example-only selections. The initial example-only
+comparison incorrectly used the warning-requiring diagnostic fixture mode;
+its failure is preserved in
+`/tmp/lorry-m8-auxiliary-check-workspace-script-expectation-fixed.log` and fixture
+`/tmp/lorry-workspace-contract-RgkS8w`. The existing ordinary workspace comparison
+mode requires no diagnostics and validates the identical artifact projection
+in `/tmp/lorry-m8-auxiliary-check-example-only-schema.log`.
+The paired contract, existing check contract, full workspace contract, and
+strict Clippy pass in
+`/tmp/lorry-m8-auxiliary-check-{public-contract,existing-contract,workspace-final-contract,clippy}.log`.
+
 The existing workspace driver still expected test feature selection and selected
 member scripts to be rejected, despite their earlier milestone-8 implementation.
 Its original failure is preserved in

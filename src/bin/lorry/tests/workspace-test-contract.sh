@@ -136,6 +136,34 @@ const _: () = assert!(TMP_PATH[TMP_PATH.len() - 3] == b't' && TMP_PATH[TMP_PATH.
 EOF
 done
 cp alpha/Cargo.toml "$WORK/alpha-manifest.toml"
+mkdir alpha/examples alpha/benches
+cat >alpha/examples/demo.rs <<'EOF'
+fn main() {
+    assert_eq!(alpha::value(), zeta::value());
+    assert_eq!(env!("CARGO_BIN_NAME"), "demo");
+}
+EOF
+cat >alpha/benches/measured.rs <<'EOF'
+fn main() {
+    assert_eq!(alpha::value(), zeta::value());
+}
+const BIN_PATH: &[u8] = env!("CARGO_BIN_EXE_alpha").as_bytes();
+const _: () = assert!(BIN_PATH.len() == "placeholder:alpha".len() && BIN_PATH[0] == b'p');
+const TMP_PATH: &[u8] = env!("CARGO_TARGET_TMPDIR").as_bytes();
+const _: () = assert!(TMP_PATH[TMP_PATH.len() - 3] == b't' && TMP_PATH[TMP_PATH.len() - 1] == b'p');
+EOF
+cat >>alpha/Cargo.toml <<'EOF'
+[[example]]
+name = "demo"
+edition = "2021"
+[[example]]
+name = "disabled"
+path = "examples/demo.rs"
+required-features = ["manual"]
+[[bench]]
+name = "measured"
+harness = false
+EOF
 python3 - <<'PY'
 from pathlib import Path
 path = Path('alpha/Cargo.toml')
@@ -145,9 +173,10 @@ PY
 for platform in native motor; do
     target=()
     if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); fi
-    for selection in all named; do
+    for selection in all named examples; do
         args=(--workspace --all-targets)
         if [ "$selection" = named ]; then args=(-p zeta -p alpha --test integration); fi
+        if [ "$selection" = examples ]; then args=(--workspace --examples); fi
         env HOME="$WORK/home" "$LORRY" check "${args[@]}" "${target[@]}" --message-format=json >"$WORK/lorry-check.json"
         "$LORRY_TEST_CARGO" check "${args[@]}" "${target[@]}" --offline --message-format=json >"$WORK/cargo-check.json"
         "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \
@@ -156,6 +185,7 @@ for platform in native motor; do
 done
 for member in alpha zeta; do cp "$WORK/$member-integration.rs" "$member/tests/integration.rs"; done
 cp "$WORK/alpha-manifest.toml" alpha/Cargo.toml
+rm -r alpha/examples alpha/benches
 for arguments in workspace named features; do
     selection=(--workspace)
     if [ "$arguments" = named ]; then selection=(-p zeta -p alpha --test integration); fi

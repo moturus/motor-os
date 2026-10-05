@@ -120,10 +120,10 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
     [ "$("$LORRY" run --jobs=default -p app)" = app ]
     "$LORRY" test -p app -- --quiet
     "$LORRY" check -p app --all-targets 2>"$WORK/all-targets.stderr"
-    [ "$(grep -Fc 'note: --all-targets leaves out examples and benches' "$WORK/all-targets.stderr")" -eq 1 ]
+    ! grep -F 'note: --all-targets leaves out examples and benches' "$WORK/all-targets.stderr"
     "$LORRY_TEST_CARGO" check -p app --all-targets --offline
-    if "$LORRY" check -p app --examples 2>"$WORK/examples.stderr"; then exit 1; fi
-    grep -F 'check --examples` is not supported' "$WORK/examples.stderr" >/dev/null
+    "$LORRY" check -p app --examples
+    "$LORRY_TEST_CARGO" check -p app --examples --offline
     "$LORRY" build --jobs=-1 -p app
     "$LORRY" build --jobs 1 -p tool 2>"$WORK/tool-build.stderr"
     [ "$("$LORRY" run)" = tool ]
@@ -575,5 +575,23 @@ for path in sys.argv[1:]:
     assert all(os.path.isfile(message['executable']) for message in artifacts)
     assert messages[-1] == {'reason': 'build-finished', 'success': True}
 PY_COLLISION
+
+mkdir -p "$WORK/examples-only/examples"
+cat >"$WORK/examples-only/Cargo.toml" <<'EOF'
+[package]
+name = "examples-only"
+version = "0.1.0"
+edition = "2024"
+EOF
+printf 'fn main() {}\n' >"$WORK/examples-only/examples/demo.rs"
+(
+    cd "$WORK/examples-only"
+    "$LORRY_TEST_CARGO" generate-lockfile --offline
+    "$LORRY" check --examples --message-format=json >"$WORK/examples-only.lorry.json"
+    "$LORRY_TEST_CARGO" check --examples --offline --message-format=json >"$WORK/examples-only.cargo.json"
+    "$LORRY_TEST_CARGO" run --quiet --locked --offline \
+        --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- differential-workspace-check-messages \
+        "$WORK/examples-only.lorry.json" "$WORK/examples-only.cargo.json"
+)
 
 echo "PASS: selected members build, run, test, and clean; unsupported lint levels and member build scripts fail; the package limit matches members by directory"

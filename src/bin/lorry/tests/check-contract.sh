@@ -15,7 +15,7 @@ if [ -z "${LORRY_TEST_RUSTC:-}" ]; then
     lorry_load_current_toolchain
 fi
 WORK="$(mktemp -d /tmp/lorry-check-contract-XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained failed fixture: $WORK" >&2; fi' EXIT
 HOST_CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 HOME_DIR="$WORK/home"
 PROJECT="$WORK/project"
@@ -125,12 +125,13 @@ export LORRY_JOBS=1
     "$LORRY" vendor --accept-all
 )
 
-if "$LORRY" check --examples --manifest-path "$PROJECT/Cargo.toml" \
-    >"$WORK/examples.out" 2>"$WORK/examples.err"; then
-    echo "check-contract: unsupported --examples succeeded without checking" >&2
+: >"$LOG"
+"$LORRY" check --examples --manifest-path "$PROJECT/Cargo.toml" \
+    >"$WORK/examples.out" 2>"$WORK/examples.err"
+if grep -F -- '--crate-name' "$LOG"; then
+    echo "check-contract: empty example selection compiled a target" >&2
     exit 1
 fi
-grep -F '`check --examples` is not supported' "$WORK/examples.err" >/dev/null
 
 TARGET="$WORK/editor-target"
 : >"$LOG"

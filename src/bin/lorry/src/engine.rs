@@ -62,8 +62,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     )?;
     let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
     let shared_tests = matches!(&cli.command, Command::Test(_));
-    let shared_test_checks =
-        matches!(&cli.command, Command::Check(options) if options.selects_tests());
+    let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.selects_tests() || options.examples);
     let shared = shared_tests
         || shared_test_checks
         || ordinary
@@ -92,14 +91,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     }
     let manifest = selected[0].clone();
     Manifest::report_warnings(&selected, cli.verbosity);
-    if matches!(&cli.command, Command::Check(options) if options.all_targets)
-        && !manifest.described_targets.is_empty()
-        && cli.verbosity != Verbosity::Quiet
-    {
-        eprintln!(
-            "note: --all-targets leaves out examples and benches until their compilation is implemented"
-        );
-    }
     for manifest in &selected {
         // Compiling the selected package without its build script would quietly
         // produce a different crate, so reject it before any other work.
@@ -1018,11 +1009,6 @@ fn build_reported(build: Build<'_>, format: MessageFormat) -> Result<BuildArtifa
 }
 
 fn check(build: Build<'_>, target_root: &Path, options: &CheckOptions) -> Result<i32> {
-    if options.examples {
-        return Err(Error::failure(
-            "`check --examples` is not supported until example targets are implemented",
-        ));
-    }
     match build_inner(build, Some((target_root, options)), options.message_format)? {
         BuildOutcome::Check(code) => Ok(code),
         BuildOutcome::Artifacts(_) => unreachable!("check returned ordinary build artifacts"),
@@ -1404,7 +1390,13 @@ fn build_inner(
                 .members
                 .unwrap_or_else(|| std::slice::from_ref(build.manifest))
                 .iter()
-                .any(|member| !member.integration_tests.is_empty())
+                .any(|member| {
+                    !member.integration_tests.is_empty()
+                        || member
+                            .described_targets
+                            .iter()
+                            .any(|target| target.kind == "bench")
+                })
     });
     let integration_binaries = (selected_integration || check_integration)
         .then(|| {
@@ -1531,6 +1523,8 @@ fn build_inner(
             } else {
                 options.test.as_deref()
             },
+            examples: options.all_targets || options.examples,
+            benches: options.all_targets,
         })?;
         executor::execute(&plan, &manifests, &executor_options)?;
         if build.validation.is_strict() {

@@ -513,11 +513,6 @@ impl Manifest {
         manifest.workspace_root = lock_root.to_owned();
         manifest.path = manifest.root.join(MANIFEST_NAME);
         resolve_target_defaults(&mut manifest, true)?;
-        if manifest.library.is_none() && manifest.binaries.is_empty() {
-            return Err(Error::failure(
-                "selected package has only example or bench targets; compiling these targets is not yet supported",
-            ));
-        }
         let lock_path = lock_root.join(LOCK_NAME);
         if !lock_path.is_file() {
             if require_current_lock {
