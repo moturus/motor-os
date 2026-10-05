@@ -8,8 +8,38 @@ use crate::paths::ToolContext;
 use crate::pending::Proposal;
 
 pub fn describe(context: &ToolContext, proposal: &Proposal) -> Result<Value, String> {
-    let mut evidence: Vec<Value> = proposal
-        .source
+    describe_with(context, &proposal.source, |session| {
+        let Some(before) = &proposal.before else {
+            return Ok(false);
+        };
+        let mut matched = false;
+        for entry in session
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == "hook_state")
+        {
+            let Some(hash) = entry.data["state"]["prompt_snapshot"].as_str() else {
+                continue;
+            };
+            let snapshot = crate::snapshot::load(&context.state, hash)?;
+            for memory in snapshot
+                .memory
+                .iter()
+                .filter(|memory| memory.target == proposal.target)
+            {
+                matched |= memory.entries()?.iter().any(|entry| entry == before);
+            }
+        }
+        Ok(matched)
+    })
+}
+
+pub fn describe_with(
+    context: &ToolContext,
+    source: &crate::memory_format::Source,
+    contains: impl Fn(&gears::session::Session) -> Result<bool, String>,
+) -> Result<Value, String> {
+    let mut evidence: Vec<Value> = source
         .entries
         .iter()
         .map(|id| json!({"id": id, "available": false}))
@@ -18,7 +48,7 @@ pub fn describe(context: &ToolContext, proposal: &Proposal) -> Result<Value, Str
     let mut unavailable = Vec::new();
     let Some(root) = context.state.existing_directory(Path::new(""))? else {
         return Ok(
-            json!({"source_session": proposal.source.session, "evidence": evidence,
+            json!({"source_session": source.session, "evidence": evidence,
             "sessions_with_old_snapshot": containing, "unavailable": unavailable}),
         );
     };
@@ -40,7 +70,7 @@ pub fn describe(context: &ToolContext, proposal: &Proposal) -> Result<Value, Str
                 continue;
             }
         };
-        if session.id() == proposal.source.session {
+        if session.id() == source.session {
             for value in &mut evidence {
                 if let Some(entry) = session
                     .entries()
@@ -56,33 +86,13 @@ pub fn describe(context: &ToolContext, proposal: &Proposal) -> Result<Value, Str
                 }
             }
         }
-        let Some(before) = &proposal.before else {
-            continue;
-        };
-        let mut matched = false;
-        for entry in session
-            .entries()
-            .iter()
-            .filter(|entry| entry.kind == "hook_state")
-        {
-            let Some(hash) = entry.data["state"]["prompt_snapshot"].as_str() else {
-                continue;
-            };
-            let snapshot = match crate::snapshot::load(&context.state, hash) {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    unavailable.push((file.clone(), error));
-                    continue;
-                }
-            };
-            for memory in snapshot
-                .memory
-                .iter()
-                .filter(|memory| memory.target == proposal.target)
-            {
-                matched |= memory.entries()?.iter().any(|entry| entry == before);
+        let matched = match contains(&session) {
+            Ok(matched) => matched,
+            Err(error) => {
+                unavailable.push((file.clone(), error));
+                false
             }
-        }
+        };
         if matched {
             containing.push(session.id().to_string());
         }
@@ -93,7 +103,7 @@ pub fn describe(context: &ToolContext, proposal: &Proposal) -> Result<Value, Str
     let unavailable: Vec<_> = unavailable.into_iter().take(10).map(|(path, error)|
         json!({"file": path.strip_prefix(&root).unwrap_or(&path), "error": error})).collect();
     Ok(
-        json!({"source_session": proposal.source.session, "evidence": evidence,
+        json!({"source_session": source.session, "evidence": evidence,
         "sessions_with_old_snapshot": containing, "unavailable": unavailable, "unavailable_count": count}),
     )
 }

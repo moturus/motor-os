@@ -35,6 +35,12 @@ pub fn history(context: &ToolContext, offset: usize, limit: usize) -> Result<Val
 
 pub fn status(context: &ToolContext) -> Value {
     let count = |target| match crate::pending::list(context, target) {
+        Ok(items) if target == Target::Global => match crate::skill_pending::list(context) {
+            Ok(skills) => {
+                json!({"count": items.len() + skills.len(), "memory": items.len(), "skills": skills.len()})
+            }
+            Err(error) => json!({"unavailable": error}),
+        },
         Ok(items) => json!({"count": items.len()}),
         Err(error) => json!({"unavailable": error}),
     };

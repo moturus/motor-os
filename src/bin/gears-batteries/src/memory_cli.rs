@@ -12,12 +12,19 @@ use crate::pending::{Decision, Proposal};
 enum Item {
     Entry(String, Box<Proposal>),
     Workspace(String, String),
+    Skill(String, Box<crate::skill_pending::Proposal>),
+    ImportedSkill(String, String, Box<crate::skill_format::Content>),
+    Unavailable(String, String),
 }
 
 impl Item {
     fn id(&self) -> &str {
         match self {
-            Self::Entry(id, _) | Self::Workspace(id, _) => id,
+            Self::Entry(id, _)
+            | Self::Workspace(id, _)
+            | Self::Skill(id, _)
+            | Self::ImportedSkill(id, _, _)
+            | Self::Unavailable(id, _) => id,
         }
     }
 
@@ -28,6 +35,16 @@ impl Item {
                     .unwrap_or_else(|error| json!({"unavailable": error}));
                 json!({"version": 1, "id": id, "kind": "entry", "change": proposal, "sources": evidence})
             }
+            Self::Skill(id, proposal) => {
+                let sources =
+                    crate::memory_sources::describe_with(context, &proposal.source, |_| Ok(false))
+                        .unwrap_or_else(|error| json!({"unavailable": error}));
+                json!({"version": 1, "id": id, "kind": "skill", "change": proposal, "sources": sources})
+            }
+            Self::ImportedSkill(id, name, content) => {
+                json!({"version": 1, "id": id, "kind": "skill_import", "name": name, "content": content})
+            }
+            Self::Unavailable(name, error) => json!({"skill": name, "unavailable": error}),
             Self::Workspace(id, text) => json!({"version": 1, "id": id, "kind": "workspace_memory",
                 "path": ".gears/MEMORY.md", "memory": text}),
         }
@@ -38,6 +55,11 @@ impl Item {
             Self::Entry(id, proposal) => {
                 crate::memory::decide(context, proposal.target, id, decision)
             }
+            Self::Skill(id, _) => crate::skill_pending::decide(context, id, decision),
+            Self::ImportedSkill(hash, name, _) => {
+                crate::skill_store::admit(context, name, hash, decision)
+            }
+            Self::Unavailable(_, _) => Err("unavailable skill cannot be admitted".into()),
             Self::Workspace(hash, _) => crate::workspace_memory::decide(context, hash, decision),
         }
     }
@@ -56,6 +78,28 @@ fn items(context: &ToolContext) -> Result<Vec<Item>, String> {
                 .into_iter()
                 .map(|(id, proposal)| Item::Entry(id, Box::new(proposal))),
         );
+    }
+    items.extend(
+        crate::skill_pending::list(context)?
+            .into_iter()
+            .map(|(id, proposal)| Item::Skill(id, Box::new(proposal))),
+    );
+    for name in crate::skill_store::names(context)? {
+        let candidate = (|| {
+            let Some(content) = crate::skill_store::current(context, &name)? else {
+                return Ok(None);
+            };
+            crate::skill_store::parse(context, &name, &content)?;
+            let hash = content.hash();
+            Ok((!crate::skill_store::approved(context, &name, &hash)?).then_some((hash, content)))
+        })();
+        match candidate {
+            Ok(Some((hash, content))) => {
+                items.push(Item::ImportedSkill(hash, name, Box::new(content)))
+            }
+            Ok(None) => {}
+            Err(error) => items.push(Item::Unavailable(name, error)),
+        }
     }
     Ok(items)
 }
@@ -88,7 +132,7 @@ pub fn run(args: &[String], mut input: impl BufRead, mut output: impl Write) -> 
             let count = items.len();
             for item in items {
                 write_json(&mut output, &item.show(&context))?;
-                if !list {
+                if !list && !matches!(item, Item::Unavailable(_, _)) {
                     write!(output, "{} [approve/deny/postpone]: ", item.id())
                         .map_err(|error| error.to_string())?;
                     output.flush().map_err(|error| error.to_string())?;
