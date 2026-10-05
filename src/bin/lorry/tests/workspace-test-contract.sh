@@ -152,6 +152,10 @@ const _: () = assert!(BIN_PATH.len() == "placeholder:alpha".len() && BIN_PATH[0]
 const TMP_PATH: &[u8] = env!("CARGO_TARGET_TMPDIR").as_bytes();
 const _: () = assert!(TMP_PATH[TMP_PATH.len() - 3] == b't' && TMP_PATH[TMP_PATH.len() - 1] == b'p');
 EOF
+cat >alpha/examples/library.rs <<'EOF'
+pub fn example_value() -> u32 { alpha::value() + zeta::value() }
+const _: () = assert!(option_env!("CARGO_BIN_NAME").is_none());
+EOF
 cat >>alpha/Cargo.toml <<'EOF'
 [[example]]
 name = "demo"
@@ -160,6 +164,9 @@ edition = "2021"
 name = "disabled"
 path = "examples/demo.rs"
 required-features = ["manual"]
+[[example]]
+name = "library"
+crate-type = ["rlib", "staticlib"]
 [[bench]]
 name = "measured"
 harness = false

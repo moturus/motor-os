@@ -76,9 +76,9 @@ workspace build, check, and Clippy share one compilation graph for default
 members, `--workspace`, repeated `-p`, and `--exclude`. Bundle testing produces
 one executable for each member with enabled harnesses, using that member's
 program/extraction paths and script environment. Workspace `check --all-targets`
-includes binary examples and benchmarks; `check --examples` checks examples with
-their dev-dependencies. Library examples and example/benchmark build/test/run
-selection remain deferred. Ordinary build/check accepts
+includes examples and benchmarks; `check --examples` checks binary, `lib`,
+`rlib`, and `staticlib` examples with their dev-dependencies. Example/benchmark
+build/test/run selection remains deferred. Ordinary build/check accepts
 root dev-dependencies without activating their features.
 
 ## Create a package

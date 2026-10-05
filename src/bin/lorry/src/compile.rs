@@ -300,7 +300,14 @@ pub fn dependency_rustc_invocation_with_build_output(
                 binary_crate_name.as_deref().unwrap(),
                 target.path.as_path(),
                 "bin",
-                "dep-info,link",
+                if key.is_harness()
+                    || target.crate_types == ["bin"]
+                    || target.crate_types.iter().any(|kind| kind == "staticlib")
+                {
+                    "dep-info,link"
+                } else {
+                    "dep-info,metadata,link"
+                },
                 output_dir,
             )
         }
@@ -412,8 +419,8 @@ pub fn dependency_rustc_invocation_with_build_output(
             push(&mut arguments, "--cfg");
             push(&mut arguments, "test");
         }
-    } else if key.kind == UnitKind::Library {
-        for crate_type in &manifest.library.as_ref().unwrap().crate_types {
+    } else if let Some(types) = key.library_types(manifest) {
+        for crate_type in types {
             push(&mut arguments, "--crate-type");
             push(&mut arguments, crate_type);
         }
@@ -491,10 +498,10 @@ pub fn dependency_rustc_invocation_with_build_output(
     }
     let mut environment =
         rustc_environment(options.cargo, manifest, crate_name, &dependency_directories)?;
-    if matches!(
-        key.kind,
-        UnitKind::Binary | UnitKind::BinaryHarness | UnitKind::Example
-    ) {
+    if matches!(key.kind, UnitKind::Binary | UnitKind::BinaryHarness)
+        || key.kind == UnitKind::Example
+            && key.auxiliary_target(manifest).unwrap().crate_types == ["bin"]
+    {
         value(
             &mut environment,
             "CARGO_BIN_NAME",
@@ -864,46 +871,40 @@ fn expected_output(
             dep_info: output_dir.join(format!("{stem}.d")),
         };
     }
-    match key.kind {
-        UnitKind::Library
-            if !manifest
-                .library
-                .as_ref()
-                .unwrap()
-                .crate_types
-                .iter()
-                .any(|kind| matches!(kind.as_str(), "lib" | "rlib")) =>
+    if let Some(types) = key.library_types(manifest) {
+        if !types
+            .iter()
+            .any(|kind| matches!(kind.as_str(), "lib" | "rlib"))
         {
-            RustcOutput::StaticLibrary {
+            return RustcOutput::StaticLibrary {
                 archive: output_dir.join(format!("lib{stem}.a")),
                 dep_info: output_dir.join(format!("{stem}.d")),
-            }
+            };
         }
-        UnitKind::Library => RustcOutput::Library {
+        return RustcOutput::Library {
             rlib: output_dir.join(format!("lib{stem}.rlib")),
             rmeta: output_dir.join(format!(
                 "lib{stem}.{}",
-                if manifest
-                    .library
-                    .as_ref()
-                    .unwrap()
-                    .requires_upstream_objects()
-                {
+                if types.iter().any(|kind| {
+                    matches!(
+                        kind.as_str(),
+                        "staticlib" | "dylib" | "cdylib" | "proc-macro"
+                    )
+                }) {
                     "rlib"
                 } else {
                     "rmeta"
                 }
             )),
-            archive: manifest
-                .library
-                .as_ref()
-                .unwrap()
-                .crate_types
+            archive: types
                 .iter()
                 .any(|kind| kind == "staticlib")
                 .then(|| output_dir.join(format!("lib{stem}.a"))),
             dep_info: output_dir.join(format!("{stem}.d")),
-        },
+        };
+    }
+    match key.kind {
+        UnitKind::Library => unreachable!(),
         UnitKind::Binary
         | UnitKind::LibraryHarness
         | UnitKind::BinaryHarness

@@ -2727,6 +2727,23 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Library examples now use Cargo's example-library identity and their declared
+`lib`, `rlib`, and `staticlib` compiler types, including mixed archives. Ordinary
+library artifact handling is shared, and LTO classifies examples by their crate
+types. Harness compilation still produces executables. Only declared executable
+targets receive `CARGO_BIN_NAME`, so a library example's test harness also omits
+it. Dynamic/procedural-macro examples remain explicit unsupported-type errors.
+The expanded Cargo graph oracle covers library example build/check/test modes,
+checks declared crate types, and validates compiler flags, archive outputs,
+harness flags, and the binary-name environment. The paired native/Motor check
+contract includes a scripted mixed-library example requiring a dev dependency.
+That contract, the compiler/graph oracle, existing static/mixed archive byte and
+cache comparisons, and strict Clippy pass in
+`/tmp/lorry-m8-library-example-contract.log`,
+`/tmp/lorry-m8-library-example-compiler-contract.log`,
+`/tmp/lorry-m8-library-example-static-regression.log`, and
+`/tmp/lorry-m8-library-example-compiler-clippy.log`.
+
 Public shared checks now include binary examples and benchmarks under
 `--all-targets`; `--examples` selects example checks. Dev features are resolved
 for these selections, benchmark compiler environments use Cargo's placeholder

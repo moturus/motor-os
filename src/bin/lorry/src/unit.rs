@@ -79,6 +79,19 @@ impl UnitKey {
         matches!(self.mode, UnitMode::Test | UnitMode::CheckTest)
     }
 
+    pub(crate) fn library_types<'a>(&self, manifest: &'a Manifest) -> Option<&'a [String]> {
+        if self.is_harness() {
+            return None;
+        }
+        if self.kind == UnitKind::Library {
+            Some(&manifest.library.as_ref().unwrap().crate_types)
+        } else {
+            self.auxiliary_target(manifest)
+                .filter(|target| target.crate_types != ["bin"])
+                .map(|target| target.crate_types.as_slice())
+        }
+    }
+
     pub fn with_profile(mut self, profile: ProfileContext, panic_abort: bool) -> Self {
         self.profile =
             if panic_abort && !self.uses_host_profile() && self.kind != UnitKind::BuildScriptRun {
@@ -424,9 +437,15 @@ pub(crate) fn workspace_auxiliary_units(
             )? {
                 continue;
             }
-            if target.crate_types != ["bin"] {
+            if target
+                .crate_types
+                .iter()
+                .any(|kind| !matches!(kind.as_str(), "bin" | "lib" | "rlib" | "staticlib"))
+                || target.crate_types.len() > 1
+                    && target.crate_types.iter().any(|kind| kind == "bin")
+            {
                 return Err(Error::failure(format!(
-                    "example `{}` uses library crate types; library example compilation is not yet supported",
+                    "example `{}` uses unsupported crate types; use bin, lib, rlib, or staticlib",
                     target.name
                 )));
             }
@@ -1762,7 +1781,12 @@ pub fn plan_dependency_units_with_remaps(
                     .name
                     .as_str(),
                 if key.kind == UnitKind::Example {
-                    CargoTargetKind::ExampleBin
+                    let types = &key.auxiliary_target(manifest).unwrap().crate_types;
+                    if types == &["bin"] {
+                        CargoTargetKind::ExampleBin
+                    } else {
+                        CargoTargetKind::ExampleLib(cargo_crate_types(types))
+                    }
                 } else {
                     CargoTargetKind::Bench
                 },
@@ -1902,11 +1926,11 @@ impl UnitProfile {
 }
 
 fn library_crate_types(manifest: &Manifest) -> Vec<CargoCrateType<'_>> {
-    manifest
-        .library
-        .as_ref()
-        .unwrap()
-        .crate_types
+    cargo_crate_types(&manifest.library.as_ref().unwrap().crate_types)
+}
+
+fn cargo_crate_types(types: &[String]) -> Vec<CargoCrateType<'_>> {
+    types
         .iter()
         .map(|kind| match kind.as_str() {
             "lib" => CargoCrateType::Lib,
@@ -2043,16 +2067,21 @@ fn unit_settings(
             UnitMode::Check => CargoCompileMode::Check { test: false },
             UnitMode::CheckTest => CargoCompileMode::Check { test: true },
         },
-        lto: if key.kind == UnitKind::Library
-            && manifest
-                .library
-                .as_ref()
-                .unwrap()
-                .requires_upstream_objects()
-        {
-            library_lto(key, manifest, options)
+        lto: if let Some(types) = key.library_types(manifest)
+            && types.iter().any(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "staticlib" | "dylib" | "cdylib" | "proc-macro"
+                )
+            }) {
+            library_lto(key, types, options)
         } else {
-            unit_lto(key, options.release, options.release_profile.lto)
+            unit_lto(
+                key,
+                key.library_types(manifest).is_some(),
+                options.release,
+                options.release_profile.lto,
+            )
         },
         logical_target,
         rustflags,
@@ -2061,18 +2090,17 @@ fn unit_settings(
 
 fn library_lto(
     key: &UnitKey,
-    manifest: &Manifest,
+    types: &[String],
     options: &PlanOptions<'_>,
 ) -> CargoUnitLto<'static> {
     let configured = options.release_profile.lto;
-    let ordinary = unit_lto(key, options.release, configured);
+    let ordinary = unit_lto(key, true, options.release, configured);
     if !options.release
         || key.compile_kind == CompileKind::Host
         || matches!(configured, ManifestLto::Default | ManifestLto::Off)
     {
         return ordinary;
     }
-    let types = &manifest.library.as_ref().unwrap().crate_types;
     if types
         .iter()
         .all(|kind| matches!(kind.as_str(), "staticlib" | "cdylib"))
@@ -2175,8 +2203,8 @@ fn shared_native_library(
                 matches!(key.package.source, PackageSourceKey::Path(_)),
                 key.profile == ProfileContext::Test,
             )
-        && unit_lto(key, options.release, options.release_profile.lto)
-            == unit_lto(&target, options.release, options.release_profile.lto)
+        && unit_lto(key, true, options.release, options.release_profile.lto)
+            == unit_lto(&target, true, options.release, options.release_profile.lto)
 }
 
 fn profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
@@ -2189,17 +2217,24 @@ fn profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
     }
 }
 
-fn unit_lto(key: &UnitKey, release: bool, configured: ManifestLto) -> CargoUnitLto<'static> {
+fn unit_lto(
+    key: &UnitKey,
+    library: bool,
+    release: bool,
+    configured: ManifestLto,
+) -> CargoUnitLto<'static> {
     if key.is_harness() {
         return root_lto(release, configured, RootTargetKind::Binary, true);
     }
-    if matches!(
-        key.kind,
-        UnitKind::Binary | UnitKind::Example | UnitKind::Bench
-    ) {
+    if !library
+        && matches!(
+            key.kind,
+            UnitKind::Binary | UnitKind::Example | UnitKind::Bench
+        )
+    {
         return root_lto(release, configured, RootTargetKind::Binary, false);
     }
-    if !release || key.compile_kind == CompileKind::Host || key.kind != UnitKind::Library {
+    if !release || key.compile_kind == CompileKind::Host || !library {
         return CargoUnitLto::OnlyObject;
     }
     match configured {
@@ -2982,6 +3017,12 @@ mod tests {
                 .position(|candidate| *candidate == node)
                 .unwrap()];
             let profile = &unit["profile"];
+            if let Some(target) = key.auxiliary_target(&manifests[&key.package]) {
+                assert_eq!(
+                    unit["target"]["crate_types"],
+                    serde_json::json!(target.crate_types)
+                );
+            }
             let (mode, compile_mode) = match key.mode {
                 UnitMode::Check => ("check", CargoCompileMode::Check { test: false }),
                 UnitMode::CheckTest => ("check", CargoCompileMode::Check { test: true }),
@@ -3037,6 +3078,14 @@ mod tests {
             )
             .unwrap();
         }
+        let path = fixture.0.join("a/Cargo.toml");
+        let source = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("{source}\n[[example]]\nname = \"library\"\ncrate-type = [\"rlib\", \"staticlib\"]\n")).unwrap();
+        fs::write(
+            fixture.0.join("a/examples/library.rs"),
+            "pub fn value() {}\n",
+        )
+        .unwrap();
         let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
         let limits = Options {
             resolver: crate::manifest::Resolver::V2,
@@ -3095,13 +3144,16 @@ mod tests {
             logical_target: None,
             rustflags: &[],
         };
-        for (kind, command, mode) in [
-            ("example", "build", UnitMode::Build),
-            ("example", "check", UnitMode::Check),
-            ("example", "test", UnitMode::Test),
-            ("bench", "build", UnitMode::Test),
-            ("bench", "check", UnitMode::CheckTest),
-            ("bench", "test", UnitMode::Test),
+        for (kind, name, command, mode) in [
+            ("example", "selected", "build", UnitMode::Build),
+            ("example", "selected", "check", UnitMode::Check),
+            ("example", "selected", "test", UnitMode::Test),
+            ("example", "library", "build", UnitMode::Build),
+            ("example", "library", "check", UnitMode::Check),
+            ("example", "library", "test", UnitMode::Test),
+            ("bench", "selected", "build", UnitMode::Test),
+            ("bench", "selected", "check", UnitMode::CheckTest),
+            ("bench", "selected", "test", UnitMode::Test),
         ] {
             let graph = workspace_auxiliary_units(
                 &resolution,
@@ -3110,7 +3162,7 @@ mod tests {
                 &options,
                 &AuxiliarySelection {
                     kind,
-                    name: Some("selected"),
+                    name: Some(name),
                     mode,
                 },
             )
@@ -3133,7 +3185,7 @@ mod tests {
                     "-p",
                     "a",
                 ])
-                .args([&format!("--{kind}"), "selected"])
+                .args([&format!("--{kind}"), name])
                 .env("CARGO_NET_OFFLINE", "true")
                 .output()
                 .unwrap();
@@ -3150,6 +3202,58 @@ mod tests {
                 &roots,
                 if command == "test" { "test" } else { "dev" },
             );
+            if kind == "example" {
+                let invocation = crate::compile::dependency_rustc_invocation(
+                    &plan,
+                    &manifests,
+                    &roots[0],
+                    &crate::compile::CommandOptions {
+                        cargo: Path::new("/lorry"),
+                        workspace_root: &fixture.0,
+                        selected_packages: &selected,
+                        host_profile: Path::new("/outputs"),
+                        target_profile: Path::new("/outputs"),
+                        host_incremental: Path::new("/incremental"),
+                        target_incremental: Path::new("/incremental"),
+                        physical_target: None,
+                        host_linker: None,
+                        target_linker: None,
+                        integration_binaries: None,
+                        integration_temp_dirs: None,
+                        verbose: false,
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    invocation.environment.contains_key("CARGO_BIN_NAME"),
+                    name == "selected"
+                );
+                assert_eq!(
+                    invocation
+                        .arguments
+                        .iter()
+                        .any(|argument| argument == "--test"),
+                    mode == UnitMode::Test
+                );
+                if name == "library" && mode == UnitMode::Build {
+                    assert!(matches!(
+                        invocation.output,
+                        crate::compile::RustcOutput::Library {
+                            archive: Some(_),
+                            ..
+                        }
+                    ));
+                    for kind in ["rlib", "staticlib"] {
+                        assert!(
+                            invocation
+                                .arguments
+                                .windows(2)
+                                .any(|args| args[0] == "--crate-type" && args[1] == kind)
+                        );
+                    }
+                }
+            }
         }
     }
 
