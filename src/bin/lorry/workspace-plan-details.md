@@ -3574,6 +3574,29 @@ acceptance cases in the plan pass on Motor.
 
 ### The compile-time pass
 
+The common compilation plan now filters to build-script runs, executable
+procedural macros, and their dependency closures after calculating identities
+and profile sharing. Check accepts the option; Clippy rejects it. A single
+selected package also uses the common member path for this pass. The new
+contract is included in `tests/test-all.sh` and proves member scripts run while
+ordinary sources intentionally fail to compile. Selected macro-only checks
+run their own script without building the macro or its ordinary dependencies,
+matching Cargo. Native and Motor comparisons cover JSON, path-free macro bytes,
+generated macro code, denied execution grants, and unchanged lock bytes.
+The contract, 35 CLI tests, and strict Clippy pass in
+`/tmp/lorry-m9-compile-time-{contract,cli-tests,clippy}.log`.
+
+The first contract's generated macro byte assertion failed, preserved in
+`/tmp/lorry-m9-compile-time-first-contract.log`. Machine code and read-only
+data were identical; the compiler's crate hash differed by 16 bytes and changed
+the ELF build ID. Replaying the captured invocation with Cargo's physical
+OUT_DIR restored exact bytes; path remapping alone did not. Evidence is in
+`/tmp/lorry-m9-generated-macro-identity-{diagnosis,replay}.log` and retained
+fixture `/tmp/lorry-compile-time-deps-qB1WE5`. This is the existing physical-path
+exception described in the spec and earlier macro contracts. The new contract
+keeps exact comparisons for path-free macros and separately compiles generated
+macro source. No compiler, source-publication, or OUT_DIR behavior was changed.
+
 Implement `check --compile-time-deps` as a filter on the common unit
 graph, covering members' own build scripts, procedural macros, and
 their dependencies. It must not be a dependency-only shortcut that

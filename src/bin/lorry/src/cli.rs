@@ -150,6 +150,7 @@ pub struct CheckOptions {
     pub target_dir: Option<String>,
     pub target: Option<String>,
     pub keep_going: bool,
+    pub compile_time_deps: bool,
     pub targets: TargetSelection,
     pub message_format: MessageFormat,
     pub jobs: Option<Jobs>,
@@ -717,7 +718,7 @@ fn locked_offline_arguments() -> [Arg; 3] {
 }
 
 fn check_command(name: &'static str) -> ClapCommand {
-    ClapCommand::new(name)
+    let command = ClapCommand::new(name)
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
         .arg(package_argument())
@@ -755,7 +756,16 @@ fn check_command(name: &'static str) -> ClapCommand {
                 .action(ArgAction::SetTrue),
         )
         .args(target_selection_arguments())
-        .arg(message_format_argument())
+        .arg(message_format_argument());
+    if name == "check" {
+        command.arg(
+            Arg::new("compile-time-deps")
+                .long("compile-time-deps")
+                .action(ArgAction::SetTrue),
+        )
+    } else {
+        command
+    }
 }
 
 fn profile_argument() -> Arg {
@@ -1132,6 +1142,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             target_dir: options.get_one::<String>("target-dir").cloned(),
             target: options.get_one::<String>("target").cloned(),
             keep_going: options.get_flag("keep-going"),
+            compile_time_deps: name == "check" && options.get_flag("compile-time-deps"),
             targets: target_selection(options),
             message_format: message_format(options),
             jobs: options.get_one::<Jobs>("jobs").copied(),
@@ -1709,6 +1720,7 @@ mod tests {
                 target_dir: Some("/project/target/rust-analyzer".to_owned()),
                 target: Some("x86_64-unknown-motor".to_owned()),
                 keep_going: true,
+                compile_time_deps: false,
                 targets: TargetSelection {
                     all_targets: true,
                     ..TargetSelection::default()

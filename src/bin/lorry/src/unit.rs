@@ -366,6 +366,40 @@ pub struct CompilationPlan {
     pub order: Vec<UnitKey>,
 }
 
+impl CompilationPlan {
+    pub(crate) fn compile_time_dependencies(mut self) -> Result<Self> {
+        let mut pending = self
+            .units
+            .keys()
+            .filter(|key| {
+                key.kind == UnitKind::BuildScriptRun
+                    || key.kind == UnitKind::ProcMacro && key.mode == UnitMode::Build
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut retained = BTreeSet::new();
+        while let Some(key) = pending.pop() {
+            if retained.insert(key.clone()) {
+                let planned = self.units.get(&key).ok_or_else(|| {
+                    Error::failure("compile-time dependency is missing from the compilation plan")
+                })?;
+                pending.extend(
+                    planned
+                        .unit
+                        .dependencies
+                        .iter()
+                        .map(|edge| edge.unit.clone()),
+                );
+            }
+        }
+        // Keep identities and settings from the full graph: skipped ordinary
+        // units still affect Cargo's host profile sharing and dependency hashes.
+        self.units.retain(|key, _| retained.contains(key));
+        self.order.retain(|key| retained.contains(key));
+        Ok(self)
+    }
+}
+
 pub struct PlanOptions<'a> {
     pub workspace_root: &'a Path,
     pub release: bool,

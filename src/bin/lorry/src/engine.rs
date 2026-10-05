@@ -109,6 +109,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         || run_example
         || shared_auxiliary_builds
         || shared_test_checks
+        || matches!(&cli.command, Command::Check(options) if options.compile_time_deps)
         || ordinary
             && (selected.len() > 1
                 || cli.features != crate::cli::FeatureSelection::default()
@@ -1727,6 +1728,11 @@ fn build_inner(
             return Err(Error::failure("selected package has no library target"));
         }
         let plan = selected_check_plan(&options.targets)?;
+        let plan = if options.compile_time_deps {
+            plan.compile_time_dependencies()?
+        } else {
+            plan
+        };
         executor::execute(&plan, &manifests, &executor_options)?;
         if build.validation.is_strict() {
             prepared.revalidate_cargo_registry_sources(repository_tree_limits(

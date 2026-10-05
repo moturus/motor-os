@@ -199,6 +199,9 @@ Explicit `rlib` and `staticlib`, mixed archives, Motor dynamic-type dropping,
 and single-member explicit/harness-free integration tests have paired Cargo
 contracts. Release `debug` and `opt-level` settings now match Cargo, including
 host-profile reduction and automatic stripping.
+The common compile-time check pass from milestone 9 is implemented and has
+paired native/Motor Cargo coverage for scripts, macros, and skipped ordinary
+sources. Editor integration and native project acceptance remain outstanding.
 
 ## Goal
 

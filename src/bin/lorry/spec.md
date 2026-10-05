@@ -615,6 +615,12 @@ information when requested, and host debug reduction requires matching
 effective runtime settings before a unit can be shared.
 `check` and `clippy` accept `--release` (or `-r`) and apply the release profile
 to metadata units while retaining the required host-tool profiles.
+`check --compile-time-deps` retains executable procedural macros, every planned
+build-script run (including members' own scripts), and their dependencies.
+It skips ordinary compiler units and selected macro metadata-only checks.
+Filtering follows full unit planning so Cargo profile sharing and identities
+remain intact. Package/feature/target selection, JSON, cache validation, and
+execution admission apply normally; Clippy rejects this check-only option.
 Tests default to the `test` profile, which inherits `dev`; release tests use
 `release`. Profile inheritance follows Cargo, including chains and explicit
 errors for cycles, missing parents, and unsupported active settings. Test/bench
