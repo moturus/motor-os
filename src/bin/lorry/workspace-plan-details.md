@@ -2727,6 +2727,24 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Active profiles now resolve inheritance iteratively from the workspace root,
+merging supported settings from dev/release roots and built-in test/bench
+defaults. Cycles, undefined parents, missing inherits, and active unsupported
+keys fail explicitly. Effective root settings and output directory names are
+kept separate; test outputs remain in debug even when inheriting release.
+Test/bench panic overrides follow Cargo's warning-and-ignore rule. Public tests
+now use the test profile, and the workspace contract compares opt-level-3 test
+harness bytes with Cargo while retaining deferred-setting rejection coverage.
+The first unit-test compile called a nonexistent Error accessor; it is preserved
+in `/tmp/lorry-m8-profile-inheritance-first-unit.log`. Using Error's Display
+implementation fixes the test. Focused inheritance tests, strict Clippy, the
+complete workspace contract, and scripted binary/example Run regression pass
+in `/tmp/lorry-m8-profile-inheritance-final-unit.log`,
+`/tmp/lorry-m8-profile-inheritance-clippy.log`,
+`/tmp/lorry-m8-profile-inheritance-workspace-contract.log`, and
+`/tmp/lorry-m8-profile-inheritance-script-regression.log`.
+The command-line selector and environment overrides follow in separate patches.
+
 The active-profile regression still asserted that dev/release debug-assertions
 were unsupported. It now uses the still-deferred rpath setting, preserving the
 unused/active-profile distinction. The complete workspace regression passes in

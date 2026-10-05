@@ -12,6 +12,7 @@ use crate::toml::Document;
 use crate::toolchain::TargetInfo;
 
 mod inheritance;
+pub(crate) mod profiles;
 mod selection;
 mod source;
 mod targets;
@@ -45,6 +46,7 @@ pub struct Manifest {
     pub default_run: Option<String>,
     pub dev: DevProfile,
     pub release: ReleaseProfile,
+    pub profile_directory: Option<String>,
     profile_errors: BTreeMap<String, Error>,
     #[allow(dead_code)]
     pub resolver: Resolver,
@@ -783,6 +785,7 @@ impl Manifest {
             dev,
             release,
             profile_errors,
+            profile_directory: None,
             resolver,
             links,
             build_script,

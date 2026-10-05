@@ -615,6 +615,11 @@ information when requested, and host debug reduction requires matching
 effective runtime settings before a unit can be shared.
 `check` and `clippy` accept `--release` (or `-r`) and apply the release profile
 to metadata units while retaining the required host-tool profiles.
+Tests default to the `test` profile, which inherits `dev`; release tests use
+`release`. Profile inheritance follows Cargo, including chains and explicit
+errors for cycles, missing parents, and unsupported active settings. Test/bench
+panic overrides are ignored with Cargo's warning. Inherited compiler settings
+and output-directory names are distinct: built-in test outputs remain in debug.
 
 ## Cargo configuration
 

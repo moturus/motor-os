@@ -55,11 +55,31 @@ fn report_build_completion(cli: &Cli, reported: &mut bool) -> Result<()> {
 fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let (workspace, selected) = crate::manifest::SourceWorkspace::load_compilation(
+    let (workspace, mut selected) = crate::manifest::SourceWorkspace::load_compilation(
         &current,
         cli.manifest_path.as_deref().map(Path::new),
         &cli.selection,
     )?;
+    let (release, testing) = match &cli.command {
+        Command::Build(options) => (options.release, false),
+        Command::Check(options) => (options.release, false),
+        Command::Run(options) => (options.build.release, false),
+        Command::Test(options) => (options.build.release, true),
+        _ => unreachable!("non-build command passed to engine"),
+    };
+    let profile = crate::manifest::profiles::SelectedProfile::load(
+        &workspace.root,
+        if release {
+            "release"
+        } else if testing {
+            "test"
+        } else {
+            "dev"
+        },
+    )?;
+    for member in &mut selected {
+        profile.apply(member);
+    }
     let mut expanded_cli = cli.clone();
     match &mut expanded_cli.command {
         Command::Build(options) => options.targets.expand_patterns(&selected)?,
@@ -259,6 +279,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         ),
         _ => unreachable!("non-build command passed to engine"),
     };
+    let release = profile.release || release;
     for manifest in &selected {
         manifest.require_profile(release, matches!(cli.command, Command::Test(_)))?;
     }
@@ -437,7 +458,12 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     crate::trace::event("verified dependency admission");
     if let Some(base) = ordinary_freshness_base
         && let Some(artifacts) = restore_fresh_profile(
-            &profile_destination(&target_root, physical_target.as_deref(), release),
+            &profile_destination(
+                &target_root,
+                physical_target.as_deref(),
+                release,
+                manifest.profile_directory.as_deref(),
+            ),
             &manifest.workspace_root,
             &manifest.root,
             base,
@@ -904,12 +930,13 @@ fn profile_destination(
     target_root: &Path,
     physical_target: Option<&str>,
     release: bool,
+    name: Option<&str>,
 ) -> PathBuf {
     let mut profile = target_root.to_owned();
     if let Some(target) = physical_target {
         profile.push(target);
     }
-    profile.push(if release { "release" } else { "debug" });
+    profile.push(name.unwrap_or(if release { "release" } else { "debug" }));
     profile
 }
 
@@ -1197,7 +1224,12 @@ fn build_inner(
             "check"
         })
     } else {
-        profile_destination(target_root, build.physical_target, build.release)
+        profile_destination(
+            target_root,
+            build.physical_target,
+            build.release,
+            build.manifest.profile_directory.as_deref(),
+        )
     };
     let staging = AtomicDirectory::new_compact(&profile_parent)?;
     crate::trace::event("created dependency preparation directory");
@@ -1407,10 +1439,12 @@ fn build_inner(
     let host_profile = if build.physical_target.is_some() {
         target_root.join(if check.is_some() {
             "check"
-        } else if build.release {
-            "release"
         } else {
-            "debug"
+            build
+                .manifest
+                .profile_directory
+                .as_deref()
+                .unwrap_or(if build.release { "release" } else { "debug" })
         })
     } else {
         destination.clone()

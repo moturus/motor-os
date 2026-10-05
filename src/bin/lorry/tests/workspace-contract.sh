@@ -264,9 +264,20 @@ EOF
     cp "$WORK/profiles.baseline" Cargo.toml
     printf '\n[profile.test]\nopt-level = 3\n' >>Cargo.toml
     "$LORRY" build -p tool
-    "$LORRY_TEST_CARGO" test -p tool --no-run --offline
+    "$LORRY_TEST_CARGO" test -p tool --no-run --offline --message-format=json >"$WORK/cargo-profile.json"
+    "$LORRY" test -p tool --no-run --message-format=json >"$WORK/lorry-profile.json"
+    python3 - "$WORK/lorry-profile.json" "$WORK/cargo-profile.json" <<'PY'
+import json, pathlib, sys
+def harnesses(path):
+    events = [event for line in open(path) for event in [json.loads(line)]
+              if event['reason'] == 'compiler-artifact' and event['profile']['test']]
+    assert events and all(event['profile']['opt_level'] == '3' for event in events)
+    return sorted(pathlib.Path(event['executable']).read_bytes() for event in events)
+assert harnesses(sys.argv[1]) == harnesses(sys.argv[2])
+PY
+    printf 'rpath = true\n' >>Cargo.toml
     if "$LORRY" test -p tool --no-run 2>"$WORK/profile.err"; then exit 1; fi
-    grep -F 'unsupported selected profile key `profile.test.opt-level`' "$WORK/profile.err" >/dev/null
+    grep -F 'unsupported selected profile key `profile.test.rpath`' "$WORK/profile.err" >/dev/null
 )
 cp "$WORK/profiles.baseline" "$WORK/project/Cargo.toml"
 
