@@ -38,6 +38,7 @@ pub mod skill_format;
 pub mod skill_pending;
 pub mod skill_snapshot;
 pub mod skill_store;
+pub mod skill_view;
 pub mod snapshot;
 pub mod todo;
 pub mod tool;
@@ -97,7 +98,7 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
     }
 }
 
-pub fn hook(event: Event) -> Result<Value, String> {
+pub fn hook(mut event: Event) -> Result<Value, String> {
     if event.event == "tool_result" {
         let mut response = provenance::transform(&event).unwrap_or_else(
             |error| json!({"notice": format!("output provenance unavailable: {error}")}),
@@ -113,11 +114,16 @@ pub fn hook(event: Event) -> Result<Value, String> {
     }
     if event.event == "context" {
         let mut response = json!({});
-        merge_optional(
-            &mut response,
-            paths::ToolContext::for_event(&event)
-                .and_then(|context| memory_context::observe(&event, &context)),
-        );
+        for observe in [memory_context::observe, skill_context::observe] {
+            let feature =
+                paths::ToolContext::for_event(&event).and_then(|context| observe(&event, &context));
+            if let Ok(feature) = &feature
+                && let Some(state) = feature.get("state")
+            {
+                event.session.state = Some(state.clone());
+            }
+            merge_optional(&mut response, feature);
+        }
         return Ok(response);
     }
     if event.event == "answer" {
@@ -142,6 +148,9 @@ pub fn hook(event: Event) -> Result<Value, String> {
         return if event.payload["tool_call"]["name"] == "memory" {
             paths::ToolContext::for_event(&event)
                 .and_then(|context| memory_tool::execute(&event, &context))
+        } else if event.payload["tool_call"]["name"] == "skill_view" {
+            paths::ToolContext::for_event(&event)
+                .and_then(|context| skill_view::execute(&event, &context))
         } else {
             todo::execute(&event)
         };
@@ -227,11 +236,45 @@ pub fn initialize_at(event: &Event, root: &gears::state::StateRoot) -> Value {
             }),
         );
     }
+    if response.get("prompt_fragments").is_some() {
+        let mut skill_event = Event {
+            protocol_version: event.protocol_version,
+            event: event.event.clone(),
+            workspace: event.workspace.clone(),
+            session: Session {
+                id: event.session.id.clone(),
+                path: event.session.path.clone(),
+                state: response
+                    .get("state")
+                    .cloned()
+                    .or_else(|| event.session.state.clone()),
+            },
+            payload: event.payload.clone(),
+        };
+        skill_event.session.state = response
+            .get("state")
+            .cloned()
+            .or_else(|| event.session.state.clone());
+        merge_optional(
+            &mut response,
+            paths::ToolContext::new(
+                event.workspace.clone(),
+                root.path().to_path_buf(),
+                event.session.id.clone(),
+                event.session.path.as_deref(),
+            )
+            .and_then(|context| skill_context::initialize(&skill_event, &context)),
+        );
+    }
     with_tools(response)
 }
 
 fn with_tools(mut response: Value) -> Value {
-    response["tools"] = json!([todo::specification(), memory_tool::specification()]);
+    response["tools"] = json!([
+        todo::specification(),
+        memory_tool::specification(),
+        skill_view::specification()
+    ]);
     response
 }
 
@@ -254,8 +297,9 @@ pub fn default_root() -> Result<PathBuf, String> {
 }
 
 fn merge_optional(response: &mut Value, feature: Result<Value, String>) {
-    let feature =
-        feature.unwrap_or_else(|error| json!({"notice": format!("memory unavailable: {error}")}));
+    let feature = feature.unwrap_or_else(
+        |error| json!({"notice": format!("batteries feature unavailable: {error}")}),
+    );
     for (name, value) in feature.as_object().unwrap() {
         if name == "notice" && response.get("notice").is_some() {
             response["notice"] = json!(format!(
@@ -263,6 +307,21 @@ fn merge_optional(response: &mut Value, feature: Result<Value, String>) {
                 response["notice"].as_str().unwrap(),
                 value.as_str().unwrap()
             ));
+        } else if name == "prompt_fragments" && response[name].is_array() {
+            response[name]
+                .as_array_mut()
+                .unwrap()
+                .extend(value.as_array().unwrap().iter().cloned());
+        } else if name == "context" && response.get(name).is_some() {
+            let previous: gears::provider::Message =
+                serde_json::from_value(response[name].clone()).expect("internal context message");
+            let added: gears::provider::Message =
+                serde_json::from_value(value.clone()).expect("internal context message");
+            response[name] = json!(gears::provider::Message::user(format!(
+                "{}\n{}",
+                previous.text_content(),
+                added.text_content()
+            )));
         } else {
             response[name] = value.clone();
         }
