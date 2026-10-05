@@ -292,7 +292,12 @@ root compilation, freshness validation, and artifact publication.
   other `cargo new` options are unsupported. It also creates the canonical
   dependency-free version-4 Cargo.lock so the package can immediately be
   built, run, and tested by Lorry without Cargo.
-- `run` forwards arguments after `--` and executes without a shell.
+- `run` selects one binary across the selected default members. A unique
+  `package.default-run` filters those members by that target name; otherwise
+  exactly one available binary is required. Explicit `--bin NAME` must also
+  match exactly one target. Ambiguous selections report the available binaries.
+  Run forwards arguments after `--`, preserves the caller's working directory,
+  and executes with the selected member's package and build-script environment.
 - `-p NAME`/`--package NAME` selects one exact explicit workspace member for
   build, clean, run, test, vendor, and review.
 - `review` is offline and non-mutating. It reconstructs and verifies the

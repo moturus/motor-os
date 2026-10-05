@@ -2727,6 +2727,23 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Run now searches the selected default members for exactly one binary. A unique
+default-run filters those members by its name, matching pinned Cargo's command
+and execution source; duplicate names remain ambiguous. Runtime configuration
+and package metadata use the matching member while shared resolution retains
+the complete selected set. The offline paired contract covers library-only
+defaults, explicit packages/names, unrelated failing binaries, unique/multiple
+default-run declarations, and duplicate target names.
+The initial contract expected Cargo's `bin` spelling while the new diagnostic
+used `binary`; that failure is retained in
+`/tmp/lorry-m8-default-member-run-first-contract.log`. A subsequent fixture
+assigned two targets the same source path, suppressing Cargo's inferred target;
+the evidence is `/tmp/lorry-m8-default-member-run-cargo-contract.log`. Distinct
+paths fix that fixture, and the complete contract passes in
+`/tmp/lorry-m8-default-member-run-distinct-path-contract.log`. Strict Clippy
+flagged an unnecessary lazy Option fallback; the corrected lint check is
+`/tmp/lorry-m8-default-member-run-current-clippy.log`.
+
 Binary/library example builds now publish stable unqualified example paths,
 including rlib/staticlib combinations. Default test compile-only examples use
 the same publication. Unit artifacts remain independently published and named

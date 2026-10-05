@@ -87,14 +87,23 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     if !ordinary && !shared_tests {
         cli.features.require_default()?;
     }
-    if selected.len() != 1 && (!shared || matches!(&cli.command, Command::Run(_))) {
+    if selected.len() != 1 && !shared {
         return Err(Error::failure(format!(
             "package selection selects {} packages; multi-package execution is not yet supported",
             selected.len()
         ))
         .with_help("select one workspace package with `-p NAME`"));
     }
-    let manifest = selected[0].clone();
+    let run_selection = match &cli.command {
+        Command::Run(options) => Some(select_run_member(
+            &selected,
+            options.build.targets.bin.first().map(String::as_str),
+        )?),
+        _ => None,
+    };
+    let manifest = run_selection
+        .map_or(&selected[0], |(member, _)| member)
+        .clone();
     Manifest::report_warnings(&selected, cli.verbosity);
     for manifest in &selected {
         // Compiling the selected package without its build script would quietly
@@ -235,13 +244,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     for manifest in &selected {
         manifest.require_profile(release, matches!(cli.command, Command::Test(_)))?;
     }
-    let run_binary = match &cli.command {
-        Command::Run(options) => Some(select_run_binary(
-            &manifest,
-            options.build.targets.bin.first().map(String::as_str),
-        )?),
-        _ => None,
-    };
+    let run_binary = run_selection.map(|(_, name)| name);
     let binary_selection = match &cli.command {
         Command::Build(options) => options.targets.single_binary(),
         Command::Run(_) if manifest.binaries.len() > 1 => run_binary,
@@ -972,24 +975,47 @@ fn validate_binary_selection<'a>(
     }
 }
 
-fn select_run_binary<'a>(manifest: &'a Manifest, requested: Option<&'a str>) -> Result<&'a str> {
-    if let Some(name) = validate_binary_selection(manifest, requested)? {
-        return Ok(name);
-    }
-    if let Some(name) = manifest.default_run.as_deref() {
-        return Ok(name);
-    }
-    match manifest.binaries.as_slice() {
-        [target] => Ok(&target.name),
-        [] => Err(Error::failure(format!(
-            "package `{}` has no binary target to run",
-            manifest.name
+fn select_run_member<'a>(
+    members: &'a [Manifest],
+    requested: Option<&str>,
+) -> Result<(&'a Manifest, &'a str)> {
+    let defaults = members
+        .iter()
+        .filter_map(|member| member.default_run.as_deref())
+        .collect::<Vec<_>>();
+    let requested = requested.or(match defaults.as_slice() {
+        [name] => Some(*name),
+        _ => None,
+    });
+    let binaries = members
+        .iter()
+        .flat_map(|member| {
+            member
+                .binaries
+                .iter()
+                .filter(move |target| requested.is_none_or(|name| name == target.name))
+                .map(move |target| (member, target.name.as_str()))
+        })
+        .collect::<Vec<_>>();
+    match binaries.as_slice() {
+        [binary] => Ok(*binary),
+        [] => Err(Error::failure(match requested {
+            Some(name) => format!("no bin target named `{name}` in selected packages"),
+            None => "a bin target must be available for `lorry run`".to_owned(),
+        })),
+        _ => Err(Error::failure(if requested.is_some() {
+            "`lorry run` can run at most one executable, but multiple were specified"
+        } else {
+            "`lorry run` could not determine which binary to run"
+        })
+        .with_help(format!(
+            "use `-p NAME`, `--bin NAME`, or `package.default-run`; available binaries: {}",
+            binaries
+                .iter()
+                .map(|(member, name)| format!("{name} in {}", member.name))
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
-        _ => Err(Error::failure(format!(
-            "package `{}` has more than one binary target",
-            manifest.name
-        ))
-        .with_help("use `--bin NAME` or set `package.default-run`")),
     }
 }
 
@@ -4402,9 +4428,10 @@ mod tests {
         let fixture = Fixture::new();
         fixture.add_multiple_binaries();
         let manifest = Manifest::load(&fixture.0).unwrap();
-        assert_eq!(select_run_binary(&manifest, None).unwrap(), "worker");
-        assert_eq!(select_run_binary(&manifest, Some("tool")).unwrap(), "tool");
-        assert!(select_run_binary(&manifest, Some("missing")).is_err());
+        let members = std::slice::from_ref(&manifest);
+        assert_eq!(select_run_member(members, None).unwrap().1, "worker");
+        assert_eq!(select_run_member(members, Some("tool")).unwrap().1, "tool");
+        assert!(select_run_member(members, Some("missing")).is_err());
 
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
