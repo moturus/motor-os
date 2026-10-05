@@ -14,6 +14,7 @@ pub mod journal;
 pub mod memory;
 pub mod memory_config;
 pub mod memory_format;
+pub mod memory_tool;
 pub mod patch_match;
 pub mod paths;
 pub mod pending;
