@@ -21,6 +21,8 @@ pub struct Turn {
     pub failing_tools: BTreeSet<String>,
     pub files_written: BTreeSet<std::path::PathBuf>,
     pub checks: Vec<Value>,
+    #[serde(default)]
+    pub skill_observations: Vec<Value>,
     pub compacted: bool,
     pub interrupted: bool,
     pub events: Vec<SavedTool>,

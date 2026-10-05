@@ -36,6 +36,7 @@ pub mod skill_config;
 pub mod skill_context;
 pub mod skill_format;
 pub mod skill_manage;
+pub mod skill_observation;
 pub mod skill_pending;
 pub mod skill_snapshot;
 pub mod skill_store;
@@ -182,7 +183,11 @@ fn observe_features(mut event: Event) -> Value {
     };
     let mut response = json!({});
     let mut notices = Vec::new();
-    for observe in [check_state::observe, turns::observe] {
+    for observe in [
+        check_state::observe,
+        skill_observation::observe,
+        turns::observe,
+    ] {
         match observe(&event, &context) {
             Ok(feature) => {
                 for (name, value) in feature.as_object().unwrap() {
