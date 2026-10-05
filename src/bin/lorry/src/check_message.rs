@@ -439,6 +439,8 @@ impl Package {
                         UnitKind::IntegrationHarness => {
                             target.kind.iter().any(|kind| kind == "test")
                         }
+                        UnitKind::Example => target.kind.iter().any(|kind| kind == "example"),
+                        UnitKind::Bench => target.kind.iter().any(|kind| kind == "bench"),
                         UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
                             target.kind.iter().any(|kind| kind == "custom-build")
                         }

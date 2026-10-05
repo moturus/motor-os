@@ -27,6 +27,8 @@ pub enum UnitKind {
     LibraryHarness,
     BinaryHarness,
     IntegrationHarness,
+    Example,
+    Bench,
     ProcMacro,
     BuildScriptCompile,
     BuildScriptRun,
@@ -59,6 +61,24 @@ pub struct UnitKey {
 }
 
 impl UnitKey {
+    pub(crate) fn auxiliary_target<'a>(
+        &self,
+        manifest: &'a Manifest,
+    ) -> Option<&'a crate::manifest::DescribedTarget> {
+        let kind = match self.kind {
+            UnitKind::Example => "example",
+            UnitKind::Bench => "bench",
+            _ => return None,
+        };
+        manifest.described_targets.iter().find(|target| {
+            target.kind == kind && Some(target.name.as_str()) == self.target.as_deref()
+        })
+    }
+
+    pub(crate) fn is_harness(&self) -> bool {
+        matches!(self.mode, UnitMode::Test | UnitMode::CheckTest)
+    }
+
     pub fn with_profile(mut self, profile: ProfileContext, panic_abort: bool) -> Self {
         self.profile =
             if panic_abort && !self.uses_host_profile() && self.kind != UnitKind::BuildScriptRun {
@@ -351,6 +371,126 @@ pub struct CheckTargetSelection<'a> {
     pub harnesses: bool,
     pub integrations: bool,
     pub integration_name: Option<&'a str>,
+}
+
+pub(crate) struct AuxiliarySelection<'a> {
+    pub kind: &'static str,
+    pub name: Option<&'a str>,
+    pub mode: UnitMode,
+}
+
+pub(crate) fn workspace_auxiliary_units(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    options: &PlanOptions<'_>,
+    selection: &AuxiliarySelection<'_>,
+) -> Result<UnitGraph> {
+    if let Some(name) = selection.name
+        && !selected.iter().any(|package| {
+            manifests[package]
+                .described_targets
+                .iter()
+                .any(|target| target.kind == selection.kind && target.name == name)
+        })
+    {
+        return Err(Error::failure(format!(
+            "no {} target named `{name}`",
+            selection.kind
+        )));
+    }
+    let mut graph = dependency_units_with_selected(resolution, manifests, selected)?;
+    graph.selected_packages.extend(selected.iter().cloned());
+    let mut roots = Vec::new();
+    for package in resolution
+        .packages
+        .iter()
+        .filter(|package| selected.contains(&package.key))
+    {
+        let manifest = &manifests[&package.key];
+        let features = features_for(package, CompileKind::Target);
+        for target in manifest.described_targets.iter().filter(|target| {
+            target.kind == selection.kind && selection.name.is_none_or(|name| name == target.name)
+        }) {
+            if !target_enabled(
+                resolution,
+                manifest,
+                &features,
+                &target.name,
+                target.required_features.as_deref(),
+                selection.name.is_some(),
+            )? {
+                continue;
+            }
+            if target.crate_types != ["bin"] {
+                return Err(Error::failure(format!(
+                    "example `{}` uses library crate types; library example compilation is not yet supported",
+                    target.name
+                )));
+            }
+            let kind = if selection.kind == "example" {
+                UnitKind::Example
+            } else {
+                UnitKind::Bench
+            };
+            let mut key = unit_key(package, kind, CompileKind::Target, &features);
+            key.target = Some(target.name.clone());
+            key.mode = selection.mode;
+            insert_unit(&mut graph.units, key.clone());
+            add_member_target_edges(&mut graph, resolution, manifests, &key, true, true)?;
+            roots.push(key);
+        }
+    }
+    if matches!(selection.mode, UnitMode::Test | UnitMode::CheckTest) {
+        graph = graph.with_profile(ProfileContext::Test, options.panic_abort);
+        roots = roots
+            .into_iter()
+            .map(|key| key.with_profile(ProfileContext::Test, options.panic_abort))
+            .collect();
+    }
+    if selection.kind == "bench" && selection.mode == UnitMode::Test {
+        let mut programs = workspace_units(
+            resolution,
+            manifests,
+            selected,
+            false,
+            true,
+            None,
+            options.release || options.dev_profile.opt_level != "0",
+        )?;
+        let keys = programs
+            .units
+            .keys()
+            .filter(|key| key.kind == UnitKind::Binary)
+            .cloned()
+            .collect::<Vec<_>>();
+        retain_unit_roots(&mut programs, keys.clone())?;
+        graph.merge(programs)?;
+        for root in &roots {
+            for program in keys.iter().filter(|key| key.package == root.package) {
+                add_edge(
+                    &mut graph.units,
+                    root,
+                    program.clone(),
+                    UnitEdgeKind::ArtifactDependency,
+                    None,
+                )?;
+            }
+        }
+    }
+    if matches!(selection.mode, UnitMode::Check | UnitMode::CheckTest) {
+        graph = graph.rekey(|mut key| {
+            if key.kind == UnitKind::Library
+                && manifests[&key.package].editable
+                && key.compile_kind == CompileKind::Target
+            {
+                key.mode = UnitMode::Check;
+            }
+            key
+        })?;
+    }
+    retain_unit_roots(&mut graph, roots)?;
+    Ok(graph)
 }
 
 pub(crate) fn workspace_check_units(
@@ -1537,7 +1677,11 @@ pub fn plan_dependency_units_with_remaps(
         let mut edges = unit.dependencies.iter().collect::<Vec<_>>();
         if matches!(
             key.kind,
-            UnitKind::Binary | UnitKind::BinaryHarness | UnitKind::IntegrationHarness
+            UnitKind::Binary
+                | UnitKind::BinaryHarness
+                | UnitKind::IntegrationHarness
+                | UnitKind::Example
+                | UnitKind::Bench
         ) {
             edges.sort_by_key(|edge| edge.unit.package == key.package);
         }
@@ -1591,6 +1735,17 @@ pub fn plan_dependency_units_with_remaps(
                     Error::failure("selected integration harness unit has no target name")
                 })?,
                 CargoTargetKind::Test,
+            ),
+            UnitKind::Example | UnitKind::Bench => (
+                key.auxiliary_target(manifest)
+                    .ok_or_else(|| Error::failure("auxiliary unit has no target"))?
+                    .name
+                    .as_str(),
+                if key.kind == UnitKind::Example {
+                    CargoTargetKind::ExampleBin
+                } else {
+                    CargoTargetKind::Bench
+                },
             ),
             UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
                 ("build-script-build", CargoTargetKind::CustomBuild)
@@ -2015,13 +2170,13 @@ fn profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
 }
 
 fn unit_lto(key: &UnitKey, release: bool, configured: ManifestLto) -> CargoUnitLto<'static> {
-    if matches!(
-        key.kind,
-        UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness
-    ) {
+    if key.is_harness() {
         return root_lto(release, configured, RootTargetKind::Binary, true);
     }
-    if key.kind == UnitKind::Binary {
+    if matches!(
+        key.kind,
+        UnitKind::Binary | UnitKind::Example | UnitKind::Bench
+    ) {
         return root_lto(release, configured, RootTargetKind::Binary, false);
     }
     if !release || key.compile_kind == CompileKind::Host || key.kind != UnitKind::Library {
@@ -2717,7 +2872,7 @@ mod tests {
         );
         let cargo: Value = serde_json::from_slice(&result.stdout).unwrap();
         let roots = std::iter::once(library).chain(binaries).collect::<Vec<_>>();
-        assert_ordinary_cargo_plan(&cargo, &plan, &manifests, &roots);
+        assert_ordinary_cargo_plan(&cargo, &plan, &manifests, &roots, "dev");
     }
 
     fn assert_ordinary_cargo_plan(
@@ -2725,6 +2880,7 @@ mod tests {
         plan: &CompilationPlan,
         manifests: &BTreeMap<PackageKey, Manifest>,
         roots: &[UnitKey],
+        profile_name: &str,
     ) {
         let units = cargo["units"].as_array().unwrap();
         let cargo_nodes = units
@@ -2748,6 +2904,8 @@ mod tests {
             let kind = match key.kind {
                 UnitKind::Library => "lib",
                 UnitKind::Binary => "bin",
+                UnitKind::Example => "example",
+                UnitKind::Bench => "bench",
                 _ => panic!("unexpected unit in build oracle: {:?}", key.kind),
             };
             let name = key.target.as_deref().unwrap_or_else(|| {
@@ -2804,20 +2962,17 @@ mod tests {
                 .position(|candidate| *candidate == node)
                 .unwrap()];
             let profile = &unit["profile"];
-            let mode = if key.mode == UnitMode::Check {
-                assert_eq!(
-                    planned.settings.mode,
-                    CargoCompileMode::Check { test: false }
-                );
-                "check"
-            } else {
-                assert_eq!(planned.settings.mode, CargoCompileMode::Build);
-                "build"
+            let (mode, compile_mode) = match key.mode {
+                UnitMode::Check => ("check", CargoCompileMode::Check { test: false }),
+                UnitMode::CheckTest => ("check", CargoCompileMode::Check { test: true }),
+                UnitMode::Test => ("test", CargoCompileMode::Test),
+                UnitMode::Build => ("build", CargoCompileMode::Build),
             };
+            assert_eq!(planned.settings.mode, compile_mode);
             assert_eq!(unit["mode"], mode);
             assert!(unit["platform"].is_null());
             assert_eq!(unit["features"], serde_json::json!(key.features));
-            assert_eq!(profile["name"], "dev");
+            assert_eq!(profile["name"], profile_name);
             assert_eq!(profile["opt_level"], planned.settings.profile.opt_level);
             assert_eq!(planned.settings.profile.lto, CargoProfileLto::Bool(false));
             assert_eq!(profile["lto"], "false");
@@ -2841,6 +2996,140 @@ mod tests {
             assert_eq!(profile["strip"], serde_json::json!({ "deferred": "None" }));
             assert_eq!(profile["rpath"], false);
             assert!(planned.settings.rustflags.is_empty());
+        }
+    }
+
+    #[test]
+    fn workspace_auxiliary_graphs_match_cargo_with_dev_dependencies() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fixture.package("a", "[package]\nname = \"a\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[dev-dependencies]\nb = { path = \"../b\", features = [\"dev\"] }\n", false);
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[features]\ndev = []\n[dependencies]\na = { path = \"../a\" }\n", false);
+        for directory in ["examples", "benches"] {
+            fs::create_dir(fixture.0.join("a").join(directory)).unwrap();
+            fs::write(
+                fixture.0.join("a").join(directory).join("selected.rs"),
+                "fn main() {}\n",
+            )
+            .unwrap();
+        }
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let limits = Options {
+            resolver: crate::manifest::Resolver::V2,
+            incompatible_rust_versions: None,
+            rust_versions: vec![Version::parse("1.99.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: None,
+        };
+        let mut catalog = Catalog::default();
+        let complete = crate::resolver::workspace::resolve_complete_workspace(
+            &workspace,
+            &mut catalog,
+            &limits,
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let resolution = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &limits,
+            &[crate::resolver::workspace::MemberRequest {
+                root: fixture.0.join("a"),
+                features: BTreeSet::new(),
+                default_features: true,
+                dev: true,
+                selected: true,
+            }],
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let manifests = resolution
+            .packages
+            .iter()
+            .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let selected = manifests
+            .keys()
+            .filter(|key| key.name == "a")
+            .cloned()
+            .collect::<Vec<_>>();
+        let options = PlanOptions {
+            workspace_root: &fixture.0,
+            release: false,
+            test_profile: false,
+            panic_abort: false,
+            dev_profile: &DevProfile::default(),
+            release_profile: &ReleaseProfile::default(),
+            rustc: &toolchain(),
+            logical_target: None,
+            rustflags: &[],
+        };
+        for (kind, command, mode) in [
+            ("example", "build", UnitMode::Build),
+            ("example", "check", UnitMode::Check),
+            ("example", "test", UnitMode::Test),
+            ("bench", "build", UnitMode::Test),
+            ("bench", "check", UnitMode::CheckTest),
+            ("bench", "test", UnitMode::Test),
+        ] {
+            let graph = workspace_auxiliary_units(
+                &resolution,
+                &manifests,
+                &selected,
+                &options,
+                &AuxiliarySelection {
+                    kind,
+                    name: Some("selected"),
+                    mode,
+                },
+            )
+            .unwrap();
+            let roots = graph
+                .units
+                .keys()
+                .filter(|key| matches!(key.kind, UnitKind::Example | UnitKind::Bench))
+                .cloned()
+                .collect::<Vec<_>>();
+            let plan = plan_dependency_units(&graph, &manifests, &options).unwrap();
+            let output = Command::new(env!("CARGO"))
+                .current_dir(&fixture.0)
+                .args([
+                    "-Z",
+                    "unstable-options",
+                    command,
+                    "--unit-graph",
+                    "--offline",
+                    "-p",
+                    "a",
+                ])
+                .args([&format!("--{kind}"), "selected"])
+                .env("CARGO_NET_OFFLINE", "true")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_ordinary_cargo_plan(
+                &cargo,
+                &plan,
+                &manifests,
+                &roots,
+                if command == "test" { "test" } else { "dev" },
+            );
         }
     }
 
@@ -2965,7 +3254,7 @@ mod tests {
                     .filter(|key| selected.contains(&key.package))
                     .cloned()
                     .collect::<Vec<_>>();
-                assert_ordinary_cargo_plan(&cargo, &plan, &manifests, &roots);
+                assert_ordinary_cargo_plan(&cargo, &plan, &manifests, &roots, "dev");
             }
         }
     }
@@ -3420,6 +3709,8 @@ mod tests {
                         }
                         UnitKind::Binary | UnitKind::BinaryHarness => "bin",
                         UnitKind::IntegrationHarness => "test",
+                        UnitKind::Example => "example",
+                        UnitKind::Bench => "bench",
                         UnitKind::ProcMacro => "proc-macro",
                         UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => "custom-build",
                     }

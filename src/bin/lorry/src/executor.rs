@@ -328,6 +328,8 @@ fn execute_inner(
                             | UnitKind::LibraryHarness
                             | UnitKind::BinaryHarness
                             | UnitKind::IntegrationHarness
+                            | UnitKind::Example
+                            | UnitKind::Bench
                             | UnitKind::ProcMacro
                             | UnitKind::BuildScriptCompile => {
                                 previous_outputs.artifacts.get(&key).cloned().map(|output| {
@@ -582,6 +584,8 @@ fn execute_unit(
             | UnitKind::LibraryHarness
             | UnitKind::BinaryHarness
             | UnitKind::IntegrationHarness
+            | UnitKind::Example
+            | UnitKind::Bench
             | UnitKind::ProcMacro
             | UnitKind::BuildScriptCompile => {
                 let manifest = manifests.get(&key.package).ok_or_else(|| {
@@ -816,6 +820,15 @@ fn execute_unit(
                             ))?
                         ),
                         UnitKind::ProcMacro => "proc macro".to_owned(),
+                        UnitKind::Example | UnitKind::Bench => format!(
+                            "{} `{}`",
+                            if key.kind == UnitKind::Example {
+                                "example"
+                            } else {
+                                "bench"
+                            },
+                            key.target.as_deref().unwrap()
+                        ),
                         UnitKind::BuildScriptCompile => "build script".to_owned(),
                         UnitKind::BuildScriptRun => unreachable!(),
                     };

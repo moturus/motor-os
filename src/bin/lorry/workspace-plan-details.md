@@ -2727,6 +2727,27 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Binary example and benchmark compiler units now have Cargo target identities,
+per-target editions, compiler environments, harness flags, cache kinds, and JSON
+target lookup. Their planner includes dev dependencies and ordinary library
+edges, applies test panic contexts, and retains benchmark program-artifact
+edges. Library example compilation still fails explicitly at this checkpoint.
+An offline Cargo oracle covers named example/benchmark build, check, and test
+graphs with a legal dev cycle, comparing roots, edges, features, modes, and
+effective profiles. This patch exceeds the preferred size slightly because the
+linked planner/compiler changes need that complete paired fixture.
+
+The initial compiler failure omitted the new kinds from an existing exhaustive
+oracle match (`/tmp/lorry-m8-auxiliary-graph-first-oracle.log`). The next run
+exposed that the reused oracle asserted the Cargo profile label `dev` even for
+`test`; its settings already matched. Evidence is preserved in
+`/tmp/lorry-m8-auxiliary-graph-complete-oracle.log`. The helper now verifies each
+command's actual label. A missed helper argument is preserved in
+`/tmp/lorry-m8-auxiliary-graph-profile-oracle.log`. The completed oracle, existing
+ordinary workspace oracle, and strict Clippy pass in
+`/tmp/lorry-m8-auxiliary-graph-{named-profile-oracle,ordinary-regression,clippy}.log`.
+The following patches connect public selectors and execution.
+
 Library and binary benchmark flags now retain Cargo's default of `true`,
 independently of their test flags. Explicit benchmark and documentation booleans
 are accepted, and malformed values fail with a type diagnostic. Shared

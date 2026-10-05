@@ -292,6 +292,18 @@ pub fn dependency_rustc_invocation_with_build_output(
                 output_dir,
             )
         }
+        UnitKind::Example | UnitKind::Bench => {
+            let target = key
+                .auxiliary_target(manifest)
+                .ok_or_else(|| Error::failure("auxiliary compiler unit has no target"))?;
+            (
+                binary_crate_name.as_deref().unwrap(),
+                target.path.as_path(),
+                "bin",
+                "dep-info,link",
+                output_dir,
+            )
+        }
         UnitKind::BuildScriptCompile => {
             let source = manifest.build_script.as_deref().ok_or_else(|| {
                 Error::failure(format!(
@@ -349,7 +361,13 @@ pub fn dependency_rustc_invocation_with_build_output(
     push(&mut arguments, crate_name);
     push(
         &mut arguments,
-        &format!("--edition={}", edition_name(manifest.edition)),
+        &format!(
+            "--edition={}",
+            edition_name(
+                key.auxiliary_target(manifest)
+                    .map_or(manifest.edition, |target| target.edition)
+            )
+        ),
     );
     let source_argument = if matches!(key.package.source, PackageSourceKey::Path(_))
         && planned.source_remap.is_none()
@@ -366,10 +384,7 @@ pub fn dependency_rustc_invocation_with_build_output(
         &mut arguments,
         "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
     );
-    if matches!(
-        key.kind,
-        UnitKind::LibraryHarness | UnitKind::BinaryHarness | UnitKind::IntegrationHarness
-    ) {
+    if key.is_harness() {
         let harness = match key.kind {
             UnitKind::LibraryHarness => manifest.library.as_ref().unwrap().harness,
             UnitKind::BinaryHarness => {
@@ -388,6 +403,7 @@ pub fn dependency_rustc_invocation_with_build_output(
                     .unwrap()
                     .harness
             }
+            UnitKind::Example | UnitKind::Bench => key.auxiliary_target(manifest).unwrap().harness,
             _ => unreachable!(),
         };
         if harness {
@@ -475,14 +491,17 @@ pub fn dependency_rustc_invocation_with_build_output(
     }
     let mut environment =
         rustc_environment(options.cargo, manifest, crate_name, &dependency_directories)?;
-    if matches!(key.kind, UnitKind::Binary | UnitKind::BinaryHarness) {
+    if matches!(
+        key.kind,
+        UnitKind::Binary | UnitKind::BinaryHarness | UnitKind::Example
+    ) {
         value(
             &mut environment,
             "CARGO_BIN_NAME",
             key.target.as_deref().unwrap(),
         );
     }
-    if key.kind == UnitKind::IntegrationHarness {
+    if matches!(key.kind, UnitKind::IntegrationHarness | UnitKind::Bench) {
         let binaries = options
             .integration_binaries
             .and_then(|packages| packages.get(&key.package))
@@ -809,6 +828,8 @@ pub(crate) fn unit_output_directory(
         | UnitKind::LibraryHarness
         | UnitKind::BinaryHarness
         | UnitKind::IntegrationHarness
+        | UnitKind::Example
+        | UnitKind::Bench
         | UnitKind::ProcMacro => unit.join("deps"),
         UnitKind::BuildScriptCompile => unit.join("build-script"),
         UnitKind::BuildScriptRun => unit.join("build-script-execution/out"),
@@ -886,7 +907,9 @@ fn expected_output(
         UnitKind::Binary
         | UnitKind::LibraryHarness
         | UnitKind::BinaryHarness
-        | UnitKind::IntegrationHarness => RustcOutput::Binary {
+        | UnitKind::IntegrationHarness
+        | UnitKind::Example
+        | UnitKind::Bench => RustcOutput::Binary {
             executable: output_dir.join(&stem),
             dep_info: output_dir.join(format!("{stem}.d")),
         },

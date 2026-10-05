@@ -238,6 +238,8 @@ impl BuildCache {
                 UnitKind::LibraryHarness => "library-harness",
                 UnitKind::BinaryHarness => "binary-harness",
                 UnitKind::IntegrationHarness => "integration-harness",
+                UnitKind::Example => "example",
+                UnitKind::Bench => "bench",
                 UnitKind::ProcMacro => "proc-macro",
                 UnitKind::BuildScriptCompile => "build-script-compile",
                 UnitKind::BuildScriptRun => unreachable!(),
