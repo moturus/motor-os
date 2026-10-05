@@ -15,7 +15,11 @@ not been reported. Phase 6.1–6.4 memory storage, admission, prompt handling
 and user commands are implemented. Phase 6.5 skills is implemented and passes
 the host gates and a native workflow linked to the fixed in-tree runtime.
 Its installed build still needs the SDK rollout described below.
-The sysbox track and phases 7–12 are not implemented.
+Sysbox step S1 is implemented and passes the focused native regression;
+its final source passes three debug and three release full core gates.
+Those gates exposed a preexisting TCP test isolation defect; its small
+test-only correction is committed and validated. Steps S2–S6 and phases
+7–12 are not implemented.
 
 The phase 3 manual checklist is not marked complete. Automated host tests
 cover the runtime and both UIs; native gates cover shipped tools, literal
@@ -74,8 +78,8 @@ grandchild on Linux and Motor OS.
 
 These policies prevent accidents; they do not confine tools. Native atomic
 replacement preserves the caller's access rather than every role's metadata.
-Checks provide development evidence, not user acceptance. Skills, `/accept`,
-reviews, workers, scheduling and gateways remain later work.
+Checks provide development evidence, not user acceptance. `/accept`, reviews,
+workers, scheduling and gateways remain later work.
 
 The portable workflow uses the actual CLI, shipped manifests and shared
 Gears runtime with a scripted provider. It reads a deliberately broken Rust
@@ -374,7 +378,65 @@ The runtime release candidate packages and verifies offline; publication and
 the external Rust fork/SDK rollout were requested separately for approval.
 See [the runtime record](gears-yaml-runtime.md) for the reviewable artifact.
 
+## Sysbox step S1 and its core gates
+
+S1 is complete in `41f5e494`. It adds parent creation, multiple operands,
+option termination, literal paths, explicit unsupported-option errors and
+the native systest, quoted wrapper and command notes. The regression runs
+transitively in the full core suite.
+
+The first combined Cargo build failed because systest enabled async-fs's
+`std` feature, changing the metadata error type seen by sysbox. The normal
+separate Makefile builds pass; the original invocation failure is preserved
+in `/tmp/gears-mkdir-native-build.log`. The first native test exposed the new
+command's empty-operand diagnostic gap: Motor reports InvalidFilename while
+mkdir requires No such file or directory. The command now handles that
+operand explicitly; its assertion is unchanged and the focused native gate
+passes. Original and corrected logs are `/tmp/gears-mkdir-focused-native.log`
+and `/tmp/gears-mkdir-focused-native-fixed.log`. Formatting and warnings-denied
+Clippy pass for both changed packages. A temporary host probe agrees with the
+installed uutils mkdir on creation behavior and exit statuses for 17 cases;
+this is not a claim of testing against an installed GNU binary. Its log is
+`/tmp/gears-mkdir-host-reference.log`.
+
+The initial series passed three release and two debug full gates, including
+mkdir. The third debug gate failed in `test_failed_tcp_setup_rolls_back_socket`:
+the global live socket count fell from 14 to 13. The failure's socket listing
+contains only SSH sockets and closed TIME-WAIT sockets whose owner has exited;
+no socket belongs to the test process. A global count equality can fail when
+unrelated sockets expire, and can also hide a new leak if another socket
+expires simultaneously. The small test-only fix compares socket IDs and
+checks for newly created sockets owned by the test while its connection is
+still alive, retaining the exact creation-counter assertion. It adds no
+waits, retries or production networking changes. The original failure is
+preserved in `/tmp/gears-mkdir-full-debug-3.log`. A diagnostic build deliberately
+omitted rollback; the corrected assertion caught its leaked socket by ID and
+owner (`/tmp/gears-mkdir-tcp-negative-control-native.log`). Restoring rollback
+passes the existing native cancellation suite
+(`/tmp/gears-mkdir-tcp-isolation-native.log`). The first diagnostic attempt
+started before the stats provider's documented one-second boot registration;
+its startup failure remains in
+`/tmp/gears-mkdir-tcp-negative-control-startup.log`. The diagnostic uses the
+normal suite's existing startup tests, with their unchanged assertions, as
+prerequisites. All temporary source changes are restored. The test-only
+correction is committed separately in `1a75bb04`.
+
+The final source passed `src/tests/full-test.sh` three times each in debug
+and release before either code commit. Every run includes the mkdir and
+failed-connect regressions, plus the Gears and batteries host component
+gates. Logs use `/tmp/gears-mkdir-full-{debug,release}-{1,2,3}-isolated.log`.
+Source hashes were checked afterward, including the unchanged production
+rollback. Formatting, diff checks and warnings-denied Clippy pass.
+
+| Profile | Testing duration for runs 1, 2, 3 |
+| --- | --- |
+| Debug | 22.6, 22.6, 22.7 minutes |
+| Release | 10.5, 10.6, 10.6 minutes |
+
 ## Next steps
+
+Independent sysbox steps S2–S6 remain, starting with sort. The batteries
+track needs the SDK rollout and repository interface decision below.
 
 Release and select the fixed runtime in the SDK, then finish native skills
 validation. The in-tree runtime gap is fixed and core-tested; rebuilding
