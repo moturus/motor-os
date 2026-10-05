@@ -1,15 +1,12 @@
 //! One immutable file per proposal; decision history is kept in the Gears root.
 
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gears::state::StateRoot;
 use serde::{Deserialize, Serialize};
 
 use crate::memory_format::{Entry, Source, Target};
 use crate::paths::ToolContext;
-
-const MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -93,44 +90,14 @@ fn storage(context: &ToolContext, target: Target) -> Result<(StateRoot, &'static
     })
 }
 
-fn relative(directory: &Path, id: &str) -> Result<PathBuf, String> {
-    if id.len() != 64
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err("invalid pending proposal id".into());
-    }
-    Ok(directory.join(format!("{id}.json")))
-}
-
 pub fn stage(context: &ToolContext, proposal: &Proposal) -> Result<String, String> {
     proposal.validate()?;
-    let bytes = serde_json::to_vec(proposal).map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_BYTES {
-        return Err("memory proposal exceeds 1 MiB".into());
-    }
-    let id = crate::snapshot::digest(&bytes);
     let (root, directory) = storage(context, proposal.target)?;
-    root.replace_file(&relative(directory, &id)?, &bytes)?;
-    Ok(id)
+    crate::pending_files::stage(&root, directory, proposal)
 }
 
-pub fn load(context: &ToolContext, target: Target, id: &str) -> Result<Proposal, String> {
-    let (root, directory) = storage(context, target)?;
-    let path = root
-        .existing_file(&relative(directory, id)?)?
-        .ok_or("pending proposal is unavailable")?;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|error| error.to_string())?
-        .take(MAX_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_BYTES || crate::snapshot::digest(&bytes) != id {
-        return Err("pending proposal is oversized or its content hash changed".into());
-    }
-    let proposal: Proposal = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+fn parse(value: serde_json::Value, target: Target) -> Result<Proposal, String> {
+    let proposal: Proposal = serde_json::from_value(value).map_err(|error| error.to_string())?;
     proposal.validate()?;
     if (proposal.target == Target::Workspace) != (target == Target::Workspace) {
         return Err("pending proposal is in the wrong scope".into());
@@ -138,26 +105,19 @@ pub fn load(context: &ToolContext, target: Target, id: &str) -> Result<Proposal,
     Ok(proposal)
 }
 
+pub fn load(context: &ToolContext, target: Target, id: &str) -> Result<Proposal, String> {
+    let (root, directory) = storage(context, target)?;
+    parse(crate::pending_files::load(&root, directory, id)?, target)
+}
+
 pub fn list(context: &ToolContext, target: Target) -> Result<Vec<(String, Proposal)>, String> {
     let (root, directory) = storage(context, target)?;
-    let Some(path) = root.existing_directory(directory)? else {
-        return Ok(Vec::new());
-    };
     let mut proposals = Vec::new();
-    for entry in std::fs::read_dir(path).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let name = entry.file_name();
-        let name = name.to_str().ok_or("pending filename is not ASCII")?;
-        if name.starts_with(".gears-tmp-") {
+    for (id, value) in crate::pending_files::list(&root, directory)? {
+        if value["kind"] == "skill" && target != Target::Workspace {
             continue;
         }
-        let id = name
-            .strip_suffix(".json")
-            .ok_or("unrecognized pending filename")?;
-        proposals.push((id.to_string(), load(context, target, id)?));
-        if proposals.len() > 1024 {
-            return Err("more than 1024 pending memory changes".into());
-        }
+        proposals.push((id, parse(value, target)?));
     }
     proposals.sort_by(|a, b| a.1.date_ms.cmp(&b.1.date_ms).then(a.0.cmp(&b.0)));
     Ok(proposals)
@@ -188,10 +148,7 @@ pub fn record(
 
 pub fn remove(context: &ToolContext, target: Target, id: &str) -> Result<(), String> {
     let (root, directory) = storage(context, target)?;
-    let path = root
-        .existing_file(&relative(directory, id)?)?
-        .ok_or("pending proposal is unavailable")?;
-    std::fs::remove_file(path).map_err(|error| error.to_string())
+    crate::pending_files::remove(&root, directory, id)
 }
 
 #[cfg(test)]

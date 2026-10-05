@@ -25,6 +25,7 @@ pub mod memory_tool;
 pub mod patch_match;
 pub mod paths;
 pub mod pending;
+pub mod pending_files;
 pub mod policy;
 pub mod provenance;
 pub mod search;
