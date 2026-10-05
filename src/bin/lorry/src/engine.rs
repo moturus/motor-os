@@ -60,7 +60,10 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         cli.manifest_path.as_deref().map(Path::new),
         &cli.selection,
     )?;
-    let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
+    let ordinary = matches!(
+        &cli.command,
+        Command::Build(_) | Command::Check(_) | Command::Run(_)
+    );
     let shared_tests = matches!(&cli.command, Command::Test(_));
     let shared_auxiliary_builds = matches!(&cli.command, Command::Build(options) if options.targets.has_target_selector() && options.targets.single_binary().is_none());
     let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.targets.selects_dev_targets() || options.targets.bin.len() > 1);
@@ -84,7 +87,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     if !ordinary && !shared_tests {
         cli.features.require_default()?;
     }
-    if selected.len() != 1 && !shared {
+    if selected.len() != 1 && (!shared || matches!(&cli.command, Command::Run(_))) {
         return Err(Error::failure(format!(
             "package selection selects {} packages; multi-package execution is not yet supported",
             selected.len()
@@ -232,16 +235,21 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     for manifest in &selected {
         manifest.require_profile(release, matches!(cli.command, Command::Test(_)))?;
     }
-    let binary_selection = match &cli.command {
-        Command::Build(options) => options.targets.single_binary(),
-        _ => None,
-    };
     let run_binary = match &cli.command {
         Command::Run(options) => Some(select_run_binary(
             &manifest,
             options.build.targets.bin.first().map(String::as_str),
         )?),
         _ => None,
+    };
+    let binary_selection = match &cli.command {
+        Command::Build(options) => options.targets.single_binary(),
+        Command::Run(_) if manifest.binaries.len() > 1 => run_binary,
+        _ => None,
+    };
+    let run_targets = crate::cli::TargetSelection {
+        bin: run_binary.into_iter().map(str::to_owned).collect(),
+        ..Default::default()
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
@@ -425,12 +433,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     &target_options,
                     &RuntimeOptions {
                         current_dir: &current,
-                        environment: &crate::compile::runtime_environment(
-                            &cargo,
-                            &manifest,
-                            &artifacts.library_paths,
-                            None,
-                        )?,
+                        environment: &program_environment(&cargo, &manifest, &artifacts)?,
                         kind: process::ChildKind::Program,
                         verbosity: cli.verbosity,
                     },
@@ -519,11 +522,11 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         Command::Run(options) => {
             let artifacts = build_reported(
                 Build {
-                    target_selection: None,
+                    target_selection: Some(&run_targets),
                     target_root: Some(&target_root),
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
-                    members: None,
+                    members: shared.then_some(selected.as_slice()),
                     global_cache_root: &global_cache_root,
                     config: &config,
                     toolchain: &toolchain,
@@ -546,7 +549,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     bundle: false,
                     validation,
                     ordinary_freshness_base,
-                    binary_selection: None,
+                    binary_selection,
                 },
                 options.build.message_format,
             )?;
@@ -563,12 +566,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 &target_options,
                 &RuntimeOptions {
                     current_dir: &current,
-                    environment: &crate::compile::runtime_environment(
-                        &cargo,
-                        &manifest,
-                        &artifacts.library_paths,
-                        None,
-                    )?,
+                    environment: &program_environment(&cargo, &manifest, &artifacts)?,
                     kind: process::ChildKind::Program,
                     verbosity: cli.verbosity,
                 },
@@ -3334,6 +3332,40 @@ pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits
         max_file_bytes: policy.max_extracted_package_bytes,
         max_tree_bytes: policy.max_extracted_package_bytes,
     })
+}
+
+fn program_environment(
+    cargo: &Path,
+    manifest: &Manifest,
+    artifacts: &BuildArtifacts,
+) -> Result<BTreeMap<String, OsString>> {
+    let mut environment = BTreeMap::new();
+    let id = crate::metadata::package::path_package_id(
+        &manifest.root,
+        &manifest.name,
+        &manifest.version.original,
+    )?;
+    for message in &artifacts.messages {
+        if message["reason"] == "build-script-executed" && message["package_id"] == id {
+            if let Some(out_dir) = message["out_dir"].as_str() {
+                environment.insert("OUT_DIR".to_owned(), out_dir.into());
+            }
+            if let Some(values) = message["env"].as_array() {
+                for pair in values {
+                    if let (Some(name), Some(value)) = (pair[0].as_str(), pair[1].as_str()) {
+                        environment.insert(name.to_owned(), value.into());
+                    }
+                }
+            }
+        }
+    }
+    environment.extend(crate::compile::runtime_environment(
+        cargo,
+        manifest,
+        &artifacts.library_paths,
+        None,
+    )?);
+    Ok(environment)
 }
 
 struct RuntimeOptions<'a> {

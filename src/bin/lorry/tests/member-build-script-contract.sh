@@ -9,7 +9,7 @@ lorry_load_current_toolchain
 export RUSTC="$LORRY_TEST_RUSTC"
 export PATH="$(dirname "$RUSTC"):$PATH"
 WORK="$(mktemp -d /tmp/lorry-member-script-contract-XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained member-script fixture: $WORK" >&2; fi' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project"/{a,b,builder}/src
 printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
@@ -128,4 +128,41 @@ env HOME="$WORK/home" SCRIPT_INPUT=private-marker "$LORRY" build -j1 2>"$WORK/hi
 [ "$(target/lorry/debug/b)" = absent ]
 rg -F 'hidden caller variable `SCRIPT_INPUT`' "$WORK/hidden.err" >/dev/null
 if rg -F private-marker "$WORK/hidden.err"; then exit 1; fi
+# Run shares member feature resolution and script output, including fresh units.
+cp "$WORK/grants.toml" lorry.toml
+cat >a/src/main.rs <<'EOF'
+fn main() {
+    assert_eq!(std::env::var("FROM_SCRIPT").unwrap(), "present");
+    assert_eq!(std::env::var("OUT_DIR").unwrap(), env!("OUT_DIR"));
+    assert_eq!(std::env::current_dir().unwrap(), std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap());
+    assert_eq!(std::env::args().skip(1).collect::<Vec<_>>(), ["argument", "two words"]);
+    println!("{}", include!(concat!(env!("OUT_DIR"), "/generated.rs")));
+}
+EOF
+mkdir -p a/src/bin
+printf 'compile_error!("run must only build the selected binary");\n' >a/src/bin/unselected.rs
+for pass in cold fresh json; do
+    format=()
+    if [ "$pass" = json ]; then format=(--message-format=json); fi
+    env HOME="$WORK/home" SCRIPT_INPUT=visible "$LORRY" run -p a --bin a --features builder/build \
+        "${format[@]}" -- argument 'two words' >"$WORK/lorry-run.out"
+    SCRIPT_INPUT=visible "$LORRY_TEST_CARGO" run -p a --bin a --features builder/build --offline \
+        "${format[@]}" -- argument 'two words' >"$WORK/cargo-run.out"
+    if [ "$pass" = json ]; then
+        python3 - "$WORK/lorry-run.out" "$WORK/cargo-run.out" <<'PY'
+import json, sys
+for path in sys.argv[1:]:
+    lines = open(path).read().splitlines()
+    assert lines[-1] == 'visible'
+    messages = list(map(json.loads, lines[:-1]))
+    assert messages[-1] == {'reason': 'build-finished', 'success': True}
+    assert any(m['reason'] == 'build-script-executed' for m in messages)
+    assert all(m.get('target', {}).get('name') != 'unselected' for m in messages)
+PY
+    else
+        cmp "$WORK/lorry-run.out" "$WORK/cargo-run.out"
+        [ "$(cat "$WORK/lorry-run.out")" = visible ]
+    fi
+done
+rm a/src/bin/unselected.rs
 echo "PASS: selected member scripts match Cargo binaries and JSON with package-specific caller grants"

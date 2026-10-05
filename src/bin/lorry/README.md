@@ -68,9 +68,10 @@ allowlists; editable members can read the workspace without writing it.
 Ordinary test now runs selected scripts and development dependencies through
 one workspace graph, including legal dev cycles. It supports CLI features,
 default members, `--workspace`, repeated `-p`, and `--exclude`, and runs each
-member's harnesses at its package root with its script environment. Run
-still rejects selected scripts. Alternative registries and CLI feature
-selection for run remain unsupported. Build,
+member's harnesses at its package root with its script environment. Run shares
+feature resolution and granted member scripts, compiles only its selected binary,
+and gives it the member's generated-output environment. Alternative registries
+remain unsupported. Build, run,
 check, Clippy, test, metadata, tree, and vendor support CLI feature selection. Ordinary
 workspace build, check, and Clippy share one compilation graph for default
 members, `--workspace`, repeated `-p`, and `--exclude`. Bundle testing produces

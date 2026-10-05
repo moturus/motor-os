@@ -377,7 +377,7 @@ names and multiple slashes fail as in Cargo. Source-only metadata describes
 declared features regardless of selection. Metadata, tree, and vendor resolve
 those flags. Ordinary build, check, and Clippy also resolve those flags across
 selected members, retaining feature unions when a member is a dependency too.
-Run still rejects nondefault CLI features. Test resolves them across selected members. Several selected members use
+Run and test resolve CLI features through the shared graph. Several selected members use
 one unit graph, package-specific primary compiler roles and Cargo JSON IDs,
 and binary owner records. Shared execution currently reuses individual units;
 single-member default-feature builds retain completed-profile reuse.
@@ -499,6 +499,11 @@ selects an explicit `--bin`, then `package.default-run`, then a sole binary;
 an unknown or ambiguous selection fails. `test` builds every enabled binary
 harness and defines `CARGO_BIN_EXE_<name>` for every program while compiling
 integration tests.
+Run resolves member build scripts under the same grants as build, and passes
+that member's published `OUT_DIR` and script environment to the program. It
+compiles only the selected binary, preserving the caller's directory and child
+arguments. Completed-profile reuse retains admission checks and can skip
+dependency scripts for existing eligible single-member builds/runs.
 Test uses those same target selectors, including repeated names and combined
 groups. Explicit library, binary, and example selections run harnesses even
 when their `test` flag is false. Plural tests/benches filter the corresponding

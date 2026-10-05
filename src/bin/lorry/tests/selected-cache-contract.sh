@@ -115,6 +115,11 @@ EOF
         echo 'selected-cache-contract: admitted profile rebuilt a compiler unit' >&2
         exit 1
     fi
+    "$LORRY" --quiet run >"$WORK/admitted-run.out"
+    test "$(cat "$counter")" = x
+    "$LORRY" --quiet run >"$WORK/admitted-fresh-run.out"
+    test "$(cat "$counter")" = x
+    cmp "$WORK/admitted-run.out" "$WORK/admitted-fresh-run.out"
     sed -i 's/^review-sha256 = ".*"/review-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"/' \
         .lorry/dependencies-v2.toml
     if "$LORRY" --quiet build >"$WORK/stale.out" 2>"$WORK/stale.err"; then

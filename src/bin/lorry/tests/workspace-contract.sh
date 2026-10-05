@@ -434,8 +434,7 @@ for command in build check test run; do
         exit 1
     fi
     case "$command" in
-        build | check | test) expected='workspace admission does not cover the requested packages or features of `scripted`' ;;
-        run) expected='package `scripted` has a build script' ;;
+        build | check | test | run) expected='workspace admission does not cover the requested packages or features of `scripted`' ;;
     esac
     grep -F "$expected" "$WORK/scripted.stderr" >/dev/null || {
         cat "$WORK/scripted.stderr" >&2

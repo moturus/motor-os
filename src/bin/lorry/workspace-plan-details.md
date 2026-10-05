@@ -2727,6 +2727,25 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Run now shares member feature resolution, grants, and build scripts. Its common
+planner selects only the requested binary, excluding an unrelated failing
+binary. Program environments derive the member's OUT_DIR and script variables
+from the retained build events, so human and JSON execution have the same
+environment and fresh events preserve it. Existing eligible completed profiles
+still skip dependency scripts across build and repeated runs with admission
+verification intact. Multi-default-member run selection and examples follow.
+
+The first compile used Display on the structured manifest Version; the corrected
+package ID uses its original string. That compile failure remains in
+`/tmp/lorry-m8-shared-run-first-binary.log`. Paired cold/fresh/JSON script runs,
+argument/cwd/runtime checks, workspace regressions, strict Clippy, and script-free
+profile reuse pass in `/tmp/lorry-m8-shared-run-json-contract.log`,
+`/tmp/lorry-m8-shared-run-workspace-regressions.log`,
+`/tmp/lorry-m8-shared-run-clippy.log`, and
+`/tmp/lorry-m8-shared-run-fast-profile-contract.log`. Runtime fixtures embedding
+their physical OUT_DIR use runtime comparisons; existing non-path-embedding
+build fixtures retain exact Cargo byte checks.
+
 Test now uses the common target selection model and planner, including repeated
 names, combined groups, examples, and benchmarks. Explicit library/bin/example
 selections ignore the test flag as Cargo does; plural tests and benches filter
