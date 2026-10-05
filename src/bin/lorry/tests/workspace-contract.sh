@@ -245,7 +245,7 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
 cp "$WORK/project/Cargo.toml" "$WORK/profiles.baseline"
 cat >>"$WORK/project/Cargo.toml" <<'EOF'
 [profile.release]
-debug-assertions = true
+rpath = true
 [profile.custom]
 inherits = "release"
 debug = true
@@ -255,12 +255,12 @@ EOF
     "$LORRY" check -p tool
     "$LORRY_TEST_CARGO" check -p tool --offline
     if "$LORRY" build -p tool --release 2>"$WORK/profile.err"; then exit 1; fi
-    grep -F 'unsupported selected profile key `profile.release.debug-assertions`' "$WORK/profile.err" >/dev/null
-    sed '/^\[profile.dev\]$/a debug-assertions = false' "$WORK/profiles.baseline" >Cargo.toml
+    grep -F 'unsupported selected profile key `profile.release.rpath`' "$WORK/profile.err" >/dev/null
+    sed '/^\[profile.dev\]$/a rpath = true' "$WORK/profiles.baseline" >Cargo.toml
     "$LORRY" build -p tool --release
     "$LORRY_TEST_CARGO" build -p tool --release --offline
     if "$LORRY" check -p tool 2>"$WORK/profile.err"; then exit 1; fi
-    grep -F 'unsupported selected profile key `profile.dev.debug-assertions`' "$WORK/profile.err" >/dev/null
+    grep -F 'unsupported selected profile key `profile.dev.rpath`' "$WORK/profile.err" >/dev/null
     cp "$WORK/profiles.baseline" Cargo.toml
     printf '\n[profile.test]\nopt-level = 3\n' >>Cargo.toml
     "$LORRY" build -p tool

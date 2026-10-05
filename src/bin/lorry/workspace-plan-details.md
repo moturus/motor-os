@@ -2727,6 +2727,11 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+The active-profile regression still asserted that dev/release debug-assertions
+were unsupported. It now uses the still-deferred rpath setting, preserving the
+unused/active-profile distinction. The complete workspace regression passes in
+`/tmp/lorry-m8-common-profile-active-key-regression.log`.
+
 Dev/release profiles now share supported LTO, stripping, codegen-unit, assertion,
 overflow-check, and incremental settings, in addition to debug/optimization and
 panic. Editable release units may explicitly enable incremental compilation;
