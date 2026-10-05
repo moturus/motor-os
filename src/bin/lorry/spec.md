@@ -234,8 +234,9 @@ configuration file, this CLI option, or the default.
 
 `locate-project` defaults to JSON and accepts plain output. With no explicit
 manifest, it finds the nearest `Cargo.toml` in the working directory or its
-parents. A member still locates itself even with
-`--workspace`; workspace-root answers wait for milestone 9.
+parents. A member locates its own manifest by default; `--workspace` returns
+the containing workspace's root manifest, matching Cargo. Source and resolved
+metadata already describe every member when invoked through a member manifest.
 The two `rustc` query forms above are read-only compatibility queries; other
 `cargo rustc` forms are rejected. Build, check, run, and test share the message
 formats described below, and accept their options after the command name.

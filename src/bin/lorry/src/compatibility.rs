@@ -9,11 +9,14 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-pub fn locate_project(manifest_path: Option<&str>, plain: bool) -> Result<i32> {
-    // Resolved metadata is per package, so a member manifest locates itself.
-    let workspace = SourceWorkspace::load(Path::new("."), manifest_path.map(Path::new))?;
-    let path = workspace
-        .manifest_path
+pub fn locate_project(manifest_path: Option<&str>, workspace: bool, plain: bool) -> Result<i32> {
+    let source = SourceWorkspace::load(Path::new("."), manifest_path.map(Path::new))?;
+    let manifest = if workspace {
+        source.root.join("Cargo.toml")
+    } else {
+        source.manifest_path
+    };
+    let path = manifest
         .to_str()
         .ok_or_else(|| Error::failure("selected manifest path is not Unicode"))?;
     if plain {

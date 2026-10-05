@@ -46,6 +46,7 @@ pub enum Command {
     Fetch(FetchOptions),
     LocateProject {
         manifest_path: Option<String>,
+        workspace: bool,
         plain: bool,
     },
     Metadata(MetadataOptions),
@@ -1156,6 +1157,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
         })),
         Some(("locate-project", options)) => Ok(Command::LocateProject {
             manifest_path: options.get_one::<String>("manifest-path").cloned(),
+            workspace: options.get_flag("workspace"),
             plain: options
                 .get_one::<String>("message-format")
                 .is_some_and(|format| format.eq_ignore_ascii_case("plain")),
@@ -1534,6 +1536,7 @@ mod tests {
             .command,
             Command::LocateProject {
                 manifest_path: Some("/project/Cargo.toml".to_owned()),
+                workspace: true,
                 plain: false,
             }
         );
@@ -1582,6 +1585,7 @@ mod tests {
                 parse(input).unwrap().command,
                 Command::LocateProject {
                     manifest_path: None,
+                    workspace: input.contains(&"--workspace"),
                     plain: false,
                 }
             );
@@ -1592,6 +1596,7 @@ mod tests {
                 .command,
             Command::LocateProject {
                 manifest_path: None,
+                workspace: false,
                 plain: true,
             }
         );

@@ -108,11 +108,14 @@ cat >"$WORK/workspace/app/src/lib.rs" <<'EOF'
 pub fn selected() {}
 EOF
 MEMBER_MANIFEST="$(realpath "$WORK/workspace/app/Cargo.toml")"
+WORKSPACE_MANIFEST="$(realpath "$WORK/workspace/Cargo.toml")"
 located="$(cd "$WORK/workspace/app" && HOME="$HOME_DIR" \
     "$LORRY" locate-project --workspace --manifest-path "$MEMBER_MANIFEST")"
-[ "$located" = "{\"root\":\"$MEMBER_MANIFEST\"}" ] || \
-    fail "locate-project did not preserve the selected member"
-WORKSPACE_MANIFEST="$(realpath "$WORK/workspace/Cargo.toml")"
+[ "$located" = "{\"root\":\"$WORKSPACE_MANIFEST\"}" ] || \
+    fail "locate-project --workspace did not identify the member's workspace"
+located="$(cd "$WORK/workspace/app" && HOME="$HOME_DIR" \
+    "$LORRY" locate-project --manifest-path "$MEMBER_MANIFEST" --message-format plain)"
+[ "$located" = "$MEMBER_MANIFEST" ] || fail "plain locate-project did not preserve the selected member"
 located="$(cd "$WORK/workspace" && HOME="$HOME_DIR" "$LORRY" locate-project \
     --workspace --manifest-path "$WORKSPACE_MANIFEST")"
 [ "$located" = "{\"root\":\"$WORKSPACE_MANIFEST\"}" ] || \

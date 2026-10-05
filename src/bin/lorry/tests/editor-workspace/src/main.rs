@@ -25,8 +25,8 @@ fn main() -> io::Result<()> {
     let repo = Path::new(&args[1]).canonicalize()?;
     let work = Path::new(&args[2]).canonicalize()?;
     let toolchain = Toolchain::discover(&repo)?;
-    for custom in [false, true] {
-        run(&lorry, &toolchain, &work, custom)?;
+    for (custom, member) in [(false, false), (true, false), (true, true)] {
+        run(&lorry, &toolchain, &work, custom, member)?;
     }
     println!(
         "PASS: actual editor commands share workspace features, generated code, target directories, and save diagnostics"
@@ -34,8 +34,20 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn run(lorry: &Path, toolchain: &Toolchain, work: &Path, custom: bool) -> io::Result<()> {
-    let case_root = work.join(if custom { "custom" } else { "default" });
+fn run(
+    lorry: &Path,
+    toolchain: &Toolchain,
+    work: &Path,
+    custom: bool,
+    member: bool,
+) -> io::Result<()> {
+    let case_root = work.join(if member {
+        "member"
+    } else if custom {
+        "custom"
+    } else {
+        "default"
+    });
     let root = case_root.join("project");
     let home = case_root.join("home");
     let wrappers = case_root.join("wrapper");
@@ -107,6 +119,9 @@ fn run(lorry: &Path, toolchain: &Toolchain, work: &Path, custom: bool) -> io::Re
     if custom {
         options["cargo"]["targetDir"] = json!(target);
         options["cargo"]["features"] = json!(["app/selected"]);
+    }
+    if member {
+        options["linkedProjects"] = json!([root.join("app/Cargo.toml")]);
     }
     let mut server = Command::new(&toolchain.rust_analyzer);
     let mut paths = vec![wrappers.clone(), toolchain.sysroot.join("bin")];

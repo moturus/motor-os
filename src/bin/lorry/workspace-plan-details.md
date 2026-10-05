@@ -3673,6 +3673,15 @@ command sequence against a fixture before changing public member-manifest
 discovery behavior. Then activate member-manifest `metadata` and
 `locate-project --workspace` together.
 
+Public `locate-project --workspace` now returns the containing root when
+invoked through a member manifest; plain/default lookup still returns the
+member. Full-workspace member metadata was already implemented in milestone 6
+and has existing paired source/resolved contracts. The editor contract now
+also opens an explicit member linked project with custom features and target
+directory, proving root lookup, full metadata, generated navigation, and save
+diagnostics together. The compatibility and three-case editor contracts and
+strict Clippy pass in `/tmp/lorry-m9-workspace-{locate-contract,member-editor-contract,discovery-clippy}.log`.
+
 Set `check.workspace = false` in the Motor OS checkout's own Helix
 configuration, a new `.helix/languages.toml`, since `src/sys` cannot be
 built as one Cargo workspace. Keep ordinary developer-image projects on

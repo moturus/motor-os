@@ -302,9 +302,10 @@ is rejected with the location to which its settings should move.
 
 `locate-project` emits `{"root":"/absolute/path/Cargo.toml"}`, or the path
 alone with `--message-format plain`. The manifest is discovered in the
-working directory or its parents, or supplied with `--manifest-path`. Both
-with and without `--workspace`, a selected member still locates itself;
-workspace-root lookup arrives in milestone 9.
+working directory or its parents, or supplied with `--manifest-path`.
+`--workspace` returns the containing workspace root; otherwise a selected
+member locates itself. Both source and resolved metadata describe the whole
+workspace when given a member manifest.
 
 Without `--no-deps`, metadata verifies and resolves the whole workspace against
 the complete lock, then publishes stable content-addressed source views needed
