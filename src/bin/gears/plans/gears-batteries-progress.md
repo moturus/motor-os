@@ -79,8 +79,8 @@ grandchild on Linux and Motor OS.
 These policies prevent accidents; they do not confine tools. Native atomic
 replacement preserves the caller's access rather than every role's metadata.
 Checks provide development evidence, not user acceptance. Reviews, workers,
-scheduling and gateways remain later work. The user has since simplified
-acceptance to an ordinary conversation message, as recorded below.
+scheduling and gateways remain later work. The user has simplified
+acceptance to a small explicit `/accept` command, as recorded below.
 
 The portable workflow uses the actual CLI, shipped manifests and shared
 Gears runtime with a scripted provider. It reads a deliberately broken Rust
@@ -439,16 +439,18 @@ rollback. Formatting, diff checks and warnings-denied Clippy pass.
 
 ## Task acceptance decision
 
-The user requested acceptance through ordinary conversation, for example
-"yes, I accept this", without formal tooling. Phase 7 now requires no
-separate implementation: normal session history already stores the user's
-message. A review may cite that message, while check receipts remain
-development evidence and do not imply acceptance or a skill's usefulness.
+The user wants `/accept` as a clear signal rather than inferring acceptance
+from natural language. Phase 7 is a small hook command that records this
+signal in the saved session, replies "Task accepted." and leaves the
+session open. It makes no model request and does not run or require a check.
+A review may cite the saved signal; check receipts remain development
+evidence and do not imply acceptance or a skill's usefulness.
 
-The earlier acceptance command, CLI, UI hint, separate acceptance record
-and repository fingerprint proposal are superseded. There is no Gix binary
-or library decision to make for acceptance. Acceptance does not schedule
-a review; optional reviews retain compaction and explicit `/review` triggers.
+The separate acceptance CLI, UI hint, acceptance file and repository
+fingerprint proposal remain superseded. There is no Gix binary or library
+decision to make for acceptance. `/accept` does not schedule a review;
+optional reviews retain compaction and explicit `/review` triggers.
+The simplified command is planned, not implemented yet.
 See [the acceptance decision](gears-acceptance-vcs.md).
 
 ## Next steps
@@ -461,8 +463,8 @@ export are verified in [the runtime record](gears-yaml-runtime.md#published-runt
 Select the fixed runtime in the SDK, then finish native skills validation.
 The in-tree runtime gap is fixed and core-tested; rebuilding
 the current SDK tuple alone will not update std's locked dependency.
-Then continue to phase 8. The ordinary-conversation acceptance decision
-resolves phase 7 without a code patch or repository inspection.
+Then implement the small `/accept` command in phase 7 and continue to
+phase 8. Acceptance needs no repository inspection.
 
 The optional Hermes import has not been performed. Automated mock tests
 establish behavior, not real-model usefulness. Keep the outstanding native

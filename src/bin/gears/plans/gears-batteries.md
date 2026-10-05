@@ -30,7 +30,7 @@ helpful, that unverified learning always hurts, or that a particular model
 size or number of confirming sessions is a reliable threshold. Results
 come from different tasks and budgets, and much of the literature has not
 been independently reproduced. Treat the learning loop as an experiment.
-Task acceptance is the user's plain-language statement in the conversation,
+Task acceptance uses the user's explicit `/accept` command,
 as recorded in [the acceptance decision](gears-acceptance-vcs.md).
 
 [Earlier notes](gears-batteries-notes.md) retain investigation history,
@@ -401,7 +401,7 @@ reminder count. Everything larger goes to the per-session data.
 
 | Event | What the batteries do |
 | --- | --- |
-| `initialize` | adds project instructions, memory and the skill list (the prompt snapshot); registers `todo` and `/review`; on resume, asks whether to run an unfinished review |
+| `initialize` | adds project instructions, memory and the skill list (the prompt snapshot); registers `todo`, `/accept` and `/review`; on resume, asks whether to run an unfinished review |
 | `permission` | applies the approval rules below |
 | `tool_execute` | runs `todo` |
 | `tool_result` | updates the turn record; wraps `curl` output as untrusted; asks the user about a memory change the agent just made |
@@ -409,7 +409,7 @@ reminder count. Everything larger goes to the per-session data.
 | `before_stop` | reminds the model to run the check (see "Evidence") |
 | `turn_end` | closes the turn record |
 | `before_compact` | marks a review as due when reviews are on |
-| `command` | carries out `/review` |
+| `command` | records the user's `/accept` signal in the saved session, or carries out `/review` |
 | `answer` | applies the user's answer to a question the hook asked |
 
 **Project instructions** come only from `AGENTS.md` at the selected
@@ -453,7 +453,7 @@ Keep three different claims separate:
 | Claim | What supports it | What it does not establish |
 | --- | --- | --- |
 | An operation succeeded | A runtime-recorded tool outcome | The user's task is complete |
-| A task was accepted | The user's explicit acceptance in the conversation | Correctness beyond the available checks, or that a proposed lesson will help later |
+| A task was accepted | The user's explicit `/accept` signal in the saved session | Correctness beyond the available checks, or that a proposed lesson will help later |
 | A lesson improves performance | Evaluation on other representative tasks, including regressions and cost | Universal usefulness across models or projects |
 
 **Check results.** Only the `check` tool produces a check result: it records
@@ -465,17 +465,19 @@ until any later call to a tool that can change the workspace (`write_file`,
 is stale. Agent-editable tests can support development, but a passing check is
 not by itself acceptance.
 
-**Task acceptance** (question 5). A task is accepted only when the user says
-so in ordinary conversation, for example "yes, I accept this". That is
-sufficient; there is no required wording or command. The user's message
-remains in the normal session history, and a later review cites that entry
-as the evidence of acceptance. An agent's claim that it is done, a passing
-check, or permission to run a tool does not stand in for the user's acceptance.
+**Task acceptance** (question 5). The user types `/accept` to give an
+unambiguous signal that they accept the current task's result. The command
+records that signal in the saved session and replies "Task accepted."
+It takes no arguments and leaves the session open for the next task.
+A later review cites the saved entry as evidence of acceptance. The system
+does not infer an acceptance signal from ordinary conversation, an agent's
+claim that it is done, a passing check or permission to run a tool.
 
-Acceptance requires no separate tool, CLI, hook event, status flag, record,
-UI reminder, commit or hash of uncommitted changes. It does not depend on
-Git or Gix, and does not require a current passing check. Check receipts
-retain their independent meaning as development evidence.
+This is a small hook command using existing session storage. It needs no
+separate `gears-batteries accept` CLI, acceptance file, UI reminder, commit
+or hash of uncommitted changes. It does not depend on Git or Gix, require a
+current passing check, make a model request or schedule a review. Check
+receipts retain their independent meaning as development evidence.
 
 **The `before_stop` reminder.** When a check is declared, a tool that can
 change the workspace ran this turn, and no current passing check exists,
@@ -614,8 +616,8 @@ pair and the workload, not on whether a model is hosted or how large it is.
 - **When.** A review is marked due before a compaction and when the user
   asks with `/review [focus]`; the focus sentence takes priority over the
   general instructions. A session may hold several tasks and a task may
-  take several turns, so turns are not review boundaries. Acceptance itself
-  is an ordinary message and does not create a review mark. Marks are stored
+  take several turns, so turns are not review boundaries. `/accept` records
+  the user's signal and does not create a review mark. Marks are stored
   in the per-session data with the session id and the last entry at the
   time, so an interrupted or repeated review handles each mark once.
 - **Who runs it** (question 6). Gears' after-turn command starts
@@ -630,7 +632,7 @@ pair and the workload, not on whether a model is hosted or how large it is.
 - **What it is told.** "Nothing to save" is the default outcome. Every
   proposal cites the entry ids that support it. A procedure may be proposed
   when the conversation shows it run and working, including a successful new
-  procedure. The user's ordinary acceptance message is evidence that they
+  procedure. The user's saved `/accept` signal is evidence that they
   accepted the result; it does not establish that a skill caused success.
   A restarted worker may reflect a spent budget rather than a bad
   procedure. The review also receives the changes the user denied, so it
@@ -932,10 +934,11 @@ meet guarantee 8 for the children they add.
   workspace's unapproved `MEMORY.md` is not used; and approving a change to
   an entry removed in the meantime fails with a message.
 
-**Phase 7. Task acceptance.** Resolved by the user's decision to accept
-results in ordinary conversation, as "Task acceptance" describes. The
-normal saved user message is the evidence. No separate implementation is
-needed; proceed to phase 8 after the remaining phase 6 validation.
+**Phase 7. Task acceptance.** The small `/accept` hook command, as "Task
+acceptance" describes. Done when it is listed in help, records the user's
+signal in the saved session, replies "Task accepted." and preserves the
+signal on resume without running a check or making a model request.
+No repository inspection or separate acceptance CLI is needed.
 
 **Phase 8. Reviews** (off by default; question 7 is discussed in this phase).
 - 8.1 Review marks, the after-turn runner, `/review [focus]`, and the
@@ -1019,9 +1022,9 @@ above. Questions 7 and 10 are open and will be discussed when phases 8 and
    automatic recovery across files, version store or `undo`.
 
 5. **What counts as a finished task, and who says so?** *Decided:* the user,
-   by saying so in ordinary conversation, for example "yes, I accept this".
-   The normal user message is sufficient evidence; no formal acceptance
-   tooling or repository inspection is required (see "Task acceptance").
+   with the explicit `/accept` signal, saved in the session and acknowledged
+   with "Task accepted." No repository inspection or check gate is required
+   (see "Task acceptance").
 
 6. **What happens to a review that has not run when Gears exits?**
    *Decided:* it is stopped. When the user resumes that session, Gears asks

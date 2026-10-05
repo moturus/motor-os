@@ -1,34 +1,36 @@
-# Task acceptance through conversation
+# Simple explicit task acceptance
 
-Status: decided by the user on 2026-10-05. This replaces the earlier
-proposal for an acceptance command and repository fingerprints.
+Status: decided by the user on 2026-10-05. Keep `/accept` as an unambiguous
+signal, with the repository fingerprint proposal superseded.
 
 ## User workflow
 
-The user accepts a task's result by saying so in ordinary conversation:
+The user types `/accept` to say that they accept the current task's result.
+The command takes no arguments, records that signal in the saved session
+and replies:
 
-> yes, I accept this
+> Task accepted.
 
-Equivalent clear statements work too; this is not an exact phrase to parse.
-The normal saved user message is the evidence of acceptance, including when
-the session is resumed. A later review can cite its session and entry ids.
-An agent's declaration of completion, a passing check, and permission to
-run a tool do not establish that the user accepted the task.
+The session stays open for the next task. A later review can cite the saved
+entry's session and entry ids as evidence of acceptance. Ordinary
+conversation is not parsed to guess acceptance. An agent's declaration of
+completion, a passing check and permission to run a tool are not acceptance
+signals.
 
-There is no acceptance command, CLI, hook event, status flag, separate
-acceptance record or UI reminder. Acceptance requires neither repository
-inspection nor a current passing check. Existing check receipts remain
-development evidence. Acceptance itself does not schedule a review;
-optional reviews read the conversation when they run through their existing
-compaction or explicit `/review` triggers.
+The command uses the existing hook and session mechanisms. It needs no
+separate acceptance CLI, file or UI reminder, repository inspection, commit,
+change fingerprint or current passing check. It makes no model request and
+does not schedule a review. Existing check receipts remain development
+evidence; optional reviews retain compaction and explicit `/review` triggers.
 
 ## Effect on the plan
 
-Phase 7 needs no separate implementation. The proposed Gix snapshot command,
-shared repository library and commit/change fingerprint are no longer needed
-for acceptance. Continue with phase 8 after the remaining phase 6 validation.
+Phase 7 implements this small hook command and verifies that its signal is
+saved and available on resume. It is planned, not implemented yet.
+The proposed Gix snapshot command and shared repository library are no longer
+needed for acceptance. Continue with phase 7 after the remaining phase 6
+validation.
 
-The earlier formal acceptance mechanism was a Gears-specific proposal,
-not a mechanism established by the reviewed papers or Hermes. The simpler
-workflow follows the user's product decision; it does not claim that
+This workflow follows the user's product decision. It is not a mechanism
+established by the reviewed papers or Hermes, and it does not claim that
 acceptance proves correctness or that a learned skill improves performance.
