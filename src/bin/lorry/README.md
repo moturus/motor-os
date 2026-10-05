@@ -76,7 +76,10 @@ check, Clippy, test, metadata, tree, and vendor support CLI feature selection. O
 workspace build, check, and Clippy share one compilation graph for default
 members, `--workspace`, repeated `-p`, and `--exclude`. Bundle testing produces
 one executable for each member with enabled harnesses, using that member's
-program/extraction paths and script environment. Workspace `check --all-targets`
+program/extraction paths and script environment. A cross-compiled member bundle
+cannot combine a host macro-library harness with target harnesses; select
+`--lib` or `--test NAME` separately, or omit `--bundle`.
+Workspace `check --all-targets`
 includes examples and benchmarks; `--tests` and `--benches` check targets
 marked for those groups. `check --examples` checks binary, `lib`,
 `rlib`, and `staticlib` examples with their dev-dependencies. Named `--example NAME` and `--bench NAME`
@@ -650,6 +653,9 @@ scripts run without network access, with read-only
 sources and toolchains, a cleared environment, and writes limited to their
 private output and temporary directories. Child tools require explicit
 compiler or archiver grants.
+Registry and Git scripts may also read and watch the exact workspace
+`Cargo.lock`. Directory watches and lock symlinks escaping the workspace are
+rejected.
 
 Motor OS currently prints an explicit warning and runs build scripts without
 that isolation. Do not interpret the warning mode as sandboxed.

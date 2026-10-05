@@ -185,7 +185,7 @@ native vendoring needed no retries. The two earlier gate failures were fixture
 mismatches: unequal Rust flags and unequal incremental-cache state. Their
 diagnoses and preserved evidence are in the details file.
 
-Milestone 8 is in progress. Named member execution grants, unpinned member
+Milestone 8 is complete. Named member execution grants, unpinned member
 native-tool grants, path-script caller allowlists, and read-only workspace
 script inputs are implemented. Ordinary build, check, and Clippy now execute
 selected members' scripts and host build-dependencies. Focused Cargo contracts
@@ -203,18 +203,24 @@ The common compile-time check pass from milestone 9 is implemented and has
 paired native/Motor Cargo coverage for scripts, macros, and skipped ordinary
 sources. Editor integration and native project acceptance remain outstanding.
 
-Milestone 9's synthetic editor cases pass on both Linux and Motor, including
-custom features and target directories. The last complete Lorry gate passed in
-1,154 seconds. The subsequent Cargo dependency-default spelling, dev-only macro
-host selection, mixed-platform bundle rejection, and exact workspace-lock
-capability fixes passed their focused checks. A fresh milestone gate is pending.
+The fresh milestone-8 gate passed in 1,176 seconds at `63599485`: 474 Rust
+tests, three own-message tests, all host contracts, Cargo native/cross identity,
+native self-build, cross/native identity, Clippy, and interrupted-child recovery.
+Host and native online vendoring needed no retries. Milestone 9's hermetic
+editor cases also pass on Linux and Motor, including custom features and target
+directories. Subsequent sandbox-descriptor and editor-helper fixes passed
+their focused checks; those patches have not had another complete gate.
 
 The actual system workspace's fetched navigation, generated application view,
-and default sysbox save checks pass on Linux. The manual fixture is committed.
-Native fetched navigation passes; admitted editor acceptance remains open.
-Its original deadline failures have compiler/linker thread snapshots. Later
-checks also exhausted the isolated eight-GiB data image; those failures are
-preserved separately and do not resolve the original stalls.
+and default sysbox save checks pass on Linux. All views now share one Cargo
+wrapper path; the generated pass reuses all 51 compiler artifacts. The helper
+and a Linux sandbox descriptor-lifetime fix are committed.
+Native editor acceptance remains open. Two observed native runs passed all
+three views, but silent observations reproduced the stall. Unpaused stacks
+show compiler reads, writes, and metadata lookups waiting in Motor's filesystem
+runtime; the helper's source restoration also waits there. The host block
+device has completed every submitted request. The guest filesystem mechanism
+is unresolved. Retained disk-capacity failures are separate evidence.
 
 Native ripgrep and sed release builds pass. Ripgrep's tests expose an external
 ignore path-matching defect beyond the integration helper; sed's tests are
@@ -224,7 +230,8 @@ guard. No product port in those external projects has been made.
 A separate interrupted-build bug can mistake a PID reused after reboot for an
 old artifact owner. Fixing it safely needs a stable native boot identity;
 wall-clock values cannot serve that purpose. That scope decision is pending.
-Milestones 8 and 9 remain open pending the gate and native acceptance.
+Milestone 9 remains open for native acceptance and the decisions about fixes
+outside Lorry. No core or external-project product source has been changed.
 
 ## Goal
 

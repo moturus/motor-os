@@ -82,7 +82,8 @@ Selected members' build scripts and build-dependencies use the shared unit
 planner and executor. Named path grants admit member execution; caller
 environment allowlists belong to each package. Editable scripts may read
 workspace inputs but write only their private outputs. Registry and Git
-scripts retain narrower input roots. Script directives and observations enter
+scripts retain narrower input roots, with read/watch access to the exact
+workspace lock file. Script directives and observations enter
 dependent unit identities and completed-profile freshness.
 
 Lorry reads Cargo lock formats 1 through 4 without rewriting valid locked

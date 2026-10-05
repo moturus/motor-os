@@ -3577,6 +3577,17 @@ published bundle, separate host and Motor selections, and a native combined
 selection. It and strict Clippy pass in
 `/tmp/lorry-m8-mixed-bundle-{contract,clippy}.log`.
 
+The fresh milestone-8 gate passed at `63599485` in 1,176 seconds, in
+`/tmp/lorry-m8-final-full-gate.log`: 474 Rust tests, three own-message tests,
+all dedicated host contracts, Cargo native/cross identity, native self-build,
+cross/native workspace identity, tests/bundles, Clippy, and interrupted-child
+recovery. The ten ignored Rust contract tests ran in their dedicated drivers.
+Host and native online vendoring needed no retries. The release developer
+image was freshly built in `/tmp/lorry-m8-final-dev-image-build.log`.
+Milestone 8 is complete at that snapshot. The subsequent Linux descriptor fix
+and stable-wrapper helper patch have focused validation, recorded below;
+neither is claimed to have another full-suite result.
+
 ## Milestone 9: editor integration and native acceptance
 
 **Result.** rust-analyzer works on a workspace as it does under Cargo. The
@@ -3586,10 +3597,10 @@ The combined milestone-8/editor gate passed in 1,154 seconds, preserved in
 `/tmp/lorry-m8-m9-workspace-editor-full-gate.log`: 471 Rust tests, three own-message
 tests, all dedicated contracts, Cargo native/Motor byte comparisons, native
 self-build and cross/native workspace identity, tests/bundles, Clippy, and
-interrupted-child recovery. All three actual native editor cases passed.
+interrupted-child recovery. All three hermetic native editor cases passed.
 Host and native online vendoring needed no retries. Real-project acceptance
 remains outstanding. The approved mixed-platform bundle rejection is implemented;
-the subsequent compatibility fixes still need a fresh full milestone gate.
+the subsequent compatibility fixes passed the fresh gate recorded above.
 
 ### The compile-time pass
 
@@ -3892,6 +3903,25 @@ outside-read denials. Strict Clippy and the host release build also pass in
 `/tmp/lorry-m9-sandbox-fd-{clippy,release-build}.log`. No limit or job count was
 increased.
 
+### Stable actual-workspace editor inputs
+
+The manual fixture originally changed its Cargo wrapper directory between
+views. PATH and CARGO therefore changed legitimate compiler inputs and forced
+another pass. All views now use one executable, with separate recording
+directories. The generated view requires every compiler artifact to be fresh.
+The host real-workspace fixture passes with all 51 artifacts fresh, in
+`/tmp/lorry-m9-stable-editor-fd-fixed-real-host-contract.log` and
+`/tmp/lorry-m9-real-editor-stable-fd-fixed`. The hermetic three-case contract,
+strict Clippy, and host/native helper builds pass in
+`/tmp/lorry-m9-stable-editor-{hermetic-contract-bash,final-clippy,
+ final-host-build,final-native-build}.log`. Native Lorry also rebuilt cleanly
+in `/tmp/lorry-m9-sandbox-fd-native-build.log`.
+The first native stable-wrapper run still failed in the admitted compile-time
+pass, before any completed invocation record. Preserve
+`/tmp/lorry-m9-native-acceptance/sys.stable-editor-v1.{out,err}` and
+`sys-stable-v1-editor-evidence` there. This helper correction did not resolve
+the native stall.
+
 ### Actual native editor diagnosis
 
 Fetched native navigation and the expected admission denial passed. The
@@ -3940,6 +3970,65 @@ The removed draft is retained only in
 `/tmp/lorry-m9-unsafe-boot-clock-draft.patch`; it is not in the product or image.
 A stable boot-identity API would require kernel/moto-sys scope and the core test
 gates. That decision is pending. No OS source or acceptance deadline was changed.
+
+### Native filesystem wait evidence
+
+On the isolated 16-GiB image, one real editor run completed admitted checks,
+then timed out in the generated pass; a later stable-wrapper run timed out
+before admitted compilation completed. Preserve
+`/tmp/lorry-m9-native-acceptance/sys.roomy-editor.{out,err}` and
+`sys-roomy-editor-evidence`, alongside the stable-wrapper failure above.
+
+Read-only CPU/thread observations and a CPU-only observer each let all three
+native views pass. Both generated passes reused all 51 artifacts. Preserve
+`sys.cpu{-observed,-only-observed}-editor.{out,err}` and their complete
+`sys-cpu{-observed,-only-observed}-editor-evidence` trees under
+`/tmp/lorry-m9-native-acceptance`. These passes do not resolve the failures.
+Their periodic network output was a possible timing influence. A silent
+observer instead retained counters in memory until 240 seconds, without
+changing the editor's 180-second deadline. It reproduced the admitted
+compile-time deadline with three compiler children and a linker making
+negligible progress from 90 through 210 seconds. Preserve
+`sys.silent-cpu-observed-editor.err`, `sys.silent-cpu-samples.err`, and
+`sys-silent-cpu-observed-editor-evidence` there.
+
+A second silent observer read unpaused stacks only after 120 seconds and
+reproduced a stall during sysbox save checking. From 150 through 240 seconds,
+compiler 409 waits on an incremental graph-cache write; compiler 410 waits
+on opening dependency metadata; compiler 411 waits on reading that metadata.
+Their runtime threads wait in the async executor. Lorry's workers also wait
+on ordinary filesystem reads, writes, metadata, copying, and process loading.
+The helper waits in `std::fs::write` during source restoration, before it can
+report its deadline error. No target was paused. The stacks and decoded names
+are in `sys.silent-stack-samples.err`, `silent-stack-decoded.log`, and
+`silent-helper-stack-decoded.log` there. Matching executable-section hashes
+for the runtime and compiler symbols are recorded in
+`{runtime,rustc}-symbol-identity.log`; the temporary symbols-only runtime build
+did not alter shipped code, and its original build artifact was restored.
+
+The running VM's VirtIO block queue had no requests in use and identical used
+and available indices (52022). QEMU had completed all submitted disk work,
+while the guest requests above remained pending. Preserve
+`silent-stack-qemu-queue-state.log`. The outer SSH command and subsequent
+evidence transfer reached their existing limits; see
+`silent-stack-observed-editor-execution-gate.log` and
+`silent-stack-observed-download.log`. The stopped image is preserved as
+`vm_images/release/lorry-m9-acceptance-silent-stack-stall.qcow2`, including the
+unrestored isolated source edit. No main-repository source was edited by the
+fixture. The shared guest filesystem wait is now located; its exact mechanism
+remains unresolved. Periodic output is not a proven cause or an accepted fix.
+Any needed native filesystem fix extends beyond Lorry and requires the core
+scope and test gates. Do not mark milestone 9 complete on the observed passes.
+
+Separately, resizing the full eight-GiB image with `/tmp` scratch failed when
+the destination filesystem reread a newly created parent directory as not in
+use. Target entry validation, rather than host read/write/seek failure,
+reported InvalidInput. Temporary isolated imager/async-fs/motor-fs diagnostics
+are retained in `roomy-image-resize-device-diagnosis.log` there. The unchanged
+production imager succeeded using workspace-disk scratch for the 16-GiB copy.
+This image-construction failure is another unresolved non-Lorry issue; it is
+not established as the cause of the native runtime stall. No core source fix
+or relaxed test limit has been made.
 
 For `src/sys`, ignore local `.lorry/` state and keep admission
 local initially. Under policy C, add named script grants in
