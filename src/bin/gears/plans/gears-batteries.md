@@ -1,6 +1,7 @@
 # Gears batteries: design and implementation plan
 
-Status: implementation through phase 6.4; design revised 2026-10-02. See the
+Status: implementation through phase 6.5; native release validation awaits
+the runtime strlen fix; design revised 2026-10-02. See the
 [implementation record](gears-batteries-progress.md) for completed patches
 and validation still outstanding. Two questions wait
 for later phases: question 7 is discussed when phase 8 is reached, and
@@ -523,7 +524,9 @@ optionally with a `NOTES.md` of quirks seen in use. `skill_view` loads one
 approved skill; `skill_manage` proposes new skills and edits. A `SKILL.md`
 the agent writes must have four sections: when it applies, the steps, how
 to check that it worked, and its pitfalls; its size limit is configurable.
-On Motor OS, only skills whose `platforms` field names `motor` are listed.
+On Motor OS, only skills whose `metadata.platforms` string names `motor`
+are listed (whitespace-separated platform names in the standard metadata
+extension map).
 The description tells the model to load at most a few skills per task.
 Successful use is recorded as an observation, not as proof that the skill
 caused it, and age alone never makes a skill true or false.

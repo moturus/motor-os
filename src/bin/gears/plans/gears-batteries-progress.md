@@ -12,8 +12,9 @@ Linux and Motor OS, and the updated release developer-image gate passes.
 The user reports that native OpenRouter use works and has requested
 continuation, clearing the phase 5 decision point. A local-model result has
 not been reported. Phase 6.1–6.4 memory storage, admission, prompt handling
-and user commands are implemented. Phase 6.5 skills awaits a frontmatter
-parser decision; the sysbox track and phases 7–12 are not implemented.
+and user commands are implemented. Phase 6.5 skills is implemented and passes the host gates. Its native
+release build exposed a missing Motor OS runtime symbol, described below.
+The sysbox track and phases 7–12 are not implemented.
 
 The phase 3 manual checklist is not marked complete. Automated host tests
 cover the runtime and both UIs; native gates cover shipped tools, literal
@@ -272,16 +273,73 @@ the gate's existing binary overrides in a user temporary directory. QEMU
 snapshot mode keeps the base image unchanged. These results do not claim a
 rebuilt developer-image or full developer-image gate for phase 6.
 
+## Skills through phase 6.5
+
+The user authorized `yaml_serde` if Agent Skills permits optional fields.
+The [standard](https://agentskills.io/specification) does: license,
+compatibility, string-valued metadata and experimental allowed-tools.
+`yaml_serde` 0.10.7 with `libyaml-rs` 0.3.0 parses frontmatter while preserving
+original bytes. These are Rust dependencies with no C build step; optional
+tool metadata grants no authority. No external dependency source was edited.
+
+Skill proposals, exact SKILL.md plus NOTES.md approval, imports, configurable
+limits, Motor platform filtering, frozen catalogs, loading and once-per-branch
+correction/withdrawal notes are implemented. Pending review includes saved
+source entries and sessions that loaded the exact old version. The portable
+real-hook fixture covers proposal approval, a new session's catalog, notes
+loading and correction, unapproved-version withdrawal, resume and check
+observations. Those tests run transitively in the existing host and native
+batteries gates.
+
+All code patches passed the batteries host component gate and host/Motor
+Clippy with warnings denied. The final debug gate is
+`/tmp/gears-batteries-skills-observation-timing-gate.log`; the release host
+gate passes in `/tmp/gears-batteries-skills-release-gate.log`.
+
+Two batteries defects found during integration are fixed: state tools
+(memory and skills) no longer mark passing workspace checks stale, and skill
+observations are captured when the check result arrives instead of at turn
+end, which could credit a later load. Original regressions are preserved in
+`/tmp/gears-batteries-skills-check-stale-original.log` and
+`/tmp/gears-batteries-skills-observation-timing-original.log`. A new symlink
+unit assertion initially expected different diagnostic wording; the exact
+checked-state diagnostic now passes. Its original failure remains in
+`/tmp/gears-batteries-skills-store-gate.log`.
+
+### Native release blocker: missing runtime strlen
+
+The native release link fails with undefined `strlen` from libyaml-rs:
+`/tmp/gears-batteries-skills-motor-build.log`. An independent 15-line Rust
+program without YAML reproduces the issue: debug links, release fails when
+LLVM replaces a byte-scanning loop with `strlen`. Rust core documents this
+symbol as a runtime requirement; the current moto-rt memory exports omit it.
+The sources and logs are `/tmp/gears-yaml-strlen-probe.rs`,
+`/tmp/gears-yaml-strlen-probe-debug.log` and
+`/tmp/gears-yaml-strlen-probe-release.log`.
+
+A temporary probe with the missing Rust export links in release, and its
+assembly contains a loop with no recursive strlen call. Logs:
+`/tmp/gears-yaml-strlen-probe-with-runtime-symbol.log` and
+`/tmp/gears-yaml-strlen-probe-with-runtime-symbol-assembly.log`.
+A proposed weak moto-rt export and system regression are prepared in
+`/tmp/gears-yaml-strlen-moto-rt.patch`; no core source has changed. See
+[the runtime fix proposal](gears-yaml-runtime.md). Applying it needs the
+runtime review required by root AGENTS.md, the embedded toolchain runtime
+update and the three debug/three release core gates before committing.
+The full release developer-image gate is not rerun while that link is known
+to fail. Native phase 6.5 validation remains incomplete.
+
 ## Next steps
 
-Continue phase 6.5 skills in small patches after choosing its parser.
-Conventional YAML frontmatter supports existing agentskills.io skills and
-requires a pure Rust parser dependency (recommended). JSON frontmatter is a
-valid YAML subset supported by existing `serde_json`, but existing YAML
-headers would need conversion. This decision is awaiting user guidance under
-[root AGENTS.md](../../../../AGENTS.md): “Stop if any non-obvious decision is
-required and ask for guidance.” No new parser dependency has been added.
+Resolve the diagnosed runtime gap and finish native/rebuilt-image skills
+validation. Then continue phase 7 after choosing the repository evidence
+interface in [the acceptance proposal](gears-acceptance-vcs.md). Gix's current
+human-readable reports do not identify complete commit/binary/untracked
+contents. The recommendation is a read-only versioned Gix command; sharing
+its repository library with batteries is an alternative. The user's choice
+is pending under root AGENTS.md's non-obvious-decision requirement.
 
-Automated mock tests establish behavior, not real-model usefulness. Keep the
-outstanding native interactive checklist visible; do not mark it complete
-from component tests alone.
+The optional Hermes import has not been performed. Automated mock tests
+establish behavior, not real-model usefulness. Keep the outstanding native
+interactive checklist visible; do not mark it complete from component tests
+alone.

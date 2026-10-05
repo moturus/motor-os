@@ -52,7 +52,8 @@ the packaged source with Lorry. The portable workflow fixture uses a scripted
 provider to drive real file tools, a Rust
 compiler check, task branching and the bounded missing-check reminder.
 It also verifies saved approval details, the mechanical turn journal, pending
-memory, frozen prompts, removal notes and imported workspace admission.
+memory, frozen prompts, removal notes, imported workspace admission, and
+approved skill loading, notes corrections and noncausal check observations.
 The host and native workflow tests make no provider or Internet requests.
 
 Declare one check at the workspace root in `.gears/batteries.toml`:
@@ -81,7 +82,8 @@ establishes evidence. Later calls to tools that may write make it stale.
 After workspace work, a missing, failed or stale check gets at most three
 `before_stop` reminders per turn. Review, worker and job runs are excluded.
 
-The batteries hook registers `memory` alongside `todo`.
+The batteries hook registers `memory`, `skill_view` and `skill_manage`
+alongside `todo`.
 `batteries/USER.md`, `batteries/MEMORY.md` and workspace
 `.gears/MEMORY.md` use `# Gears memory v1` followed by entries. Each entry
 starts with `§ ` and a one-line JSON header containing `id`, `kind`
@@ -99,6 +101,9 @@ version = 1
 [memory]
 user_chars = 1375
 memory_chars = 2200
+[skills]
+skill_chars = 20000
+notes_chars = 4000
 ```
 
 Each limit must be 1–65,536 characters. Missing settings use the shown
@@ -163,4 +168,66 @@ pending; postponement changes nothing. A write failure stops the operation.
 A crash can leave a logged approval unapplied or an applied change still
 pending. There is no automatic replay or transaction across these files.
 As specified by the plan, standalone commands assume one writer; run them
-when Gears is idle. Skills and their admission remain phase 6.5 work.
+when Gears is idle.
+
+
+Skills live in `batteries/skills/NAME/SKILL.md`, with optional `NOTES.md` in
+that directory. The [Agent Skills standard](https://agentskills.io/specification)
+requires YAML `name` and `description`. Its optional fields are `license`,
+`compatibility`, `metadata` (a string-to-string mapping), and experimental
+`allowed-tools`. The implementation uses `yaml_serde` 0.10.7 and preserves
+the raw Markdown and frontmatter. Unknown extension fields remain in the
+file. `allowed-tools` does not change Gears permissions.
+
+For Motor OS listing, explicitly include `motor` in `metadata.platforms`;
+this is a standard metadata extension, with whitespace-separated names:
+
+```markdown
+---
+name: rust-checks
+description: >-
+  Run the project's declared Rust check after a code change.
+compatibility: Motor OS or Linux with the project toolchain installed.
+metadata:
+  platforms: motor linux
+---
+## When it applies
+After changing Rust source in this workspace.
+## Steps
+Read the check declaration and finish the intended edits.
+## How to check
+Run the check tool and inspect its receipt.
+## Pitfalls
+A passing check is development evidence; the user decides task acceptance.
+```
+
+New or rewritten skills proposed by `skill_manage` must contain those four
+literal headings. Imported skills and notes-only edits may retain an
+existing standard-conforming body. The configured skill limit includes
+frontmatter and headings; notes have a separate limit. Files use UTF-8 and
+LF endings. Invalid, oversized or symlinked files are reported and skipped.
+
+`skill_manage` takes `action = add | replace | remove`, `name`, and
+`skill_md` / `notes_md` contents for additions or replacements. Omitted
+replacement fields preserve their previous contents; `notes_md = null`
+removes the notes. All proposals wait for `gears-batteries pending` and show
+complete before/after contents and saved source evidence. Approval checks
+both captured files before writing. The same command admits hand-edited or
+imported skills by a hash of the exact `SKILL.md` and `NOTES.md` bytes.
+Changing either file requires new approval.
+
+The prompt lists approved names and descriptions; `skill_view` loads one
+skill and its notes, or lists the catalog when called without a name. At
+most three distinct skills may be loaded per session. New sessions and
+compaction refresh the catalog; resume and running branches retain their
+original catalog membership. New approvals become available on refresh.
+Changed or removed versions are withdrawn; approved corrections to loaded
+skills arrive once per branch as context notes, including corrected notes.
+The running session's system prefix stays unchanged. Past text remains in
+history. Auxiliary scripts and resources are not loaded by `skill_view`.
+
+A passing check records which skill versions were loaded at that check's
+result, alongside actual saved load and check entry ids in `turns.jsonl`.
+Loading, proposing or approving skills does not stale a workspace check.
+These observations make no causal claim and do not record user acceptance.
+They are evidence of co-occurrence, not proof that a skill improves results.
