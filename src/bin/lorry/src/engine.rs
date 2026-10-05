@@ -125,14 +125,16 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 validate_member_binary_selection(&selected, Some(name))?;
             }
         }
-        for name in &options.targets.test {
-            if !selected.iter().any(|member| {
-                member
-                    .integration_tests
-                    .iter()
-                    .any(|target| target.name == *name)
-            }) {
-                return Err(unknown_integration_test(&manifest, name));
+        if !options.targets.tests {
+            for name in &options.targets.test {
+                if !selected.iter().any(|member| {
+                    member
+                        .integration_tests
+                        .iter()
+                        .any(|target| target.name == *name)
+                }) {
+                    return Err(unknown_integration_test(&manifest, name));
+                }
             }
         }
     }
@@ -1405,7 +1407,9 @@ fn build_inner(
                             .any(|target| target.kind == "bench" && target.test)
                 }));
     let check_integration = check.is_some_and(|(_, options)| {
-        (options.targets.selects_tests() || !options.targets.bench.is_empty())
+        (options.targets.selects_tests()
+            || options.targets.benches
+            || !options.targets.bench.is_empty())
             && build
                 .members
                 .unwrap_or_else(|| std::slice::from_ref(build.manifest))

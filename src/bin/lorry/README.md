@@ -76,10 +76,10 @@ workspace build, check, and Clippy share one compilation graph for default
 members, `--workspace`, repeated `-p`, and `--exclude`. Bundle testing produces
 one executable for each member with enabled harnesses, using that member's
 program/extraction paths and script environment. Workspace `check --all-targets`
-includes examples and benchmarks; `check --examples` checks binary, `lib`,
+includes examples and benchmarks; `--tests` and `--benches` check targets
+marked for those groups. `check --examples` checks binary, `lib`,
 `rlib`, and `staticlib` examples with their dev-dependencies. Named `--example NAME` and `--bench NAME`
-checks also select targets across the chosen members. Named build/check target
-selectors can be repeated where supported; `--all-targets` selects everything
+checks also select targets across the chosen members. Named check target selectors can be repeated; `--all-targets` selects everything
 and takes precedence over named check filters. Example/benchmark
 build/test/run selectors remain deferred. Default tests compile enabled examples,
 run examples and benchmarks marked `test = true`, and include those test targets
@@ -255,7 +255,7 @@ lorry locate-project [--workspace] [--manifest-path PATH]
 lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH] [--release]
             [--target-dir DIRECTORY] [--target TRIPLE]
             [--workspace] [-q|--quiet] [--keep-going]
-            [--all-targets|--lib|--bins|--examples] [--example NAME|--bench NAME]
+            [--all-targets|--lib|--bins|--tests|--examples|--benches] [--example NAME|--bench NAME]
             [--bin NAME] [--test NAME]
             [--message-format json|json-diagnostic-rendered-ansi]
 lorry clippy [CHECK OPTIONS] [--no-deps] [-- LINT OPTIONS...]

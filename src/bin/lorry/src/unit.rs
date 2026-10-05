@@ -380,12 +380,31 @@ pub struct PlanOptions<'a> {
     pub rustflags: &'a [String],
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) enum HarnessFilter {
+    #[default]
+    All,
+    Tests,
+    Benches,
+}
+
+impl HarnessFilter {
+    fn matches(self, tested: bool, benched: bool) -> bool {
+        match self {
+            Self::All => tested || benched,
+            Self::Tests => tested,
+            Self::Benches => benched,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CheckTargetSelection<'a> {
     pub normal: bool,
     pub binaries: bool,
     pub binary_name: Option<&'a str>,
     pub harnesses: bool,
+    pub harness_filter: HarnessFilter,
     pub integrations: bool,
     pub integration_name: Option<&'a str>,
     pub examples: bool,
@@ -399,6 +418,7 @@ pub(crate) struct AuxiliarySelection<'a> {
     pub name: Option<&'a str>,
     pub mode: UnitMode,
     pub tested: Option<bool>,
+    pub benched: Option<bool>,
     pub test_profile: bool,
 }
 
@@ -422,6 +442,25 @@ pub(crate) fn workspace_auxiliary_units(
             selection.kind
         )));
     }
+    let matches = |target: &crate::manifest::DescribedTarget| {
+        target.kind == selection.kind
+            && selection.name.is_none_or(|name| name == target.name)
+            && selection.tested.is_none_or(|tested| tested == target.test)
+            && selection
+                .benched
+                .is_none_or(|benched| benched == target.bench)
+    };
+    if !selected
+        .iter()
+        .any(|key| manifests[key].described_targets.iter().any(&matches))
+    {
+        return Ok(UnitGraph {
+            units: BTreeMap::new(),
+            order: Vec::new(),
+            selected_packages: selected.iter().cloned().collect(),
+            primary_macros: BTreeSet::new(),
+        });
+    }
     let mut graph = dependency_units_with_selected(resolution, manifests, selected)?;
     graph.selected_packages.extend(selected.iter().cloned());
     let mut roots = Vec::new();
@@ -432,11 +471,11 @@ pub(crate) fn workspace_auxiliary_units(
     {
         let manifest = &manifests[&package.key];
         let features = features_for(package, CompileKind::Target);
-        for target in manifest.described_targets.iter().filter(|target| {
-            target.kind == selection.kind
-                && selection.name.is_none_or(|name| name == target.name)
-                && selection.tested.is_none_or(|tested| tested == target.test)
-        }) {
+        for target in manifest
+            .described_targets
+            .iter()
+            .filter(|target| matches(target))
+        {
             if !target_enabled(
                 resolution,
                 manifest,
@@ -532,6 +571,8 @@ pub(crate) fn workspace_check_targets(
     options: &PlanOptions<'_>,
 ) -> Result<UnitGraph> {
     let default = !targets.has_target_selector();
+    let testing = targets.tests || targets.all_targets;
+    let benching = targets.benches || targets.all_targets;
     let mut graph = workspace_check_units(
         resolution,
         manifests,
@@ -539,10 +580,15 @@ pub(crate) fn workspace_check_targets(
         &CheckTargetSelection {
             normal: targets.all_targets || targets.lib || targets.bins || default,
             binaries: targets.all_targets || targets.bins || default,
-            harnesses: targets.all_targets,
-            integrations: targets.all_targets,
+            harnesses: testing || benching,
+            harness_filter: match (testing, benching) {
+                (true, false) => HarnessFilter::Tests,
+                (false, true) => HarnessFilter::Benches,
+                _ => HarnessFilter::All,
+            },
+            integrations: testing || benching,
             examples: targets.all_targets || targets.examples,
-            benches: targets.all_targets,
+            benches: benching,
             ..CheckTargetSelection::default()
         },
         options,
@@ -554,6 +600,7 @@ pub(crate) fn workspace_check_targets(
             .filter(|key| {
                 selected.contains(&key.package)
                     && (key.kind == UnitKind::Binary
+                        || key.is_harness()
                         || matches!(key.kind, UnitKind::Example | UnitKind::Bench))
             })
             .cloned()
@@ -561,11 +608,33 @@ pub(crate) fn workspace_check_targets(
         graph.primary_macros.clear();
         retain_unit_roots(&mut graph, roots)?;
     }
+    for (enabled, kind, tested, benched) in [
+        (testing, "example", Some(true), None),
+        (testing, "bench", Some(true), None),
+        (benching, "example", None, Some(true)),
+    ] {
+        if enabled {
+            graph.merge(workspace_auxiliary_units(
+                resolution,
+                manifests,
+                selected,
+                options,
+                &AuxiliarySelection {
+                    kind,
+                    name: None,
+                    mode: UnitMode::CheckTest,
+                    tested,
+                    benched,
+                    test_profile: true,
+                },
+            )?)?;
+        }
+    }
     for (kind, names, all) in [
         ("bin", &targets.bin, targets.bins),
-        ("test", &targets.test, false),
+        ("test", &targets.test, targets.tests),
         ("example", &targets.example, targets.examples),
-        ("bench", &targets.bench, false),
+        ("bench", &targets.bench, targets.benches),
     ] {
         if targets.all_targets || all {
             continue;
@@ -640,7 +709,7 @@ pub(crate) fn workspace_check_units(
             selected,
             options,
             selection.integration_name,
-            selection.harnesses,
+            selection.harness_filter,
         )?;
         for unit in tests.units.values_mut() {
             unit.dependencies
@@ -727,6 +796,7 @@ pub(crate) fn workspace_check_units(
                     name: if enabled { None } else { name },
                     mode,
                     tested: None,
+                    benched: (kind == "bench" && enabled).then_some(true),
                     test_profile: false,
                 },
             )?)?;
@@ -1166,7 +1236,7 @@ pub(crate) fn workspace_test_units(
         selected,
         options,
         integration_name,
-        false,
+        HarnessFilter::Tests,
     )?;
     if integration_name.is_none() {
         for (kind, tested, mode) in [
@@ -1192,6 +1262,7 @@ pub(crate) fn workspace_test_units(
                     name: None,
                     mode,
                     tested: Some(tested),
+                    benched: None,
                     test_profile: true,
                 },
             )?)?;
@@ -1206,7 +1277,7 @@ fn workspace_harness_units(
     selected: &[PackageKey],
     options: &PlanOptions<'_>,
     integration_name: Option<&str>,
-    bench_harnesses: bool,
+    filter: HarnessFilter,
 ) -> Result<UnitGraph> {
     let panic_abort = options.panic_abort;
     if let Some(name) = integration_name
@@ -1238,14 +1309,14 @@ fn workspace_harness_units(
             .library
             .iter()
             .filter(|target| {
-                integration_name.is_none() && (target.test || (bench_harnesses && target.bench))
+                integration_name.is_none() && filter.matches(target.test, target.bench)
             })
             .map(|target| (UnitKind::LibraryHarness, &target.name, None));
         let binaries = manifest
             .binaries
             .iter()
             .filter(|target| {
-                integration_name.is_none() && (target.test || (bench_harnesses && target.bench))
+                integration_name.is_none() && filter.matches(target.test, target.bench)
             })
             .map(|target| {
                 (
@@ -1257,7 +1328,11 @@ fn workspace_harness_units(
         let integrations = manifest
             .integration_tests
             .iter()
-            .filter(|target| integration_name.map_or(target.test, |name| name == target.name))
+            .filter(|target| {
+                integration_name.map_or(filter.matches(target.test, target.bench), |name| {
+                    name == target.name
+                })
+            })
             .map(|target| {
                 (
                     UnitKind::IntegrationHarness,
@@ -3343,6 +3418,7 @@ mod tests {
                         name: Some(name),
                         mode,
                         tested: None,
+                        benched: None,
                         test_profile: false,
                     },
                 )
@@ -3934,6 +4010,7 @@ mod tests {
                         binaries: true,
                         binary_name: None,
                         harnesses: integration_name.is_none(),
+                        harness_filter: HarnessFilter::All,
                         integrations: true,
                         integration_name,
                         examples: false,

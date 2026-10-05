@@ -159,7 +159,7 @@ lorry [+toolchain] [GLOBAL] cache clean
 lorry [+toolchain] [GLOBAL] check  [-p NAME|PACKAGE_ID] [--manifest-path PATH]
                                   [--target-dir DIRECTORY] [--target TRIPLE]
                                   [--workspace] [--keep-going]
-                                  [--all-targets|--lib|--bins|--bin NAME|--test NAME|--examples|--example NAME|--bench NAME]
+                                  [--all-targets|--lib|--bins|--tests|--benches|--bin NAME|--test NAME|--examples|--example NAME|--bench NAME]
                                   [--message-format FORMAT] [--release|-r]
 lorry [+toolchain] [GLOBAL] clean  [-p NAME]
                                   [--release|-r] [--target TRIPLE]
@@ -421,7 +421,9 @@ script outputs. `check --examples` checks binary, `lib`, `rlib`, and `staticlib`
 examples, including packages with only example targets. `--example NAME` and
 `--bench NAME` check named targets across the selected members. Named check
 selectors can be repeated and combined; `--all-targets` takes precedence over
-their names. Dynamic/procedural-macro
+their names. `--tests` and `--benches` select targets marked for each group,
+including examples and integration tests. Plural groups override corresponding
+named filters. Dynamic/procedural-macro
 example types and explicit build/test/run example/benchmark selectors remain
 deferred and fail explicitly. Default tests compile enabled examples, run
 examples and benchmarks marked `test = true`, and include those test targets

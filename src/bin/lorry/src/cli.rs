@@ -159,9 +159,11 @@ pub struct TargetSelection {
     pub lib: bool,
     pub bins: bool,
     pub bin: Vec<String>,
+    pub tests: bool,
     pub test: Vec<String>,
     pub examples: bool,
     pub example: Vec<String>,
+    pub benches: bool,
     pub bench: Vec<String>,
 }
 
@@ -171,9 +173,11 @@ impl TargetSelection {
             || self.lib
             || self.bins
             || !self.bin.is_empty()
+            || self.tests
             || !self.test.is_empty()
             || self.examples
             || !self.example.is_empty()
+            || self.benches
             || !self.bench.is_empty()
     }
 
@@ -186,11 +190,15 @@ impl TargetSelection {
     }
 
     pub(crate) fn selects_tests(&self) -> bool {
-        self.all_targets || !self.test.is_empty()
+        self.all_targets || self.tests || !self.test.is_empty()
     }
 
     pub(crate) fn selects_dev_targets(&self) -> bool {
-        self.selects_tests() || self.examples || !self.example.is_empty() || !self.bench.is_empty()
+        self.selects_tests()
+            || self.benches
+            || self.examples
+            || !self.example.is_empty()
+            || !self.bench.is_empty()
     }
 }
 
@@ -665,7 +673,7 @@ fn check_command(name: &'static str) -> ClapCommand {
         .arg(message_format_argument())
 }
 
-fn target_selection_arguments() -> [Arg; 8] {
+fn target_selection_arguments() -> [Arg; 10] {
     let flag = |name: &'static str| Arg::new(name).long(name).action(ArgAction::SetTrue);
     let named = |name: &'static str| {
         Arg::new(name)
@@ -680,9 +688,11 @@ fn target_selection_arguments() -> [Arg; 8] {
         flag("bins"),
         named("bin"),
         named("test"),
+        flag("tests"),
         flag("examples"),
         named("example"),
         named("bench"),
+        flag("benches"),
     ]
 }
 
@@ -692,9 +702,11 @@ fn target_selection(options: &ArgMatches) -> TargetSelection {
         lib: options.get_flag("lib"),
         bins: options.get_flag("bins"),
         bin: values(options, "bin"),
+        tests: options.get_flag("tests"),
         test: values(options, "test"),
         examples: options.get_flag("examples"),
         example: values(options, "example"),
+        benches: options.get_flag("benches"),
         bench: values(options, "bench"),
     }
 }
@@ -1654,6 +1666,20 @@ mod tests {
             assert_eq!(options.targets.test, ["first", "second"]);
             assert_eq!(options.targets.example, ["demo", "library"]);
             assert_eq!(options.targets.bench, ["a", "b"]);
+        }
+    }
+
+    #[test]
+    fn parses_plural_check_target_groups() {
+        for command in ["check", "clippy"] {
+            let Command::Check(options) =
+                parse(&[command, "--tests", "--benches"]).unwrap().command
+            else {
+                panic!("expected check");
+            };
+            assert!(options.targets.tests && options.targets.benches);
+            assert!(options.targets.selects_dev_targets());
+            assert!(!options.targets.selects_library() && !options.targets.selects_binaries());
         }
     }
 

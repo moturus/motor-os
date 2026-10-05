@@ -231,11 +231,16 @@ const _: () = assert!(TMP_PATH[TMP_PATH.len() - 3] == b't' && TMP_PATH[TMP_PATH.
 EOF
 cat >alpha/examples/library.rs <<'EOF'
 pub fn example_value() -> u32 { alpha::value() + zeta::value() }
+#[cfg(test)]
+fn main() { assert_eq!(example_value(), 84); }
 const _: () = assert!(option_env!("CARGO_BIN_NAME").is_none());
 EOF
 cat >>alpha/Cargo.toml <<'EOF'
 [[example]]
 name = "demo"
+test = true
+bench = true
+harness = false
 edition = "2021"
 [[example]]
 name = "disabled"
@@ -243,12 +248,19 @@ path = "examples/demo.rs"
 required-features = ["manual"]
 [[example]]
 name = "library"
+test = true
+bench = true
+harness = false
 crate-type = ["rlib", "staticlib"]
 [[bench]]
 name = "measured"
+test = true
+bench = false
 harness = false
 [[test]]
 name = "second"
+test = false
+bench = true
 path = "tests/integration.rs"
 harness = false
 [[bench]]
@@ -265,12 +277,15 @@ PY
 for platform in native motor; do
     target=()
     if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); fi
-    for selection in all named examples example bench repeated; do
+    for selection in all named examples example bench repeated tests benches groups; do
         args=(--workspace --all-targets)
         if [ "$selection" = named ]; then args=(-p zeta -p alpha --test second); fi
         if [ "$selection" = examples ]; then args=(--workspace --examples); fi
         if [ "$selection" = example ]; then args=(--workspace --example demo); fi
         if [ "$selection" = bench ]; then args=(-p alpha --bench measured); fi
+        if [ "$selection" = tests ]; then args=(--workspace --tests --test missing); fi
+        if [ "$selection" = benches ]; then args=(--workspace --benches --bench missing); fi
+        if [ "$selection" = groups ]; then args=(--workspace --bins --tests --benches --bin missing --test missing --bench missing); fi
         if [ "$selection" = repeated ]; then args=(--workspace --bin alpha --bin zeta --test integration --test second --example demo --example library --bench measured --bench second); fi
         env HOME="$WORK/home" "$LORRY" check "${args[@]}" "${target[@]}" --message-format=json >"$WORK/lorry-check.json"
         "$LORRY_TEST_CARGO" check "${args[@]}" "${target[@]}" --offline --message-format=json >"$WORK/cargo-check.json"

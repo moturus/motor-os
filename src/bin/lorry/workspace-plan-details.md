@@ -2727,6 +2727,23 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Check and Clippy now accept `--tests` and `--benches`, including combinations
+with binary and named selections. Test and benchmark flags filter every relevant
+target kind independently; examples may have ordinary and harness checks in the
+same graph. All targets includes each enabled test/benchmark group and plural
+groups override corresponding named filters. Empty auxiliary groups avoid graph
+construction. Binary-only pruning retains harness roots requested by other groups.
+
+The first compiler run missed one updated oracle initializer, preserved in
+`/tmp/lorry-m8-plural-check-targets-first-parser.log`. All 31 parser tests, native
+and Motor Cargo JSON comparisons (including opposite test/benchmark flags,
+library examples, and combined plural groups), existing workspace runtime/bundle
+regressions, both harness/auxiliary graph oracles, and strict Clippy pass in
+`/tmp/lorry-m8-plural-check-targets-parser.log`,
+`/tmp/lorry-m8-plural-check-targets-combined-contract.log`,
+`/tmp/lorry-m8-plural-check-targets-{harness,auxiliary}-oracle.log`, and
+`/tmp/lorry-m8-plural-check-targets-final-clippy.log`.
+
 Integration tests and described example/benchmark targets now retain their
 benchmark booleans. Integration tests and examples default to false; benchmarks
 default to true. Explicit integration `bench` keys are accepted, and malformed
