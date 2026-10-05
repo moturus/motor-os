@@ -18,15 +18,16 @@ fn main() -> io::Result<()> {
     let args = env::args_os().skip(1).collect::<Vec<_>>();
     assert_eq!(
         args.len(),
-        3,
-        "usage: lorry-editor-workspace LORRY REPOSITORY WORK"
+        4,
+        "usage: lorry-editor-workspace LORRY REPOSITORY WORK CONFIG_JSON"
     );
     let lorry = Path::new(&args[0]).canonicalize()?;
     let repo = Path::new(&args[1]).canonicalize()?;
     let work = Path::new(&args[2]).canonicalize()?;
+    let shipped: Value = serde_json::from_slice(&fs::read(&args[3])?)?;
     let toolchain = Toolchain::discover(&repo)?;
     for (custom, member) in [(false, false), (true, false), (true, true)] {
-        run(&lorry, &toolchain, &work, custom, member)?;
+        run(&lorry, &toolchain, &work, &shipped, custom, member)?;
     }
     println!(
         "PASS: actual editor commands share workspace features, generated code, target directories, and save diagnostics"
@@ -38,6 +39,7 @@ fn run(
     lorry: &Path,
     toolchain: &Toolchain,
     work: &Path,
+    shipped: &Value,
     custom: bool,
     member: bool,
 ) -> io::Result<()> {
@@ -89,36 +91,32 @@ fn run(
     } else {
         "target/rust-analyzer"
     };
-    let mut override_command = vec![
-        cargo.to_string_lossy().into_owned(),
-        "check".into(),
-        "--workspace".into(),
-        "--message-format=json".into(),
-        "--all-targets".into(),
-        "--keep-going".into(),
-        "--compile-time-deps".into(),
-        "--target".into(),
-        "x86_64-unknown-motor".into(),
-        "--target-dir".into(),
-        target.into(),
-    ];
+    let mut override_command = shipped["cargo"]["buildScripts"]["overrideCommand"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    override_command[0] = cargo.to_string_lossy().into_owned();
     if custom {
+        let directory = override_command
+            .iter()
+            .position(|arg| arg == "--target-dir")
+            .unwrap()
+            + 1;
+        override_command[directory] = target.into();
         override_command.extend([
             "--features".into(),
             "app/selected".into(),
             "--no-default-features".into(),
         ]);
     }
-    let mut options = json!({
-        "cargo": {"target": "x86_64-unknown-motor", "targetDir": true,
-            "sysroot": "discover", "features": [], "noDefaultFeatures": custom,
-            "buildScripts": {"enable": true, "useRustcWrapper": false, "overrideCommand": override_command}},
-        "check": {"targets": ["x86_64-unknown-motor"]},
-        "procMacro": {"enable": false}, "files": {"watcher": "client"}
-    });
+    let mut options = shipped.clone();
+    options["cargo"]["buildScripts"]["overrideCommand"] = json!(override_command);
     if custom {
         options["cargo"]["targetDir"] = json!(target);
         options["cargo"]["features"] = json!(["app/selected"]);
+        options["cargo"]["noDefaultFeatures"] = json!(true);
     }
     if member {
         options["linkedProjects"] = json!([root.join("app/Cargo.toml")]);

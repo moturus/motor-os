@@ -17,6 +17,12 @@ cargo.targetDir = true
 cargo.sysroot = "discover"
 cargo.buildScripts.enable = true
 cargo.buildScripts.useRustcWrapper = false
+# Overrides run literally; project feature/target changes need a complete override.
+cargo.buildScripts.overrideCommand = [
+  "/devtools/bin/lorry", "check", "--workspace", "--message-format=json",
+  "--all-targets", "--keep-going", "--compile-time-deps",
+  "--target", "x86_64-unknown-motor", "--target-dir", "target/rust-analyzer",
+]
 check.targets = ["x86_64-unknown-motor"]
 procMacro.enable = false
 files.watcher = "client"

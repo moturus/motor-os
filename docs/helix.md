@@ -41,9 +41,12 @@ OS. Lorry provides source metadata without dependency preparation or a
 lockfile. rust-analyzer uses it as an offline fallback and logs the full
 metadata error.
 
-Dependency navigation, resolved features, generated sources, and compiler
-checks require an admitted Lorry package and dependencies prepared explicitly
-with `lorry vendor`. A virtual workspace root is not a Lorry build package.
+Dependency navigation and resolved features need a current lock and sources
+prepared explicitly with `lorry fetch`. Metadata describes the whole workspace
+even through a member manifest and does not require admission. Generated
+sources and compiler checks additionally require a covering review with
+`lorry vendor --locked`. Virtual roots support workspace checks and member
+selection. Compilation never downloads missing sources.
 Build scripts and checks run with the invoking user's authority; opening a
 project is not a sandbox boundary.
 
@@ -73,6 +76,43 @@ Build scripts are enabled without a rustc wrapper; procedural-macro
 expansion in the analyzer is disabled. The client reports file changes.
 Lorry's compiler-side procedural-macro support is separate. General server
 configuration is documented in [build-rustc.md](build-rustc.md#native-motor-rust-analyzer).
+
+The build-script pass uses a complete `check --workspace --all-targets
+--keep-going --compile-time-deps` override for Motor, writing beneath
+`target/rust-analyzer/lorry`. It runs member scripts and builds executable
+procedural macros and their dependencies while skipping ordinary application
+compilation. Ordinary projects keep workspace-wide checks on save.
+
+rust-analyzer runs an override literally; it does not append configured
+features, default-feature settings, target, or target directory. Projects that
+change these settings must supply a complete override too. For example:
+
+```toml
+[language-server.rust-analyzer.config]
+cargo.features = ["app/selected"]
+cargo.noDefaultFeatures = true
+cargo.targetDir = "target/editor"
+cargo.buildScripts.overrideCommand = [
+  "/devtools/bin/lorry", "check", "--workspace", "--message-format=json",
+  "--all-targets", "--keep-going", "--compile-time-deps",
+  "--target", "x86_64-unknown-motor", "--target-dir", "target/editor",
+  "--features", "app/selected", "--no-default-features",
+]
+```
+
+Replace `app/selected` with the project's feature request and review that same
+scope with `lorry vendor --locked --features app/selected --no-default-features`.
+The normal metadata and save-check commands use the configured settings.
+
+The Motor OS checkout's `.helix/languages.toml` sets `check.workspace = false`
+because `src/sys` has member-specific compiler requirements. This exception
+belongs to that checkout. Saving a file outside its members, including files
+under `src/third_party`, starts no member check. Its workspace-root
+`src/sys/lorry.toml` grants the editable `moto-io` member's build script.
+Commands started at `src/sys` do not read member-local Cargo configuration;
+the `tokio_unstable` settings in `motor-fs` and `tokio-tests` therefore do not
+apply to those root-started editor checks. Run their real builds from their
+normal directories.
 
 To use Clippy for save diagnostics, set rust-analyzer's `check.command` to
 `"clippy"` in the project's `.helix/languages.toml`. Lorry uses the native

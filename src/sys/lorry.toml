@@ -1,0 +1,7 @@
+config-version = 1
+
+[policy.rules.moto-io]
+action = "allow"
+source = "path"
+name = "moto-io"
+allow-build-script = true

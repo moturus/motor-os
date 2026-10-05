@@ -3622,6 +3622,18 @@ selected by the shipped `cargo.targetDir` setting. It runs at each
 workspace root. Verify the actual directory against rust-analyzer's
 normal command rather than assuming its spelling.
 
+The developer-image Helix configuration now supplies that complete override
+with `target/rust-analyzer`, verified against the normal command's actual
+directory. The editor contract reads the shipped TOML rather than duplicating
+its defaults and still proves the custom override and member-linked case.
+The checkout's new `.helix/languages.toml` limits only its own checks to members,
+and `src/sys/lorry.toml` grants the named editable `moto-io` script. These are
+configuration changes, with no OS source or external checkout changes.
+The actual shipped-config contract and strict Clippy pass in
+`/tmp/lorry-m9-shipped-editor-{contract,clippy}.log`. Native validation remains
+part of the milestone gate. `docs/helix.md` documents fetch versus admission,
+the complete project override, and root-started member-config limitations.
+
 Projects that change `cargo.features`, `cargo.noDefaultFeatures`,
 `cargo.target`, `cargo.targetDir`, or other relevant arguments must also
 provide a complete project override in `.helix/languages.toml`. Document
