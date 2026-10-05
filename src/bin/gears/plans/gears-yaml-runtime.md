@@ -104,4 +104,36 @@ no toolchain or external dependency source has been changed.
 
 After the toolchain update, rerun the batteries native release build and
 `src/tests/full-test-dev.sh --release`. Native skills validation remains
-incomplete until its runtime dependency also contains the fix.
+incomplete for the installed build until its runtime dependency also contains
+the fix.
+
+## Release candidate and native skills evidence
+
+A temporary archive of commit `8b55c381` packages moto-rt as candidate
+version 0.17.7. Comparing its Rust sources against the checksum-verified
+published 0.17.6 archive finds only the approved strlen addition. Public
+registry metadata checked on 2026-10-05 reports latest version 0.17.6 and
+no existing 0.17.7 release. Offline packaging and Motor-target verification
+with `libc` enabled pass in `/tmp/gears-runtime-release-package.log`.
+
+Review artifact:
+[/tmp/gears-runtime-rollout.ibHHea/package-target/package/moto-rt-0.17.7.crate](/tmp/gears-runtime-rollout.ibHHea/package-target/package/moto-rt-0.17.7.crate).
+Its SHA-256 is
+`688432b20875428966db03ed67be13c5f1969538f4c8fa32eb65e04a3515eb7f`.
+This temporary package is a review artifact, not the final published checksum:
+the actual release must package the committed version change with its VCS
+metadata, then use the published checksum in the Rust library lock.
+
+The same temporary tree points Gears at the candidate with `libc` enabled.
+Native release builds of Gears, batteries and the portable workflow pass.
+The existing batteries VM gate passes with uploaded current binaries in a
+release snapshot, including the skills workflow and current sibling/config
+startup. Build and run logs are
+`/tmp/gears-skills-local-runtime-build.log` and
+`/tmp/gears-skills-local-runtime-native-gate.log`.
+
+No tracked dependency selection, installed SDK, registry publication or
+external source has changed. These checks validate the skills implementation
+on Motor OS with the fix, while the SDK rollout and installed-image gate
+remain outstanding. Explicit approval was requested for crate publication,
+the external Rust fork lock update and push, and the SDK rollout.

@@ -1,6 +1,6 @@
 # Gears batteries implementation record
 
-Updated 2026-10-04. The design in [gears-batteries.md](gears-batteries.md)
+Updated 2026-10-05. The design in [gears-batteries.md](gears-batteries.md)
 remains authoritative. Work proceeds in small patches with one-line commits.
 All Gears defects found during implementation are in scope.
 
@@ -12,8 +12,9 @@ Linux and Motor OS, and the updated release developer-image gate passes.
 The user reports that native OpenRouter use works and has requested
 continuation, clearing the phase 5 decision point. A local-model result has
 not been reported. Phase 6.1–6.4 memory storage, admission, prompt handling
-and user commands are implemented. Phase 6.5 skills is implemented and passes the host gates. Its native
-release build exposed a missing Motor OS runtime symbol, described below.
+and user commands are implemented. Phase 6.5 skills is implemented and passes
+the host gates and a native workflow linked to the fixed in-tree runtime.
+Its installed build still needs the SDK rollout described below.
 The sysbox track and phases 7–12 are not implemented.
 
 The phase 3 manual checklist is not marked complete. Automated host tests
@@ -352,7 +353,26 @@ Rust library lock update and new toolchain tuple are separate follow-up work;
 no external source or installed toolchain has changed. This corrects the
 initial suggestion of simply rebuilding the embedded runtime.
 The full release developer-image gate is not rerun while that link is known
-to fail. Native phase 6.5 validation remains incomplete.
+to fail. Installed-build phase 6.5 validation remains incomplete.
+
+### Native skills validation with the fixed runtime
+
+A temporary archive of commit `8b55c381` selects the fixed runtime with its
+`libc` feature enabled. Only the temporary manifests change: candidate
+moto-rt version 0.17.7 and Gears' dependency selection. Both the batteries
+workflow and Gears build in native release mode. The existing batteries VM
+gate passes in a release developer-image snapshot with the uploaded current
+binaries, including skill approval, loading, correction, withdrawal, resume
+and check observations. Current sibling binaries also pass configuration
+startup. Logs: `/tmp/gears-skills-local-runtime-build.log` and
+`/tmp/gears-skills-local-runtime-native-gate.log`.
+
+This establishes native skills behavior with the fixed runtime. It does not
+claim that the installed SDK or packaged-source build has been updated. The
+temporary dependency selection is diagnostic, not a shipping manifest edit.
+The runtime release candidate packages and verifies offline; publication and
+the external Rust fork/SDK rollout were requested separately for approval.
+See [the runtime record](gears-yaml-runtime.md) for the reviewable artifact.
 
 ## Next steps
 

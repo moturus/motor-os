@@ -1,7 +1,8 @@
 # Gears batteries: design and implementation plan
 
-Status: implementation through phase 6.5; native release validation awaits
-the runtime strlen fix; design revised 2026-10-02. See the
+Status: implementation through phase 6.5; native skills pass with the fixed
+runtime. Installed-build validation awaits the SDK update; design revised
+2026-10-02. See the
 [implementation record](gears-batteries-progress.md) for completed patches
 and validation still outstanding. Two questions wait
 for later phases: question 7 is discussed when phase 8 is reached, and
