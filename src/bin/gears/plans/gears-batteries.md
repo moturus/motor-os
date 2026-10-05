@@ -2,7 +2,7 @@
 
 Status: implementation through phase 6.5; native skills pass with the fixed
 runtime. Installed-build validation awaits the SDK update. Sysbox step S1
-is complete and core-gated; design revised 2026-10-02. See the
+is complete and core-gated; design revised 2026-10-05. See the
 [implementation record](gears-batteries-progress.md) for completed patches
 and validation still outstanding. Two questions wait
 for later phases: question 7 is discussed when phase 8 is reached, and
@@ -30,10 +30,8 @@ helpful, that unverified learning always hurts, or that a particular model
 size or number of confirming sessions is a reliable threshold. Results
 come from different tasks and budgets, and much of the literature has not
 been independently reproduced. Treat the learning loop as an experiment.
-The `/accept` command and repository fingerprint in phase 7 are
-Gears-specific design choices, not mechanisms established by that research
-or copied from Hermes. Their provenance and evidence limits are recorded
-in [the acceptance proposal](gears-acceptance-vcs.md#provenance-and-evidence-limits).
+Task acceptance is the user's plain-language statement in the conversation,
+as recorded in [the acceptance decision](gears-acceptance-vcs.md).
 
 [Earlier notes](gears-batteries-notes.md) retain investigation history,
 mock-provider prototypes and reproductions of the Gears defects fixed in
@@ -403,15 +401,15 @@ reminder count. Everything larger goes to the per-session data.
 
 | Event | What the batteries do |
 | --- | --- |
-| `initialize` | adds project instructions, memory and the skill list (the prompt snapshot); registers `todo` and the `/accept` and `/review` commands; on resume, asks whether to run an unfinished review |
+| `initialize` | adds project instructions, memory and the skill list (the prompt snapshot); registers `todo` and `/review`; on resume, asks whether to run an unfinished review |
 | `permission` | applies the approval rules below |
 | `tool_execute` | runs `todo` |
 | `tool_result` | updates the turn record; wraps `curl` output as untrusted; asks the user about a memory change the agent just made |
 | `context` | adds a note once when remembered material was removed or corrected (see "Memory") |
 | `before_stop` | reminds the model to run the check (see "Evidence") |
-| `turn_end` | closes the turn record; sets the `/accept` hint |
+| `turn_end` | closes the turn record |
 | `before_compact` | marks a review as due when reviews are on |
-| `command` | carries out `/accept`, which ends the task and marks a review as due when reviews are on, and `/review` |
+| `command` | carries out `/review` |
 | `answer` | applies the user's answer to a question the hook asked |
 
 **Project instructions** come only from `AGENTS.md` at the selected
@@ -455,7 +453,7 @@ Keep three different claims separate:
 | Claim | What supports it | What it does not establish |
 | --- | --- | --- |
 | An operation succeeded | A runtime-recorded tool outcome | The user's task is complete |
-| A task was accepted | Task-specific checks or explicit user acceptance, tied to the resulting state | A proposed lesson will help later |
+| A task was accepted | The user's explicit acceptance in the conversation | Correctness beyond the available checks, or that a proposed lesson will help later |
 | A lesson improves performance | Evaluation on other representative tasks, including regressions and cost | Universal usefulness across models or projects |
 
 **Check results.** Only the `check` tool produces a check result: it records
@@ -468,13 +466,16 @@ is stale. Agent-editable tests can support development, but a passing check is
 not by itself acceptance.
 
 **Task acceptance** (question 5). A task is accepted only when the user says
-so, with `/accept` in Gears or `gears-batteries accept SESSION`. With the
-acceptance the batteries record, in the per-session data, the last check's
-result and whether it is current, the workspace's current commit, and a hash
-of its uncommitted changes. A missing or stale check is shown to the user but
-does not stop them from accepting. After a turn in which a tool could have
-changed the workspace, the TUI's status line reminds the user that `/accept`
-marks the task done; the line UI prints the same reminder after the turn.
+so in ordinary conversation, for example "yes, I accept this". That is
+sufficient; there is no required wording or command. The user's message
+remains in the normal session history, and a later review cites that entry
+as the evidence of acceptance. An agent's claim that it is done, a passing
+check, or permission to run a tool does not stand in for the user's acceptance.
+
+Acceptance requires no separate tool, CLI, hook event, status flag, record,
+UI reminder, commit or hash of uncommitted changes. It does not depend on
+Git or Gix, and does not require a current passing check. Check receipts
+retain their independent meaning as development evidence.
 
 **The `before_stop` reminder.** When a check is declared, a tool that can
 change the workspace ran this turn, and no current passing check exists,
@@ -559,8 +560,8 @@ user or agent can find where an entry came from.
 
 **Layout.** Under the Gears directory, `batteries/` holds `USER.md`,
 `MEMORY.md`, `skills/`, `pending/`, `changes.jsonl`, `snapshots/`,
-`sessions/<id>/` (turn records, `sh` state, file-read records, review marks,
-acceptance) and `eval/`. `batteries.toml` in the Gears directory holds the
+`sessions/<id>/` (turn records, `sh` state, file-read records and review
+marks) and `eval/`. `batteries.toml` in the Gears directory holds the
 user-wide settings: memory size limits, the review models and the proposal
 cap. A workspace's `.gears/` holds its `MEMORY.md`, its own `pending/`,
 `tasks/` for orchestration, and `batteries.toml` with the project's `check`
@@ -610,16 +611,16 @@ experiment until phase 9 says otherwise; turning them on names the executor
 and reviewer models in `batteries.toml`, because the decision depends on that
 pair and the workload, not on whether a model is hosted or how large it is.
 
-- **When.** A review is marked due at task end, that is when the user
-  accepts the task with `/accept`, before a compaction, and when the user
+- **When.** A review is marked due before a compaction and when the user
   asks with `/review [focus]`; the focus sentence takes priority over the
   general instructions. A session may hold several tasks and a task may
-  take several turns, so turns are not review boundaries. Marks are stored
+  take several turns, so turns are not review boundaries. Acceptance itself
+  is an ordinary message and does not create a review mark. Marks are stored
   in the per-session data with the session id and the last entry at the
   time, so an interrupted or repeated review handles each mark once.
 - **Who runs it** (question 6). Gears' after-turn command starts
   `gears-batteries review` after a completed turn and after a hook command
-  such as `/accept`; it runs the session's due reviews and is stopped if
+  such as `/review`; it runs the session's due reviews and is stopped if
   the user starts another turn; the review then runs after that turn. A
   review still due or running when Gears exits is stopped. When the user
   later resumes that session, Gears asks whether to run it; if not, the
@@ -629,7 +630,9 @@ pair and the workload, not on whether a model is hosted or how large it is.
 - **What it is told.** "Nothing to save" is the default outcome. Every
   proposal cites the entry ids that support it. A procedure may be proposed
   when the conversation shows it run and working, including a successful new
-  procedure. A restarted worker may reflect a spent budget rather than a bad
+  procedure. The user's ordinary acceptance message is evidence that they
+  accepted the result; it does not establish that a skill caused success.
+  A restarted worker may reflect a spent budget rather than a bad
   procedure. The review also receives the changes the user denied, so it
   does not propose them again.
 - **What it may do.** Read-only file tools, session reading and proposals
@@ -929,11 +932,10 @@ meet guarantee 8 for the children they add.
   workspace's unapproved `MEMORY.md` is not used; and approving a change to
   an entry removed in the meantime fails with a message.
 
-**Phase 7. Task acceptance.** `/accept`, `gears-batteries accept`, the
-acceptance record and the `/accept` hint, as "Task acceptance" describes.
-Done when an accepted session's record names the commit, the hash of
-uncommitted changes and the check state, and the hint appears only after
-turns that could have changed the workspace.
+**Phase 7. Task acceptance.** Resolved by the user's decision to accept
+results in ordinary conversation, as "Task acceptance" describes. The
+normal saved user message is the evidence. No separate implementation is
+needed; proceed to phase 8 after the remaining phase 6 validation.
 
 **Phase 8. Reviews** (off by default; question 7 is discussed in this phase).
 - 8.1 Review marks, the after-turn runner, `/review [focus]`, and the
@@ -1017,9 +1019,9 @@ above. Questions 7 and 10 are open and will be discussed when phases 8 and
    automatic recovery across files, version store or `undo`.
 
 5. **What counts as a finished task, and who says so?** *Decided:* the user,
-   with `/accept`, recorded with the check state and the workspace's commit
-   and uncommitted changes; the TUI reminds the user that `/accept` exists
-   (see "Task acceptance").
+   by saying so in ordinary conversation, for example "yes, I accept this".
+   The normal user message is sufficient evidence; no formal acceptance
+   tooling or repository inspection is required (see "Task acceptance").
 
 6. **What happens to a review that has not run when Gears exits?**
    *Decided:* it is stopped. When the user resumes that session, Gears asks

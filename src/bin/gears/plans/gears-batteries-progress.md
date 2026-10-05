@@ -78,8 +78,9 @@ grandchild on Linux and Motor OS.
 
 These policies prevent accidents; they do not confine tools. Native atomic
 replacement preserves the caller's access rather than every role's metadata.
-Checks provide development evidence, not user acceptance. `/accept`, reviews,
-workers, scheduling and gateways remain later work.
+Checks provide development evidence, not user acceptance. Reviews, workers,
+scheduling and gateways remain later work. The user has since simplified
+acceptance to an ordinary conversation message, as recorded below.
 
 The portable workflow uses the actual CLI, shipped manifests and shared
 Gears runtime with a scripted provider. It reads a deliberately broken Rust
@@ -436,25 +437,32 @@ rollback. Formatting, diff checks and warnings-denied Clippy pass.
 | Debug | 22.6, 22.6, 22.7 minutes |
 | Release | 10.5, 10.6, 10.6 minutes |
 
+## Task acceptance decision
+
+The user requested acceptance through ordinary conversation, for example
+"yes, I accept this", without formal tooling. Phase 7 now requires no
+separate implementation: normal session history already stores the user's
+message. A review may cite that message, while check receipts remain
+development evidence and do not imply acceptance or a skill's usefulness.
+
+The earlier acceptance command, CLI, UI hint, separate acceptance record
+and repository fingerprint proposal are superseded. There is no Gix binary
+or library decision to make for acceptance. Acceptance does not schedule
+a review; optional reviews retain compaction and explicit `/review` triggers.
+See [the acceptance decision](gears-acceptance-vcs.md).
+
 ## Next steps
 
 Independent sysbox steps S2–S6 remain, starting with sort. The batteries
-track needs the SDK rollout and repository interface decision below.
+track needs the SDK rollout below.
 
 The user has published moto-rt 0.17.7; its registry checksum and weak strlen
 export are verified in [the runtime record](gears-yaml-runtime.md#published-runtime-verification).
 Select the fixed runtime in the SDK, then finish native skills validation.
 The in-tree runtime gap is fixed and core-tested; rebuilding
 the current SDK tuple alone will not update std's locked dependency.
-Then continue phase 7 after choosing the repository evidence
-interface in [the acceptance proposal](gears-acceptance-vcs.md). Gix's current
-human-readable reports do not identify complete commit/binary/untracked
-contents. The recommendation is a read-only versioned Gix command; sharing
-its repository library with batteries is an alternative. The user's choice
-is pending under root AGENTS.md's non-obvious-decision requirement.
-The `/accept` workflow and repository fingerprint are Gears-specific
-design proposals with no equivalent identified in the reviewed papers or
-Hermes implementation; they have not been evaluated for usefulness.
+Then continue to phase 8. The ordinary-conversation acceptance decision
+resolves phase 7 without a code patch or repository inspection.
 
 The optional Hermes import has not been performed. Automated mock tests
 establish behavior, not real-model usefulness. Keep the outstanding native
