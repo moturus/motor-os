@@ -48,7 +48,11 @@ pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
         },
         lto: root_lto(
             input.release,
-            input.release_profile.lto,
+            if input.release {
+                input.release_profile.lto
+            } else {
+                ManifestLto::Default
+            },
             input.target_kind,
             input.test,
         ),

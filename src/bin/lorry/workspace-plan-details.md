@@ -3389,7 +3389,12 @@ expected static-library loading to fail after that capability had landed.
 It now proves successful static-library loading and the distinction between
 compiler dependency inputs and source metadata's development dependencies.
 The focused regression passes in `/tmp/lorry-m8-registry-static-capability-test.log`.
-The separate historical stage-one identity failure is diagnosed below.
+The historical stage-one helper also passed release LTO settings into its
+fixed-default dev profile after dev LTO became supported by the common helper.
+It now passes default LTO for that inactive release layer. All five identity
+tests retain their exact Cargo hashes and pass in
+`/tmp/lorry-m8-stage-one-inactive-release-identity-test.log`; strict Clippy
+passes in `/tmp/lorry-m8-stage-one-inactive-release-clippy.log`.
 
 Active profile settings now include Cargo's shared dev/release compiler keys,
 named inheritance, default test settings, and named-profile output directories.
