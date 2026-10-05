@@ -67,25 +67,23 @@ Lorry and Cargo configuration layers while enforcing which layer may control
 security-sensitive settings. `toolchain.rs` discovers `rustc`, identifies the
 Cargo-compatibility family, and evaluates target `cfg` expressions.
 
-The build root is one selected package, with at most one library, a bounded
-deterministic set of discovered or explicit binaries, and discovered
-integration tests in files or directories. Shared membership discovery supplies inheritance,
-defaults, and selectors. The workspace provides one lock, resolver, profiles,
-patches, artifact parent, and root admission record. Independently selected
-members coexist in the shared profile with per-package ownership. Root
-planning carries each
-binary name through identity, publication, freshness, test environments, and
+Compilation selects members and targets from one workspace model. Each package
+has at most one library and bounded sets of binaries, integrations, examples,
+and benchmarks. Shared membership discovery supplies inheritance, defaults,
+and selectors. The workspace provides one lock, resolver, profiles, patches,
+artifact parent, and root admission record. Selected members coexist in the
+shared profile with per-package ownership. Unit planning carries package and
+target identity through publication, freshness, runtime environments, and
 bundles. Dependency manifests are parsed through a wider but still explicit
 subset needed to compile the selected graph. Recognized metadata is inert;
 unknown build semantics are errors.
 
-Root build-script execution is not implemented. `manifest.rs` currently
-accepts a dependency-free root `build.rs`, but root planning never creates its
-compile/run units and therefore never applies its directives. This is a known
-fail-closed defect: until root scripts are implemented, parsing must reject
-them rather than silently building a different program. Dependency build
-scripts are fully planned and executed through the policy boundary described
-below.
+Selected members' build scripts and build-dependencies use the shared unit
+planner and executor. Named path grants admit member execution; caller
+environment allowlists belong to each package. Editable scripts may read
+workspace inputs but write only their private outputs. Registry and Git
+scripts retain narrower input roots. Script directives and observations enter
+dependent unit identities and completed-profile freshness.
 
 Lorry reads Cargo lock formats 1 through 4 without rewriting valid locked
 inputs. Ordinary vendoring preserves compatible parent dependency edges and
@@ -294,7 +292,8 @@ unchanged between passes. Both executable-code forms need separate explicit
 grants; native tools remain available only to build scripts.
 
 Build scripts are compiled as host units. Procedural macros are distinct host
-units whose normal dependency closure is also compiled for the compiler host.
+units whose normal dependency closure is also compiled for the compiler host,
+including macros reached through a selected target's dev-dependencies.
 Linux uses rustc's normal in-process dynamic-library client. Motor uses a
 static PIE executable and the same private proc-macro bridge serialization over
 framed stdin/stdout; this is process separation but not a sandbox. Rustc keeps
@@ -373,10 +372,13 @@ manifest may appear in member dep-info outside the package directory.
 On Motor the shipped sibling is a launcher; its identity also includes the
 native driver payload's hash.
 
-Ordinary tests remain separate Rust harnesses. `bundle.rs` creates one
-target-native self-extracting executable containing the selected harnesses and
-required package binary. The launcher verifies its payload table and extracts
-only beneath its configured private root.
+Ordinary tests use one workspace graph with dev-dependencies and legal dev
+cycles. Compilation finishes before execution; harnesses run in Cargo package
+and target order with their owning package's environment. `bundle.rs` creates
+one self-extracting executable per member containing its selected harnesses
+and required package binary. Host-only macro bundles use the host plan and
+runtime. The launcher verifies its payload table and extracts only beneath its
+configured private root.
 
 ## Platform and image boundary
 

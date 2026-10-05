@@ -51,7 +51,7 @@ of the member selected by `-p`.
 
 A supported package has:
 
-- one or more selected members for ordinary build, check, and Clippy;
+- one or more selected members for build, check, Clippy, and test;
 - at most one library and 64 binary targets;
 - optional `tests/*.rs` and `tests/*/main.rs` integration tests;
 - a current Cargo.lock in Cargo format 1 through 4, including for
@@ -84,7 +84,8 @@ checks also select targets across the chosen members. Named check target selecto
 and takes precedence over named check filters. Example/benchmark
 build selectors use the same target groups and repeated names, compiling harnesses
 without running them. Test accepts the same selectors, repeats, and combinations,
-with ordinary execution, `--no-run`, or `--bundle`. Run example selection remains deferred. Default tests compile enabled examples,
+with ordinary execution, `--no-run`, or `--bundle`. Run can select an executable
+example with `--example NAME`. Default tests compile enabled examples,
 run examples and benchmarks marked `test = true`, and include those test targets
 in member bundles. Ordinary build/check accepts
 root dev-dependencies without activating their features.
@@ -108,25 +109,30 @@ It leaves the workspace manifest and lockfile unchanged.
 lorry build [--release|-r] [--target TRIPLE] [--strict-validation]
             [--lib|--bins|--tests|--examples|--benches|--all-targets]
             [--bin NAME] [--test NAME] [--example NAME] [--bench NAME]
-             [--keep-going]
-lorry run   [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]
+            [--keep-going]
+lorry run   [--release|-r] [--target TRIPLE] [--bin NAME|--example NAME]
+            [--strict-validation] [-- ARGS...]
 lorry test  [NAME] [--release|-r] [--target TRIPLE] [--strict-validation]
-            [--test NAME] [--no-run] [--no-fail-fast] [--bundle] [-- ARGS...]
+            [--lib|--bins|--tests|--examples|--benches|--all-targets]
+            [--bin NAME] [--test NAME] [--example NAME] [--bench NAME]
+            [--no-run] [--no-fail-fast] [--bundle] [-- ARGS...]
 ```
 
 Package commands accept Cargo names, package IDs, versions, and member-name
 patterns. A member invocation defaults to itself; workspace-root invocations
 use Cargo's default members. Repeated `-p`, `--workspace`, and `--exclude`
-select members for ordinary build, check, Clippy, and test. Run currently
-requires exactly one member. Members share the root lockfile, resolver, profiles, patches,
+select members for ordinary build, check, Clippy, and test. Run selects one
+executable across the default members or its selected package. Members share the root lockfile, resolver, profiles, patches,
 and target ownership. Membership, package/dependency/lint inheritance, and
 component globs follow the rules below. External members remain unsupported.
 
 The dev and release profiles accept `panic = "unwind"` or `panic = "abort"`,
-`debug`, and `opt-level`. The release profile also accepts Lorry's documented
-`lto`, `strip`, and `codegen-units` keys. A panic strategy applies to ordinary root and target
-dependency crates; Cargo-compatible test, build-script, and procedural-macro
-units continue to unwind.
+`debug`, `opt-level`, `lto`, `strip`, `codegen-units`, `debug-assertions`,
+`overflow-checks`, and `incremental`. Tests use the test profile inherited
+from dev, or release with `--release`. Build/check/Clippy/run/test also accept
+`--profile NAME` for Cargo-style named profile inheritance. A panic strategy
+applies to ordinary target crates; tests, build scripts, and procedural macros
+continue to unwind. See `spec.md` for supported profile environment overrides.
 
 Examples:
 
@@ -141,8 +147,10 @@ lorry test --bundle --no-run
 Binary discovery follows Cargo's ordinary `src/main.rs`, `src/bin/*.rs`, and
 `src/bin/*/main.rs` layouts and merges explicit `[[bin]]` targets. Set
 `package.autobins = false` to disable discovery. `build` compiles every binary
-unless one exact `--bin` is selected. `run` selects `--bin`, then
-`package.default-run`, then a sole binary; otherwise it reports the ambiguity.
+unless target selectors narrow the selection. Named build/check/test selectors
+can be repeated and accept Cargo target patterns. `run` selects `--bin`, then
+a unique `package.default-run`, then a sole binary across the selected members;
+otherwise it reports the ambiguity.
 
 `run` returns the program's status. Ordinary tests build separate library,
 binary, and integration-test harnesses, then run them in order and stop at the
@@ -168,8 +176,9 @@ mutable path sources, tools, cache entries, root inputs, and artifacts before
 reuse. Structural checks, policy, admission identity, and resource limits are
 never disabled.
 
-`--bundle` packages the selected harnesses and required package binary into a
-single target-native self-extracting executable. Bundle arguments are sent to
+`--bundle` packages each member's selected harnesses and required package binary
+into a self-extracting executable. A host-only procedural-macro bundle uses the
+compiler host even during a cross-target invocation. Bundle arguments are sent to
 every harness and all harness failures are aggregated.
 
 Build output is owned by Lorry and stored below the chosen target directory's

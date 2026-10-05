@@ -303,8 +303,9 @@ root compilation, freshness validation, and artifact publication.
   `--example NAME` selects exactly one executable example and enables its
   dev-dependencies. Library examples cannot be executed. Run rejects target
   glob patterns and simultaneous binary/example selectors, as Cargo does.
-- `-p NAME`/`--package NAME` selects one exact explicit workspace member for
-  build, clean, run, test, vendor, and review.
+- `-p NAME`/`--package NAME` selects matching workspace members for
+  build, check, Clippy, clean, run, test, vendor, and review. Supported repeated
+  selectors combine and deduplicate their selections.
 - `review` is offline and non-mutating. It reconstructs and verifies the
   committed canonical dependency review, then writes its exact TOML to stdout.
   It accepts no command-specific arguments and rejects
@@ -354,11 +355,12 @@ root compilation, freshness validation, and artifact publication.
 
 ## Package and manifest model
 
-Build, clean, run, and test currently execute one selected package. Vendor
-and review use the workspace-root record; fetch and resolved metadata use
-the complete workspace lock, independent of admission scope.
-The current package is selected by its `Cargo.toml`; `-p NAME` selects one
-exact member from a workspace root. Builds and source metadata share the
+Build, check, Clippy, and test execute shared graphs for their selected members;
+clean respects package ownership, and run selects one executable. Vendor and
+review use the workspace-root record; fetch and resolved metadata use the
+complete workspace lock, independent of admission scope.
+The current package is selected by its `Cargo.toml`; `-p NAME` selects matching
+members from the containing workspace. Builds and source metadata share the
 membership reader: a root package and recursively reached normal, build,
 dev, and target-specific path dependencies below the root are members.
 `members` may be absent or include `"."`. Exclusions are directory prefixes;
@@ -555,9 +557,10 @@ The supported manifest surface includes:
 Crates.io dependencies require a version requirement. Path dependencies may
 omit one; when supplied, it must match the selected local package. Root
 dev-dependencies, including target-conditioned declarations, are retained and
-remain inactive for ordinary build/check. Execution of targets needing them
-is gated until their common-planner wiring is implemented. Lorry may compile approved transitive build-dependencies for
-dependency build scripts.
+remain inactive for ordinary library/binary build/check targets. Test harnesses,
+integrations, examples, and benchmarks activate their required dev graph.
+Approved build-dependencies compile on the host for member and dependency
+build scripts.
 
 Compiler manifests now retain top-level and target-qualified build
 dependencies. The shared planner can create the member's host script compiler,
@@ -595,11 +598,8 @@ feature list. Dependency-qualified requirements use the resolved dependency
 features. A build with every implicit target disabled succeeds without compiler
 units or artifact messages.
 
-Lorry rejects dynamic/procedural-macro example types, example/benchmark build/test/run
-selectors, unsupported
-profile keys, artifact dependencies, alternative
-registries, non-crates.io patches, and
-CLI feature-selection flags for run.
+Lorry rejects dynamic/procedural-macro example types, unsupported profile keys,
+artifact dependencies, alternative registries, and non-crates.io patches.
 Build, run, and test reject an unmaterialized crates.io Git patch and direct
 the user to `lorry vendor`; they never fetch or modify it themselves.
 Documentation tests are not run because native Motor has no `rustdoc`; the
@@ -1577,8 +1577,8 @@ executable carrying rustc's registration metadata and private stdio protocol
 entry point. Resolver 2
 and 3 host features remain separate when the same package is also selected as
 a target dependency. Proc-macro unit and cache identity includes its distinct
-target kind, compiler host, and exact rustc identity. A selected root package
-cannot itself be a procedural-macro crate.
+target kind, compiler host, and exact rustc identity. Selected member macros
+also use host library and harness units, with named member execution grants.
 
 Rustc arguments, environment, Cargo-compatible metadata/extra-filename hashes,
 target search paths, `--extern` paths, lints/check-cfg, profile/LTO behavior,
