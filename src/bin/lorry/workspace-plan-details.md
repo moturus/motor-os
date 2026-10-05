@@ -2727,6 +2727,17 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+The real cc-rs 1.2.29 member contract now covers Helix's C++ scanner pattern,
+generated Rust code, static archive linking, Linux sandbox denial without the
+C++ grant, and native/cross-Motor Cargo byte identity. Its JSON comparison
+normalizes only the separate verified registry source locations. Initial helper
+failures are preserved in `/tmp/lorry-m8-cxx-first-contract.log` (warning-required
+helper), `/tmp/lorry-m8-cxx-clean-json-contract.log` (source locations), and
+`/tmp/lorry-m8-cxx-source-view-contract.log` (helper requires generated.rs).
+The generated-code fixture passes in
+`/tmp/lorry-m8-cxx-generated-code-contract.log`. The driver runs in test-all
+and acquires all dependencies from the local Cargo-cache curl fixture, offline.
+
 Trusted C++ tool configuration now accepts `stdlib`, projecting target-qualified
 `CXXSTDLIB` only for the granted C++ compiler. Omission retains cc-rs's default;
 an empty value omits its runtime library, matching the pinned cc-rs implementation.
