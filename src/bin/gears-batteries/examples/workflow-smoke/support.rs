@@ -88,6 +88,7 @@ impl Fixture {
                         "before_stop",
                         "turn_end",
                         "answer",
+                        "context",
                     ]
                     .into_iter()
                     .map(String::from)

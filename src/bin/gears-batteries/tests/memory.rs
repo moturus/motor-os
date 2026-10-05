@@ -206,6 +206,55 @@ fn the_real_hook_delivers_all_admission_answers_without_asking_in_unattended_run
                     .all(|id| entries.iter().any(|entry| entry.id == *id))
             );
         }
+        if choice == Some("approve") {
+            let with_memory = runtime.session().id().to_string();
+            let hash =
+                runtime.session().hook_state("batteries").unwrap()["prompt_snapshot"].clone();
+            context
+                .state
+                .replace_file(Target::User.relative(), b"# Gears memory v1\n")
+                .unwrap();
+            for prompt in ["Use the current memory.", "Check it again."] {
+                runtime
+                    .turn(prompt.into(), &mut answers, &mut |_| Ok(()))
+                    .unwrap();
+            }
+            let requests = provider.requests.lock().unwrap();
+            assert!(
+                requests[3]
+                    .system
+                    .iter()
+                    .any(|text| text.contains("Prefer small Rust patches."))
+            );
+            for request in &requests[3..5] {
+                assert_eq!(
+                    request
+                        .messages
+                        .iter()
+                        .filter(|message| message
+                            .text_content()
+                            .contains("Withdraw User memory entry preference"))
+                        .count(),
+                    1
+                );
+            }
+            assert_eq!(
+                runtime.session().hook_state("batteries").unwrap()["prompt_snapshot"],
+                hash
+            );
+            drop(requests);
+            runtime.resume(&with_memory).unwrap();
+            runtime
+                .turn("Use resumed memory.".into(), &mut answers, &mut |_| Ok(()))
+                .unwrap();
+            let requests = provider.requests.lock().unwrap();
+            assert!(
+                !requests[5]
+                    .system
+                    .iter()
+                    .any(|text| text.contains("Prefer small Rust patches."))
+            );
+        }
         drop(runtime);
         std::fs::remove_dir_all(path).unwrap();
     }

@@ -13,6 +13,7 @@ pub mod instructions;
 pub mod journal;
 pub mod memory;
 pub mod memory_config;
+pub mod memory_context;
 pub mod memory_format;
 pub mod memory_question;
 pub mod memory_snapshot;
@@ -96,6 +97,15 @@ pub fn hook(event: Event) -> Result<Value, String> {
                     .and_then(|context| memory_question::after_result(&event, &context)),
             );
         }
+        return Ok(response);
+    }
+    if event.event == "context" {
+        let mut response = json!({});
+        merge_optional(
+            &mut response,
+            paths::ToolContext::for_event(&event)
+                .and_then(|context| memory_context::observe(&event, &context)),
+        );
         return Ok(response);
     }
     if event.event == "answer" {
