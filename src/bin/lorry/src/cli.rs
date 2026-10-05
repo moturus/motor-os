@@ -148,6 +148,13 @@ pub struct CheckOptions {
     pub target_dir: Option<String>,
     pub target: Option<String>,
     pub keep_going: bool,
+    pub targets: TargetSelection,
+    pub message_format: MessageFormat,
+    pub jobs: Option<Jobs>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TargetSelection {
     pub all_targets: bool,
     pub lib: bool,
     pub bins: bool,
@@ -156,8 +163,35 @@ pub struct CheckOptions {
     pub examples: bool,
     pub example: Option<String>,
     pub bench: Option<String>,
-    pub message_format: MessageFormat,
-    pub jobs: Option<Jobs>,
+}
+
+impl TargetSelection {
+    pub(crate) fn has_target_selector(&self) -> bool {
+        self.all_targets
+            || self.lib
+            || self.bins
+            || self.bin.is_some()
+            || self.test.is_some()
+            || self.examples
+            || self.example.is_some()
+            || self.bench.is_some()
+    }
+
+    pub(crate) fn selects_library(&self) -> bool {
+        self.all_targets || self.lib || !self.has_target_selector()
+    }
+
+    pub(crate) fn selects_binaries(&self) -> bool {
+        self.all_targets || self.bins || self.bin.is_some() || !self.has_target_selector()
+    }
+
+    pub(crate) fn selects_tests(&self) -> bool {
+        self.all_targets || self.test.is_some()
+    }
+
+    pub(crate) fn selects_dev_targets(&self) -> bool {
+        self.selects_tests() || self.examples || self.example.is_some() || self.bench.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -627,37 +661,41 @@ fn check_command(name: &'static str) -> ClapCommand {
                 .long("keep-going")
                 .action(ArgAction::SetTrue),
         )
-        .arg(
-            Arg::new("all-targets")
-                .long("all-targets")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(Arg::new("lib").long("lib").action(ArgAction::SetTrue))
-        .arg(Arg::new("bins").long("bins").action(ArgAction::SetTrue))
-        .arg(
-            Arg::new("bin")
-                .long("bin")
-                .value_name("NAME")
-                .value_parser(NonEmptyStringValueParser::new()),
-        )
-        .arg(
-            Arg::new("test")
-                .long("test")
-                .value_name("NAME")
-                .value_parser(NonEmptyStringValueParser::new()),
-        )
-        .arg(
-            Arg::new("examples")
-                .long("examples")
-                .action(ArgAction::SetTrue),
-        )
-        .args(["example", "bench"].map(|name| {
-            Arg::new(name)
-                .long(name)
-                .value_name("NAME")
-                .value_parser(NonEmptyStringValueParser::new())
-        }))
+        .args(target_selection_arguments())
         .arg(message_format_argument())
+}
+
+fn target_selection_arguments() -> [Arg; 8] {
+    let flag = |name: &'static str| Arg::new(name).long(name).action(ArgAction::SetTrue);
+    let named = |name: &'static str| {
+        Arg::new(name)
+            .long(name)
+            .value_name("NAME")
+            .value_parser(NonEmptyStringValueParser::new())
+    };
+    [
+        flag("all-targets"),
+        flag("lib"),
+        flag("bins"),
+        named("bin"),
+        named("test"),
+        flag("examples"),
+        named("example"),
+        named("bench"),
+    ]
+}
+
+fn target_selection(options: &ArgMatches) -> TargetSelection {
+    TargetSelection {
+        all_targets: options.get_flag("all-targets"),
+        lib: options.get_flag("lib"),
+        bins: options.get_flag("bins"),
+        bin: options.get_one::<String>("bin").cloned(),
+        test: options.get_one::<String>("test").cloned(),
+        examples: options.get_flag("examples"),
+        example: options.get_one::<String>("example").cloned(),
+        bench: options.get_one::<String>("bench").cloned(),
+    }
 }
 
 fn message_format_argument() -> Arg {
@@ -968,14 +1006,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             target_dir: options.get_one::<String>("target-dir").cloned(),
             target: options.get_one::<String>("target").cloned(),
             keep_going: options.get_flag("keep-going"),
-            all_targets: options.get_flag("all-targets"),
-            lib: options.get_flag("lib"),
-            bins: options.get_flag("bins"),
-            bin: options.get_one::<String>("bin").cloned(),
-            test: options.get_one::<String>("test").cloned(),
-            examples: options.get_flag("examples"),
-            example: options.get_one::<String>("example").cloned(),
-            bench: options.get_one::<String>("bench").cloned(),
+            targets: target_selection(options),
             message_format: message_format(options),
             jobs: options.get_one::<Jobs>("jobs").copied(),
         })),
@@ -1540,14 +1571,10 @@ mod tests {
                 target_dir: Some("/project/target/rust-analyzer".to_owned()),
                 target: Some("x86_64-unknown-motor".to_owned()),
                 keep_going: true,
-                all_targets: true,
-                lib: false,
-                bins: false,
-                bin: None,
-                test: None,
-                examples: false,
-                example: None,
-                bench: None,
+                targets: TargetSelection {
+                    all_targets: true,
+                    ..TargetSelection::default()
+                },
                 message_format: MessageFormat::Json,
                 jobs: None,
             })
@@ -1568,7 +1595,12 @@ mod tests {
         else {
             panic!("expected check");
         };
-        assert!(flycheck.all_targets && flycheck.lib && flycheck.bins && flycheck.examples);
+        assert!(
+            flycheck.targets.all_targets
+                && flycheck.targets.lib
+                && flycheck.targets.bins
+                && flycheck.targets.examples
+        );
         assert!(flycheck.release);
         assert_eq!(
             flycheck.message_format,
@@ -1585,8 +1617,8 @@ mod tests {
             else {
                 panic!("expected check");
             };
-            assert_eq!(options.example.as_deref(), Some("demo"));
-            assert_eq!(options.bench.as_deref(), Some("measure"));
+            assert_eq!(options.targets.example.as_deref(), Some("demo"));
+            assert_eq!(options.targets.bench.as_deref(), Some("measure"));
             for selector in ["--example", "--bench"] {
                 assert!(parse(&[command, selector]).is_err());
                 assert!(parse(&[command, selector, ""]).is_err());
@@ -1613,7 +1645,7 @@ mod tests {
         let Command::Check(options) = cli.command else {
             panic!("expected the shared check path")
         };
-        assert!(options.lib);
+        assert!(options.targets.lib);
         assert_eq!(
             options.clippy.unwrap(),
             [

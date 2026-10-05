@@ -63,7 +63,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
     let shared_tests = matches!(&cli.command, Command::Test(_));
     let shared_test_checks =
-        matches!(&cli.command, Command::Check(options) if options.selects_dev_targets());
+        matches!(&cli.command, Command::Check(options) if options.targets.selects_dev_targets());
     let shared = shared_tests
         || shared_test_checks
         || ordinary
@@ -109,7 +109,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         }
     }
     if let Command::Check(options) = &cli.command
-        && options.lib
+        && options.targets.lib
         && selected.iter().all(|member| member.library.is_none())
     {
         return Err(Error::failure(format!(
@@ -118,8 +118,8 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         )));
     }
     if let Command::Check(options) = &cli.command {
-        validate_member_binary_selection(&selected, options.bin.as_deref())?;
-        if let Some(name) = &options.test
+        validate_member_binary_selection(&selected, options.targets.bin.as_deref())?;
+        if let Some(name) = &options.targets.test
             && !manifest
                 .integration_tests
                 .iter()
@@ -229,7 +229,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let target_info = toolchain.target_info(physical_target.as_deref())?;
     if !shared
         && (matches!(&cli.command, Command::Test(_))
-            || matches!(&cli.command, Command::Check(options) if options.selects_dev_targets()))
+            || matches!(&cli.command, Command::Check(options) if options.targets.selects_dev_targets()))
     {
         for manifest in &selected {
             manifest.require_dev_targets_supported(&target_info)?;
@@ -1384,7 +1384,7 @@ fn build_inner(
                             .any(|target| target.kind == "bench" && target.test)
                 }));
     let check_integration = check.is_some_and(|(_, options)| {
-        (options.selects_tests() || options.bench.is_some())
+        (options.targets.selects_tests() || options.targets.bench.is_some())
             && build
                 .members
                 .unwrap_or_else(|| std::slice::from_ref(build.manifest))
@@ -1493,11 +1493,11 @@ fn build_inner(
         let members = build
             .members
             .unwrap_or_else(|| std::slice::from_ref(build.manifest));
-        if options.lib && members.iter().all(|member| member.library.is_none()) {
+        if options.targets.lib && members.iter().all(|member| member.library.is_none()) {
             return Err(Error::failure("selected package has no library target"));
         }
-        validate_member_binary_selection(members, options.bin.as_deref())?;
-        if let Some(name) = options.test.as_deref()
+        validate_member_binary_selection(members, options.targets.bin.as_deref())?;
+        if let Some(name) = options.targets.test.as_deref()
             && !members.iter().any(|member| {
                 member
                     .integration_tests
@@ -1508,24 +1508,24 @@ fn build_inner(
             return Err(unknown_integration_test(build.manifest, name));
         }
         let plan = selected_check_plan(&CheckTargetSelection {
-            normal: options.selects_library() || options.selects_binaries(),
-            binaries: options.selects_binaries(),
-            binary_name: if options.all_targets || options.bins {
+            normal: options.targets.selects_library() || options.targets.selects_binaries(),
+            binaries: options.targets.selects_binaries(),
+            binary_name: if options.targets.all_targets || options.targets.bins {
                 None
             } else {
-                options.bin.as_deref()
+                options.targets.bin.as_deref()
             },
-            harnesses: options.all_targets,
-            integrations: options.selects_tests(),
-            integration_name: if options.all_targets {
+            harnesses: options.targets.all_targets,
+            integrations: options.targets.selects_tests(),
+            integration_name: if options.targets.all_targets {
                 None
             } else {
-                options.test.as_deref()
+                options.targets.test.as_deref()
             },
-            examples: options.all_targets || options.examples,
-            example_name: options.example.as_deref(),
-            benches: options.all_targets,
-            bench_name: options.bench.as_deref(),
+            examples: options.targets.all_targets || options.targets.examples,
+            example_name: options.targets.example.as_deref(),
+            benches: options.targets.all_targets,
+            bench_name: options.targets.bench.as_deref(),
         })?;
         executor::execute(&plan, &manifests, &executor_options)?;
         if build.validation.is_strict() {
@@ -2931,35 +2931,6 @@ struct StagedArtifacts {
 
 struct TestOutput<'a> {
     bundle_layout: Option<&'a bundle::Layout>,
-}
-
-impl CheckOptions {
-    fn has_target_selector(&self) -> bool {
-        self.all_targets
-            || self.lib
-            || self.bins
-            || self.bin.is_some()
-            || self.test.is_some()
-            || self.examples
-            || self.example.is_some()
-            || self.bench.is_some()
-    }
-
-    fn selects_library(&self) -> bool {
-        self.all_targets || self.lib || !self.has_target_selector()
-    }
-
-    fn selects_binaries(&self) -> bool {
-        self.all_targets || self.bins || self.bin.is_some() || !self.has_target_selector()
-    }
-
-    fn selects_tests(&self) -> bool {
-        self.all_targets || self.test.is_some()
-    }
-
-    fn selects_dev_targets(&self) -> bool {
-        self.selects_tests() || self.examples || self.example.is_some() || self.bench.is_some()
-    }
 }
 
 fn binary_collision_warnings(

@@ -2727,6 +2727,15 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Check and Clippy now store target flags and names in a reusable CLI target
+selector with one argument definition and selection policy. This preserves
+existing command behavior while preparing the other compiler commands to share
+it. All 29 CLI parser tests, the existing check selection/environment/freshness
+contract, and strict Clippy pass in
+`/tmp/lorry-m8-common-check-selectors-current-parser.log`,
+`/tmp/lorry-m8-common-check-selectors-contract.log`, and
+`/tmp/lorry-m8-common-check-selectors-clippy.log`.
+
 The complete CLI parser group found one stale rejection for the newly supported
 `check --example NAME`. The failure is preserved in
 `/tmp/lorry-m8-common-check-selectors-parser.log`; the positive named-selector
