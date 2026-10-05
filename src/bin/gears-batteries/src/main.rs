@@ -25,10 +25,17 @@ fn run() -> Result<(), String> {
             serde_json::to_writer(&mut stdout, &response).map_err(|error| error.to_string())?;
             stdout.write_all(b"\n").map_err(|error| error.to_string())
         }
+        [role, ..] if matches!(role.as_str(), "pending" | "history" | "status") => {
+            gears_batteries::memory_cli::run(
+                &args,
+                std::io::stdin().lock(),
+                std::io::stdout().lock(),
+            )
+        }
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("usage: gears-batteries hook | tool NAME\nOptional workflows for Gears.");
+            println!("{}", gears_batteries::memory_options::USAGE);
             Ok(())
         }
-        _ => Err("usage: gears-batteries hook | tool NAME".into()),
+        _ => Err(gears_batteries::memory_options::USAGE.into()),
     }
 }

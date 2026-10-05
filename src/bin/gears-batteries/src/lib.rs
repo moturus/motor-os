@@ -12,6 +12,7 @@ pub mod file_write;
 pub mod instructions;
 pub mod journal;
 pub mod memory;
+pub mod memory_cli;
 pub mod memory_config;
 pub mod memory_context;
 pub mod memory_format;
