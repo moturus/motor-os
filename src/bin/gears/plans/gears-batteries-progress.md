@@ -11,8 +11,9 @@ place. Phase 5.1–5.6 are implemented. The real-binary workflow passes on
 Linux and Motor OS, and the updated release developer-image gate passes.
 The user reports that native OpenRouter use works and has requested
 continuation, clearing the phase 5 decision point. A local-model result has
-not been reported. Phase 6 is underway; the sysbox track and phases 7–12
-are not implemented.
+not been reported. Phase 6.1–6.4 memory storage, admission, prompt handling
+and user commands are implemented. Phase 6.5 skills awaits a frontmatter
+parser decision; the sysbox track and phases 7–12 are not implemented.
 
 The phase 3 manual checklist is not marked complete. Automated host tests
 cover the runtime and both UIs; native gates cover shipped tools, literal
@@ -71,8 +72,8 @@ grandchild on Linux and Motor OS.
 
 These policies prevent accidents; they do not confine tools. Native atomic
 replacement preserves the caller's access rather than every role's metadata.
-Checks provide development evidence, not user acceptance. Memory, skills,
-`/accept`, reviews, workers, scheduling and gateways remain later work.
+Checks provide development evidence, not user acceptance. Skills, `/accept`,
+reviews, workers, scheduling and gateways remain later work.
 
 The portable workflow uses the actual CLI, shipped manifests and shared
 Gears runtime with a scripted provider. It reads a deliberately broken Rust
@@ -80,6 +81,46 @@ crate, searches source and sessions, writes a literal filename, patches the
 assertion and compiles it. It verifies the saved check, approval details and
 turn journal, restores earlier tasks on a fork, then proves a model can get
 only three missing-check reminders. No provider or Internet request is made.
+It also postpones a model's memory proposal, then exercises memory commands
+and prompt transitions in a separate isolated workspace on both systems.
+
+## Memory through phase 6.4
+
+- Versioned entry files distinguish user, observed and inferred claims,
+  with session/entry sources, scope, date and optional applicability.
+  User-wide character limits include metadata. Invalid optional files are
+  reported and skipped independently.
+- The `memory` hook tool stages add/replace/remove proposals by content hash.
+  Whole-file changes are refused; exact duplicates are ignored. Interactive
+  questions display the proposal and other pending counts. Approval, denial
+  and postponement are delivered to the model; unattended runs leave pending
+  intact without asking.
+- Approval validates the captured entry before logging a decision, then
+  atomically replaces the memory file and removes pending. Changed or removed
+  entries fail before logging. Write failures stop the operation. The agreed
+  single-writer order has no transaction or automatic recovery across files.
+- New sessions and compaction snapshot approved memory. Additions do not
+  change the current session's prefix. Resume and fork retain frozen entries
+  while reconciling corrections and removals. Running branches get one note
+  for each change, preserving their original prefix; resumed prefixes omit
+  removed material. This cannot erase past text from model history.
+- Imported or hand-edited workspace memory requires local approval of the
+  exact file hash. Initialization displays it to the user while excluding it
+  from the model prompt. Entry approval cannot incidentally admit other
+  unreviewed contents of that file.
+- `pending` shows before/after entries, bounded source excerpts and sessions
+  whose snapshots contain the old entry. Unavailable evidence is identified;
+  snapshot membership does not prove a provider request used it. Closed input
+  postpones; `--list` makes no decisions. Explicit approve/deny/postpone by
+  complete hash also works for imported workspace files. `history` streams
+  bounded decision pages; `status` reports pending and workspace approval,
+  with later review/eval features explicitly unimplemented.
+
+The sample hook now subscribes to `answer` and `context`. Users updating an
+existing installation must copy the updated sample or add both events.
+See the [batteries README](../../gears-batteries/README.md) for command syntax,
+file format, limits and failure behavior. Approval admits future use and
+does not certify truth or usefulness.
 
 ## Recent defects and their evidence
 
@@ -211,15 +252,35 @@ The atomic lock-publication race remains recorded separately in
 `docs/plans/future-work.md`, as requested. Do not hide diagnostic failures
 with retries, longer timeouts or weaker assertions.
 
+Phase 6.1–6.4 patches pass the batteries host component gate, formatting and
+host/Motor Clippy with warnings denied. Real-binary regressions cover all
+admission answers, unattended runs, stale entry approvals, decision pages,
+workspace hashes, and running/resumed prompt behavior. They run transitively
+in `full-test.sh` through the existing batteries gate. The latest debug host
+gate is `/tmp/gears-batteries-phase6-portable-gate.log`; final release evidence
+is `/tmp/gears-batteries-phase6-release-gate.log`. The two sample event-list
+changes also passed the Gears component gate.
+
+The native release build passes
+(`/tmp/gears-batteries-phase6-portable-motor-build.log`). The focused native
+component gate passes with uploaded current binaries, including the extended
+memory workflow and updated sibling-binary/config startup
+(`/tmp/gears-batteries-phase6-native-gate-fixed.log`). The initial native
+setup tried to upload into read-only `/devtools/bin` and failed before tests
+(`/tmp/gears-batteries-phase6-native-gate.log`). The corrected harness uses
+the gate's existing binary overrides in a user temporary directory. QEMU
+snapshot mode keeps the base image unchanged. These results do not claim a
+rebuilt developer-image or full developer-image gate for phase 6.
+
 ## Next steps
 
-Continue phase 6 memory and skills in small patches. The first foundation
-shares the durable journal writer with decision history and adds a bounded
-reader that ignores only an incomplete final line, reports corrupt completed
-records and leaves history unchanged. The batteries component gate passes
-(`/tmp/gears-batteries-phase6-journal-gate.log`), including its real-binary
-workflow; host/Motor Clippy with warnings denied and formatting pass. The
-new regressions run transitively in `full-test.sh` through that gate.
+Continue phase 6.5 skills in small patches after choosing its parser.
+Conventional YAML frontmatter supports existing agentskills.io skills and
+requires a pure Rust parser dependency (recommended). JSON frontmatter is a
+valid YAML subset supported by existing `serde_json`, but existing YAML
+headers would need conversion. This decision is awaiting user guidance under
+[root AGENTS.md](../../../../AGENTS.md): “Stop if any non-obvious decision is
+required and ask for guidance.” No new parser dependency has been added.
 
 Automated mock tests establish behavior, not real-model usefulness. Keep the
 outstanding native interactive checklist visible; do not mark it complete

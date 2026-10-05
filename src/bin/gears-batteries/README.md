@@ -51,7 +51,8 @@ The release developer-image gate exercises the installed binary and rebuilds
 the packaged source with Lorry. The portable workflow fixture uses a scripted
 provider to drive real file tools, a Rust
 compiler check, task branching and the bounded missing-check reminder.
-It also verifies saved approval details and the mechanical turn journal.
+It also verifies saved approval details, the mechanical turn journal, pending
+memory, frozen prompts, removal notes and imported workspace admission.
 The host and native workflow tests make no provider or Internet requests.
 
 Declare one check at the workspace root in `.gears/batteries.toml`:
@@ -80,8 +81,8 @@ establishes evidence. Later calls to tools that may write make it stale.
 After workspace work, a missing, failed or stale check gets at most three
 `before_stop` reminders per turn. Review, worker and job runs are excluded.
 
-The batteries hook registers `memory` alongside `todo`. Memory prompt
-snapshots and the user commands are the next phase 6 patches. `batteries/USER.md`, `batteries/MEMORY.md` and workspace
+The batteries hook registers `memory` alongside `todo`.
+`batteries/USER.md`, `batteries/MEMORY.md` and workspace
 `.gears/MEMORY.md` use `# Gears memory v1` followed by entries. Each entry
 starts with `§ ` and a one-line JSON header containing `id`, `kind`
 (`user`, `observed`, `inferred`), `scope`, `source` (session and entry ids),
@@ -110,4 +111,56 @@ defaults; `memory_chars` applies separately to global and workspace memory.
 One-shot runs leave it pending. The calling entry is recorded along with
 any cited source ids; the kind is a provenance claim for the user to review.
 The user's answer is sent back to the model. Copy the updated sample config,
-or add `answer` to the batteries hook's event list, to receive questions.
+or add `answer` and `context` to the batteries hook's event list, to receive
+questions and memory correction notes.
+
+
+New sessions and compaction include approved memory in their saved prompt
+snapshot. Additions approved during a session appear at the next new session
+or compaction. Resume, fork and provider changes keep the frozen entries,
+while replacing or removing entries that have changed since the snapshot.
+A running branch receives one context note for each correction or removal;
+its original system prefix stays unchanged. Past text remains in history.
+Current user and project instructions take precedence over memory, and
+approval does not establish that an entry is true or useful.
+
+Workspace `.gears/MEMORY.md` is used only when its exact content hash has a
+local approval in `batteries/changes.jsonl`. Cloned or hand-edited contents
+are shown to the user at initialization and excluded from the model prompt
+until approved. A changed file requires another approval. USER and global
+memory are local user files; valid hand edits are read directly.
+
+Review postponed changes from the workspace root:
+
+```sh
+gears-batteries pending
+gears-batteries pending --list
+gears-batteries pending --approve FULL_CONTENT_HASH
+gears-batteries history --offset 0 --limit 20
+gears-batteries status
+```
+
+`pending` shows the full before/after entry, its cited evidence (up to 512
+characters per message), unavailable sources, and saved sessions whose
+snapshots contain the old entry. Snapshot membership does not prove that a
+model used it. Each item asks for `approve`, `deny` or `postpone`; empty or
+closed input postpones. `--list` makes no decisions. Explicit `--deny ID`
+and `--postpone ID` are also available. The same command displays and admits
+imported workspace files by their complete content hash. Memory changes
+made by the tool always edit individual entries.
+
+All three commands accept `--workspace PATH` and `--root PATH`; defaults are
+the current directory and the Gears directory. Global pending changes and
+the selected workspace's changes are included. History is oldest first,
+with pages of 1–100 decisions and `next_offset` for the next page. Status
+reports pending counts and workspace approval; reviews and evals are marked
+unimplemented until their later phases.
+
+Approval validates the captured entry against the current file before
+writing any decision. It then appends the decision, replaces the memory
+file atomically, and removes pending. Denial appends its decision and removes
+pending; postponement changes nothing. A write failure stops the operation.
+A crash can leave a logged approval unapplied or an applied change still
+pending. There is no automatic replay or transaction across these files.
+As specified by the plan, standalone commands assume one writer; run them
+when Gears is idle. Skills and their admission remain phase 6.5 work.
