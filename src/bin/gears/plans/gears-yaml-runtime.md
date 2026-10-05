@@ -134,7 +134,7 @@ pushed before the managed
 SDK build, which requires a declared commit reachable from the published
 source ref. Compiled SDK binaries are built locally, not published.
 
-### Rollout sequence after approval
+### Rollout sequence
 
 1. Completed by the user: bump and commit the in-tree moto-rt version to
    0.17.7 (`1cf8bb9d`), then publish it with the approved `strlen` fix.
@@ -148,10 +148,17 @@ source ref. Compiled SDK binaries are built locally, not published.
 5. Validate the batteries native release build, all three debug and three
    release main-image full gates, and `src/tests/full-test-dev.sh --release`.
 
-The external-fork and SDK actions remain proposed. The temporary package
-and native checks below establish that the fix works, while native
-skills validation with the installed SDK remains incomplete until this
-dependency selection is updated and the installed-image gate passes.
+The user requested continuation with this rollout on 2026-10-05. Before
+editing, the external fork's
+[AGENTS.md](/home/posk/motor-dev/toolchain-src/rust/AGENTS.md:85) requires:
+"Do not make any LLM-generated repository change unless the user has named,
+in this conversation, another person who agreed in advance to review it."
+The reviewer's name has been requested and is pending. The fork also
+requires confirmation of personal review of the final committed diff before
+pushing. No external source or SDK selection has changed. Temporary native
+checks establish that the fix works; installed-build validation remains
+incomplete until this dependency selection is updated and the developer-image
+gate passes.
 
 ## Published runtime verification
 

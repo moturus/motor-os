@@ -56,6 +56,15 @@ memory, frozen prompts, removal notes, imported workspace admission, and
 approved skill loading, notes corrections and noncausal check observations.
 The host and native workflow tests make no provider or Internet requests.
 
+Use `/accept` to accept the current task's result. It takes no arguments,
+saves your signal in the session and replies "Task accepted." The session
+stays open, and the signal survives resume and follows the session branch.
+The command makes no model request, requires no check or repository, and
+does not schedule a review. Ordinary conversation does not count as this
+explicit signal. Copy the updated sample configuration or add `command`
+to your batteries hook's event list to enable the command. `/help` lists it
+when the hook is loaded.
+
 Declare one check at the workspace root in `.gears/batteries.toml`:
 
 ```toml

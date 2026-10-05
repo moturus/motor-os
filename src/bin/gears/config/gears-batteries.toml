@@ -20,7 +20,7 @@ plain_http_allowlist = ["127.0.0.1"]
 name = "batteries"
 command = ["gears-batteries", "hook"]
 events = ["initialize", "permission", "tool_execute", "tool_result",
-          "turn_start", "entry", "before_stop", "turn_end", "answer", "context"]
+          "turn_start", "entry", "before_stop", "turn_end", "answer", "context", "command"]
 timeout_seconds = 30
 max_output_bytes = 1048576
 

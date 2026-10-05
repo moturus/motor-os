@@ -1,5 +1,6 @@
 //! Optional coding workflows using Gears' command-hook protocol.
 
+pub mod acceptance;
 pub mod check;
 pub mod check_approval;
 pub mod check_config;
@@ -102,6 +103,9 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
 }
 
 pub fn hook(mut event: Event) -> Result<Value, String> {
+    if event.event == "command" {
+        return acceptance::execute(&event);
+    }
     if event.event == "tool_result" {
         let mut response = provenance::transform(&event).unwrap_or_else(
             |error| json!({"notice": format!("output provenance unavailable: {error}")}),
@@ -280,6 +284,7 @@ pub fn initialize_at(event: &Event, root: &gears::state::StateRoot) -> Value {
 }
 
 fn with_tools(mut response: Value) -> Value {
+    response["commands"] = json!([acceptance::specification()]);
     response["tools"] = json!([
         todo::specification(),
         memory_tool::specification(),

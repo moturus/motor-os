@@ -1,7 +1,7 @@
 # Gears batteries: design and implementation plan
 
-Status: implementation through phase 6.5; native skills pass with the fixed
-runtime. Installed-build validation awaits the SDK update. Sysbox step S1
+Status: implementation through phase 7; native skills and `/accept` pass
+with the fixed runtime. Installed-build validation awaits the SDK update. Sysbox step S1
 is complete and core-gated; design revised 2026-10-05. See the
 [implementation record](gears-batteries-progress.md) for completed patches
 and validation still outstanding. Two questions wait

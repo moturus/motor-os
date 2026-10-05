@@ -14,12 +14,14 @@ continuation, clearing the phase 5 decision point. A local-model result has
 not been reported. Phase 6.1–6.4 memory storage, admission, prompt handling
 and user commands are implemented. Phase 6.5 skills is implemented and passes
 the host gates and a native workflow linked to the fixed in-tree runtime.
-Its installed build still needs the SDK rollout described below.
+Phase 7's explicit `/accept` command is implemented and passes the same
+host and native component gates. Installed builds still need the SDK
+rollout described below.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
 test-only correction is committed and validated. Steps S2–S6 and phases
-7–12 are not implemented.
+8–12 are not implemented.
 
 The phase 3 manual checklist is not marked complete. Automated host tests
 cover the runtime and both UIs; native gates cover shipped tools, literal
@@ -450,8 +452,35 @@ The separate acceptance CLI, UI hint, acceptance file and repository
 fingerprint proposal remain superseded. There is no Gix binary or library
 decision to make for acceptance. `/accept` does not schedule a review;
 optional reviews retain compaction and explicit `/review` triggers.
-The simplified command is planned, not implemented yet.
+The command is implemented through the existing hook command and context
+entry mechanisms. No new state file or session format is needed. Its saved
+entry keeps the user's signal with the active branch's session history.
 See [the acceptance decision](gears-acceptance-vcs.md).
+
+### Phase 7 validation
+
+The portable real-hook workflow verifies command registration, explicit
+acceptance rather than natural-language inference, rejection of arguments,
+saved entry ids, resume, branch isolation and repeated acceptance. Its
+scripted provider sees only the ordinary conversation request; commands
+make no further requests, preserve hook state and do not run the deliberately
+failing workspace check. Debug and release batteries gates pass, as does
+the Gears host gate. Host and Motor-target Clippy pass with warnings denied.
+Logs: `/tmp/gears-accept-host-{debug,release}-final.log`,
+`/tmp/gears-accept-gears-host-debug.log` and
+`/tmp/gears-accept-clippy-{host,motor}-final.log`.
+
+Native release builds and the existing batteries VM workflow pass using a
+temporary source archive linked to the approved local runtime with `libc`
+enabled. Uploaded sibling binaries and the updated sample config also pass
+startup, `/help`, `/accept` and continuation through `/session`. The initial
+extra CLI assertion wrongly treated the normal `gears:` notice prefix as
+an error; the corrected assertion requires the exact sole success notice.
+The original log is `/tmp/gears-accept-native-gate.log`; final logs are
+`/tmp/gears-accept-native-build.log` and
+`/tmp/gears-accept-native-gate-validated.log`. This component validation
+does not update the installed SDK or replace the pending packaged-source
+developer-image gate.
 
 ## Next steps
 
@@ -463,8 +492,12 @@ export are verified in [the runtime record](gears-yaml-runtime.md#published-runt
 Select the fixed runtime in the SDK, then finish native skills validation.
 The in-tree runtime gap is fixed and core-tested; rebuilding
 the current SDK tuple alone will not update std's locked dependency.
-Then implement the small `/accept` command in phase 7 and continue to
-phase 8. Acceptance needs no repository inspection.
+The user requested continuation with the SDK rollout. The external Rust
+fork's [AGENTS.md](/home/posk/motor-dev/toolchain-src/rust/AGENTS.md:85)
+requires another reviewer to be named before any repository edit. That
+name has been requested; the fork and SDK remain unchanged while awaiting
+it. Phase 7 is complete at the component level. Phase 8 needs the discussion
+of question 7 before implementation.
 
 The optional Hermes import has not been performed. Automated mock tests
 establish behavior, not real-model usefulness. Keep the outstanding native

@@ -1,7 +1,8 @@
 # Simple explicit task acceptance
 
-Status: decided by the user on 2026-10-05. Keep `/accept` as an unambiguous
-signal, with the repository fingerprint proposal superseded.
+Status: implemented on 2026-10-05 following the user's decision. Keep
+`/accept` as an unambiguous signal; the repository fingerprint proposal is
+superseded.
 
 ## User workflow
 
@@ -25,11 +26,12 @@ evidence; optional reviews retain compaction and explicit `/review` triggers.
 
 ## Effect on the plan
 
-Phase 7 implements this small hook command and verifies that its signal is
-saved and available on resume. It is planned, not implemented yet.
+Phase 7 implements this command using an existing hook context entry. Its
+host and native workflow tests verify persistence, resume, branching and
+the absence of model requests or checks. Installed-image validation still
+awaits the SDK update described in [the runtime record](gears-yaml-runtime.md).
 The proposed Gix snapshot command and shared repository library are no longer
-needed for acceptance. Continue with phase 7 after the remaining phase 6
-validation.
+needed for acceptance.
 
 This workflow follows the user's product decision. It is not a mechanism
 established by the reviewed papers or Hermes, and it does not claim that
