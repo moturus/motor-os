@@ -3770,7 +3770,53 @@ Original evidence: `/tmp/lorry-m9-native-acceptance/ripgrep.test.err` and
 The focused Cargo contract and strict Clippy passed in
 `/tmp/lorry-m9-dev-macro-{workspace-contract,clippy}.log`.
 
-Three acceptance issues remain under discussion rather than being treated as
+Native Lorry was rebuilt from `869e03fe`; the original external-path reproducer
+now compiles its macro and binary harness. Native locked vendoring and ripgrep's
+release build passed again. The first upload failed because the prior executable
+was read-only; staging under a fresh versioned filename preserves that sealed
+file. Evidence: `/tmp/lorry-m9-dev-macro-native-build.log`,
+`/tmp/lorry-m9-dev-macro-diagnosis/lorry.fixed.{out,err}`, and
+`/tmp/lorry-m9-native-acceptance/config-upload.readonly-binary-failure.log`.
+
+The native workspace test proceeded past macro planning, then exhausted the
+developer image's 4 GiB data partition while linking harnesses. The failed image
+and `/tmp/lorry-m9-native-acceptance/ripgrep.fixed-dev-macro.test.{out,err}` are
+preserved. A read-only standard-Rust inventory on an 8 GiB image copy measured
+2.11 GB of acceptance files, 983 MB of shared cache, and 627 MB of installed
+Rust/LLVM files, before filesystem metadata/allocation overhead. No assertion
+or timeout was changed. Inventory evidence is
+`/tmp/lorry-m9-native-acceptance/disk-{top,artifact}-usage.{out,err}`.
+
+With enough disk space, the unchanged full workspace test fails on ripgrep's
+integration helper: `cfg(not(windows))` selects `std::os::unix::fs::symlink`
+on Motor. A direct pinned-rustc Motor probe produces the same missing-API error.
+Evidence: `/tmp/lorry-m9-native-acceptance/ripgrep.enough-space.test.{out,err}`
+and `unix-symlink-probe.err` in that directory. The dependent integration cases
+have not been disabled or counted as passing.
+
+Independent library diagnostics exposed two small test-only platform mistakes.
+Globset chose Windows path expectations on every non-Unix target; grep-cli's
+hostname test unwrapped success even on its explicitly unsupported platforms.
+Per the root test-only-fix exception, isolated checkout
+`/tmp/lorry-m9-ripgrep-test-port` commits the corrections as `28313db`; original
+external checkouts remain unchanged. The changed files are
+`crates/globset/src/{glob.rs,pathutil.rs}` and `crates/cli/src/hostname.rs`.
+All assertions remain active for their applicable platform. Formatting passed;
+Linux passed 290 globset and 22 CLI tests, Motor passed 290 globset and 21 CLI
+tests. Evidence: `/tmp/lorry-m9-ripgrep-test-port-host-both.{out,err}` and
+`/tmp/lorry-m9-native-acceptance/ripgrep.platform-tests-fixed.test.{out,err}`.
+The isolated commit is also exported as `/tmp/lorry-m9-ripgrep-platform-tests.patch`.
+
+The library diagnostic then stops at ignore's
+`incremental::tests::leading_dot_slash_impacts_matching` (175 passed, one failed).
+Its non-Unix `pathutil::strip_prefix` uses component-normalizing
+`Path::strip_prefix`, while the Unix implementation preserves literal bytes.
+Stripping the root from a path ending in `/./foo` therefore loses the `./`
+before anchored matching on Motor. This is product behavior outside Lorry;
+the failing assertion is retained pending discussion of a scoped ripgrep port.
+The library-only diagnostic does not replace the required workspace acceptance.
+
+Four acceptance issues remain under discussion rather than being treated as
 passing cases. Native sed's locked uucore 0.12.0 script emits a watch directive
 for the consumer's workspace `Cargo.lock`, found by walking `OUT_DIR` ancestors.
 Cargo accepts that directive; Lorry's registry-script watch-root policy rejects

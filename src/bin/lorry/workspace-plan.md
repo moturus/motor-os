@@ -203,6 +203,19 @@ The common compile-time check pass from milestone 9 is implemented and has
 paired native/Motor Cargo coverage for scripts, macros, and skipped ordinary
 sources. Editor integration and native project acceptance remain outstanding.
 
+Milestone 9's synthetic editor cases pass on both Linux and Motor, including
+custom features and target directories. The complete Lorry gate passed in
+1,154 seconds. Real-project acceptance subsequently found and fixed Cargo's
+legacy dependency-default spelling and dev-only procedural-macro host selection.
+Focused Cargo comparisons and strict Clippy passed for both fixes. Ripgrep's
+native release build passes; its full workspace tests require external test
+and path ports. Helix is blocked by its locked cc dependency's native platform
+guard, and sed needs a decision about tracking the workspace lock file from a
+registry script. The actual `src/sys` editor acceptance also needs a decision
+about testing generated code and save checks in separate analyzer views.
+Those diagnoses and preserved failures are in the details file. Milestones
+8 and 9 remain open, including the mixed-platform bundle decision.
+
 ## Goal
 
 Make Lorry build, check, and test Cargo workspaces on Linux and on Motor.
@@ -603,9 +616,9 @@ there must be named before it is made.
 - Prove that unchanged builds skip build-script processes without skipping
   input or policy validation. Test editor-generated code with nondefault
   features and a custom target directory.
-- Run focused contracts while developing, and `tests/test-all.sh` for
-  every code patch, within its 30-minute budget. Markdown-only changes
-  need no test.
+- Run focused contracts for individual patches, and `tests/test-all.sh` for
+  milestone gates, within its 30-minute budget. Markdown-only changes need
+  no test.
 - Run `src/tests/full-test-dev.sh --release` for changes to native editor
   behavior and for native acceptance. Changes outside Lorry follow the
   repository's gates for their scope. The native Clippy driver needs the
