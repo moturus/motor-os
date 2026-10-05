@@ -2727,6 +2727,16 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Trusted C++ tool configuration now accepts `stdlib`, projecting target-qualified
+`CXXSTDLIB` only for the granted C++ compiler. Omission retains cc-rs's default;
+an empty value omits its runtime library, matching the pinned cc-rs implementation.
+Other tool roles reject the setting, and values must be strings containing
+portable library-name characters. Caller grants continue to reject controlled
+native-tool variables. Configuration typing/role checks, empty/default/named
+projection cases, existing C++ grant tests, and strict Clippy pass in
+`/tmp/lorry-m8-cxx-stdlib-complete-unit.log` and
+`/tmp/lorry-m8-cxx-stdlib-clippy.log`. The script/compiler contract follows.
+
 The native-tool model now has an explicit `cxx-compiler` role, configured and
 granted separately from the C compiler. It projects target-qualified `CXX` and
 `CXXFLAGS`, compiler resource/sysroot reads, and scoped source remapping only

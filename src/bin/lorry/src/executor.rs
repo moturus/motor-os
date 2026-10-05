@@ -1438,6 +1438,7 @@ mod tests {
         let native_tools = BTreeMap::from([(
             (target.triple.clone(), NativeToolRole::CCompiler),
             NativeTool {
+                cpp_stdlib: None,
                 program: Some(PathBuf::from("/bin/true")),
                 prefix_args: Vec::new(),
                 flags: Vec::new(),

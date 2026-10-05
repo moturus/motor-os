@@ -140,6 +140,7 @@ pub enum NativeToolRole {
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NativeTool {
+    pub cpp_stdlib: Option<String>,
     pub program: Option<PathBuf>,
     pub prefix_args: Vec<String>,
     pub flags: Vec<String>,
@@ -812,12 +813,35 @@ fn merge_native_tools(path: &Path, document: &Document, config: &mut Config) -> 
                 document,
                 table,
                 &format!("native-tools.{target}.{role_name}"),
-                &["program", "prefix-args", "flags"],
+                &["program", "prefix-args", "flags", "stdlib"],
             )?;
             let tool = config
                 .native_tools
                 .entry((target.to_owned(), role))
                 .or_default();
+            if let Some(item) = table.get("stdlib") {
+                let name = format!("native-tools.{target}.{role_name}.stdlib");
+                if role != NativeToolRole::CxxCompiler {
+                    return Err(Error::at(
+                        path,
+                        document.line_of_item(item),
+                        format!("`{name}` is only supported for cxx-compiler"),
+                        "configure the C++ standard library on the C++ compiler role",
+                    ));
+                }
+                let library = require_string(path, document, item, &name)?;
+                if library.bytes().any(|byte| {
+                    !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'+' | b'-' | b'.')
+                }) {
+                    return Err(Error::at(
+                        path,
+                        document.line_of_item(item),
+                        format!("`{name}` must be a library name or an empty string"),
+                        "use an empty string to omit the C++ standard library",
+                    ));
+                }
+                tool.cpp_stdlib = Some(library);
+            }
             if let Some(item) = table.get("program") {
                 tool.program = Some(absolute_path(
                     path,
@@ -2462,6 +2486,39 @@ native-tools = ["cxx-compiler"]
             config.policy.rules["grammar"].native_tools,
             BTreeSet::from([NativeToolRole::CxxCompiler])
         );
+    }
+
+    #[test]
+    fn cxx_standard_library_configuration_is_typed_and_role_specific() {
+        let temp = TempDir::new();
+        let path = temp.0.join("lorry.toml");
+        for role in ["c-compiler", "cxx-compiler", "archiver"] {
+            for value in [
+                "\"\"",
+                "\"c++\"",
+                "\"stdc++\"",
+                "\"a b\"",
+                "\"../lib\"",
+                "true",
+                "0",
+            ] {
+                fs::write(&path, format!("config-version = 1\n[native-tools.\"x86_64-unknown-motor\".{role}]\nstdlib = {value}\n")).unwrap();
+                let mut config = Config::default();
+                let parsed = merge_lorry_file(&path, LayerKind::Local, &mut config);
+                if role == "cxx-compiler" && ["\"\"", "\"c++\"", "\"stdc++\""].contains(&value) {
+                    parsed.unwrap();
+                    assert_eq!(
+                        config.native_tools
+                            [&("x86_64-unknown-motor".into(), NativeToolRole::CxxCompiler)]
+                            .cpp_stdlib
+                            .as_deref(),
+                        Some(value.trim_matches('"'))
+                    );
+                } else {
+                    assert!(parsed.is_err(), "{role}: {value}");
+                }
+            }
+        }
     }
 
     #[test]

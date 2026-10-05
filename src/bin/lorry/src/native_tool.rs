@@ -49,6 +49,13 @@ pub fn project(
             format!("{program_variable}_{suffix}"),
             command_value(program.as_os_str(), &tool.prefix_args),
         );
+        if *role == NativeToolRole::CxxCompiler
+            && let Some(library) = &tool.cpp_stdlib
+        {
+            projection
+                .environment
+                .insert(format!("CXXSTDLIB_{suffix}"), library.into());
+        }
         let mut flags = tool.flags.iter().map(OsString::from).collect::<Vec<_>>();
         if matches!(
             role,
@@ -220,11 +227,13 @@ mod tests {
     fn projects_only_granted_target_specific_cc_variables() {
         let target = "x86_64-unknown.motor";
         let compiler = NativeTool {
+            cpp_stdlib: None,
             program: Some(executable()),
             prefix_args: vec!["clang".to_owned()],
             flags: vec!["--target=x86_64-unknown-motor".to_owned()],
         };
         let archiver = NativeTool {
+            cpp_stdlib: None,
             program: Some(executable()),
             prefix_args: vec!["ar".to_owned()],
             flags: Vec::new(),
@@ -274,6 +283,7 @@ mod tests {
         let configured = BTreeMap::from([(
             ("test-target".to_owned(), NativeToolRole::Archiver),
             NativeTool {
+                cpp_stdlib: None,
                 program: Some(std::env::temp_dir().join("lorry-missing-native-tool")),
                 prefix_args: Vec::new(),
                 flags: Vec::new(),
@@ -287,6 +297,7 @@ mod tests {
     fn projects_cxx_only_with_its_explicit_grant() {
         let target = "x86_64-unknown-motor";
         let compiler = NativeTool {
+            cpp_stdlib: None,
             program: Some(executable()),
             prefix_args: vec!["clang++".into()],
             flags: vec!["--target=x86_64-unknown-motor".into()],
@@ -337,6 +348,38 @@ mod tests {
     }
 
     #[test]
+    fn projects_trusted_cxx_standard_library_including_empty_values() {
+        let target = "x86_64-unknown-motor";
+        for library in [None, Some(""), Some("c++"), Some("stdc++")] {
+            let configured = BTreeMap::from([(
+                (target.into(), NativeToolRole::CxxCompiler),
+                NativeTool {
+                    program: Some(executable()),
+                    cpp_stdlib: library.map(str::to_owned),
+                    ..NativeTool::default()
+                },
+            )]);
+            let projected = project(
+                &configured,
+                &BTreeSet::from([NativeToolRole::CxxCompiler]),
+                target,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                projected.environment.get("CXXSTDLIB_x86_64_unknown_motor"),
+                library.map(OsString::from).as_ref()
+            );
+            assert!(
+                project(&configured, &BTreeSet::new(), target, None)
+                    .unwrap()
+                    .environment
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn exposes_only_the_granted_compiler_resources_and_sysroot() {
         let root =
             std::env::temp_dir().join(format!("lorry-native-sysroot-{}", std::process::id()));
@@ -347,6 +390,7 @@ mod tests {
             let configured = BTreeMap::from([(
                 (target.to_owned(), role),
                 NativeTool {
+                    cpp_stdlib: None,
                     program: Some(executable()),
                     prefix_args: Vec::new(),
                     flags: vec![format!("--sysroot={}", root.display())],
@@ -373,6 +417,7 @@ mod tests {
             (
                 (target.to_owned(), NativeToolRole::CCompiler),
                 NativeTool {
+                    cpp_stdlib: None,
                     program: Some(executable.clone()),
                     prefix_args: Vec::new(),
                     flags: vec!["-O2".to_owned()],
@@ -381,6 +426,7 @@ mod tests {
             (
                 (target.to_owned(), NativeToolRole::CxxCompiler),
                 NativeTool {
+                    cpp_stdlib: None,
                     program: Some(executable.clone()),
                     prefix_args: Vec::new(),
                     flags: vec!["-O2".to_owned()],
@@ -389,6 +435,7 @@ mod tests {
             (
                 (target.to_owned(), NativeToolRole::Archiver),
                 NativeTool {
+                    cpp_stdlib: None,
                     program: Some(executable),
                     prefix_args: Vec::new(),
                     flags: vec!["crs".to_owned()],

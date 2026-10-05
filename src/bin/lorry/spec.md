@@ -1564,7 +1564,11 @@ present, and exposes each absolute existing directory named by an exact
 resource roots; an invalid configured sysroot fails before the build script
 runs. Neither root is exposed without the corresponding compiler grant. The C++ role
 projects target-qualified `CXX` and `CXXFLAGS`, and receives the same scoped
-source-path remapping as the C compiler.
+source-path remapping as the C compiler. Its optional `stdlib` setting projects
+`CXXSTDLIB_<target>`; an empty string tells cc-rs to omit its C++ runtime library,
+and omission preserves cc-rs's target default. Named libraries use portable
+ASCII library names. This setting is rejected on other tool roles and cannot
+come from caller-variable grants.
 Undeclared helpers must be denied. Linux acceptance must include a native tool
 that exists in target configuration but is absent from the package grant: it
 receives neither an environment entry nor execute permission. This
