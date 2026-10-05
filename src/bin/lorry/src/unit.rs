@@ -573,6 +573,41 @@ pub(crate) fn workspace_compiler_targets(
     options: &PlanOptions<'_>,
     mode: UnitMode,
 ) -> Result<UnitGraph> {
+    if mode == UnitMode::CheckTest {
+        let mut graph = workspace_compiler_targets(
+            resolution,
+            manifests,
+            selected,
+            targets,
+            options,
+            UnitMode::Test,
+        )?;
+        let checked = |mut key: UnitKey| {
+            if key.mode == UnitMode::Test {
+                key.mode = UnitMode::CheckTest;
+            } else if key.kind == UnitKind::Library
+                && key.compile_kind == CompileKind::Target
+                && manifests[&key.package].editable
+            {
+                key.mode = UnitMode::Check;
+            }
+            key
+        };
+        let roots = graph
+            .units
+            .keys()
+            .filter(|key| key.mode == UnitMode::Test && selected.contains(&key.package))
+            .cloned()
+            .map(checked)
+            .collect();
+        for unit in graph.units.values_mut() {
+            unit.dependencies
+                .retain(|edge| edge.kind != UnitEdgeKind::ArtifactDependency);
+        }
+        graph = graph.rekey(checked)?;
+        retain_unit_roots(&mut graph, roots)?;
+        return Ok(graph);
+    }
     let harness_mode = if mode == UnitMode::Check {
         UnitMode::CheckTest
     } else {

@@ -60,22 +60,30 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         cli.manifest_path.as_deref().map(Path::new),
         &cli.selection,
     )?;
-    let (release, testing) = match &cli.command {
-        Command::Build(options) => (options.release, false),
-        Command::Check(options) => (options.release, false),
-        Command::Run(options) => (options.build.release, false),
-        Command::Test(options) => (options.build.release, true),
+    let (release, testing, requested_profile) = match &cli.command {
+        Command::Build(options) => (options.release, false, options.profile.as_deref()),
+        Command::Check(options) => (options.release, false, options.profile.as_deref()),
+        Command::Run(options) => (
+            options.build.release,
+            false,
+            options.build.profile.as_deref(),
+        ),
+        Command::Test(options) => (
+            options.build.release,
+            true,
+            options.build.profile.as_deref(),
+        ),
         _ => unreachable!("non-build command passed to engine"),
     };
     let profile = crate::manifest::profiles::SelectedProfile::load(
         &workspace.root,
-        if release {
+        requested_profile.unwrap_or(if release {
             "release"
         } else if testing {
             "test"
         } else {
             "dev"
-        },
+        }),
     )?;
     for member in &mut selected {
         profile.apply(member);
@@ -96,7 +104,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         matches!(&cli.command, Command::Run(options) if !options.build.targets.example.is_empty());
     let shared_tests = matches!(&cli.command, Command::Test(_));
     let shared_auxiliary_builds = matches!(&cli.command, Command::Build(options) if options.targets.has_target_selector() && options.targets.single_binary().is_none());
-    let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.targets.selects_dev_targets() || options.targets.bin.len() > 1);
+    let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.targets.selects_dev_targets() || options.targets.bin.len() > 1 || options.profile.as_deref() == Some("test"));
     let shared = shared_tests
         || run_example
         || shared_auxiliary_builds
@@ -256,7 +264,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         );
     }
 
-    let (release, command_target, validation) = match &cli.command {
+    let (_, command_target, validation) = match &cli.command {
         Command::Build(options) => (
             options.release,
             options.target.as_deref(),
@@ -279,7 +287,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         ),
         _ => unreachable!("non-build command passed to engine"),
     };
-    let release = profile.release || release;
+    let release = profile.release;
     for manifest in &selected {
         manifest.require_profile(release, matches!(cli.command, Command::Test(_)))?;
     }
@@ -472,7 +480,15 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     {
         crate::trace::event("accepted fresh root profile after dependency admission");
         crate::check_message::replay(&artifacts.messages, cli.message_format(), color)?;
-        report_finished(release, cli.verbosity, validation, &artifacts)?;
+        report_finished(
+            manifest
+                .profile_name
+                .as_deref()
+                .unwrap_or(if release { "release" } else { "dev" }),
+            cli.verbosity,
+            validation,
+            &artifacts,
+        )?;
         report_build_completion(cli, reported)?;
         return match &cli.command {
             Command::Build(_) => Ok(0),
@@ -1409,7 +1425,11 @@ fn build_inner(
                 &options,
                 &selected_packages,
                 targets,
-                crate::unit::UnitMode::Check,
+                if build.manifest.profile_name.as_deref() == Some("test") {
+                    crate::unit::UnitMode::CheckTest
+                } else {
+                    crate::unit::UnitMode::Check
+                },
             )
         } else {
             prepared.selected_check_plan(
@@ -2084,7 +2104,16 @@ fn build_inner(
 }
 
 fn finish_build(build: &Build<'_>, artifacts: &BuildArtifacts) -> Result<()> {
-    report_finished(build.release, build.verbosity, build.validation, artifacts)
+    report_finished(
+        build
+            .manifest
+            .profile_name
+            .as_deref()
+            .unwrap_or(if build.release { "release" } else { "dev" }),
+        build.verbosity,
+        build.validation,
+        artifacts,
+    )
 }
 
 fn runtime_library_paths(
@@ -2162,16 +2191,13 @@ fn runtime_library_paths(
 }
 
 fn report_finished(
-    release: bool,
+    profile: &str,
     verbosity: Verbosity,
     validation: ValidationMode,
     artifacts: &BuildArtifacts,
 ) -> Result<()> {
     if verbosity != Verbosity::Quiet {
-        eprintln!(
-            "Finished `{}` profile",
-            if release { "release" } else { "dev" }
-        );
+        eprintln!("Finished `{profile}` profile");
     }
     if verbosity == Verbosity::Verbose && validation.is_strict() {
         eprintln!(

@@ -28,6 +28,8 @@ cat >"$WORK/project/shared/Cargo.toml" <<'EOF'
 name = "shared"
 version = "1.0.0"
 edition = "2024"
+[lib]
+doctest = false
 [build-dependencies]
 builder = { path = "../builder" }
 EOF
@@ -36,6 +38,8 @@ cat >"$WORK/project/builder/Cargo.toml" <<'EOF'
 name = "builder"
 version = "1.0.0"
 edition = "2024"
+[lib]
+doctest = false
 EOF
 printf 'pub fn value() -> u32 { 42 }\n' >"$WORK/project/builder/src/lib.rs"
 cat >"$WORK/project/shared/build.rs" <<'EOF'
@@ -43,6 +47,7 @@ fn main() {
     let value = builder::value();
     std::fs::write(std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("generated.rs"), value.to_string()).unwrap();
     println!("cargo::rustc-env=BUILD_VALUE={value}");
+    println!("cargo::rustc-env=BUILD_PROFILE={}", std::env::var("PROFILE").unwrap());
 }
 EOF
 cat >"$WORK/project/lorry.toml" <<'EOF'
@@ -63,10 +68,36 @@ printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s
 cd "$WORK/project"
 cp "$WORK/manifest.toml" Cargo.toml
 "$LORRY_TEST_CARGO" generate-lockfile --offline
-for strip in default false none debuginfo symbols debug-limited debug-full debug-lines debug-off dev-abort dev-limited dev-full dev-off dev-settings release-settings; do
+for strip in default false none debuginfo symbols debug-limited debug-full debug-lines debug-off dev-abort dev-limited dev-full dev-off dev-settings release-settings named-opt named-dev named-test named-builtin-test; do
     cp "$WORK/manifest.toml" Cargo.toml
     mode=(--release)
-    if [ "$strip" = dev-settings ]; then
+    if [[ "$strip" == named-* ]]; then
+        mode=(--profile "${strip#named-}")
+        cat >>Cargo.toml <<'EOF'
+[profile.release]
+lto = "thin"
+[profile.opt]
+inherits = "release"
+opt-level = "s"
+codegen-units = 1
+strip = true
+[profile.friendly]
+inherits = "dev"
+debug = 1
+opt-level = 2
+[profile.developer]
+inherits = "friendly"
+EOF
+        if [ "$strip" = named-dev ]; then mode=(--profile developer); fi
+        if [ "$strip" = named-test ]; then mode=(--profile integration); fi
+        if [ "$strip" = named-builtin-test ]; then mode=(--profile test); fi
+        cat >>Cargo.toml <<'EOF'
+[profile.integration]
+inherits = "test"
+debug = false
+opt-level = 1
+EOF
+    elif [ "$strip" = dev-settings ]; then
         mode=()
         cat >>Cargo.toml <<'EOF'
 [profile.dev]
@@ -113,19 +144,41 @@ EOF
         target=()
         profile=release
         if [[ "$strip" == dev-* ]]; then profile=debug; fi
+        if [[ "$strip" == named-* ]]; then profile="${mode[1]}"; fi
+        if [ "$profile" = test ]; then profile=debug; fi
         if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); profile=x86_64-unknown-motor/$profile; fi
-        for command in build check; do
+        commands=(build check)
+        if [[ "$strip" == named-* ]]; then commands+=(test); fi
+        for command in "${commands[@]}"; do
+        execution=()
+        if [ "$command" = test ]; then execution=(--no-run); fi
         comparison=differential-script-clean-messages
         if [ "$command" = check ]; then comparison=differential-script-clean-check-messages; fi
-        env HOME="$WORK/home" "$LORRY" "$command" "${mode[@]}" --workspace -j1 "${target[@]}" \
+        env HOME="$WORK/home" "$LORRY" "$command" "${execution[@]}" "${mode[@]}" --workspace -j1 "${target[@]}" \
             --message-format=json >"$WORK/lorry-$strip-$platform.json"
-        "$LORRY_TEST_CARGO" "$command" "${mode[@]}" --workspace -j1 "${target[@]}" --offline \
+        "$LORRY_TEST_CARGO" "$command" "${execution[@]}" "${mode[@]}" --workspace -j1 "${target[@]}" --offline \
             --message-format=json >"$WORK/cargo-$strip-$platform.json"
         if [ "$command" = build ]; then cmp "target/$profile/app" "target/lorry/$profile/app"; fi
+        if [ "$command" = test ]; then
+            python3 - "$WORK/lorry-$strip-$platform.json" "$WORK/cargo-$strip-$platform.json" <<'PY'
+import json, pathlib, sys
+def harnesses(path):
+    return sorted(pathlib.Path(event['executable']).read_bytes() for line in open(path)
+                  for event in [json.loads(line)] if event['reason'] == 'compiler-artifact'
+                  and event['profile']['test'])
+lorry, cargo = map(harnesses, sys.argv[1:])
+assert lorry and lorry == cargo
+PY
+        fi
         "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" \
             --locked --offline -- "$comparison" \
             "$WORK/lorry-$strip-$platform.json" "$WORK/cargo-$strip-$platform.json"
         done
+        if [[ "$strip" == named-* ]] && [ "$platform" = native ]; then
+            for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
+                [ "$(env HOME="$WORK/home" "$builder" run --quiet "${mode[@]}" -p app --offline)" = 42 ]
+            done
+        fi
     done
 done
 [ "$(target/lorry/release/app)" = 42 ]

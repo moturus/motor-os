@@ -2727,6 +2727,33 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Build/check/clippy/run/test now accept --profile NAME and Cargo's release
+conflict and reserved/path-safe names. Selected compiler settings, output
+directories, and reported profile names are carried independently. Host
+outputs use the same named directory, and scripts receive PROFILE from the
+inherited dev/release root. Cargo's legacy check --profile test behavior uses
+the shared harness planner in metadata mode, preserving executable scripts and
+macros and dropping integration program-artifact edges. Custom profiles that
+inherit test keep ordinary Check mode.
+The paired named-profile contract covers chained release/dev/test inheritance,
+native/Motor build/check/test messages, binary/harness byte identity, custom
+directories, script PROFILE values, and native Run. The first comparison found
+an extra normal builder library in Cargo's test stream. Its doctest prerequisite
+is proven by `/tmp/lorry-m8-named-profile-doctest-graph.json`; doctests are outside
+scope, so the fixture disables them explicitly while retaining exact assertions.
+The original failure and fixture remain in
+`/tmp/lorry-m8-named-profile-first-contract.log` and
+`/tmp/lorry-release-profile-contract-tsVowS`.
+The first legacy-check build read profile from a shadowing PlanOptions variable;
+that compile failure is `/tmp/lorry-m8-named-profile-harness-build.log`. An
+incorrectly started subsequent contract used the old executable and reproduces
+the unimplemented legacy mode in
+`/tmp/lorry-m8-named-profile-scope-fixed-contract.log`. The corrected build reads
+the applied manifest profile name, then the full contract passes in
+`/tmp/lorry-m8-named-profile-current-contract.log`. Final parser and strict Clippy
+checks pass in `/tmp/lorry-m8-named-profile-final-parser.log` and
+`/tmp/lorry-m8-named-profile-clippy.log`.
+
 Active profiles now resolve inheritance iteratively from the workspace root,
 merging supported settings from dev/release roots and built-in test/bench
 defaults. Cycles, undefined parents, missing inherits, and active unsupported

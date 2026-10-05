@@ -19,6 +19,7 @@ pub(crate) const KEYS: &[&str] = &[
 ];
 
 pub(crate) struct SelectedProfile {
+    name: String,
     pub directory: String,
     pub release: bool,
     settings: ReleaseProfile,
@@ -33,13 +34,7 @@ impl SelectedProfile {
     }
 
     fn parse(path: &Path, document: &Document, name: &str) -> Result<Self> {
-        if name.is_empty()
-            || name
-                .chars()
-                .any(|ch| !ch.is_alphanumeric() && ch != '_' && ch != '-')
-        {
-            return Err(Error::failure(format!("invalid profile name `{name}`")));
-        }
+        validate_name(name)?;
         let profiles = document
             .root()
             .get("profile")
@@ -131,6 +126,7 @@ impl SelectedProfile {
             CargoDebugInfo::Full
         });
         Ok(Self {
+            name: name.to_owned(),
             directory: match name {
                 "dev" | "test" | "debug" => "debug",
                 "bench" => "release",
@@ -158,9 +154,52 @@ impl SelectedProfile {
         };
         manifest.release = profile.clone();
         manifest.profile_directory = Some(self.directory.clone());
+        manifest.profile_name = Some(self.name.clone());
         manifest.profile_errors.clear();
         manifest.warnings.extend(self.warnings.iter().cloned());
     }
+}
+
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|ch| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+    {
+        return Err(Error::failure(format!("invalid profile name `{name}`")));
+    }
+    let lower = name.to_lowercase();
+    if lower.starts_with("cargo")
+        || matches!(
+            lower.as_str(),
+            "build-override"
+                | "build"
+                | "check"
+                | "clean"
+                | "config"
+                | "fetch"
+                | "fix"
+                | "install"
+                | "metadata"
+                | "package"
+                | "publish"
+                | "report"
+                | "root"
+                | "run"
+                | "rust"
+                | "rustc"
+                | "rustdoc"
+                | "target"
+                | "tmp"
+                | "uninstall"
+                | "doc"
+        )
+    {
+        return Err(Error::failure(format!(
+            "profile `{name}` is reserved and not allowed to be explicitly specified"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

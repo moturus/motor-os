@@ -47,6 +47,7 @@ pub struct Manifest {
     pub dev: DevProfile,
     pub release: ReleaseProfile,
     pub profile_directory: Option<String>,
+    pub profile_name: Option<String>,
     profile_errors: BTreeMap<String, Error>,
     #[allow(dead_code)]
     pub resolver: Resolver,
@@ -786,6 +787,7 @@ impl Manifest {
             release,
             profile_errors,
             profile_directory: None,
+            profile_name: None,
             resolver,
             links,
             build_script,

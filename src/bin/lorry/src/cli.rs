@@ -77,6 +77,7 @@ pub enum RustcQueryKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildOptions {
     pub release: bool,
+    pub profile: Option<String>,
     pub keep_going: bool,
     pub target: Option<String>,
     pub target_dir: Option<String>,
@@ -143,6 +144,7 @@ pub enum MessageFormat {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckOptions {
     pub release: bool,
+    pub profile: Option<String>,
     pub clippy: Option<Vec<String>>,
     pub manifest_path: Option<String>,
     pub target_dir: Option<String>,
@@ -723,6 +725,7 @@ fn check_command(name: &'static str) -> ClapCommand {
         .arg(manifest_path_argument())
         .args(locked_offline_arguments())
         .arg(jobs_argument())
+        .arg(profile_argument())
         .arg(
             Arg::new("release")
                 .long("release")
@@ -753,6 +756,14 @@ fn check_command(name: &'static str) -> ClapCommand {
         )
         .args(target_selection_arguments())
         .arg(message_format_argument())
+}
+
+fn profile_argument() -> Arg {
+    Arg::new("profile")
+        .long("profile")
+        .value_name("NAME")
+        .conflicts_with("release")
+        .value_parser(NonEmptyStringValueParser::new())
 }
 
 fn target_selection_arguments() -> [Arg; 10] {
@@ -980,6 +991,7 @@ fn feature_selection_arguments() -> [Arg; 3] {
 
 fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
     let command = build_command(name)
+        .arg(profile_argument())
         .args(feature_selection_arguments())
         .arg(jobs_argument())
         .arg(
@@ -1106,6 +1118,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
         },
         Some((name @ ("check" | "clippy"), options)) => Ok(Command::Check(CheckOptions {
             release: options.get_flag("release"),
+            profile: options.get_one::<String>("profile").cloned(),
             clippy: (name == "clippy").then(|| {
                 let mut arguments = values(options, "arguments");
                 if options.get_flag("no-deps") {
@@ -1244,6 +1257,11 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
 fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOptions {
     BuildOptions {
         release: matches.get_flag("release"),
+        profile: matches
+            .try_get_one::<String>("profile")
+            .ok()
+            .flatten()
+            .cloned(),
         keep_going: matches
             .try_get_one::<bool>("keep-going")
             .ok()
@@ -1344,6 +1362,7 @@ mod tests {
             cli.command,
             Command::Build(BuildOptions {
                 release: true,
+                profile: None,
                 keep_going: false,
                 target: Some("x86_64-unknown-motor".to_owned()),
                 target_dir: None,
@@ -1472,6 +1491,7 @@ mod tests {
             Command::Clean(CleanOptions {
                 build: BuildOptions {
                     release: true,
+                    profile: None,
                     keep_going: false,
                     target: Some("x86_64-unknown-motor".to_owned()),
                     target_dir: Some("/tmp/editor-target".to_owned()),
@@ -1681,6 +1701,7 @@ mod tests {
             check.command,
             Command::Check(CheckOptions {
                 release: false,
+                profile: None,
                 clippy: None,
                 manifest_path: Some("/project/Cargo.toml".to_owned()),
                 target_dir: Some("/project/target/rust-analyzer".to_owned()),
@@ -1944,6 +1965,22 @@ mod tests {
                         .is_usage()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn compiler_commands_accept_profiles_with_release_conflicts() {
+        for command in ["build", "check", "clippy", "run", "test"] {
+            let cli = parse(&[command, "--profile", "custom"]).unwrap();
+            let profile = match cli.command {
+                Command::Build(options) => options.profile,
+                Command::Check(options) => options.profile,
+                Command::Run(options) => options.build.profile,
+                Command::Test(options) => options.build.profile,
+                _ => unreachable!(),
+            };
+            assert_eq!(profile.as_deref(), Some("custom"));
+            assert!(parse(&[command, "--profile", "custom", "--release"]).is_err());
         }
     }
 

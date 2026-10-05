@@ -620,6 +620,13 @@ Tests default to the `test` profile, which inherits `dev`; release tests use
 errors for cycles, missing parents, and unsupported active settings. Test/bench
 panic overrides are ignored with Cargo's warning. Inherited compiler settings
 and output-directory names are distinct: built-in test outputs remain in debug.
+Build/check/clippy/run/test accept `--profile NAME`, conflicting with `--release`.
+Custom build/run/test outputs publish beneath the named profile directory;
+dev/test map to debug and bench maps to release. Build-script PROFILE reflects
+the inherited dev/release root. Profile names follow Cargo's reserved-name and
+path-character rules.
+The legacy Cargo `check --profile test` form checks the selected library/binary
+harnesses; custom profiles inheriting test retain ordinary check target modes.
 
 ## Cargo configuration
 
