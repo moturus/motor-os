@@ -21,7 +21,7 @@ MOTOR_LINKER="$LORRY_MOTOR_LINKER"
 MOTOR_SYSROOT="$LORRY_MOTOR_SYSROOT"
 NATIVE_RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-proc-macro-contract-XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained failed macro fixture: $WORK" >&2; fi' EXIT
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 export HOME="$WORK/home"
 mkdir -p "$HOME/.config/lorry" "$WORK/project/src" \
@@ -135,11 +135,35 @@ printf '%s\n' \
     RUSTC="$NATIVE_RUSTC" "$LORRY" build
     [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 84 ]
     "$LORRY" +"$MOTOR_TOOLCHAIN" build --target "$MOTOR_TARGET"
+    for platform in native motor; do
+        target=()
+        if [ "$platform" = motor ]; then target=(--target "$MOTOR_TARGET"); fi
+        RUSTC="$NATIVE_RUSTC" "$LORRY" build "${target[@]}" --message-format=json \
+            >"$WORK/helper-$platform-lorry.json"
+        RUSTC="$NATIVE_RUSTC" "$LORRY_TEST_CARGO" build "${target[@]}" --locked --offline \
+            --target-dir "$WORK/cargo-target" --message-format=json \
+            >"$WORK/helper-$platform-cargo.json"
+        python3 - "$WORK/helper-$platform-lorry.json" "$WORK/helper-$platform-cargo.json" <<'PY'
+import json, pathlib, sys
+def helpers(path):
+    return sorted((json.dumps(event['profile'], sort_keys=True), event['features'],
+                   sorted(pathlib.Path(file).name for file in event['filenames']))
+                  for line in open(path) if line.startswith('{')
+                  for event in [json.loads(line)]
+                  if event['reason'] == 'compiler-artifact' and event['target']['name'] == 'macro_helper')
+lorry, cargo = map(helpers, sys.argv[1:])
+assert len(lorry) == len(cargo) == 2 and lorry == cargo, (lorry, cargo)
+PY
+    done
 )
 find "$WORK/project/target/lorry/debug/build/derive-answer" -type f \
     -name 'libderive_answer-*.so' | grep -q .
+# Native host tools omit debug information; explicit-target host tools retain it.
+# Cargo consequently publishes one more host helper when the target changes.
 [ "$(find "$WORK/project/target/lorry/debug/build/macro-helper" -type f \
-    -name 'libmacro_helper-*.rlib' | wc -l)" -eq 2 ]
+    -name 'libmacro_helper-*.rlib' | wc -l)" -eq 3 ]
+[ "$(find "$WORK/cargo-target/debug/build/macro-helper" -type f \
+    -name 'libmacro_helper-*.rlib' | wc -l)" -eq 3 ]
 if [ -d "$WORK/project/target/lorry/$MOTOR_TARGET/debug/build/derive-answer" ] &&
     find "$WORK/project/target/lorry/$MOTOR_TARGET/debug/build/derive-answer" \
         -type f -name 'libderive_answer-*.so' | grep -q .; then

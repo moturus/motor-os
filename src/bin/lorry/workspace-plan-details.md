@@ -3396,6 +3396,18 @@ tests retain their exact Cargo hashes and pass in
 `/tmp/lorry-m8-stage-one-inactive-release-identity-test.log`; strict Clippy
 passes in `/tmp/lorry-m8-stage-one-inactive-release-clippy.log`.
 
+The next milestone gate passed those tests and the expanded workspace contracts,
+then stopped after 456 seconds at the legacy macro driver's fixed archive count.
+`/tmp/lorry-m8-full-diagnosed-fixes-gate.log` preserves that failure. The traced
+assertion is in `/tmp/lorry-m8-proc-macro-gate-assertion-trace.log`, and fixture
+`/tmp/lorry-proc-macro-contract-2HUBQs` is retained. Paired compiler commands and
+JSON in `/tmp/lorry-m8-proc-macro-count-*` show both builders produce three host
+helper archives: native host tools omit debug information, while explicit-target
+host tools retain it. The driver now compares each build's exact helper profiles,
+features, and artifact names with Cargo, retains failed fixtures, and asserts
+both builders' final counts. It passes in
+`/tmp/lorry-m8-proc-macro-cargo-profile-count-contract.log`.
+
 Active profile settings now include Cargo's shared dev/release compiler keys,
 named inheritance, default test settings, and named-profile output directories.
 Build, check, test, run, and clean accept `--profile`; the legacy
