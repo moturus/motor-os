@@ -3643,6 +3643,30 @@ code.
 
 ### Discovery and check on save
 
+The new Lorry-owned editor contract runs the pinned rust-analyzer over LSP with
+an ordinary two-member workspace. Before changing public member discovery, it
+proved the actual metadata/build-script/flycheck sequence for the proposed
+complete default override and a project override with `app/selected`, disabled
+default features, and a custom target directory. Generated-code definitions and
+hover values agree with the selected features, Cargo artifact filenames stay
+under the configured target directory, and saving publishes compiler diagnostics.
+The complete override's arguments and working directory are recorded and checked.
+This standalone test package reuses the existing framed LSP helper library and
+has its own pinned lock; its initial patch is larger because it introduces that
+complete independent test boundary. The contract and strict Clippy pass in
+`/tmp/lorry-m9-editor-workspace-{feature-scope-contract,clippy}.log`.
+
+The first fixture assertion incorrectly counted vendoring's `.vendor.lock` as
+compiler output; the retained directory contains only that expected lock.
+The corrected assertion requires exactly that entry and separately verifies
+every compiler artifact's configured directory. Evidence is in
+`/tmp/lorry-m9-editor-workspace-first-contract.log` and fixture
+`/tmp/lorry-editor-workspace-SghhbB`. The custom case then correctly rejected
+its default-feature admission when requesting `app/selected`; direct command
+diagnosis is `/tmp/lorry-m9-editor-custom-diagnosis.{json,err}`. The fixture now
+reviews the actual custom features before starting the editor. These are test
+setup corrections, with no product behavior changed or failures ignored.
+
 Package discovery, full-workspace metadata, and the check/build-script
 passes must become compatible together. Run the actual rust-analyzer
 command sequence against a fixture before changing public member-manifest
