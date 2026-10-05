@@ -35,6 +35,7 @@ pub mod skill_catalog;
 pub mod skill_config;
 pub mod skill_context;
 pub mod skill_format;
+pub mod skill_manage;
 pub mod skill_pending;
 pub mod skill_snapshot;
 pub mod skill_store;
@@ -148,6 +149,9 @@ pub fn hook(mut event: Event) -> Result<Value, String> {
         return if event.payload["tool_call"]["name"] == "memory" {
             paths::ToolContext::for_event(&event)
                 .and_then(|context| memory_tool::execute(&event, &context))
+        } else if event.payload["tool_call"]["name"] == "skill_manage" {
+            paths::ToolContext::for_event(&event)
+                .and_then(|context| skill_manage::execute(&event, &context))
         } else if event.payload["tool_call"]["name"] == "skill_view" {
             paths::ToolContext::for_event(&event)
                 .and_then(|context| skill_view::execute(&event, &context))
@@ -273,7 +277,8 @@ fn with_tools(mut response: Value) -> Value {
     response["tools"] = json!([
         todo::specification(),
         memory_tool::specification(),
-        skill_view::specification()
+        skill_view::specification(),
+        skill_manage::specification()
     ]);
     response
 }
