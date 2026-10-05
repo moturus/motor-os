@@ -115,11 +115,6 @@ mod platform {
         _padding: u32,
     }
 
-    struct Prepared {
-        ruleset: OwnedFd,
-        _paths: Vec<File>,
-    }
-
     impl Sandbox for PlatformSandbox {
         fn apply(&self, command: &mut Command, policy: &Policy) -> Result<()> {
             if policy.network != NetworkAccess::Deny {
@@ -142,14 +137,14 @@ mod platform {
             }
 
             let initial_program = canonical_file(Path::new(command.get_program()), "build script")?;
-            let prepared = prepare(policy, &initial_program)?;
+            let ruleset = prepare(policy, &initial_program)?;
             // SAFETY: this closure calls only async-signal-safe syscalls, does
             // not allocate, and either installs the restrictions or makes the
             // child fail before exec.
             unsafe {
                 command.pre_exec(move || {
                     install_no_new_privileges()?;
-                    restrict_self(prepared.ruleset.as_raw_fd())?;
+                    restrict_self(ruleset.as_raw_fd())?;
                     install_network_filter()?;
                     Ok(())
                 });
@@ -158,7 +153,7 @@ mod platform {
         }
     }
 
-    fn prepare(policy: &Policy, initial_program: &Path) -> Result<Prepared> {
+    fn prepare(policy: &Policy, initial_program: &Path) -> Result<OwnedFd> {
         let abi = unsafe {
             libc::syscall(
                 libc::SYS_landlock_create_ruleset,
@@ -192,26 +187,17 @@ mod platform {
         }
         // SAFETY: a successful syscall returned a new owned descriptor.
         let ruleset = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-        let mut paths = Vec::new();
-
         for path in &policy.read_only {
-            add_path_rule(&ruleset, path, READ_ACCESS, "read-only", &mut paths)?;
+            add_path_rule(&ruleset, path, READ_ACCESS, "read-only")?;
         }
         for path in &policy.writable {
-            add_path_rule(
-                &ruleset,
-                path,
-                READ_ACCESS | WRITE_ACCESS,
-                "writable",
-                &mut paths,
-            )?;
+            add_path_rule(&ruleset, path, READ_ACCESS | WRITE_ACCESS, "writable")?;
         }
         add_path_rule(
             &ruleset,
             initial_program,
             READ_ACCESS | ACCESS_EXECUTE,
             "initial executable",
-            &mut paths,
         )?;
         if let Some(interpreter) = elf_interpreter(initial_program)? {
             add_path_rule(
@@ -219,7 +205,6 @@ mod platform {
                 &interpreter,
                 READ_ACCESS | ACCESS_EXECUTE,
                 "ELF interpreter",
-                &mut paths,
             )?;
         }
         for executable in &policy.executables {
@@ -229,7 +214,6 @@ mod platform {
                 &path,
                 READ_ACCESS | ACCESS_EXECUTE,
                 "approved executable",
-                &mut paths,
             )?;
             if let Some(interpreter) = elf_interpreter(&path)? {
                 add_path_rule(
@@ -237,23 +221,13 @@ mod platform {
                     &interpreter,
                     READ_ACCESS | ACCESS_EXECUTE,
                     "ELF interpreter",
-                    &mut paths,
                 )?;
             }
         }
-        Ok(Prepared {
-            ruleset,
-            _paths: paths,
-        })
+        Ok(ruleset)
     }
 
-    fn add_path_rule(
-        ruleset: &OwnedFd,
-        path: &Path,
-        access: u64,
-        description: &str,
-        paths: &mut Vec<File>,
-    ) -> Result<()> {
+    fn add_path_rule(ruleset: &OwnedFd, path: &Path, access: u64, description: &str) -> Result<()> {
         let canonical = std::fs::canonicalize(path).map_err(|error| {
             Error::failure(format!(
                 "failed to canonicalize sandbox {description} path `{}`: {error}",
@@ -306,7 +280,9 @@ mod platform {
                 canonical.display()
             )));
         }
-        paths.push(file);
+        // Landlock retains the inode through the ruleset after add_rule;
+        // each path descriptor can close before preparing the next rule.
+        drop(file);
         Ok(())
     }
 
@@ -613,6 +589,50 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn linux_many_rules_fit_a_small_descriptor_limit() {
+        if std::env::var_os("LORRY_SANDBOX_MANY_RULES").is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "sandbox::tests::linux_many_rules_fit_a_small_descriptor_limit",
+                    "--nocapture",
+                ])
+                .env("LORRY_SANDBOX_MANY_RULES", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // Lower the limit only in this isolated process, leaving parallel
+        // tests unaffected. The policy has more paths than available handles.
+        let limit = libc::rlimit {
+            rlim_cur: 64,
+            rlim_max: 64,
+        };
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        let fixture = Fixture::new();
+        let mut policy = fixture.policy();
+        for index in 0..128 {
+            let path = fixture.source.join(format!("input-{index}"));
+            fs::write(&path, b"input").unwrap();
+            policy.read_only.push(path);
+        }
+        for action in ["read-source", "deny-source-write", "deny-outside-read"] {
+            let output = fixture.run(action, &policy);
+            assert!(
+                output.status.success(),
+                "{action}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 

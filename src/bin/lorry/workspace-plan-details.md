@@ -3872,6 +3872,26 @@ tempfile/rustix development dependency chain. Preserve
 `/tmp/lorry-m9-native-acceptance/sed.lock-watch.test.{out,err}`; no errno source
 has been changed and no test assertion was relaxed.
 
+### Linux sandbox descriptor lifetime
+
+The actual workspace's warm compile-time pass exposed a Lorry defect:
+concurrent scripts each kept a descriptor for every sandbox path while
+preparing their Landlock rulesets. The 321-package workspace reached the
+normal 1,024-descriptor limit. Preserve the failed helper run in
+`/tmp/lorry-m9-stable-editor-real-host-contract.log` and its invocation evidence
+under `/tmp/lorry-m9-real-editor-stable/generated`.
+
+Path descriptors now close after each successful `landlock_add_rule`; the
+ruleset retains the inode, as shown in the
+[kernel example](https://docs.kernel.org/userspace-api/landlock.html).
+The focused regression lowers only its isolated child's limit to 64 and
+prepares 128 additional path rules. It originally failed on input 55, in
+`/tmp/lorry-m9-sandbox-fd-original-regression.log`. All five sandbox tests now
+pass in `/tmp/lorry-m9-sandbox-fd-fixed-tests.log`, including read-only and
+outside-read denials. Strict Clippy and the host release build also pass in
+`/tmp/lorry-m9-sandbox-fd-{clippy,release-build}.log`. No limit or job count was
+increased.
+
 ### Actual native editor diagnosis
 
 Fetched native navigation and the expected admission denial passed. The
