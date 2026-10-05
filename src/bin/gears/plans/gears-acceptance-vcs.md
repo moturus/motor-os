@@ -4,6 +4,23 @@ Status: proposed; needs the user's choice before phase 7 implementation.
 This supplements [phase 7](gears-batteries.md), which records explicit user
 acceptance alongside the check state, commit and uncommitted-change hash.
 
+## Provenance and evidence limits
+
+The `/accept` command, completion reminder and commit/change fingerprint
+are Gears-specific design choices introduced while drafting this plan.
+No equivalent workflow with those repository fingerprints was identified
+in the reviewed papers or Hermes implementation. These choices have not
+been evaluated for effectiveness or user effort.
+
+The related research uses outcome feedback in other ways:
+[Reflexion](https://arxiv.org/html/2303.11366v4#S3) uses environment,
+heuristic or test-based evaluation; [ReasoningBank](https://arxiv.org/html/2509.25140v2#S3.SS2)
+uses an LLM judge to label trajectories before extracting memories.
+The reviewed [Hermes implementation](https://github.com/NousResearch/hermes-agent/blob/d0288be5b3330d2442e3907185b8e9d0958297bb/agent/background_review.py)
+triggers automatic reviews by activity counters. Those are precedents for
+using feedback or reviewing sessions, not evidence for this particular
+manual acceptance workflow or a requirement to add Gix fingerprinting.
+
 ## Why repository inspection is needed
 
 Phase 7 makes `/accept` a record that the user accepted a particular task

@@ -30,6 +30,10 @@ helpful, that unverified learning always hurts, or that a particular model
 size or number of confirming sessions is a reliable threshold. Results
 come from different tasks and budgets, and much of the literature has not
 been independently reproduced. Treat the learning loop as an experiment.
+The `/accept` command and repository fingerprint in phase 7 are
+Gears-specific design choices, not mechanisms established by that research
+or copied from Hermes. Their provenance and evidence limits are recorded
+in [the acceptance proposal](gears-acceptance-vcs.md#provenance-and-evidence-limits).
 
 [Earlier notes](gears-batteries-notes.md) retain investigation history,
 mock-provider prototypes and reproductions of the Gears defects fixed in

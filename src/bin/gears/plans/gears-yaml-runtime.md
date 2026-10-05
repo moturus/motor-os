@@ -2,7 +2,7 @@
 
 Status: the approved runtime export and native regression are implemented.
 The final patch passed the full core gate three times each in debug and
-release. The selected SDK still needs the published runtime update below.
+release. The selected SDK still needs to select published moto-rt 0.17.7.
 The skills implementation uses the user-authorized `yaml_serde` dependency. Its host
 debug and release gates pass, as do host and Motor-target Clippy.
 
@@ -100,19 +100,20 @@ rebuilding the current declared toolchain would reuse that published crate
 and would not pick up this change. This corrects the initial suggestion
 that a local runtime rebuild was sufficient.
 
-Updating std's copy requires releasing a runtime version containing the fix,
-updating the fork's library lock and the declared Rust revision/lock hash,
+The user has published the fixed runtime as 0.17.7. Updating std's copy now
+requires updating the fork's library lock and declared Rust revision/lock hash,
 and building/selecting the corresponding new toolchain tuple. Follow
 [the toolchain procedure](../../../../docs/toolchain.md#5-changing-the-toolchain).
-That release and fork update are separate from the approved in-tree fix;
-no toolchain or external dependency source has been changed.
+The fork update and SDK selection remain separate from the approved in-tree
+fix and completed publication; no toolchain or external fork source has
+been changed by this task.
 
 ### Exact proposed external Rust-fork change
 
 The external checkout is `/home/posk/motor-dev/toolchain-src/rust`, backed
 by `https://github.com/moturus/rust`. Its `library/std/Cargo.toml` already
 declares `moto-rt` version `0.17` with `rustc-dep-of-std`, which enables the
-runtime's `libc` exports. That declaration accepts the proposed 0.17.7
+runtime's `libc` exports. That declaration accepts the published 0.17.7
 release. The only planned external source edit is the moto-rt entry in
 `library/Cargo.lock`:
 
@@ -122,20 +123,22 @@ release. The only planned external source edit is the moto-rt entry in
 +version = "0.17.7"
  source = "registry+https://github.com/rust-lang/crates.io-index"
 -checksum = "f8e7200c0150f580541a80917e0ade7f91c0e76d2d9f81e3735ebdb7a3862bef"
-+checksum = "<checksum of the final published 0.17.7 package>"
++checksum = "0a1f77799833534c2aa19be58ab03aee6b60bc203d430ba43a65c97172e06d3f"
 ```
 
-The checksum above is a placeholder. Updating this lock entry selects the
-existing Motor OS runtime fix; it requires no Rust compiler, LLVM or std
-implementation changes. The external fork gets a new commit because the
-dependency selection changed. Its branch must be pushed before the managed
+The checksum above was verified against the published archive. Updating
+this lock entry selects the existing Motor OS runtime fix; it requires no
+Rust compiler, LLVM or std implementation changes. The external fork gets
+a new commit because the dependency selection changed. Its branch must be
+pushed before the managed
 SDK build, which requires a declared commit reachable from the published
 source ref. Compiled SDK binaries are built locally, not published.
 
 ### Rollout sequence after approval
 
-1. Bump and commit the in-tree moto-rt version to 0.17.7, verify the final
-   package, then publish it with the approved `strlen` fix.
+1. Completed by the user: bump and commit the in-tree moto-rt version to
+   0.17.7 (`1cf8bb9d`), then publish it with the approved `strlen` fix.
+   The published package is verified below.
 2. Update only the external fork's runtime lock entry with the published
    version and checksum, then commit and push that fork change.
 3. Update Motor OS `src/toolchain-versions.sh` with the new Rust revision,
@@ -145,27 +148,40 @@ source ref. Compiled SDK binaries are built locally, not published.
 5. Validate the batteries native release build, all three debug and three
    release main-image full gates, and `src/tests/full-test-dev.sh --release`.
 
-These publication and external-fork actions remain proposed. The temporary
-package and native checks below establish that the fix works, while native
+The external-fork and SDK actions remain proposed. The temporary package
+and native checks below establish that the fix works, while native
 skills validation with the installed SDK remains incomplete until this
 dependency selection is updated and the installed-image gate passes.
+
+## Published runtime verification
+
+On 2026-10-05, the user reported publication of moto-rt 0.17.7.
+[Registry metadata](https://crates.io/api/v1/crates/moto-rt/0.17.7) confirms
+the release is not yanked and was published at 21:23:52 UTC. The downloaded
+archive matches its published SHA-256:
+`0a1f77799833534c2aa19be58ab03aee6b60bc203d430ba43a65c97172e06d3f`.
+Its `src/libc.rs` includes the approved weak Rust `strlen` export, and its
+VCS metadata names commit `1cf8bb9ddc9d116b8db7012a120e818a7180177f`.
+The archive is `/tmp/gears-moto-rt-0.17.7-published.crate`; metadata is
+`/tmp/gears-moto-rt-0.17.7-registry.json`.
 
 ## Release candidate and native skills evidence
 
 A temporary archive of commit `8b55c381` packages moto-rt as candidate
 version 0.17.7. Comparing its Rust sources against the checksum-verified
-published 0.17.6 archive finds only the approved strlen addition. Public
-registry metadata checked on 2026-10-05 reports latest version 0.17.6 and
-no existing 0.17.7 release. Offline packaging and Motor-target verification
-with `libc` enabled pass in `/tmp/gears-runtime-release-package.log`.
+published 0.17.6 archive finds only the approved strlen addition. Before
+publication, registry metadata checked on 2026-10-05 reported latest
+version 0.17.6 and no existing 0.17.7 release. Offline packaging and
+Motor-target verification with `libc` enabled pass in
+`/tmp/gears-runtime-release-package.log`.
 
 Review artifact:
 [/tmp/gears-runtime-rollout.ibHHea/package-target/package/moto-rt-0.17.7.crate](/tmp/gears-runtime-rollout.ibHHea/package-target/package/moto-rt-0.17.7.crate).
 Its SHA-256 is
 `688432b20875428966db03ed67be13c5f1969538f4c8fa32eb65e04a3515eb7f`.
 This temporary package is a review artifact, not the final published checksum:
-the actual release must package the committed version change with its VCS
-metadata, then use the published checksum in the Rust library lock.
+the final release packages the committed version change with its VCS
+metadata. Use the verified published checksum above in the Rust library lock.
 
 The same temporary tree points Gears at the candidate with `libc` enabled.
 Native release builds of Gears, batteries and the portable workflow pass.
@@ -175,8 +191,8 @@ startup. Build and run logs are
 `/tmp/gears-skills-local-runtime-build.log` and
 `/tmp/gears-skills-local-runtime-native-gate.log`.
 
-No tracked dependency selection, installed SDK, registry publication or
-external source has changed. These checks validate the skills implementation
-on Motor OS with the fix, while the SDK rollout and installed-image gate
-remain outstanding. Explicit approval was requested for crate publication,
-the external Rust fork lock update and push, and the SDK rollout.
+These temporary checks changed no tracked dependency selection, installed
+SDK, registry publication or external source. The user has since completed
+publication, as recorded above. The checks validate the skills implementation
+on Motor OS with the fix; the external Rust fork lock update and push,
+SDK rollout and installed-image gate remain outstanding.

@@ -352,9 +352,10 @@ despite an explicit drop before await; its original output is preserved in
 `/tmp/gears-strlen-systest-clippy.log`.
 
 The selected toolchain embeds published moto-rt 0.17.6, not the local tree.
-Rebuilding it alone will not update that dependency. A runtime release,
-Rust library lock update and new toolchain tuple are separate follow-up work;
-no external source or installed toolchain has changed. This corrects the
+Rebuilding it alone will not update that dependency. The user has since
+published the fixed runtime as 0.17.7; the Rust library lock update and new
+toolchain tuple remain follow-up work. No external source or installed
+toolchain has changed. This corrects the
 initial suggestion of simply rebuilding the embedded runtime.
 The full release developer-image gate is not rerun while that link is known
 to fail. Installed-build phase 6.5 validation remains incomplete.
@@ -376,6 +377,8 @@ claim that the installed SDK or packaged-source build has been updated. The
 temporary dependency selection is diagnostic, not a shipping manifest edit.
 The runtime release candidate packages and verifies offline; publication and
 the external Rust fork/SDK rollout were requested separately for approval.
+The user has since completed publication of 0.17.7, and the published
+package's checksum and weak strlen export are verified.
 See [the runtime record](gears-yaml-runtime.md) for the reviewable artifact.
 
 ## Sysbox step S1 and its core gates
@@ -438,8 +441,10 @@ rollback. Formatting, diff checks and warnings-denied Clippy pass.
 Independent sysbox steps S2–S6 remain, starting with sort. The batteries
 track needs the SDK rollout and repository interface decision below.
 
-Release and select the fixed runtime in the SDK, then finish native skills
-validation. The in-tree runtime gap is fixed and core-tested; rebuilding
+The user has published moto-rt 0.17.7; its registry checksum and weak strlen
+export are verified in [the runtime record](gears-yaml-runtime.md#published-runtime-verification).
+Select the fixed runtime in the SDK, then finish native skills validation.
+The in-tree runtime gap is fixed and core-tested; rebuilding
 the current SDK tuple alone will not update std's locked dependency.
 Then continue phase 7 after choosing the repository evidence
 interface in [the acceptance proposal](gears-acceptance-vcs.md). Gix's current
@@ -447,6 +452,9 @@ human-readable reports do not identify complete commit/binary/untracked
 contents. The recommendation is a read-only versioned Gix command; sharing
 its repository library with batteries is an alternative. The user's choice
 is pending under root AGENTS.md's non-obvious-decision requirement.
+The `/accept` workflow and repository fingerprint are Gears-specific
+design proposals with no equivalent identified in the reviewed papers or
+Hermes implementation; they have not been evaluated for usefulness.
 
 The optional Hermes import has not been performed. Automated mock tests
 establish behavior, not real-model usefulness. Keep the outstanding native
