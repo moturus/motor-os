@@ -68,23 +68,25 @@ impl PreparedGraph {
         self.finish_plan(options, manifests, graph)
     }
 
-    pub(crate) fn workspace_check_targets(
+    pub(crate) fn workspace_compiler_targets(
         &self,
         options: &PlanOptions<'_>,
         selected: &[PackageKey],
         targets: &crate::cli::TargetSelection,
+        mode: crate::unit::UnitMode,
     ) -> Result<CompilationPlan> {
         let manifests = self
             .packages
             .iter()
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
-        let graph = crate::unit::workspace_check_targets(
+        let graph = crate::unit::workspace_compiler_targets(
             &self.resolution,
             &manifests,
             selected,
             targets,
             options,
+            mode,
         )?;
         self.finish_plan(options, manifests, graph)
     }

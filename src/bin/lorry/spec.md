@@ -1573,6 +1573,9 @@ Undeclared helpers must be denied. Linux acceptance must include a native tool
 that exists in target configuration but is absent from the package grant: it
 receives neither an environment entry nor execute permission. This
 distinguishes package admission from mere administrator configuration.
+The cc-rs member contract exercises Helix's C++ scanner pattern, generated Rust
+code, and linking. Native Linux and cross-Motor executables match Cargo bytes;
+JSON comparisons account for separate verified registry source locations.
 
 Motor runs build scripts without isolation and emits an explicit warning for
 every sandbox application. This is not a sandboxed mode and must not be

@@ -563,17 +563,23 @@ pub(crate) fn workspace_auxiliary_units(
     Ok(graph)
 }
 
-pub(crate) fn workspace_check_targets(
+pub(crate) fn workspace_compiler_targets(
     resolution: &Resolution,
     manifests: &BTreeMap<PackageKey, Manifest>,
     selected: &[PackageKey],
     targets: &crate::cli::TargetSelection,
     options: &PlanOptions<'_>,
+    mode: UnitMode,
 ) -> Result<UnitGraph> {
+    let harness_mode = if mode == UnitMode::Check {
+        UnitMode::CheckTest
+    } else {
+        UnitMode::Test
+    };
     let default = !targets.has_target_selector();
     let testing = targets.tests || targets.all_targets;
     let benching = targets.benches || targets.all_targets;
-    let mut graph = workspace_check_units(
+    let mut graph = workspace_target_units(
         resolution,
         manifests,
         selected,
@@ -592,6 +598,7 @@ pub(crate) fn workspace_check_targets(
             ..CheckTargetSelection::default()
         },
         options,
+        mode,
     )?;
     if targets.bins && !targets.selects_library() {
         let roots = graph
@@ -622,7 +629,7 @@ pub(crate) fn workspace_check_targets(
                 &AuxiliarySelection {
                     kind,
                     name: None,
-                    mode: UnitMode::CheckTest,
+                    mode: harness_mode,
                     tested,
                     benched,
                     test_profile: true,
@@ -656,7 +663,7 @@ pub(crate) fn workspace_check_targets(
                 _ => unreachable!(),
             }
             let mut part =
-                workspace_check_units(resolution, manifests, selected, &selection, options)?;
+                workspace_target_units(resolution, manifests, selected, &selection, options, mode)?;
             if kind == "bin" {
                 let roots = part
                     .units
@@ -684,12 +691,30 @@ pub(crate) fn workspace_check_units(
     selection: &CheckTargetSelection<'_>,
     options: &PlanOptions<'_>,
 ) -> Result<UnitGraph> {
+    workspace_target_units(
+        resolution,
+        manifests,
+        selected,
+        selection,
+        options,
+        UnitMode::Check,
+    )
+}
+
+fn workspace_target_units(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    selection: &CheckTargetSelection<'_>,
+    options: &PlanOptions<'_>,
+    mode: UnitMode,
+) -> Result<UnitGraph> {
     let mut graph = if selection.normal {
         workspace_units(
             resolution,
             manifests,
             selected,
-            true,
+            mode == UnitMode::Check,
             selection.binaries,
             selection.binary_name,
             options.release || options.dev_profile.opt_level != "0",
@@ -711,78 +736,94 @@ pub(crate) fn workspace_check_units(
             selection.integration_name,
             selection.harness_filter,
         )?;
-        for unit in tests.units.values_mut() {
-            unit.dependencies
-                .retain(|edge| edge.kind != UnitEdgeKind::ArtifactDependency);
-        }
-        let mut pending = tests
-            .units
-            .keys()
-            .filter(|key| {
-                key.mode == UnitMode::Test
-                    && if key.kind == UnitKind::IntegrationHarness {
-                        selection.integrations
-                    } else {
-                        selection.harnesses
-                    }
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut checked = BTreeMap::new();
-        let roots = pending
-            .iter()
-            .map(|key| UnitKey {
-                mode: UnitMode::CheckTest,
-                ..key.clone()
-            })
-            .collect::<Vec<_>>();
-        while let Some(key) = pending.pop() {
-            let mode = if key.mode == UnitMode::Test {
-                UnitMode::CheckTest
-            } else {
-                UnitMode::Check
-            };
-            let checked_key = UnitKey {
-                mode,
-                ..key.clone()
-            };
-            if checked.contains_key(&checked_key) {
-                continue;
+        if mode == UnitMode::Check {
+            for unit in tests.units.values_mut() {
+                unit.dependencies
+                    .retain(|edge| edge.kind != UnitEdgeKind::ArtifactDependency);
             }
-            let mut unit = tests.units[&key].clone();
-            unit.key = checked_key.clone();
-            unit.dependencies = unit
-                .dependencies
-                .into_iter()
-                .map(|mut edge| {
-                    if edge.kind == UnitEdgeKind::RustDependency
-                        && edge.unit.kind == UnitKind::Library
-                        && manifests[&edge.unit.package].editable
-                    {
-                        pending.push(edge.unit.clone());
-                        edge.unit.mode = UnitMode::Check;
-                    }
-                    edge
+            let mut pending = tests
+                .units
+                .keys()
+                .filter(|key| {
+                    key.mode == UnitMode::Test
+                        && if key.kind == UnitKind::IntegrationHarness {
+                            selection.integrations
+                        } else {
+                            selection.harnesses
+                        }
                 })
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut checked = BTreeMap::new();
+            let roots = pending
+                .iter()
+                .map(|key| UnitKey {
+                    mode: UnitMode::CheckTest,
+                    ..key.clone()
+                })
+                .collect::<Vec<_>>();
+            while let Some(key) = pending.pop() {
+                let mode = if key.mode == UnitMode::Test {
+                    UnitMode::CheckTest
+                } else {
+                    UnitMode::Check
+                };
+                let checked_key = UnitKey {
+                    mode,
+                    ..key.clone()
+                };
+                if checked.contains_key(&checked_key) {
+                    continue;
+                }
+                let mut unit = tests.units[&key].clone();
+                unit.key = checked_key.clone();
+                unit.dependencies = unit
+                    .dependencies
+                    .into_iter()
+                    .map(|mut edge| {
+                        if edge.kind == UnitEdgeKind::RustDependency
+                            && edge.unit.kind == UnitKind::Library
+                            && manifests[&edge.unit.package].editable
+                        {
+                            pending.push(edge.unit.clone());
+                            edge.unit.mode = UnitMode::Check;
+                        }
+                        edge
+                    })
+                    .collect();
+                checked.insert(checked_key, unit);
+            }
+            tests.units.extend(checked);
+            retain_unit_roots(&mut tests, roots)?;
+        } else {
+            let roots = tests
+                .units
+                .keys()
+                .filter(|key| {
+                    key.mode == UnitMode::Test
+                        && if key.kind == UnitKind::IntegrationHarness {
+                            selection.integrations
+                        } else {
+                            selection.harnesses
+                        }
+                })
+                .cloned()
                 .collect();
-            checked.insert(checked_key, unit);
+            retain_unit_roots(&mut tests, roots)?;
         }
-        tests.units.extend(checked);
-        retain_unit_roots(&mut tests, roots)?;
         graph.merge(tests)?;
     }
     for (enabled, name, kind, mode) in [
-        (
-            selection.examples,
-            selection.example_name,
-            "example",
-            UnitMode::Check,
-        ),
+        (selection.examples, selection.example_name, "example", mode),
         (
             selection.benches,
             selection.bench_name,
             "bench",
-            UnitMode::CheckTest,
+            if mode == UnitMode::Check {
+                UnitMode::CheckTest
+            } else {
+                UnitMode::Test
+            },
         ),
     ] {
         if enabled || name.is_some() {
@@ -3404,9 +3445,23 @@ mod tests {
             ("bench", "selected", "check", UnitMode::CheckTest),
             ("bench", "selected", "test", UnitMode::Test),
             ("default", "", "test", UnitMode::Test),
+            ("all", "", "build", UnitMode::Build),
+            ("all", "", "check", UnitMode::Check),
         ] {
             let graph = if kind == "default" {
                 workspace_test_units(&resolution, &manifests, &selected, &options, None)
+            } else if kind == "all" {
+                workspace_compiler_targets(
+                    &resolution,
+                    &manifests,
+                    &selected,
+                    &crate::cli::TargetSelection {
+                        all_targets: true,
+                        ..Default::default()
+                    },
+                    &options,
+                    mode,
+                )
             } else {
                 workspace_auxiliary_units(
                     &resolution,
@@ -3429,7 +3484,8 @@ mod tests {
                 .keys()
                 .filter(|key| {
                     key.package.name == "a"
-                        && (key.is_harness()
+                        && (kind == "all" && key.kind == UnitKind::Library
+                            || key.is_harness()
                             || matches!(key.kind, UnitKind::Example | UnitKind::Bench))
                 })
                 .cloned()
@@ -3448,7 +3504,9 @@ mod tests {
                     "a",
                 ])
                 .env("CARGO_NET_OFFLINE", "true");
-            if kind != "default" {
+            if kind == "all" {
+                cargo_command.arg("--all-targets");
+            } else if kind != "default" {
                 cargo_command.args([&format!("--{kind}"), name]);
             }
             let output = cargo_command.output().unwrap();

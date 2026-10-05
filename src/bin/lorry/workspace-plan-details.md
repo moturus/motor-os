@@ -2727,6 +2727,14 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+The common compiler-target planner now retains ordinary build harnesses and
+their program dependencies as well as the existing check graph projection.
+Build/check all-targets graphs agree with Cargo on units, edges, features, and
+settings for the auxiliary-target fixture with a legal dev-dependency cycle.
+Focused validation and strict Clippy pass in
+`/tmp/lorry-m8-shared-compiler-mode-first-oracle.log` and
+`/tmp/lorry-m8-shared-compiler-mode-clippy.log`. Public build selectors follow.
+
 The real cc-rs 1.2.29 member contract now covers Helix's C++ scanner pattern,
 generated Rust code, static archive linking, Linux sandbox denial without the
 C++ grant, and native/cross-Motor Cargo byte identity. Its JSON comparison

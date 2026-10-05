@@ -1248,7 +1248,12 @@ fn build_inner(
             rustflags: build.rustflags,
         };
         if build.members.is_some() {
-            prepared.workspace_check_targets(&options, &selected_packages, targets)
+            prepared.workspace_compiler_targets(
+                &options,
+                &selected_packages,
+                targets,
+                crate::unit::UnitMode::Check,
+            )
         } else {
             prepared.selected_check_plan(
                 &options,
