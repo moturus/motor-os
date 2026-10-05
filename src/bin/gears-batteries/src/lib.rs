@@ -14,6 +14,7 @@ pub mod journal;
 pub mod memory;
 pub mod memory_config;
 pub mod memory_format;
+pub mod memory_question;
 pub mod memory_tool;
 pub mod patch_match;
 pub mod paths;
@@ -84,9 +85,21 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
 
 pub fn hook(event: Event) -> Result<Value, String> {
     if event.event == "tool_result" {
-        return Ok(provenance::transform(&event).unwrap_or_else(
+        let mut response = provenance::transform(&event).unwrap_or_else(
             |error| json!({"notice": format!("output provenance unavailable: {error}")}),
-        ));
+        );
+        if event.payload["tool_call"]["name"] == "memory" {
+            merge_optional(
+                &mut response,
+                paths::ToolContext::for_event(&event)
+                    .and_then(|context| memory_question::after_result(&event, &context)),
+            );
+        }
+        return Ok(response);
+    }
+    if event.event == "answer" {
+        return paths::ToolContext::for_event(&event)
+            .and_then(|context| memory_question::answer(&event, &context));
     }
     if matches!(
         event.event.as_str(),
@@ -95,7 +108,12 @@ pub fn hook(event: Event) -> Result<Value, String> {
         return Ok(observe_features(event));
     }
     if event.event == "tool_execute" {
-        return todo::execute(&event);
+        return if event.payload["tool_call"]["name"] == "memory" {
+            paths::ToolContext::for_event(&event)
+                .and_then(|context| memory_tool::execute(&event, &context))
+        } else {
+            todo::execute(&event)
+        };
     }
     if event.event == "initialize" {
         let result = default_root().and_then(gears::state::StateRoot::new);
@@ -148,7 +166,7 @@ pub fn initialize_at(event: &Event, root: &gears::state::StateRoot) -> Value {
 }
 
 fn with_tools(mut response: Value) -> Value {
-    response["tools"] = json!([todo::specification()]);
+    response["tools"] = json!([todo::specification(), memory_tool::specification()]);
     response
 }
 
@@ -167,6 +185,22 @@ pub fn default_root() -> Result<PathBuf, String> {
     #[cfg(not(unix))]
     {
         Ok(PathBuf::from("/user/cfg/gears"))
+    }
+}
+
+fn merge_optional(response: &mut Value, feature: Result<Value, String>) {
+    let feature =
+        feature.unwrap_or_else(|error| json!({"notice": format!("memory unavailable: {error}")}));
+    for (name, value) in feature.as_object().unwrap() {
+        if name == "notice" && response.get("notice").is_some() {
+            response["notice"] = json!(format!(
+                "{}\n{}",
+                response["notice"].as_str().unwrap(),
+                value.as_str().unwrap()
+            ));
+        } else {
+            response[name] = value.clone();
+        }
     }
 }
 

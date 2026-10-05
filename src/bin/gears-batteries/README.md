@@ -80,8 +80,8 @@ establishes evidence. Later calls to tools that may write make it stale.
 After workspace work, a missing, failed or stale check gets at most three
 `before_stop` reminders per turn. Review, worker and job runs are excluded.
 
-Memory storage is being implemented in phase 6; the memory tool is not yet
-registered. `batteries/USER.md`, `batteries/MEMORY.md` and workspace
+The batteries hook registers `memory` alongside `todo`. Memory prompt
+snapshots and the user commands are the next phase 6 patches. `batteries/USER.md`, `batteries/MEMORY.md` and workspace
 `.gears/MEMORY.md` use `# Gears memory v1` followed by entries. Each entry
 starts with `§ ` and a one-line JSON header containing `id`, `kind`
 (`user`, `observed`, `inferred`), `scope`, `source` (session and entry ids),
@@ -102,3 +102,12 @@ memory_chars = 2200
 
 Each limit must be 1–65,536 characters. Missing settings use the shown
 defaults; `memory_chars` applies separately to global and workspace memory.
+
+`memory` accepts `action = list | add | replace | remove` and
+`target = user | global | workspace`. Add/replace take entry `text`, optional
+`kind`, `applies_to` and `source_entries`; replace/remove require an existing
+`id`. Every change is staged first and shown with approve/deny/postpone.
+One-shot runs leave it pending. The calling entry is recorded along with
+any cited source ids; the kind is a provenance claim for the user to review.
+The user's answer is sent back to the model. Copy the updated sample config,
+or add `answer` to the batteries hook's event list, to receive questions.
