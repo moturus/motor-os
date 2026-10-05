@@ -2727,6 +2727,16 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Integration tests and described example/benchmark targets now retain their
+benchmark booleans. Integration tests and examples default to false; benchmarks
+default to true. Explicit integration `bench` keys are accepted, and malformed
+booleans remain errors. An offline Cargo `check --benches --unit-graph` oracle
+compares the five roots implied by the retained flags, including a benchmark-only
+integration test and example. It and strict Clippy pass in
+`/tmp/lorry-m8-auxiliary-benchmark-flags-first-oracle.log` and
+`/tmp/lorry-m8-auxiliary-benchmark-flags-clippy.log`.
+Public plural selection follows in the next patch.
+
 Cargo's parser source distinguishes explicit targets sharing a source from
 inferred targets at that path. The first shared-source correction retained an
 inferred target that Cargo suppresses; the expanded offline metadata oracle

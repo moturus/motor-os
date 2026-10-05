@@ -22,6 +22,7 @@ pub(crate) struct DescribedTarget {
     pub required_features: Option<Vec<String>>,
     pub edition: Edition,
     pub test: bool,
+    pub bench: bool,
     pub doc: bool,
     pub harness: bool,
 }
@@ -82,6 +83,7 @@ pub(super) fn parse(
                 required_features: None,
                 edition,
                 test: false,
+                bench: kind == "bench",
                 doc: false,
                 harness: true,
             };
@@ -162,7 +164,7 @@ pub(super) fn parse(
                     source.display()
                 )));
             }
-            for flag in ["bench", "doctest", "doc-scrape-examples"] {
+            for flag in ["doctest", "doc-scrape-examples"] {
                 optional_bool(path, document, table, kind, flag)?;
             }
             let crate_types = optional_string_array(path, document, table, kind, "crate-type")?
@@ -203,6 +205,8 @@ pub(super) fn parse(
                     edition
                 },
                 test: optional_bool(path, document, table, kind, "test")?.unwrap_or(false),
+                bench: optional_bool(path, document, table, kind, "bench")?
+                    .unwrap_or(kind == "bench"),
                 doc: optional_bool(path, document, table, kind, "doc")?.unwrap_or(false),
                 harness: optional_bool(path, document, table, kind, "harness")?.unwrap_or(true),
             };

@@ -222,6 +222,7 @@ pub struct IntegrationTestTarget {
     pub path: PathBuf,
     pub required_features: Option<Vec<String>>,
     pub test: bool,
+    pub bench: bool,
     pub doc: bool,
     pub harness: bool,
 }
@@ -1790,7 +1791,13 @@ fn parse_integration_tests(
                 if mode == ManifestMode::Root
                     && !matches!(
                         key,
-                        "name" | "path" | "test" | "doc" | "harness" | "required-features"
+                        "name"
+                            | "path"
+                            | "test"
+                            | "bench"
+                            | "doc"
+                            | "harness"
+                            | "required-features"
                     )
                 {
                     return Err(unsupported_key(
@@ -1846,6 +1853,7 @@ fn parse_integration_tests(
                         "required-features",
                     )?,
                     test: optional_bool(path, document, table, "test", "test")?.unwrap_or(true),
+                    bench: optional_bool(path, document, table, "test", "bench")?.unwrap_or(false),
                     doc: optional_bool(path, document, table, "test", "doc")?.unwrap_or(false),
                     harness: optional_bool(path, document, table, "test", "harness")?
                         .unwrap_or(true),
@@ -1970,6 +1978,7 @@ fn discover_integration_tests(root: &Path) -> Result<Vec<IntegrationTestTarget>>
             path,
             required_features: None,
             test: true,
+            bench: false,
             doc: false,
             harness: true,
         });
@@ -4418,6 +4427,109 @@ members = ["ignored-member"]
 
         fs::write(root.join("tests/a_b.rs"), "").unwrap();
         assert!(Manifest::load(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auxiliary_benchmark_flags_match_cargo_roots() {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("lorry-benchmark-flags-{}-{id}", std::process::id()));
+        for directory in ["src", "tests", "examples", "benches"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for source in [
+            "src/lib.rs",
+            "src/main.rs",
+            "tests/selected.rs",
+            "tests/default.rs",
+            "examples/selected.rs",
+            "examples/default.rs",
+            "benches/selected.rs",
+            "benches/disabled.rs",
+        ] {
+            fs::write(root.join(source), "").unwrap();
+        }
+        let source = r#"[package]
+name = "flags"
+version = "1.0.0"
+edition = "2024"
+[[test]]
+name = "selected"
+test = false
+bench = true
+[[example]]
+name = "selected"
+bench = true
+[[bench]]
+name = "disabled"
+bench = false
+"#;
+        fs::write(root.join("Cargo.toml"), source).unwrap();
+        let manifest = Manifest::load_source_dependency(&root).unwrap();
+        let mut expected = vec![
+            ("lib".to_owned(), "flags".to_owned()),
+            ("bin".to_owned(), "flags".to_owned()),
+        ];
+        expected.extend(
+            manifest
+                .integration_tests
+                .iter()
+                .filter(|target| target.bench)
+                .map(|target| ("test".to_owned(), target.name.clone())),
+        );
+        expected.extend(
+            manifest
+                .described_targets
+                .iter()
+                .filter(|target| target.bench)
+                .map(|target| (target.kind.to_owned(), target.name.clone())),
+        );
+        expected.sort();
+        let output = std::process::Command::new(env!("CARGO"))
+            .args([
+                "-Z",
+                "unstable-options",
+                "check",
+                "--unit-graph",
+                "--offline",
+                "--benches",
+            ])
+            .env("CARGO_HOME", root.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let graph: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let mut actual = graph["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|index| {
+                let target = &graph["units"][index.as_u64().unwrap() as usize]["target"];
+                (
+                    target["kind"][0].as_str().unwrap().to_owned(),
+                    target["name"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        actual.sort();
+        assert_eq!(expected.len(), 5);
+        assert_eq!(expected, actual);
+        for kind in ["test", "example", "bench"] {
+            fs::write(root.join("Cargo.toml"), format!("{source}\n[[{kind}]]\nname = \"invalid\"\npath = \"src/main.rs\"\nbench = \"true\"\n")).unwrap();
+            assert!(
+                Manifest::load_source_dependency(&root)
+                    .unwrap_err()
+                    .render()
+                    .contains("must be a boolean")
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
