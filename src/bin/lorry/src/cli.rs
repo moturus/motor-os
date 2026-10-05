@@ -154,6 +154,8 @@ pub struct CheckOptions {
     pub bin: Option<String>,
     pub test: Option<String>,
     pub examples: bool,
+    pub example: Option<String>,
+    pub bench: Option<String>,
     pub message_format: MessageFormat,
     pub jobs: Option<Jobs>,
 }
@@ -649,6 +651,12 @@ fn check_command(name: &'static str) -> ClapCommand {
                 .long("examples")
                 .action(ArgAction::SetTrue),
         )
+        .args(["example", "bench"].map(|name| {
+            Arg::new(name)
+                .long(name)
+                .value_name("NAME")
+                .value_parser(NonEmptyStringValueParser::new())
+        }))
         .arg(message_format_argument())
 }
 
@@ -966,6 +974,8 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             bin: options.get_one::<String>("bin").cloned(),
             test: options.get_one::<String>("test").cloned(),
             examples: options.get_flag("examples"),
+            example: options.get_one::<String>("example").cloned(),
+            bench: options.get_one::<String>("bench").cloned(),
             message_format: message_format(options),
             jobs: options.get_one::<Jobs>("jobs").copied(),
         })),
@@ -1536,6 +1546,8 @@ mod tests {
                 bin: None,
                 test: None,
                 examples: false,
+                example: None,
+                bench: None,
                 message_format: MessageFormat::Json,
                 jobs: None,
             })
@@ -1562,6 +1574,24 @@ mod tests {
             flycheck.message_format,
             MessageFormat::JsonDiagnosticRenderedAnsi
         );
+    }
+
+    #[test]
+    fn parses_named_auxiliary_checks() {
+        for command in ["check", "clippy"] {
+            let Command::Check(options) = parse(&[command, "--example", "demo", "--bench=measure"])
+                .unwrap()
+                .command
+            else {
+                panic!("expected check");
+            };
+            assert_eq!(options.example.as_deref(), Some("demo"));
+            assert_eq!(options.bench.as_deref(), Some("measure"));
+            for selector in ["--example", "--bench"] {
+                assert!(parse(&[command, selector]).is_err());
+                assert!(parse(&[command, selector, ""]).is_err());
+            }
+        }
     }
 
     #[test]

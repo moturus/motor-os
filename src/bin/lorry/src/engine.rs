@@ -62,7 +62,8 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     )?;
     let ordinary = matches!(&cli.command, Command::Build(_) | Command::Check(_));
     let shared_tests = matches!(&cli.command, Command::Test(_));
-    let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.selects_tests() || options.examples);
+    let shared_test_checks =
+        matches!(&cli.command, Command::Check(options) if options.selects_dev_targets());
     let shared = shared_tests
         || shared_test_checks
         || ordinary
@@ -228,7 +229,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let target_info = toolchain.target_info(physical_target.as_deref())?;
     if !shared
         && (matches!(&cli.command, Command::Test(_))
-            || matches!(&cli.command, Command::Check(options) if options.all_targets || options.test.is_some() || options.examples))
+            || matches!(&cli.command, Command::Check(options) if options.selects_dev_targets()))
     {
         for manifest in &selected {
             manifest.require_dev_targets_supported(&target_info)?;
@@ -1385,7 +1386,7 @@ fn build_inner(
                 .iter()
                 .any(|member| !member.integration_tests.is_empty()));
     let check_integration = check.is_some_and(|(_, options)| {
-        options.selects_tests()
+        (options.selects_tests() || options.bench.is_some())
             && build
                 .members
                 .unwrap_or_else(|| std::slice::from_ref(build.manifest))
@@ -1524,7 +1525,9 @@ fn build_inner(
                 options.test.as_deref()
             },
             examples: options.all_targets || options.examples,
+            example_name: options.example.as_deref(),
             benches: options.all_targets,
+            bench_name: options.bench.as_deref(),
         })?;
         executor::execute(&plan, &manifests, &executor_options)?;
         if build.validation.is_strict() {
@@ -2947,6 +2950,8 @@ impl CheckOptions {
             || self.bin.is_some()
             || self.test.is_some()
             || self.examples
+            || self.example.is_some()
+            || self.bench.is_some()
     }
 
     fn selects_library(&self) -> bool {
@@ -2959,6 +2964,10 @@ impl CheckOptions {
 
     fn selects_tests(&self) -> bool {
         self.all_targets || self.test.is_some()
+    }
+
+    fn selects_dev_targets(&self) -> bool {
+        self.selects_tests() || self.examples || self.example.is_some() || self.bench.is_some()
     }
 }
 

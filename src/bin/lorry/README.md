@@ -77,7 +77,8 @@ members, `--workspace`, repeated `-p`, and `--exclude`. Bundle testing produces
 one executable for each member with enabled harnesses, using that member's
 program/extraction paths and script environment. Workspace `check --all-targets`
 includes examples and benchmarks; `check --examples` checks binary, `lib`,
-`rlib`, and `staticlib` examples with their dev-dependencies. Example/benchmark
+`rlib`, and `staticlib` examples with their dev-dependencies. Named `--example NAME` and `--bench NAME`
+checks also select targets across the chosen members. Example/benchmark
 build/test/run selection remains deferred. Ordinary build/check accepts
 root dev-dependencies without activating their features.
 
@@ -250,7 +251,7 @@ lorry locate-project [--workspace] [--manifest-path PATH]
 lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH] [--release]
             [--target-dir DIRECTORY] [--target TRIPLE]
             [--workspace] [-q|--quiet] [--keep-going]
-            [--all-targets|--lib|--bins|--examples]
+            [--all-targets|--lib|--bins|--examples] [--example NAME|--bench NAME]
             [--bin NAME] [--test NAME]
             [--message-format json|json-diagnostic-rendered-ansi]
 lorry clippy [CHECK OPTIONS] [--no-deps] [-- LINT OPTIONS...]

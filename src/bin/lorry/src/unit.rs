@@ -388,7 +388,9 @@ pub struct CheckTargetSelection<'a> {
     pub integrations: bool,
     pub integration_name: Option<&'a str>,
     pub examples: bool,
+    pub example_name: Option<&'a str>,
     pub benches: bool,
+    pub bench_name: Option<&'a str>,
 }
 
 pub(crate) struct AuxiliarySelection<'a> {
@@ -611,11 +613,21 @@ pub(crate) fn workspace_check_units(
         retain_unit_roots(&mut tests, roots)?;
         graph.merge(tests)?;
     }
-    for (enabled, kind, mode) in [
-        (selection.examples, "example", UnitMode::Check),
-        (selection.benches, "bench", UnitMode::CheckTest),
+    for (enabled, name, kind, mode) in [
+        (
+            selection.examples,
+            selection.example_name,
+            "example",
+            UnitMode::Check,
+        ),
+        (
+            selection.benches,
+            selection.bench_name,
+            "bench",
+            UnitMode::CheckTest,
+        ),
     ] {
-        if enabled {
+        if enabled || name.is_some() {
             graph.merge(workspace_auxiliary_units(
                 resolution,
                 manifests,
@@ -623,7 +635,7 @@ pub(crate) fn workspace_check_units(
                 options,
                 &AuxiliarySelection {
                     kind,
-                    name: None,
+                    name: if enabled { None } else { name },
                     mode,
                 },
             )?)?;
@@ -3775,7 +3787,9 @@ mod tests {
                         integrations: true,
                         integration_name,
                         examples: false,
+                        example_name: None,
                         benches: false,
+                        bench_name: None,
                     },
                     &options,
                 )

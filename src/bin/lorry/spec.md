@@ -159,7 +159,7 @@ lorry [+toolchain] [GLOBAL] cache clean
 lorry [+toolchain] [GLOBAL] check  [-p NAME|PACKAGE_ID] [--manifest-path PATH]
                                   [--target-dir DIRECTORY] [--target TRIPLE]
                                   [--workspace] [--keep-going]
-                                  [--all-targets|--lib|--bins|--bin NAME|--test NAME|--examples]
+                                  [--all-targets|--lib|--bins|--bin NAME|--test NAME|--examples|--example NAME|--bench NAME]
                                   [--message-format FORMAT] [--release|-r]
 lorry [+toolchain] [GLOBAL] clean  [-p NAME]
                                   [--release|-r] [--target TRIPLE]
@@ -418,7 +418,8 @@ auto flags and edition 2015's defaults follow Cargo. Examples and
 benchmarks compile through the shared graph under `check --all-targets`,
 including their dev-dependencies, target editions, required features, and
 script outputs. `check --examples` checks binary, `lib`, `rlib`, and `staticlib`
-examples, including packages with only example targets. Dynamic/procedural-macro
+examples, including packages with only example targets. `--example NAME` and
+`--bench NAME` check named targets across the selected members. Dynamic/procedural-macro
 example types and build/test/run example/benchmark selectors remain deferred
 and fail explicitly.
 Members and default-members accept component globs `*`, `?`, and `[...]`,
@@ -1421,8 +1422,9 @@ Selected `check` targets run through that planner and executor, including
 Cargo-format compiler messages when requested. With `--keep-going`, units
 independent of a failed unit continue; without it, no new units start after
 the first observed failure.
-Until example targets are implemented, `check --examples` fails explicitly
-instead of succeeding without checking a target.
+`check --examples` checks enabled examples; an empty selection succeeds without
+compiling a target, as Cargo does. Explicit names must exist and satisfy their
+required features.
 
 `clippy` uses check's options, planner, and Cargo messages. It requires a
 matching sibling `clippy-driver` and uses separate `clippy` output and

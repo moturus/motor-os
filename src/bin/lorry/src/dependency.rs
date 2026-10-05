@@ -1818,7 +1818,9 @@ mod tests {
                     integrations: true,
                     integration_name: Some("integration"),
                     examples: false,
+                    example_name: None,
                     benches: false,
+                    bench_name: None,
                 },
             )
             .unwrap();
@@ -1877,7 +1879,9 @@ mod tests {
                     integrations: true,
                     integration_name: None,
                     examples: false,
+                    example_name: None,
                     benches: false,
+                    bench_name: None,
                 },
             )
             .unwrap();

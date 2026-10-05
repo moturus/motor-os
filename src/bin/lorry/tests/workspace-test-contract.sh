@@ -180,15 +180,28 @@ PY
 for platform in native motor; do
     target=()
     if [ "$platform" = motor ]; then target=(--target x86_64-unknown-motor); fi
-    for selection in all named examples; do
+    for selection in all named examples example bench; do
         args=(--workspace --all-targets)
         if [ "$selection" = named ]; then args=(-p zeta -p alpha --test integration); fi
         if [ "$selection" = examples ]; then args=(--workspace --examples); fi
+        if [ "$selection" = example ]; then args=(--workspace --example demo); fi
+        if [ "$selection" = bench ]; then args=(-p alpha --bench measured); fi
         env HOME="$WORK/home" "$LORRY" check "${args[@]}" "${target[@]}" --message-format=json >"$WORK/lorry-check.json"
         "$LORRY_TEST_CARGO" check "${args[@]}" "${target[@]}" --offline --message-format=json >"$WORK/cargo-check.json"
         "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \
             differential-script-clean-check-messages "$WORK/lorry-check.json" "$WORK/cargo-check.json"
     done
+done
+for selector in --example --bench; do
+    for tool in "$LORRY" "$LORRY_TEST_CARGO"; do
+        if env HOME="$WORK/home" "$tool" check --workspace "$selector" missing --offline >"$WORK/missing.out" 2>"$WORK/missing.err"; then exit 1; fi
+        rg -q 'no (example|bench) target named.*missing' "$WORK/missing.err"
+    done
+done
+for tool in "$LORRY" "$LORRY_TEST_CARGO"; do
+    if env HOME="$WORK/home" "$tool" check -p alpha --example disabled --offline >"$WORK/disabled.out" 2>"$WORK/disabled.err"; then exit 1; fi
+    rg -q 'requires.*features' "$WORK/disabled.err"
+    env HOME="$WORK/home" "$tool" check -p alpha --example disabled --features manual --offline
 done
 for member in alpha zeta; do cp "$WORK/$member-integration.rs" "$member/tests/integration.rs"; done
 cp "$WORK/alpha-manifest.toml" alpha/Cargo.toml

@@ -2727,6 +2727,19 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Named example and benchmark checks now select across the chosen members,
+resolve dev features, reject missing names and unmet required features, and use
+the shared compiler plan. Benchmark checks receive Cargo's placeholder program
+paths and temporary directory even without an integration-test selection. The
+first paired run exposed that missing environment condition; its original
+failure and fixture remain in `/tmp/lorry-m8-named-auxiliary-check-contract.log`
+and `/tmp/lorry-workspace-test-dG8vrq`. The corrected native/Motor paired checks,
+required-feature diagnostics, existing workspace test/bundle execution, parser
+coverage, and strict Clippy pass in
+`/tmp/lorry-m8-named-auxiliary-check-environment-contract.log`,
+`/tmp/lorry-m8-named-auxiliary-check-parser.log`, and
+`/tmp/lorry-m8-named-auxiliary-check-environment-clippy.log`.
+
 Examples owned by a selected procedural-macro member now retain their target
 resolution context while their macro library remains on the host. A selected
 example treats that library as a host dependency; ordinary macro library roots
