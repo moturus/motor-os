@@ -2727,6 +2727,19 @@ host runtime/bundles, and strict Clippy pass in
 
 ### Member build-time code
 
+Clean now accepts --profile NAME, validates its inheritance/directory, and
+removes either that complete profile or the selected packages' owned files.
+Other profile outputs and unselected member/dependency owners are preserved.
+Cleanup resolves source settings without rejecting deferred build-only keys;
+it remains usable when compilation would reject a valid unsupported setting.
+The paired Cargo contract covers named member/all cleanup, preserved debug
+programs, deferred rpath, unknown-profile rejection, and unchanged lock bytes.
+It, parser tests, focused clean tests, and strict Clippy pass in
+`/tmp/lorry-m8-clean-profile-first-contract.log`,
+`/tmp/lorry-m8-clean-profile-first-parser.log`,
+`/tmp/lorry-m8-clean-profile-unit.log`, and
+`/tmp/lorry-m8-clean-profile-clippy.log`.
+
 Build/check/clippy/run/test now accept --profile NAME and Cargo's release
 conflict and reserved/path-safe names. Selected compiler settings, output
 directories, and reported profile names are carried independently. Host

@@ -942,7 +942,9 @@ fn build_command(name: &'static str) -> ClapCommand {
 }
 
 fn clean_command() -> ClapCommand {
-    build_command("clean").arg(workspace_argument())
+    build_command("clean")
+        .arg(workspace_argument())
+        .arg(profile_argument())
 }
 
 fn package_argument() -> Arg {
@@ -1970,13 +1972,14 @@ mod tests {
 
     #[test]
     fn compiler_commands_accept_profiles_with_release_conflicts() {
-        for command in ["build", "check", "clippy", "run", "test"] {
+        for command in ["build", "check", "clippy", "run", "test", "clean"] {
             let cli = parse(&[command, "--profile", "custom"]).unwrap();
             let profile = match cli.command {
                 Command::Build(options) => options.profile,
                 Command::Check(options) => options.profile,
                 Command::Run(options) => options.build.profile,
                 Command::Test(options) => options.build.profile,
+                Command::Clean(options) => options.build.profile,
                 _ => unreachable!(),
             };
             assert_eq!(profile.as_deref(), Some("custom"));

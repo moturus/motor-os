@@ -28,12 +28,20 @@ pub(crate) struct SelectedProfile {
 
 impl SelectedProfile {
     pub fn load(root: &Path, name: &str) -> Result<Self> {
-        let path = root.join("Cargo.toml");
-        let document = Document::load(&path, "workspace profiles")?;
-        Self::parse(&path, &document, name)
+        Self::load_checked(root, name, true)
     }
 
-    fn parse(path: &Path, document: &Document, name: &str) -> Result<Self> {
+    pub fn directory_for_clean(root: &Path, name: &str) -> Result<String> {
+        Ok(Self::load_checked(root, name, false)?.directory)
+    }
+
+    fn load_checked(root: &Path, name: &str, building: bool) -> Result<Self> {
+        let path = root.join("Cargo.toml");
+        let document = Document::load(&path, "workspace profiles")?;
+        Self::parse(&path, &document, name, building)
+    }
+
+    fn parse(path: &Path, document: &Document, name: &str, building: bool) -> Result<Self> {
         validate_name(name)?;
         let profiles = document
             .root()
@@ -101,6 +109,9 @@ impl SelectedProfile {
                     continue;
                 }
                 if !KEYS.contains(&key) {
+                    if !building {
+                        continue;
+                    }
                     return Err(Error::at(
                         path,
                         document.line_of_item(item),
@@ -212,6 +223,7 @@ mod tests {
             path,
             &Document::parse(path, "profiles", text.to_owned())?,
             name,
+            true,
         )
     }
 

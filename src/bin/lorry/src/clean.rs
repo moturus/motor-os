@@ -14,7 +14,19 @@ pub fn execute(
 ) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let workspace = crate::manifest::SourceWorkspace::load(&current, manifest_path.map(Path::new))?;
+    let mut workspace =
+        crate::manifest::SourceWorkspace::load(&current, manifest_path.map(Path::new))?;
+    let profile = options
+        .build
+        .profile
+        .as_deref()
+        .map(|name| {
+            crate::manifest::profiles::SelectedProfile::directory_for_clean(&workspace.root, name)
+        })
+        .transpose()?;
+    for member in &mut workspace.packages {
+        member.profile_directory.clone_from(&profile);
+    }
     let package_selected =
         (selection.workspace && !workspace.packages.is_empty()) || !selection.packages.is_empty();
     let selected = if package_selected {
@@ -47,12 +59,14 @@ pub fn execute(
     let _artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
     let artifact_root = target_directory.join("lorry");
 
-    let target = if options.build.release || options.build.target.is_some() {
+    let target = if options.build.release || profile.is_some() || options.build.target.is_some() {
         config.selected_target(options.build.target.as_deref())?
     } else {
         None
     };
-    if (package_selected || options.build.release || target.is_some()) && artifact_root.exists() {
+    if (package_selected || options.build.release || profile.is_some() || target.is_some())
+        && artifact_root.exists()
+    {
         crate::engine::migrate_artifact_layout(&artifact_root)?;
     }
     let mut removed = false;
@@ -69,7 +83,12 @@ pub fn execute(
             }
         }
     } else {
-        removed = clean_artifacts_root(&artifact_root, options.build.release, target.as_deref())?;
+        removed = clean_artifacts_root(
+            &artifact_root,
+            options.build.release,
+            target.as_deref(),
+            profile.as_deref(),
+        )?;
     }
     if verbosity != Verbosity::Quiet {
         if removed {
@@ -83,7 +102,7 @@ pub fn execute(
 
 #[cfg(test)]
 fn clean_artifacts(root: &Path, release: bool, target: Option<&str>) -> Result<bool> {
-    clean_artifacts_root(&root.join("target/lorry"), release, target)
+    clean_artifacts_root(&root.join("target/lorry"), release, target, None)
 }
 
 fn clean_manifest_artifacts(
@@ -106,7 +125,12 @@ fn clean_manifest_artifacts(
             target,
         );
     }
-    clean_artifacts_root(&target_parent.join("lorry"), release, target)
+    clean_artifacts_root(
+        &target_parent.join("lorry"),
+        release,
+        target,
+        manifest.profile_directory.as_deref(),
+    )
 }
 
 fn clean_package_artifacts(
@@ -123,7 +147,11 @@ fn clean_package_artifacts(
     if let Some(target) = target {
         profile.push(target);
     }
-    profile.push(if release { "release" } else { "debug" });
+    profile.push(manifest.profile_directory.as_deref().unwrap_or(if release {
+        "release"
+    } else {
+        "debug"
+    }));
     let mut removed = false;
     if real_directory(&profile, "selected profile")? {
         let package_units = profile.join("build").join(&package.name);
@@ -218,7 +246,12 @@ fn clean_package_artifacts(
     Ok(removed)
 }
 
-fn clean_artifacts_root(root: &Path, release: bool, target: Option<&str>) -> Result<bool> {
+fn clean_artifacts_root(
+    root: &Path,
+    release: bool,
+    target: Option<&str>,
+    profile: Option<&str>,
+) -> Result<bool> {
     let parent = root
         .parent()
         .ok_or_else(|| Error::failure("artifact root has no parent"))?;
@@ -226,7 +259,7 @@ fn clean_artifacts_root(root: &Path, release: bool, target: Option<&str>) -> Res
     {
         return Ok(false);
     }
-    if !release && target.is_none() {
+    if !release && target.is_none() && profile.is_none() {
         remove_directory(root)?;
         return Ok(true);
     }
@@ -235,7 +268,9 @@ fn clean_artifacts_root(root: &Path, release: bool, target: Option<&str>) -> Res
         selected_parent.push(target);
         real_directory(&selected_parent, "target artifact directory")?;
     }
-    let selected = if release {
+    let selected = if let Some(profile) = profile {
+        selected_parent.join(profile)
+    } else if release {
         selected_parent.join("release")
     } else {
         selected_parent
@@ -467,7 +502,7 @@ mod tests {
         fixture.directory("target/lorry/debug");
         let custom = fixture.directory("editor-target/lorry/debug");
 
-        assert!(clean_artifacts_root(custom.parent().unwrap(), false, None).unwrap());
+        assert!(clean_artifacts_root(custom.parent().unwrap(), false, None, None).unwrap());
         assert!(!fixture.0.join("editor-target/lorry").exists());
         assert!(fixture.0.join("target/lorry/debug").is_dir());
     }
