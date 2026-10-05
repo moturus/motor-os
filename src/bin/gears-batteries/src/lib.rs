@@ -18,6 +18,7 @@ pub mod memory_format;
 pub mod memory_history;
 pub mod memory_question;
 pub mod memory_snapshot;
+pub mod memory_sources;
 pub mod memory_tool;
 pub mod patch_match;
 pub mod paths;

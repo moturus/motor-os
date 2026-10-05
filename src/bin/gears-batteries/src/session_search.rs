@@ -131,7 +131,7 @@ pub fn search(
     )
 }
 
-fn discover(
+pub(crate) fn discover(
     directory: &Path,
     files: &mut Vec<PathBuf>,
     unavailable: &mut Vec<(PathBuf, String)>,
