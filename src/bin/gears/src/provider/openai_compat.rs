@@ -429,15 +429,9 @@ fn build_body(
     object.insert("model".to_string(), serde_json::json!(req.model));
     object.insert("messages".to_string(), serde_json::Value::Array(messages));
     if quirks.prompt_cache_key {
-        // Keep routing stable as the tail grows, but separate a changed
-        // opening prompt, model, or selected provider.
-        let start = serde_json::to_vec(&(
-            cache_identity,
-            &req.model,
-            &req.system,
-            req.messages.first(),
-        ))
-        .map_err(|e| ProviderError::Protocol(format!("cannot hash prompt start: {e}")))?;
+        // Conversation compaction must not change routing for the stable prefix.
+        let start = serde_json::to_vec(&(cache_identity, &req.model, &req.system, &req.tools))
+            .map_err(|e| ProviderError::Protocol(format!("cannot hash prompt start: {e}")))?;
         let digest = Sha256::digest(start);
         object.insert(
             "prompt_cache_key".to_string(),
@@ -739,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_key_tracks_the_opening_prompt_and_selected_provider() {
+    fn cache_key_tracks_the_stable_prefix_and_selected_provider() {
         let quirks = Quirks::for_host("openrouter.ai");
         let first = request().with_system(vec!["instructions".into()]);
         let mut continued = first.clone();
@@ -747,6 +741,12 @@ mod tests {
         continued.messages.push(Message::user("follow up"));
         let key = body(&first, quirks)["prompt_cache_key"].clone();
         assert_eq!(body(&continued, quirks)["prompt_cache_key"], key);
+        continued.messages = vec![Message::user("[Conversation summary]\nCompacted history")];
+        assert_eq!(body(&continued, quirks)["prompt_cache_key"], key);
+        continued
+            .tools
+            .push(ToolSpec::new("read", "Read a file", serde_json::json!({})));
+        assert_ne!(body(&continued, quirks)["prompt_cache_key"], key);
         assert_ne!(
             body(&request().with_system(vec!["different".into()]), quirks)["prompt_cache_key"],
             key

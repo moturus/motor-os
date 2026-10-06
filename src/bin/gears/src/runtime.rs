@@ -15,7 +15,7 @@ use crate::provider::{
     ToolOutcome, ToolSpec, Usage, UsageMeter,
 };
 use crate::session::{
-    Compaction, PermissionGrant, Session, SessionInfo, Store, ToolState, TreeItem,
+    Compaction, PermissionGrant, RequestPrefix, Session, SessionInfo, Store, ToolState, TreeItem,
 };
 use crate::tool_state::Overrides;
 use crate::tools::{ExecutionContext, Registry};
@@ -869,6 +869,10 @@ impl Runtime {
             };
             self.ensure_fits(&messages)?;
             let request = self.request(messages, true);
+            self.session.record_request_prefix(&RequestPrefix {
+                system: request.system.clone(),
+                tools: request.tools.clone(),
+            })?;
             let completion = {
                 let mut sink = RuntimeSink {
                     cancellation: &self.cancellation,

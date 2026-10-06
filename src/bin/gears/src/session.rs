@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::provider::{ContentBlock, Message, Role, Usage, UsageMeter};
+use crate::provider::{ContentBlock, Message, Role, ToolSpec, Usage, UsageMeter};
 use crate::state::StateRoot;
 
 const VERSION: u32 = 1;
@@ -51,6 +51,14 @@ pub struct Compaction {
 pub struct RuntimeIdentity {
     pub prompt_hash: String,
     pub manifest_hash: String,
+}
+
+/// Instructions and tool schemas are independent of compactable conversation history.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestPrefix {
+    pub system: Vec<String>,
+    pub tools: Vec<ToolSpec>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -725,6 +733,26 @@ impl Session {
         identity: &RuntimeIdentity,
     ) -> Result<String, String> {
         self.append("runtime_identity", identity)
+    }
+
+    pub fn record_request_prefix(&mut self, prefix: &RequestPrefix) -> Result<(), String> {
+        if self.request_prefix()?.as_ref() != Some(prefix) {
+            self.append("request_prefix", prefix)?;
+        }
+        Ok(())
+    }
+
+    /// Read the last actual request prefix on the selected branch, including across compaction.
+    pub fn request_prefix(&self) -> Result<Option<RequestPrefix>, String> {
+        self.active_entries()?
+            .into_iter()
+            .rev()
+            .find(|entry| entry.kind == "request_prefix")
+            .map(|entry| {
+                serde_json::from_value(entry.data)
+                    .map_err(|error| format!("entry {}: bad request prefix: {error}", entry.id))
+            })
+            .transpose()
     }
 
     pub fn latest_runtime_identity(&self) -> Option<RuntimeIdentity> {

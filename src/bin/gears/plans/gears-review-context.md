@@ -1,13 +1,20 @@
 # Review context and prompt-cache reuse
 
-Status: decision needed before connecting the background review runner.
+Status: user approved keeping the stable prefix separately on 2026-10-06.
 
-The plan requires the review's first request to retain the parent's request
-prefix. A saved-entry fork preserves the original history, but the normal
-runtime compacts it before making a request if it exceeds the configured
-input limit. Before-compaction marks deliberately select such histories.
-Adding the review instructions can also push a previously fitting history
-over that limit.
+The stable prefix means system instructions and tool definitions, rather than
+the entire previous request including history. Save it independently at actual
+model requests, retain it across history compaction, and use the marked parent's
+prefix for a review. Review instructions follow the shared prefix. The reviewer
+may see the same tool definitions, but review permission policy still denies
+commands and writes. Old sessions without a saved prefix use their reconstructed
+instructions and report that exact historical reuse is unavailable.
+
+Conversation summaries and retained messages replace oversized history; they
+do not replace the stable prefix. Original history remains available through
+session reading. The auxiliary summarization request has its own instructions
+and is not itself the review request. Prefix tokens still count toward context
+capacity. A prefix alone that exceeds the limit must be refused explicitly.
 
 ## Evidence
 
@@ -28,9 +35,12 @@ The first temporary resolver selected an older cached crossterm revision;
 using the repository's exact lock fixes that probe setup. No dependency,
 SDK or external fork source changed.
 
-## Alternatives
+## Earlier alternatives
 
-1. **Permit bounded compaction when needed (recommended).** Keep the full
+These alternatives assumed the prefix included the entire previous request.
+The user's separation of stable instructions from history resolves that ambiguity.
+
+1. **Permit bounded compaction when needed.** Keep the full
    request prefix when it fits; otherwise review a summary and retained
    messages. The original saved history remains available through session
    reading, and proposal citations still refer to the marked parent branch.

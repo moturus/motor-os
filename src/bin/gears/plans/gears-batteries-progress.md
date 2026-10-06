@@ -725,6 +725,22 @@ the first successful debug run is `host-debug-original.log`.
 
 ## SDK rollout and next steps
 
+### Saved stable request prefixes
+
+Actual agent requests save system fragments and tool schemas independently of
+history, once per change. Compaction leaves that record available; historical
+forks select the prefix at their exact saved entry. Old sessions return no
+snapshot, and malformed records fail explicitly. OpenRouter's routing key now
+uses the stable system/tool prefix rather than the first conversation message.
+
+The portable shipped-tools fixture checks automatic compaction, exact marked
+entries, changed prefixes, deduplication and malformed records. Host debug and
+release HTTP gates, warnings-denied host/native Clippy, the native release
+build and the release snapshot VM's shipped-tools gate pass. Logs use
+`/tmp/gears-stable-prefix-*`; the first host-gate attempt was blocked by the
+filesystem sandbox before testing curl, and the authorized gate passes in
+`host-debug-authorized.log`. Reusing the prefix in the review child follows.
+
 The user published moto-rt 0.17.7 and pushed the authorized external Rust-fork
 commit `f046f257239`. It changes only std's runtime version and checksum;
 compiler, LLVM and std implementation sources are unchanged. The managed
@@ -745,10 +761,10 @@ proposals. Phase 9 requires
 the user's quality/cost criterion in question 7; keep reviews disabled until
 an explicit model-pair decision and real-model evidence justify enabling them.
 
-Before connecting the runner, resolve [review context and cache reuse](gears-review-context.md).
-A hermetic saved-entry fork reproduces automatic compaction before the first
-review request when the original history exceeds the input limit. The choice
-is whether to permit that fallback or leave oversized reviews pending.
+The user approved keeping the stable prefix separately from compactable history;
+see [review context and cache reuse](gears-review-context.md). A saved-entry fork
+can compact oversized history without discarding the marked parent's instructions.
+The auxiliary summary request is separate from the actual review request.
 
 The optional Hermes import has not been performed. Automated mock tests
 establish behavior, not real-model usefulness. Keep the outstanding native

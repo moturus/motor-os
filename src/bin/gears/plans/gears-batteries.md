@@ -646,9 +646,13 @@ pair and the workload, not on whether a model is hosted or how large it is.
   proposals per review is capped in `batteries.toml` (default 4), as
   resource policy.
 
-The review's first request starts with exactly the parent's last request,
-so the provider's cache applies; a prototype showed this with the parent
-still open.
+Keep the stable system instructions and tool definitions separately from
+conversation history. A review reuses the prefix saved at its marked parent
+entry and appends its review instructions after that prefix. Compact oversized
+history while retaining the prefix; the original saved branch remains readable.
+Unchanged tool schemas may be advertised while review policy still denies
+writes and commands. Changed schemas or a different model/provider can reduce
+cache reuse. Cache hits are measured, not guaranteed.
 
 ## Measuring whether learning helps
 
@@ -954,8 +958,8 @@ No repository inspection or separate acceptance CLI is needed.
   the denied changes.
 - 8.3 `cleanup` proposals.
 - Done when a review of a session with nothing notable proposes nothing, a
-  proposal over the cap is refused, a review's first request shares the
-  parent's prefix, an interrupted review leaves nothing half-written and
+  proposal over the cap is refused, a review request shares the parent's
+  saved stable prefix even after history compaction, an interrupted review leaves nothing half-written and
   handles its mark once, and a new session does not run another session's
   review.
 
