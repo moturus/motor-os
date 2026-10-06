@@ -267,6 +267,21 @@ fn execute_inner(
         }
     }
 
+    // Recovery enumerates shared unit parents. Finish it before workers can
+    // rename or remove sibling entries; Motor's iterator needs stable entries.
+    for key in &plan.order {
+        if key.kind == UnitKind::BuildScriptRun {
+            continue;
+        }
+        let planned = &plan.units[key];
+        let output_dir = unit_output_directory(planned, &commands);
+        let unit_dir = output_dir
+            .parent()
+            .ok_or_else(|| Error::failure("rustc unit has no output directory"))?;
+        AtomicDirectory::recover_previous(unit_dir)?;
+        AtomicDirectory::discard_abandoned_staging(unit_dir)?;
+    }
+
     let workers = options.jobs.clamp(1, total.max(1));
     let state = std::sync::Mutex::new(state);
     let wakeup = std::sync::Condvar::new();
@@ -669,8 +684,6 @@ fn execute_unit(
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| Error::failure("rustc unit has no UTF-8 name"))?;
-                AtomicDirectory::recover_previous(unit_dir)?;
-                AtomicDirectory::discard_abandoned_staging(unit_dir)?;
                 let dependencies = cache_dependencies(planned, outputs)?;
                 let selected = options.selected_packages.contains(&key.package);
                 let selected_inputs =

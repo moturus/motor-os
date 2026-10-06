@@ -4057,7 +4057,53 @@ a directory-iteration race consistent with the failure; it does not establish th
 Helix owner timeout's cause. A Lorry repair should protect recovery enumeration
 from its own parallel directory mutations, rather than retrying or ignoring an
 iterator error. No such repair, unrelated kernel change, or weakened assertion
-has been applied in this review patch.
+was applied in the boot-identity review patch.
+
+#### Follow-up: recovery ordering and retained dead children
+
+Lorry's boot-owner repair is committed as `d51738b4`. The directory repair moves
+all planned compiler-unit recovery into a serial pass before spawning executor
+workers. Compilation and publication remain parallel. The artifact lock has
+already excluded interrupted writers, and no new worker can mutate an entry
+while recovery enumerates its parent. This requires no new mutex, filesystem
+API, iterator retry, or ignored error.
+
+The regression stages two interrupted units and makes the first compiler verify
+that both units have recovered. It fails with the old executor and passes with
+the new one; a subsequent two-job rebuild also verifies both executables. It is
+included in the existing host artifact-lock contract and native suite. Focused
+atomic recovery, the host contract, the native regression, and strict host/Motor
+Clippy passed. Evidence is in `/tmp/lorry-m9-continue`, including
+`artifact-lock-final.log` and `native-recovery-results.log`.
+
+Further native diagnosis found a concrete kernel defect behind this class of
+child-barrier timeout. A temporary helper pins two threads to one CPU and makes
+them hand the CPU to each other with `SysCpu::wait`'s swap target. After killing
+their owner, the worker is dead (`active=0`) but remains in its former owner's
+child list for at least 30 seconds. Feeding that owner's same-boot record to
+Lorry reproduces `previous Motor build 13 still has children after 30 seconds;
+artifacts were not changed`. An otherwise equivalent ordinary-wake control
+clears its child record within 100 ms. Preserve `swap-results.log`,
+`swap-lorry-results.log`, `fold-results.log`, and the copied fixture. The original
+Helix timeout did not capture child state; attribution of that particular run
+to this defect remains unproven, although its exact failure is now reproduced.
+
+`Thread::wait_and_switch(next: Arc<Thread>)` holds `next` across the context
+switch, then calls `after_wait`. If the caller was killed while parked,
+`after_wait` calls the non-returning `die`; Rust never drops `next`. That leaked
+thread reference retains its process statistics, which retain parent statistics
+and keep the dead child in `list_children`. The kernel has already closed the
+dead process's IPC endpoints; there is no surviving compiler to wait for.
+The minimal proposed repair drops `next` after the switch returns and before
+calling `after_wait`. It preserves the direct-switch lifetime and the strict
+Lorry descendant barrier. A native cancellation regression belongs in systest,
+followed by three debug and three release core gates and the Lorry milestone
+gate. The proposed patch is `/tmp/lorry-m9-continue/kernel-wakee-review.patch`.
+
+This is an additional preexisting kernel defect, so root AGENTS.md requires
+stopping for review after diagnosis. No kernel fix or other system source change
+has been applied. All diagnostic programs live under `/tmp`; no instrumentation
+is present in repository source. Milestone 9 remains incomplete.
 
 All temporary diagnostics were removed from repository source. The user reviewed
 and committed the kernel initializer and systest coverage as `4debacaa`, then

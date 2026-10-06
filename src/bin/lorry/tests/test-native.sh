@@ -372,6 +372,10 @@ prepare_host() {
         -C linker="$MOTOR_LINKER" -Clink-self-contained=no \
         -Cdefault-linker-libraries=yes -C panic=abort \
         "$SCRIPT_DIR/helpers/cancel-probe.rs" -o "$WORK/cancel-probe"
+    "$motor_rustc" --edition=2024 --target "$MOTOR_TARGET" \
+        -C linker="$MOTOR_LINKER" -Clink-self-contained=no \
+        -Cdefault-linker-libraries=yes -C panic=abort \
+        "$SCRIPT_DIR/helpers/recovery-probe.rs" -o "$WORK/recovery-probe"
     diff -qr "$motor_toolchain_sysroot/lib/rustlib/$MOTOR_TARGET" \
         "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" >"$WORK/sysroot-diff" || {
         cat "$WORK/sysroot-diff" >&2
@@ -506,12 +510,13 @@ run_native() {
     remote_command "[ -d $REMOTE_ROOT ] || /system/bin/mkdir $REMOTE_ROOT"
     REMOTE_CREATED=1
     if [ "$WARM" -eq 1 ]; then
-        for executable in lorry-cross lorry-native cancel-probe; do
+        for executable in lorry-cross lorry-native cancel-probe recovery-probe; do
             remote_command "[ ! -f $REMOTE_ROOT/$executable ] || /system/bin/rm $REMOTE_ROOT/$executable"
         done
     fi
     upload_file "$WORK/lorry-cross" "$REMOTE_ROOT/lorry-cross"
     upload_file "$WORK/cancel-probe" "$REMOTE_ROOT/cancel-probe"
+    upload_file "$WORK/recovery-probe" "$REMOTE_ROOT/recovery-probe"
     upload_file "$WORK/editor-workspace" "$REMOTE_ROOT/editor-workspace"
     upload_file "$WORK/editor-config.json" "$REMOTE_ROOT/editor-config.json"
 
@@ -649,6 +654,7 @@ PY
     [ "$(wc -l <"$incremental_lines")" -ge 2 ] ||
         fail "two Motor debug compilations did not reuse the same incremental root"
     remote_command "$REMOTE_ROOT/cancel-probe $REMOTE_ROOT/lorry-native $REMOTE_ROOT/cancel-fixture"
+    remote_command "$REMOTE_ROOT/recovery-probe $REMOTE_ROOT/lorry-native $REMOTE_ROOT/recovery-fixture"
 }
 
 cleanup() {

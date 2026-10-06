@@ -243,11 +243,20 @@ boots produced distinct IDs. The release developer-image gate failed in Helix's
 diagnostic-on-save check when Lorry's same-boot child barrier timed out. That
 original failure is retained and unresolved; it did not reach the complete
 Lorry suite or native source-build phase.
-The direct native boot-owner recovery regression passed. Targeted reruns did not
-reproduce the original timeout; it remains unresolved. A cancellation diagnostic
-also exposed concurrent output-directory iteration failing during recovery.
-The kernel review is complete; the dependent Lorry repair is ready to commit
-after its focused artifact-lock checks.
+The direct native boot-owner recovery regression passed, and Lorry's boot-owner
+repair is committed as `d51738b4` after focused checks. A separate cancellation
+diagnostic exposed concurrent output-directory iteration failing during recovery.
+Recovery now finishes before parallel workers start; its regression fails on the
+old executor and passes on Linux and Motor. Focused artifact-lock checks and
+strict host/Motor Clippy pass.
+Further diagnosis reproduced the child timeout with a dead native process.
+The kernel's direct-switch path retains a wakee `Arc` when a killed caller never
+returns from `after_wait`, keeping the dead process in its former owner's child
+list. The ordinary-wake control clears its record within 100 ms. Lorry reproduces
+the original 30-second error against the retained record; the original Helix run
+did not capture its child state, so attribution of that particular run remains
+unproven. The additional kernel repair is held for review under AGENTS.md. No
+timeout, descendant check, or failure assertion has been weakened.
 Milestone 9 remains open for the remaining native project acceptance and scope
 decisions. The filesystem repair and regression are committed; the latest
 validation evidence is recorded below and in the details file. No external-project

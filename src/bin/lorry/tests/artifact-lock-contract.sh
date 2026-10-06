@@ -118,3 +118,6 @@ wait "$recovered"
 test "$("$WORK/target/lorry/debug/artifact-lock-fixture")" = recovered
 test -z "$(find "$staging_parent" -maxdepth 1 -type d -name '.*.lorry-staging-*' -print -quit)"
 echo "PASS: artifact lock survives clean, releases before programs, and cleans killed builds' staging after children exit"
+
+"$RUSTC" --edition=2024 "$SCRIPT_DIR/helpers/recovery-probe.rs" -o "$WORK/recovery-probe"
+"$WORK/recovery-probe" "$LORRY" "$WORK/recovery-fixture"
