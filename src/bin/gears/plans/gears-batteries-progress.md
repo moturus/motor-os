@@ -1185,3 +1185,12 @@ verify an 8 KiB output artifact survives its shorter preview and unavailable
 checks remain distinct. Both host profiles, warnings-denied host/native Clippy,
 native release build and release snapshot VM pass; logs use
 `/tmp/gears-eval-artifacts-*`.
+
+Evaluation option parsing requires explicit task files, provider/model, repeats,
+actor/criterion deadlines and the user's criterion. It accepts 1–32 task files,
+rejects duplicate scalar options and validates bounds before side effects.
+Portable fixtures, both host profiles, warnings-denied host/native Clippy, native
+release build and release snapshot VM pass. The initial build used the wrong
+module for the existing root helper; that failure remains in
+`/tmp/gears-eval-options-*`, corrected host/build/Clippy logs use `root-fixed`.
+The native fixture log is `/tmp/gears-eval-options-native.log`.

@@ -11,6 +11,7 @@ pub mod eval_binary;
 pub mod eval_command;
 pub mod eval_config;
 pub mod eval_copy;
+pub mod eval_options;
 pub mod eval_policy;
 pub mod eval_prepare;
 pub mod eval_report;
