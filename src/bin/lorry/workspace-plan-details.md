@@ -3836,8 +3836,11 @@ Its non-Unix `pathutil::strip_prefix` uses component-normalizing
 `Path::strip_prefix`, while the Unix implementation preserves literal bytes.
 Stripping the root from a path ending in `/./foo` therefore loses the `./`
 before anchored matching on Motor. This is product behavior outside Lorry;
-the failing assertion is retained pending discussion of a scoped ripgrep port.
-The library-only diagnostic does not replace the required workspace acceptance.
+the user accepts this specific test failure for the current Lorry milestone.
+The assertion and original failure evidence remain intact; this matching
+limitation is recorded, and a ripgrep product port is not required. Other
+applicable ripgrep tests remain required, with the Unix symlink integration
+helper separately deferred under the user's earlier instruction.
 
 The owner approved Cargo-compatible bundle rejection, exact workspace-lock
 access, and separate default/application editor views. Native acceptance still
@@ -3860,6 +3863,16 @@ source successfully, in `/tmp/lorry-m9-native-acceptance/cc-wrapper-probe.{out,e
 The Linux-hosted cross build does not exercise the crate's native branch.
 No cc or external-project product source has been changed. Original evidence:
 `/tmp/lorry-m9-native-acceptance/helix.build.{json,err}`.
+
+The proposed external change is in cc-rs 1.2.29's `src/tempfile.rs`: permit
+`target_os = "motor"` in its supported-platform guard, and import `std::os`
+only where the existing Unix or Windows options use it. Its default file
+creation already uses `OpenOptions::create_new`; compiler detection uses this
+helper in production. Preserve the existing name-collision handling and
+close-before-removal cleanup. Select the reviewed patched source explicitly in
+Helix's dependency configuration, then re-vendor and admit it normally. Validate
+native temporary-file behavior and C/C++ compilation before rerunning the
+actual native Helix release build. This port has not been applied.
 
 The actual fetched `src/sys` editor copy supports member and Git-source
 navigation with the expected admission warning. Generated-constant navigation
@@ -3911,7 +3924,7 @@ selected by the image's toolchain:
 | Project | Build | Tests |
 | --- | --- | --- |
 | sed | `lorry build --release --locked --offline` | Full native suite not required; deferred. Original reproducer: `lorry test --locked --offline`. |
-| ripgrep | `lorry build --release --locked --offline` | `lorry test --workspace --exclude grep-pcre2 --locked --offline` |
+| ripgrep | `lorry build --release --locked --offline` | Exercise applicable workspace tests excluding `grep-pcre2`; known `ignore` leading-dot-slash failure allowed, Unix symlink integration helper deferred. Original workspace reproducer: `lorry test --workspace --exclude grep-pcre2 --locked --offline`. |
 | Helix | `lorry build -p helix-term --bin hx --release --no-default-features --locked --offline` | Not required by this plan. |
 
 Each isolated project uses exact locked package/source grants, followed by
@@ -3940,21 +3953,21 @@ in the table's order, are:
 5f07964ca8383340128bf2f2a579b47cab4aaf4f7a3c1a0f6e1e3f6cc466e55d
 ```
 
-Closing these cases requires scoped external product ports: permit cc's existing
-standard-Rust named-tempfile implementation on Motor; preserve literal path-prefix
-matching in ignore. The Motor stdlib represents OS strings as UTF-8, so ignore
-can preserve literal prefixes using standard Rust string operations without
-changing the stdlib. Sed's deferred tests do not require an errno or tempfile
-port to close this Lorry milestone. The current external failures do not bound
-the number of later platform issues.
+The remaining known build blocker requires a scoped external dependency port:
+permit cc's existing standard-Rust named-tempfile implementation on Motor.
+Sed's deferred tests do not require an errno or tempfile port, and ripgrep's
+accepted matching limitation does not require an ignore port to close this
+Lorry milestone. The current external failure does not bound the number of
+later platform issues.
 
-The proposed ripgrep product change is confined to
+The deferred ripgrep product change would be confined to
 `crates/ignore/src/pathutil.rs`: select a Motor-specific implementation of
 `strip_prefix` that removes the literal UTF-8 string prefix and preserves the
 remainder, including `./`. This follows the existing Unix implementation's
 literal matching policy and can use stable `OsStr::to_str` and string
-operations. The existing `leading_dot_slash_impacts_matching` regression must
-pass natively with its assertions unchanged; the port has not been applied.
+operations. The existing `leading_dot_slash_impacts_matching` regression remains
+unchanged; its failure is allowed for this milestone. This port has not been
+applied and is not required by the current acceptance scope.
 
 The waived ripgrep integration helper is independent of that path-matching bug.
 No external product source has been changed. The repository's rule for
@@ -4270,14 +4283,15 @@ tests passed again before committing that repair. The initially failed release
 developer gate is now followed by the successful complete gate above; the
 remaining milestone work is independent real-project acceptance.
 
-Independent real-project acceptance remains: Helix encounters cc 1.2.29's native
-tempfile platform guard; ripgrep has an `ignore` path-matching defect beyond its
-waived symlink integration helper.
-Sed's native build passed, and the user approved deferring its unsupported native
-upstream test suite. The Motor cc wrapper itself works. External product ports
-require separate scope approval; further diagnosis and isolated test-only fixes
-remain authorized under the repository rules. No deferred Cargo feature or optional performance work is
-needed to close the plan.
+The remaining known real-project build blocker is Helix's cc 1.2.29 native
+tempfile platform guard. Sed's native build passed, and the user approved
+deferring its unsupported native upstream test suite. Ripgrep's native release
+build passed; its known ignore matching test failure is allowed for this
+milestone, and its symlink integration helper is deferred. Other applicable
+ripgrep tests remain required. The Motor cc wrapper itself works. External
+product ports require separate scope approval; further diagnosis and isolated
+test-only fixes remain authorized under the repository rules. No deferred Cargo
+feature or optional performance work is needed to close the plan.
 
 ### Native filesystem deadlock: cause and repair options
 

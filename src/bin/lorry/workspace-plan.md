@@ -7,18 +7,22 @@ This plan was updated after review on 2026-10-02 and revises the committed v3
 
 The real-project acceptance status is:
 
-| Project | Completed | Remaining blocker on Motor |
+| Project | Completed | Outstanding status on Motor |
 | --- | --- | --- |
 | sed | Native release build | Native upstream tests deferred: uucore/errno and tempfile gaps are in the test setup. |
-| ripgrep | Native release build | `ignore` loses literal `./` during path matching; workspace tests also have the previously waived symlink helper. |
+| ripgrep | Native release build | Known `ignore` leading-dot-slash test failure allowed for this milestone; symlink integration helper deferred. |
 | Helix | Locked vendoring and execution admission | The native build encounters cc 1.2.29's tempfile platform guard. |
 
-The remaining failures require external project or dependency ports.
-Their failures, required commands, and tool settings are recorded in
+Helix's native build is the remaining known acceptance blocker and requires
+an external dependency port. Diagnosed failures, required commands, and tool
+settings are recorded in
 [the milestone-9 details](workspace-plan-details.md#srcsys-and-the-real-projects).
-The waived ripgrep helper does not waive its separate library failure. No known
-large Lorry implementation milestone remains; the plan cannot close until the
-remaining acceptance is completed or its scope is explicitly revised.
+The user accepts ripgrep's known `ignore` matcher test failure for this milestone;
+it remains a recorded matching limitation and does not require a product port.
+Its symlink integration helper remains deferred. Other applicable ripgrep tests
+and all Lorry-owned gates remain required. No known large Lorry implementation
+milestone remains; the plan cannot close until the remaining acceptance is
+completed or its scope is explicitly revised.
 Lorry acceptance does not require compiling and running all sed tests natively
 on Motor. The successful native release build is accepted, and the upstream
 test suite is deferred because of unsupported test-only dependencies. Porting
@@ -252,9 +256,10 @@ See the detailed plan's diagnosis and validation evidence. Retained disk-capacit
 failures are separate evidence.
 
 Native ripgrep and sed release builds pass. Ripgrep's tests expose an external
-ignore path-matching defect beyond the integration helper; sed's deferred tests
-encounter errno's platform guard. The shipped native cc wrapper compiles and
-runs C successfully; Helix is blocked by the locked Rust cc crate's platform
+ignore path-matching defect, now allowed for this milestone, alongside the
+deferred integration helper. Sed's deferred tests encounter errno's platform
+guard. The shipped native cc wrapper compiles and runs C successfully; Helix
+is blocked by the locked Rust cc crate's platform
 guard. No product port in those external projects has been made.
 A separate interrupted-build bug can mistake a PID reused after reboot for an
 old artifact owner. The user added `KernelStaticPage::boot_random_id` and
@@ -353,7 +358,9 @@ The work is done when all of these pass:
 - **Real projects, on Motor.** sed builds in release mode. Compiling and running
   its full test suite natively is not required; unsupported external test
   dependencies and the upstream test suite are deferred. ripgrep builds in
-  release mode and runs `test --workspace --exclude grep-pcre2`. Helix
+  release mode and exercises applicable workspace tests, excluding `grep-pcre2`;
+  the known `ignore` leading-dot-slash test failure is allowed, and the Unix
+  symlink integration helper is deferred. Helix
   builds with `-p helix-term --bin hx --release --no-default-features`.
   Each project's tool grants and settings are written down.
 - **Editor, on Motor.** After `lorry fetch` in `src/sys`, Helix jumps
