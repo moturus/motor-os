@@ -100,10 +100,14 @@ fn file_mode_end_to_end() {
     let flood = format!("{flood_prefix}{}\n", "x".repeat(220 - flood_prefix.len()));
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        for _ in 0..32 {
-            moto_sys::SysRay::log(&flood).unwrap();
+        // A debug scan of the previous 4 MiB file can dominate the deadline.
+        // Keep bursts below the ring capacity, but emit several before scanning.
+        for _ in 0..16 {
+            for _ in 0..32 {
+                moto_sys::SysRay::log(&flood).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        std::thread::sleep(Duration::from_millis(10));
         let previous = std::fs::read(KERNEL_LOG_PREVIOUS_PATH).unwrap_or_default();
         if contains(&previous, flood_prefix.as_bytes()) {
             break;
