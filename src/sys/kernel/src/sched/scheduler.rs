@@ -604,6 +604,7 @@ pub fn start() -> ! {
             let shared_page = crate::mm::virt::get_kernel_static_page_mut();
             shared_page.version = 0;
             shared_page.num_cpus = crate::arch::num_cpus() as u32;
+            shared_page.boot_random_id = new_boot_random_id();
             update_system_time();
         }
         core::sync::atomic::fence(Ordering::Release);
@@ -620,6 +621,23 @@ pub fn start() -> ! {
 
     let queue = PERCPU_SCHEDULERS.get_per_cpu();
     queue.sched_loop();
+}
+
+fn new_boot_random_id() -> u64 {
+    assert!(
+        x86::cpuid::CpuId::new()
+            .get_feature_info()
+            .is_some_and(|info| info.has_rdrand()),
+        "boot identity requires RDRAND"
+    );
+    // Use the runtime's bounded hardware-reseed allowance; zero marks an older
+    // kernel without boot identity support and must never be published.
+    for _ in 0..10 {
+        if let Ok(id @ 1..) = moto_sys::rdrand() {
+            return id;
+        }
+    }
+    panic!("RDRAND did not provide a nonzero boot identity");
 }
 
 fn update_system_time() {
