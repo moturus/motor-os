@@ -394,3 +394,10 @@ Source approval/denial counts cover all recorded history and may include unrelat
 work. The report stays descriptive (`insufficient_evidence`) until the user
 applies the stated criterion to representative held-out coverage and costs.
 It never enables reviews. Equal observed rates do not establish equivalence.
+
+The paired suite runs starting regressions in a separate fresh preflight copy
+before model calls. It then repeats both arms 2–16 times, alternating their
+order. Each trial gets a fresh frozen workspace/state. `report.json` is replaced
+after each actor and criterion result; failed actors, acceptance failures and
+cancellation remain visible. Failed preflight starts no models. An uncertain
+process cleanup stops further work rather than rerunning the trial.

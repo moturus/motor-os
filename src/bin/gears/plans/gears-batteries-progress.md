@@ -1160,3 +1160,12 @@ review usage include explicit coverage limitations; total historical review
 cost and human time are unknown. Portable fixtures, both host profiles,
 warnings-denied host/native Clippy, native release build and release snapshot
 VM pass; logs use `/tmp/gears-eval-report-*`.
+
+Paired execution now connects starting-regression preflight, alternating repeated
+arms, fresh copies, independent criteria and incremental reporting. Portable
+fixtures run four real loopback actors, retain a deliberate acceptance failure,
+verify actual learning-arm order and prove failed preflight/cancellation make
+no additional model requests. Both host profiles, warnings-denied host/native
+Clippy, native release build and release snapshot VM pass; logs use
+`/tmp/gears-eval-suite-*`. The runner and shared actor fixture exceed 300 added
+lines because their end-to-end assertions exercise the complete paired flow.

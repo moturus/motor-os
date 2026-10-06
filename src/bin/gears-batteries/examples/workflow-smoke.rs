@@ -66,6 +66,9 @@ mod eval_report;
 #[path = "workflow-smoke/eval_states.rs"]
 mod eval_states;
 
+#[path = "workflow-smoke/eval_suite.rs"]
+mod eval_suite;
+
 #[path = "workflow-smoke/eval_tasks.rs"]
 mod eval_tasks;
 
@@ -300,6 +303,7 @@ fn run() -> Result<(), String> {
     eval_prepare::run_fixture(&fixture.root.join("eval-prepare"), &binary)?;
     eval_report::run_fixture(&fixture.root.join("eval-report"))?;
     eval_states::run_fixture(&fixture.root.join("eval-states"))?;
+    eval_suite::run_fixture(&fixture.root.join("eval-suite"), &binary, &gears, &compiler)?;
     eval_tasks::run_fixture(&fixture.workspace, &fixture.root.join("eval-tasks"))?;
     eval_directory::run_fixture(
         &binary,
