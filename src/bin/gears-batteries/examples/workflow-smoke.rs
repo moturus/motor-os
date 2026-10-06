@@ -42,6 +42,9 @@ mod review_proposals;
 #[path = "workflow-smoke/prefix_corrections.rs"]
 mod prefix_corrections;
 
+#[path = "workflow-smoke/review_launch.rs"]
+mod review_launch;
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let binary =
@@ -213,6 +216,7 @@ fn run() -> Result<(), String> {
     drop(runtime);
     memory::run(&binary, &fixture.root)?;
     review_marks::run(&fixture.workspace, &fixture.root.join("review-state"))?;
+    review_launch::run(&fixture.workspace, &fixture.root.join("review-launch"))?;
     review_anchor::run(&fixture.workspace, &fixture.root.join("review-anchor"))?;
     review_policy::run(&fixture.workspace, &fixture.root.join("review-policy"))?;
     review_triggers::run(&fixture.workspace, &fixture.root.join("review-triggers"))?;

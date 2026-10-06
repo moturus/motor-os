@@ -774,6 +774,21 @@ are retained; final focused logs end in `fixed`/`authorized`, and final host
 Clippy uses `host-clippy-fixed.log`. This supplies review authority metadata;
 the batteries runner has not yet been connected.
 
+### Review launch preparation
+
+The runner can prepare a literal ephemeral saved-entry fork with the preserved
+prefix and review role installed before hooks initialize. Disabled, handled,
+paused and review-role marks do not launch. Foreign sources, inconsistent
+executor metadata, missing reviewers and incomplete policy subscriptions fail
+before a provider request. Historical marks retain their original executor even
+when the parent later changes models.
+
+The portable fixture covers these checks, custom hook names, literal paths,
+configured limits and unchanged parent bytes. Both host batteries profiles,
+warnings-denied host/native Clippy, the native release build and the release
+snapshot VM workflow pass. Logs use `/tmp/gears-review-launch-*`. Execution and
+review instructions are the next patches; this preparation API starts no child.
+
 ### Corrections after a frozen prefix
 
 Batteries hooks recognize `preserve_prefix` during initialization. They retain

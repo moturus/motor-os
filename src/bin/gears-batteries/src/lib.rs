@@ -30,6 +30,7 @@ pub mod pending_files;
 pub mod policy;
 pub mod provenance;
 pub mod review_config;
+pub mod review_launch;
 pub mod review_marks;
 pub mod review_proposals;
 pub mod review_resume;
