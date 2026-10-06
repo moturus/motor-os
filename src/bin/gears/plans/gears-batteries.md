@@ -693,7 +693,12 @@ workspace) into a temporary directory and runs `gears --config EVAL
 starting state and budgets pinned, repeating each arm the configured number
 of times. Because `--config` does not move the Gears directory, the eval
 points each run at its isolated copy with `--gears-dir DIR`, a flag added
-in phase 9 for this purpose only. Repeating a few tasks does not create
+in phase 9 for this purpose only.
+The flag requires an explicit configuration, a prompt and a fresh ephemeral
+session; it rejects resume and fork. Relative directory paths become absolute
+before startup. Descendants inherit the selected directory, with a separate
+lock owner when a nested Gears selects another directory.
+Repeating a few tasks does not create
 broad coverage: a small
 personal suite can find large failures but cannot establish general
 improvement.

@@ -34,6 +34,7 @@ Usage: gears [OPTIONS]
 Options:
   --config PATH       Read configuration from PATH
   --workspace DIR     Use DIR as the working directory
+  --gears-dir DIR     Select state for --config PATH --ephemeral -p runs
   --log-file PATH     Append a diagnostic trace to PATH
   --provider NAME     Select a configured provider
   -m, --model ID      Select a model
@@ -92,6 +93,7 @@ pub struct Args {
     pub action: Action,
     pub config: Option<PathBuf>,
     pub workspace: Option<PathBuf>,
+    pub gears_dir: Option<PathBuf>,
     pub log_file: Option<PathBuf>,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -112,6 +114,7 @@ impl Args {
             action: Action::Run,
             config: None,
             workspace: None,
+            gears_dir: None,
             log_file: None,
             provider: None,
             model: None,
@@ -157,6 +160,13 @@ impl Args {
                 "--config" => args.config = Some(value(flag, inline, &mut iterator)?.into()),
                 "--workspace" => args.workspace = Some(value(flag, inline, &mut iterator)?.into()),
                 "--log-file" => args.log_file = Some(value(flag, inline, &mut iterator)?.into()),
+                "--gears-dir" => {
+                    let directory = value(flag, inline, &mut iterator)?;
+                    if directory.is_empty() || args.gears_dir.is_some() {
+                        return Err("--gears-dir needs one nonempty directory".into());
+                    }
+                    args.gears_dir = Some(PathBuf::from(directory));
+                }
                 "--provider" => {
                     args.provider = Some(value(flag, inline, &mut iterator)?.to_string())
                 }
@@ -244,6 +254,14 @@ impl Args {
                 }
                 _ => return Err(format!("unrecognized argument {argument:?}")),
             }
+        }
+        if args.gears_dir.is_some()
+            && (args.action != Action::Run
+                || args.config.is_none()
+                || args.prompt.is_none()
+                || args.session != SessionStart::Ephemeral)
+        {
+            return Err("--gears-dir requires --config PATH --ephemeral -p".into());
         }
         if args.fork_entry.is_some()
             && !matches!(
@@ -335,6 +353,68 @@ fn value<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evaluation_directories_require_explicit_fresh_ephemeral_configuration() {
+        let base = [
+            "--gears-dir",
+            "copy",
+            "--config",
+            "eval.toml",
+            "--ephemeral",
+            "-p",
+            "task",
+        ];
+        assert_eq!(
+            Args::parse(&base).unwrap().gears_dir,
+            Some(PathBuf::from("copy"))
+        );
+        for argv in [
+            vec!["--gears-dir", "copy"],
+            vec!["--gears-dir", "copy", "--ephemeral", "-p", "task"],
+            vec!["--gears-dir", "copy", "--config", "eval.toml", "-p", "task"],
+            vec![
+                "--gears-dir",
+                "copy",
+                "--config",
+                "eval.toml",
+                "--ephemeral",
+            ],
+            vec![
+                "--gears-dir",
+                "",
+                "--config",
+                "eval.toml",
+                "--ephemeral",
+                "-p",
+                "task",
+            ],
+            vec![
+                "--gears-dir",
+                "copy",
+                "--config",
+                "eval.toml",
+                "--ephemeral",
+                "--fork",
+                "saved",
+                "-p",
+                "task",
+            ],
+            vec![
+                "--gears-dir",
+                "copy",
+                "--gears-dir",
+                "other",
+                "--config",
+                "eval.toml",
+                "--ephemeral",
+                "-p",
+                "task",
+            ],
+        ] {
+            assert!(Args::parse(&argv).is_err(), "{argv:?}");
+        }
+    }
 
     #[test]
     fn session_starts_are_explicit_and_exclusive() {

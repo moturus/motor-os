@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 
 #[path = "tool-smoke/directory_lock.rs"]
 mod directory_lock;
+#[path = "tool-smoke/eval_directory.rs"]
+mod eval_directory;
 #[path = "tool-smoke/file_access.rs"]
 mod file_access;
 #[path = "tool-smoke/fork_entry.rs"]
@@ -49,6 +51,7 @@ fn main() -> Result<(), String> {
     file_access::smoke()?;
     request_prefix::smoke()?;
     state_directory::smoke(&gears)?;
+    eval_directory::smoke(&gears)?;
     println!("gears shipped tools ALL PASS");
     Ok(())
 }
@@ -291,4 +294,9 @@ fn saved_request_prefixes_survive_compaction_and_historical_forks() {
 #[test]
 fn selected_directories_keep_defaults_locks_and_sessions_together() {
     state_directory::smoke(Path::new(env!("CARGO_BIN_EXE_gears"))).unwrap();
+}
+
+#[test]
+fn nested_evaluation_directories_do_not_inherit_another_roots_owner() {
+    eval_directory::smoke(Path::new(env!("CARGO_BIN_EXE_gears"))).unwrap();
 }

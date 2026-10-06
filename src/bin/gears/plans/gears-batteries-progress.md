@@ -1046,3 +1046,15 @@ cleanup, saved sessions and invalid roots against a loopback mock.
 Both host Gears profiles, warnings-denied host/native Clippy, native release
 build and the release snapshot VM shipped-tool gate pass; logs use
 `/tmp/gears-eval-directory-*`. The CLI flag and batteries root connection follow.
+
+`--gears-dir DIR` now selects an absolute inherited directory before startup.
+It requires explicit configuration and a fresh ephemeral prompt, rejecting
+resume/fork and incomplete invocations before creating state. A nested Gears
+switching directories acquires its own lock; same-root descendants keep the
+existing ownership checks. The real-process fixture exercises both nested
+directories and an untouched inherited directory on Linux and Motor OS.
+Both host profiles, warnings-denied host/native Clippy, native release build
+and release snapshot VM pass; logs use `/tmp/gears-eval-directory-cli-*`.
+The initial compilation and misplaced-validation failures are preserved in
+`host-debug.log` and `host-debug-fixed.log`; final validation keeps the failing
+assertions and adds a real-process check before directory creation.
