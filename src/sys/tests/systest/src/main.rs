@@ -44,6 +44,7 @@ mod stdio_file_relay;
 mod stdio_peek;
 mod stdio_terminal;
 mod subcommand;
+mod swap_cancel;
 mod sys_io_self_test;
 mod sys_tty;
 mod sysbox_cat;
@@ -1191,6 +1192,9 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if swap_cancel::run_command(&args) {
+        return;
+    }
     if args.len() == 2 && args[1] == "boot-random-id" {
         println!("{:016x}", moto_sys::KernelStaticPage::get().boot_random_id);
         return;
@@ -1720,6 +1724,7 @@ fn main() {
     spawn_wait_kill::test_shared_listener_restart();
     ipc_service::run_tests();
     spawn_wait_kill::test_thread_creation_exit_rollback();
+    swap_cancel::run_tests();
     ctrl_c::run_tests();
     command_output::run_test();
     sysbox_diff::run_test();
