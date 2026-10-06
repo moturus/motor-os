@@ -1169,3 +1169,10 @@ no additional model requests. Both host profiles, warnings-denied host/native
 Clippy, native release build and release snapshot VM pass; logs use
 `/tmp/gears-eval-suite-*`. The runner and shared actor fixture exceed 300 added
 lines because their end-to-end assertions exercise the complete paired flow.
+
+Executable pinning now copies the Gears/batteries pair into an owned sibling
+layout, records hashes/lengths and preserves native execute access. The bounded
+file copier is shared with workspace snapshots. Portable fixtures execute both
+pinned binaries and reject an existing destination/non-file source. Both host
+profiles, warnings-denied host/native Clippy, native release build and release
+snapshot VM pass; logs use `/tmp/gears-eval-binary-*`.

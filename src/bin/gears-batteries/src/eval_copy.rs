@@ -141,52 +141,62 @@ impl Copy<'_> {
             return Err("evaluation copy exceeds 100000 files".into());
         }
         let source = self.source.join(relative);
-        let before = std::fs::symlink_metadata(&source).map_err(|e| e.to_string())?;
-        if !before.is_file() {
-            return Err("evaluation copy source changed type".into());
-        }
         let destination = self.target.file(relative)?;
-        let mut input = File::open(&source).map_err(|e| e.to_string())?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .map_err(|e| e.to_string())?;
-        let mut hash = Sha256::new();
-        let mut length = 0u64;
-        let mut buffer = [0; 32768];
-        loop {
-            let count = input.read(&mut buffer).map_err(|e| e.to_string())?;
-            if count == 0 {
-                break;
-            }
-            self.bytes += count as u64;
-            length += count as u64;
-            if self.bytes > 512 * 1024 * 1024 {
-                return Err("evaluation copy exceeds 512 MiB; add explicit exclusions".into());
-            }
-            output
-                .write_all(&buffer[..count])
-                .map_err(|e| e.to_string())?;
-            hash.update(&buffer[..count]);
-        }
-        let after = input.metadata().map_err(|e| e.to_string())?;
-        if length != before.len()
-            || before.len() != after.len()
-            || before.modified().ok() != after.modified().ok()
-        {
-            return Err(
-                "workspace changed during evaluation copy; freeze it before copying".into(),
-            );
-        }
-        output.sync_all().map_err(|e| e.to_string())?;
-        drop(output);
-        access(&source, &destination, &before)?;
+        let (length, hash) = file(&source, &destination, 512 * 1024 * 1024 - self.bytes)?;
+        self.bytes += length;
         self.manifest.update(b"file");
         self.manifest.update(length.to_le_bytes());
-        self.manifest.update(hash.finalize());
+        self.manifest.update(hash);
         Ok(())
     }
+}
+
+pub(crate) fn file(
+    source: &Path,
+    destination: &Path,
+    limit: u64,
+) -> Result<(u64, [u8; 32]), String> {
+    let before = std::fs::symlink_metadata(source).map_err(|e| e.to_string())?;
+    if !before.is_file() {
+        return Err("evaluation copy source changed type".into());
+    }
+    if before.len() > limit {
+        return Err("evaluation file exceeds its byte budget".into());
+    }
+    let mut input = File::open(source).map_err(|e| e.to_string())?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|e| e.to_string())?;
+    let mut hash = Sha256::new();
+    let mut length = 0u64;
+    let mut buffer = [0; 32768];
+    loop {
+        let count = input.read(&mut buffer).map_err(|e| e.to_string())?;
+        if count == 0 {
+            break;
+        }
+        length += count as u64;
+        if length > limit {
+            return Err("evaluation file exceeds its byte budget".into());
+        }
+        output
+            .write_all(&buffer[..count])
+            .map_err(|e| e.to_string())?;
+        hash.update(&buffer[..count]);
+    }
+    let after = input.metadata().map_err(|e| e.to_string())?;
+    if length != before.len()
+        || before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+    {
+        return Err("workspace changed during evaluation copy; freeze it before copying".into());
+    }
+    output.sync_all().map_err(|e| e.to_string())?;
+    drop(output);
+    access(source, destination, &before)?;
+    Ok((length, hash.finalize().into()))
 }
 
 fn access(source: &Path, destination: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {

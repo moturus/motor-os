@@ -401,3 +401,8 @@ order. Each trial gets a fresh frozen workspace/state. `report.json` is replaced
 after each actor and criterion result; failed actors, acceptance failures and
 cancellation remain visible. Failed preflight starts no models. An uncertain
 process cleanup stops further work rather than rerunning the trial.
+
+Executable pinning copies Gears and batteries together into a fresh `bin/`
+inside evaluation output and records their content hashes/lengths. Both use the
+shared bounded file copier, preserving execute access without copying build
+caches or consulting mutable binaries again during trials.
