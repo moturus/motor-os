@@ -149,9 +149,45 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
         assert_eq!(review_marks::due(&context)?.len(), 1);
         assert_eq!(std::fs::read(&result_path).unwrap(), baseline);
     }
-    review_runner::complete(&context, &id, &success)?;
+    let mut noisy = success.clone();
+    noisy.stderr = "Legacy prefix notice".into();
+    noisy.stdout = format!(
+        "{}\n{}",
+        json!({"type": "notice", "text": "Current correction"}),
+        noisy.stdout
+    );
+    review_runner::complete(&context, &id, &noisy)?;
+    let displayed = gears_batteries::review_status::latest(&context.state)?.unwrap();
+    assert!(
+        displayed["diagnostics"]
+            .as_str()
+            .unwrap()
+            .contains("Legacy prefix notice")
+    );
+    assert!(
+        displayed["diagnostics"]
+            .as_str()
+            .unwrap()
+            .contains("Current correction")
+    );
     assert!(review_runner::complete(&context, &id, &success).is_err());
     assert!(review_marks::due(&context)?.is_empty());
+    let bounded = review_marks::create(
+        &context,
+        &entry,
+        Reason::Command,
+        "Bounded diagnostics",
+        &model,
+    )?;
+    let noisy = Output {
+        stderr: "字".repeat(3000),
+        ..success
+    };
+    review_runner::complete(&context, &bounded, &noisy)?;
+    let displayed = gears_batteries::review_status::latest(&context.state)?.unwrap();
+    let diagnostics = displayed["diagnostics"].as_str().unwrap();
+    assert!(diagnostics.chars().count() <= 2080);
+    assert!(diagnostics.ends_with("[Review diagnostics truncated]"));
     println!("gears batteries review runner ALL PASS");
     Ok(())
 }

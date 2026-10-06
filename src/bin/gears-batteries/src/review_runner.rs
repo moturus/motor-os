@@ -122,12 +122,50 @@ pub fn complete(context: &ToolContext, id: &str, output: &Output) -> Result<(), 
         .chars()
         .take(1024)
         .collect();
+    let diagnostics = diagnostics(output);
+    if !diagnostics.is_empty() {
+        eprintln!("review {id}:\n{diagnostics}");
+    }
     let record = json!({"version": 1, "session": context.session, "workspace": context.workspace,
-        "mark": id, "executor": mark.executor, "reviewer": crate::review_config::load(&context.state)?.reviewer, "date_ms": crate::pending::now_ms()?, "answer": answer, "usage": final_record.usage});
+        "mark": id, "executor": mark.executor, "reviewer": crate::review_config::load(&context.state)?.reviewer, "date_ms": crate::pending::now_ms()?, "answer": answer, "usage": final_record.usage, "diagnostics": diagnostics});
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
     // Completion is durable first; failure to update status must not rerun the mark.
     review_marks::finish(context, id, Disposition::Completed)?;
     context
         .state
         .replace_file(Path::new("batteries/last-review.json"), &bytes)
+}
+
+fn diagnostics(output: &Output) -> String {
+    let mut text: String = output.stderr.chars().take(2048).collect();
+    let mut truncated = text.len() < output.stderr.len()
+        || output.stderr_dropped != 0
+        || output.stdout_dropped != 0;
+    for line in output.stdout.lines() {
+        if !line.contains("\"type\":\"notice\"") {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if record["type"] != "notice" {
+            continue;
+        }
+        let Some(notice) = record["text"].as_str() else {
+            continue;
+        };
+        let remaining = 2048_usize.saturating_sub(text.chars().count());
+        if remaining <= 1 {
+            truncated = true;
+            break;
+        }
+        let part: String = notice.chars().take(remaining - 1).collect();
+        truncated |= part.len() < notice.len();
+        text.push('\n');
+        text.push_str(&part);
+    }
+    if truncated {
+        text.push_str("\n[Review diagnostics truncated]");
+    }
+    text.trim().to_string()
 }

@@ -865,6 +865,19 @@ The subsequent invocation is an explicit part of the interruption scenario;
 there is no automatic retry or timeout change. Cleanup still needs the requested
 cutoff guidance; evaluation still needs question 7's quality/cost criterion.
 
+### Visible review diagnostics
+
+A reproduced legacy-session review succeeded while hiding Gears' explicit
+missing-prefix fallback notice. The companion now displays bounded child stderr
+and JSONL notices and retains them in the completed result. UTF-8 diagnostics
+are capped with an explicit truncation marker. The real legacy-fork fixture
+verifies that the fallback notice reaches the user and parent bytes stay intact.
+
+Both host profiles, warnings-denied host/native Clippy, the native release build
+and release snapshot VM workflow pass. Logs use `/tmp/gears-review-diagnostics-*`.
+`original.log` preserves the successful-but-silent child result that failed the
+notice assertion; the fixed and final debug gates preserve that assertion.
+
 ### Corrections after a frozen prefix
 
 Batteries hooks recognize `preserve_prefix` during initialization. They retain

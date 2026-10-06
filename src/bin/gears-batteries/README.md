@@ -264,6 +264,8 @@ Reviews keep the marked system/tool prefix while compacting oversized history.
 User focus, denied changes and mechanical evidence follow that prefix; evidence
 over 64 KiB is refused explicitly, leaving the mark due. Failed or interrupted
 reviews stay due; successful marks are handled once. Nothing to save is normal.
+Bounded child diagnostics are displayed and saved with the result, including the
+explicit fallback notice when an older session lacks a saved request prefix.
 
 `gears-batteries status` shows the configured review pair and proposal limit
 under `review_settings`, marks execution experimental and shows `last_review`.

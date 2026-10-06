@@ -99,6 +99,7 @@ pub fn run(batteries: &Path, gears: &Path, fixture: &Path) -> Result<(), String>
             .pause(Duration::from_millis(500)).close(),
         reply(r#"{"choices":[{"delta":{"content":"Original greeting and answer."},"finish_reason":"stop"}]}"#),
         reply(r#"{"choices":[{"delta":{"content":"Nothing to save"},"finish_reason":"stop"}]}"#),
+        reply(r#"{"choices":[{"delta":{"content":"Nothing to save"},"finish_reason":"stop"}]}"#),
     ]).map_err(|error| error.to_string())?;
     let key = base.join("local.key");
     std::fs::write(&key, "fixture").map_err(|error| error.to_string())?;
@@ -249,6 +250,55 @@ pub fn run(batteries: &Path, gears: &Path, fixture: &Path) -> Result<(), String>
         before_workspace
     );
     assert!(gears_batteries::skill_pending::list(&context)?.is_empty());
+    let mut legacy = store.create(false, None)?;
+    legacy.set_provider("default")?;
+    legacy.set_model("executor")?;
+    let old_entry = legacy.append_message(&Message::assistant("Legacy answer"))?;
+    let legacy_context = ToolContext::new(
+        context.workspace.clone(),
+        context.state.path().into(),
+        legacy.id().into(),
+        legacy.path(),
+    )?;
+    review_marks::create(&legacy_context, &old_entry, Reason::Command, "", &model)?;
+    assert!(legacy.request_prefix()?.is_none());
+    // This scenario tests legacy fallback with the ordinary configured window.
+    let original_config = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        original_config.replace("window_tokens=4096", "window_tokens=128000"),
+    )
+    .map_err(|error| error.to_string())?;
+    for (name, value) in &mut request.env {
+        match name.as_str() {
+            "GEARS_SESSION_ID" => *value = legacy.id().into(),
+            "GEARS_SESSION_PATH" => *value = legacy.path().unwrap().to_str().unwrap().into(),
+            _ => {}
+        }
+    }
+    let legacy_before = std::fs::read(legacy.path().unwrap()).unwrap();
+    let output = invoke(&request)?;
+    assert!(output.success(), "{output:?}");
+    assert!(
+        output
+            .stderr
+            .contains("saved prefix unavailable; using reconstructed instructions"),
+        "{output:?}"
+    );
+    assert_eq!(server.requests().len(), 7);
+    assert_eq!(
+        std::fs::read(legacy.path().unwrap()).unwrap(),
+        legacy_before
+    );
+    drop(legacy);
+    std::fs::remove_dir_all(
+        context
+            .state
+            .path()
+            .join("batteries/sessions")
+            .join(&legacy_context.session),
+    )
+    .map_err(|error| error.to_string())?;
     let group = parent.path().unwrap().parent().unwrap().to_path_buf();
     drop(parent);
     std::fs::remove_dir_all(group).map_err(|error| error.to_string())?;
