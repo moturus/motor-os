@@ -565,7 +565,8 @@ decisions, reviews read denials so they do not propose them again, and the
 user or agent can find where an entry came from.
 
 **Layout.** Under the Gears directory, `batteries/` holds `USER.md`,
-`MEMORY.md`, `skills/`, `pending/`, `changes.jsonl`, `snapshots/`,
+`MEMORY.md`, `skills/`, `archived-skills/`, `pending/`, `changes.jsonl`,
+`skill-loads.jsonl`, `snapshots/`,
 `sessions/<id>/` (turn records, `sh` state, file-read records and review
 marks) and `eval/`. `batteries.toml` in the Gears directory holds the
 user-wide settings: memory size limits, the review models and the proposal
@@ -610,6 +611,10 @@ lists decisions. `status` shows on one screen whether reviews are on and for
 which models, what is pending, and the last review and eval results. `cleanup`
 proposes archiving unused agent-written skills and points out skills whose
 "when" sections overlap; it never archives or merges on its own.
+Approved skill removals retain both files in a versioned, content-addressed
+archive before withdrawing the live version. Successful `skill_view` loads
+are recorded separately from saved conversations, including ephemeral runs;
+these are load observations, not evidence of usefulness.
 
 ## Reviews
 

@@ -67,9 +67,10 @@ pub fn execute(event: &Event, context: &ToolContext) -> Result<Value, String> {
     frozen.loaded.retain(|skill| skill.name != name);
     desired.loaded.retain(|skill| skill.name != name);
     frozen.loaded.push(loaded.clone());
-    desired.loaded.push(loaded);
+    desired.loaded.push(loaded.clone());
     state["skill_snapshot"] = json!(crate::skill_snapshot::save(context, &frozen)?);
     state["skill_view_snapshot"] = json!(crate::skill_snapshot::save(context, &desired)?);
+    crate::skill_loads::record(context, &name, &descriptor.hash, loaded.source)?;
     Ok(
         json!({"state": state, "tool_result": {"content": json!({"version": 1, "name": name,
         "hash": descriptor.hash, "content": content, "observation": "Loaded an approved skill; this does not establish successful use or usefulness."}).to_string(), "is_error": false}}),

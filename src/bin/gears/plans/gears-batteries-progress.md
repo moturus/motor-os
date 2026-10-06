@@ -972,8 +972,8 @@ pass. See [the rollout record](gears-yaml-runtime.md#rollout-sequence) for the
 exact SDK name and logs. The earlier failures remain preserved in that record.
 
 The independent sysbox track continues with field keys and S3–S6 after the
-numeric/human patch. Phase 8 continues with cleanup proposals. Guidance is
-requested on the cleanup cutoff.
+numeric/human patch. Phase 8 continues with cleanup proposals. Cleanup will
+require a cutoff when invoked, without setting an automatic retention period.
 Phase 9 requires
 the user's quality/cost criterion in question 7; keep reviews disabled until
 an explicit model-pair decision and real-model evidence justify enabling them.
@@ -987,3 +987,11 @@ The optional Hermes import has not been performed. Automated mock tests
 establish behavior, not real-model usefulness. Keep the outstanding native
 interactive checklist visible; do not mark it complete from component tests
 alone.
+
+Cleanup foundations now record successful skill loads independently of saved
+sessions, including ephemeral runs. Approved removals retain exact SKILL.md
+and NOTES.md bytes in `batteries/archived-skills/`; the pending display names
+that archive. Postponement, denial and stale approval leave live files intact.
+The portable workflow checks these cases on both platforms. Host debug/release,
+warnings-denied host/native Clippy, native release build and the release snapshot
+VM component gate pass; logs use `/tmp/gears-cleanup-retention-*`.

@@ -130,6 +130,9 @@ pub fn decide(context: &ToolContext, id: &str, decision: Decision) -> Result<(),
     if decision == Decision::Approve {
         proposal.check_current(context)?;
         proposal.validate_after(context)?;
+        if proposal.after.is_none() {
+            crate::skill_archive::save(context, &proposal.name, proposal.before.as_ref().unwrap())?;
+        }
     }
     let path = context.state.file(Path::new("batteries/changes.jsonl"))?;
     crate::journal::append_at(

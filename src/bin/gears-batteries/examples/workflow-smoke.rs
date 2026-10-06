@@ -21,6 +21,9 @@ mod acceptance;
 #[path = "workflow-smoke/skills.rs"]
 mod skills;
 
+#[path = "workflow-smoke/skill_retention.rs"]
+mod skill_retention;
+
 #[path = "workflow-smoke/review_marks.rs"]
 mod review_marks;
 
@@ -243,6 +246,7 @@ fn run() -> Result<(), String> {
         &fixture.root.join("prefix-workspace"),
         &fixture.root.join("prefix-state"),
     )?;
+    skill_retention::run(&fixture.workspace, &fixture.root.join("skill-retention"))?;
     fixture.cleanup(&group, &sessions, &snapshots)?;
     skills::run(&binary, &compiler)?;
     acceptance::run(&binary, &compiler)?;
