@@ -26,6 +26,7 @@ pub fn run(
     acquisition: Value,
     cancel: &Cancellation,
 ) -> Result<Value, String> {
+    process::ensure_cleanup()?;
     if !(2..=16).contains(&settings.repetitions)
         || !(Duration::from_secs(1)..=Duration::from_secs(3600)).contains(&settings.command_timeout)
         || settings.criterion.trim().is_empty()

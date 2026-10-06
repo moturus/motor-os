@@ -8,6 +8,7 @@ pub mod check_state;
 pub mod command_policy;
 pub mod eval_actor;
 pub mod eval_binary;
+pub mod eval_cli;
 pub mod eval_command;
 pub mod eval_config;
 pub mod eval_copy;

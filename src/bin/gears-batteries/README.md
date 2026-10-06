@@ -291,8 +291,8 @@ executable access, applies the declared exclusions, and refuses linked or
 special entries. Bounds are 64 directory levels, 100,000 entries and 512 MiB;
 add explicit exclusions for build artifacts. A failed copy removes only its own
 incomplete destination and reports cleanup failure. Freeze source workspaces
-before copying. Paired execution and reports follow; loading or copying does
-not run a model or enable reviews.
+before copying. Loading or copying alone does not run a model or enable reviews; the
+manual `eval` command below runs paired trials.
 
 `/review [focus]` records a due review mark at the current saved conversation
 entry. Reviews are disabled by default; user-wide `batteries.toml` must set
@@ -412,3 +412,41 @@ trial workspace; reports contain at most 1,024 characters per stream plus paths
 and saved byte counts. Gears JSONL retains full recorded check content while
 summaries identify it by hash. Truncated/malformed event streams leave tool
 counts unknown. Unchecked regressions are distinct from observed failures.
+
+Run a held-out suite by hand after choosing its quality/cost criterion:
+
+```sh
+gears-batteries eval --task /user/cfg/gears/batteries/eval/tasks/empty-records.toml \
+  --task /user/cfg/gears/batteries/eval/tasks/binary-records.toml \
+  --config /user/cfg/gears/gears-batteries.toml --provider openrouter \
+  --model YOUR_MODEL --trials 3 --seconds 120 --command-seconds 60 \
+  --criterion 'More accepted tasks, no new regressions, within my stated review budget.' \
+  --output /user/tmp/held-out-run
+```
+
+Use the provider name actually declared in your configuration. `--trials` is
+per arm per task; the example schedules 12 actors. The task list is explicit
+(1–32 files with distinct names). All templates, learning and tool definitions
+are captured before the first model request, and the executable pair is pinned
+once. Source files/settings remain unchanged by the runner. Freeze the source
+workspaces and settings while preparing the run. Key files come from the
+configuration or Gears' usual API-key location; child checks receive no API-key
+environment variable.
+
+The output directory must be fresh and separate from every source workspace;
+relative root/output paths resolve from the invoking directory. `--root DIR`
+selects the source learning directory; `--gears PROGRAM` selects the Gears
+executable (otherwise its sibling beside batteries). Output includes `inputs.json`,
+aggregate `report.json`, per-task reports under `tasks/<name>/`, and trial event,
+error and criterion artifacts. Aggregate rows include their artifact base path.
+Approval/denial acquisition counts are reported once for the source directory,
+with the currently configured review pair distinguished from historical pairing.
+
+A failed preflight, preparation or cancellation exits nonzero and retains the
+reports already written. An acceptance failure is an experimental outcome and
+remains in a completed report. The command never retries a trial or enables
+reviews. Its free-text criterion is recorded for the user's assessment; it does
+not parse a statistical decision rule or fabricate missing review costs/human
+seconds. Real-model runs are manual and outside regular tests, whose providers
+are loopback mocks. Keep held-out answers/judge assets out of source learning and
+model-visible copies.

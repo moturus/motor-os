@@ -5,12 +5,14 @@ and `/accept` validated with the selected `dev.3` SDK. Phase 8 has model-pair
 settings, durable marks, exact saved-entry snapshots, review tool policy and
 command/compaction triggers, the resume question, a durable proposal cap and a
 connected runner that preserves the saved prefix after compaction, and explicit
-cutoff-based cleanup proposals with approval-only archival.
+cutoff-based cleanup proposals with approval-only archival. Phase 9's manual
+multi-task evaluation command, frozen workspace/state copies, repeated arms and
+reports pass focused host/native fixtures; the first real-model run is pending.
 Sysbox S1 and S2's byte/numeric/human sorting are complete and
-core-gated; field keys remain. Design revised 2026-10-05. See the
+core-gated; field keys remain. Design revised 2026-10-06. See the
 [implementation record](gears-batteries-progress.md) for completed patches
 and validation still outstanding. Two questions wait
-for later phases: question 7 is discussed when phase 8 is reached, and
+for later phases: question 7 is needed before the first real-model evaluation, and
 question 10 when phase 12 is. Tool confinement is deferred (see "Deferred:
 tool confinement").
 
@@ -687,6 +689,15 @@ build or a matching string. The batteries may propose tasks from sessions
 whose result the user accepted; the user approves them in `pending`. A
 held-back set is written by the user and never shown to reviews.
 
+The manual command is `gears-batteries eval --task FILE [--task FILE ...]
+--config FILE --provider NAME --model NAME --trials N --seconds N
+--command-seconds N --criterion TEXT --output DIR`, with optional `--root DIR`
+and `--gears PROGRAM`. Current execution uses workspace copies; repository-at-
+commit cloning remains an alternative. It captures all task templates, approved
+learning and tool definitions before model requests, pins executable versions,
+checks each starting workspace's regressions, alternates arm order and preserves
+per-task and aggregate reports. Regular fixtures use loopback models only.
+
 **Runs.** Each run clones the repository with `gix` (or copies the
 workspace) into a temporary directory and runs `gears --config EVAL
 --ephemeral --output jsonl -p PROMPT` with the model, configuration,
@@ -706,9 +717,12 @@ improvement.
 **Report.** Accepted-task rate, regressions, elapsed time, model and tool
 cost, and human review effort including denied proposals and the cost of
 reviews and evaluation, attributed to particular memory and tool versions.
-The verdict is one of improving, degrading, equivalent within a stated
-tolerance, or insufficient evidence; failing to detect a difference is not
-equivalence. The eval uses a real model, is run by hand and is never part of
+The user assesses improving, degrading, equivalent within a stated tolerance,
+or insufficient evidence against the criterion recorded before the run; failing
+to detect a difference is not equivalence. The initial command's report remains
+`insufficient_evidence`: its free-text criterion is not an executable statistical
+rule, and missing historical review/tool cost or human time stays unknown. It
+never changes review settings. The eval uses a real model, is run by hand and is never part of
 `full-test`. Useful tools and curated memory stay available whatever it
 finds.
 
@@ -985,7 +999,7 @@ No repository inspection or separate acceptance CLI is needed.
   handles its mark once, and a new session does not run another session's
   review.
 
-**Phase 9. Measurement** (needs question 7, discussed in phase 8). Task
+**Phase 9. Measurement** (question 7 is required for its first real-model run). Task
 format, isolated copies of the Gears directory and repositories, the two
 arms, repeated trials and the report; then the user's first run. Its
 result decides whether reviews are turned on for a given pair of models.
@@ -1065,7 +1079,7 @@ above. Questions 7 and 10 are open and will be discussed when phases 8 and
    resumes that session.
 
 7. **What result should turn reviews on?** (discussed in phase 8, needed
-   before phase 9) Reviews may make the agent better, make no difference,
+   before its first real-model run) Reviews may make the agent better, make no difference,
    or make it worse, and they cost money. The eval in phase 9 runs the same tasks twice, once with what
    reviews taught the agent and once without, and compares the results.
    Before the first run, the user writes down what result would be good

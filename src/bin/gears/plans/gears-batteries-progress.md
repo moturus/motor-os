@@ -22,6 +22,10 @@ review runner. Real-binary compacted reviews preserve the saved prefix on both
 systems, with historical resource checkpoints and current withdrawal corrections
 after resume. Real in-flight interruption and session isolation pass. Phase 8.3
 cleanup stages explicit-cutoff archival proposals and passes the real CLI workflow.
+Phase 9's manual `eval` command captures multiple tasks, tools and learning,
+runs repeated isolated arms, and reports independent criteria and partial costs.
+Focused host/native fixtures pass. Its final release developer-image gate is
+pending; the first real-model run needs the user's held-out tasks and criterion.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
@@ -32,7 +36,7 @@ warnings-denied Clippy pass, as do three debug and three release full core
 runs after the diagnosed kernel-log test correction (`9adb3ddf`). The second
 S2 patch adds exact numeric and human-size sorting and passes the same six
 core gates with the stock `dev.3` SDK. Field keys, S3–S6 and the remaining
-phase 8–12 work are pending.
+first real-model evaluation and optional phases 10–12 are pending.
 
 The phase 3 manual checklist is not marked complete. Automated host tests
 cover the runtime and both UIs; native gates cover shipped tools, literal
@@ -1194,3 +1198,18 @@ release build and release snapshot VM pass. The initial build used the wrong
 module for the existing root helper; that failure remains in
 `/tmp/gears-eval-options-*`, corrected host/build/Clippy logs use `root-fixed`.
 The native fixture log is `/tmp/gears-eval-options-native.log`.
+
+The manual `gears-batteries eval` command now captures 1–32 task inputs before
+model requests, pins one executable pair, runs repeated arms and writes per-task
+and aggregate reports without duplicating source acquisition counts. It records
+the current review pair separately from unavailable historical pairing. Real
+CLI fixtures run two tasks/eight actors, retain a deliberate acceptance failure,
+resolve artifact paths and preserve source settings. Relative root/output paths
+are normalized before validation; the original failing host logs are
+`/tmp/gears-eval-cli-host-debug.log` and `host-release.log`. The unchanged relative
+output assertion passes, with additional relative-root coverage. Both corrected
+host profiles, warnings-denied host/native Clippy, native release build and
+release snapshot VM pass; corrected logs use `root-fixed`, native fixture log is
+`/tmp/gears-eval-cli-native.log`. This patch keeps the CLI and its actual-process
+integration test together; options, copying, pinning and paired execution were
+committed separately.

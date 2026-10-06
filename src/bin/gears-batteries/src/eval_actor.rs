@@ -108,6 +108,7 @@ pub fn run(
         .collect();
     Ok(
         json!({"version":1,"completed":complete,"exit_status":output.code,
+        "events_artifact":directory.join("actor.jsonl"),"stderr_artifact":directory.join("actor.stderr"),
         "duration_ms":start.elapsed().as_millis().min(u64::MAX as u128) as u64,
         "timed_out":output.timed_out,"cancelled":output.cancelled,
         "stdout_dropped":output.stdout_dropped,"stderr_dropped":output.stderr_dropped,

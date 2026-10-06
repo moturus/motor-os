@@ -18,6 +18,13 @@ fn run() -> Result<(), String> {
             println!();
             Ok(())
         }
+        [role, flag] if role == "eval" && matches!(flag.as_str(), "--help" | "-h") => {
+            println!("{}", gears_batteries::eval_options::USAGE);
+            Ok(())
+        }
+        [role, ..] if role == "eval" => {
+            gears_batteries::eval_cli::run(&args, std::io::stdout().lock())
+        }
         [role] if role == "review" => {
             let completed = gears_batteries::review_runner::from_env()?;
             if completed != 0 {
@@ -40,7 +47,11 @@ fn run() -> Result<(), String> {
             )
         }
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("{}", gears_batteries::memory_options::USAGE);
+            println!(
+                "{}\n{}",
+                gears_batteries::memory_options::USAGE,
+                gears_batteries::eval_options::USAGE
+            );
             Ok(())
         }
         _ => Err(gears_batteries::memory_options::USAGE.into()),
