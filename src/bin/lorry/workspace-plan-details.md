@@ -3969,8 +3969,109 @@ by NTP and cannot safely authorize touching interrupted artifacts. See the
 [KVM implementation](https://linux.googlesource.com/virt/kvm/kvm/+/e503f539dc113ce74347d9b1ce1f7b83f68f5fe0/arch/x86/kvm/x86.c).
 The removed draft is retained only in
 `/tmp/lorry-m9-unsafe-boot-clock-draft.patch`; it is not in the product or image.
-A stable boot-identity API would require kernel/moto-sys scope and the core test
-gates. That decision is pending. No OS source or acceptance deadline was changed.
+The initial proposal was a boot-identity query. The user instead added
+`KernelStaticPage::boot_random_id`, explicitly authorized its initialization,
+and requested an uncommitted kernel patch for review. The repair below uses that
+field directly, with no new API. The original diagnosis changed no OS source or
+acceptance deadline.
+
+### Remaining completion work after the filesystem repair
+
+Milestones 1 through 8 are complete. The actual native system editor acceptance
+and complete Lorry suite passed with the filesystem repair, before this patch.
+The next Lorry product defect addressed here is interrupted artifact ownership across
+reboots. A PID-only record can refer to an unrelated process after reboot, causing
+the next Lorry process to wait on itself as that process's child. Existing native
+`ProcessInfoV1` exposes no process incarnation or boot identity. The shared page's
+`system_start_time_tsc` is deliberately initialized to zero; the wall-clock base
+is adjustable. Neither is a substitute for boot identity.
+
+Applied repair, uncommitted pending the requested review:
+
+1. Initialize the user's 64-bit field in the BSP's existing scheduler-start shared
+   page setup, before posting the first userspace job. Require RDRAND support and
+   a nonzero hardware value; zero identifies unsupported older kernels. The draw
+   uses the runtime's existing ten-attempt hardware-reseed allowance, with a panic
+   on exhaustion and no clock fallback. The field is assigned exactly once; periodic
+   clock-page updates leave it intact. No additional service, syscall, persistent
+   boot file, or change to moto-rt or Rust's standard library is needed.
+2. Record boot identity and PID atomically as `2 <16-digit-hex-boot-id> <pid>\n`
+   before spawning artifact writers. Compare boot identity before querying a
+   previous owner's children. An old-boot record cannot name a surviving writer,
+   so replace it under the existing artifact lock. Same-boot and legacy PID-only
+   records retain the current descendant barrier and deadline. Malformed records
+   and zero boot identities fail closed. Normal release removes only the exact
+   record written by that lock holder.
+3. The pinned published moto-sys 0.3.0 lacks the appended field. Lorry uses a small
+   `repr(C)` extension of that exact ABI prefix to read the kernel's full mapped
+   page. Both definitions assert the field's byte offset is 64. This avoids a crate
+   publication, path-dependency packaging change, or toolchain rebuild; no cached
+   registry source is modified. Once a published dependency exposes the field,
+   that compatibility reader can become an ordinary field access.
+4. The existing native cancellation fixture now covers same-boot and legacy held
+   children, an old-boot record naming the build's parent, and malformed records
+   that must leave both the record and published binary unchanged. Native systest
+   checks nonzero identity, agreement across eight threads and a subprocess, and
+   stability over its full run. Core gates are three debug and three release
+   runs; the release developer-image gate also includes the complete Lorry suite.
+
+Focused artifact-lock tests (five cases) and strict Clippy on both host and Motor
+pass. All three debug and all three release `src/tests/full-test.sh` gates passed
+at the unchanged kernel revision, in 987/977/973 and 704/580/583 seconds. Every
+native systest passed its identity checks and final stability assertion. The six
+independent boot IDs are recorded in
+`/tmp/lorry-m9-boot-id-gates/core-boot-identities.txt` and are all distinct.
+
+The release developer-image gate failed after 454 seconds, before its native
+source-build and complete Lorry phases. Helix's diagnostic-on-save assertion
+failed because rust-analyzer's Lorry check reported: `previous Motor build 839
+still has children after 30 seconds; artifacts were not changed`. This was
+within one boot, after canceling the previous check, so the new cross-boot
+identity comparison does not bypass this existing child barrier. Preserve the
+original `/tmp/motor-helix-lsp.qPRFwX/helix.log` and
+`/tmp/lorry-m9-boot-id-gates/dev-release.log`. Two targeted reruns on the used
+image, one on a newly rebuilt image, and one with temporary Lorry child logging
+passed. None captured the original timeout's child state, so it remains
+unresolved: the evidence does not distinguish a surviving writer from retained
+dead process records. Startup and controlled-output cancellation diagnostics
+also cleared child records within 10 ms. These are observations, not retries
+used to declare the original gate passing. Its 30-second barrier remains strict.
+
+The native boot-owner regression passed directly against the shipped release
+Lorry: same-boot and legacy held children, canceled-compiler recovery, an old-boot
+record naming the next build's parent, malformed records, and exact owner-record
+removal. Evidence is `boot-owner-probe-results.log` and its copied fixture in
+`/tmp/lorry-m9-boot-id-gates`. The final ABI reader uses the mapped page's public
+address directly rather than extending a pointer borrowed from the old prefix.
+Motor strict Clippy passes again; the final release executable has the identical
+SHA-256 to the binary used by this native regression.
+
+A separate diagnostic using two native `check --all-targets` compiler jobs found
+`failed to read output parent: InvalidArgument (os error 7)` after cancellation.
+Preserve `cancel-stat-directory-race-results.log` and its copied fixture in the
+same evidence directory. The likely cause is that parallel executor workers each enumerate the shared
+unit parent in `recover_previous`/`discard_abandoned_staging` while sibling units
+can remove or rename directory entries. Motor's iterator prefetches an entry ID
+and explicitly does not guarantee surviving concurrent deletion. This identifies
+a directory-iteration race consistent with the failure; it does not establish the original
+Helix owner timeout's cause. A Lorry repair should protect recovery enumeration
+from its own parallel directory mutations, rather than retrying or ignoring an
+iterator error. No such repair, unrelated kernel change, or weakened assertion
+has been applied in this review patch.
+
+All temporary diagnostics were removed from repository source. The user reviewed
+and committed the kernel initializer and systest coverage as `4debacaa`, then
+authorized continuing the dependent Lorry repair. All five focused artifact-lock
+tests passed again before committing that repair. Milestone validation is incomplete: the release developer
+gate failed and its full Lorry/native source-build phases did not run.
+
+Independent real-project acceptance remains: sed tests encounter errno 0.3.14's
+platform guard; Helix encounters cc 1.2.29's native tempfile platform guard; ripgrep
+has an `ignore` path-matching defect beyond its waived symlink integration helper.
+The Motor cc wrapper itself works. External product ports require separate scope
+approval; further diagnosis and isolated test-only fixes remain authorized under
+the repository rules. No deferred Cargo feature or optional performance work is
+needed to close the plan.
 
 ### Native filesystem deadlock: cause and repair options
 
@@ -3997,7 +4098,7 @@ Because the lock is global, unrelated filesystem operations also queue behind
 the writer. This explains why the editor helper's source restoration stalls
 along with the compilers. Completed host disk requests cannot break this cycle.
 
-**Recommended repair:** drop the filesystem read guard immediately after
+**Committed repair (`8be0fc76`):** drop the filesystem read guard immediately after
 copying the metadata, before awaiting the response page. The metadata value
 is already an owned snapshot, so preparing its IPC response needs no guard.
 This is a small change to `on_cmd_metadata` that removes the resource cycle
@@ -4013,15 +4114,66 @@ reads drain, but would change fairness and risk writer starvation. Enlarging
 the page pool or reducing compiler concurrency would only change how easily
 the existing cycle is reached. Neither is a proposed repair.
 
-The diagnosis is complete for the reproduced runtime stall. No permanent core
-fix has been made. The repository rule for a preexisting non-Lorry bug requires
-discussion before repair; milestone 9 remains open. If the recommended fix is
-approved, add a native regression that fills one connection's response-page
-pool and verifies a writer on another connection can finish while metadata
-remains pending. Include it transitively in `src/tests/full-test.sh`, run the
-required three debug and three release core gates, and rerun native editor
-acceptance with its original limits. A subsequent Lorry milestone gate is
-still needed for the outstanding acceptance work.
+The user approved this repair after diagnosis and requested full gating followed
+by a stop without committing. The local patch moves the existing guard drop
+and adds `metadata_page_pressure_test` to the native `systest` filesystem suite.
+That suite is invoked transitively by `src/tests/full-test.sh`. The regression
+fills one connection's response-page pool, leaves metadata pending, and requires
+a writer on another connection to finish before releasing any response page.
+It releases the pages and removes its file before reporting a failed progress
+assertion, so the old defect cannot wedge failure reporting. The focused
+`test-fs-metadata-page-pressure` entry point runs the same body.
+
+The regression fails against the original shipped service with the expected
+blocked-writer assertion; preserve
+`/tmp/lorry-m9-fs-fix-gates/regression-old.{out,err}`. It passes on all seven
+native boots in the full gates below. No deadline, assertion, IPC limit,
+compiler concurrency, or lock fairness was relaxed.
+
+| Gate | Result | Wall time including preparation |
+|---|---|---|
+| `src/tests/full-test.sh`, three debug runs | Pass, all three | 976, 978, 979 seconds |
+| `src/tests/full-test.sh --release`, three runs | Pass, all three | 613, 584, 579 seconds |
+| `src/tests/full-test-dev.sh --release` | Pass | 1,965 seconds |
+
+The developer-image gate includes repository acceptance, native source builds,
+and the complete Lorry product suite. Lorry's suite passes in 926 seconds,
+including native/cross identity, native self-build, all three hermetic editor
+cases, native Clippy, and interrupted-child recovery. Online vendoring needed
+no external retries. Gate status, individual logs, and copied `systest` logs
+are under `/tmp/lorry-m9-fs-fix-gates`; `gates.status` records every exit status.
+
+The native test package passes strict Clippy. The extra broad strict check
+encounters five existing netstack dependency lints; a scoped `sys-io` check
+encounters 29 existing lints. An untouched HEAD source copy produces exactly
+the same 29 diagnostics and source locations as the patched service: no new
+Clippy findings. Preserve `clippy{,-selected,-baseline-complete,-systest}.log`
+and `clippy-comparison.txt` there. Those original strict failures are retained;
+no lint suppression or unrelated code cleanup was added.
+
+The original actual-system editor workload also passes all three views with
+the fixed production service, eight guest CPUs sharing four host CPUs, its
+original 180-second phase deadlines, and no observer activity. The generated
+pass reuses all 51 compiler artifacts. Preserve
+`/tmp/lorry-m9-native-acceptance/sys.fs-fixed-v2-editor.{out,err}` and
+`sys-fs-fixed-v2-editor-evidence`. The overlay's initrd service is byte-identical
+to the gated release binary, SHA-256
+`448da76d6707c1ab623e677a5c22162ae17c4724c5c1195886ca55609cbf59b9`.
+
+The first supplementary overlay failed before starting the editor: the temporary
+image helper ended its disk at the initrd's final 512-byte sector, while the boot
+loader reads 4-KiB blocks. The final read exceeded the disk by 2,048 bytes;
+`qemu-io` reproduced the I/O error. A new overlay adds only that required padding
+and then boots and passes acceptance. Preserve `sys-fs-fixed-qemu.log` beside
+the native evidence and `native-boot-{boundary-diagnosis,padding-fix}.txt` under
+the gate directory. The padding correction leaves the initrd, MBR, and data
+filesystem unchanged. The failed overlay and original image remain unchanged;
+no boot code or test limit was changed.
+
+The repair and validation are complete. After the requested stop without a commit,
+the user separately authorized committing the service fix and native regression;
+they are committed as `8be0fc76`. Milestone 9 still has the separate project-port
+and boot-identity work.
 
 ### Confirming service traces and controlled reproduction
 

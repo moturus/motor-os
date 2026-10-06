@@ -1734,12 +1734,17 @@ uses independent copies.
 Staging names use one leading dot even when the destination is a hidden file,
 so they remain valid on Motor.
 Copied executables are made read/execute on Motor before publication.
-On Motor, a build or clean writes its PID to an atomic owner record beside the
-artifact lock before starting children. Normal lock release removes that
-record. If an interrupted owner left it behind, the next command keeps the
-lock and waits for that owner's child process records to disappear before it
-changes artifacts. A process-list error or a child still present after 30
-seconds fails the command without changing artifacts.
+On Motor, a build or clean writes its kernel boot identity and PID to an atomic
+version-2 owner record beside the artifact lock before starting children. Normal
+lock release removes that exact record. The kernel's nonzero `boot_random_id` is
+immutable within one boot. A record from a different boot cannot name a surviving
+writer and is replaced under the lock without interpreting its PID. For the same
+boot, the next command waits for that owner's child process records to disappear
+before changing artifacts. Legacy PID-only records retain that conservative wait.
+A missing kernel boot identity, malformed record, process-list error, or child
+still present after 30 seconds fails without changing artifacts. Lorry's pinned
+published moto-sys predates the appended field; a layout-checked ABI reader reads
+it from the kernel's full mapped page, rejecting older kernels' zero value.
 If a compiler-unit replacement is interrupted between preserving the old
 directory and installing the new one, the next build restores the previous
 completed directory under the artifact lock. It leaves abandoned staging

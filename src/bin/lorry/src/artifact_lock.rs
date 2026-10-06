@@ -20,6 +20,8 @@ pub struct ArtifactLock {
     _lease: File,
     #[cfg(target_os = "motor")]
     owner_path: PathBuf,
+    #[cfg(target_os = "motor")]
+    owner_record: String,
 }
 
 impl ArtifactLock {
@@ -64,13 +66,15 @@ impl ArtifactLock {
         #[cfg(target_os = "linux")]
         let lease = acquire_child_lease(&directory)?;
         #[cfg(target_os = "motor")]
-        let owner_path = {
+        let (owner_path, owner_record) = {
+            let boot_id = motor_boot_id()?;
             let path = directory.join(OWNER_NAME);
-            wait_for_previous_owner(&path)?;
+            wait_for_previous_owner(&path, boot_id)?;
+            let owner = format!("2 {boot_id:016x} {}\n", std::process::id());
             let mut record = crate::atomic::AtomicFile::new(&path)?;
-            record.write_all(format!("{}\n", std::process::id()).as_bytes())?;
+            record.write_all(owner.as_bytes())?;
             record.commit()?;
-            path
+            (path, owner)
         };
         Ok(Self {
             _file: file,
@@ -78,6 +82,8 @@ impl ArtifactLock {
             _lease: lease,
             #[cfg(target_os = "motor")]
             owner_path,
+            #[cfg(target_os = "motor")]
+            owner_record,
         })
     }
 
@@ -97,8 +103,9 @@ impl Drop for ArtifactLock {
     fn drop(&mut self) {
         #[cfg(target_os = "motor")]
         {
-            let expected = format!("{}\n", std::process::id());
-            if fs::read_to_string(&self.owner_path).ok().as_deref() == Some(expected.as_str()) {
+            if fs::read_to_string(&self.owner_path).ok().as_deref()
+                == Some(self.owner_record.as_str())
+            {
                 if let Err(error) = fs::remove_file(&self.owner_path) {
                     eprintln!("failed to clear Motor artifact owner: {error}");
                 }
@@ -114,7 +121,52 @@ impl Drop for ArtifactLock {
 }
 
 #[cfg(target_os = "motor")]
-fn wait_for_previous_owner(path: &Path) -> Result<()> {
+fn motor_boot_id() -> Result<u64> {
+    // Published moto-sys 0.3.0 has the ABI prefix, but not its new tail field.
+    #[repr(C)]
+    struct PageWithBootId {
+        prefix: moto_sys::KernelStaticPage,
+        boot_random_id: u64,
+    }
+    const _: () = assert!(core::mem::offset_of!(PageWithBootId, boot_random_id) == 64);
+    let page = moto_sys::KernelStaticPage::VADDR as usize as *const PageWithBootId;
+    // SAFETY: the kernel maps the full read-only page at this address. The field
+    // is initialized before userspace and immutable; older kernels leave zero.
+    let boot_id = unsafe { (*page).boot_random_id };
+    if boot_id == 0 {
+        return Err(Error::failure(
+            "Motor kernel provides no nonzero boot identity",
+        ));
+    }
+    Ok(boot_id)
+}
+
+#[cfg(any(target_os = "motor", test))]
+fn motor_owner(record: &str) -> Result<(Option<u64>, u64)> {
+    let malformed = || Error::failure("Motor artifact owner record is malformed");
+    let value = record.strip_suffix('\n').ok_or_else(malformed)?;
+    let (boot_id, pid) = if let Some(value) = value.strip_prefix("2 ") {
+        let (boot, pid) = value.split_once(' ').ok_or_else(malformed)?;
+        if boot.len() != 16 || !boot.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(malformed());
+        }
+        let boot = u64::from_str_radix(boot, 16).map_err(|_| malformed())?;
+        if boot == 0 {
+            return Err(malformed());
+        }
+        (Some(boot), pid)
+    } else {
+        (None, value)
+    };
+    let pid = pid.parse::<u64>().map_err(|_| malformed())?;
+    if pid == 0 {
+        return Err(malformed());
+    }
+    Ok((boot_id, pid))
+}
+
+#[cfg(target_os = "motor")]
+fn wait_for_previous_owner(path: &Path, current_boot: u64) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
         Ok(_) => return Err(Error::failure("Motor artifact owner is not a regular file")),
@@ -127,11 +179,10 @@ fn wait_for_previous_owner(path: &Path) -> Result<()> {
     }
     let record = fs::read_to_string(path)
         .map_err(|error| Error::failure(format!("failed to read Motor artifact owner: {error}")))?;
-    let pid = record
-        .strip_suffix('\n')
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|pid| *pid > 0)
-        .ok_or_else(|| Error::failure("Motor artifact owner record is malformed"))?;
+    let (boot_id, pid) = motor_owner(&record)?;
+    if boot_id.is_some_and(|boot| boot != current_boot) {
+        return Ok(()); // A writer from another boot cannot still be running.
+    }
     if pid == u64::from(std::process::id()) {
         return Ok(()); // A stale record after a reboot reused our PID.
     }
@@ -270,6 +321,29 @@ fn verify_open_file(file: &File, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn motor_owner_records_distinguish_boots_and_preserve_legacy_pids() {
+        assert_eq!(
+            motor_owner("2 0123456789abcdef 240\n").unwrap(),
+            (Some(0x0123456789abcdef), 240)
+        );
+        assert_eq!(motor_owner("240\n").unwrap(), (None, 240));
+        for invalid in [
+            "",
+            "240",
+            "0\n",
+            "2 0000000000000000 240\n",
+            "2 0123456789abcdef 0\n",
+            "2 0123456789abcdef 240\nextra\n",
+            "2 0123456789abcdeg 240\n",
+            "2 123 240\n",
+            "2 0123456789abcdef 240 241\n",
+            "3 0123456789abcdef 240\n",
+        ] {
+            assert!(motor_owner(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
 
     #[test]
     fn serializes_writers_and_survives_cleaning_the_artifact_tree() {

@@ -88,6 +88,18 @@ fn run() -> Result<(), String> {
         .trim()
         .parse::<u32>()
         .map_err(|error| error.to_string())?;
+    let owner = fs::read_to_string(root.join("target/.lorry-artifacts.owner"))
+        .map_err(|error| error.to_string())?;
+    let fields = owner.split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 3 || fields[0] != "2" || fields[2] != interrupted.id().to_string() {
+        return Err(format!(
+            "build did not publish its boot identity and PID: {owner:?}"
+        ));
+    }
+    let boot_id = u64::from_str_radix(fields[1], 16).map_err(|error| error.to_string())?;
+    if boot_id == 0 {
+        return Err("build published a zero boot identity".to_owned());
+    }
     interrupted.kill().map_err(|error| error.to_string())?;
     interrupted.wait().map_err(|error| error.to_string())?;
     drop(interrupted);
@@ -116,8 +128,12 @@ fn run() -> Result<(), String> {
     if abandoned_staging_count(&root)? != 0 {
         return Err("recovery left the killed compiler's staging behind".to_owned());
     }
-    verify_held_owner(&root, &build, &source)?;
-    println!("PASS: Motor waited for killed and held compiler children before recovery");
+    verify_held_owner(&root, &build, &source, Some(boot_id))?;
+    verify_held_owner(&root, &build, &source, None)?;
+    verify_old_boot_and_malformed_owners(&root, &build, boot_id)?;
+    println!(
+        "PASS: Motor recovery protects same-boot and legacy children, ignores old boots, and rejects malformed owners"
+    );
     Ok(())
 }
 
@@ -164,7 +180,14 @@ fn verify_held_owner(
     root: &Path,
     build: &impl Fn() -> Command,
     source: &Path,
+    boot_id: Option<u64>,
 ) -> Result<(), String> {
+    for name in ["hold-ready", "hold-release"] {
+        let path = root.join(name);
+        if path.exists() {
+            fs::remove_file(path).map_err(|error| error.to_string())?;
+        }
+    }
     let helper = env::current_exe().map_err(|error| error.to_string())?;
     let mut holder = Command::new(helper)
         .env("LORRY_HOLD_ROOT", root)
@@ -183,7 +206,10 @@ fn verify_held_owner(
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let owner = format!("{}\n", holder.id());
+    let owner = match boot_id {
+        Some(boot) => format!("2 {boot:016x} {}\n", holder.id()),
+        None => format!("{}\n", holder.id()),
+    };
     let marker = root.join("target/.lorry-artifacts.owner");
     fs::write(&marker, &owner).map_err(|error| error.to_string())?;
     fs::write(
@@ -232,6 +258,54 @@ fn verify_held_owner(
     if !output.status.success() || output.stdout != b"held-owner-recovered\n" {
         return Err("published binary did not reflect the held-owner recovery".to_owned());
     }
+    Ok(())
+}
+
+fn verify_old_boot_and_malformed_owners(
+    root: &Path,
+    build: &impl Fn() -> Command,
+    boot_id: u64,
+) -> Result<(), String> {
+    let marker = root.join("target/.lorry-artifacts.owner");
+    let other_boot = if boot_id == u64::MAX { 1 } else { boot_id + 1 };
+    // This probe is the next build's parent. Looking up this old-boot PID would
+    // make the build wait for itself to exit, reproducing the observed cycle.
+    fs::write(
+        &marker,
+        format!("2 {other_boot:016x} {}\n", std::process::id()),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut recovered = build().spawn().map_err(|error| error.to_string())?;
+    if !wait_success(&mut recovered, Instant::now() + Duration::from_secs(30))? {
+        return Err("old-boot owner naming the build's parent blocked recovery".to_owned());
+    }
+    if marker.exists() {
+        return Err("successful old-boot recovery did not clear its owner record".to_owned());
+    }
+
+    let binary = root.join("target/lorry/debug/cancel-probe-fixture");
+    let previous = fs::read(&binary).map_err(|error| error.to_string())?;
+    for invalid in [
+        "2 0000000000000000 240\n",
+        "3 0123456789abcdef 240\n",
+        "garbage\n",
+    ] {
+        fs::write(&marker, invalid).map_err(|error| error.to_string())?;
+        let output = build()
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success()
+            || !String::from_utf8_lossy(&output.stderr).contains("owner record is malformed")
+            || fs::read_to_string(&marker).map_err(|error| error.to_string())? != invalid
+            || fs::read(&binary).map_err(|error| error.to_string())? != previous
+        {
+            return Err(format!(
+                "malformed owner was not rejected before changing artifacts: {invalid:?}"
+            ));
+        }
+    }
+    fs::remove_file(marker).map_err(|error| error.to_string())?;
     Ok(())
 }
 

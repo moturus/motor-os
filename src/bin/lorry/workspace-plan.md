@@ -201,30 +201,33 @@ contracts. Release `debug` and `opt-level` settings now match Cargo, including
 host-profile reduction and automatic stripping.
 The common compile-time check pass from milestone 9 is implemented and has
 paired native/Motor Cargo coverage for scripts, macros, and skipped ordinary
-sources. Editor integration and native project acceptance remain outstanding.
+sources. Native project acceptance remains outstanding.
 
 The fresh milestone-8 gate passed in 1,176 seconds at `63599485`: 474 Rust
 tests, three own-message tests, all host contracts, Cargo native/cross identity,
 native self-build, cross/native identity, Clippy, and interrupted-child recovery.
 Host and native online vendoring needed no retries. Milestone 9's hermetic
 editor cases also pass on Linux and Motor, including custom features and target
-directories. Subsequent sandbox-descriptor and editor-helper fixes passed
-their focused checks; those patches have not had another complete gate.
+directories. Subsequent sandbox-descriptor and editor-helper fixes are now
+covered by another complete Lorry gate, passing in 926 seconds as part of the
+release developer-image gate for the approved filesystem repair.
 
 The actual system workspace's fetched navigation, generated application view,
 and default sysbox save checks pass on Linux. All views now share one Cargo
 wrapper path; the generated pass reuses all 51 compiler artifacts. The helper
 and a Linux sandbox descriptor-lifetime fix are committed.
-Native editor acceptance remains open. Two observed native runs passed all
-three views, but silent observations reproduced the stall. Targeted service
-traces now establish a filesystem deadlock: metadata holds the global read
-lock while waiting for a response page; reads holding response pages wait
+Earlier native runs passed under observation, but silent runs reproduced the
+stall. Targeted service traces establish a filesystem deadlock: metadata holds
+the global read lock while waiting for a response page; reads holding response pages wait
 behind a writer that needs metadata to release the lock. A controlled probe
 on the unmodified image confirms that releasing one page unblocks metadata
-and a writer on another connection. The proposed minimal repair releases the
-metadata lock before allocating its response page. It requires discussion
-and core validation before implementation; see the detailed plan's native
-filesystem diagnosis. Retained disk-capacity failures are separate evidence.
+and a writer on another connection. The approved minimal repair releases the
+metadata lock before allocating its response page. It is committed as `8be0fc76`
+with a native regression, and passes three debug and three release core gates plus
+the release developer-image gate. The actual native system editor workload
+now passes all three views with the original deadlines and scheduling stress.
+See the detailed plan's diagnosis and validation evidence. Retained disk-capacity
+failures are separate evidence.
 
 Native ripgrep and sed release builds pass. Ripgrep's tests expose an external
 ignore path-matching defect beyond the integration helper; sed's tests are
@@ -232,10 +235,23 @@ blocked by errno's platform guard. The shipped native cc wrapper compiles and
 runs C successfully; Helix is blocked by the locked Rust cc crate's platform
 guard. No product port in those external projects has been made.
 A separate interrupted-build bug can mistake a PID reused after reboot for an
-old artifact owner. Fixing it safely needs a stable native boot identity;
-wall-clock values cannot serve that purpose. That scope decision is pending.
-Milestone 9 remains open for native acceptance and the decisions about fixes
-outside Lorry. No core or external-project product source has been changed.
+old artifact owner. The user added `KernelStaticPage::boot_random_id` and
+authorized kernel initialization, now committed as `4debacaa`. Lorry records
+that identity with the owner PID. Three debug and three release core gates passed,
+including nonzero identity, cross-process agreement, and stability; all six
+boots produced distinct IDs. The release developer-image gate failed in Helix's
+diagnostic-on-save check when Lorry's same-boot child barrier timed out. That
+original failure is retained and unresolved; it did not reach the complete
+Lorry suite or native source-build phase.
+The direct native boot-owner recovery regression passed. Targeted reruns did not
+reproduce the original timeout; it remains unresolved. A cancellation diagnostic
+also exposed concurrent output-directory iteration failing during recovery.
+The kernel review is complete; the dependent Lorry repair is ready to commit
+after its focused artifact-lock checks.
+Milestone 9 remains open for the remaining native project acceptance and scope
+decisions. The filesystem repair and regression are committed; the latest
+validation evidence is recorded below and in the details file. No external-project
+product source changed.
 
 ## Goal
 
