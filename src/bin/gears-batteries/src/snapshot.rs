@@ -75,7 +75,9 @@ pub fn initialize(event: &Event, root: &StateRoot) -> Result<Value, String> {
         event.session.path.as_deref(),
     )?;
     let (live, mut notices) = crate::memory_snapshot::load(&context);
-    let refresh = event.payload["reason"] == "compaction" || saved.is_none();
+    let preserve = event.payload["preserve_prefix"] == true;
+    let compacted = event.payload["reason"] == "compaction";
+    let refresh = (!preserve && compacted) || saved.is_none();
     let mut rewrite = refresh;
     let snapshot = if refresh {
         let fragments = match crate::instructions::load(&event.workspace) {
@@ -93,6 +95,8 @@ pub fn initialize(event: &Event, root: &StateRoot) -> Result<Value, String> {
             fragments,
             memory: live,
         }
+    } else if preserve {
+        saved.unwrap()
     } else {
         let mut saved = saved.unwrap();
         let memory = crate::memory_snapshot::reconcile(&saved.memory, &live)?;
@@ -105,16 +109,42 @@ pub fn initialize(event: &Event, root: &StateRoot) -> Result<Value, String> {
     } else {
         state["prompt_snapshot"].as_str().unwrap().to_string()
     };
-    if state["prompt_snapshot"] != hash || refresh {
+    if state["prompt_snapshot"] != hash || refresh || (preserve && compacted) {
         state
             .as_object_mut()
             .unwrap()
             .remove("memory_view_snapshot");
     }
     state["prompt_snapshot"] = json!(hash);
+    let correction = if preserve {
+        match crate::instructions::load(&event.workspace) {
+            Ok(current) => {
+                let current: Vec<_> = current.into_iter().collect();
+                (current != snapshot.fragments).then(|| {
+                    gears::provider::Message::user(format!(
+                        "Current project instructions supersede the historical prefix.\n{}",
+                        if current.is_empty() {
+                            "The previous project instructions were removed.".into()
+                        } else {
+                            current.join("\n\n")
+                        }
+                    ))
+                })
+            }
+            Err(error) => {
+                notices.push(format!("current project instructions unavailable: {error}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
     let mut fragments = snapshot.fragments;
     fragments.extend(snapshot.memory.iter().map(Stored::prompt));
     let mut response = json!({"prompt_fragments": fragments});
+    if let Some(correction) = correction {
+        response["context"] = json!(correction);
+    }
     if event.session.state.as_ref() != Some(&state) {
         response["state"] = state;
     }

@@ -16,13 +16,17 @@ pub fn initialize(event: &Event, context: &ToolContext) -> Result<Value, String>
         .map(|hash| crate::skill_snapshot::load(context, hash))
         .transpose()?;
     let (catalog, notices) = crate::skill_catalog::load(context, crate::skill_catalog::platform());
-    let refresh = saved.is_none() || event.payload["reason"] == "compaction";
+    let preserve = event.payload["preserve_prefix"] == true;
+    let compacted = event.payload["reason"] == "compaction";
+    let refresh = saved.is_none() || (!preserve && compacted);
     let desired = if refresh {
         Snapshot {
             version: 1,
             catalog,
             loaded: Vec::new(),
         }
+    } else if preserve {
+        saved.as_ref().unwrap().clone()
     } else {
         crate::skill_snapshot::reconcile(context, saved.as_ref().unwrap(), &catalog)?
     };
@@ -36,6 +40,9 @@ pub fn initialize(event: &Event, context: &ToolContext) -> Result<Value, String>
         && state.get("skill_view_snapshot").is_none()
     {
         state["skill_view_snapshot"] = json!(old_hash);
+    }
+    if preserve && compacted {
+        state.as_object_mut().unwrap().remove("skill_view_snapshot");
     }
     state["skill_snapshot"] = json!(hash);
     let fragments = if desired.catalog.is_empty() {

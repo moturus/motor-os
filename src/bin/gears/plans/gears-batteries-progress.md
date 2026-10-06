@@ -774,6 +774,24 @@ are retained; final focused logs end in `fixed`/`authorized`, and final host
 Clippy uses `host-clippy-fixed.log`. This supplies review authority metadata;
 the batteries runner has not yet been connected.
 
+### Corrections after a frozen prefix
+
+Batteries hooks recognize `preserve_prefix` during initialization. They retain
+the historical prompt and skill snapshots, deliver withdrawals through current
+context, and reset correction views after compaction so removed notes are sent
+again. Changed project instructions follow the shared prefix as current context.
+The existing context merger retains simultaneous memory and skill corrections.
+
+The portable workflow covers withdrawn memory and skills, changed project
+instructions, stable prompt fragments, repeated context and compaction. Both
+host batteries profiles, warnings-denied host/native Clippy, native release
+build and the release snapshot VM workflow pass. Logs use
+`/tmp/gears-prefix-corrections-batteries-*` and the combined
+`native-gate.log`. An earlier direct workflow invocation used a relative binary
+path, which cannot resolve from the fixture workspace; the component script's
+absolute paths fix setup. The initial unused-mut warning is removed. The Gears
+initialization patch supplies this flag before the first hook call.
+
 The user published moto-rt 0.17.7 and pushed the authorized external Rust-fork
 commit `f046f257239`. It changes only std's runtime version and checksum;
 compiler, LLVM and std implementation sources are unchanged. The managed

@@ -107,7 +107,7 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
     }
 }
 
-pub fn hook(mut event: Event) -> Result<Value, String> {
+pub fn hook(event: Event) -> Result<Value, String> {
     if event.event == "command" {
         return if event.payload["name"] == "review" {
             paths::ToolContext::for_event(&event)
@@ -139,18 +139,8 @@ pub fn hook(mut event: Event) -> Result<Value, String> {
         return Ok(response);
     }
     if event.event == "context" {
-        let mut response = json!({});
-        for observe in [memory_context::observe, skill_context::observe] {
-            let feature =
-                paths::ToolContext::for_event(&event).and_then(|context| observe(&event, &context));
-            if let Ok(feature) = &feature
-                && let Some(state) = feature.get("state")
-            {
-                event.session.state = Some(state.clone());
-            }
-            merge_optional(&mut response, feature);
-        }
-        return Ok(response);
+        let context = paths::ToolContext::for_event(&event)?;
+        return Ok(context_at(event, &context));
     }
     if event.event == "answer" {
         return paths::ToolContext::for_event(&event).and_then(|context| {
@@ -203,6 +193,20 @@ pub fn hook(mut event: Event) -> Result<Value, String> {
     } else {
         json!({})
     })
+}
+
+pub fn context_at(mut event: Event, context: &paths::ToolContext) -> Value {
+    let mut response = json!({});
+    for observe in [memory_context::observe, skill_context::observe] {
+        let feature = observe(&event, context);
+        if let Ok(feature) = &feature
+            && let Some(state) = feature.get("state")
+        {
+            event.session.state = Some(state.clone());
+        }
+        merge_optional(&mut response, feature);
+    }
+    response
 }
 
 fn observe_features(mut event: Event) -> Value {
