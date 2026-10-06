@@ -11,11 +11,12 @@ The real-project acceptance status is:
 | --- | --- | --- |
 | sed | Native release build | Native upstream tests deferred: uucore/errno and tempfile gaps are in the test setup. |
 | ripgrep | Native release build | Known `ignore` leading-dot-slash test failure allowed for this milestone; symlink integration helper deferred. |
-| Helix | Locked vendoring and execution admission | The native build encounters cc 1.2.29's tempfile platform guard. |
+| Helix | Locked vendoring and execution admission | The native build selects upstream cc 1.2.29; Helix must select the existing Motor cc-rs fork. |
 
-Helix's native build is the remaining known acceptance blocker and requires
-an external dependency port. Diagnosed failures, required commands, and tool
-settings are recorded in
+Helix's native build is the remaining known acceptance blocker. The proposed
+fix changes Helix's dependency configuration and lockfile to select the existing
+Motor cc-rs fork; that fork already has the required temporary-file support.
+Diagnosed failures, required commands, and tool settings are recorded in
 [the milestone-9 details](workspace-plan-details.md#srcsys-and-the-real-projects).
 The user accepts ripgrep's known `ignore` matcher test failure for this milestone;
 it remains a recorded matching limitation and does not require a product port.

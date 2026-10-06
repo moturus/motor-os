@@ -3864,15 +3864,19 @@ The Linux-hosted cross build does not exercise the crate's native branch.
 No cc or external-project product source has been changed. Original evidence:
 `/tmp/lorry-m9-native-acceptance/helix.build.{json,err}`.
 
-The proposed external change is in cc-rs 1.2.29's `src/tempfile.rs`: permit
-`target_os = "motor"` in its supported-platform guard, and import `std::os`
-only where the existing Unix or Windows options use it. Its default file
-creation already uses `OpenOptions::create_new`; compiler detection uses this
-helper in production. Preserve the existing name-collision handling and
-close-before-removal cleanup. Select the reviewed patched source explicitly in
-Helix's dependency configuration, then re-vendor and admit it normally. Validate
-native temporary-file behavior and C/C++ compilation before rerunning the
-actual native Helix release build. This port has not been applied.
+The initial proposal to add Motor support to cc was unnecessary. Inspection of
+[Motor's existing cc-rs fork](https://github.com/moturus/cc-rs/blob/02932efc0d268db49c150a3ae31a6ad2c422f45b/src/tempfile.rs)
+confirms that its platform guard already permits Motor and its `std::os` import
+is conditional. This is cc 1.4.0 at `02932efc`, already selected by Motor OS's
+`src/bin/curl/Cargo.toml` and lockfile. Helix's tested Motor branch currently
+has no cc replacement and locks crates.io's unsupported 1.2.29 instead.
+
+The revised proposal changes only the external Helix fork's `Cargo.toml` and
+`Cargo.lock`: add a root `[patch.crates-io]` cc entry pinned to the existing
+Motor fork revision, then update the locked cc selection and dependencies.
+Re-vendor and admit the resulting graph normally, then rerun the actual native
+Helix release build. No new cc-rs source change is indicated by this failure.
+The Helix dependency change has not been applied.
 
 The actual fetched `src/sys` editor copy supports member and Git-source
 navigation with the expected admission warning. Generated-constant navigation
@@ -3953,8 +3957,8 @@ in the table's order, are:
 5f07964ca8383340128bf2f2a579b47cab4aaf4f7a3c1a0f6e1e3f6cc466e55d
 ```
 
-The remaining known build blocker requires a scoped external dependency port:
-permit cc's existing standard-Rust named-tempfile implementation on Motor.
+The remaining known build blocker requires a scoped external dependency update:
+select the existing Motor cc-rs fork in Helix's manifest and lockfile.
 Sed's deferred tests do not require an errno or tempfile port, and ripgrep's
 accepted matching limitation does not require an ignore port to close this
 Lorry milestone. The current external failure does not bound the number of
@@ -4288,10 +4292,12 @@ tempfile platform guard. Sed's native build passed, and the user approved
 deferring its unsupported native upstream test suite. Ripgrep's native release
 build passed; its known ignore matching test failure is allowed for this
 milestone, and its symlink integration helper is deferred. Other applicable
-ripgrep tests remain required. The Motor cc wrapper itself works. External
-product ports require separate scope approval; further diagnosis and isolated
-test-only fixes remain authorized under the repository rules. No deferred Cargo
-feature or optional performance work is needed to close the plan.
+ripgrep tests remain required. The Motor cc wrapper itself works, and Motor's
+cc-rs fork already contains the required platform support. Selecting that fork
+is a Helix manifest/lockfile change, not a new cc source port. External changes
+require separate scope approval; further diagnosis and isolated test-only fixes
+remain authorized under the repository rules. No deferred Cargo feature or
+optional performance work is needed to close the plan.
 
 ### Native filesystem deadlock: cause and repair options
 
