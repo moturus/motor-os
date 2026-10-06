@@ -13,6 +13,9 @@ use std::{collections::BTreeSet, io::Write, path::Path, time::Instant};
 
 pub fn run(args: &[String], mut output: impl Write) -> Result<(), String> {
     process::ensure_cleanup()?;
+    if std::env::var_os("GEARS_SESSION_ID").is_some() {
+        return Err("run held-out evaluations outside Gears tools so judge output cannot enter saved chats or reviews".into());
+    }
     let mut options = Options::parse(args)?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     for path in [&mut options.root, &mut options.output] {
@@ -160,7 +163,16 @@ pub fn run(args: &[String], mut output: impl Write) -> Result<(), String> {
             Some(error),
         ),
     };
-    let report = reporting.save(&reports, &inputs, status, error.as_deref())?;
+    let mut report = reporting.save(&reports, &inputs, status, error.as_deref())?;
+    if let Err(warning) =
+        crate::eval_status::record(&source.state, &root.path().join("report.json"), &report)
+    {
+        report["status_record_warning"] = json!(warning);
+        root.replace_file(
+            Path::new("report.json"),
+            &serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?,
+        )?;
+    }
     serde_json::to_writer_pretty(&mut output, &report).map_err(|e| e.to_string())?;
     writeln!(output).map_err(|e| e.to_string())?;
     if let Some(error) = error {

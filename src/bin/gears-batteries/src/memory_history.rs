@@ -61,9 +61,12 @@ pub fn status(context: &ToolContext) -> Value {
     let last_review = crate::review_status::latest(&context.state)
         .map(|record| record.unwrap_or(Value::Null))
         .unwrap_or_else(|error| json!({"unavailable": error}));
+    let last_eval = crate::eval_status::latest(&context.state)
+        .map(|record| record.unwrap_or(Value::Null))
+        .unwrap_or_else(|error| json!({"unavailable":error}));
     json!({"version": 1, "reviews": "experimental", "review_settings": reviews,
         "pending_global": count(Target::Global), "pending_workspace": count(Target::Workspace),
-        "workspace_memory": workspace, "last_review": last_review, "last_eval": "not implemented"})
+        "workspace_memory": workspace, "last_review": last_review, "last_eval": last_eval})
 }
 
 #[cfg(test)]

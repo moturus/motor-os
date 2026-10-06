@@ -17,6 +17,7 @@ pub mod eval_policy;
 pub mod eval_prepare;
 pub mod eval_report;
 pub mod eval_state;
+pub mod eval_status;
 pub mod eval_suite;
 pub mod eval_task;
 pub mod file_patch;

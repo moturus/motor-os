@@ -44,13 +44,13 @@ pub fn run_fixture(
     let output = process::run(
         &Request {
             program: root.join("bin/gears-batteries").display().to_string(),
-            args,
+            args: args.clone(),
             cwd: root.into(),
             stdin: None,
             timeout: Duration::from_secs(120),
             max_output_bytes: 2 * 1024 * 1024,
             env: vec![],
-            remove_env: vec![gears::provider::KEY_ENV.into()],
+            remove_env: vec![gears::provider::KEY_ENV.into(), "GEARS_SESSION_ID".into()],
         },
         &Cancellation::new(),
         &mut |_, _| {},
@@ -105,5 +105,39 @@ pub fn run_fixture(
                 .contains("Private criterion")
         );
     }
+    let latest = gears_batteries::eval_status::latest(&source.state)?.unwrap();
+    assert_eq!(latest["status"], "complete");
+    assert_eq!(
+        gears_batteries::memory_history::status(&source)["last_eval"],
+        latest
+    );
+    let mut guarded = args;
+    let index = guarded.iter().position(|v| v == "--output").unwrap();
+    guarded[index + 1] = "guarded-output".into();
+    let result = process::run(
+        &Request {
+            program: root.join("bin/gears-batteries").display().to_string(),
+            args: guarded,
+            cwd: root.into(),
+            stdin: None,
+            timeout: Duration::from_secs(30),
+            max_output_bytes: 8192,
+            env: vec![("GEARS_SESSION_ID".into(), "saved-parent".into())],
+            remove_env: vec![gears::provider::KEY_ENV.into()],
+        },
+        &Cancellation::new(),
+        &mut |_, _| {},
+    )
+    .map_err(|e| e.to_string())?;
+    assert!(!result.success());
+    assert!(result.stderr.contains("outside Gears tools"));
+    assert!(!root.join("guarded-output").exists());
+    assert_eq!(server.requests().len(), 24);
+    source
+        .state
+        .replace_file(Path::new("batteries/last-eval.json"), b"{}")?;
+    let status = gears_batteries::memory_history::status(&source);
+    assert!(status["last_eval"]["unavailable"].is_string());
+    assert_eq!(status["pending_global"]["count"], 0);
     std::fs::remove_dir_all(root).map_err(|e| e.to_string())
 }

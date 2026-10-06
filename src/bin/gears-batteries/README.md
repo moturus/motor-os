@@ -413,7 +413,7 @@ and saved byte counts. Gears JSONL retains full recorded check content while
 summaries identify it by hash. Truncated/malformed event streams leave tool
 counts unknown. Unchecked regressions are distinct from observed failures.
 
-Run a held-out suite by hand after choosing its quality/cost criterion:
+Run a held-out suite from a shell outside Gears tools after choosing its quality/cost criterion:
 
 ```sh
 gears-batteries eval --task /user/cfg/gears/batteries/eval/tasks/empty-records.toml \
@@ -428,7 +428,7 @@ Use the provider name actually declared in your configuration. `--trials` is
 per arm per task; the example schedules 12 actors. The task list is explicit
 (1–32 files with distinct names). All templates, learning and tool definitions
 are captured before the first model request, and the executable pair is pinned
-once. Source files/settings remain unchanged by the runner. Freeze the source
+once. Source workspaces, learning and configuration remain unchanged. Freeze the source
 workspaces and settings while preparing the run. Key files come from the
 configuration or Gears' usual API-key location; child checks receive no API-key
 environment variable.
@@ -455,3 +455,11 @@ Each task output also preserves `task.json`: the normalized input, original
 file hash/path and selected source directory. Its hash is included in the input
 manifest. This keeps the prompt/check/criterion vectors available for inspection
 after the original task file changes; the model template never receives it.
+
+`status` shows a small last-result index stored in the source Gears directory
+after evaluation, including model, outcome, arm totals and report path. It does
+not contain task prompts or judge output. A broken optional index appears as
+`unavailable` without hiding pending work; an index-write failure is retained
+in the report as `status_record_warning`. The evaluator rejects Gears tool
+context (`GEARS_SESSION_ID` present) before side effects, so judge output does
+not enter a saved parent chat or its later reviews.

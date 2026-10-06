@@ -1219,3 +1219,14 @@ source hashes/paths and a manifest hash. This preserves the prompt and vectors
 for later inspection without relying on an unchanged source TOML file. Both
 host profiles, warnings-denied host/native Clippy, native release build and
 release snapshot VM pass; logs use `/tmp/gears-eval-task-artifact-*`.
+
+`status` now reads a bounded last-evaluation index; the manual runner writes
+only this result metadata back to source state, leaving workspaces, learning and
+configuration unchanged. Optional index failures remain visible without hiding
+pending work. Evaluation refuses Gears tool context before side effects to keep
+judge output out of saved parent chats and later reviews. The actual CLI fixture
+verifies the index, corruption handling, unchanged model-request count and no
+output directory on refusal. Both host profiles, warnings-denied host/native
+Clippy, native release build and release snapshot VM pass; logs use
+`/tmp/gears-eval-status-*`. All phase 9 infrastructure is now implemented; the
+release developer-image gate and first user-run real-model evaluation remain.
