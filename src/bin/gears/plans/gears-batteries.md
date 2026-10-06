@@ -7,7 +7,8 @@ command/compaction triggers, the resume question, a durable proposal cap and a
 connected runner that preserves the saved prefix after compaction, and explicit
 cutoff-based cleanup proposals with approval-only archival. Phase 9's manual
 multi-task evaluation command, frozen workspace/state copies, repeated arms and
-reports pass focused host/native fixtures; the first real-model run is pending.
+reports pass focused host/native fixtures and the release developer-image gate;
+the first real-model run is pending.
 Sysbox S1 and S2's byte/numeric/human sorting are complete and
 core-gated; field keys remain. Design revised 2026-10-06. See the
 [implementation record](gears-batteries-progress.md) for completed patches
