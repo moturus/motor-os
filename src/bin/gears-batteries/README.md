@@ -63,7 +63,9 @@ The command makes no model request, requires no check or repository, and
 does not schedule a review. Ordinary conversation does not count as this
 explicit signal. Copy the updated sample configuration or add `command`
 to your batteries hook's event list to enable the command. `/help` lists it
-when the hook is loaded.
+when enabled. An older event list keeps the other batteries features working
+and shows an enabling notice. Update both sibling binaries when upgrading;
+an older Gears sender keeps commands disabled with an upgrade notice.
 
 Declare one check at the workspace root in `.gears/batteries.toml`:
 

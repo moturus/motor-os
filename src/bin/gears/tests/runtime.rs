@@ -3332,7 +3332,7 @@ fn before_stop_reminders_are_saved_as_user_notes_and_bounded_per_turn() {
 }
 
 #[test]
-fn hook_setup_receives_startup_provider_and_model() {
+fn hook_setup_receives_startup_provider_model_and_subscriptions() {
     let fixture = Fixture::new("setup-payload");
     let log = fixture.root.join("setup.json");
     let config = Config {
@@ -3353,7 +3353,8 @@ fn hook_setup_receives_startup_provider_and_model() {
     let event: serde_json::Value = serde_json::from_slice(&std::fs::read(log).unwrap()).unwrap();
     assert_eq!(
         event["payload"],
-        serde_json::json!({"reason":"startup","provider":"default","model":"test/model"})
+        serde_json::json!({"reason":"startup","provider":"default","model":"test/model",
+            "subscribed_events": ["initialize"]})
     );
     assert_eq!(event["session"]["id"], runtime.session().id());
 }

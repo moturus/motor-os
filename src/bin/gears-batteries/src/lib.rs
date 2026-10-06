@@ -169,7 +169,7 @@ pub fn hook(mut event: Event) -> Result<Value, String> {
         let result = default_root().and_then(gears::state::StateRoot::new);
         return Ok(match result {
             Ok(root) => initialize_at(&event, &root),
-            Err(error) => with_tools(initialization_notice(error)),
+            Err(error) => with_tools(&event, initialization_notice(error)),
         });
     }
     Ok(if event.event == "permission" {
@@ -280,11 +280,27 @@ pub fn initialize_at(event: &Event, root: &gears::state::StateRoot) -> Value {
             .and_then(|context| skill_context::initialize(&skill_event, &context)),
         );
     }
-    with_tools(response)
+    with_tools(event, response)
 }
 
-fn with_tools(mut response: Value) -> Value {
-    response["commands"] = json!([acceptance::specification()]);
+fn with_tools(event: &Event, mut response: Value) -> Value {
+    let events = event.payload.get("subscribed_events");
+    let commands = match events {
+        Some(Value::Null) => true,
+        Some(Value::Array(events)) => events.iter().any(|event| event == "command"),
+        _ => false,
+    };
+    response["commands"] = if commands {
+        json!([acceptance::specification()])
+    } else {
+        let notice = if matches!(events, Some(Value::Array(_))) {
+            "The batteries' /accept command is disabled; add \"command\" to this hook's events to enable it."
+        } else {
+            "Update Gears to enable the batteries' /accept command."
+        };
+        merge_optional(&mut response, Ok(json!({"notice": notice})));
+        json!([])
+    };
     response["tools"] = json!([
         todo::specification(),
         memory_tool::specification(),
@@ -347,6 +363,47 @@ fn merge_optional(response: &mut Value, feature: Result<Value, String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_require_reported_subscriptions_and_preserve_other_features() {
+        for (payload, enabled) in [
+            (json!({}), false),
+            (json!({"subscribed_events": null}), true),
+            (json!({"subscribed_events": []}), false),
+            (json!({"subscribed_events": ["initialize"]}), false),
+            (
+                json!({"subscribed_events": ["initialize", "command"]}),
+                true,
+            ),
+            (json!({"subscribed_events": "invalid"}), false),
+        ] {
+            let event = read_event(
+                json!({"protocol_version": 1, "event": "initialize",
+                "workspace": "/work", "session": {"id": "fixture"}, "payload": payload})
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+            let previous = json!({"tasks": ["keep me"]});
+            let response = with_tools(
+                &event,
+                json!({"state": previous, "notice": "previous notice"}),
+            );
+            assert_eq!(
+                response["commands"].as_array().unwrap().len(),
+                usize::from(enabled),
+                "{payload}"
+            );
+            assert_eq!(response["tools"].as_array().unwrap().len(), 4);
+            assert_eq!(response["state"], previous);
+            assert!(
+                response["notice"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("previous notice")
+            );
+        }
+    }
 
     #[test]
     fn optional_initialization_failure_keeps_previous_hook_state() {

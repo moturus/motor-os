@@ -21,6 +21,7 @@ fn accepted(runtime: &Runtime) -> Result<usize, String> {
 }
 
 pub fn run(binary: &Path, compiler: &str) -> Result<(), String> {
+    subscriptions(binary, compiler)?;
     let fixture = Fixture::new(binary, compiler)?;
     let store = Store::with_root(&fixture.workspace, fixture.state.clone())?;
     let session = store.create(false, None)?;
@@ -124,5 +125,79 @@ pub fn run(binary: &Path, compiler: &str) -> Result<(), String> {
     drop(runtime);
     fixture.cleanup(&group, &sessions, &[snapshot])?;
     println!("explicit task acceptance ALL PASS");
+    Ok(())
+}
+
+fn subscriptions(binary: &Path, compiler: &str) -> Result<(), String> {
+    for restricted in [true, false] {
+        let mut fixture = Fixture::new(binary, compiler)?;
+        if restricted {
+            fixture.config.hooks[0]
+                .events
+                .as_mut()
+                .unwrap()
+                .retain(|event| event != "command");
+        } else {
+            fixture.config.hooks[0].events = None;
+        }
+        let store = Store::with_root(&fixture.workspace, fixture.state.clone())?;
+        let session = store.create(false, None)?;
+        let group = session.path().unwrap().parent().unwrap().to_path_buf();
+        let id = session.id().to_string();
+        let provider = Arc::new(Scripted::from_responses(vec![
+            answer("Hello."),
+            answer("Hello."),
+        ]));
+        let mut runtime = Runtime::new(
+            provider.clone(),
+            store,
+            session,
+            &fixture.config,
+            "fixture/model".into(),
+        )?;
+        let snapshot = runtime.session().hook_state(&fixture.hook).unwrap()["prompt_snapshot"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for resumed in [false, true] {
+            if resumed {
+                runtime.resume(&id)?;
+            }
+            assert_eq!(runtime.hook_commands().is_empty(), restricted);
+            assert!(runtime.tools().enabled("read_file").is_some());
+            let notices = runtime.take_startup_notices();
+            if restricted {
+                assert!(
+                    notices.iter().any(|notice| notice.contains("command")),
+                    "{notices:?}"
+                );
+            } else {
+                runtime.hook_command("accept", "", &mut |_| Ok(()))?;
+                assert_eq!(accepted(&runtime)?, usize::from(resumed) + 1);
+            }
+            runtime.turn(
+                "Give a greeting.".into(),
+                &mut Approvals::default(),
+                &mut |_| Ok(()),
+            )?;
+            let requests = provider.requests.lock().unwrap();
+            for name in ["todo", "memory", "skill_view", "skill_manage", "read_file"] {
+                assert!(
+                    requests
+                        .last()
+                        .unwrap()
+                        .tools
+                        .iter()
+                        .any(|tool| tool.name == name),
+                    "{name}"
+                );
+            }
+        }
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        assert!(!fixture.workspace.join("checked.rmeta").exists());
+        drop(runtime);
+        fixture.cleanup(&group, &[id], &[snapshot])?;
+    }
+    println!("batteries command subscriptions ALL PASS");
     Ok(())
 }

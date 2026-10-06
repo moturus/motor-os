@@ -720,6 +720,15 @@ impl Manager {
         {
             return Ok(Response::default());
         }
+        let mut payload = payload;
+        if event_name == "initialize"
+            && let Some(fields) = payload.as_object_mut()
+        {
+            fields.insert(
+                "subscribed_events".into(),
+                serde_json::json!(hook.config.events),
+            );
+        }
         let event = Event {
             protocol_version: PROTOCOL_VERSION,
             event: event_name,

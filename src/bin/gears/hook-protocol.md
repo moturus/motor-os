@@ -13,7 +13,11 @@ an empty list receives none. Unknown or duplicate event names are rejected.
 Unsubscribed events do not start a process, including `initialize`; hooks that
 register tools must subscribe to both `initialize` and `tool_execute`.
 
-`initialize` carries `reason`, `provider`, and `model`. Setup runs at startup
+`initialize` carries `reason`, `provider`, `model`, and `subscribed_events`.
+The subscription field is the hook's configured event list, or `null` when
+all events are subscribed. A hook should register commands only when
+`command` is subscribed; older senders omit the subscription field.
+Setup runs at startup
 and again after new, resumed, forked, or cloned sessions, model/provider changes,
 and compaction. Its prompt fragments
 and tool registrations replace the previous setup's registrations. Failed
