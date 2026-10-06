@@ -789,6 +789,22 @@ warnings-denied host/native Clippy, the native release build and the release
 snapshot VM workflow pass. Logs use `/tmp/gears-review-launch-*`. Execution and
 review instructions are the next patches; this preparation API starts no child.
 
+### Review instructions and evidence
+
+The compiled review instructions default to "Nothing to save", require saved
+citations and successful execution evidence for procedures, and distinguish
+acceptance, check results and co-occurrence from causal claims. User focus,
+current denials and mechanical records follow the preserved prefix. Completed
+turns after the mark are excluded; an in-progress turn is labeled partial.
+Quoted evidence cannot close its provenance marker. Evidence over 64 KiB is
+refused explicitly, leaving the mark due rather than omitting user denials.
+
+Both host batteries profiles, warnings-denied host/native Clippy, the native
+release build and release snapshot VM workflow pass. The portable fixture
+covers denial delivery, later-turn exclusion, source quoting, partial evidence,
+unchanged parent bytes and oversized refusal. Logs use
+`/tmp/gears-review-instructions-*`. Runner execution is next.
+
 ### Corrections after a frozen prefix
 
 Batteries hooks recognize `preserve_prefix` during initialization. They retain
