@@ -250,7 +250,10 @@ entry. Reviews are disabled by default; user-wide `batteries.toml` must set
 `[reviews.reviewer]` provider/model pairs. The executor pair must match the
 session exactly. Subscribe the hook to `before_compact` to record compaction
 marks too. Recording does not call a model or change the conversation.
-Background execution is not implemented yet; these marks are prerequisites.
+On startup or `/resume`, unfinished reviews ask whether to run or dismiss them.
+An unanswered question keeps them paused. Dismissal affects only the displayed
+marks; other sessions do not consume them. Workspace-memory admission is asked
+first if it is pending. Background execution is not implemented yet.
 
 `gears-batteries status` shows the configured review pair and proposal limit
 under `review_settings`, and separately reports that execution is unavailable.

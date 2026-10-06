@@ -17,7 +17,7 @@ and user commands are implemented. Phase 6.5 skills and phase 7's explicit
 `dev.3` SDK. The SDK rollout is complete: three debug and three release
 main-image gates and `full-test-dev.sh --release` pass, including native
 packaged-source builds. Phase 8 has settings, marks, saved-entry snapshots,
-tool policy and triggers; its runner, resume question and proposal cap remain.
+tool policy, triggers and the resume question; its runner and proposal cap remain.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
@@ -658,6 +658,25 @@ release developer-image gate pass. The successful rerun is
 preserved. Core/SDK hashes match the six successful main-image runs. Both the
 runtime link gap and source-vendoring blocker are resolved.
 
+### Unfinished reviews on resume
+
+Startup and `/resume` ask whether to run or dismiss this session's unfinished
+marks through the existing hook-question flow. An unanswered or unattended
+question keeps them paused. Accepting preserves due marks for the future runner;
+dismissal changes only the displayed marks to dropped. Initialization of a new
+or cloned session clears inherited question state without touching other
+sessions' marks. Workspace-memory admission precedes the review question.
+
+The real-hook fixture exercises cancellation, acceptance, bounded dismissal,
+new-session isolation and repeated resume without making a provider request or
+running a check. Host debug/release, warnings-denied host/Motor Clippy, native
+release build and the release native VM component gate pass. It runs through the
+existing workflow included in full-test.sh. The original fixture failure is
+preserved in `/tmp/gears-review-resume-host-debug-original.log`: an empty file
+lacked the required memory header. Encoding a valid empty Document fixes setup;
+the two-question assertion is unchanged. Final logs use
+`/tmp/gears-review-resume-*`, with `host-debug-fixed` for the corrected gate.
+
 ## SDK rollout and next steps
 
 The user published moto-rt 0.17.7 and pushed the authorized external Rust-fork
@@ -675,8 +694,8 @@ pass. See [the rollout record](gears-yaml-runtime.md#rollout-sequence) for the
 exact SDK name and logs. The earlier failures remain preserved in that record.
 
 The independent sysbox track continues with field keys and S3–S6 after the
-numeric/human patch. Phase 8 continues with the runner, resume question,
-proposal cap, first-request prefix test and cleanup proposals. Phase 9 requires
+numeric/human patch. Phase 8 continues with the runner, proposal cap, first-request prefix test
+and cleanup proposals. Phase 9 requires
 the user's quality/cost criterion in question 7; keep reviews disabled until
 an explicit model-pair decision and real-model evidence justify enabling them.
 

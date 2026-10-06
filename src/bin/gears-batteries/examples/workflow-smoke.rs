@@ -33,6 +33,9 @@ mod review_policy;
 #[path = "workflow-smoke/review_triggers.rs"]
 mod review_triggers;
 
+#[path = "workflow-smoke/review_resume.rs"]
+mod review_resume;
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let binary =
@@ -210,6 +213,7 @@ fn run() -> Result<(), String> {
     fixture.cleanup(&group, &sessions, &snapshots)?;
     skills::run(&binary, &compiler)?;
     acceptance::run(&binary, &compiler)?;
+    review_resume::run(&binary, &compiler)?;
     println!("gears batteries workflow ALL PASS");
     Ok(())
 }

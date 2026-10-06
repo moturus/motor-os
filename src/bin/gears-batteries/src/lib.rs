@@ -31,6 +31,7 @@ pub mod policy;
 pub mod provenance;
 pub mod review_config;
 pub mod review_marks;
+pub mod review_resume;
 pub mod review_triggers;
 pub mod search;
 pub mod session_search;
@@ -156,7 +157,14 @@ pub fn hook(mut event: Event) -> Result<Value, String> {
                 state["awaiting_workspace_memory"] == event.payload["id"]
                     && event.payload["id"].is_string()
             }) {
-                workspace_memory::answer(&event, &context)
+                let mut response = workspace_memory::answer(&event, &context)?;
+                if let Some(state) = response.get("state") {
+                    let question = review_resume::question(&context, state);
+                    merge_optional(&mut response, question);
+                }
+                Ok(response)
+            } else if review_resume::owns_answer(&event, &context) {
+                review_resume::answer(&event, &context)
             } else {
                 memory_question::answer(&event, &context)
             }
@@ -296,6 +304,22 @@ pub fn initialize_at(event: &Event, root: &gears::state::StateRoot) -> Value {
             )
             .and_then(|context| skill_context::initialize(&skill_event, &context)),
         );
+    }
+    let state = response
+        .get("state")
+        .cloned()
+        .or_else(|| event.session.state.clone())
+        .unwrap_or_else(|| json!({}));
+    if state.is_object() {
+        let defer = response.get("question").is_some();
+        let reviews = paths::ToolContext::new(
+            event.workspace.clone(),
+            root.path().to_path_buf(),
+            event.session.id.clone(),
+            event.session.path.as_deref(),
+        )
+        .and_then(|context| review_resume::initialize(event, &context, &state, defer));
+        merge_optional(&mut response, reviews);
     }
     with_tools(event, response)
 }
