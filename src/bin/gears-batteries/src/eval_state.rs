@@ -4,9 +4,14 @@ use crate::{
     memory_format::{Document, Entry, Kind, Target},
     paths::ToolContext,
 };
-use std::{collections::BTreeMap, path::Path};
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 pub struct Frozen {
+    source_workspace: PathBuf,
     settings: String,
     memories: Vec<(Target, Vec<(Entry, bool)>)>,
     skills: Vec<crate::skill_cleanup::Version>,
@@ -83,6 +88,7 @@ pub fn capture(context: &ToolContext) -> Result<Frozen, String> {
         memories.push((target, entries));
     }
     Ok(Frozen {
+        source_workspace: context.workspace.clone(),
         settings: toml::to_string(&settings).map_err(|e| e.to_string())?,
         memories,
         skills: crate::skill_cleanup::versions(context)?,
@@ -116,4 +122,76 @@ impl Frozen {
     pub fn settings(&self) -> &str {
         &self.settings
     }
+}
+impl Frozen {
+    pub fn install(&self, workspace: &Path, root: &Path, learning: bool) -> Result<Value, String> {
+        let context = ToolContext::new(workspace.into(), root.into(), "eval-state".into(), None)?;
+        if context.workspace.starts_with(&self.source_workspace)
+            || self.source_workspace.starts_with(&context.workspace)
+        {
+            return Err("evaluation state must be installed in a separate workspace copy".into());
+        }
+        match std::fs::symlink_metadata(context.state.path()) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err("evaluation state destination must not exist".into()),
+        }
+        if context.workspace.starts_with(context.state.path())
+            || context.state.path().starts_with(&context.workspace)
+        {
+            return Err("evaluation workspace and state must be separate".into());
+        }
+        context
+            .state
+            .replace_file(Path::new("batteries.toml"), self.settings.as_bytes())?;
+        let limits = crate::memory_config::load(&context.state)?;
+        let mut versions = Vec::new();
+        for (target, entries) in &self.memories {
+            let selected: Vec<_> = entries
+                .iter()
+                .filter(|(_, learned)| learning || !learned)
+                .collect();
+            let document = Document {
+                entries: selected.iter().map(|(entry, _)| entry.clone()).collect(),
+            };
+            let text = document.encode(*target, limits.for_target(*target))?;
+            crate::memory::root(&context, *target)?
+                .replace_file(target.relative(), text.as_bytes())?;
+            versions.push(json!({"target": target, "hash": crate::snapshot::digest(text.as_bytes()),
+                "entries": selected.iter().map(|(e, learned)| json!({"id":e.metadata.id,
+                "kind":e.metadata.kind,"learned":learned,"hash":crate::snapshot::digest(&serde_json::to_vec(e).unwrap())})).collect::<Vec<_>>() }));
+            if *target == Target::Workspace {
+                admission(
+                    &context,
+                    json!({"kind":"workspace_memory", "workspace_memory_hash":crate::snapshot::digest(text.as_bytes())}),
+                )?;
+            }
+        }
+        let mut skills = Vec::new();
+        for skill in &self.skills {
+            if !learning && skill.origin.is_some() {
+                continue;
+            }
+            crate::skill_store::write(&context, &skill.name, Some(&skill.content))?;
+            admission(
+                &context,
+                json!({"kind":"skill", "name":skill.name,
+                "content_hash":skill.content.hash(), "content":skill.content}),
+            )?;
+            skills.push(json!({"name":skill.name, "hash":skill.content.hash(), "learned":skill.origin.is_some()}));
+        }
+        Ok(
+            json!({"version":1, "learning":learning, "memory":versions, "skills":skills,
+            "settings_hash":crate::snapshot::digest(self.settings.as_bytes()),
+            "history":"only minimal admission records; no source sessions, pending proposals or review artifacts"}),
+        )
+    }
+}
+
+fn admission(context: &ToolContext, mut record: Value) -> Result<(), String> {
+    record["version"] = json!(1);
+    record["decision"] = json!("approve");
+    record["date_ms"] = json!(0);
+    record["source"] = json!({"path":"evaluation snapshot"});
+    let path = context.state.file(Path::new("batteries/changes.jsonl"))?;
+    crate::journal::append_at(&context.state, &path, &record)
 }

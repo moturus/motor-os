@@ -1094,3 +1094,12 @@ unapproved workspace memory, freezes selected versions and disables reviews
 only in captured settings. Portable fixtures, both host profiles,
 warnings-denied host/native Clippy, native release build and release snapshot
 VM pass; logs use `/tmp/gears-eval-state-capture-*`.
+
+Frozen state installs into separate workspace copies and fresh state directories.
+Both arms retain user memory, manual curation and curated skills; only the
+learning arm adds exact approved agent versions. Minimal admission records make
+workspace memory and skills usable without importing source conversations,
+pending proposals, old snapshots or review artifacts. Version manifests identify
+selected entries, skill contents and shared settings. Portable fixtures, both
+host profiles, warnings-denied host/native Clippy, native release build and
+release snapshot VM pass; logs use `/tmp/gears-eval-state-install-*`.

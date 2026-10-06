@@ -335,4 +335,8 @@ remain in both arms; current approved agent skill versions join the learning
 arm. Explicit manual workspace-memory admission supersedes agent provenance.
 Capture validates complete decision history and workspace admission, freezes
 these versions in memory, and turns reviews off in the captured settings without
-changing live settings. Installing copies and executing trials follow.
+changing live settings. Installation requires a separate workspace copy and a
+fresh state destination. It writes only selected memory/skill versions and the
+minimal approval records needed to use them, records their content hashes, and
+copies no source sessions, review history or pending proposals. Paired execution
+and reports follow.
