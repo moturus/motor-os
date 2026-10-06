@@ -63,6 +63,7 @@ impl Task {
             );
         }
         command(&self.check)?;
+        crate::check_config::validate(&self.check)?;
         for arguments in self.acceptance.iter().chain(&self.regressions) {
             command(arguments)?;
         }

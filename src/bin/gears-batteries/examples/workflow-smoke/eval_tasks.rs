@@ -34,6 +34,10 @@ pub fn run_fixture(workspace: &Path, root: &Path) -> Result<(), String> {
     assert_eq!(eval_task::load(&path)?.task.workspace, workspace);
     for invalid in [
         task.replace("version=1", "version=2"),
+        task.replace(
+            "check=['rustc', 'a file*', '--crate-type=lib']",
+            "check=['sh', '-c', 'true']",
+        ),
         task.replace("prompt='Fix the literal fixture.'", "prompt='   '"),
         task.replace(
             "regressions=[['regression', '--offline']]",

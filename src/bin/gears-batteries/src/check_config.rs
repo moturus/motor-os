@@ -73,7 +73,7 @@ pub fn load(context: &ToolContext, system: &str) -> Result<Option<Vec<String>>, 
     Ok(vector)
 }
 
-fn validate(vector: &[String]) -> Result<(), String> {
+pub(crate) fn validate(vector: &[String]) -> Result<(), String> {
     if vector.is_empty()
         || vector.len() > 128
         || vector[0].is_empty()

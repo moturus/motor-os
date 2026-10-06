@@ -1103,3 +1103,12 @@ pending proposals, old snapshots or review artifacts. Version manifests identify
 selected entries, skill contents and shared settings. Portable fixtures, both
 host profiles, warnings-denied host/native Clippy, native release build and
 release snapshot VM pass; logs use `/tmp/gears-eval-state-install-*`.
+
+Fresh trial roots can grant narrowly scoped unattended authority to file tools,
+todo, skill viewing and the exact declared check. Saved sessions, edits to
+instructions/state, outside paths, shell/publishing tools, learning changes and
+historical search are excluded. Changed check declarations fail while normal
+check signatures/receipts remain intact. Task validation now also applies the
+existing check declaration limits. Portable fixtures, both host profiles,
+warnings-denied host/native Clippy, native release build and release snapshot
+VM pass; logs use `/tmp/gears-eval-policy-*`.

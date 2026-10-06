@@ -340,3 +340,13 @@ fresh state destination. It writes only selected memory/skill versions and the
 minimal approval records needed to use them, records their content hashes, and
 copies no source sessions, review history or pending proposals. Paired execution
 and reports follow.
+
+Trial copies can install `batteries/eval-policy.json` to grant unattended
+file-tool reads and edits within their exact workspace, plus the task's literal
+check. It applies only to ephemeral sessions. Instructions and `.gears/` files
+are protected from edits; outside paths, shell/publishing calls, session search
+and learning changes are denied. A substituted check declaration fails before
+execution. Checks still produce the ordinary approval signature and receipts.
+These hook decisions scope file tools; project check programs retain the user's
+process authority, as with ordinary batteries checks. Live directories have no
+evaluation authority file and keep their existing policy.

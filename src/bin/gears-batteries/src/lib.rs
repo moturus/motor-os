@@ -7,6 +7,7 @@ pub mod check_config;
 pub mod check_state;
 pub mod command_policy;
 pub mod eval_copy;
+pub mod eval_policy;
 pub mod eval_state;
 pub mod eval_task;
 pub mod file_patch;

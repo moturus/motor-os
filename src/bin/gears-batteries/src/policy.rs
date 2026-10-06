@@ -15,6 +15,9 @@ pub fn permission(event: &Event) -> Value {
         return json!({"decision": "deny"});
     }
     let decision = ToolContext::for_event(event).and_then(|context| {
+        if let Some(response) = crate::eval_policy::permission(event, &context)? {
+            return Ok(response);
+        }
         if event.payload["tool_call"]["name"] == "check" {
             let call: ToolCall = serde_json::from_value(event.payload["tool_call"].clone())
                 .map_err(|error| error.to_string())?;
