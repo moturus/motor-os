@@ -2,7 +2,9 @@
 
 Status: the approved runtime export and native regression are implemented.
 The final patch passed the full core gate three times each in debug and
-release. The selected SDK still needs to select published moto-rt 0.17.7.
+release. The external Rust fork now selects published moto-rt 0.17.7 in
+commit `f046f257239`; publishing that commit and selecting the rebuilt SDK
+remain.
 The skills implementation uses the user-authorized `yaml_serde` dependency. Its host
 debug and release gates pass, as do host and Motor-target Clippy.
 
@@ -105,16 +107,16 @@ requires updating the fork's library lock and declared Rust revision/lock hash,
 and building/selecting the corresponding new toolchain tuple. Follow
 [the toolchain procedure](../../../../docs/toolchain.md#5-changing-the-toolchain).
 The fork update and SDK selection remain separate from the approved in-tree
-fix and completed publication; no toolchain or external fork source has
-been changed by this task.
+fix and completed crate publication. The fork's lock update is committed;
+the SDK declaration is prepared, but the installed selector is unchanged.
 
-### Exact proposed external Rust-fork change
+### Exact external Rust-fork change
 
 The external checkout is `/home/posk/motor-dev/toolchain-src/rust`, backed
 by `https://github.com/moturus/rust`. Its `library/std/Cargo.toml` already
 declares `moto-rt` version `0.17` with `rustc-dep-of-std`, which enables the
 runtime's `libc` exports. That declaration accepts the published 0.17.7
-release. The only planned external source edit is the moto-rt entry in
+release. The only external source edit is the moto-rt entry in
 `library/Cargo.lock`:
 
 ```diff
@@ -148,17 +150,20 @@ source ref. Compiled SDK binaries are built locally, not published.
 5. Validate the batteries native release build, all three debug and three
    release main-image full gates, and `src/tests/full-test-dev.sh --release`.
 
-The user requested continuation with this rollout on 2026-10-05. Before
-editing, the external fork's
-[AGENTS.md](/home/posk/motor-dev/toolchain-src/rust/AGENTS.md:85) requires:
-"Do not make any LLM-generated repository change unless the user has named,
-in this conversation, another person who agreed in advance to review it."
-The reviewer's name has been requested and is pending. The fork also
-requires confirmation of personal review of the final committed diff before
-pushing. No external source or SDK selection has changed. Temporary native
-checks establish that the fix works; installed-build validation remains
-incomplete until this dependency selection is updated and the developer-image
-gate passes.
+The user explicitly authorized this Motor OS fork update and instructed us
+not to apply the Rust checkout's AGENTS.md. Commit `f046f2572396582a5be4b387f335d2c773749bb2`
+changes only the two lock fields above; a parsed comparison verifies that
+every other package and dependency is identical. The resulting library lock
+SHA-256 is `a0c4d55e7c052cee9e1b5d1f65e56029d99f28641736b88dff6a871d30c5e972`.
+The Motor OS declaration is prepared as `1.99.0-beta-f47d5bb-motor.dev.3`;
+the existing installed selector remains unchanged until the new SDK is built.
+
+The HTTPS push failed because this session has no GitHub credentials. An
+SSH check also failed authentication setup. The user has been asked to push
+the completed commit to `motor-os-1.99.0-beta-f47d5bb` from their authenticated
+shell. This is the remaining prerequisite for the managed build. Temporary
+native checks establish that the runtime fix works; installed-build validation
+remains incomplete until the new SDK and developer-image gate pass.
 
 ## Published runtime verification
 

@@ -554,12 +554,16 @@ export are verified in [the runtime record](gears-yaml-runtime.md#published-runt
 Select the fixed runtime in the SDK, then finish native skills validation.
 The in-tree runtime gap is fixed and core-tested; rebuilding
 the current SDK tuple alone will not update std's locked dependency.
-The user requested continuation with the SDK rollout. The external Rust
-fork's [AGENTS.md](/home/posk/motor-dev/toolchain-src/rust/AGENTS.md:85)
-requires another reviewer to be named before any repository edit. That
-name has been requested; the fork and SDK remain unchanged while awaiting
-it. The exact two-field proposal is `/tmp/gears-sdk-runtime-lock.patch`;
-its read-only applicability check passes. Phase 7 is complete at the
+The user explicitly authorized the Motor OS Rust fork update without the
+Rust checkout's AGENTS.md gate. External commit `f046f257239` changes only
+the runtime version and checksum; the published archive checksum and exact
+parsed lockfile difference are verified. The Motor OS SDK declaration is
+prepared as `dev.3`, and its offline runtime, managed-source, key, bootstrap
+and version contracts pass. The installed SDK selector is unchanged.
+GitHub push authentication is unavailable in this session, so the user has
+been asked to push the completed fork commit before the managed SDK build.
+See [the rollout record](gears-yaml-runtime.md#rollout-sequence).
+Phase 7 is complete at the
 component level. Phase 8 will discuss question 7; phase 9 requires the
 user's criterion before evaluation.
 
