@@ -36,6 +36,10 @@ pub struct KernelStaticPage {
     // sys-io clients) should fail fast with OOM instead of digging the hole
     // deeper. Appended last: earlier field offsets are ABI.
     pub memory_pressure: AtomicU32,
+
+    // Nonzero random boot identity, initialized once before starting userspace.
+    // Appended last: earlier field offsets are ABI.
+    pub boot_random_id: u64,
 }
 
 impl KernelStaticPage {
@@ -54,6 +58,7 @@ impl KernelStaticPage {
 }
 const _: () =
     assert!(core::mem::size_of::<KernelStaticPage>() as u64 <= KernelStaticPage::PAGE_SIZE);
+const _: () = assert!(core::mem::offset_of!(KernelStaticPage, boot_random_id) == 64);
 
 /// Whether the kernel signals memory pressure. One shared-page load.
 #[cfg(feature = "userspace")]
