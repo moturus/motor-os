@@ -1152,3 +1152,11 @@ other judge dependencies. Portable fixtures exercise acceptance, rejection and
 a missing program without shell expansion or provider-key inheritance. Both
 host profiles, warnings-denied host/native Clippy, native release build and
 release snapshot VM pass; logs use `/tmp/gears-eval-criteria-*`.
+
+Descriptive reports now aggregate both arms without turning missing cost/time
+into zero or treating equal observed rates as equivalence. Acceptance includes
+independent regression protection. Source approval/denial counts and latest
+review usage include explicit coverage limitations; total historical review
+cost and human time are unknown. Portable fixtures, both host profiles,
+warnings-denied host/native Clippy, native release build and release snapshot
+VM pass; logs use `/tmp/gears-eval-report-*`.

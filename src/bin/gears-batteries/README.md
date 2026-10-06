@@ -385,3 +385,12 @@ model copies. Keep judge dependencies and expected answers outside those copies
 too, using task exclusions where necessary. These trusted programs retain normal
 user process authority. Outcomes include exit status, deadline/cancellation,
 bounded output and elapsed time; a missing program is a failed criterion.
+
+Evaluation reports separate each arm's accepted outcomes, regressions, actor
+failures, elapsed time, tool calls and reported model cost. Acceptance requires
+a completed actor and all acceptance/regression programs to pass. Reports retain
+partial cost flags; unrecorded tool/review costs and human time remain unknown.
+Source approval/denial counts cover all recorded history and may include unrelated
+work. The report stays descriptive (`insufficient_evidence`) until the user
+applies the stated criterion to representative held-out coverage and costs.
+It never enables reviews. Equal observed rates do not establish equivalence.
