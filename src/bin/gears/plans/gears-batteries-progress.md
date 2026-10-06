@@ -995,3 +995,12 @@ that archive. Postponement, denial and stale approval leave live files intact.
 The portable workflow checks these cases on both platforms. Host debug/release,
 warnings-denied host/native Clippy, native release build and the release snapshot
 VM component gate pass; logs use `/tmp/gears-cleanup-retention-*`.
+
+Cleanup candidate analysis retains only locally approved current versions.
+Agent ownership comes from an approved proposal; manual admission supersedes
+it even for identical bytes, and an unapproved edit is excluded. Literal
+overlap hints compare the `When it applies` sections after case/whitespace
+normalization without claiming semantic equivalence. Cutoffs parse explicit
+calendar dates at midnight UTC, with leap-year validation. Portable fixtures,
+both host profiles, warnings-denied host/native Clippy, native release build
+and release snapshot VM pass; logs use `/tmp/gears-cleanup-candidates-*`.

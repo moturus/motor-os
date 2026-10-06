@@ -43,6 +43,7 @@ pub mod session_search;
 pub mod shell_words;
 pub mod skill_archive;
 pub mod skill_catalog;
+pub mod skill_cleanup;
 pub mod skill_config;
 pub mod skill_context;
 pub mod skill_format;
