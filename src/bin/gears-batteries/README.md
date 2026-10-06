@@ -261,6 +261,13 @@ use `pending --approve ID`, `--deny ID` or `--postpone ID`. Approval validates t
 captured version and preserves both files under `batteries/archived-skills/`
 before withdrawing them. The pending item shows its cutoff and archive path.
 
+For an evaluation copy, `gears --config EVAL --gears-dir COPY --ephemeral -p
+PROMPT` selects the directory used by Gears and its batteries hooks. Memory,
+skills, snapshots, journals and pending changes stay in that copy. Use the
+batteries CLI's `--root COPY` option to inspect it from your ordinary shell.
+This flag selects state; workspace copying and paired evaluation are separate
+measurement steps.
+
 `/review [focus]` records a due review mark at the current saved conversation
 entry. Reviews are disabled by default; user-wide `batteries.toml` must set
 `version = 1`, `[reviews] enabled = true`, and both `[reviews.executor]` and

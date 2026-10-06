@@ -1058,3 +1058,10 @@ and release snapshot VM pass; logs use `/tmp/gears-eval-directory-cli-*`.
 The initial compilation and misplaced-validation failures are preserved in
 `host-debug.log` and `host-debug-fixed.log`; final validation keeps the failing
 assertions and adds a real-process check before directory creation.
+
+Batteries now uses Gears' shared directory API. A real hook/CLI fixture selects
+another directory over the inherited root, verifies the selected user guideline
+in the actual provider request, and checks snapshots, turn journals and pending
+items stay in the copy. The inherited guideline remains unchanged. Both host
+batteries profiles, warnings-denied host/native Clippy, native release build and
+release snapshot VM pass; logs use `/tmp/gears-eval-directory-batteries-*`.

@@ -384,17 +384,7 @@ fn initialization_notice(error: String) -> Value {
 }
 
 pub fn default_root() -> Result<PathBuf, String> {
-    #[cfg(unix)]
-    {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join(".gears"))
-            .ok_or_else(|| "HOME is not set; cannot locate Gears directory".into())
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(PathBuf::from("/user/cfg/gears"))
-    }
+    gears::directory::default_root()
 }
 
 fn merge_optional(response: &mut Value, feature: Result<Value, String>) {
