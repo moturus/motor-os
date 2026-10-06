@@ -556,30 +556,25 @@ impl ThreadControlBlock {
     // off-CPU — with direct switches (switch_to) it may not be the thread
     // the frame resumed.
     pub fn off_cpu_thread() -> alloc::sync::Weak<Thread> {
-        unsafe { Self::current_thread_ptr().as_ref() }
-            .unwrap()
-            .get_weak()
-    }
-
-    pub fn current_thread_ptr() -> *const Thread {
         unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }
             .unwrap()
-            .owner
+            .owner()
+            .get_weak()
     }
 
     // W7: direct switch — save this thread's kernel context exactly like
     // pause() and install `next`'s exactly like resume(), without bouncing
-    // through the sched-loop stack. `next` must have been claimed via a
-    // *_for_switch wake: Runnable, off-CPU, parked in wait()'s pause,
-    // with no resume job posted anywhere. The caller
-    // (wait_and_switch) parks `self` from the other side of the switch
-    // (finish_direct_switch), mirroring how on_thread_paused() runs after
-    // pause() has saved the context.
+    // through the sched-loop stack. The caller (wait_and_switch) parks
+    // `self` from the other side of the switch (finish_direct_switch),
+    // mirroring how on_thread_paused() runs after pause() has saved the
+    // context.
     /// # Safety
     ///
-    /// `next` must be kept alive until the incoming context begins. That
-    /// context may release it before this call returns, so only a raw pointer,
-    /// not a Rust reference, can cross the switch.
+    /// `next` must have been claimed via a *_for_switch wake: Runnable,
+    /// off-CPU, parked in wait() or wait_and_switch(), with no resume job
+    /// posted anywhere. It must be kept alive until the incoming context
+    /// begins. That context may release it before this call returns, so only
+    /// a raw pointer, not a Rust reference, can cross the switch.
     #[inline(never)]
     pub unsafe fn switch_to(&self, next: *const ThreadControlBlock) {
         // Mirror pause() for self...
