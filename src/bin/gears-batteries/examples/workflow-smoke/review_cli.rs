@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gears::{
-    mock::{MockServer, sse_response},
+    mock::{MockServer, Script, sse_response},
     process::{self, Cancellation, Request},
     provider::Message,
     session::{Compaction, RequestPrefix, Store},
@@ -94,6 +94,11 @@ pub fn run(batteries: &Path, gears: &Path, fixture: &Path) -> Result<(), String>
     let server = MockServer::start(vec![
         reply(r#"{"choices":[{"delta":{"content":"Original greeting and answer."},"finish_reason":"stop"}]}"#),
         reply(r#"{"choices":[{"delta":{"content":"Nothing to save"},"finish_reason":"stop"}]}"#),
+        reply(r#"{"choices":[{"delta":{"content":"Original greeting and answer."},"finish_reason":"stop"}]}"#),
+        Script::new().write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Partial review\"},\"finish_reason\":null}]}\n\n")
+            .pause(Duration::from_millis(500)).close(),
+        reply(r#"{"choices":[{"delta":{"content":"Original greeting and answer."},"finish_reason":"stop"}]}"#),
+        reply(r#"{"choices":[{"delta":{"content":"Nothing to save"},"finish_reason":"stop"}]}"#),
     ]).map_err(|error| error.to_string())?;
     let key = base.join("local.key");
     std::fs::write(&key, "fixture").map_err(|error| error.to_string())?;
@@ -104,7 +109,7 @@ pub fn run(batteries: &Path, gears: &Path, fixture: &Path) -> Result<(), String>
         |target| gears_batteries::pending::list(&context, target).map(|items| items.len());
     let before_global = pending(gears_batteries::memory_format::Target::Global)?;
     let before_workspace = pending(gears_batteries::memory_format::Target::Workspace)?;
-    let request = Request {
+    let mut request = Request {
         program: batteries_copy.to_str().unwrap().into(),
         args: vec!["review".into()],
         cwd: context.workspace.clone(),
@@ -126,11 +131,26 @@ pub fn run(batteries: &Path, gears: &Path, fixture: &Path) -> Result<(), String>
         ],
         remove_env: vec![gears::provider::KEY_ENV.into()],
     };
-    let invoke = || {
-        process::run(&request, &Cancellation::new(), &mut |_, _| {})
+    let invoke = |request: &Request| {
+        process::run(request, &Cancellation::new(), &mut |_, _| {})
             .map_err(|error| error.to_string())
     };
-    let output = invoke()?;
+    let mut new = store.create(false, None)?;
+    new.append_message(&Message::assistant("Separate session"))?;
+    let saved_env = request.env.clone();
+    for (name, value) in &mut request.env {
+        match name.as_str() {
+            "GEARS_SESSION_ID" => *value = new.id().into(),
+            "GEARS_SESSION_PATH" => *value = new.path().unwrap().to_str().unwrap().into(),
+            _ => {}
+        }
+    }
+    assert!(invoke(&request)?.success());
+    assert!(server.requests().is_empty());
+    assert_eq!(review_marks::due(&context)?.len(), 1);
+    request.env = saved_env;
+    drop(new);
+    let output = invoke(&request)?;
     assert!(output.success(), "{output:?}");
     assert_eq!(
         review_marks::load(&context, &id)?.unwrap().disposition,
@@ -147,7 +167,7 @@ pub fn run(batteries: &Path, gears: &Path, fixture: &Path) -> Result<(), String>
             .is_some_and(|text| text.contains("\"Nothing to save\" is the default outcome"))
     }));
     assert!(!body.to_string().contains("Later task"));
-    assert!(invoke()?.success());
+    assert!(invoke(&request)?.success());
     assert_eq!(
         server.requests().len(),
         2,
@@ -165,6 +185,61 @@ pub fn run(batteries: &Path, gears: &Path, fixture: &Path) -> Result<(), String>
     )
     .unwrap();
     assert_eq!(result["answer"], "Nothing to save");
+    assert_eq!(result["usage"]["completions"], 2, "include summary cost");
+    let interrupted =
+        review_marks::create(&context, &entry, Reason::Command, "Second review", &model)?;
+    let previous_result = std::fs::read(
+        context
+            .state
+            .existing_file(Path::new("batteries/last-review.json"))?
+            .unwrap(),
+    )
+    .unwrap();
+    let cancellation = Cancellation::new();
+    let output = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while server.requests().len() < 4 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "review never reached its model request"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            cancellation.cancel();
+        });
+        process::run(&request, &cancellation, &mut |_, _| {})
+    })
+    .map_err(|error| error.to_string())?;
+    assert!(output.cancelled, "{output:?}");
+    assert_eq!(
+        review_marks::load(&context, &interrupted)?
+            .unwrap()
+            .disposition,
+        Disposition::Due
+    );
+    assert_eq!(
+        std::fs::read(
+            context
+                .state
+                .existing_file(Path::new("batteries/last-review.json"))?
+                .unwrap()
+        )
+        .unwrap(),
+        previous_result
+    );
+    assert_eq!(std::fs::read(parent.path().unwrap()).unwrap(), before);
+    assert!(invoke(&request)?.success());
+    assert_eq!(
+        review_marks::load(&context, &interrupted)?
+            .unwrap()
+            .disposition,
+        Disposition::Completed
+    );
+    assert_eq!(server.requests().len(), 6);
+    assert!(invoke(&request)?.success());
+    assert_eq!(server.requests().len(), 6);
+    assert_eq!(std::fs::read(parent.path().unwrap()).unwrap(), before);
     assert_eq!(
         pending(gears_batteries::memory_format::Target::Global)?,
         before_global

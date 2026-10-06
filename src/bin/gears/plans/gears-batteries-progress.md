@@ -19,7 +19,7 @@ main-image gates and `full-test-dev.sh --release` pass, including native
 packaged-source builds. Phase 8 has settings, marks, saved-entry snapshots,
 tool policy, triggers, the resume question, the proposal cap and the connected
 review runner. Real-binary compacted reviews preserve the saved prefix on both
-systems. An in-flight interruption regression and cleanup remain.
+systems. Real in-flight interruption and session isolation pass; cleanup remains.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
@@ -850,6 +850,21 @@ preserves two CLI assertions for the old unimplemented placeholder; they now
 assert the experimental value. The portable fixture covers optional-record
 failure isolation and unchanged damaged bytes.
 
+### Real review interruption and session isolation
+
+The actual companion/Gears pair now has a loopback regression that starts a
+separate saved session without consuming the parent's mark, interrupts a review
+after its model request starts, and completes the remaining due mark on a later
+invocation. Further invocations make no request. Parent bytes, pending counts
+and the previous completed result survive cancellation. Completed review usage
+includes the auxiliary summary request.
+
+Both host profiles, warnings-denied host/native Clippy, the native release build
+and release snapshot VM workflow pass. Logs use `/tmp/gears-review-interruption-*`.
+The subsequent invocation is an explicit part of the interruption scenario;
+there is no automatic retry or timeout change. Cleanup still needs the requested
+cutoff guidance; evaluation still needs question 7's quality/cost criterion.
+
 ### Corrections after a frozen prefix
 
 Batteries hooks recognize `preserve_prefix` during initialization. They retain
@@ -897,8 +912,8 @@ pass. See [the rollout record](gears-yaml-runtime.md#rollout-sequence) for the
 exact SDK name and logs. The earlier failures remain preserved in that record.
 
 The independent sysbox track continues with field keys and S3–S6 after the
-numeric/human patch. Phase 8 continues with an in-flight interruption
-regression and cleanup proposals. Guidance is requested on the cleanup cutoff.
+numeric/human patch. Phase 8 continues with cleanup proposals. Guidance is
+requested on the cleanup cutoff.
 Phase 9 requires
 the user's quality/cost criterion in question 7; keep reviews disabled until
 an explicit model-pair decision and real-model evidence justify enabling them.
