@@ -376,3 +376,12 @@ the model workspace. Completion, tool failures, check receipts, time, truncation
 and provider usage are recorded; a model saying "Done" does not erase tool
 failures. Missing or partially reported prices remain uncertain. Cleanup
 uncertainty prevents subsequent trials.
+
+Acceptance and regression programs run as literal argument vectors, with the
+trial workspace as their working directory and `GEARS_EVAL_WORKSPACE` set to
+that path. Relative program paths containing `/` resolve against the original
+workspace; bare names use PATH. Their original program files are omitted from
+model copies. Keep judge dependencies and expected answers outside those copies
+too, using task exclusions where necessary. These trusted programs retain normal
+user process authority. Outcomes include exit status, deadline/cancellation,
+bounded output and elapsed time; a missing program is a failed criterion.

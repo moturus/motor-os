@@ -1144,3 +1144,11 @@ The corrected sibling layout keeps the tool-success assertions. Both host
 profiles, warnings-denied host/native Clippy, native release build and release
 snapshot VM pass; logs use `/tmp/gears-eval-actor-*`, fixed debug/native builds
 and Clippy use `siblings`.
+
+Acceptance and regression programs now run separately from the conversation as
+literal vectors against each copied workspace. Original judge programs are
+omitted from model copies; authors must also exclude their expected answers and
+other judge dependencies. Portable fixtures exercise acceptance, rejection and
+a missing program without shell expansion or provider-key inheritance. Both
+host profiles, warnings-denied host/native Clippy, native release build and
+release snapshot VM pass; logs use `/tmp/gears-eval-criteria-*`.

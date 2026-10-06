@@ -63,6 +63,32 @@ pub fn prepare(
     if let Ok(relative) = task.path.strip_prefix(&context.workspace) {
         source.exclude.push(relative.into());
     }
+    for argv in task.task.acceptance.iter().chain(&task.task.regressions) {
+        let program = Path::new(&argv[0]);
+        if !program.is_absolute() && !argv[0].contains('/') {
+            continue;
+        }
+        let path = if program.is_absolute() {
+            program.to_path_buf()
+        } else {
+            context.workspace.join(program)
+        };
+        let parent = ToolContext::new(
+            path.parent()
+                .ok_or("criterion has no program directory")?
+                .into(),
+            context.state.path().into(),
+            "eval-criterion".into(),
+            None,
+        )?;
+        let path = parent.workspace.join(
+            path.file_name()
+                .ok_or("criterion needs a program filename")?,
+        );
+        if let Ok(relative) = path.strip_prefix(&context.workspace) {
+            source.exclude.push(relative.into());
+        }
+    }
     source.exclude.sort();
     source.exclude.dedup();
     root.directory(Path::new(""))?;

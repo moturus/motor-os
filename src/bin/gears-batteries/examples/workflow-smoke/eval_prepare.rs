@@ -8,9 +8,14 @@ pub fn run_fixture(root: &Path, batteries: &Path) -> Result<(), String> {
     std::fs::create_dir(source.workspace.join(".git")).unwrap();
     std::fs::write(source.workspace.join(".git/leak"), "old worktree pointer").unwrap();
     std::fs::write(source.workspace.join("a file*"), "frozen original").unwrap();
+    std::fs::write(
+        source.workspace.join("hidden-judge"),
+        "held-back assertions",
+    )
+    .unwrap();
     let task_path = source.workspace.join("held-back.toml");
     let exclusions: Vec<_> = (0..64).map(|i| format!("skip-{i}")).collect();
-    std::fs::write(&task_path,format!("version=1\nworkspace={:?}\nprompt='fix'\nexclude={exclusions:?}\ncheck=['compiler']\nacceptance=[['judge']]\nregressions=[['regression']]",source.workspace)).unwrap();
+    std::fs::write(&task_path,format!("version=1\nworkspace={:?}\nprompt='fix'\nexclude={exclusions:?}\ncheck=['compiler']\nacceptance=[['./hidden-judge']]\nregressions=[['regression']]",source.workspace)).unwrap();
     let config = root.join("config.toml");
     std::fs::write(
         &config,
@@ -33,6 +38,7 @@ pub fn run_fixture(root: &Path, batteries: &Path) -> Result<(), String> {
             b"frozen original"
         );
         assert!(!trial.workspace.join("held-back.toml").exists());
+        assert!(!trial.workspace.join("hidden-judge").exists());
         assert!(!trial.workspace.join(".git").exists());
         let context = ToolContext::new(
             trial.workspace.clone(),
