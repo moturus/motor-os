@@ -39,6 +39,9 @@ mod cleanup_cli;
 #[path = "workflow-smoke/eval_directory.rs"]
 mod eval_directory;
 
+#[path = "workflow-smoke/eval_actor.rs"]
+mod eval_actor;
+
 #[path = "workflow-smoke/eval_config.rs"]
 mod eval_config;
 
@@ -282,6 +285,7 @@ fn run() -> Result<(), String> {
         &fixture.root.join("prefix-workspace"),
         &fixture.root.join("prefix-state"),
     )?;
+    eval_actor::run_fixture(&fixture.root.join("eval-actor"), &binary, &gears, &compiler)?;
     eval_config::run_fixture(&fixture.root.join("eval-config"), &binary)?;
     eval_copies::run_fixture(&fixture.root.join("eval-copies"), &compiler)?;
     eval_install::run_fixture(&fixture.root.join("eval-install"))?;

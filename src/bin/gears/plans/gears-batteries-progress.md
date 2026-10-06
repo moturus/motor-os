@@ -1132,3 +1132,15 @@ output and repeated trial destinations fail. Internal reserved exclusions do not
 reduce the task format's 64 user exclusions. Portable fixtures, both host profiles,
 warnings-denied host/native Clippy, native release build and release snapshot
 VM pass; logs use `/tmp/gears-eval-prepare-*`.
+
+The owned evaluation actor runs real Gears with pinned configuration, selected
+state, explicit provider/model/deadline and JSONL. It stores events outside the
+workspace and records outcomes, tool failures, checks, elapsed time, truncation
+and partial usage. Portable tests run real writes/checks in both arms, verify
+actual requests include learning only in its arm, and preserve source files.
+The initial host fixture had separate binary build directories; its tool failures
+are retained in `gears-eval-actor-host-debug.log` and the original fixture artifact.
+The corrected sibling layout keeps the tool-success assertions. Both host
+profiles, warnings-denied host/native Clippy, native release build and release
+snapshot VM pass; logs use `/tmp/gears-eval-actor-*`, fixed debug/native builds
+and Clippy use `siblings`.
