@@ -25,8 +25,10 @@ test-only correction is committed and validated. The first S2 patch is
 committed in `399cf0a5`: byte-order `sort` with `-r -u -f -s -c -o`, literal
 operands and a quoted executable wrapper. Its native regression and
 warnings-denied Clippy pass, as do three debug and three release full core
-runs after the diagnosed kernel-log test correction (`9adb3ddf`). Numeric,
-human and field-key sorting, steps S3–S6 and phases 8–12 remain.
+runs after the diagnosed kernel-log test correction (`9adb3ddf`). The second
+S2 patch adds exact numeric and human-size sorting and passes the same six
+core gates with the stock `dev.3` SDK. Field keys, S3–S6 and the remaining
+phase 8–12 work are pending.
 
 The phase 3 manual checklist is not marked complete. Automated host tests
 cover the runtime and both UIs; native gates cover shipped tools, literal
@@ -449,7 +451,8 @@ rollback. Formatting, diff checks and warnings-denied Clippy pass.
 Commit `399cf0a5` adds byte-order sorting with `-r -u -f -s -c -o`, raw-byte
 order diagnostics, literal operands, and output opened only after reading
 the inputs. Its native systest runs transitively in the full core suite.
-Numeric/human comparison and field keys are separate subsequent patches.
+Numeric/human comparison is the second patch below; field keys remain a
+separate subsequent patch.
 The focused native regression and warnings-denied Clippy pass. A temporary
 host build agrees with GNU for 555 input, flag, file and output cases.
 
@@ -483,10 +486,27 @@ Final full-gate logs:
 | Debug | 22.1, 21.9, 21.7 minutes |
 | Release | 11.0, 10.6, 10.6 minutes |
 
-Numeric/human and field-key sort, plus `uniq`, are prepared only in temporary
-source trees. Their host comparisons with GNU and native builds and Clippy
-pass; native execution and each patch's full core gate remain before shipping.
-No additional sysbox implementation is installed by those temporary builds.
+Field-key sort and `uniq` remain prepared only in temporary source trees.
+Their host comparisons with GNU and native builds and Clippy pass; native
+execution and each patch's full core gate remain before shipping.
+
+### Exact numeric and human sorting
+
+`sort -n` compares decimal prefixes without floating-point rounding, including
+long mantissas and numbers beyond 2^53. `-h` compares human-size suffix ranks
+then exact mantissas. Both retain reverse, stable, unique, ASCII folding,
+order checks and full-line tie breaking where appropriate. Conflicting modes
+are refused before opening an output file.
+
+The native systest covers signs, zero, junk prefixes, decimal ties, units,
+300-digit numbers, flag combinations and preserving output on invalid options.
+It passes in three debug and three release full core gates with the stock
+`dev.3` SDK. Source hashes match across all six runs; the release developer
+suite passes too. Warnings-denied native sysbox and systest Clippy pass.
+The host driver agrees with GNU sort 9.7 in 2,112 output/status/diagnostic
+comparisons (`/tmp/gears-sort-runtime-numeric-gnu.log`). Native golden cases
+also pass in the host harness (`/tmp/gears-sort-runtime-numeric-fixture.log`).
+Full logs use `/tmp/gears-sdk-runtime-full-{debug,release}-{1,2,3}.log`.
 
 ## Task acceptance decision
 

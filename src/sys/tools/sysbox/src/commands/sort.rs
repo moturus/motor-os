@@ -1,10 +1,15 @@
-//! Byte-order line sorting; comparisons use C-locale ASCII case folding.
+//! Byte, exact decimal and human-size sorting in the C locale.
+
+#[path = "sort_numeric.rs"]
+mod numeric;
 
 use std::cmp::Ordering;
 use std::io::{Read, Write};
 
 #[derive(Default)]
 struct Options {
+    numeric: bool,
+    human: bool,
     reverse: bool,
     unique: bool,
     fold: bool,
@@ -34,14 +39,17 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
         }
         if argument == "--help" {
             println!(
-                "usage: sort [-rufsc] [-o FILE] [--] [FILE]...\n\
-                      Sort lines in byte order; no files or '-' reads standard input.\n\
+                "usage: sort [-nhrufsc] [-o FILE] [--] [FILE]...\n\
+                      Sort lines (byte order by default); no files or '-' reads standard input.\n\
+                      -n decimal prefix; -h human sizes;\n\
                       -r reverse; -u unique; -f fold ASCII case; -s stable;\n\
                       -c check order without output; -o FILE write sorted lines to FILE."
             );
             std::process::exit(0);
         }
         let flags = match argument.as_str() {
+            "--numeric-sort" => "n",
+            "--human-numeric-sort" => "h",
             "--reverse" => "r",
             "--unique" => "u",
             "--ignore-case" => "f",
@@ -53,6 +61,8 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
         };
         for (position, flag) in flags.char_indices() {
             match flag {
+                'n' => options.numeric = true,
+                'h' => options.human = true,
                 'r' => options.reverse = true,
                 'u' => options.unique = true,
                 'f' => options.fold = true,
@@ -88,6 +98,9 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
             }
         }
     }
+    if options.numeric && options.human {
+        fail("options '-hn' are incompatible");
+    }
     if files.is_empty() {
         files.push("-".into());
     }
@@ -102,7 +115,9 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
 
 impl Options {
     fn compare(&self, left: &[u8], right: &[u8]) -> Ordering {
-        let mut order = if self.fold {
+        let mut order = if self.numeric || self.human {
+            numeric::compare(left, right, self.human, self.fold)
+        } else if self.fold {
             left.iter()
                 .map(u8::to_ascii_uppercase)
                 .cmp(right.iter().map(u8::to_ascii_uppercase))

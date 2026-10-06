@@ -1,4 +1,4 @@
-//! Native byte sorting, order diagnostics and literal shell operands.
+//! Native byte/numeric sorting, order diagnostics and literal shell operands.
 
 use std::io::Write;
 use std::path::Path;
@@ -123,6 +123,81 @@ pub fn run_test() {
         .output()
         .unwrap();
     expect(wrapper, 0, b"a\nz\n", None);
+    numeric_cases(&root);
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox_sort::run_test PASS");
+}
+
+fn numeric_cases(root: &Path) {
+    for (args, input, output) in [
+        (
+            &["-n"][..],
+            &b"9\n10\n-2\n0\n-0.1\n.2\n.10"[..],
+            &b"-2\n-0.1\n0\n.10\n.2\n9\n10\n"[..],
+        ),
+        (
+            &["-ns"],
+            b" +1\njunk\n-0\n0.000\n.0",
+            b" +1\njunk\n-0\n0.000\n.0\n",
+        ),
+        (
+            &["-n"],
+            b"9007199254740993\n9007199254740992",
+            b"9007199254740992\n9007199254740993\n",
+        ),
+        (&["-n"], b"10e2\n9\n2x", b"2x\n9\n10e2\n"),
+        (&["-n"], b"2x\n2a\n1", b"1\n2a\n2x\n"),
+        (&["-ns"], b"2x\n2a\n1", b"1\n2x\n2a\n"),
+        (&["-nu"], b"01\n1.0\n1\n2\n02", b"01\n2\n"),
+        (
+            &["-h"],
+            b"1000M\n2G\n9K\n1M\n-2G\n-999M\n0K",
+            b"-2G\n-999M\n0K\n9K\n1M\n1000M\n2G\n",
+        ),
+        (&["-h"], b"1m\n999\n2M\n1K", b"1m\n999\n1K\n2M\n"),
+        (&["-hf"], b"1m\n999\n2M\n1K", b"999\n1K\n1m\n2M\n"),
+        (&["-hr"], b"1G\n1k\n1024\n0M", b"1G\n1k\n1024\n0M\n"),
+        (&["--numeric-sort", "--reverse"], b"9\n10", b"10\n9\n"),
+        (&["--human-numeric-sort"], b"2G\n1M", b"1M\n2G\n"),
+    ] {
+        expect(run(root, args, input), 0, output, None);
+    }
+    // Long mantissas must retain exact ordering beyond integer and float limits.
+    for values in [
+        [format!("1{}", "0".repeat(300)), "9".repeat(300)],
+        [
+            format!(".{}2", "0".repeat(300)),
+            format!(".{}1", "0".repeat(300)),
+        ],
+    ] {
+        let input = format!("{}\n{}", values[0], values[1]);
+        let expected = format!("{}\n{}\n", values[1], values[0]);
+        expect(
+            run(root, &["-n"], input.as_bytes()),
+            0,
+            expected.as_bytes(),
+            None,
+        );
+    }
+    expect(run(root, &["-nc"], b"2\n10"), 0, b"", None);
+    expect(
+        run(root, &["-nc"], b"9\n2"),
+        1,
+        b"",
+        Some(b"sort: -:2: disorder: 2"),
+    );
+    expect(
+        run(root, &["-ncu"], b"1\n01"),
+        1,
+        b"",
+        Some(b"sort: -:2: disorder: 01"),
+    );
+    std::fs::write(root.join("numeric-out"), b"keep me").unwrap();
+    expect(
+        run(root, &["-nh", "-o", "numeric-out"], b""),
+        2,
+        b"",
+        Some(b"sort: options '-hn' are incompatible"),
+    );
+    assert_eq!(std::fs::read(root.join("numeric-out")).unwrap(), b"keep me");
 }
