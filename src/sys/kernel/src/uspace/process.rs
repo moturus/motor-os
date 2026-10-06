@@ -42,7 +42,11 @@ fn set_direct_switch_prev(prev: Arc<Thread>) {
 fn finish_direct_switch() {
     let prev = crate::arch::take_direct_switch_prev();
     if prev != 0 {
+        // SAFETY: wait_and_switch transfers both references to this incoming
+        // context. Its TCB identifies the wakee; neither reference stays on a
+        // parked stack that may be discarded without running Rust destructors.
         let prev = unsafe { Arc::from_raw(prev as usize as *const Thread) };
+        let _wakee = unsafe { Arc::from_raw(ThreadControlBlock::current_thread_ptr()) };
         prev.on_thread_paused();
     }
 }
@@ -1592,7 +1596,11 @@ impl Thread {
         next.clear_wait_objects_on_wake();
 
         set_direct_switch_prev(self.get_weak().upgrade().unwrap());
-        self.tcb.switch_to(&next.tcb);
+        let next = Arc::into_raw(next);
+        // SAFETY: finish_direct_switch in the wakee consumes the transferred
+        // Arc only after switching to its TCB. No reference to that TCB may
+        // survive on our parked stack, since the wakee can exit before us.
+        unsafe { self.tcb.switch_to(core::ptr::addr_of!((*next).tcb)) };
         // We are back on a CPU: someone woke us (queue path or a direct
         // switch of their own).
 
