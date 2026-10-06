@@ -46,6 +46,7 @@ Options:
   --fork ID           Clone a saved session; may combine with --ephemeral
   --fork-entry ID     End that clone at this saved entry; requires --fork
   --preserve-prefix   Reuse the saved prefix; requires --fork --ephemeral
+  --hook-state NAME=JSON  Overlay hook fields in an ephemeral one-shot fork
   --ephemeral         Do not save the session
   -n, --name NAME     Name a new session
   -v, -vv, -vvv       Increase transport diagnostics
@@ -101,6 +102,7 @@ pub struct Args {
     pub session: SessionStart,
     pub fork_entry: Option<String>,
     pub preserve_prefix: bool,
+    pub hook_states: Vec<(String, serde_json::Value)>,
     pub name: Option<String>,
 }
 
@@ -120,6 +122,7 @@ impl Args {
             session: SessionStart::New,
             fork_entry: None,
             preserve_prefix: false,
+            hook_states: Vec::new(),
             name: None,
         };
         let mut iterator = argv.iter().map(AsRef::as_ref);
@@ -206,6 +209,35 @@ impl Args {
                     }
                     args.preserve_prefix = true;
                 }
+                "--hook-state" => {
+                    let input = value(flag, inline, &mut iterator)?;
+                    if input.len() > 16384 {
+                        return Err("--hook-state exceeds 16 KiB".into());
+                    }
+                    let (name, json) = input
+                        .split_once('=')
+                        .ok_or("--hook-state needs NAME=JSON")?;
+                    if name.is_empty()
+                        || !name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                    {
+                        return Err("--hook-state needs a valid hook name".into());
+                    }
+                    if args
+                        .hook_states
+                        .iter()
+                        .any(|(existing, _)| existing == name)
+                    {
+                        return Err("only one --hook-state may name each hook".into());
+                    }
+                    let fields: serde_json::Value = serde_json::from_str(json)
+                        .map_err(|error| format!("invalid --hook-state JSON: {error}"))?;
+                    if !fields.is_object() {
+                        return Err("--hook-state requires a JSON object".into());
+                    }
+                    args.hook_states.push((name.into(), fields));
+                }
                 "--ephemeral" | "--no-session" => args.set_session(SessionStart::Ephemeral)?,
                 "-n" | "--name" => {
                     args.name = Some(value(flag, inline, &mut iterator)?.to_string())
@@ -231,6 +263,11 @@ impl Args {
         }
         if args.preserve_prefix && !matches!(args.session, SessionStart::ForkEphemeral(_)) {
             return Err("--preserve-prefix requires --fork --ephemeral".into());
+        }
+        if !args.hook_states.is_empty()
+            && (!matches!(args.session, SessionStart::ForkEphemeral(_)) || args.prompt.is_none())
+        {
+            return Err("--hook-state requires --fork --ephemeral -p".into());
         }
         if args.action == Action::Ask {
             if args.prompt.is_none() {
@@ -377,6 +414,52 @@ mod tests {
         ] {
             assert!(Args::parse(&argv).is_err(), "{argv:?}");
         }
+    }
+
+    #[test]
+    fn hook_state_overlays_are_bounded_objects_for_ephemeral_one_shot_forks() {
+        let prefix = [
+            "--fork",
+            "parent",
+            "--ephemeral",
+            "-p",
+            "review",
+            "--hook-state",
+        ];
+        let argv = |field| prefix.into_iter().chain([field]).collect::<Vec<_>>();
+        assert_eq!(
+            Args::parse(&argv("batteries={\"run_kind\":\"review\"}"))
+                .unwrap()
+                .hook_states[0]
+                .1["run_kind"],
+            "review"
+        );
+        for invalid in [
+            "x",
+            "={}",
+            "bad.name={}",
+            "batteries=[]",
+            "batteries=null",
+            "batteries={",
+        ] {
+            assert!(Args::parse(&argv(invalid)).is_err(), "{invalid}");
+        }
+        let oversized = format!("batteries={{\"s\":\"{}\"}}", "x".repeat(16384));
+        assert!(Args::parse(&argv(&oversized)).is_err());
+        assert!(Args::parse(&["--hook-state", "batteries={}"]).is_err());
+        assert!(
+            Args::parse(&[
+                "--fork",
+                "parent",
+                "--ephemeral",
+                "--hook-state",
+                "batteries={}"
+            ])
+            .is_err()
+        );
+        let mut duplicate = argv("batteries={}");
+        duplicate.extend(["--hook-state", "batteries={}"]);
+        assert!(Args::parse(&duplicate).is_err());
     }
 
     #[test]

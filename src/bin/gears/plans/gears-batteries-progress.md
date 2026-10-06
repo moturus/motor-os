@@ -757,6 +757,23 @@ after changing Capture's shape left one old field access; `focused-final.log`
 preserves that compile failure and `focused-fixed.log` contains the corrected
 test with unchanged behavioral assertions.
 
+### Role metadata before hook initialization
+
+Ephemeral one-shot forks accept bounded `--hook-state NAME=JSON` overlays.
+They retain unrelated inherited fields and apply the selected fields before
+the first hook initialization. Unknown hooks and invalid, duplicate or
+oversized inputs are refused. The parent is never modified.
+
+The real CLI fixture verifies the first initialization event, retained source
+state, unknown-hook refusal without another model request, and parent bytes.
+Host debug/release HTTP gates, warnings-denied host/native Clippy, the native
+release build and release snapshot VM shipped gate pass. Logs use
+`/tmp/gears-fork-hook-state-*`. Original fixture setup failures (a short-lived
+test string, a sandbox-denied loopback listener and redundant JSON formatting)
+are retained; final focused logs end in `fixed`/`authorized`, and final host
+Clippy uses `host-clippy-fixed.log`. This supplies review authority metadata;
+the batteries runner has not yet been connected.
+
 The user published moto-rt 0.17.7 and pushed the authorized external Rust-fork
 commit `f046f257239`. It changes only std's runtime version and checksum;
 compiler, LLVM and std implementation sources are unchanged. The managed

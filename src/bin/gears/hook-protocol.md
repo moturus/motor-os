@@ -60,6 +60,15 @@ when it is 1. The common optional fields are state, context, and notice.
 State replaces that hook's latest namespaced state. Context is a normalized
 Gears message that is also added to model context.
 
+An ephemeral one-shot fork may pass `--hook-state NAME=JSON` to overlay fields
+on one configured hook's inherited state before its first initialization. JSON
+must be an object of at most 16 KiB, each hook may be named once, and the option
+requires `--fork --ephemeral -p`. Unconfigured hooks are refused. This lets an
+owned background reader declare its role and source without modifying the
+parent or introducing process-global role variables. `--preserve-prefix` keeps
+the marked parent's saved system/tool prefix while these current hooks enforce
+execution policy.
+
 Common fields also include `hint` and `question`. A hint is one line of at
 most 256 bytes; an empty string clears it. Later hints replace earlier ones.
 A question has this shape:

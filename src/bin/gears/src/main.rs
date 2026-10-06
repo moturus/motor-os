@@ -140,6 +140,11 @@ fn agent(
         )
     })?;
     let store = Store::new(&workspace)?;
+    for (name, _) in &args.hook_states {
+        if !config.hooks.iter().any(|hook| &hook.name == name) {
+            return Err(format!("--hook-state names an unconfigured hook {name:?}"));
+        }
+    }
     let mut session = open_session(&store, args)?;
     let saved_prefix = if args.preserve_prefix {
         session.request_prefix()?
@@ -243,10 +248,25 @@ fn open_session(store: &Store, args: &Args) -> Result<Session, String> {
                 Some(entry) => source.at(entry)?,
                 None => source,
             };
-            store.clone_active_with_options(
+            let mut child = store.clone_active_with_options(
                 &source,
                 matches!(args.session, SessionStart::ForkEphemeral(_)),
-            )
+            )?;
+            for (name, fields) in &args.hook_states {
+                let mut state = child
+                    .hook_state(name)
+                    .unwrap_or_else(|| serde_json::json!({}));
+                state
+                    .as_object_mut()
+                    .ok_or("inherited hook state is not an object")?
+                    .extend(fields.as_object().unwrap().clone());
+                child.append_hook_state(&gears::session::HookState {
+                    hook: name.clone(),
+                    state,
+                    context: None,
+                })?;
+            }
+            Ok(child)
         }
     }
 }
