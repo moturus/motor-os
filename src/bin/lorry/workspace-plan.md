@@ -11,11 +11,12 @@ The real-project acceptance status is:
 | --- | --- | --- |
 | sed | Native release build | Native upstream tests deferred: uucore/errno and tempfile gaps are in the test setup. |
 | ripgrep | Native release build | Known `ignore` leading-dot-slash test failure allowed for this milestone; symlink integration helper deferred. |
-| Helix | Locked vendoring and execution admission | The native build selects upstream cc 1.2.29; Helix must select the existing Motor cc-rs fork. |
+| Helix | Motor cc-rs dependency update and focused compiler checks | Re-vendor the updated graph and rerun the full native release build. |
 
-Helix's native build is the remaining known acceptance blocker. The proposed
-fix changes Helix's dependency configuration and lockfile to select the existing
-Motor cc-rs fork; that fork already has the required temporary-file support.
+Helix's native release build remains to be validated. Its dependency
+configuration and lockfile now select the existing Motor cc-rs fork, committed
+in the external Helix checkout as `73c0876c`. Focused checks prove that the fork
+compiles for Motor and Linux and that Cargo selects it in Helix's build graph.
 Diagnosed failures, required commands, and tool settings are recorded in
 [the milestone-9 details](workspace-plan-details.md#srcsys-and-the-real-projects).
 The user accepts ripgrep's known `ignore` matcher test failure for this milestone;
@@ -259,9 +260,11 @@ failures are separate evidence.
 Native ripgrep and sed release builds pass. Ripgrep's tests expose an external
 ignore path-matching defect, now allowed for this milestone, alongside the
 deferred integration helper. Sed's deferred tests encounter errno's platform
-guard. The shipped native cc wrapper compiles and runs C successfully; Helix
-is blocked by the locked Rust cc crate's platform
-guard. No product port in those external projects has been made.
+guard. The shipped native cc wrapper compiles and runs C successfully. Helix's
+original native build encountered the upstream Rust cc platform guard; the
+approved Helix dependency update now selects Motor's existing cc-rs fork.
+Full native Helix validation remains pending. No new external product code port
+has been made.
 A separate interrupted-build bug can mistake a PID reused after reboot for an
 old artifact owner. The user added `KernelStaticPage::boot_random_id` and
 authorized kernel initialization, now committed as `4debacaa`. Lorry records
