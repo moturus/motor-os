@@ -1353,10 +1353,102 @@ pub fn service_progress_test() {
     println!("    ---- FS: service_progress_test PASS");
 }
 
+/// A client withholding response pages must not hold up another client's writer.
+pub fn metadata_page_pressure_test() {
+    use moto_ipc::io_channel::{self, CHANNEL_PAGE_COUNT};
+    use moto_sys_io::api_fs;
+    use std::time::Duration;
+
+    crate::ensure_temp_dir();
+    let root = std::env::temp_dir();
+    let name = format!("systest-metadata-page-pressure-{}", std::process::id());
+    moto_async::LocalRuntime::new().block_on(async {
+        let (sender, mut receiver) = io_channel::connect(api_fs::FS_URL).unwrap();
+        let (writer, mut writer_receiver) = io_channel::connect(api_fs::FS_URL).unwrap();
+        let mut stat = api_fs::stat_path_msg_encode(
+            root.to_str().unwrap(),
+            sender.alloc_page(u64::MAX).await.unwrap(),
+        );
+        stat.id = 1;
+        sender.send(stat).await.unwrap();
+        let (entry, _) = api_fs::stat_resp_decode(receiver.recv().await.unwrap()).unwrap();
+
+        // Keep the donated server pages occupied by deferring response decoding.
+        let mut held = Vec::new();
+        for id in 2..2 + CHANNEL_PAGE_COUNT as u64 {
+            let mut msg = api_fs::metadata_msg_encode(entry);
+            msg.id = id;
+            sender.send(msg).await.unwrap();
+        }
+        for _ in 0..CHANNEL_PAGE_COUNT {
+            let response = receiver.recv().await.unwrap();
+            response.status().unwrap();
+            held.push(response);
+        }
+
+        let pending_id = 2 + CHANNEL_PAGE_COUNT as u64;
+        let mut metadata = api_fs::metadata_msg_encode(entry);
+        metadata.id = pending_id;
+        sender.send(metadata).await.unwrap();
+
+        // A later page-free request proves the service has processed this channel
+        // while its metadata response is still waiting for a server page.
+        let mut barrier = api_fs::stat_path_msg_encode(
+            root.to_str().unwrap(),
+            sender.alloc_page(u64::MAX).await.unwrap(),
+        );
+        barrier.id = pending_id + 1;
+        sender.send(barrier).await.unwrap();
+        let response = receiver.recv().await.unwrap();
+        assert_eq!(response.id, barrier.id);
+        response.status().unwrap();
+
+        let mut create = api_fs::create_entry_msg_encode(
+            entry,
+            false,
+            &name,
+            writer.alloc_page(u64::MAX).await.unwrap(),
+        );
+        create.id = 1;
+        writer.send(create).await.unwrap();
+        let result = {
+            let response = std::pin::pin!(writer_receiver.recv());
+            let deadline = std::pin::pin!(moto_async::sleep(Duration::from_secs(2)));
+            match futures::future::select(response, deadline).await {
+                futures::future::Either::Left((response, _)) => Some(response.unwrap()),
+                futures::future::Either::Right(_) => None,
+            }
+        };
+
+        // Release backpressure even on failure, so the old bug cannot wedge the
+        // service while the test reports its assertion or removes its file.
+        api_fs::metadata_resp_decode(held.pop().unwrap(), &sender).unwrap();
+        let response = receiver.recv().await.unwrap();
+        assert_eq!(response.id, pending_id);
+        api_fs::metadata_resp_decode(response, &sender).unwrap();
+        let created = match result {
+            Some(response) => response,
+            None => writer_receiver.recv().await.unwrap(),
+        };
+        assert_eq!(created.id, create.id);
+        created.status().unwrap();
+        for response in held {
+            api_fs::metadata_resp_decode(response, &sender).unwrap();
+        }
+        std::fs::remove_file(root.join(name)).unwrap();
+        assert!(
+            result.is_some(),
+            "metadata page backpressure blocked a writer on another connection"
+        );
+    });
+    println!("    ---- FS: metadata_page_pressure_test PASS");
+}
+
 pub fn run_tests() {
     println!("running FS tests ...");
     concurrent_client_progress_test();
     service_progress_test();
+    metadata_page_pressure_test();
     block_cache_capacity_test();
     scattered_writes_test();
     permissions_vdso_test();

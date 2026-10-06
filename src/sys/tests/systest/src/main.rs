@@ -1408,6 +1408,10 @@ fn main() {
         fs::concurrent_client_progress_test();
         return;
     }
+    if args.len() == 2 && args[1] == "test-fs-metadata-page-pressure" {
+        fs::metadata_page_pressure_test();
+        return;
+    }
     // The FS pressure regression; the suite runs the same body at spam size
     // 128. The optional argument sizes the mid-episode lock-acquire spam;
     // the large default exists to drive a build *without* the FS refusal set
