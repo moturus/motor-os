@@ -39,6 +39,9 @@ mod cleanup_cli;
 #[path = "workflow-smoke/eval_directory.rs"]
 mod eval_directory;
 
+#[path = "workflow-smoke/eval_tasks.rs"]
+mod eval_tasks;
+
 #[path = "workflow-smoke/review_marks.rs"]
 mod review_marks;
 
@@ -261,6 +264,7 @@ fn run() -> Result<(), String> {
         &fixture.root.join("prefix-workspace"),
         &fixture.root.join("prefix-state"),
     )?;
+    eval_tasks::run_fixture(&fixture.workspace, &fixture.root.join("eval-tasks"))?;
     eval_directory::run_fixture(
         &binary,
         &gears,

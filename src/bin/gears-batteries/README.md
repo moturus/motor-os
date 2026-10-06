@@ -268,6 +268,26 @@ batteries CLI's `--root COPY` option to inspect it from your ordinary shell.
 This flag selects state; workspace copying and paired evaluation are separate
 measurement steps.
 
+Measurement task inputs use `batteries/eval/tasks/<name>.toml`. Names use the
+same lowercase naming rules as skills. The first source format copies a
+workspace; relative source paths resolve beside the task file.
+
+```toml
+version = 1
+workspace = "/user/project"
+prompt = "Fix the parser's handling of empty records."
+exclude = ["target", ".git"]
+check = ["cargo", "test", "--offline"]
+acceptance = [["./tests/check-empty-records"]]
+regressions = [["./tests/check-existing-records"]]
+```
+
+Commands are literal argument vectors. Acceptance and regression commands are
+required and separate from the prompt and the agent's declared check. Task
+loading rejects unknown fields, traversal exclusions, symlinks and oversized
+inputs, and records the SHA-256 of the exact file. This parser does not run a
+model or enable reviews; copying, paired execution and reports follow.
+
 `/review [focus]` records a due review mark at the current saved conversation
 entry. Reviews are disabled by default; user-wide `batteries.toml` must set
 `version = 1`, `[reviews] enabled = true`, and both `[reviews.executor]` and

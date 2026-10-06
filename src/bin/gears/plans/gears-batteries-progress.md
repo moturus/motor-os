@@ -1065,3 +1065,12 @@ in the actual provider request, and checks snapshots, turn journals and pending
 items stay in the copy. The inherited guideline remains unchanged. Both host
 batteries profiles, warnings-denied host/native Clippy, native release build and
 release snapshot VM pass; logs use `/tmp/gears-eval-directory-batteries-*`.
+
+Evaluation task inputs now validate a versioned workspace source, prompt,
+explicit copy exclusions and literal check/acceptance/regression commands.
+Relative workspace paths resolve beside the task file; exact task bytes have
+an identity for later reports. Criteria remain separate from model prompts.
+Portable fixtures cover strict parsing, relative sources, changed byte hashes,
+traversal, symlinks and size limits. Both host batteries profiles,
+warnings-denied host/native Clippy, native release build and release snapshot
+VM pass; logs use `/tmp/gears-eval-tasks-*`.
