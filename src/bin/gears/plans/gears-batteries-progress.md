@@ -1074,3 +1074,14 @@ Portable fixtures cover strict parsing, relative sources, changed byte hashes,
 traversal, symlinks and size limits. Both host batteries profiles,
 warnings-denied host/native Clippy, native release build and release snapshot
 VM pass; logs use `/tmp/gears-eval-tasks-*`.
+
+Workspace copying creates separate fresh destinations with bounded traversal,
+literal exclusions, ordered content identities and preserved executable access.
+Portable fixtures execute a copied compiled program, compare independent copies,
+check writes leave source/other-arm bytes intact, and reject existing/nested or
+linked destinations. Batteries adds a native-only dependency on the existing
+moto-rt permission API; no runtime, SDK or external-fork code changed.
+Both host profiles, warnings-denied host/native Clippy, native release build and
+release snapshot VM pass; logs use `/tmp/gears-eval-copies-*`. Initial build
+failures (fixture variable and missing native dependency) are preserved; fixed
+host logs use the `fixed` suffix.

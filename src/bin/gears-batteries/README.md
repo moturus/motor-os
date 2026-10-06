@@ -285,8 +285,14 @@ regressions = [["./tests/check-existing-records"]]
 Commands are literal argument vectors. Acceptance and regression commands are
 required and separate from the prompt and the agent's declared check. Task
 loading rejects unknown fields, traversal exclusions, symlinks and oversized
-inputs, and records the SHA-256 of the exact file. This parser does not run a
-model or enable reviews; copying, paired execution and reports follow.
+inputs, and records the SHA-256 of the exact file. The workspace-copy API now creates a fresh destination and records an ordered
+content identity. It preserves literal filenames, empty directories and
+executable access, applies the declared exclusions, and refuses linked or
+special entries. Bounds are 64 directory levels, 100,000 entries and 512 MiB;
+add explicit exclusions for build artifacts. A failed copy removes only its own
+incomplete destination and reports cleanup failure. Freeze source workspaces
+before copying. Paired execution and reports follow; loading or copying does
+not run a model or enable reviews.
 
 `/review [focus]` records a due review mark at the current saved conversation
 entry. Reviews are disabled by default; user-wide `batteries.toml` must set

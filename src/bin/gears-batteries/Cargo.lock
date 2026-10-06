@@ -140,6 +140,7 @@ name = "gears-batteries"
 version = "0.1.0"
 dependencies = [
  "gears",
+ "moto-rt",
  "serde",
  "serde_json",
  "sha2",
