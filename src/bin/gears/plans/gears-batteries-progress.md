@@ -736,6 +736,11 @@ proposals. Phase 9 requires
 the user's quality/cost criterion in question 7; keep reviews disabled until
 an explicit model-pair decision and real-model evidence justify enabling them.
 
+Before connecting the runner, resolve [review context and cache reuse](gears-review-context.md).
+A hermetic saved-entry fork reproduces automatic compaction before the first
+review request when the original history exceeds the input limit. The choice
+is whether to permit that fallback or leave oversized reviews pending.
+
 The optional Hermes import has not been performed. Automated mock tests
 establish behavior, not real-model usefulness. Keep the outstanding native
 interactive checklist visible; do not mark it complete from component tests
