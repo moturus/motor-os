@@ -595,9 +595,12 @@ precedence over remembered heuristics. When an entry or skill is removed or
 corrected, it stops being used everywhere: at each `context` event, every
 Gears process running the hook (interactive, resumed, forked, worker or
 review) compares its snapshot with the current files and, once, adds a note
-saying which material was removed and what replaces it. A resumed or forked
-session whose snapshot holds removed material gets a fresh snapshot, at the
-cost of one cache miss. A removal affects future use, not past actions, and
+saying which material was removed and what replaces it. An ordinary resumed
+or forked session whose snapshot holds removed material gets a fresh snapshot,
+at the cost of one cache miss. A saved-prefix review retains the resource
+references checkpointed at the actual request and delivers current corrections
+after that prefix, including after compaction. Its current permissions and
+review role remain in force. A removal affects future use, not past actions, and
 cannot make a model forget text it has already seen.
 
 **User commands.** `gears-batteries pending` lists the waiting changes and

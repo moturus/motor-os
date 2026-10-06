@@ -261,6 +261,11 @@ Copy the updated sample or add `[after_turn] command = ["gears-batteries", "revi
 to your Gears configuration. The batteries hook must directly invoke the
 `gears-batteries hook` command and include its policy and context subscriptions.
 Reviews keep the marked system/tool prefix while compacting oversized history.
+Historical hook checkpoints keep withdrawal corrections tied to that prefix,
+even after normal resume has reconciled the current resource snapshots. Only
+prompt and skill references are restored; permissions and review metadata remain
+current. If batteries was absent at the saved request, current project
+instructions follow the preserved prefix as context.
 User focus, denied changes and mechanical evidence follow that prefix; evidence
 over 64 KiB is refused explicitly, leaving the mark due. Failed or interrupted
 reviews stay due; successful marks are handled once. Nothing to save is normal.

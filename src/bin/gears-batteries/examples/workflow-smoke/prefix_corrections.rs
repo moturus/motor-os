@@ -58,7 +58,16 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
     gears_batteries::skill_store::write(&context, "checks", None)?;
     std::fs::write(workspace.join("AGENTS.md"), "Current project instructions.")
         .map_err(|e| e.to_string())?;
+    // A normal resume can reconcile resources before another model request.
+    // The review must still correct the last actual, older request prefix.
+    event.payload["reason"] = json!("resume");
+    let resumed = gears_batteries::initialize_at(&event, &context.state);
+    event.session.state = Some(resumed["state"].clone());
     event.payload["preserve_prefix"] = json!(true);
+    event.payload["prefix_state"] = initial["state"].clone();
+    event.session.state.as_mut().unwrap()["run_kind"] = json!("review");
+    event.session.state.as_mut().unwrap()["review_run"] = json!({"mark": "current"});
+    event.session.state.as_mut().unwrap()["permissions"] = json!({"write": false});
     for reason in ["startup", "compaction"] {
         event.event = "initialize".into();
         event.payload["reason"] = json!(reason);
@@ -70,6 +79,9 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
                 .contains("Current project instructions.")
         );
         assert!(initialized.get("notice").is_none(), "{initialized}");
+        assert_eq!(initialized["state"]["run_kind"], "review");
+        assert_eq!(initialized["state"]["review_run"]["mark"], "current");
+        assert_eq!(initialized["state"]["permissions"]["write"], false);
         event.session.state = Some(
             initialized
                 .get("state")

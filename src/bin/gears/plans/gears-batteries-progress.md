@@ -19,7 +19,8 @@ main-image gates and `full-test-dev.sh --release` pass, including native
 packaged-source builds. Phase 8 has settings, marks, saved-entry snapshots,
 tool policy, triggers, the resume question, the proposal cap and the connected
 review runner. Real-binary compacted reviews preserve the saved prefix on both
-systems. Real in-flight interruption and session isolation pass; cleanup remains.
+systems, with historical resource checkpoints and current withdrawal corrections
+after resume. Real in-flight interruption and session isolation pass; cleanup remains.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
@@ -891,6 +892,26 @@ and release snapshot VM workflow pass. Logs use `/tmp/gears-review-attribution-*
 native gates retain the settings-change regression.
 
 ### Corrections after a frozen prefix
+
+A focused resume-before-review regression reproduced lost withdrawal baselines:
+normal initialization had already removed memory and skills from current hook
+snapshots while the last actual prefix still contained them. Batteries now
+restores only historical prompt and skill references from `prefix_state`,
+retaining current permissions and review metadata. An absent historical hook
+starts with empty resource snapshots; current project instructions are delivered
+as context instead of being mistaken for part of the saved prefix.
+
+Both batteries host profiles, warnings-denied host/native Clippy, the native
+release build and release snapshot VM workflow pass. Logs use
+`/tmp/gears-prefix-resources-*`; `original.log` preserves the lost-baseline
+assertion failure. The portable regression covers resume before preservation,
+simultaneous withdrawals and compaction; the actual CLI covers adding batteries
+after the last saved request while retaining exact prefix bytes.
+The complete `src/tests/full-test-dev.sh --release` gate also passes, including
+installed Gears/batteries, native packaged-source builds and the bounded Lorry
+suite; its log is `full-dev.log`. The build-generated updates to unrelated
+lockfiles are restored; the user's existing `src/sys/Cargo.lock`
+change is retained.
 
 Each actual request now records a small hook-state checkpoint, including when
 prefix bytes are unchanged. Preserved forks receive only their own hook's

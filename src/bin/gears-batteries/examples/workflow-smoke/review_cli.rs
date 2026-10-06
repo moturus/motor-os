@@ -60,6 +60,12 @@ pub fn run(batteries: &Path, gears: &Path, fixture: &Path) -> Result<(), String>
         tools: Vec::new(),
     };
     parent.record_request_prefix(&prefix)?;
+    // Batteries is added after the last actual request, whose prefix had no hook.
+    std::fs::write(
+        workspace.join("AGENTS.md"),
+        "New current project instructions.",
+    )
+    .map_err(|error| error.to_string())?;
     parent.append_message(&Message::user("Hello"))?;
     let entry = parent.append_message(&Message::assistant("Ordinary answer. ".repeat(2000)))?;
     let context = ToolContext::new(workspace, state_path, parent.id().into(), parent.path())?;
@@ -162,6 +168,19 @@ pub fn run(batteries: &Path, gears: &Path, fixture: &Path) -> Result<(), String>
     let body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
     assert_eq!(body["model"], "reviewer");
     assert_eq!(body["messages"][0]["content"], prefix.system[0]);
+    assert!(
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(1)
+            .any(|message| {
+                message["content"]
+                    .to_string()
+                    .contains("New current project instructions.")
+            }),
+        "{body}"
+    );
     assert!(body["messages"].as_array().unwrap().iter().any(|message| {
         message["content"]
             .as_str()

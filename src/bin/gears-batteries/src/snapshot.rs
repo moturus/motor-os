@@ -64,6 +64,29 @@ pub(crate) fn save(root: &StateRoot, snapshot: &Snapshot) -> Result<String, Stri
 
 pub fn initialize(event: &Event, root: &StateRoot) -> Result<Value, String> {
     let mut state = crate::hook_state(event)?;
+    if let Some(prefix) = crate::prefix_state(event)? {
+        let hash = match prefix.get("prompt_snapshot") {
+            Some(hash) => hash
+                .as_str()
+                .ok_or("invalid historical prompt reference")?
+                .to_string(),
+            None => save(
+                root,
+                &Snapshot {
+                    version: 2,
+                    fragments: Vec::new(),
+                    memory: Vec::new(),
+                },
+            )?,
+        };
+        if state["prompt_snapshot"] != hash {
+            state
+                .as_object_mut()
+                .unwrap()
+                .remove("memory_view_snapshot");
+        }
+        state["prompt_snapshot"] = json!(hash);
+    }
     let saved = state
         .get("prompt_snapshot")
         .map(|hash| load(root, hash.as_str().ok_or("invalid prompt snapshot hash")?))

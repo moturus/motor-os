@@ -111,6 +111,18 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
     }
 }
 
+/// Historical resources are separate from current permissions and run metadata.
+pub(crate) fn prefix_state(event: &Event) -> Result<Option<&Value>, String> {
+    if event.payload["preserve_prefix"] != true {
+        return Ok(None);
+    }
+    match event.payload.get("prefix_state") {
+        None => Ok(None),
+        Some(value @ (Value::Object(_) | Value::Null)) => Ok(Some(value)),
+        _ => Err("historical prefix state must be an object or null".into()),
+    }
+}
+
 pub fn hook(event: Event) -> Result<Value, String> {
     if event.event == "command" {
         return if event.payload["name"] == "review" {

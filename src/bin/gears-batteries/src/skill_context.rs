@@ -8,6 +8,26 @@ use crate::skill_snapshot::Snapshot;
 
 pub fn initialize(event: &Event, context: &ToolContext) -> Result<Value, String> {
     let mut state = crate::hook_state(event)?;
+    if let Some(prefix) = crate::prefix_state(event)? {
+        let hash = match prefix.get("skill_snapshot") {
+            Some(hash) => hash
+                .as_str()
+                .ok_or("invalid historical skill reference")?
+                .to_string(),
+            None => crate::skill_snapshot::save(
+                context,
+                &Snapshot {
+                    version: 1,
+                    catalog: Vec::new(),
+                    loaded: Vec::new(),
+                },
+            )?,
+        };
+        if state["skill_snapshot"] != hash {
+            state.as_object_mut().unwrap().remove("skill_view_snapshot");
+        }
+        state["skill_snapshot"] = json!(hash);
+    }
     let old_hash = state
         .get("skill_snapshot")
         .map(|hash| hash.as_str().ok_or("invalid skill snapshot reference"))
