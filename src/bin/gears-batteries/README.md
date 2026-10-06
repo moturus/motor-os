@@ -358,3 +358,13 @@ file/check tool definitions, and records their content identities. The copied
 configuration uses the exact batteries executable and removes after-turn work
 and live tracing. Source configuration/tool edits cannot change the pinned copy.
 Symbolic configuration paths are refused before normalization or output creation.
+
+Trial preparation freezes one workspace template, then creates a fresh workspace
+and batteries directory for each run. In addition to task exclusions, it omits
+`.git`, `.gears`, the task file itself and an embedded live Gears directory.
+The selected workspace memory and check declaration are installed separately.
+Old worktree pointers and pending/history artifacts do not enter the copies.
+Each trial has a neutral numeric name, its own authority, and a manifest of its
+installed versions. The output directory must be fresh and outside the source
+workspace. Neither later source edits nor an earlier trial's files enter the
+next trial. Workspace-copy evaluation does not provide repository metadata.

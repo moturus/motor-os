@@ -1123,3 +1123,12 @@ VM pass; final logs use `/tmp/gears-eval-config-*-component-guard.log` and
 remain. A targeted assertion reproduced symbolic traversal followed by `..`;
 raw components are now checked before reading. The unchanged assertion passes;
 its original failure is `/tmp/gears-eval-config-symbolic-original.log`.
+
+Trial preparation connects frozen inputs, configuration/tool pinning, separate
+workspaces/state, manifests and scoped authority. Held-back task files and
+runtime/VCS metadata are omitted from the source template; later source changes
+and prior trial answers cannot enter subsequent file copies. Existing/nested
+output and repeated trial destinations fail. Internal reserved exclusions do not
+reduce the task format's 64 user exclusions. Portable fixtures, both host profiles,
+warnings-denied host/native Clippy, native release build and release snapshot
+VM pass; logs use `/tmp/gears-eval-prepare-*`.

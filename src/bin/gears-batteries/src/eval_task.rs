@@ -20,6 +20,7 @@ pub struct Task {
 }
 
 pub struct Loaded {
+    pub path: PathBuf,
     pub name: String,
     pub task: Task,
     pub hash: String,
@@ -138,5 +139,6 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
         name,
         task,
         hash: crate::snapshot::digest(&bytes),
+        path,
     })
 }

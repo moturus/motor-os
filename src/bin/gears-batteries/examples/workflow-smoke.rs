@@ -51,6 +51,9 @@ mod eval_install;
 #[path = "workflow-smoke/eval_policy.rs"]
 mod eval_policy;
 
+#[path = "workflow-smoke/eval_prepare.rs"]
+mod eval_prepare;
+
 #[path = "workflow-smoke/eval_states.rs"]
 mod eval_states;
 
@@ -283,6 +286,7 @@ fn run() -> Result<(), String> {
     eval_copies::run_fixture(&fixture.root.join("eval-copies"), &compiler)?;
     eval_install::run_fixture(&fixture.root.join("eval-install"))?;
     eval_policy::run_fixture(&fixture.root.join("eval-policy"))?;
+    eval_prepare::run_fixture(&fixture.root.join("eval-prepare"), &binary)?;
     eval_states::run_fixture(&fixture.root.join("eval-states"))?;
     eval_tasks::run_fixture(&fixture.workspace, &fixture.root.join("eval-tasks"))?;
     eval_directory::run_fixture(

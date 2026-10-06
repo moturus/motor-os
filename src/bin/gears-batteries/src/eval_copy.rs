@@ -29,8 +29,26 @@ struct Copy<'a> {
 
 pub fn workspace(task: &crate::eval_task::Task, destination: &Path) -> Result<Identity, String> {
     task.validate()?;
+    copy(&task.workspace, destination, &task.exclude)
+}
+
+pub(crate) fn copy(
+    source: &Path,
+    destination: &Path,
+    exclude: &[PathBuf],
+) -> Result<Identity, String> {
+    if exclude.len() > 128
+        || exclude.iter().any(|path| {
+            path.as_os_str().is_empty()
+                || path
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        })
+    {
+        return Err("invalid internal evaluation copy exclusions".into());
+    }
     let context = crate::paths::ToolContext::new(
-        task.workspace.clone(),
+        source.into(),
         destination.into(),
         "eval-copy".into(),
         None,
@@ -48,7 +66,7 @@ pub fn workspace(task: &crate::eval_task::Task, destination: &Path) -> Result<Id
     let mut copy = Copy {
         source: &source,
         target: context.state.clone(),
-        exclude: &task.exclude,
+        exclude,
         files: 0,
         entries: 0,
         bytes: 0,
