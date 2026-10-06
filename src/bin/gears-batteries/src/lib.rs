@@ -6,6 +6,7 @@ pub mod check_approval;
 pub mod check_config;
 pub mod check_state;
 pub mod command_policy;
+pub mod eval_config;
 pub mod eval_copy;
 pub mod eval_policy;
 pub mod eval_state;

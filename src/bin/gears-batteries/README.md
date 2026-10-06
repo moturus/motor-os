@@ -350,3 +350,11 @@ execution. Checks still produce the ordinary approval signature and receipts.
 These hook decisions scope file tools; project check programs retain the user's
 process authority, as with ordinary batteries checks. Live directories have no
 evaluation authority file and keep their existing policy.
+
+Evaluation configuration pinning requires one direct batteries hook with its
+permission, execution and bookkeeping subscriptions. It resolves provider key
+and certificate paths beside the original configuration, copies the selected
+file/check tool definitions, and records their content identities. The copied
+configuration uses the exact batteries executable and removes after-turn work
+and live tracing. Source configuration/tool edits cannot change the pinned copy.
+Symbolic configuration paths are refused before normalization or output creation.

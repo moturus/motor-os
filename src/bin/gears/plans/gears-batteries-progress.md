@@ -1112,3 +1112,14 @@ check signatures/receipts remain intact. Task validation now also applies the
 existing check declaration limits. Portable fixtures, both host profiles,
 warnings-denied host/native Clippy, native release build and release snapshot
 VM pass; logs use `/tmp/gears-eval-policy-*`.
+
+Evaluation configuration pinning resolves resource paths, copies permitted tool
+definitions with identities, validates the direct batteries hook/subscriptions,
+and removes after-turn work/live tracing from the copy. Source edits leave the
+pinned configuration/tools unchanged. Portable fixtures, both host profiles,
+warnings-denied host/native Clippy, native release build and release snapshot
+VM pass; final logs use `/tmp/gears-eval-config-*-component-guard.log` and
+`gears-eval-config-native.log`. Initial TOML-iterator/needless-borrow failures
+remain. A targeted assertion reproduced symbolic traversal followed by `..`;
+raw components are now checked before reading. The unchanged assertion passes;
+its original failure is `/tmp/gears-eval-config-symbolic-original.log`.
