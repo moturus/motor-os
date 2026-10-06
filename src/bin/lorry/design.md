@@ -124,8 +124,9 @@ Registry index records do not identify a package as a procedural macro, so
 resolution and evidence preparation form a bounded refinement loop. The first
 resolution selects source identities; verified manifests annotate those
 identities as procedural macros; resolution repeats until host/target
-selection is stable. A normal edge to a procedural macro becomes a compiler-
-host edge before activating that package's closure. Resolver 2 and 3 therefore
+selection is stable. A dependency edge to a procedural macro, including a
+development edge, becomes a compiler-host edge before activating that package's
+closure. Resolver 2 and 3 therefore
 keep the macro's host features separate if the same dependency is also used by
 target code.
 
@@ -328,6 +329,20 @@ separate explicit capabilities unless those inputs are converted.
 units. `identity.rs` and `compile.rs` reproduce the supported Cargo rustc
 argument and metadata conventions. `executor.rs` validates inputs, invokes
 children without a shell, and verifies expected outputs.
+
+`check --compile-time-deps` filters the fully planned graph to executable
+procedural macros, build-script runs, and their dependency closures. Member
+scripts are included. Filtering after planning preserves ordinary identities
+and profile sharing; execution admission and freshness checks still apply.
+
+An artifact lock serializes builds and clean for each target directory. On
+Linux, compiler and script children inherit a lease so a surviving child keeps
+the barrier after its Lorry parent is killed. Motor records the kernel boot
+identity and owner PID, then queries retained descendants before recovery.
+Records from earlier boots cannot identify a current owner. Same-boot children
+must exit before any artifact changes; malformed records and failed queries
+remain errors. Interrupted-unit recovery finishes before parallel compiler
+workers begin. Compilation and publication can then proceed in parallel.
 
 Compilation units use Cargo's current private per-unit output layout. Direct
 and transitive Rust dependencies are exposed as separate search directories,

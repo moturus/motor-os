@@ -275,6 +275,7 @@ lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH] [--release]
             [--all-targets|--lib|--bins|--tests|--examples|--benches] [--example NAME|--bench NAME]
             [--bin NAME] [--test NAME]
             [--message-format json|json-diagnostic-rendered-ansi]
+            [--compile-time-deps]
 lorry clippy [CHECK OPTIONS] [--no-deps] [-- LINT OPTIONS...]
 ```
 
@@ -303,8 +304,7 @@ component globs `*`, `?`, and `[...]`; recursive `**` is rejected.
 `[lints] workspace = true` inherits Rust, Clippy, and rustdoc settings from
 `workspace.lints`; member overrides alongside inheritance are rejected.
 Workspace dependencies inherit sources and add member features. Examples and
-benches are described, with explicit targets and Cargo's auto-discovery rules;
-their compilation remains deferred.
+benches follow explicit target declarations and Cargo's auto-discovery rules.
 
 Cargo configuration follows the invocation directory and its parents;
 selecting a package or supplying `--manifest-path` does not move that search.
@@ -340,6 +340,14 @@ library, binaries, integration tests, and test-mode library and binaries;
 target directory owns a separate `DIRECTORY/lorry/check` profile. The two JSON
 message formats produce newline-delimited Cargo-compatible messages on stdout
 and keep progress on stderr; the ANSI form changes only rendered diagnostics.
+
+`check --compile-time-deps` prepares generated sources and executable procedural
+macros for tools such as rust-analyzer. It runs the planned build scripts,
+including members' own scripts, and compiles the dependencies needed by those
+scripts and macros. Ordinary compiler units are skipped. The pass uses the same
+package, feature, target, and target-directory settings and requires execution
+admission. Clippy rejects this check-only option. See [the Helix guide](../../../docs/helix.md)
+for complete editor invocations and project overrides.
 
 `--bin NAME` or `--test NAME` selects a named binary or integration test plus
 its library dependencies. Combining a named selector with `--all-targets`

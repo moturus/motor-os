@@ -1,7 +1,24 @@
 # Lorry workspace support
 
-Status: implementation in progress. This plan was updated after review on
-2026-10-02 and revises the committed v3 (`3c90c8cf`).
+Status: milestones 1–8 are complete. Milestone 9's Lorry implementation and
+native editor acceptance are complete; its real-project acceptance remains open.
+This plan was updated after review on 2026-10-02 and revises the committed v3
+(`3c90c8cf`).
+
+The remaining acceptance cases are:
+
+| Project | Completed | Remaining blocker on Motor |
+| --- | --- | --- |
+| sed | Native release build | Tests encounter errno 0.3.14's guard through uucore; tempfile's named-file backend also needs Motor support. |
+| ripgrep | Native release build | `ignore` loses literal `./` during path matching; workspace tests also have the previously waived symlink helper. |
+| Helix | Locked vendoring and execution admission | The native build encounters cc 1.2.29's tempfile platform guard. |
+
+The remaining failures require external project or dependency ports.
+Their failures, required commands, and tool settings are recorded in
+[the milestone-9 details](workspace-plan-details.md#srcsys-and-the-real-projects).
+The waived ripgrep helper does not waive its separate library failure. No known
+large Lorry implementation milestone remains; the plan cannot close until the
+remaining acceptance is completed or its scope is explicitly revised.
 
 The four first patches and milestone 1 are committed. The selected package's
 library, binaries, test harnesses, integration tests, and check targets use
@@ -241,7 +258,7 @@ that identity with the owner PID. Three debug and three release core gates passe
 including nonzero identity, cross-process agreement, and stability; all six
 boots produced distinct IDs. The release developer-image gate failed in Helix's
 diagnostic-on-save check when Lorry's same-boot child barrier timed out. That
-original failure is retained and unresolved; it did not reach the complete
+original failure is preserved; that run did not reach the complete
 Lorry suite or native source-build phase.
 The direct native boot-owner recovery regression passed, and Lorry's boot-owner
 repair is committed as `d51738b4` after focused checks. A separate cancellation
@@ -250,17 +267,32 @@ Recovery now finishes before parallel workers start; its regression fails on the
 old executor and passes on Linux and Motor. Focused artifact-lock checks and
 strict host/Motor Clippy pass.
 Further diagnosis reproduced the child timeout with a dead native process.
-The kernel's direct-switch path retains a wakee `Arc` when a killed caller never
-returns from `after_wait`, keeping the dead process in its former owner's child
-list. The ordinary-wake control clears its record within 100 ms. Lorry reproduces
+The kernel's direct-switch path retains a wakee `Arc` on a killed caller's
+discarded stack, keeping the dead process in its former owner's child list.
+The ordinary-wake control clears its record within 100 ms. Lorry reproduces
 the original 30-second error against the retained record; the original Helix run
 did not capture its child state, so attribution of that particular run remains
-unproven. The additional kernel repair is held for review under AGENTS.md. No
-timeout, descendant check, or failure assertion has been weakened.
+unproven. The authorized kernel fix transfers that reference to the incoming
+context, which releases it independently of the killed caller's stack cleanup.
+Dropping it only after the caller resumes proved insufficient.
+The new systest regression fails on the old kernel and passes with the handoff.
+Three debug and three release full core gates pass, as does the release developer
+gate, including Helix save diagnostics, native source builds, and the complete
+Lorry suite (1,054 seconds). The user committed the kernel fix and regression as
+`baa0349e`, then committed the follow-up handoff, wait-handle cleanup, and test
+improvements as `80c216f2`. No timeout, descendant check, or failure assertion has
+been weakened. Evidence for the initial fix is in `/tmp/lorry-m9-wakee-gates`.
 Milestone 9 remains open for the remaining native project acceptance and scope
 decisions. The filesystem repair and regression are committed; the latest
 validation evidence is recorded below and in the details file. No external-project
 product source changed.
+After the kernel follow-up commit, all Lorry host contracts and the native gate
+passed. The complete driver first stopped because an independent core gate was
+using the shared VM; a separate developer VM completed the native tests in 605
+seconds. The original failure and the routing-only test adaptation are preserved
+in `/tmp/lorry-m9-final-acceptance`. The README and design now describe the
+compile-time pass and current recovery behavior; native project grants and tool
+settings are recorded in the milestone details.
 
 ## Goal
 

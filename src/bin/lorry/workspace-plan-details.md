@@ -3590,8 +3590,9 @@ neither is claimed to have another full-suite result.
 
 ## Milestone 9: editor integration and native acceptance
 
-**Result.** rust-analyzer works on a workspace as it does under Cargo. The
-acceptance cases in the plan pass on Motor.
+**Status.** Lorry's implementation and native editor acceptance are complete.
+Real-project acceptance remains open for the diagnosed external platform issues
+below; it has not been counted as passing.
 
 The combined milestone-8/editor gate passed in 1,154 seconds, preserved in
 `/tmp/lorry-m8-m9-workspace-editor-full-gate.log`: 471 Rust tests, three own-message
@@ -3879,9 +3880,70 @@ continue to use hermetic fixtures. Original application-view failure evidence:
 Native sed builds after the exact workspace-lock fix, in
 `/tmp/lorry-m9-native-acceptance/sed.lock-watch.build.{json,err}`. Its tests now
 reach errno 0.3.14's unsupported-platform guard in `src/sys.rs`, through the
-tempfile/rustix development dependency chain. Preserve
+uucore/rustix development dependency chain. Preserve
 `/tmp/lorry-m9-native-acceptance/sed.lock-watch.test.{out,err}`; no errno source
 has been changed and no test assertion was relaxed.
+
+The pinned Cargo's offline inverse tree for the Motor target confirms
+`errno <- rustix <- uucore <- sed / uutests`, in
+`/tmp/lorry-m9-final-acceptance/sed-errno-cargo-tree.{out,err}`. Sed's test features
+and uutests enable uucore's `entries`, `process`, and `mode`, whose feature lists
+activate its optional, unconditional rustix dependency. Cargo and Lorry agree
+on the Motor graph. Tempfile and terminal_size already exclude rustix on Motor.
+A minimal port can make uucore's rustix dependency conditional on supported
+platforms. Separately, tempfile's Motor file backend is currently the
+`other.rs` implementation, whose operations return unsupported; sed's tests use
+`NamedTempFile`. That backend needs a proper native implementation too.
+
+The remaining acceptance uses these native commands, with the Motor target
+selected by the image's toolchain:
+
+| Project | Build | Tests |
+| --- | --- | --- |
+| sed | `lorry build --release --locked --offline` | `lorry test --locked --offline` |
+| ripgrep | `lorry build --release --locked --offline` | `lorry test --workspace --exclude grep-pcre2 --locked --offline` |
+| Helix | `lorry build -p helix-term --bin hx --release --no-default-features --locked --offline` | Not required by this plan. |
+
+Each isolated project uses exact locked package/source grants, followed by
+`lorry vendor --workspace --locked --offline --accept-all`. Helix also supplies
+`--no-default-features` to that admission command. The configurations are
+`/tmp/lorry-m9-native-acceptance/configs/{sed,ripgrep,helix}.toml`; none is a broad
+grant to unreviewed dependency code.
+
+| Project | Exact grant records | Build-script / macro grants | Additional tools and caller environment |
+| --- | ---: | ---: | --- |
+| sed | 39 | 27 / 13 | No additional native tools or caller environment. |
+| ripgrep | 18 | 17 / 1 | No additional native tools or caller environment. |
+| Helix | 74 | 60 / 14 | `helix-static-grammars`: C, C++, archiver; `tree-house-bindings`: C, archiver; `helix-term`: `HELIX_DEFAULT_RUNTIME`, `HELIX_DISABLE_AUTO_GRAMMAR_BUILD`. |
+
+The image's C compiler is `/devtools/bin/cc`, a wrapper over LLVM, configured
+with `--target=x86_64-unknown-motor`. Its archiver is `/devtools/llvm/bin/llvm`
+with the `ar` prefix argument and no extra flags. Helix configures its C++ compiler
+as `/devtools/bin/c++`, with `--target=x86_64-unknown-motor` and `stdlib = "c++"`.
+The build supplies `HELIX_DEFAULT_RUNTIME=/devtools/helix/runtime` and
+`HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1`. The three configuration SHA-256 values,
+in the table's order, are:
+
+```text
+26b042f4ced25a6428d9bbef92f148bf85a09d9fd29ed8816623bde95f42266a
+43c7497d46f0da5fe757e5a750edfa7359012638bc4261fe6207fe91e78a0478
+5f07964ca8383340128bf2f2a579b47cab4aaf4f7a3c1a0f6e1e3f6cc466e55d
+```
+
+Closing these cases requires scoped external product ports: permit cc's existing
+standard-Rust named-tempfile implementation on Motor; correct uucore's Motor
+dependency selection and implement tempfile's Motor file backend; preserve
+literal path-prefix matching in ignore. The Motor stdlib represents OS strings
+as UTF-8, so ignore can preserve literal prefixes
+using standard Rust string operations without changing the stdlib. Sed's errno
+guard cannot simply be removed: Motor I/O returns explicit error codes, and its
+stdlib does not define a last-I/O errno value. The C library has a separate errno
+ABI. A dependency port must keep those representations distinct and may require
+changes beyond errno; the current guards do not bound the number of later
+platform issues.
+The waived ripgrep integration helper is independent of that path-matching bug.
+No external product source has been changed. The repository's rule for
+preexisting non-Lorry bugs requires discussing those fixes before applying them.
 
 ### Linux sandbox descriptor lifetime
 
@@ -4061,7 +4123,8 @@ was applied in the boot-identity review patch.
 
 #### Follow-up: recovery ordering and retained dead children
 
-Lorry's boot-owner repair is committed as `d51738b4`. The directory repair moves
+Lorry's boot-owner repair is committed as `d51738b4`; the directory repair is
+committed as `889ae885`. The directory repair moves
 all planned compiler-unit recovery into a serial pass before spawning executor
 workers. Compilation and publication remain parallel. The artifact lock has
 already excluded interrupted writers, and no new worker can mutate an entry
@@ -4089,27 +4152,108 @@ Helix timeout did not capture child state; attribution of that particular run
 to this defect remains unproven, although its exact failure is now reproduced.
 
 `Thread::wait_and_switch(next: Arc<Thread>)` holds `next` across the context
-switch, then calls `after_wait`. If the caller was killed while parked,
-`after_wait` calls the non-returning `die`; Rust never drops `next`. That leaked
-thread reference retains its process statistics, which retain parent statistics
-and keep the dead child in `list_children`. The kernel has already closed the
-dead process's IPC endpoints; there is no surviving compiler to wait for.
-The minimal proposed repair drops `next` after the switch returns and before
-calling `after_wait`. It preserves the direct-switch lifetime and the strict
-Lorry descendant barrier. A native cancellation regression belongs in systest,
-followed by three debug and three release core gates and the Lorry milestone
-gate. The proposed patch is `/tmp/lorry-m9-continue/kernel-wakee-review.patch`.
+switch. Killing the caller can discard its parked kernel stack without unwinding
+Rust locals. This happens either when `after_wait` calls the non-returning `die`,
+or when `on_thread_paused` cleans up the killed caller before it can resume.
+The leaked thread reference retains its process statistics, which retain parent
+statistics and keep the dead child in `list_children`. The kernel has already
+closed the dead process's IPC endpoints; there is no surviving compiler to wait
+for.
 
-This is an additional preexisting kernel defect, so root AGENTS.md requires
-stopping for review after diagnosis. No kernel fix or other system source change
-has been applied. All diagnostic programs live under `/tmp`; no instrumentation
-is present in repository source. Milestone 9 remains incomplete.
+After the user authorized the kernel fix, the proposed `drop(next)` after the
+switch returned still failed the permanent cancellation regression. Temporary
+kernel traces confirmed the second cleanup path: a caller can exit while parked
+and never execute that drop. Preserve `before-fix-results.log`,
+`after-fix-results.log`, `kill-path-diagnostic-results.log`, and
+`kill-path-diagnostic-qemu.log` in `/tmp/lorry-m9-wakee-gates`. The first two runs
+failed at episode 0's swap case; the traced run failed at episode 3's swap case
+and recorded killed-thread cleanup from `on_thread_paused`.
+
+The validated `baa0349e` fix transfers `next` with `Arc::into_raw` before switching.
+Its `finish_direct_switch` hook on the incoming thread recovers that reference from
+its current TCB and drops it together with the existing previous-thread reference.
+No owning reference remains on the parked caller's stack. `switch_to` accepts a
+raw TCB pointer and ends its borrow before the assembly switch, because the
+wakee can exit before the caller resumes. This uses the existing handoff slot;
+it adds no allocation, lock, boot work, syscall, or userspace API.
+
+The permanent `systest::swap_cancel` regression runs four distinct cancellation
+episodes, each with an ordinary-wake control and a direct-switch worker. It kills
+the worker's owner, closes the last owner handle, and requires the child records
+to disappear within five seconds. The workers share one CPU and verify that
+direct switches occurred. These are eight distinct kills, not retries. The
+regression is called unconditionally from systest, so every full core gate covers
+it. The old kernel and the insufficient drop-after-resume fix fail; the final
+handoff passes. All temporary kernel instrumentation was removed before gating.
+
+The unchanged final patch passed all required gates:
+
+| Gate | Wall time | Result |
+| --- | ---: | --- |
+| `src/tests/full-test.sh`, debug 1 / 2 / 3 | 983 / 975 / 978 seconds | PASS |
+| `src/tests/full-test.sh --release`, 1 / 2 / 3 | 608 / 581 / 576 seconds | PASS |
+| `src/tests/full-test-dev.sh --release` | 2,096 seconds | PASS |
+
+The new regression passed exactly once in each of the seven full systest runs.
+The developer gate passed Helix hover, definition, completion, save diagnostics,
+and shutdown (`/tmp/motor-helix-lsp.rVnCaf`), native source builds, and the complete
+Lorry suite in 1,054 seconds, below its 1,800-second limit. Online vendoring needed
+no retries. Kernel and systest strict Clippy, their package formatting checks,
+and `git diff --check` also pass. A final workspace-wide formatting check reports
+an existing line-wrap difference in untouched `lib/moto-io/src/net/vsock.rs`;
+the same code is present in HEAD and was left unchanged. Logs and the tested
+source snapshots are in
+`/tmp/lorry-m9-wakee-gates`. The original Helix failure remains preserved; the new
+passing run does not establish its uncaptured child state retrospectively.
+
+The user committed this kernel fix and permanent regression as `baa0349e`, then
+committed the reviewed follow-up as `80c216f2`. The follow-up makes the per-CPU
+previous/next reference handoff explicit, spills owning wait handles into the
+thread, and strengthens the cancellation regression: workers must actually be
+parked in the wait syscall, and a wait error is fatal. No external product source
+changed, and no Lorry timeout or descendant barrier was weakened. Milestone 9
+remains incomplete.
+
+The follow-up's recorded core gates passed three release runs
+(637 / 581 / 582 seconds) and three debug runs (977 / 985 / 980 seconds).
+Its release developer gate passed the native editor views, save diagnostics,
+shutdown, and native source builds, then stopped in Lorry's host cache contract
+because that shell's PATH lacked `rg`; exit status 127 was preserved.
+Evidence is in
+`/tmp/claude-1000/-home-posk-motor-dev-motor-os/ae443bfc-e170-468f-ae8f-247526922857/scratchpad/gate3`.
+
+Continuing against committed `80c216f2`, the complete Lorry driver was launched
+with the installed `rg` on PATH. All host contracts, 476 Rust tests, three
+own-message tests, Cargo comparisons, and host preparation for the native
+self-build passed. The driver then stopped at VM startup in 582 seconds:
+another independently running core gate already owned the shared VM connection.
+No native Lorry test ran in that attempt. Preserve
+`/tmp/lorry-m9-final-acceptance/complete-suite.log` and native evidence directory
+`target/lorry/native-self-tests/self-20261006T203731Z-2722630`.
+The native gate then passed in a separate developer VM using the existing
+`MOTO_QEMU_USER_NET=1` mode and a private QEMU lock. A temporary driver copy
+changes only its script location and SSH/SFTP routing to `127.0.0.1:10023`.
+Fixtures, source, assertions, image, and native phase limit are unchanged. The
+second run is bounded by the 1,218 seconds remaining after the first attempt;
+it passed in 605 seconds: host preparation 195.104, VM startup 2.275, and native
+self-gate 405.615 seconds. Host and native online vendoring needed no retries.
+
+All Lorry product boundaries are now covered by the passed host contracts and
+native gate, including Cargo and cross/native byte identity, workspace commands,
+tests and bundles, native Clippy, editor commands, boot-owner recovery, and
+recovery before parallel execution. The original complete-driver invocation
+still records its VM-startup failure; neither infrastructure failure is counted
+as a passing complete-suite invocation. No core gate was started for this
+Lorry-only continuation. Preserve `/tmp/lorry-m9-final-acceptance/native-isolated.log`,
+`native-routing-only.patch` in the same directory, and native evidence directory
+`target/lorry/native-self-tests/self-20261006T205106Z-2792783`.
 
 All temporary diagnostics were removed from repository source. The user reviewed
 and committed the kernel initializer and systest coverage as `4debacaa`, then
 authorized continuing the dependent Lorry repair. All five focused artifact-lock
-tests passed again before committing that repair. Milestone validation is incomplete: the release developer
-gate failed and its full Lorry/native source-build phases did not run.
+tests passed again before committing that repair. The initially failed release
+developer gate is now followed by the successful complete gate above; the
+remaining milestone work is independent real-project acceptance.
 
 Independent real-project acceptance remains: sed tests encounter errno 0.3.14's
 platform guard; Helix encounters cc 1.2.29's native tempfile platform guard; ripgrep
