@@ -47,5 +47,16 @@ pub fn run_fixture(root: &Path) -> Result<(), String> {
     assert_eq!(report["verdict"], "insufficient_evidence");
     assert_eq!(report["reviews_enabled"], false);
     assert_eq!(report["arms"][1]["model_cost"]["complete"], false);
+    let unavailable = eval_report::summarize(
+        &[json!({"arm":"learning","actor":{"completed":false},"acceptance":[],"regressions":[]})],
+        json!({}),
+        json!({}),
+        "No new regressions.",
+        json!({}),
+        1,
+    );
+    assert_eq!(unavailable["arms"][1]["regression_failures"], 0);
+    assert_eq!(unavailable["arms"][1]["regression_unchecked"], 1);
+    assert!(unavailable["arms"][1]["tool_calls"].is_null());
     std::fs::remove_dir_all(root).map_err(|e| e.to_string())
 }

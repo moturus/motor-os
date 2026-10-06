@@ -130,7 +130,7 @@ pub fn prepare_fixture(
     let config = root.join("config.toml");
     std::fs::write(&config,format!("version=1\n[provider]\nbase_url={:?}\nkey_file={key:?}\n[net]\negress_allowlist=['127.0.0.1']\nplain_http_allowlist=['127.0.0.1']\n[[hooks]]\nname='batteries'\ncommand=['gears-batteries','hook']\n[[tools]]\ndirectory='tools/read_file'\nenabled=true\n[[tools]]\ndirectory='tools/write_file'\nenabled=true\n[[tools]]\ndirectory='tools/check'\nenabled=true\n",server.url("/v1"))).unwrap();
     let judge_source = root.join("judge.rs");
-    std::fs::write(&judge_source,r#"fn main(){if std::env::args().nth(1).as_deref()==Some("accept"){assert_eq!(std::fs::read("answer*").unwrap(),b"accepted bytes");}}"#).unwrap();
+    std::fs::write(&judge_source,r#"fn main(){if std::env::args().nth(1).as_deref()==Some("accept"){assert_eq!(std::fs::read("answer*").unwrap(),b"accepted bytes");}else{print!("{}","x".repeat(8192));}}"#).unwrap();
     let compiled = gears_batteries::eval_command::run(
         &[
             compiler.into(),

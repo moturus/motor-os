@@ -71,7 +71,7 @@ pub fn run(
             return Err("evaluation cancelled".into());
         }
         let initial = prepared.trial(0, false)?;
-        preflight = json!({"regressions":commands(&prepared.task.task.regressions,prepared,&initial.workspace,settings.command_timeout,cancel)?});
+        preflight = json!({"regressions":commands(&prepared.task.task.regressions,prepared,&initial.workspace,settings.command_timeout,"preflight",cancel)?});
         save(&rows, &preflight, "running", None)?;
         if !passed(&preflight["regressions"]) {
             return Err(
@@ -110,6 +110,7 @@ pub fn run(
                     prepared,
                     &trial.workspace,
                     settings.command_timeout,
+                    "acceptance",
                     cancel,
                 )?;
                 rows.last_mut().unwrap()["regressions"] = commands(
@@ -117,6 +118,7 @@ pub fn run(
                     prepared,
                     &trial.workspace,
                     settings.command_timeout,
+                    "regressions",
                     cancel,
                 )?;
                 save(&rows, &preflight, "running", None)?;
@@ -147,20 +149,38 @@ fn commands(
     prepared: &Prepared,
     workspace: &Path,
     timeout: Duration,
+    kind: &str,
     cancel: &Cancellation,
 ) -> Result<Value, String> {
     let mut outcomes = Vec::new();
-    for argv in vectors {
+    for (index, argv) in vectors.iter().enumerate() {
         if cancel.cancelled() {
             break;
         }
-        outcomes.push(eval_command::run(
+        let mut outcome = eval_command::run(
             argv,
             &prepared.task.task.workspace,
             workspace,
             timeout,
             cancel,
-        )?);
+        )?;
+        let directory = workspace
+            .parent()
+            .unwrap()
+            .strip_prefix(prepared.root.path())
+            .map_err(|e| e.to_string())?;
+        for stream in ["stdout", "stderr"] {
+            if let Some(text) = outcome[stream].as_str() {
+                let path = directory.join(format!("{kind}-{index:02}.{stream}"));
+                prepared.root.replace_file(&path, text.as_bytes())?;
+                let bytes = text.len();
+                let preview: String = text.chars().take(1024).collect();
+                outcome[format!("{stream}_artifact")] = json!(path);
+                outcome[format!("{stream}_saved_bytes")] = json!(bytes);
+                outcome[stream] = json!(preview);
+            }
+        }
+        outcomes.push(outcome);
     }
     Ok(json!(outcomes))
 }

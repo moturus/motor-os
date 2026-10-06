@@ -1176,3 +1176,12 @@ file copier is shared with workspace snapshots. Portable fixtures execute both
 pinned binaries and reject an existing destination/non-file source. Both host
 profiles, warnings-denied host/native Clippy, native release build and release
 snapshot VM pass; logs use `/tmp/gears-eval-binary-*`.
+
+Criterion output now lives in separate artifacts with bounded report previews,
+and check content is referenced by hash in summaries. Actor counters count
+recorded starts and remain unknown for damaged/truncated events. Unchecked
+regressions no longer count as observed regression failures. Portable fixtures
+verify an 8 KiB output artifact survives its shorter preview and unavailable
+checks remain distinct. Both host profiles, warnings-denied host/native Clippy,
+native release build and release snapshot VM pass; logs use
+`/tmp/gears-eval-artifacts-*`.

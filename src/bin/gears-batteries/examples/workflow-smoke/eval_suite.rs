@@ -37,6 +37,14 @@ pub fn run_fixture(
         &Cancellation::new(),
     )?;
     assert_eq!(report["status"], "complete", "{report}");
+    let preflight = &report["preflight"]["regressions"][0];
+    assert_eq!(preflight["stdout_saved_bytes"], 8192);
+    assert!(preflight["stdout"].as_str().unwrap().len() <= 4096);
+    let artifact = prepared
+        .root
+        .path()
+        .join(preflight["stdout_artifact"].as_str().unwrap());
+    assert_eq!(std::fs::read(artifact).unwrap().len(), 8192);
     assert_eq!(report["trials"].as_array().unwrap().len(), 4);
     assert_eq!(report["arms"][0]["accepted"], 1);
     assert_eq!(report["arms"][1]["accepted"], 2);

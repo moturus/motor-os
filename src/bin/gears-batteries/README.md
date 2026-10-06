@@ -406,3 +406,9 @@ Executable pinning copies Gears and batteries together into a fresh `bin/`
 inside evaluation output and records their content hashes/lengths. Both use the
 shared bounded file copier, preserving execute access without copying build
 caches or consulting mutable binaries again during trials.
+
+Criterion stdout/stderr are retained as separate bounded artifacts beside the
+trial workspace; reports contain at most 1,024 characters per stream plus paths
+and saved byte counts. Gears JSONL retains full recorded check content while
+summaries identify it by hash. Truncated/malformed event streams leave tool
+counts unknown. Unchecked regressions are distinct from observed failures.

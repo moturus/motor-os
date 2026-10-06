@@ -45,7 +45,7 @@ pub fn summarize(
         let selected:Vec<_>=rows.iter().filter(|r|r["arm"]==arm).collect();
         let accepted=selected.iter().filter(|r|r["actor"]["completed"]==true
             && all_passed(&r["acceptance"]) && all_passed(&r["regressions"])).count();
-        let regressions=selected.iter().filter(|r|!all_passed(&r["regressions"])).count();
+        let regressions=selected.iter().filter(|r|r["regressions"].as_array().is_some_and(|checks|checks.iter().any(|r|r["passed"]==false))).count();
         let known:Vec<_>=selected.iter().filter_map(|r|r["actor"]["usage"]["cost_usd"].as_f64().filter(|v|v.is_finite()&&*v>=0.0)).collect();
         let complete=!selected.is_empty()&&known.len()==selected.len()
             &&selected.iter().all(|r|r["actor"]["usage"]["cost_is_partial"]==false);
@@ -54,6 +54,7 @@ pub fn summarize(
         json!({"arm":arm,"trials":selected.len(),"accepted":accepted,
             "accepted_rate":(!selected.is_empty()).then(||accepted as f64/selected.len() as f64),
             "regression_failures":regressions,
+            "regression_unchecked":selected.iter().filter(|r|r["regressions"].as_array().is_none_or(|checks|checks.is_empty())).count(),
             "actor_failures":selected.iter().filter(|r|r["actor"]["completed"]!=true).count(),
             "actor_elapsed_ms":total(selected.iter().map(|r|r["actor"]["duration_ms"].as_u64())),
             "criterion_elapsed_ms":total(selected.iter().flat_map(|r|["acceptance","regressions"].into_iter().flat_map(move |kind|r[kind].as_array().into_iter().flatten())).map(|r|r["duration_ms"].as_u64())),

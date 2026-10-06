@@ -97,6 +97,7 @@ pub fn run(
             .find(|r| r["type"] == "usage")
             .and_then(|r| r.get("total"))
     });
+    let events_complete = output.stdout_dropped == 0 && parse_error.is_none();
     let complete = output.success()
         && output.stdout_dropped == 0
         && parse_error.is_none()
@@ -110,8 +111,8 @@ pub fn run(
         "duration_ms":start.elapsed().as_millis().min(u64::MAX as u128) as u64,
         "timed_out":output.timed_out,"cancelled":output.cancelled,
         "stdout_dropped":output.stdout_dropped,"stderr_dropped":output.stderr_dropped,
-        "parse_error":parse_error,"error":final_record.map(|r|&r["error"]),"usage":usage,
-        "tool_calls":tools.len(),"tool_failures":tools.iter().filter(|r|r["is_error"]==true).count(),
-        "declared_checks":tools.iter().filter(|r|r["name"]=="check").map(|r|json!({"outcome":r["outcome"],"is_error":r["is_error"],"content":r["content"]})).collect::<Vec<_>>() }),
+        "events_complete":events_complete,"parse_error":parse_error,"error":final_record.and_then(|r|r["error"].as_str()).map(|s|s.chars().take(1024).collect::<String>()),"usage":usage,
+        "tool_calls":events_complete.then(||records.iter().filter(|r|r["type"]=="tool_start").count()),"tool_failures":events_complete.then(||tools.iter().filter(|r|r["is_error"]==true).count()),
+        "declared_checks":tools.iter().filter(|r|r["name"]=="check").map(|r|json!({"outcome":r["outcome"],"is_error":r["is_error"],"content_hash":crate::snapshot::digest(r["content"].to_string().as_bytes())})).collect::<Vec<_>>() }),
     )
 }
