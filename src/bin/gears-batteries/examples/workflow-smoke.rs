@@ -42,6 +42,9 @@ mod eval_directory;
 #[path = "workflow-smoke/eval_copies.rs"]
 mod eval_copies;
 
+#[path = "workflow-smoke/eval_states.rs"]
+mod eval_states;
+
 #[path = "workflow-smoke/eval_tasks.rs"]
 mod eval_tasks;
 
@@ -268,6 +271,7 @@ fn run() -> Result<(), String> {
         &fixture.root.join("prefix-state"),
     )?;
     eval_copies::run_fixture(&fixture.root.join("eval-copies"), &compiler)?;
+    eval_states::run_fixture(&fixture.root.join("eval-states"))?;
     eval_tasks::run_fixture(&fixture.workspace, &fixture.root.join("eval-tasks"))?;
     eval_directory::run_fixture(
         &binary,

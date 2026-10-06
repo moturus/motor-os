@@ -327,3 +327,12 @@ Review proposals share `max_proposals` across memory and skills, including
 proposals already approved or denied. Their optional source `review` hash
 links them to the mark, and their session/entry citations refer to the saved
 parent history. Interrupting a review does not reset its proposal budget.
+
+Evaluation state capture keeps `user` entries and manual memory curation in
+both arms. Non-user entries are classified as learning only when their exact
+current contents match an approved entry proposal. Curated approved skills
+remain in both arms; current approved agent skill versions join the learning
+arm. Explicit manual workspace-memory admission supersedes agent provenance.
+Capture validates complete decision history and workspace admission, freezes
+these versions in memory, and turns reviews off in the captured settings without
+changing live settings. Installing copies and executing trials follow.

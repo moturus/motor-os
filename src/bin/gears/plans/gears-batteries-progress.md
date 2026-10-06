@@ -1085,3 +1085,12 @@ Both host profiles, warnings-denied host/native Clippy, native release build and
 release snapshot VM pass; logs use `/tmp/gears-eval-copies-*`. Initial build
 failures (fixture variable and missing native dependency) are preserved; fixed
 host logs use the `fixed` suffix.
+
+Evaluation state capture separates exact approved non-user entry proposals
+from user entries and manual curation, retaining the latter in both arms.
+Manual workspace admission supersedes agent provenance; approved current skill
+provenance uses the cleanup analysis. Capture rejects incomplete history and
+unapproved workspace memory, freezes selected versions and disables reviews
+only in captured settings. Portable fixtures, both host profiles,
+warnings-denied host/native Clippy, native release build and release snapshot
+VM pass; logs use `/tmp/gears-eval-state-capture-*`.
