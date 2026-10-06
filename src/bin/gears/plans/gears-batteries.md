@@ -1,8 +1,11 @@
 # Gears batteries: design and implementation plan
 
-Status: implementation through phase 7; native skills and `/accept` pass
-with the fixed runtime. Installed-build validation awaits the SDK update. Sysbox step S1
-is complete and core-gated; design revised 2026-10-05. See the
+Status: implementation through phase 7, including installed native skills
+and `/accept` validated with the selected `dev.3` SDK. Phase 8 has model-pair
+settings, durable marks, exact saved-entry snapshots, review tool policy and
+command/compaction triggers; the runner, resume question and proposal cap
+remain. Sysbox S1 and byte-order S2 are complete and core-gated; design
+revised 2026-10-05. See the
 [implementation record](gears-batteries-progress.md) for completed patches
 and validation still outstanding. Two questions wait
 for later phases: question 7 is discussed when phase 8 is reached, and

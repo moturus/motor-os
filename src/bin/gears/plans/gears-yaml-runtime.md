@@ -3,8 +3,9 @@
 Status: the approved runtime export and native regression are implemented.
 The final patch passed the full core gate three times each in debug and
 release. The external Rust fork now selects published moto-rt 0.17.7 in
-commit `f046f257239`; publishing that commit and selecting the rebuilt SDK
-remain.
+commit `f046f257239`, pushed by the user. The managed `dev.3` SDK is built
+and selected; three debug and three release main-image gates and the release
+developer-image gate pass.
 The skills implementation uses the user-authorized `yaml_serde` dependency. Its host
 debug and release gates pass, as do host and Motor-target Clippy.
 
@@ -96,19 +97,19 @@ compiler toolchain and its target standard libraries through the managed
 build procedure. The relevant part is Rust std's bundled runtime dependency:
 ordinary native builds must obtain the fixed `strlen` automatically.
 
-The installed Rust std selects published crates.io moto-rt 0.17.6 through
-the Rust fork's library lock. It does not select this working tree. Merely
-rebuilding the current declared toolchain would reuse that published crate
-and would not pick up this change. This corrects the initial suggestion
+Before this rollout, installed Rust std selected published crates.io moto-rt
+0.17.6 through the Rust fork's library lock, rather than this working tree.
+Rebuilding that declaration would reuse the published crate and would not
+pick up the change. This corrects the initial suggestion
 that a local runtime rebuild was sufficient.
 
 The user has published the fixed runtime as 0.17.7. Updating std's copy now
 requires updating the fork's library lock and declared Rust revision/lock hash,
 and building/selecting the corresponding new toolchain tuple. Follow
 [the toolchain procedure](../../../../docs/toolchain.md#5-changing-the-toolchain).
-The fork update and SDK selection remain separate from the approved in-tree
-fix and completed crate publication. The fork's lock update is committed;
-the SDK declaration is prepared, but the installed selector is unchanged.
+The fork update and SDK selection are completed follow-ups to the approved
+in-tree fix and crate publication. The fork lock, declared revision and lock
+hash, installed SDK and repository selector now select moto-rt 0.17.7.
 
 ### Exact external Rust-fork change
 
@@ -155,15 +156,44 @@ not to apply the Rust checkout's AGENTS.md. Commit `f046f2572396582a5be4b387f335
 changes only the two lock fields above; a parsed comparison verifies that
 every other package and dependency is identical. The resulting library lock
 SHA-256 is `a0c4d55e7c052cee9e1b5d1f65e56029d99f28641736b88dff6a871d30c5e972`.
-The Motor OS declaration is prepared as `1.99.0-beta-f47d5bb-motor.dev.3`;
-the existing installed selector remains unchanged until the new SDK is built.
+The user pushed the commit to `motor-os-1.99.0-beta-f47d5bb`, and its remote
+revision is verified. The managed producer passes for the new declaration,
+`1.99.0-beta-f47d5bb-motor.dev.3`, including the host and native SDKs, add-on
+tools and all three release images. The selected toolchain is
+`motor-1.99.0-beta-f47d5bb-dev.3-82a339531aad4929f5bbea5d7d090619358dfdcc33e0a3e2360601c640b1e684`.
 
-The HTTPS push failed because this session has no GitHub credentials. An
-SSH check also failed authentication setup. The user has been asked to push
-the completed commit to `motor-os-1.99.0-beta-f47d5bb` from their authenticated
-shell. This is the remaining prerequisite for the managed build. Temporary
-native checks establish that the runtime fix works; installed-build validation
-remains incomplete until the new SDK and developer-image gate pass.
+The new SDK's moto-rt archive exports weak `strlen`; its assembly contains
+the expected byte scan without a recursive call. Both the original optimized
+NUL-scan reproducer and the actual batteries release binary link against
+the stock SDK standard library without the temporary runtime override.
+The cutover check passes. Three debug and three release main-image gates
+pass with identical core and SDK sources, followed by the release
+developer-image gate. The latter validates installed skills, `/accept`, review
+prerequisites and native packaged-source builds against the stock SDK.
+Producer evidence is in `/tmp/gears-sdk-runtime-rollout.log`; the six main-image
+logs are `/tmp/gears-sdk-runtime-full-{debug,release}-{1,2,3}.log`, and the
+developer-image log is `/tmp/gears-sdk-runtime-full-dev-release-fixed.log`.
+`/tmp/gears-sdk-runtime-core-gates.log` records all seven successful gates.
+
+## Developer source-build diagnosis and fix
+
+The selected SDK passes all six main-image gates and the installed batteries
+workflow in the release developer image, including skills and `/accept`.
+The developer suite then fails while Lorry vendors `libyaml-rs 0.3.0`:
+its library manifest sets `doc-scrape-examples = false`, which Lorry's
+Stage-2 allowlist does not recognize. This happens before compiling the
+YAML parser; it is separate from the resolved `strlen` link failure.
+The original log is `/tmp/gears-sdk-runtime-full-dev-release.log`.
+
+[Lorry AGENTS.md](../../lorry/AGENTS.md) explicitly puts discovered Lorry
+issues in scope. The small follow-up accepts the disabled boolean setting
+as inert metadata in roots and dependencies, still refusing true and other
+types. Its existing metadata contract and native Cargo/Lorry identity fixture
+cover the setting. The focused metadata contract, complete Lorry suite, warnings-denied
+host/Motor Clippy and corrected release developer-image gate pass. The
+successful developer log is `/tmp/gears-sdk-runtime-full-dev-release-fixed.log`;
+the original failed run above is preserved and not counted as validation.
+Core/SDK hashes remain identical to the six successful main-image runs.
 
 ## Published runtime verification
 
@@ -206,5 +236,6 @@ startup. Build and run logs are
 These temporary checks changed no tracked dependency selection, installed
 SDK, registry publication or external source. The user has since completed
 publication, as recorded above. The checks validate the skills implementation
-on Motor OS with the fix; the external Rust fork lock update and push,
-SDK rollout and installed-image gate remain outstanding.
+on Motor OS with the fix. The external Rust fork update and SDK build are
+now complete, including the selected SDK's required full gates as recorded
+above.

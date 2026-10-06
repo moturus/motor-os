@@ -1,6 +1,6 @@
 # Gears batteries implementation record
 
-Updated 2026-10-05. The design in [gears-batteries.md](gears-batteries.md)
+Updated 2026-10-06. The design in [gears-batteries.md](gears-batteries.md)
 remains authoritative. Work proceeds in small patches with one-line commits.
 All Gears defects found during implementation are in scope.
 
@@ -12,11 +12,12 @@ Linux and Motor OS, and the updated release developer-image gate passes.
 The user reports that native OpenRouter use works and has requested
 continuation, clearing the phase 5 decision point. A local-model result has
 not been reported. Phase 6.1–6.4 memory storage, admission, prompt handling
-and user commands are implemented. Phase 6.5 skills is implemented and passes
-the host gates and a native workflow linked to the fixed in-tree runtime.
-Phase 7's explicit `/accept` command is implemented and passes the same
-host and native component gates. Installed builds still need the SDK
-rollout described below.
+and user commands are implemented. Phase 6.5 skills and phase 7's explicit
+`/accept` pass the host gates and installed native workflow using the stock
+`dev.3` SDK. The SDK rollout is complete: three debug and three release
+main-image gates and `full-test-dev.sh --release` pass, including native
+packaged-source builds. Phase 8 has settings, marks, saved-entry snapshots,
+tool policy and triggers; its runner, resume question and proposal cap remain.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
@@ -527,8 +528,8 @@ an error; the corrected assertion requires the exact sole success notice.
 The original log is `/tmp/gears-accept-native-gate.log`; final logs are
 `/tmp/gears-accept-native-build.log` and
 `/tmp/gears-accept-native-gate-validated.log`. This component validation
-does not update the installed SDK or replace the pending packaged-source
-developer-image gate.
+was an early component check. The later stock-SDK installed workflow and
+packaged-source developer-image gate now pass; no runtime override is needed.
 
 ### Acceptance upgrade compatibility
 
@@ -558,8 +559,8 @@ workflow. Host and Motor-target Clippy pass with warnings denied. The actual
 batteries release binary now links against the validated `dev.3` SDK's stock
 standard library, without the temporary runtime-feature override. Logs are
 `/tmp/gears-review-config-{host-debug,host-release,host-clippy,native-clippy,native-build}.log`.
-The SDK's native tools and images are still being assembled; the tracked
-selector and full cutover gates remain pending.
+The SDK's host/native tools, images, tracked selector and full cutover gates
+now pass, including installed workflow execution.
 
 ### Durable review marks
 
@@ -569,8 +570,8 @@ leave a mark due. New sessions cannot consume another session's marks.
 Damaged, oversized or changed records are refused without overwriting them.
 The portable workflow tests these rules in both host profiles; host and
 Motor-target Clippy and the native release build pass. Native execution is
-included in the pending developer-image gate. Hook triggers and the runner
-remain subsequent patches; this storage API does not start reviews.
+included in the passing release developer-image gate. Triggers are now
+implemented below; this storage API itself does not start reviews.
 
 ### Reviews at saved entries
 
@@ -580,8 +581,8 @@ round is refused. An ephemeral fork retains the original prompt snapshot
 while the parent remains writable and unchanged. The Gears debug host gate,
 both batteries workflow profiles, host and Motor-target warnings-denied
 Clippy and native release workflow build pass. Logs use
-`/tmp/gears-review-anchors-*`; installed native execution remains in the
-pending release developer-image gate.
+`/tmp/gears-review-anchors-*`; installed native execution passes in the
+release developer-image gate.
 
 ### Review tool policy
 
@@ -606,7 +607,7 @@ unchanged and makes no provider request; the runner remains a later patch.
 
 Both host batteries profiles, host and Motor-target warnings-denied Clippy,
 and the native release build pass. The portable trigger fixture is included
-in the existing workflow and pending developer-image gate. Logs use
+in the existing workflow and passing release developer-image gate. Logs use
 `/tmp/gears-review-triggers-*`.
 
 ### Review settings in status
@@ -621,31 +622,43 @@ atomic state writer fixes that setup without changing assertions. The
 original log is `/tmp/gears-review-status-host-debug-original.log`; final
 logs use `/tmp/gears-review-status-*`.
 
-## Next steps
+### Developer source-build diagnosis
 
-The independent sysbox track continues with numeric/human sort, then field
-keys and S3–S6. The batteries track needs the SDK rollout below.
+The stock `dev.3` SDK passes three debug and three release main-image gates,
+and the release developer-image repository suite and installed batteries
+workflow pass. Its source-build phase then fails before compiling batteries:
+Lorry rejects `lib.doc-scrape-examples = false` in `libyaml-rs 0.3.0`.
+The original failure remains in `/tmp/gears-sdk-runtime-full-dev-release.log`.
+This documentation setting has no build effect. Lorry's local instructions
+put discovered Lorry issues in scope; the narrow compatibility patch accepts
+only false, with metadata and native identity regression coverage. The focused
+contract, complete Lorry suite, warnings-denied host/Motor Clippy and corrected
+release developer-image gate pass. The successful rerun is
+`/tmp/gears-sdk-runtime-full-dev-release-fixed.log`; the original remains
+preserved. Core/SDK hashes match the six successful main-image runs. Both the
+runtime link gap and source-vendoring blocker are resolved.
 
-The user has published moto-rt 0.17.7; its registry checksum and weak strlen
-export are verified in [the runtime record](gears-yaml-runtime.md#published-runtime-verification).
-Select the fixed runtime in the SDK, then finish native skills validation.
-The in-tree runtime gap is fixed and core-tested; rebuilding
-the current SDK tuple alone will not update std's locked dependency.
-The user explicitly authorized the Motor OS Rust fork update without the
-Rust checkout's AGENTS.md gate. External commit `f046f257239` changes only
-the runtime version and checksum; the published archive checksum and exact
-parsed lockfile difference are verified. The Motor OS SDK declaration is
-prepared as `dev.3`, and its offline runtime, managed-source, key, bootstrap
-and version contracts pass. The installed SDK selector is unchanged.
-The user pushed the fork commit; remote verification passes. The managed SDK
-build is running, and its host SDK has passed validation. The original
-optimized NUL-scan probe and actual batteries release binary both link against
-its stock standard library. The native assembly, selector and full gates remain.
-See [the rollout record](gears-yaml-runtime.md#rollout-sequence).
-Phase 7 is complete at the
-component level. Phase 8 has started with the review settings parser and will
-discuss question 7; phase 9 requires the
-user's criterion before evaluation.
+## SDK rollout and next steps
+
+The user published moto-rt 0.17.7 and pushed the authorized external Rust-fork
+commit `f046f257239`. It changes only std's runtime version and checksum;
+compiler, LLVM and std implementation sources are unchanged. The managed
+`dev.3` producer, host/native SDKs, add-on tools and all three release images
+pass. The repository selects the new SDK, whose weak `strlen` links both the
+original optimized NUL-scan reproducer and the actual batteries release binary
+without a runtime-feature override.
+
+Three debug and three release main-image gates pass with frozen core/SDK
+sources, followed by `src/tests/full-test-dev.sh --release`. Installed skills,
+explicit acceptance, review prerequisites and native packaged-source builds
+pass. See [the rollout record](gears-yaml-runtime.md#rollout-sequence) for the
+exact SDK name and logs. The earlier failures remain preserved in that record.
+
+The independent sysbox track continues with field keys and S3–S6 after the
+numeric/human patch. Phase 8 continues with the runner, resume question,
+proposal cap, first-request prefix test and cleanup proposals. Phase 9 requires
+the user's quality/cost criterion in question 7; keep reviews disabled until
+an explicit model-pair decision and real-model evidence justify enabling them.
 
 The optional Hermes import has not been performed. Automated mock tests
 establish behavior, not real-model usefulness. Keep the outstanding native
