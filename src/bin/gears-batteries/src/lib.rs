@@ -35,6 +35,7 @@ pub mod review_launch;
 pub mod review_marks;
 pub mod review_proposals;
 pub mod review_resume;
+pub mod review_runner;
 pub mod review_triggers;
 pub mod search;
 pub mod session_search;

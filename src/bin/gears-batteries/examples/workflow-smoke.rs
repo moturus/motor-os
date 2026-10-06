@@ -48,6 +48,9 @@ mod review_launch;
 #[path = "workflow-smoke/review_instructions.rs"]
 mod review_instructions;
 
+#[path = "workflow-smoke/review_runner.rs"]
+mod review_runner;
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let binary =
@@ -226,6 +229,7 @@ fn run() -> Result<(), String> {
     )?;
     review_anchor::run(&fixture.workspace, &fixture.root.join("review-anchor"))?;
     review_policy::run(&fixture.workspace, &fixture.root.join("review-policy"))?;
+    review_runner::run(&fixture.workspace, &fixture.root.join("review-runner"))?;
     review_triggers::run(&fixture.workspace, &fixture.root.join("review-triggers"))?;
     review_proposals::run(&fixture.workspace, &fixture.root.join("review-proposals"))?;
     prefix_corrections::run(
@@ -241,6 +245,14 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    if std::env::args_os().next().is_some_and(|name| {
+        std::path::Path::new(&name)
+            .file_name()
+            .is_some_and(|name| name == "review-child")
+    }) {
+        review_runner::child();
+        return;
+    }
     if let Err(error) = run() {
         eprintln!("batteries workflow fixture failed: {error}");
         std::process::exit(1);

@@ -68,7 +68,8 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
         &id,
         "Nothing to save",
     )?
-    .unwrap();
+    .unwrap()
+    .request;
     let value = |flag: &str| {
         request.args[request.args.iter().position(|arg| arg == flag).unwrap() + 1].as_str()
     };

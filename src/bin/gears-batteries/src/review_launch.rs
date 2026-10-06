@@ -7,13 +7,18 @@ use serde_json::json;
 
 use crate::{paths::ToolContext, review_config, review_marks};
 
+pub struct Launch {
+    pub request: Request,
+    pub hook: String,
+}
+
 pub fn prepare(
     context: &ToolContext,
     parent_path: &Path,
     config: &Config,
     mark_id: &str,
     instructions: &str,
-) -> Result<Option<Request>, String> {
+) -> Result<Option<Launch>, String> {
     let settings = review_config::load(&context.state)?;
     if !settings.enabled {
         return Ok(None);
@@ -101,19 +106,22 @@ pub fn prepare(
     if let Some(path) = &config.config_path {
         args.extend(["--config".into(), path_arg(path)?]);
     }
-    Ok(Some(Request {
-        program: path_arg(
-            &std::env::current_exe()
-                .map_err(|error| error.to_string())?
-                .with_file_name("gears"),
-        )?,
-        args,
-        cwd: context.workspace.clone(),
-        stdin: None,
-        timeout: limits.timeout,
-        max_output_bytes: limits.max_output_bytes,
-        env: Vec::new(),
-        remove_env: vec![gears::provider::KEY_ENV.into()],
+    Ok(Some(Launch {
+        hook: hook.name.clone(),
+        request: Request {
+            program: path_arg(
+                &std::env::current_exe()
+                    .map_err(|error| error.to_string())?
+                    .with_file_name("gears"),
+            )?,
+            args,
+            cwd: context.workspace.clone(),
+            stdin: None,
+            timeout: limits.timeout,
+            max_output_bytes: limits.max_output_bytes,
+            env: Vec::new(),
+            remove_env: vec![gears::provider::KEY_ENV.into()],
+        },
     }))
 }
 

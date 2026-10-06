@@ -805,6 +805,21 @@ covers denial delivery, later-turn exclusion, source quoting, partial evidence,
 unchanged parent bytes and oversized refusal. Logs use
 `/tmp/gears-review-instructions-*`. Runner execution is next.
 
+### Owned review execution and completion
+
+The review library runs due marks under the shared owned process runner.
+Cancellation, failed exits and incomplete or invalid final JSONL leave a mark
+due. A successful final record completes it once, then atomically records the
+answer and reported usage; an unavailable cost remains unknown. Failure to
+update the latest-result display cannot resurrect a completed mark.
+
+Both host profiles, warnings-denied host/native Clippy, the native release
+build and release snapshot VM workflow pass. Final logs use
+`/tmp/gears-review-runner-elf-*`. Original setup failures remain in the earlier
+`gears-review-runner-*` logs: a fixture closure lifetime, a missing driver call,
+and a native script without execute permission. The corrected fixture copies
+a compiled child, preserving its permissions. CLI and sample wiring are next.
+
 ### Corrections after a frozen prefix
 
 Batteries hooks recognize `preserve_prefix` during initialization. They retain
