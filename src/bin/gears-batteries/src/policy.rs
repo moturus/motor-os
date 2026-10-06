@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 use crate::{Event, paths::ToolContext};
 
 pub fn permission(event: &Event) -> Value {
+    if !review_tool_allowed(event) {
+        return json!({"decision": "deny"});
+    }
     let decision = ToolContext::for_event(event).and_then(|context| {
         if event.payload["tool_call"]["name"] == "check" {
             let call: ToolCall = serde_json::from_value(event.payload["tool_call"].clone())
@@ -33,6 +36,22 @@ pub fn permission(event: &Event) -> Value {
     }
 }
 
+fn review_tool_allowed(event: &Event) -> bool {
+    if event
+        .session
+        .state
+        .as_ref()
+        .is_none_or(|state| state["run_kind"] != "review")
+    {
+        return true;
+    }
+    match event.payload["tool_call"]["name"].as_str() {
+        Some("memory" | "skill_manage" | "skill_view" | "session_search") => true,
+        Some("sh" | "check" | "todo" | "write_file" | "patch") => false,
+        _ => event.payload["tool"]["read_only"] == true,
+    }
+}
+
 pub fn decide(event: &Event, context: &ToolContext) -> Result<Decision, String> {
     let call: ToolCall = serde_json::from_value(event.payload["tool_call"].clone())
         .map_err(|error| format!("invalid permission call: {error}"))?;
@@ -40,6 +59,9 @@ pub fn decide(event: &Event, context: &ToolContext) -> Result<Decision, String> 
         serde_json::from_str(&call.arguments).map_err(|error| error.to_string())?;
     if !arguments.is_object() {
         return Err("tool arguments must be an object".into());
+    }
+    if !review_tool_allowed(event) {
+        return Ok(Decision::Deny);
     }
     match call.name.as_str() {
         "todo" | "session_search" | "skill_view" | "memory" | "skill_manage" => Ok(Decision::Allow),

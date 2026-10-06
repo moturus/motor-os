@@ -582,6 +582,18 @@ Clippy and native release workflow build pass. Logs use
 `/tmp/gears-review-anchors-*`; installed native execution remains in the
 pending release developer-image gate.
 
+### Review tool policy
+
+Review runs may use memory and skill proposals, session reading and declared
+read-only tools. Shell, check, task-state and file-writing calls are denied,
+including before check preparation. Ordinary runs retain their authority.
+The portable fixture passes both host profiles, warnings-denied host and
+Motor-target Clippy, and the native release build. The initial fixture omitted
+the path in its ordinary writer case; correcting that input preserves every
+assertion. Its original failure is
+`/tmp/gears-review-policy-host-debug-original.log`; final logs use
+`/tmp/gears-review-policy-*`. The runner and proposal cap remain later patches.
+
 ## Next steps
 
 The independent sysbox track continues with numeric/human sort, then field
