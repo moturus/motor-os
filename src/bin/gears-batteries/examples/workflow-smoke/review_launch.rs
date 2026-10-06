@@ -61,15 +61,16 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
     parent.set_model("different")?;
     let before = std::fs::read(parent.path().unwrap()).unwrap();
     config.config_path = Some(workspace.join("config with spaces.toml"));
-    let request = review_launch::prepare(
+    let launch = review_launch::prepare(
         &context,
         parent.path().unwrap(),
         &config,
         &id,
         "Nothing to save",
     )?
-    .unwrap()
-    .request;
+    .unwrap();
+    assert_eq!(launch.reviewer.model, "reviewer");
+    let request = launch.request;
     let value = |flag: &str| {
         request.args[request.args.iter().position(|arg| arg == flag).unwrap() + 1].as_str()
     };

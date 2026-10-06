@@ -34,6 +34,10 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
         provider: "default".into(),
         model: "executor".into(),
     };
+    let reviewer = Model {
+        provider: "default".into(),
+        model: "reviewer".into(),
+    };
     let id = review_marks::create(&context, &entry, Reason::Command, "", &model)?;
     let config = Config::parse(
         "version=1\n[after_turn]\ncommand=['gears-batteries','review']\ntimeout_seconds=10\nmax_output_bytes=8192\n[[hooks]]\nname='batteries'\ncommand=['gears-batteries','hook']\n",
@@ -71,6 +75,7 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
         serde_json::from_slice(&std::fs::read(&result_path).unwrap()).unwrap();
     assert_eq!(record["mark"], id);
     assert_eq!(record["answer"], "Nothing to save");
+    assert_eq!(record["reviewer"]["model"], "reviewer");
     assert_eq!(record["usage"]["total_tokens"], 15);
     assert!(record["usage"]["cost_usd"].is_null());
     let status = gears_batteries::memory_history::status(&context);
@@ -145,7 +150,7 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
             ..success.clone()
         },
     ] {
-        assert!(review_runner::complete(&context, &id, &invalid).is_err());
+        assert!(review_runner::complete(&context, &id, &invalid, &reviewer).is_err());
         assert_eq!(review_marks::due(&context)?.len(), 1);
         assert_eq!(std::fs::read(&result_path).unwrap(), baseline);
     }
@@ -156,7 +161,7 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
         json!({"type": "notice", "text": "Current correction"}),
         noisy.stdout
     );
-    review_runner::complete(&context, &id, &noisy)?;
+    review_runner::complete(&context, &id, &noisy, &reviewer)?;
     let displayed = gears_batteries::review_status::latest(&context.state)?.unwrap();
     assert!(
         displayed["diagnostics"]
@@ -170,7 +175,7 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
             .unwrap()
             .contains("Current correction")
     );
-    assert!(review_runner::complete(&context, &id, &success).is_err());
+    assert!(review_runner::complete(&context, &id, &success, &reviewer).is_err());
     assert!(review_marks::due(&context)?.is_empty());
     let bounded = review_marks::create(
         &context,
@@ -183,7 +188,7 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
         stderr: "字".repeat(3000),
         ..success
     };
-    review_runner::complete(&context, &bounded, &noisy)?;
+    review_runner::complete(&context, &bounded, &noisy, &reviewer)?;
     let displayed = gears_batteries::review_status::latest(&context.state)?.unwrap();
     let diagnostics = displayed["diagnostics"].as_str().unwrap();
     assert!(diagnostics.chars().count() <= 2080);
@@ -201,5 +206,20 @@ fn final_record() -> String {
 }
 
 pub fn child() {
+    // Simulate the user changing model settings while this child is running.
+    let args: Vec<_> = std::env::args().collect();
+    let parent = args.windows(2).find(|pair| pair[0] == "--fork").unwrap();
+    let settings = Path::new(&parent[1])
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("batteries.toml");
+    let text = std::fs::read_to_string(&settings).unwrap();
+    std::fs::write(
+        settings,
+        text.replace("model='reviewer'", "model='changed-after-launch'"),
+    )
+    .unwrap();
     println!("{}", final_record());
 }

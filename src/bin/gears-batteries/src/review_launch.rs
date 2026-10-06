@@ -10,6 +10,7 @@ use crate::{paths::ToolContext, review_config, review_marks};
 pub struct Launch {
     pub request: Request,
     pub hook: String,
+    pub reviewer: review_config::Model,
 }
 
 pub fn prepare(
@@ -76,6 +77,7 @@ pub fn prepare(
     config
         .provider(&reviewer.provider)
         .ok_or("reviewer provider is not configured in Gears")?;
+    let selected_reviewer = reviewer.clone();
     let limits = config
         .after_turn
         .as_ref()
@@ -108,6 +110,7 @@ pub fn prepare(
     }
     Ok(Some(Launch {
         hook: hook.name.clone(),
+        reviewer: selected_reviewer,
         request: Request {
             program: path_arg(
                 &std::env::current_exe()

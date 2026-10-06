@@ -878,6 +878,18 @@ and release snapshot VM workflow pass. Logs use `/tmp/gears-review-diagnostics-*
 `original.log` preserves the successful-but-silent child result that failed the
 notice assertion; the fixed and final debug gates preserve that assertion.
 
+### Reviewer attribution stays with the launched model
+
+A regression changes reviewer settings while the owned child is running. The
+completed result previously attributed its usage and answer to the new setting.
+The launch now retains its selected reviewer and passes it to completion, so
+status records the model actually launched.
+
+Both host profiles, warnings-denied host/native Clippy, the native release build
+and release snapshot VM workflow pass. Logs use `/tmp/gears-review-attribution-*`.
+`original.log` preserves the wrong-model assertion failure; the fixed host and
+native gates retain the settings-change regression.
+
 ### Corrections after a frozen prefix
 
 Batteries hooks recognize `preserve_prefix` during initialization. They retain

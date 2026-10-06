@@ -91,13 +91,18 @@ pub fn run(
         if cancellation.cancelled() {
             return Err("review interrupted; mark remains due".into());
         }
-        complete(context, &id, &output)?;
+        complete(context, &id, &output, &launch.reviewer)?;
         completed += 1;
     }
     Ok(completed)
 }
 
-pub fn complete(context: &ToolContext, id: &str, output: &Output) -> Result<(), String> {
+pub fn complete(
+    context: &ToolContext,
+    id: &str,
+    output: &Output,
+    reviewer: &crate::review_config::Model,
+) -> Result<(), String> {
     if !output.success() {
         return Err(format!(
             "review {id} failed; mark remains due:\n{}",
@@ -127,7 +132,7 @@ pub fn complete(context: &ToolContext, id: &str, output: &Output) -> Result<(), 
         eprintln!("review {id}:\n{diagnostics}");
     }
     let record = json!({"version": 1, "session": context.session, "workspace": context.workspace,
-        "mark": id, "executor": mark.executor, "reviewer": crate::review_config::load(&context.state)?.reviewer, "date_ms": crate::pending::now_ms()?, "answer": answer, "usage": final_record.usage, "diagnostics": diagnostics});
+        "mark": id, "executor": mark.executor, "reviewer": reviewer, "date_ms": crate::pending::now_ms()?, "answer": answer, "usage": final_record.usage, "diagnostics": diagnostics});
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
     // Completion is durable first; failure to update status must not rerun the mark.
     review_marks::finish(context, id, Disposition::Completed)?;
