@@ -491,6 +491,15 @@ Field-key sort and `uniq` remain prepared only in temporary source trees.
 Their host comparisons with GNU and native builds and Clippy pass; native
 execution and each patch's full core gate remain before shipping.
 
+The field work is split further to keep each shipping patch small: field/byte
+ranges first, then per-key ordering flags. The first projection is
+`/tmp/gears-sort-key-ranges.rs` (118 lines), with its combined command prototype
+in `/tmp/gears-sort-key-ranges-prototype.rs`. It matches GNU sort 9.11 in 3,888
+output/status/diagnostic comparisons (`/tmp/gears-sort-key-ranges-gnu.log`).
+Its standalone driver initially lacked Cargo's package-version environment;
+setting that build metadata fixes the harness. This projection has no native
+or full core gate yet and changes no installed utility.
+
 ### Exact numeric and human sorting
 
 `sort -n` compares decimal prefixes without floating-point rounding, including
