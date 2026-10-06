@@ -11,8 +11,8 @@ reports pass focused host/native fixtures and the release developer-image gate;
 the first real-model run is pending.
 Sysbox S1 and S2's byte/numeric/human sorting are complete and
 core-gated; field keys remain. Design revised 2026-10-06. See the
-[implementation record](gears-batteries-progress.md) for completed patches
-and validation still outstanding. Two questions wait
+[remaining-work checklist](gears-batteries-progress.md#what-remains) for current
+status; that document also retains the implementation history. Two questions wait
 for later phases: question 7 is needed before the first real-model evaluation, and
 question 10 when phase 12 is. Tool confinement is deferred (see "Deferred:
 tool confinement").

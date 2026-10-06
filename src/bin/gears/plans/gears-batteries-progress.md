@@ -6,43 +6,31 @@ All Gears defects found during implementation are in scope.
 
 ## Current position
 
-The phase 0 companion documents and the phase 1–4 implementations are in
-place. Phase 5.1–5.6 are implemented. The real-binary workflow passes on
-Linux and Motor OS, and the updated release developer-image gate passes.
-The user reports that native OpenRouter use works and has requested
-continuation, clearing the phase 5 decision point. A local-model result has
-not been reported. Phase 6.1–6.4 memory storage, admission, prompt handling
-and user commands are implemented. Phase 6.5 skills and phase 7's explicit
-`/accept` pass the host gates and installed native workflow using the stock
-`dev.3` SDK. The SDK rollout is complete: three debug and three release
-main-image gates and `full-test-dev.sh --release` pass, including native
-packaged-source builds. Phase 8 has settings, marks, saved-entry snapshots,
-tool policy, triggers, the resume question, the proposal cap and the connected
-review runner. Real-binary compacted reviews preserve the saved prefix on both
-systems, with historical resource checkpoints and current withdrawal corrections
-after resume. Real in-flight interruption and session isolation pass. Phase 8.3
-cleanup stages explicit-cutoff archival proposals and passes the real CLI workflow.
-Phase 9's manual `eval` command captures multiple tasks, tools and learning,
-runs repeated isolated arms, and reports independent criteria and partial costs.
-Focused host/native fixtures and the final release developer-image gate pass.
-The first real-model run needs the user's held-out tasks and criterion.
-Sysbox step S1 is implemented and passes the focused native regression;
-its final source passes three debug and three release full core gates.
-Those gates exposed a preexisting TCP test isolation defect; its small
-test-only correction is committed and validated. The first S2 patch is
-committed in `399cf0a5`: byte-order `sort` with `-r -u -f -s -c -o`, literal
-operands and a quoted executable wrapper. Its native regression and
-warnings-denied Clippy pass, as do three debug and three release full core
-runs after the diagnosed kernel-log test correction (`9adb3ddf`). The second
-S2 patch adds exact numeric and human-size sorting and passes the same six
-core gates with the stock `dev.3` SDK. Field keys and S3–S6 remain separate
-Sysbox work. The first real-model evaluation and optional phases 10–12 are pending.
+Gears and batteries are implemented through phase 9's evaluation runner:
+providers, tools, memory, skills, `/accept`, reviews, cleanup and paired
+measurement. The SDK rollout is complete. Automated host/native component
+checks and `src/tests/full-test-dev.sh --release` pass. The user has confirmed
+that Gears works with OpenRouter on Motor OS.
 
-The phase 3 manual checklist is not marked complete. Automated host tests
-cover the runtime and both UIs; native gates cover shipped tools, literal
-arguments, local HTTP, the six line-interface approval choices, process
-ownership and the directory lock. Complete native interactive UI checks
-before declaring that checklist finished.
+## What remains
+
+| Work | Status and next step |
+| --- | --- |
+| First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
+| Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
+| Motor OS command utilities | Separate coding work remains: `sort -k -t`, then `uniq`, `cut`, `tr` and `xargs`. `mkdir -p` and byte/numeric/human-size sorting are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
+| Optional orchestration (10) | Implement supervised worker agents and their budgets. |
+| Optional web tools (11) | Implement web search and page extraction using curl. |
+| Optional scheduler/gateway (12) | Implement scheduled jobs, HTTP/Telegram access and unattended approval/cancellation. Service behavior still needs the phase 12 decision. |
+
+The real-model evaluation needs user input. It does not block the other
+coding or validation work. Reviews remain off by default; passing mock tests
+does not show that learned material improves future work.
+
+The sections below are the implementation history. Earlier statements that
+something was "pending" describe that time; use the checklist above for the
+current status.
 
 ## Implemented extensions
 
