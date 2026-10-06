@@ -5,11 +5,11 @@ native editor acceptance are complete; its real-project acceptance remains open.
 This plan was updated after review on 2026-10-02 and revises the committed v3
 (`3c90c8cf`).
 
-The remaining acceptance cases are:
+The real-project acceptance status is:
 
 | Project | Completed | Remaining blocker on Motor |
 | --- | --- | --- |
-| sed | Native release build | Tests encounter errno 0.3.14's guard through uucore; tempfile's named-file backend also needs Motor support. |
+| sed | Native release build | Native upstream tests deferred: uucore/errno and tempfile gaps are in the test setup. |
 | ripgrep | Native release build | `ignore` loses literal `./` during path matching; workspace tests also have the previously waived symlink helper. |
 | Helix | Locked vendoring and execution admission | The native build encounters cc 1.2.29's tempfile platform guard. |
 
@@ -19,6 +19,9 @@ Their failures, required commands, and tool settings are recorded in
 The waived ripgrep helper does not waive its separate library failure. No known
 large Lorry implementation milestone remains; the plan cannot close until the
 remaining acceptance is completed or its scope is explicitly revised.
+The user approved deferring sed's native upstream test suite for this Lorry
+milestone. Its successful native build is accepted; its tests are recorded as
+deferred. All Lorry-owned test gates remain required.
 
 The four first patches and milestone 1 are committed. The selected package's
 library, binaries, test harnesses, integration tests, and check targets use
@@ -345,7 +348,8 @@ The work is done when all of these pass:
   What a test or a program prints stays plain text, as under Cargo.
 - **Clippy.** `lorry clippy` agrees with `cargo clippy` on a fixture on
   Linux, and runs natively on Motor.
-- **Real projects, on Motor.** sed builds and tests. ripgrep builds in
+- **Real projects, on Motor.** sed builds; its native upstream test suite is
+  deferred because of unsupported external test dependencies. ripgrep builds in
   release mode and runs `test --workspace --exclude grep-pcre2`. Helix
   builds with `-p helix-term --bin hx --release --no-default-features`.
   Each project's tool grants and settings are written down.

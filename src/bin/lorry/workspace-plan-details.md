@@ -3893,14 +3893,23 @@ on the Motor graph. Tempfile and terminal_size already exclude rustix on Motor.
 A minimal port can make uucore's rustix dependency conditional on supported
 platforms. Separately, tempfile's Motor file backend is currently the
 `other.rs` implementation, whose operations return unsupported; sed's tests use
-`NamedTempFile`. That backend needs a proper native implementation too.
+`NamedTempFile`.
 
-The remaining acceptance uses these native commands, with the Motor target
+The user approved deferring these test-only dependency issues for Lorry
+acceptance. The Motor sed fork already uses `crate::sed::motor::NamedTempFile`
+for production in-place editing (`src/sed/in_place.rs`), while its unit and
+integration tests still use the generic tempfile crate. Porting that crate and
+uucore's test dependency graph is separate work. The successful native release
+build is accepted; the upstream native tests remain deferred with the original
+compilation failure preserved. No Lorry-owned test is disabled or counted as
+passing without execution.
+
+Native project validation uses these commands, with the Motor target
 selected by the image's toolchain:
 
 | Project | Build | Tests |
 | --- | --- | --- |
-| sed | `lorry build --release --locked --offline` | `lorry test --locked --offline` |
+| sed | `lorry build --release --locked --offline` | Deferred; original reproducer: `lorry test --locked --offline`. |
 | ripgrep | `lorry build --release --locked --offline` | `lorry test --workspace --exclude grep-pcre2 --locked --offline` |
 | Helix | `lorry build -p helix-term --bin hx --release --no-default-features --locked --offline` | Not required by this plan. |
 
@@ -3931,16 +3940,12 @@ in the table's order, are:
 ```
 
 Closing these cases requires scoped external product ports: permit cc's existing
-standard-Rust named-tempfile implementation on Motor; correct uucore's Motor
-dependency selection and implement tempfile's Motor file backend; preserve
-literal path-prefix matching in ignore. The Motor stdlib represents OS strings
-as UTF-8, so ignore can preserve literal prefixes
-using standard Rust string operations without changing the stdlib. Sed's errno
-guard cannot simply be removed: Motor I/O returns explicit error codes, and its
-stdlib does not define a last-I/O errno value. The C library has a separate errno
-ABI. A dependency port must keep those representations distinct and may require
-changes beyond errno; the current guards do not bound the number of later
-platform issues.
+standard-Rust named-tempfile implementation on Motor; preserve literal path-prefix
+matching in ignore. The Motor stdlib represents OS strings as UTF-8, so ignore
+can preserve literal prefixes using standard Rust string operations without
+changing the stdlib. Sed's deferred tests do not require an errno or tempfile
+port to close this Lorry milestone. The current external failures do not bound
+the number of later platform issues.
 The waived ripgrep integration helper is independent of that path-matching bug.
 No external product source has been changed. The repository's rule for
 preexisting non-Lorry bugs requires discussing those fixes before applying them.
@@ -4255,12 +4260,13 @@ tests passed again before committing that repair. The initially failed release
 developer gate is now followed by the successful complete gate above; the
 remaining milestone work is independent real-project acceptance.
 
-Independent real-project acceptance remains: sed tests encounter errno 0.3.14's
-platform guard; Helix encounters cc 1.2.29's native tempfile platform guard; ripgrep
-has an `ignore` path-matching defect beyond its waived symlink integration helper.
-The Motor cc wrapper itself works. External product ports require separate scope
-approval; further diagnosis and isolated test-only fixes remain authorized under
-the repository rules. No deferred Cargo feature or optional performance work is
+Independent real-project acceptance remains: Helix encounters cc 1.2.29's native
+tempfile platform guard; ripgrep has an `ignore` path-matching defect beyond its
+waived symlink integration helper.
+Sed's native build passed, and the user approved deferring its unsupported native
+upstream test suite. The Motor cc wrapper itself works. External product ports
+require separate scope approval; further diagnosis and isolated test-only fixes
+remain authorized under the repository rules. No deferred Cargo feature or optional performance work is
 needed to close the plan.
 
 ### Native filesystem deadlock: cause and repair options
