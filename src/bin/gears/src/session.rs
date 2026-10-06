@@ -336,6 +336,25 @@ impl Store {
 /// Later appends do not change this snapshot. It never owns a writer or lock.
 pub struct Snapshot(Session);
 
+impl Snapshot {
+    /// Read the branch ending at an exact saved entry, without changing its source.
+    pub fn at(&self, entry_id: &str) -> Result<Self, String> {
+        let entries = self.0.path_to(Some(entry_id))?;
+        if incomplete_round_start(&entries)?.is_some() {
+            return Err("snapshot entry ends in an unfinished tool round".into());
+        }
+        Session::from_parts(
+            self.0.header.clone(),
+            entries,
+            self.0.path.clone(),
+            None,
+            None,
+            0,
+        )
+        .map(Self)
+    }
+}
+
 impl std::ops::Deref for Snapshot {
     type Target = Session;
 
@@ -1226,6 +1245,83 @@ mod tests {
         writer.append_message(&Message::user("third")).unwrap();
         drop(writer);
         assert!(!lock.exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn anchored_snapshots_keep_old_context_and_refuse_unfinished_tool_rounds() {
+        let (base, _, store) = fixture("anchored-snapshot");
+        let mut writer = store.create(false, None).unwrap();
+        writer.append_message(&Message::user("work")).unwrap();
+        let call = crate::provider::ToolCall::new("call", "sh", "{}");
+        let start = writer
+            .append_message(&Message::assistant_response("running".into(), vec![call]))
+            .unwrap();
+        let result = writer
+            .append_message(&Message::tool_result("call", "sh", "done", false))
+            .unwrap();
+        writer
+            .append_hook_state(&HookState {
+                hook: "batteries".into(),
+                state: serde_json::json!({"prompt_snapshot": "original"}),
+                context: None,
+            })
+            .unwrap();
+        let anchor = writer
+            .append_message(&Message::assistant("original result"))
+            .unwrap();
+        let original = writer.context_messages().unwrap();
+        writer
+            .append_compaction(&Compaction {
+                summary: "later summary".into(),
+                retained_tail: Vec::new(),
+                tokens_before: 100,
+            })
+            .unwrap();
+        writer.append_message(&Message::user("next task")).unwrap();
+        writer
+            .append_hook_state(&HookState {
+                hook: "batteries".into(),
+                state: serde_json::json!({"prompt_snapshot": "refreshed"}),
+                context: None,
+            })
+            .unwrap();
+        let source = writer.path().unwrap();
+        let before = std::fs::read(source).unwrap();
+        let snapshot = store.read(writer.id()).unwrap();
+        assert_ne!(snapshot.context_messages().unwrap(), original);
+        let selected = snapshot.at(&anchor).unwrap();
+        assert_eq!(selected.context_messages().unwrap(), original);
+        assert_eq!(selected.active_leaf(), Some(anchor.as_str()));
+        assert_eq!(selected.path(), Some(source));
+        assert_eq!(
+            selected.hook_state("batteries").unwrap()["prompt_snapshot"],
+            "original"
+        );
+        assert!(selected.entry(snapshot.active_leaf().unwrap()).is_none());
+        assert!(snapshot.at(&start).err().unwrap().contains("unfinished"));
+        assert!(snapshot.at("missing").is_err());
+        assert_eq!(
+            snapshot
+                .at(&result)
+                .unwrap()
+                .context_messages()
+                .unwrap()
+                .len(),
+            3
+        );
+        let mut child = store.clone_active_with_options(&selected, true).unwrap();
+        assert_eq!(child.context_messages().unwrap(), original);
+        child.append_message(&Message::user("review")).unwrap();
+        assert_eq!(std::fs::read(source).unwrap(), before);
+        assert_ne!(snapshot.active_leaf(), selected.active_leaf());
+        drop(child);
+        drop(selected);
+        drop(snapshot);
+        writer
+            .append_message(&Message::assistant("parent still live"))
+            .unwrap();
+        drop(writer);
         std::fs::remove_dir_all(base).unwrap();
     }
 

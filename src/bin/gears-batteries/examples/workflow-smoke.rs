@@ -24,6 +24,9 @@ mod skills;
 #[path = "workflow-smoke/review_marks.rs"]
 mod review_marks;
 
+#[path = "workflow-smoke/review_anchor.rs"]
+mod review_anchor;
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let binary =
@@ -195,6 +198,7 @@ fn run() -> Result<(), String> {
     drop(runtime);
     memory::run(&binary, &fixture.root)?;
     review_marks::run(&fixture.workspace, &fixture.root.join("review-state"))?;
+    review_anchor::run(&fixture.workspace, &fixture.root.join("review-anchor"))?;
     fixture.cleanup(&group, &sessions, &snapshots)?;
     skills::run(&binary, &compiler)?;
     acceptance::run(&binary, &compiler)?;

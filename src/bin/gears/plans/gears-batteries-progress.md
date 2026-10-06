@@ -571,6 +571,17 @@ Motor-target Clippy and the native release build pass. Native execution is
 included in the pending developer-image gate. Hook triggers and the runner
 remain subsequent patches; this storage API does not start reviews.
 
+### Reviews at saved entries
+
+`Snapshot::at` reads the branch ending at a mark's exact entry. Later turns,
+compaction and prompt refreshes cannot change that view; an unfinished tool
+round is refused. An ephemeral fork retains the original prompt snapshot
+while the parent remains writable and unchanged. The Gears debug host gate,
+both batteries workflow profiles, host and Motor-target warnings-denied
+Clippy and native release workflow build pass. Logs use
+`/tmp/gears-review-anchors-*`; installed native execution remains in the
+pending release developer-image gate.
+
 ## Next steps
 
 The independent sysbox track continues with numeric/human sort, then field
