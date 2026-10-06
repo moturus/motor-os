@@ -141,6 +141,11 @@ fn agent(
     })?;
     let store = Store::new(&workspace)?;
     let mut session = open_session(&store, args)?;
+    let saved_prefix = if args.preserve_prefix {
+        session.request_prefix()?
+    } else {
+        None
+    };
     let provider_name = args
         .provider
         .clone()
@@ -175,6 +180,12 @@ fn agent(
         .or_else(|| config.models.first().cloned())
         .ok_or("no model selected; use --model or provider.model in the config")?;
     let mut runtime = Runtime::new_with_registry(provider, store, session, config, model, tools)?;
+    if args.preserve_prefix {
+        match saved_prefix {
+            Some(prefix) => runtime.preserve_request_prefix(prefix)?,
+            None => diagnostic("saved prefix unavailable; using reconstructed instructions"),
+        }
+    }
     let factory_config = config.clone();
     let verbosity = args.verbosity;
     let factory: ProviderFactory = Arc::new(move |name| {

@@ -741,6 +741,22 @@ build and the release snapshot VM's shipped-tools gate pass. Logs use
 filesystem sandbox before testing curl, and the authorized gate passes in
 `host-debug-authorized.log`. Reusing the prefix in the review child follows.
 
+Ephemeral forks now accept `--preserve-prefix`. The runtime uses the saved
+system fragments and advertised tool schemas through history compaction and
+counts that prefix when checking the input limit. An oversized prefix fails
+before a provider call; new sessions clear the override. Execution continues
+through current tools and permission hooks. Missing legacy snapshots produce
+an explicit notice and use reconstructed instructions.
+
+The portable fixture covers a compacted review, unchanged parent bytes,
+oversized-prefix refusal and new-session isolation. The actual fork CLI also
+exercises the legacy fallback. Host debug/release HTTP gates, warnings-denied
+host/native Clippy, native release build and the release snapshot VM shipped
+gate pass. Logs use `/tmp/gears-preserved-prefix-*`. The initial fixture build
+after changing Capture's shape left one old field access; `focused-final.log`
+preserves that compile failure and `focused-fixed.log` contains the corrected
+test with unchanged behavioral assertions.
+
 The user published moto-rt 0.17.7 and pushed the authorized external Rust-fork
 commit `f046f257239`. It changes only std's runtime version and checksum;
 compiler, LLVM and std implementation sources are unchanged. The managed

@@ -161,6 +161,7 @@ pub struct Runtime {
     tools: Registry,
     tool_state_directory: PathBuf,
     prompt: Effective,
+    preserved_prefix: Option<RequestPrefix>,
     model: String,
     max_tool_rounds: usize,
     context: ContextConfig,
@@ -279,6 +280,7 @@ impl Runtime {
             tools,
             tool_state_directory,
             prompt,
+            preserved_prefix: None,
             model,
             max_tool_rounds: config.max_tool_rounds,
             context: config.context,
@@ -296,6 +298,24 @@ impl Runtime {
 
     pub fn cancellation(&self) -> Cancellation {
         self.cancellation.clone()
+    }
+
+    /// An ephemeral reader may retain its source instructions and advertised schemas.
+    /// Execution still uses the current registry, hooks and permission policy.
+    pub fn preserve_request_prefix(&mut self, prefix: RequestPrefix) -> Result<(), String> {
+        self.prepare_write()?;
+        if !self.session.is_ephemeral() {
+            return Err("preserving a saved prefix requires an ephemeral session".into());
+        }
+        let limit = self
+            .context
+            .window_tokens
+            .saturating_sub(self.context.output_reserve_tokens);
+        if estimate_request_tokens(&prefix.system, &[], &prefix.tools) > limit {
+            return Err("saved request prefix exceeds the model input limit".into());
+        }
+        self.preserved_prefix = Some(prefix);
+        Ok(())
     }
 
     pub fn tools(&self) -> &Registry {
@@ -1240,6 +1260,7 @@ impl Runtime {
         self.hooks = hooks;
         self.prompt = prompt;
         self.usage = self.session.usage();
+        self.preserved_prefix = None;
         self.hooks.notify(
             "session_start",
             serde_json::json!({"session_id": self.session.id()}),
@@ -1651,6 +1672,16 @@ impl Runtime {
     }
 
     fn request(&self, messages: Vec<Message>, tools: bool) -> Request {
+        if let Some(prefix) = &self.preserved_prefix {
+            let request = Request::new(&self.model, messages)
+                .with_system(prefix.system.clone())
+                .with_cancellation(self.cancellation.clone());
+            return if tools {
+                request.with_tools(prefix.tools.clone())
+            } else {
+                request
+            };
+        }
         let request = Request::new(&self.model, messages)
             .with_system(self.prompt.fragments().to_vec())
             .with_cancellation(self.cancellation.clone());
@@ -1671,11 +1702,8 @@ impl Runtime {
         observer: &mut dyn Observer,
     ) -> Result<bool, String> {
         let messages = self.session.context_messages()?;
-        let tokens_before = estimate_request_tokens(
-            self.prompt.fragments(),
-            &messages,
-            &self.request(Vec::new(), true).tools,
-        );
+        let prefix = self.request(Vec::new(), true);
+        let tokens_before = estimate_request_tokens(&prefix.system, &messages, &prefix.tools);
         let threshold = self
             .context
             .window_tokens
@@ -1764,12 +1792,7 @@ impl Runtime {
             context
         };
         let hard_limit = self.context.window_tokens.saturating_sub(reserve);
-        if estimate_request_tokens(
-            self.prompt.fragments(),
-            &compact_context,
-            &self.request(Vec::new(), true).tools,
-        ) > hard_limit
-        {
+        if estimate_request_tokens(&prefix.system, &compact_context, &prefix.tools) > hard_limit {
             return Err("compacted context still exceeds the model limit".to_string());
         }
         let entry = Compaction {
@@ -1800,11 +1823,8 @@ impl Runtime {
             .context
             .window_tokens
             .saturating_sub(self.context.output_reserve_tokens);
-        let tokens = estimate_request_tokens(
-            self.prompt.fragments(),
-            messages,
-            &self.request(Vec::new(), true).tools,
-        );
+        let prefix = self.request(Vec::new(), true);
+        let tokens = estimate_request_tokens(&prefix.system, messages, &prefix.tools);
         if tokens > limit {
             Err(format!(
                 "hook-transformed context is approximately {tokens} tokens; limit is {limit}"

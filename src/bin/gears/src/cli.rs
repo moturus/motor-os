@@ -45,6 +45,7 @@ Options:
   --session ID        Alias for --resume
   --fork ID           Clone a saved session; may combine with --ephemeral
   --fork-entry ID     End that clone at this saved entry; requires --fork
+  --preserve-prefix   Reuse the saved prefix; requires --fork --ephemeral
   --ephemeral         Do not save the session
   -n, --name NAME     Name a new session
   -v, -vv, -vvv       Increase transport diagnostics
@@ -99,6 +100,7 @@ pub struct Args {
     pub verbosity: u8,
     pub session: SessionStart,
     pub fork_entry: Option<String>,
+    pub preserve_prefix: bool,
     pub name: Option<String>,
 }
 
@@ -117,6 +119,7 @@ impl Args {
             verbosity: 0,
             session: SessionStart::New,
             fork_entry: None,
+            preserve_prefix: false,
             name: None,
         };
         let mut iterator = argv.iter().map(AsRef::as_ref);
@@ -197,6 +200,12 @@ impl Args {
                     }
                     args.fork_entry = Some(entry.into());
                 }
+                "--preserve-prefix" => {
+                    if inline.is_some() || args.preserve_prefix {
+                        return Err("--preserve-prefix takes no value and may appear once".into());
+                    }
+                    args.preserve_prefix = true;
+                }
                 "--ephemeral" | "--no-session" => args.set_session(SessionStart::Ephemeral)?,
                 "-n" | "--name" => {
                     args.name = Some(value(flag, inline, &mut iterator)?.to_string())
@@ -219,6 +228,9 @@ impl Args {
             if args.ui == crate::ui::select::Requested::Tui {
                 return Err("--output jsonl cannot use --ui tui".into());
             }
+        }
+        if args.preserve_prefix && !matches!(args.session, SessionStart::ForkEphemeral(_)) {
+            return Err("--preserve-prefix requires --fork --ephemeral".into());
         }
         if args.action == Action::Ask {
             if args.prompt.is_none() {
@@ -338,6 +350,30 @@ mod tests {
             vec!["--fork", "parent", "--ephemeral", "--ephemeral"],
             vec!["--fork", "parent", "--ephemeral", "--fork", "other"],
             vec!["ask", "review", "--fork", "parent", "--ephemeral"],
+        ] {
+            assert!(Args::parse(&argv).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn preserving_prefixes_requires_an_ephemeral_fork() {
+        assert!(
+            Args::parse(&["--preserve-prefix", "--fork", "parent", "--ephemeral"])
+                .unwrap()
+                .preserve_prefix
+        );
+        for argv in [
+            vec!["--preserve-prefix"],
+            vec!["--fork", "parent", "--preserve-prefix"],
+            vec!["--ephemeral", "--preserve-prefix"],
+            vec!["--fork", "parent", "--ephemeral", "--preserve-prefix=yes"],
+            vec![
+                "--fork",
+                "parent",
+                "--ephemeral",
+                "--preserve-prefix",
+                "--preserve-prefix",
+            ],
         ] {
             assert!(Args::parse(&argv).is_err(), "{argv:?}");
         }

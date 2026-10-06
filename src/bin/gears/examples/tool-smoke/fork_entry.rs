@@ -48,6 +48,7 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
                 "--fork-entry".into(),
                 entry,
                 "--ephemeral".into(),
+                "--preserve-prefix".into(),
                 "--ui".into(),
                 "line".into(),
             ],
