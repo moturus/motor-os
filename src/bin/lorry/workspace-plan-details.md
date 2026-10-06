@@ -3590,9 +3590,10 @@ neither is claimed to have another full-suite result.
 
 ## Milestone 9: editor integration and native acceptance
 
-**Status.** Lorry's implementation and native editor acceptance are complete.
-Real-project acceptance remains open for the diagnosed external platform issues
-below; it has not been counted as passing.
+**Status.** Milestone 9 is complete. Lorry's implementation, native editor
+acceptance, and real-project acceptance pass with the user's explicit external
+test deferrals recorded below. Failed runs and their diagnoses remain evidence;
+deferred or accepted failing tests are not counted as successful executions.
 
 The combined milestone-8/editor gate passed in 1,154 seconds, preserved in
 `/tmp/lorry-m8-m9-workspace-editor-full-gate.log`: 471 Rust tests, three own-message
@@ -3839,12 +3840,22 @@ before anchored matching on Motor. This is product behavior outside Lorry;
 the user accepts this specific test failure for the current Lorry milestone.
 The assertion and original failure evidence remain intact; this matching
 limitation is recorded, and a ripgrep product port is not required. Other
-applicable ripgrep tests remain required, with the Unix symlink integration
-helper separately deferred under the user's earlier instruction.
+applicable ripgrep tests have run, with the Unix symlink integration helper
+separately deferred under the user's earlier instruction.
+
+The original workspace command failed while compiling that integration helper,
+before running the root binary's unit tests. The final acceptance audit found
+this uncovered target. A fresh developer-image overlay now runs
+`lorry test -p ripgrep --bin rg --locked --offline` separately: all 118 binary
+unit tests pass in a 27-second native build/test invocation. Native online
+workspace vendoring and admission passed in 14 seconds without retries.
+Evidence is `ripgrep-native-{vendor,binary-tests}.{out,err,status,seconds}` under
+`/tmp/lorry-helix-native-9UXa5j`. This fixture archives the already committed
+test-only correction `28313db`; no additional external source change was made.
 
 The owner approved Cargo-compatible bundle rejection, exact workspace-lock
-access, and separate default/application editor views. Native acceptance still
-has the following diagnosed failures. Native sed's locked uucore 0.12.0 script emits a watch directive
+access, and separate default/application editor views. Earlier native acceptance
+had the following diagnosed failures. Native sed's locked uucore 0.12.0 script emits a watch directive
 for the consumer's workspace `Cargo.lock`, found by walking `OUT_DIR` ancestors.
 Cargo accepts that directive; Lorry's registry-script watch-root policy rejects
 it. The approved capability now allows reading and tracking that exact workspace
@@ -3891,9 +3902,82 @@ upstream cc lockfile; both failures and the baseline backtrace are preserved.
 This does not occur when planning the actual Helix build or compiling the fork
 through the temporary consumer. No Cargo source has been changed.
 
-Re-vendor and admit the updated Helix graph normally, then rerun the actual
-native Helix release build before claiming native acceptance. No new cc-rs
-source change is indicated by the original platform guard failure.
+The exact Cargo source confirms the diagnostic panic's cause. In
+`src/ops/cargo_compile/unit_generator.rs:93`, root-unit generation assumes roots
+are not build dependencies and requests `NormalOrDev` features for an ordinary
+library. Selecting the external dependency with `-p cc` promotes it to a root,
+but Helix's resolved feature map contains only `HostDep` for that package.
+`src/resolver/features.rs:326` panics on the missing entry. This happens before
+rustc runs and reproduces with both cc versions. Stopping after these focused
+checks was premature: the actual native Helix validation was still authorized.
+
+Native Helix acceptance is now complete. Evidence is in
+`/tmp/lorry-helix-native-9UXa5j`. The release developer image was rebuilt normally
+with `make -j$(nproc) BUILD=release dev.img`; a fresh overlay, private VM lock,
+and user-network SSH port isolated this run from other gates. The fixture is a
+clean archive of external Helix commit `73c0876c`, with the previously documented
+exact dependency grants and C/C++/archiver settings. Native online vendoring and
+admission passed in 70 seconds without retries. The admitted graph selects
+cc 1.4.0 and find-msvc-tools 0.1.9 at `02932efc`, plus shlex 2.0.1.
+
+The first build passed the cc compilation and grammar scripts, then failed in
+the link of `helix-term`'s build-script executable after 117 seconds. Its YAML
+C++ scanner references `__gxx_personality_v0`. The installed `libc++abi.a`
+defines that symbol, but rustc's default `-nostartfiles -nodefaultlibs` link mode
+suppresses Clang's C runtime recipe. The grammar crate's `-lc++` alone does not
+add the C++ ABI runtime. This is separate from Cargo's dependency-only panic.
+Preserve `native-build.{json,err,status,seconds}` and `link-failure.txt`.
+
+Adding the documented `link-self-contained=no` and `default-linker-libraries=yes`
+flags to the fixture's Motor target configuration did not cover the host unit:
+Lorry normalizes native Motor's logical target as explicit, so target Rust flags
+do not reach the compiler-host build script. That diagnostic failed with the
+same missing symbol in 90 seconds; its linker arguments still contained
+`-nostartfiles -nodefaultlibs`. Evidence is
+`native-c-runtime-build.{json,err,status,seconds}` and
+`cargo-config.target-flags-failure`. No flag-propagation policy was changed.
+
+The successful fixture instead uses the existing Linux cross-build's explicit
+Rust/C linker recipe, adapted to native LLVM paths. Both native host and target
+linkers select this trusted local wrapper through the fixture's Cargo config:
+
+```toml
+[target.x86_64-unknown-motor]
+linker = "/devtools/tmp/lorry-helix-native/motor-rust-cc"
+```
+
+The wrapper is a Motor Rush script. Its single command is:
+
+```sh
+exec /devtools/llvm/bin/llvm clang --target=x86_64-unknown-motor "$@" -Wl,--start-group /devtools/llvm/lib/crt1.o -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group
+```
+
+This makes the required runtime libraries explicit even when rustc suppresses
+driver defaults. It changes only the isolated fixture's link configuration;
+the external Helix checkout still contains only the authorized manifest/lock
+update, and Motor OS system, cc-rs, Cargo, and LLVM code remain unchanged.
+
+The complete offline native release build passed in 259 seconds within the
+original 1,800-second deadline: 210 compiler artifacts, 31 script executions,
+and one successful build-finished record. The compiler warnings are confined
+to the external projects. The native executable reports `helix 25.07.1`, and
+`hx --health yaml` finds its parser, highlight, textobject, and indent queries.
+The optional YAML/Ansible language servers are not installed. Native startup
+and this grammar check both exit successfully. No Helix test suite was required.
+
+The downloaded lockfile is byte-identical to the updated input, SHA-256
+`11ef67d4190fcd90f0c706b9b39fbc3878326e5d32dd6551fb2ca943197f7540`.
+The native executable's SHA-256 is
+`e6193c4f7c1604745efd30ee00cb4aa9e25a03c98dbb4af805777ce9b0b6a1be`;
+its ELF defines both `motor_start` and `__gxx_personality_v0`. Preserve the
+downloaded admission, Cargo/Lorry configurations, wrapper, executable, startup
+outputs, and `native-runtime-linker-build.{json,err,status,seconds}` alongside
+the failed diagnostics. The initial fixture setup errors (`mkdir -p` and a
+project-owned cache setting) are also retained separately.
+
+With this native build, the previously completed Lorry host/native gates and
+editor acceptance, and the user's explicit sed/ripgrep test deferrals, all nine
+milestones are complete. No additional cc-rs product port was necessary.
 
 The actual fetched `src/sys` editor copy supports member and Git-source
 navigation with the expected admission warning. Generated-constant navigation
@@ -3976,11 +4060,10 @@ in the table's order, are:
 
 The diagnosed cc platform guard has an applied dependency update: Helix's
 manifest and lockfile select the existing Motor cc-rs fork. The full native
-Helix build must be rerun to validate acceptance.
+Helix build now passes with the Rust/C runtime linker configuration above.
 Sed's deferred tests do not require an errno or tempfile port, and ripgrep's
 accepted matching limitation does not require an ignore port to close this
-Lorry milestone. The current external failure does not bound the number of
-later platform issues.
+Lorry milestone.
 
 The deferred ripgrep product change would be confined to
 `crates/ignore/src/pathutil.rs`: select a Motor-specific implementation of

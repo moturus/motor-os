@@ -1,30 +1,33 @@
 # Lorry workspace support
 
-Status: milestones 1–8 are complete. Milestone 9's Lorry implementation and
-native editor acceptance are complete; its real-project acceptance remains open.
+Status: all nine milestones are complete, including native editor and
+real-project acceptance with the user-approved external test deferrals below.
 This plan was updated after review on 2026-10-02 and revises the committed v3
 (`3c90c8cf`).
 
 The real-project acceptance status is:
 
-| Project | Completed | Outstanding status on Motor |
+| Project | Completed | Accepted limitations and required settings on Motor |
 | --- | --- | --- |
 | sed | Native release build | Native upstream tests deferred: uucore/errno and tempfile gaps are in the test setup. |
-| ripgrep | Native release build | Known `ignore` leading-dot-slash test failure allowed for this milestone; symlink integration helper deferred. |
-| Helix | Motor cc-rs dependency update and focused compiler checks | Re-vendor the updated graph and rerun the full native release build. |
+| ripgrep | Native release build, library tests, and 118 binary unit tests | Known `ignore` leading-dot-slash test failure allowed for this milestone; symlink integration helper deferred. |
+| Helix | Native online vendoring, release build, and executable startup | Use Motor's cc-rs fork and an explicit Rust/C runtime linker for host and target units. |
 
-Helix's native release build remains to be validated. Its dependency
-configuration and lockfile now select the existing Motor cc-rs fork, committed
-in the external Helix checkout as `73c0876c`. Focused checks prove that the fork
-compiles for Motor and Linux and that Cargo selects it in Helix's build graph.
+Helix's dependency configuration and lockfile select the existing Motor cc-rs
+fork, committed in the external Helix checkout as `73c0876c`. Native online
+vendoring passed in 70 seconds without retries. The full native release build
+passed in 259 seconds with the existing cross-build Rust/C linker recipe adapted
+to native paths. The resulting editor starts and finds its compiled YAML parser
+and queries. The linker configuration is confined to the isolated native fixture;
+no additional Helix or toolchain product source was changed.
 Diagnosed failures, required commands, and tool settings are recorded in
 [the milestone-9 details](workspace-plan-details.md#srcsys-and-the-real-projects).
 The user accepts ripgrep's known `ignore` matcher test failure for this milestone;
 it remains a recorded matching limitation and does not require a product port.
 Its symlink integration helper remains deferred. Other applicable ripgrep tests
-and all Lorry-owned gates remain required. No known large Lorry implementation
-milestone remains; the plan cannot close until the remaining acceptance is
-completed or its scope is explicitly revised.
+have run, and the current Lorry host and native gates pass. Original failures and
+their diagnoses remain recorded; the approved deferrals are not counted as
+successful test executions. No required milestone work remains.
 Lorry acceptance does not require compiling and running all sed tests natively
 on Motor. The successful native release build is accepted, and the upstream
 test suite is deferred because of unsupported test-only dependencies. Porting
@@ -229,7 +232,7 @@ contracts. Release `debug` and `opt-level` settings now match Cargo, including
 host-profile reduction and automatic stripping.
 The common compile-time check pass from milestone 9 is implemented and has
 paired native/Motor Cargo coverage for scripts, macros, and skipped ordinary
-sources. Native project acceptance remains outstanding.
+sources. Native project acceptance is complete with the deferrals listed above.
 
 The fresh milestone-8 gate passed in 1,176 seconds at `63599485`: 474 Rust
 tests, three own-message tests, all host contracts, Cargo native/cross identity,
@@ -263,8 +266,8 @@ deferred integration helper. Sed's deferred tests encounter errno's platform
 guard. The shipped native cc wrapper compiles and runs C successfully. Helix's
 original native build encountered the upstream Rust cc platform guard; the
 approved Helix dependency update now selects Motor's existing cc-rs fork.
-Full native Helix validation remains pending. No new external product code port
-has been made.
+Full native Helix validation now passes with the explicit Rust/C runtime linker
+configuration recorded in the details. No new external product code port was needed.
 A separate interrupted-build bug can mistake a PID reused after reboot for an
 old artifact owner. The user added `KernelStaticPage::boot_random_id` and
 authorized kernel initialization, now committed as `4debacaa`. Lorry records
@@ -296,10 +299,10 @@ Lorry suite (1,054 seconds). The user committed the kernel fix and regression as
 `baa0349e`, then committed the follow-up handoff, wait-handle cleanup, and test
 improvements as `80c216f2`. No timeout, descendant check, or failure assertion has
 been weakened. Evidence for the initial fix is in `/tmp/lorry-m9-wakee-gates`.
-Milestone 9 remains open for the remaining native project acceptance and scope
-decisions. The filesystem repair and regression are committed; the latest
+Milestone 9 is complete with the external test exceptions listed above.
+The filesystem repair and regression are committed; the latest
 validation evidence is recorded below and in the details file. No external-project
-product source changed.
+product source changed beyond Helix's authorized manifest and lockfile update.
 After the kernel follow-up commit, all Lorry host contracts and the native gate
 passed. The complete driver first stopped because an independent core gate was
 using the shared VM; a separate developer VM completed the native tests in 605
