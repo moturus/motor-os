@@ -31,6 +31,7 @@ pub mod policy;
 pub mod provenance;
 pub mod review_config;
 pub mod review_marks;
+pub mod review_triggers;
 pub mod search;
 pub mod session_search;
 pub mod shell_words;
@@ -106,7 +107,21 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
 
 pub fn hook(mut event: Event) -> Result<Value, String> {
     if event.event == "command" {
-        return acceptance::execute(&event);
+        return if event.payload["name"] == "review" {
+            paths::ToolContext::for_event(&event)
+                .and_then(|context| review_triggers::record(&event, &context))
+        } else {
+            acceptance::execute(&event)
+        };
+    }
+    if event.event == "before_compact" {
+        let mut response = json!({});
+        merge_optional(
+            &mut response,
+            paths::ToolContext::for_event(&event)
+                .and_then(|context| review_triggers::record(&event, &context)),
+        );
+        return Ok(response);
     }
     if event.event == "tool_result" {
         let mut response = provenance::transform(&event).unwrap_or_else(
@@ -293,7 +308,10 @@ fn with_tools(event: &Event, mut response: Value) -> Value {
         _ => false,
     };
     response["commands"] = if commands {
-        json!([acceptance::specification()])
+        json!([
+            acceptance::specification(),
+            review_triggers::specification()
+        ])
     } else {
         let notice = if matches!(events, Some(Value::Array(_))) {
             "The batteries' /accept command is disabled; add \"command\" to this hook's events to enable it."
@@ -393,7 +411,7 @@ mod tests {
             );
             assert_eq!(
                 response["commands"].as_array().unwrap().len(),
-                usize::from(enabled),
+                2 * usize::from(enabled),
                 "{payload}"
             );
             assert_eq!(response["tools"].as_array().unwrap().len(), 4);

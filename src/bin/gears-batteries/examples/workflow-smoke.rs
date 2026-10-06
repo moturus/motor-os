@@ -30,6 +30,9 @@ mod review_anchor;
 #[path = "workflow-smoke/review_policy.rs"]
 mod review_policy;
 
+#[path = "workflow-smoke/review_triggers.rs"]
+mod review_triggers;
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let binary =
@@ -203,6 +206,7 @@ fn run() -> Result<(), String> {
     review_marks::run(&fixture.workspace, &fixture.root.join("review-state"))?;
     review_anchor::run(&fixture.workspace, &fixture.root.join("review-anchor"))?;
     review_policy::run(&fixture.workspace, &fixture.root.join("review-policy"))?;
+    review_triggers::run(&fixture.workspace, &fixture.root.join("review-triggers"))?;
     fixture.cleanup(&group, &sessions, &snapshots)?;
     skills::run(&binary, &compiler)?;
     acceptance::run(&binary, &compiler)?;

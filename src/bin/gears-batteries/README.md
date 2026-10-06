@@ -242,3 +242,12 @@ result, alongside actual saved load and check entry ids in `turns.jsonl`.
 Loading, proposing or approving skills does not stale a workspace check.
 These observations make no causal claim and do not record user acceptance.
 They are evidence of co-occurrence, not proof that a skill improves results.
+
+
+`/review [focus]` records a due review mark at the current saved conversation
+entry. Reviews are disabled by default; user-wide `batteries.toml` must set
+`version = 1`, `[reviews] enabled = true`, and both `[reviews.executor]` and
+`[reviews.reviewer]` provider/model pairs. The executor pair must match the
+session exactly. Subscribe the hook to `before_compact` to record compaction
+marks too. Recording does not call a model or change the conversation.
+Background execution is not implemented yet; these marks are prerequisites.

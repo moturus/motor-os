@@ -550,7 +550,8 @@ Phase 8's user-wide `[reviews]` parser is implemented. Reviews default to
 off with a proposal cap of four. Enabling requires named executor and
 reviewer provider/model pairs; eligibility matches the executor pair exactly.
 Invalid versions, misspelled fields, zero caps and invalid names are refused.
-Review marks, commands and execution remain later phase 8 patches.
+Marks, saved-entry snapshots, tool policy and triggers are implemented below;
+the runner and proposal cap remain later phase 8 patches.
 
 The host debug and release batteries gates pass, including the real-binary
 workflow. Host and Motor-target Clippy pass with warnings denied. The actual
@@ -593,6 +594,20 @@ the path in its ordinary writer case; correcting that input preserves every
 assertion. Its original failure is
 `/tmp/gears-review-policy-host-debug-original.log`; final logs use
 `/tmp/gears-review-policy-*`. The runner and proposal cap remain later patches.
+
+### Review triggers
+
+`/review [focus]` and the subscribed `before_compact` event now record a
+durable mark at the current saved entry. Reviews stay off by default and
+require the configured executor pair to match the session. Repeated commands
+retain handled marks; review runs cannot schedule reviews. Ephemeral sessions
+cannot create persistent marks. Recording a mark leaves the conversation
+unchanged and makes no provider request; the runner remains a later patch.
+
+Both host batteries profiles, host and Motor-target warnings-denied Clippy,
+and the native release build pass. The portable trigger fixture is included
+in the existing workflow and pending developer-image gate. Logs use
+`/tmp/gears-review-triggers-*`.
 
 ## Next steps
 
