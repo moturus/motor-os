@@ -544,6 +544,22 @@ Clippy gates pass. Original failure:
 `/tmp/gears-accept-subscriptions-original.log`; native validation:
 `/tmp/gears-accept-subscriptions-native-gate.log`.
 
+### Review settings groundwork
+
+Phase 8's user-wide `[reviews]` parser is implemented. Reviews default to
+off with a proposal cap of four. Enabling requires named executor and
+reviewer provider/model pairs; eligibility matches the executor pair exactly.
+Invalid versions, misspelled fields, zero caps and invalid names are refused.
+Review marks, commands and execution remain later phase 8 patches.
+
+The host debug and release batteries gates pass, including the real-binary
+workflow. Host and Motor-target Clippy pass with warnings denied. The actual
+batteries release binary now links against the validated `dev.3` SDK's stock
+standard library, without the temporary runtime-feature override. Logs are
+`/tmp/gears-review-config-{host-debug,host-release,host-clippy,native-clippy,native-build}.log`.
+The SDK's native tools and images are still being assembled; the tracked
+selector and full cutover gates remain pending.
+
 ## Next steps
 
 The independent sysbox track continues with numeric/human sort, then field
@@ -560,11 +576,14 @@ the runtime version and checksum; the published archive checksum and exact
 parsed lockfile difference are verified. The Motor OS SDK declaration is
 prepared as `dev.3`, and its offline runtime, managed-source, key, bootstrap
 and version contracts pass. The installed SDK selector is unchanged.
-GitHub push authentication is unavailable in this session, so the user has
-been asked to push the completed fork commit before the managed SDK build.
+The user pushed the fork commit; remote verification passes. The managed SDK
+build is running, and its host SDK has passed validation. The original
+optimized NUL-scan probe and actual batteries release binary both link against
+its stock standard library. The native assembly, selector and full gates remain.
 See [the rollout record](gears-yaml-runtime.md#rollout-sequence).
 Phase 7 is complete at the
-component level. Phase 8 will discuss question 7; phase 9 requires the
+component level. Phase 8 has started with the review settings parser and will
+discuss question 7; phase 9 requires the
 user's criterion before evaluation.
 
 The optional Hermes import has not been performed. Automated mock tests
