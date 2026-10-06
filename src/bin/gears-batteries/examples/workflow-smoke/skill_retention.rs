@@ -28,6 +28,7 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
     let proposal = skill_pending::Proposal {
         version: 1,
         kind: "skill".into(),
+        cleanup: None,
         name: "checks".into(),
         before: Some(content.clone()),
         after: None,

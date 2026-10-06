@@ -21,6 +21,7 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
     let mut proposal = skill_pending::Proposal {
         version: 1,
         kind: "skill".into(),
+        cleanup: None,
         name: "agent".into(),
         before: None,
         after: Some(agent.clone()),

@@ -93,6 +93,7 @@ mod tests {
         let mut proposal = Proposal {
             version: 1,
             kind: "skill".into(),
+            cleanup: None,
             name: "checks".into(),
             before: Some(content),
             after: None,

@@ -95,6 +95,7 @@ pub fn execute(event: &Event, context: &ToolContext) -> Result<Value, String> {
     let proposal = Proposal {
         version: 1,
         kind: "skill".into(),
+        cleanup: None,
         name: arguments.name,
         before,
         after,

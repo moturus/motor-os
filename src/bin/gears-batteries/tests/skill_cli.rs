@@ -30,6 +30,7 @@ fn pending_reviews_complete_skill_and_notes_versions_and_preserves_unavailable_f
     let proposal = Proposal {
         version: 1,
         kind: "skill".into(),
+        cleanup: None,
         name: "checks".into(),
         before: None,
         after: Some(content.clone()),

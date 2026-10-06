@@ -1012,3 +1012,11 @@ to be available before an archival proposal can cite them. Session sizes, count
 and total entries are bounded. Portable fixtures, both host profiles,
 warnings-denied host/native Clippy, native release build and release snapshot VM
 pass; logs use `/tmp/gears-cleanup-usage-*`.
+
+Cleanup now stages archival proposals with their explicit cutoff, observation
+dates, inspected session count and history limitations. Recent loads or loaded
+snapshots, unavailable origin evidence, incomplete history and prior denials
+protect a version. Repeated proposals deduplicate; no live skill is changed.
+Portable proposal fixtures, both host profiles, warnings-denied host/native
+Clippy, native release build and release snapshot VM pass; logs use
+`/tmp/gears-cleanup-proposals-*`.

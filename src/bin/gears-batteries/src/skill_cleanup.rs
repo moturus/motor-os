@@ -2,16 +2,21 @@
 
 use crate::{paths::ToolContext, skill_format::Content, skill_pending::Proposal};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 pub struct Version {
     pub name: String,
     pub content: Content,
     pub origin: Option<(Proposal, u64)>,
+    pub archive_denied: bool,
 }
 
 pub fn versions(context: &ToolContext) -> Result<Vec<Version>, String> {
     let mut origins = BTreeMap::new();
+    let mut denied = BTreeSet::new();
     crate::journal::visit(
         &context.state,
         Path::new("batteries/changes.jsonl"),
@@ -20,6 +25,17 @@ pub fn versions(context: &ToolContext) -> Result<Vec<Version>, String> {
                 || !matches!(record["decision"].as_str(), Some("approve" | "deny"))
             {
                 return Err("unsupported or malformed decision record".into());
+            }
+            if record["kind"] == "skill"
+                && record["decision"] == "deny"
+                && record.get("proposal").is_some()
+            {
+                let proposal: Proposal = serde_json::from_value(record["proposal"].clone())
+                    .map_err(|e| e.to_string())?;
+                proposal.validate()?;
+                if proposal.after.is_none() {
+                    denied.insert((proposal.name, proposal.before.unwrap().hash()));
+                }
             }
             if record["kind"] == "skill" && record["decision"] == "approve" {
                 let name = record["name"]
@@ -59,10 +75,12 @@ pub fn versions(context: &ToolContext) -> Result<Vec<Version>, String> {
             .remove(&name)
             .filter(|(expected, _, _)| *expected == hash)
             .map(|(_, proposal, date)| (proposal, date));
+        let archive_denied = denied.contains(&(name.clone(), hash));
         versions.push(Version {
             name,
             content,
             origin,
+            archive_denied,
         });
     }
     let mut approved: Vec<_> = versions
@@ -147,4 +165,75 @@ pub fn cutoff(value: &str) -> Result<u64, String> {
         + day
         - 1;
     Ok(days * 86_400_000)
+}
+
+pub const LIMITATIONS: &str = "Only recorded history is inspected. Deleted sessions and prior ephemeral runs cannot be reconstructed. Loads and loaded snapshots do not establish usefulness.";
+
+pub fn propose(context: &ToolContext, since_ms: u64) -> Result<Value, String> {
+    let now = crate::pending::now_ms()?;
+    if since_ms > now {
+        return Err("cleanup cutoff must not be in the future".into());
+    }
+    if let Some(path) = context
+        .state
+        .existing_file(Path::new("batteries/changes.jsonl"))?
+    {
+        crate::skill_usage::complete_file(&path)?;
+    }
+    let versions = versions(context)?;
+    let usage = crate::skill_usage::scan(context)?;
+    let mut proposals = Vec::new();
+    let mut retained = Vec::new();
+    for version in &versions {
+        let last_load = usage.last_load.get(&version.name).map(|load| load.date_ms);
+        let last_snapshot = usage.last_snapshot.get(&version.name).copied();
+        let reason = match &version.origin {
+            None => Some("current version is user-managed"),
+            Some((_, date)) if *date >= since_ms => {
+                Some("current version was approved since cutoff")
+            }
+            _ if last_load.is_some_and(|date| date >= since_ms)
+                || last_snapshot.is_some_and(|date| date >= since_ms) =>
+            {
+                Some("recorded skill activity since cutoff")
+            }
+            _ if version.archive_denied => Some("archiving this version was denied"),
+            _ if !usage.unavailable.is_empty() => Some("recorded history is unavailable"),
+            Some((origin, _)) if !usage.source_available(&origin.source) => {
+                Some("origin evidence is unavailable")
+            }
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            retained.push(json!({"name": version.name, "reason": reason, "last_load_ms": last_load, "last_snapshot_ms": last_snapshot}));
+            continue;
+        }
+        let proposal = Proposal {
+            version: 1,
+            kind: "skill".into(),
+            name: version.name.clone(),
+            before: Some(version.content.clone()),
+            after: None,
+            source: version.origin.as_ref().unwrap().0.source.clone(),
+            date_ms: now,
+            cleanup: Some(crate::skill_pending::Cleanup {
+                since_ms,
+                checked_ms: now,
+                last_load_ms: last_load,
+                last_snapshot_ms: last_snapshot,
+                recorded_sessions: usage.sessions_read,
+                limitations: LIMITATIONS.into(),
+            }),
+        };
+        let id = crate::skill_pending::propose(context, &proposal)?
+            .ok_or("archive proposal unexpectedly empty")?;
+        proposals.push(json!({"id": id, "change": crate::skill_pending::load(context, &id)?,
+            "archive_on_approval": crate::skill_archive::relative(&version.name, &version.content)}));
+    }
+    Ok(
+        json!({"version": 1, "since_ms": since_ms, "checked_ms": now,
+        "requires_approval": true, "proposals": proposals, "retained": retained, "overlaps": overlaps(&versions),
+        "coverage": {"sessions_read": usage.sessions_read, "unavailable": usage.unavailable,
+            "limitations": LIMITATIONS}}),
+    )
 }

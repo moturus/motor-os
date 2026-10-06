@@ -22,6 +22,19 @@ pub struct Proposal {
     pub after: Option<Content>,
     pub source: Source,
     pub date_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<Cleanup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Cleanup {
+    pub since_ms: u64,
+    pub checked_ms: u64,
+    pub last_load_ms: Option<u64>,
+    pub last_snapshot_ms: Option<u64>,
+    pub recorded_sessions: usize,
+    pub limitations: String,
 }
 
 impl Proposal {
@@ -32,6 +45,21 @@ impl Proposal {
         }
         if self.before.is_none() && self.after.is_none() {
             return Err("empty skill proposal".into());
+        }
+        if let Some(cleanup) = &self.cleanup
+            && (self.before.is_none()
+                || self.after.is_some()
+                || cleanup.checked_ms < cleanup.since_ms
+                || cleanup
+                    .last_load_ms
+                    .is_some_and(|date| date >= cleanup.since_ms)
+                || cleanup
+                    .last_snapshot_ms
+                    .is_some_and(|date| date >= cleanup.since_ms)
+                || cleanup.recorded_sessions == 0
+                || cleanup.limitations.len() > 1024)
+        {
+            return Err("invalid cleanup evidence".into());
         }
         if !self.source.valid_review()
             || !crate::memory_format::identifier(&self.source.session)
@@ -164,7 +192,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let mut proposal = Proposal { version: 1, kind: "skill".into(), name: "checks".into(), before: None,
+        let mut proposal = Proposal { version: 1, kind: "skill".into(), cleanup: None, name: "checks".into(), before: None,
             after: Some(Content { skill_md: "---\nname: checks\ndescription: Run checks.\n---\n## When it applies\nRust.\n## Steps\nRun checks.\n## How to check\nAll pass.\n## Pitfalls\nStale builds.\n".into(), notes_md: None }),
             source: Source { review: None, session: "s1".into(), entries: vec!["e1".into()] }, date_ms: 1 };
         let id = propose(&context, &proposal).unwrap().unwrap();

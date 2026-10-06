@@ -12,6 +12,7 @@ use std::{
 #[derive(Default)]
 pub struct Usage {
     pub last_load: BTreeMap<String, Load>,
+    pub last_snapshot: BTreeMap<String, u64>,
     pub entries: BTreeMap<String, BTreeSet<String>>,
     pub unavailable: Vec<Value>,
     pub sessions_read: usize,
@@ -124,6 +125,19 @@ pub fn scan(context: &ToolContext) -> Result<Usage, String> {
             let mut entries = BTreeSet::new();
             for entry in session.entries() {
                 entries.insert(entry.id.clone());
+                if entry.kind == "hook_state" {
+                    for key in ["skill_snapshot", "skill_view_snapshot"] {
+                        if let Some(hash) = entry.data["state"][key].as_str() {
+                            for loaded in crate::skill_snapshot::load(context, hash)?.loaded {
+                                usage
+                                    .last_snapshot
+                                    .entry(loaded.name)
+                                    .and_modify(|date| *date = (*date).max(entry.timestamp_ms))
+                                    .or_insert(entry.timestamp_ms);
+                            }
+                        }
+                    }
+                }
                 if entry.kind != "message" {
                     continue;
                 }
