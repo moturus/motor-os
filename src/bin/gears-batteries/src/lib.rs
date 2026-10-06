@@ -31,6 +31,7 @@ pub mod policy;
 pub mod provenance;
 pub mod review_config;
 pub mod review_marks;
+pub mod review_proposals;
 pub mod review_resume;
 pub mod review_triggers;
 pub mod search;

@@ -61,6 +61,7 @@ mod tests {
         )
         .unwrap();
         let source = Source {
+            review: None,
             session: session.id().into(),
             entries: vec![id, "missing".into()],
         };

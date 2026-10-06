@@ -84,6 +84,7 @@ mod tests {
                     notes_md: None,
                 },
                 source: Source {
+                    review: None,
                     session: "s1".into(),
                     entries: vec!["load-entry".into()],
                 },

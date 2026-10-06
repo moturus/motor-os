@@ -38,7 +38,8 @@ impl Proposal {
         {
             return Err("replacement must retain the memory entry id".into());
         }
-        if !crate::memory_format::identifier(&self.source.session)
+        if !self.source.valid_review()
+            || !crate::memory_format::identifier(&self.source.session)
             || self.source.entries.is_empty()
             || self.source.entries.len() > 32
             || self
@@ -168,6 +169,7 @@ mod tests {
         )
         .unwrap();
         let source = Source {
+            review: None,
             session: "s1".into(),
             entries: vec!["e1".into()],
         };

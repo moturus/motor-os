@@ -99,10 +99,15 @@ pub fn execute(event: &Event, context: &ToolContext) -> Result<Value, String> {
         before,
         after,
         source: Source {
+            review: None,
             session: context.session.clone(),
             entries,
         },
         date_ms: crate::pending::now_ms()?,
+    };
+    let proposal = Proposal {
+        source: crate::review_proposals::source(event, context, proposal.source)?,
+        ..proposal
     };
     let id = crate::skill_pending::propose(context, &proposal)?;
     Ok(

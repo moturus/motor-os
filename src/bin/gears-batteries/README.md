@@ -257,3 +257,8 @@ first if it is pending. Background execution is not implemented yet.
 
 `gears-batteries status` shows the configured review pair and proposal limit
 under `review_settings`, and separately reports that execution is unavailable.
+
+Review proposals share `max_proposals` across memory and skills, including
+proposals already approved or denied. Their optional source `review` hash
+links them to the mark, and their session/entry citations refer to the saved
+parent history. Interrupting a review does not reset its proposal budget.

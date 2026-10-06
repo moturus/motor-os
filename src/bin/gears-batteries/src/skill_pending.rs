@@ -33,7 +33,8 @@ impl Proposal {
         if self.before.is_none() && self.after.is_none() {
             return Err("empty skill proposal".into());
         }
-        if !crate::memory_format::identifier(&self.source.session)
+        if !self.source.valid_review()
+            || !crate::memory_format::identifier(&self.source.session)
             || self.source.entries.is_empty()
             || self.source.entries.len() > 32
             || self
@@ -162,7 +163,7 @@ mod tests {
         .unwrap();
         let mut proposal = Proposal { version: 1, kind: "skill".into(), name: "checks".into(), before: None,
             after: Some(Content { skill_md: "---\nname: checks\ndescription: Run checks.\n---\n## When it applies\nRust.\n## Steps\nRun checks.\n## How to check\nAll pass.\n## Pitfalls\nStale builds.\n".into(), notes_md: None }),
-            source: Source { session: "s1".into(), entries: vec!["e1".into()] }, date_ms: 1 };
+            source: Source { review: None, session: "s1".into(), entries: vec!["e1".into()] }, date_ms: 1 };
         let id = propose(&context, &proposal).unwrap().unwrap();
         assert!(
             crate::pending::list(&context, crate::memory_format::Target::Global)

@@ -168,6 +168,7 @@ mod tests {
             before: Some(entry),
             after: None,
             source: crate::memory_format::Source {
+                review: None,
                 session: session.id().into(),
                 entries: vec![source, "missing".into()],
             },

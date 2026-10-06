@@ -204,6 +204,7 @@ mod tests {
                 name: "checks".into(),
                 content,
                 source: Source {
+                    review: None,
                     session: "s1".into(),
                     entries: vec!["e1".into()],
                 },

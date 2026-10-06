@@ -130,6 +130,7 @@ mod tests {
             name: "checks".into(),
             content: content.clone(),
             source: Source {
+                review: None,
                 session: "s1".into(),
                 entries: vec!["e1".into()],
             },

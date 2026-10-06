@@ -141,6 +141,7 @@ mod tests {
         )
         .unwrap();
         let source = Source {
+            review: None,
             session: "s1".into(),
             entries: vec!["e1".into()],
         };

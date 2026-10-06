@@ -59,6 +59,7 @@ pub fn execute(event: &Event, context: &ToolContext) -> Result<Value, String> {
         name: name.clone(),
         content: content.clone(),
         source: Source {
+            review: None,
             session: context.session.clone(),
             entries: vec![caller.into()],
         },

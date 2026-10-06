@@ -56,6 +56,19 @@ pub enum Scope {
 pub struct Source {
     pub session: String,
     pub entries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+}
+
+impl Source {
+    pub(crate) fn valid_review(&self) -> bool {
+        self.review.as_ref().is_none_or(|id| {
+            id.len() == 64
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,7 +106,8 @@ pub fn identifier(value: &str) -> bool {
 impl Entry {
     pub fn validate(&self, target: Target) -> Result<(), String> {
         let metadata = &self.metadata;
-        if !identifier(&metadata.id)
+        if !metadata.source.valid_review()
+            || !identifier(&metadata.id)
             || !identifier(&metadata.source.session)
             || metadata.source.entries.is_empty()
             || metadata.source.entries.len() > 32
@@ -202,6 +216,7 @@ mod tests {
                 kind: Kind::User,
                 scope: Scope::Global,
                 source: Source {
+                    review: None,
                     session: "session-1".into(),
                     entries: vec!["entry-2".into()],
                 },

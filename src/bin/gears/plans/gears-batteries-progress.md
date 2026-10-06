@@ -17,7 +17,8 @@ and user commands are implemented. Phase 6.5 skills and phase 7's explicit
 `dev.3` SDK. The SDK rollout is complete: three debug and three release
 main-image gates and `full-test-dev.sh --release` pass, including native
 packaged-source builds. Phase 8 has settings, marks, saved-entry snapshots,
-tool policy, triggers and the resume question; its runner and proposal cap remain.
+tool policy, triggers, the resume question and the proposal cap; its runner,
+first-request prefix test and cleanup proposals remain.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
@@ -692,6 +693,27 @@ existing shipped-tools fixture in full-test.sh. The debug gate was supplemented
 with the newly added exact CLI test; the release gate includes it. Logs use
 `/tmp/gears-fork-entry-*` (`host-cli-fixture-exact` is the targeted debug run).
 
+### Durable review proposal limits and citations
+
+Review proposals carry an optional review-mark hash alongside their parent
+session and saved entry ids. Old source records still parse and serialize
+unchanged. Review tools cite the marked parent entry and check any additional
+citations against that historical branch, instead of citing an unsaved child
+calling entry. A handled mark or disabled executor pair cannot propose.
+
+Memory and skills share `max_proposals`. Counting existing pending files and
+complete decision records preserves the limit after interruption, denial or
+approval; no counter or recovery journal is added. Ordinary proposals and
+other marks keep separate budgets. All review output remains pending.
+
+The portable workflow covers both proposal types, refusal over the cap,
+decisions followed by a restarted child, another mark, historical citation
+bounds, parent immutability and backwards-compatible source JSON. Host
+debug/release, warnings-denied host/Motor Clippy, native release build and
+release native VM component gates pass. Existing workflow drivers include
+these regressions in full-test.sh. Logs use `/tmp/gears-review-proposals-*`;
+the first successful debug run is `host-debug-original.log`.
+
 ## SDK rollout and next steps
 
 The user published moto-rt 0.17.7 and pushed the authorized external Rust-fork
@@ -709,8 +731,8 @@ pass. See [the rollout record](gears-yaml-runtime.md#rollout-sequence) for the
 exact SDK name and logs. The earlier failures remain preserved in that record.
 
 The independent sysbox track continues with field keys and S3–S6 after the
-numeric/human patch. Phase 8 continues with the runner, proposal cap, first-request prefix test
-and cleanup proposals. Phase 9 requires
+numeric/human patch. Phase 8 continues with the runner, first-request prefix test and cleanup
+proposals. Phase 9 requires
 the user's quality/cost criterion in question 7; keep reviews disabled until
 an explicit model-pair decision and real-model evidence justify enabling them.
 

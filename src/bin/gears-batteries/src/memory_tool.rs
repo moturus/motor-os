@@ -78,9 +78,11 @@ pub fn execute(event: &Event, context: &ToolContext) -> Result<Value, String> {
     entries.extend(arguments.source_entries.unwrap_or_default());
     entries.dedup();
     let source = Source {
+        review: None,
         session: context.session.clone(),
         entries,
     };
+    let source = crate::review_proposals::source(event, context, source)?;
     let date_ms = crate::pending::now_ms()?;
     let before = if matches!(arguments.action, Action::Replace | Action::Remove) {
         let id = arguments

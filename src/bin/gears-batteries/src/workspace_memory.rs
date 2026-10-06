@@ -152,6 +152,7 @@ mod tests {
                     kind: Kind::Observed,
                     scope: Scope::Workspace,
                     source: Source {
+                        review: None,
                         session: "elsewhere".into(),
                         entries: vec!["e1".into()],
                     },
