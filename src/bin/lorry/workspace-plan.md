@@ -19,9 +19,11 @@ Their failures, required commands, and tool settings are recorded in
 The waived ripgrep helper does not waive its separate library failure. No known
 large Lorry implementation milestone remains; the plan cannot close until the
 remaining acceptance is completed or its scope is explicitly revised.
-The user approved deferring sed's native upstream test suite for this Lorry
-milestone. Its successful native build is accepted; its tests are recorded as
-deferred. All Lorry-owned test gates remain required.
+Lorry acceptance does not require compiling and running all sed tests natively
+on Motor. The successful native release build is accepted, and the upstream
+test suite is deferred because of unsupported test-only dependencies. Porting
+those dependencies is outside this milestone. All Lorry-owned test gates remain
+required.
 
 The four first patches and milestone 1 are committed. The selected package's
 library, binaries, test harnesses, integration tests, and check targets use
@@ -250,8 +252,8 @@ See the detailed plan's diagnosis and validation evidence. Retained disk-capacit
 failures are separate evidence.
 
 Native ripgrep and sed release builds pass. Ripgrep's tests expose an external
-ignore path-matching defect beyond the integration helper; sed's tests are
-blocked by errno's platform guard. The shipped native cc wrapper compiles and
+ignore path-matching defect beyond the integration helper; sed's deferred tests
+encounter errno's platform guard. The shipped native cc wrapper compiles and
 runs C successfully; Helix is blocked by the locked Rust cc crate's platform
 guard. No product port in those external projects has been made.
 A separate interrupted-build bug can mistake a PID reused after reboot for an
@@ -348,8 +350,9 @@ The work is done when all of these pass:
   What a test or a program prints stays plain text, as under Cargo.
 - **Clippy.** `lorry clippy` agrees with `cargo clippy` on a fixture on
   Linux, and runs natively on Motor.
-- **Real projects, on Motor.** sed builds; its native upstream test suite is
-  deferred because of unsupported external test dependencies. ripgrep builds in
+- **Real projects, on Motor.** sed builds in release mode. Compiling and running
+  its full test suite natively is not required; unsupported external test
+  dependencies and the upstream test suite are deferred. ripgrep builds in
   release mode and runs `test --workspace --exclude grep-pcre2`. Helix
   builds with `-p helix-term --bin hx --release --no-default-features`.
   Each project's tool grants and settings are written down.

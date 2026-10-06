@@ -3899,17 +3899,18 @@ The user approved deferring these test-only dependency issues for Lorry
 acceptance. The Motor sed fork already uses `crate::sed::motor::NamedTempFile`
 for production in-place editing (`src/sed/in_place.rs`), while its unit and
 integration tests still use the generic tempfile crate. Porting that crate and
-uucore's test dependency graph is separate work. The successful native release
-build is accepted; the upstream native tests remain deferred with the original
-compilation failure preserved. No Lorry-owned test is disabled or counted as
-passing without execution.
+uucore's test dependency graph is separate work. Compiling and running all sed
+tests natively on Motor is not a Lorry acceptance requirement. The successful
+native release build is accepted; the upstream native tests remain deferred
+with the original compilation failure preserved. No Lorry-owned test is
+disabled or counted as passing without execution.
 
 Native project validation uses these commands, with the Motor target
 selected by the image's toolchain:
 
 | Project | Build | Tests |
 | --- | --- | --- |
-| sed | `lorry build --release --locked --offline` | Deferred; original reproducer: `lorry test --locked --offline`. |
+| sed | `lorry build --release --locked --offline` | Full native suite not required; deferred. Original reproducer: `lorry test --locked --offline`. |
 | ripgrep | `lorry build --release --locked --offline` | `lorry test --workspace --exclude grep-pcre2 --locked --offline` |
 | Helix | `lorry build -p helix-term --bin hx --release --no-default-features --locked --offline` | Not required by this plan. |
 
@@ -3946,6 +3947,15 @@ can preserve literal prefixes using standard Rust string operations without
 changing the stdlib. Sed's deferred tests do not require an errno or tempfile
 port to close this Lorry milestone. The current external failures do not bound
 the number of later platform issues.
+
+The proposed ripgrep product change is confined to
+`crates/ignore/src/pathutil.rs`: select a Motor-specific implementation of
+`strip_prefix` that removes the literal UTF-8 string prefix and preserves the
+remainder, including `./`. This follows the existing Unix implementation's
+literal matching policy and can use stable `OsStr::to_str` and string
+operations. The existing `leading_dot_slash_impacts_matching` regression must
+pass natively with its assertions unchanged; the port has not been applied.
+
 The waived ripgrep integration helper is independent of that path-matching bug.
 No external product source has been changed. The repository's rule for
 preexisting non-Lorry bugs requires discussing those fixes before applying them.
