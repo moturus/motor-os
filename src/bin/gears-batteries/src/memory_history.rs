@@ -58,9 +58,12 @@ pub fn status(context: &ToolContext) -> Value {
     let reviews = crate::review_config::load(&context.state)
         .map(|settings| json!(settings))
         .unwrap_or_else(|error| json!({"unavailable": error}));
-    json!({"version": 1, "reviews": "not implemented", "review_settings": reviews,
+    let last_review = crate::review_status::latest(&context.state)
+        .map(|record| record.unwrap_or(Value::Null))
+        .unwrap_or_else(|error| json!({"unavailable": error}));
+    json!({"version": 1, "reviews": "experimental", "review_settings": reviews,
         "pending_global": count(Target::Global), "pending_workspace": count(Target::Workspace),
-        "workspace_memory": workspace, "last_review": "not implemented", "last_eval": "not implemented"})
+        "workspace_memory": workspace, "last_review": last_review, "last_eval": "not implemented"})
 }
 
 #[cfg(test)]
@@ -115,7 +118,7 @@ mod tests {
         assert!(history(&context, 0, 0).is_err());
         let status = status(&context);
         assert_eq!(status["pending_global"]["count"], 0);
-        assert_eq!(status["reviews"], "not implemented");
+        assert_eq!(status["reviews"], "experimental");
         let pending = context
             .state
             .directory(Path::new("batteries/pending"))

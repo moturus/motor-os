@@ -169,8 +169,10 @@ All three commands accept `--workspace PATH` and `--root PATH`; defaults are
 the current directory and the Gears directory. Global pending changes and
 the selected workspace's changes are included. History is oldest first,
 with pages of 1–100 decisions and `next_offset` for the next page. Status
-reports pending counts and workspace approval; reviews and evals are marked
-unimplemented until their later phases.
+reports pending counts, workspace approval and experimental review settings.
+`last_review` contains the latest completed mark, executor/reviewer pair, answer
+and provider-reported usage; an absent cost remains unknown. Corrupt optional
+review data is reported independently. Evaluation remains unimplemented.
 
 Approval validates the captured entry against the current file before
 writing any decision. It then appends the decision, replaces the memory
@@ -264,7 +266,7 @@ over 64 KiB is refused explicitly, leaving the mark due. Failed or interrupted
 reviews stay due; successful marks are handled once. Nothing to save is normal.
 
 `gears-batteries status` shows the configured review pair and proposal limit
-under `review_settings`, and separately reports that execution is unavailable.
+under `review_settings`, marks execution experimental and shows `last_review`.
 
 Review proposals share `max_proposals` across memory and skills, including
 proposals already approved or denied. Their optional source `review` hash

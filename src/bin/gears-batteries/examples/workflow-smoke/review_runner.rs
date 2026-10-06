@@ -29,6 +29,7 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
         parent.path(),
     )?;
     context.state.replace_file(Path::new("batteries.toml"), b"version=1\n[reviews]\nenabled=true\n[reviews.executor]\nprovider='default'\nmodel='executor'\n[reviews.reviewer]\nprovider='default'\nmodel='reviewer'\n")?;
+    assert!(gears_batteries::review_status::latest(&context.state)?.is_none());
     let model = Model {
         provider: "default".into(),
         model: "executor".into(),
@@ -72,6 +73,26 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
     assert_eq!(record["answer"], "Nothing to save");
     assert_eq!(record["usage"]["total_tokens"], 15);
     assert!(record["usage"]["cost_usd"].is_null());
+    let status = gears_batteries::memory_history::status(&context);
+    assert_eq!(status["reviews"], "experimental");
+    assert_eq!(status["last_review"], record);
+    let original = std::fs::read(&result_path).unwrap();
+    for invalid in [
+        b"{".to_vec(),
+        vec![b' '; 16 * 1024 + 1],
+        serde_json::to_vec(&json!({"version": 2})).unwrap(),
+    ] {
+        context
+            .state
+            .replace_file(Path::new("batteries/last-review.json"), &invalid)?;
+        let status = gears_batteries::memory_history::status(&context);
+        assert!(status["last_review"]["unavailable"].is_string());
+        assert_eq!(status["pending_global"]["count"], 0);
+        assert_eq!(std::fs::read(&result_path).unwrap(), invalid);
+    }
+    context
+        .state
+        .replace_file(Path::new("batteries/last-review.json"), &original)?;
     let other = ToolContext::new(workspace.into(), root.into(), "other".into(), None)?;
     assert_eq!(
         review_runner::run(

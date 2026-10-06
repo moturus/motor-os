@@ -19,7 +19,7 @@ main-image gates and `full-test-dev.sh --release` pass, including native
 packaged-source builds. Phase 8 has settings, marks, saved-entry snapshots,
 tool policy, triggers, the resume question, the proposal cap and the connected
 review runner. Real-binary compacted reviews preserve the saved prefix on both
-systems. Status, an in-flight interruption regression and cleanup remain.
+systems. An in-flight interruption regression and cleanup remain.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
@@ -836,6 +836,20 @@ batteries and Gears profiles, warnings-denied batteries host/native Clippy,
 the native release build and release snapshot VM workflow pass. Logs use
 `/tmp/gears-review-cli-*`; no external provider is contacted.
 
+### Latest review status
+
+`status` marks review execution experimental and reports the latest completed
+mark, model pair, bounded answer and provider-reported usage. Missing data is
+null; damaged, unsupported or oversized optional data is reported independently
+without hiding pending changes or modifying the file. Unknown cost stays null.
+
+Both host profiles, warnings-denied host/native Clippy, the native release build
+and release snapshot VM workflow pass. Logs use `/tmp/gears-review-status-*`;
+the corrected debug gate is `host-debug-fixed.log`. The original debug log
+preserves two CLI assertions for the old unimplemented placeholder; they now
+assert the experimental value. The portable fixture covers optional-record
+failure isolation and unchanged damaged bytes.
+
 ### Corrections after a frozen prefix
 
 Batteries hooks recognize `preserve_prefix` during initialization. They retain
@@ -883,7 +897,7 @@ pass. See [the rollout record](gears-yaml-runtime.md#rollout-sequence) for the
 exact SDK name and logs. The earlier failures remain preserved in that record.
 
 The independent sysbox track continues with field keys and S3–S6 after the
-numeric/human patch. Phase 8 continues with status, an in-flight interruption
+numeric/human patch. Phase 8 continues with an in-flight interruption
 regression and cleanup proposals. Guidance is requested on the cleanup cutoff.
 Phase 9 requires
 the user's quality/cost criterion in question 7; keep reviews disabled until

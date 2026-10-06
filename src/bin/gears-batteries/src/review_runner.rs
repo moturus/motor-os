@@ -25,7 +25,7 @@ struct Final {
 }
 
 #[derive(Deserialize, Serialize)]
-struct Usage {
+pub(crate) struct Usage {
     completions: u64,
     prompt_tokens: u64,
     completion_tokens: u64,

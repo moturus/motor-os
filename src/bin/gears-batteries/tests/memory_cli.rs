@@ -122,7 +122,7 @@ fn the_binary_reviews_postponed_changes_and_refuses_stale_approvals_without_logg
     );
     let status: Value = serde_json::from_str(&fixture.success(&["status"], b"")).unwrap();
     assert_eq!(status["pending_global"]["count"], 0);
-    assert_eq!(status["reviews"], "not implemented");
+    assert_eq!(status["reviews"], "experimental");
     proposal.before = Some(entry);
     proposal.after.as_mut().unwrap().text = "Prefer native Rust.".into();
     let stale = gears_batteries::memory::propose(&fixture.context, &proposal)
@@ -195,7 +195,7 @@ fn status_reports_model_pairs_and_invalid_optional_configuration() {
     let settings = std::path::Path::new("batteries.toml");
     fixture.context.state.replace_file(settings, b"version=1\n[reviews]\nenabled=true\nmax_proposals=2\n[reviews.executor]\nprovider='local'\nmodel='executor'\n[reviews.reviewer]\nprovider='openrouter'\nmodel='vendor/reviewer'\n").unwrap();
     let status = fixture.history(&["status"]);
-    assert_eq!(status["reviews"], "not implemented");
+    assert_eq!(status["reviews"], "experimental");
     assert_eq!(status["review_settings"]["enabled"], true);
     assert_eq!(status["review_settings"]["max_proposals"], 2);
     assert_eq!(status["review_settings"]["executor"]["provider"], "local");

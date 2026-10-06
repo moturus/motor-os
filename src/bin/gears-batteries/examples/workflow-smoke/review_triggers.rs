@@ -37,7 +37,7 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
     );
     assert!(review_marks::due(&context)?.is_empty());
     let status = gears_batteries::memory_history::status(&context);
-    assert_eq!(status["reviews"], "not implemented");
+    assert_eq!(status["reviews"], "experimental");
     assert_eq!(status["review_settings"]["enabled"], false);
     assert_eq!(status["review_settings"]["max_proposals"], 4);
     let configuration = b"version=1\n[reviews]\nenabled=true\n[reviews.executor]\nprovider='local'\nmodel='executor'\n[reviews.reviewer]\nprovider='local'\nmodel='reviewer'\n";
@@ -129,7 +129,7 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
     );
     assert_eq!(review_marks::due(&context)?.len(), 2);
     let status = gears_batteries::memory_history::status(&context);
-    assert_eq!(status["reviews"], "not implemented");
+    assert_eq!(status["reviews"], "experimental");
     assert_eq!(status["review_settings"]["enabled"], true);
     assert_eq!(
         status["review_settings"]["executor"],
