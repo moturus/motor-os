@@ -1036,3 +1036,13 @@ and the pre-fix `gears-cleanup-cli-host-release.log`. Both fixed host profiles,
 warnings-denied host/native Clippy, native release build and release snapshot
 VM pass; logs use `/tmp/gears-cleanup-cli-*`. Measurement infrastructure is next;
 the quality/cost criterion is required before its first real-model run.
+
+Phase 9's state-directory foundation shares the root used by configuration,
+provider choice, tool/permission settings, locks and sessions. The internal
+`GEARS_DIRECTORY` override is inherited by child processes; explicit selection
+does not fall back to legacy configuration elsewhere. The actual-process
+fixture checks selected defaults, malformed selected tool settings, startup
+cleanup, saved sessions and invalid roots against a loopback mock.
+Both host Gears profiles, warnings-denied host/native Clippy, native release
+build and the release snapshot VM shipped-tool gate pass; logs use
+`/tmp/gears-eval-directory-*`. The CLI flag and batteries root connection follow.

@@ -210,23 +210,15 @@ impl Config {
     }
 
     pub fn default_path() -> Option<PathBuf> {
-        #[cfg(target_os = "motor")]
-        {
-            Some(PathBuf::from("/user/cfg/gears/gears.toml"))
-        }
-        #[cfg(all(unix, not(target_os = "motor")))]
-        {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".gears/gears.toml"))
-        }
-        #[cfg(not(any(target_os = "motor", unix)))]
-        {
-            None
-        }
+        crate::directory::default_root()
+            .ok()
+            .map(|root| root.join("gears.toml"))
     }
 
     fn legacy_path() -> Option<PathBuf> {
+        if std::env::var_os(crate::directory::ENV).is_some() {
+            return None;
+        }
         #[cfg(target_os = "motor")]
         {
             Some(PathBuf::from("/user/cfg/gears.toml"))

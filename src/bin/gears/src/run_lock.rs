@@ -19,16 +19,7 @@ pub struct DirectoryLock {
 
 impl DirectoryLock {
     pub fn acquire_default() -> Result<Self, String> {
-        #[cfg(target_os = "motor")]
-        let root = PathBuf::from("/user/cfg/gears");
-        #[cfg(all(unix, not(target_os = "motor")))]
-        let root = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join(".gears"))
-            .ok_or("HOME is not set; cannot locate Gears directory")?;
-        #[cfg(not(any(target_os = "motor", unix)))]
-        return Err("this platform has no Gears directory".to_string());
-        Self::acquire_at(&root)
+        Self::acquire_at(&crate::directory::default_root()?)
     }
 
     pub fn acquire_at(root: &Path) -> Result<Self, String> {

@@ -1221,21 +1221,7 @@ fn clipped(text: &str, limit: usize) -> String {
 }
 
 fn default_root() -> Result<PathBuf, String> {
-    #[cfg(target_os = "motor")]
-    {
-        Ok(PathBuf::from("/user/cfg/gears/sessions"))
-    }
-    #[cfg(all(unix, not(target_os = "motor")))]
-    {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join(".gears/sessions"))
-            .ok_or("HOME is not set; cannot locate Gears sessions".to_string())
-    }
-    #[cfg(not(any(target_os = "motor", unix)))]
-    {
-        Err("this platform has no Gears session root".to_string())
-    }
+    Ok(crate::directory::default_root()?.join("sessions"))
 }
 
 fn workspace_key(workspace: &Path) -> String {

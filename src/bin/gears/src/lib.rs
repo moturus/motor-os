@@ -4,6 +4,7 @@ pub mod after_turn;
 pub mod cancellation;
 pub mod cli;
 pub mod config;
+pub mod directory;
 pub mod hooks;
 pub mod mock;
 pub mod net;

@@ -18,6 +18,8 @@ mod fork_entry;
 mod owned_work;
 #[path = "tool-smoke/request_prefix.rs"]
 mod request_prefix;
+#[path = "tool-smoke/state_directory.rs"]
+mod state_directory;
 
 #[cfg(not(test))]
 fn main() -> Result<(), String> {
@@ -46,6 +48,7 @@ fn main() -> Result<(), String> {
     fork_entry::smoke(&gears)?;
     file_access::smoke()?;
     request_prefix::smoke()?;
+    state_directory::smoke(&gears)?;
     println!("gears shipped tools ALL PASS");
     Ok(())
 }
@@ -283,4 +286,9 @@ fn startup_forks_select_old_entries_without_locking_or_changing_the_parent() {
 #[test]
 fn saved_request_prefixes_survive_compaction_and_historical_forks() {
     request_prefix::smoke().unwrap();
+}
+
+#[test]
+fn selected_directories_keep_defaults_locks_and_sessions_together() {
+    state_directory::smoke(Path::new(env!("CARGO_BIN_EXE_gears"))).unwrap();
 }
