@@ -29,24 +29,28 @@ use moto_sys::UserThreadControlBlock;
 // wakee (wait_and_switch), its own park bookkeeping (on_thread_paused)
 // cannot run in its own context — it runs from the *wakee's* context right
 // after the switch, exactly like on_thread_paused runs after tcb.pause()
-// has saved the context in the queue path. The parked thread's Arc is
-// stashed across the switch in this CPU's gs:[72] slot (see the GS struct
-// in arch/x64) — per-CPU by construction, no static array.
+// has saved the context in the queue path. The parked thread's Arc and the
+// wakee's are stashed across the switch in this CPU's gs:[72] and gs:[80]
+// slots (see the GS struct in arch/x64) — per-CPU by construction, no
+// static array. Neither may stay on the parked stack: a killed thread's
+// stack is discarded without running Rust destructors.
 
-fn set_direct_switch_prev(prev: Arc<Thread>) {
-    crate::arch::set_direct_switch_prev(Arc::into_raw(prev) as usize as u64);
+fn set_direct_switch(prev: Arc<Thread>, next: Arc<Thread>) {
+    crate::arch::set_direct_switch(
+        Arc::into_raw(prev) as usize as u64,
+        Arc::into_raw(next) as usize as u64,
+    );
 }
 
-// Parks the thread that direct-switched to us, if any. Must run first
+// Parks the thread that direct-switched to `wakee`, if any. Must run first
 // thing after every potential switch-in point (wait()/wait_and_switch()).
-fn finish_direct_switch() {
-    let prev = crate::arch::take_direct_switch_prev();
-    if prev != 0 {
-        // SAFETY: wait_and_switch transfers both references to this incoming
-        // context. Its TCB identifies the wakee; neither reference stays on a
-        // parked stack that may be discarded without running Rust destructors.
+fn finish_direct_switch(wakee: &Thread) {
+    if let Some((prev, next)) = crate::arch::take_direct_switch() {
+        // SAFETY: both are the Arc::into_raw pointers that set_direct_switch
+        // handed to this incoming context, taken exactly once.
         let prev = unsafe { Arc::from_raw(prev as usize as *const Thread) };
-        let _wakee = unsafe { Arc::from_raw(ThreadControlBlock::current_thread_ptr()) };
+        let next = unsafe { Arc::from_raw(next as usize as *const Thread) };
+        debug_assert!(core::ptr::eq(Arc::as_ptr(&next), wakee));
         prev.on_thread_paused();
     }
 }
@@ -971,6 +975,13 @@ pub struct Thread {
     // wait: steady-state waits register handles without allocating (S13).
     sys_wait_objects: SpinLock<Vec<WaitObject>>,
 
+    // The handle list of a sys_wait() too long for the syscall's inline
+    // buffer. It lives here, not on the syscall stack, because a killed
+    // thread's stack is discarded without running Rust destructors. Kept
+    // between waits: at most max_wait_handles entries. Only the thread
+    // itself touches it, so it needs no lock.
+    wait_handle_spill: core::cell::UnsafeCell<Vec<u64>>,
+
     timed_out: AtomicBool,
     wakers: SpinLock<WakerVec>,
 
@@ -1030,6 +1041,7 @@ impl Thread {
             timer_id: AtomicU64::new(0),
             timer_cpu: AtomicU32::new(u32::MAX),
             sys_wait_objects: SpinLock::new(Vec::new()),
+            wait_handle_spill: core::cell::UnsafeCell::new(Vec::new()),
             timed_out: AtomicBool::new(false),
             wakers: SpinLock::new(WakerVec::new(SysHandle::NONE)),
             last_cpu: AtomicU32::new(u32::MAX),
@@ -1153,6 +1165,15 @@ impl Thread {
         let mut list = self.sys_wait_objects.lock(line!());
         assert!(list.is_empty());
         list.extend(objects); // Reuses the capacity retained by clear_wait_objects_on_wake().
+    }
+
+    /// # Safety
+    ///
+    /// Only the thread itself may call this, and it must not hold an earlier
+    /// borrow: see the field comment.
+    #[allow(clippy::mut_from_ref)]
+    pub(super) unsafe fn wait_handle_spill(&self) -> &mut Vec<u64> {
+        &mut *self.wait_handle_spill.get()
     }
 
     pub(super) fn add_waker(&self, waker: SysHandle) {
@@ -1580,7 +1601,7 @@ impl Thread {
         // tcb.pause() above is done, which means the thread is
         // no longer InWait.
 
-        finish_direct_switch();
+        finish_direct_switch(self);
         self.after_wait()
     }
 
@@ -1595,16 +1616,16 @@ impl Thread {
         next.cancel_timeout();
         next.clear_wait_objects_on_wake();
 
-        set_direct_switch_prev(self.get_weak().upgrade().unwrap());
-        let next = Arc::into_raw(next);
-        // SAFETY: finish_direct_switch in the wakee consumes the transferred
-        // Arc only after switching to its TCB. No reference to that TCB may
-        // survive on our parked stack, since the wakee can exit before us.
-        unsafe { self.tcb.switch_to(core::ptr::addr_of!((*next).tcb)) };
+        let next_tcb = core::ptr::addr_of!(next.tcb);
+        set_direct_switch(self.get_weak().upgrade().unwrap(), next);
+        // SAFETY: `next` was claimed by a *_for_switch wake. Its Arc, just
+        // handed over, is released by finish_direct_switch in the wakee,
+        // that is, only after the switch to its TCB.
+        unsafe { self.tcb.switch_to(next_tcb) };
         // We are back on a CPU: someone woke us (queue path or a direct
         // switch of their own).
 
-        finish_direct_switch();
+        finish_direct_switch(self);
         self.after_wait()
     }
 

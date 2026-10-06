@@ -110,35 +110,58 @@ pub fn install_kernel_page_table() {
     install_page_table(kpt);
 }
 
-// W7 direct switch: this CPU's "previous thread" slot (gs:[72], see the GS
-// struct) — an Arc::into_raw pointer to the thread that direct-switched
-// away and still needs its park bookkeeping run, 0 when none. Same-CPU
-// set/take only; see the field comment for why plain accesses suffice.
-pub fn set_direct_switch_prev(ptr: u64) {
+// W7 direct switch: this CPU's handoff slots (gs:[72] and gs:[80], see the
+// GS struct) — Arc::into_raw pointers to the thread that direct-switched
+// away and still needs its park bookkeeping run, and to the wakee it
+// switched to; both 0 when none. Same-CPU set/take only; see the field
+// comment for why plain accesses suffice.
+pub fn set_direct_switch(prev: u64, next: u64) {
     #[cfg(debug_assertions)]
     {
-        let prev: u64;
+        let (old_prev, old_next): (u64, u64);
         unsafe {
-            core::arch::asm!("mov {}, gs:[72]", out(reg) prev, options(nostack));
+            core::arch::asm!(
+                "mov {}, gs:[72]",
+                "mov {}, gs:[80]",
+                out(reg) old_prev,
+                out(reg) old_next,
+                options(nostack)
+            );
         }
-        debug_assert_eq!(prev, 0);
+        debug_assert_eq!((old_prev, old_next), (0, 0));
     }
-    unsafe {
-        core::arch::asm!("mov gs:[72], {}", in(reg) ptr, options(nostack));
-    }
-}
-
-pub fn take_direct_switch_prev() -> u64 {
-    let ptr: u64;
     unsafe {
         core::arch::asm!(
-            "mov {p}, gs:[72]",
-            "mov qword ptr gs:[72], 0",
-            p = out(reg) ptr,
+            "mov gs:[72], {}",
+            "mov gs:[80], {}",
+            in(reg) prev,
+            in(reg) next,
             options(nostack)
         );
     }
-    ptr
+}
+
+// Takes the (prev, next) pair left by set_direct_switch; None when no
+// handoff is pending, which is every wake that came through the run queue.
+pub fn take_direct_switch() -> Option<(u64, u64)> {
+    let prev: u64;
+    unsafe {
+        core::arch::asm!("mov {}, gs:[72]", out(reg) prev, options(nostack));
+    }
+    if prev == 0 {
+        return None;
+    }
+    let next: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, gs:[80]",
+            "mov qword ptr gs:[72], 0",
+            "mov qword ptr gs:[80], 0",
+            out(reg) next,
+            options(nostack)
+        );
+    }
+    Some((prev, next))
 }
 
 pub fn bsp() -> uCpus {
@@ -291,6 +314,9 @@ struct GS {
     // preempted and no IRQ path touches this, so plain same-CPU
     // reads/writes are race-free.
     direct_switch_prev: u64,
+    // offset 80: Arc::into_raw pointer to that switch's wakee, which
+    // releases it on emergence; set and taken together with offset 72.
+    direct_switch_next: u64,
 }
 
 impl GS {
@@ -360,6 +386,7 @@ impl GS {
         gs.kpt = paging::kpt_phys_addr();
         gs.current_cr3 = gs.kpt; // CR3 == KPT during init.
         gs.direct_switch_prev = 0;
+        gs.direct_switch_next = 0;
 
         wrmsr(Self::MSR_IA32_GS_BASE, gs_val); // Same as asm!("wrgsbase {gsval}").
         wrmsr(Self::MSR_IA32_KERNEL_GSBASE, gs_val);
