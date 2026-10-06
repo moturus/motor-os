@@ -26,6 +26,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox rm");
     println!("\tsysbox rmdir");
     println!("\tsysbox sleep");
+    println!("\tsysbox sort");
     println!("\tsysbox ss");
     println!("\tsysbox stats");
     println!("\tsysbox tail");
@@ -90,6 +91,7 @@ fn main() {
         "rm" => commands::rm::do_command(&args[1..]),
         "rmdir" => commands::rmdir::do_command(&args[1..]),
         "sleep" => commands::sleep::do_command(&args[1..]),
+        "sort" => commands::sort::do_command(&args[1..]),
         "ss" => commands::ss::do_command(&args[1..]),
         "stats" => commands::stats::do_command(&args[1..]),
         "tail" => commands::tail::do_command(&args[1..]),

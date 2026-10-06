@@ -19,6 +19,7 @@ pub mod pstat;
 pub mod rm;
 pub mod rmdir;
 pub mod sleep;
+pub mod sort;
 pub mod ss;
 pub mod stats;
 pub mod tail;

@@ -66,6 +66,11 @@ The shell is somewhat barebones now (contributions are welcome!).
 - `mkdir [-p | --parents] [--] DIRECTORY...` creates directories. With `-p`,
   it creates missing parents and accepts directories that already exist;
   files blocking a directory are errors. Other creation flags are refused;
+- `sort [-rufsc] [-o FILE] [--] [FILE]...` sorts newline-delimited byte
+  strings, reading standard input for no file or `-`. Flags reverse order,
+  remove equal keys, fold ASCII case, keep equal keys stable, check order,
+  or select an output file. Input is read before opening output. Numeric
+  and field-key options are not yet supported;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
   numeric IPv4 and IPv6 addresses, `localhost`, and DNS names;
 - `head [-n [-]NUM | -c [-]NUM] [-q | -v] [-z] [FILE]...` prints the first 10
