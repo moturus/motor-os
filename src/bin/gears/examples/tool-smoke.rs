@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 mod directory_lock;
 #[path = "tool-smoke/file_access.rs"]
 mod file_access;
+#[path = "tool-smoke/fork_entry.rs"]
+mod fork_entry;
 #[path = "tool-smoke/owned_work.rs"]
 mod owned_work;
 
@@ -39,6 +41,7 @@ fn main() -> Result<(), String> {
         .unwrap_or(gears);
     owned_work::smoke(&gears, &directory.join("tools/sh"))?;
     directory_lock::smoke(&gears)?;
+    fork_entry::smoke(&gears)?;
     file_access::smoke()?;
     println!("gears shipped tools ALL PASS");
     Ok(())
@@ -267,4 +270,9 @@ fn another_gears_cannot_replace_a_live_directory_lock() {
 #[test]
 fn atomic_workspace_replacement_keeps_executable_access() {
     file_access::smoke().unwrap();
+}
+
+#[test]
+fn startup_forks_select_old_entries_without_locking_or_changing_the_parent() {
+    fork_entry::smoke(Path::new(env!("CARGO_BIN_EXE_gears"))).unwrap();
 }

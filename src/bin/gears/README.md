@@ -174,6 +174,9 @@ source file and writer lock untouched. `Store::clone_active_with_options`
 can copy that snapshot into a saved or ephemeral child session.
 The CLI accepts `--fork ID --ephemeral -p 'review this work'` to read a live
 parent's usable history and run a child without saving its conversation.
+Add `--fork-entry ENTRY` to end the copy at an exact saved entry, including
+one from before a later compaction. An unknown entry or unfinished tool round
+is refused; the source session remains unchanged and writable.
 
 For machine-readable one-shot output, use `-p PROMPT --output jsonl`.
 Version 1 starts with a `session` record containing `session_id`, `path`

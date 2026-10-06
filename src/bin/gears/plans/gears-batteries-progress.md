@@ -677,6 +677,21 @@ lacked the required memory header. Encoding a valid empty Document fixes setup;
 the two-question assertion is unchanged. Final logs use
 `/tmp/gears-review-resume-*`, with `host-debug-fixed` for the corrected gate.
 
+### Saved-entry CLI forks
+
+`gears --fork SESSION --fork-entry ENTRY --ephemeral` reads the branch ending
+at the marked entry even after the parent compacts or continues. This exposes
+the existing snapshot API to the future background runner. Unknown entries,
+invalid option combinations and duplicate selectors are refused.
+
+Host debug/release provider gates, warnings-denied host/Motor Clippy and the
+native release build pass. The real CLI fixture passes on Linux and Motor OS:
+it displays the original conversation after compaction, makes no provider
+request and leaves the parent unchanged and writable. It runs through the
+existing shipped-tools fixture in full-test.sh. The debug gate was supplemented
+with the newly added exact CLI test; the release gate includes it. Logs use
+`/tmp/gears-fork-entry-*` (`host-cli-fixture-exact` is the targeted debug run).
+
 ## SDK rollout and next steps
 
 The user published moto-rt 0.17.7 and pushed the authorized external Rust-fork

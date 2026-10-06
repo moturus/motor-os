@@ -44,6 +44,7 @@ Options:
   -r, --resume ID     Resume a session by path or partial id
   --session ID        Alias for --resume
   --fork ID           Clone a saved session; may combine with --ephemeral
+  --fork-entry ID     End that clone at this saved entry; requires --fork
   --ephemeral         Do not save the session
   -n, --name NAME     Name a new session
   -v, -vv, -vvv       Increase transport diagnostics
@@ -97,6 +98,7 @@ pub struct Args {
     pub ui: crate::ui::select::Requested,
     pub verbosity: u8,
     pub session: SessionStart,
+    pub fork_entry: Option<String>,
     pub name: Option<String>,
 }
 
@@ -114,6 +116,7 @@ impl Args {
             ui: crate::ui::select::Requested::Auto,
             verbosity: 0,
             session: SessionStart::New,
+            fork_entry: None,
             name: None,
         };
         let mut iterator = argv.iter().map(AsRef::as_ref);
@@ -183,12 +186,31 @@ impl Args {
                 "--fork" => args.set_session(SessionStart::Fork(
                     value(flag, inline, &mut iterator)?.to_string(),
                 ))?,
+                "--fork-entry" => {
+                    if args.fork_entry.is_some() {
+                        return Err("only one --fork-entry may be supplied".into());
+                    }
+                    let entry = value(flag, inline, &mut iterator)?;
+                    if entry.is_empty() || entry.len() > 128 || entry.chars().any(char::is_control)
+                    {
+                        return Err("--fork-entry needs a saved entry id".into());
+                    }
+                    args.fork_entry = Some(entry.into());
+                }
                 "--ephemeral" | "--no-session" => args.set_session(SessionStart::Ephemeral)?,
                 "-n" | "--name" => {
                     args.name = Some(value(flag, inline, &mut iterator)?.to_string())
                 }
                 _ => return Err(format!("unrecognized argument {argument:?}")),
             }
+        }
+        if args.fork_entry.is_some()
+            && !matches!(
+                args.session,
+                SessionStart::Fork(_) | SessionStart::ForkEphemeral(_)
+            )
+        {
+            return Err("--fork-entry requires --fork".into());
         }
         if args.output == Output::Jsonl {
             if args.action != Action::Run || args.prompt.is_none() {
@@ -276,6 +298,28 @@ mod tests {
             SessionStart::Resume("abc".to_string())
         );
         assert!(Args::parse(&["-c", "--ephemeral"]).is_err());
+    }
+
+    #[test]
+    fn saved_entry_selection_requires_a_fork_and_accepts_either_option_order() {
+        for argv in [
+            vec!["--fork", "parent", "--fork-entry", "e1"],
+            vec!["--fork-entry=e1", "--ephemeral", "--fork", "parent"],
+        ] {
+            assert_eq!(
+                Args::parse(&argv).unwrap().fork_entry.as_deref(),
+                Some("e1")
+            );
+        }
+        for argv in [
+            vec!["--fork-entry", "e1"],
+            vec!["--resume", "parent", "--fork-entry", "e1"],
+            vec!["--fork", "parent", "--fork-entry="],
+            vec!["--fork", "parent", "--fork-entry", "e1", "--fork-entry=e2"],
+            vec!["--fork", "parent", "--fork-entry", "bad\nentry"],
+        ] {
+            assert!(Args::parse(&argv).is_err(), "{argv:?}");
+        }
     }
 
     #[test]

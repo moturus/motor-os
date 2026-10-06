@@ -228,6 +228,10 @@ fn open_session(store: &Store, args: &Args) -> Result<Session, String> {
         SessionStart::Resume(selector) => store.open(selector),
         SessionStart::Fork(selector) | SessionStart::ForkEphemeral(selector) => {
             let source = store.read(selector)?;
+            let source = match &args.fork_entry {
+                Some(entry) => source.at(entry)?,
+                None => source,
+            };
             store.clone_active_with_options(
                 &source,
                 matches!(args.session, SessionStart::ForkEphemeral(_)),
@@ -351,6 +355,48 @@ fn diagnostic(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_forks_select_the_saved_entry_before_later_compaction() {
+        let base = std::env::temp_dir().join(format!("gears-cli-entry-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        let store = Store::with_root(&base, base.join("state")).unwrap();
+        let mut parent = store.create(false, None).unwrap();
+        parent
+            .append_message(&Message::user("Original task"))
+            .unwrap();
+        let entry = parent
+            .append_message(&Message::assistant("Original answer"))
+            .unwrap();
+        let messages = parent.context_messages().unwrap();
+        parent
+            .append_compaction(&gears::session::Compaction {
+                summary: "Later summary".into(),
+                retained_tail: Vec::new(),
+                tokens_before: 100,
+            })
+            .unwrap();
+        parent.append_message(&Message::user("Later task")).unwrap();
+        let path = parent.path().unwrap().to_path_buf();
+        let before = std::fs::read(&path).unwrap();
+        for ephemeral in [false, true] {
+            let mut argv = vec!["--fork", parent.id(), "--fork-entry", &entry];
+            if ephemeral {
+                argv.push("--ephemeral");
+            }
+            let child = open_session(&store, &Args::parse(&argv).unwrap()).unwrap();
+            assert_eq!(child.is_ephemeral(), ephemeral);
+            assert_eq!(child.context_messages().unwrap(), messages);
+        }
+        let args = Args::parse(&["--fork", parent.id(), "--fork-entry", "missing"]).unwrap();
+        assert!(open_session(&store, &args).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        parent
+            .append_message(&Message::assistant("Parent continued"))
+            .unwrap();
+        drop(parent);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn startup_forks_read_a_live_parent_and_preserve_the_selected_storage_mode() {
