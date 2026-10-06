@@ -609,6 +609,18 @@ and the native release build pass. The portable trigger fixture is included
 in the existing workflow and pending developer-image gate. Logs use
 `/tmp/gears-review-triggers-*`.
 
+### Review settings in status
+
+`gears-batteries status` now reports the requested model pair, enabled flag
+and proposal limit under `review_settings`, while `reviews` still explicitly
+says execution is not implemented. Invalid configuration is reported beside
+the unaffected pending-change counts. Both host profiles, warnings-denied
+host/Motor Clippy and the native release build pass. The first new CLI test
+used a plain write into a nonexistent state directory; using the existing
+atomic state writer fixes that setup without changing assertions. The
+original log is `/tmp/gears-review-status-host-debug-original.log`; final
+logs use `/tmp/gears-review-status-*`.
+
 ## Next steps
 
 The independent sysbox track continues with numeric/human sort, then field

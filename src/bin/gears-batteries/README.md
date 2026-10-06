@@ -251,3 +251,6 @@ entry. Reviews are disabled by default; user-wide `batteries.toml` must set
 session exactly. Subscribe the hook to `before_compact` to record compaction
 marks too. Recording does not call a model or change the conversation.
 Background execution is not implemented yet; these marks are prerequisites.
+
+`gears-batteries status` shows the configured review pair and proposal limit
+under `review_settings`, and separately reports that execution is unavailable.

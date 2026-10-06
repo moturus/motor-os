@@ -36,6 +36,10 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
             .contains("disabled")
     );
     assert!(review_marks::due(&context)?.is_empty());
+    let status = gears_batteries::memory_history::status(&context);
+    assert_eq!(status["reviews"], "not implemented");
+    assert_eq!(status["review_settings"]["enabled"], false);
+    assert_eq!(status["review_settings"]["max_proposals"], 4);
     let configuration = b"version=1\n[reviews]\nenabled=true\n[reviews.executor]\nprovider='local'\nmodel='executor'\n[reviews.reviewer]\nprovider='local'\nmodel='reviewer'\n";
     context
         .state
@@ -124,6 +128,28 @@ pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
             .contains("saved session")
     );
     assert_eq!(review_marks::due(&context)?.len(), 2);
+    let status = gears_batteries::memory_history::status(&context);
+    assert_eq!(status["reviews"], "not implemented");
+    assert_eq!(status["review_settings"]["enabled"], true);
+    assert_eq!(
+        status["review_settings"]["executor"],
+        json!({"provider": "local", "model": "executor"})
+    );
+    assert_eq!(
+        status["review_settings"]["reviewer"],
+        json!({"provider": "local", "model": "reviewer"})
+    );
+    context
+        .state
+        .replace_file(Path::new("batteries.toml"), b"version=99")?;
+    let status = gears_batteries::memory_history::status(&context);
+    assert!(
+        status["review_settings"]["unavailable"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported")
+    );
+    assert_eq!(status["pending_global"]["count"], 0);
     println!("gears batteries review triggers ALL PASS");
     Ok(())
 }

@@ -188,3 +188,32 @@ fn imported_workspace_approval_is_bound_to_the_bytes_listed_by_the_binary() {
     let status: Value = serde_json::from_str(&fixture.success(&["status"], b"")).unwrap();
     assert_eq!(status["workspace_memory"]["approved"], false);
 }
+
+#[test]
+fn status_reports_model_pairs_and_invalid_optional_configuration() {
+    let fixture = Fixture::new("review-status");
+    let settings = std::path::Path::new("batteries.toml");
+    fixture.context.state.replace_file(settings, b"version=1\n[reviews]\nenabled=true\nmax_proposals=2\n[reviews.executor]\nprovider='local'\nmodel='executor'\n[reviews.reviewer]\nprovider='openrouter'\nmodel='vendor/reviewer'\n").unwrap();
+    let status = fixture.history(&["status"]);
+    assert_eq!(status["reviews"], "not implemented");
+    assert_eq!(status["review_settings"]["enabled"], true);
+    assert_eq!(status["review_settings"]["max_proposals"], 2);
+    assert_eq!(status["review_settings"]["executor"]["provider"], "local");
+    assert_eq!(
+        status["review_settings"]["reviewer"]["model"],
+        "vendor/reviewer"
+    );
+    fixture
+        .context
+        .state
+        .replace_file(settings, b"version=2")
+        .unwrap();
+    let status = fixture.history(&["status"]);
+    assert!(
+        status["review_settings"]["unavailable"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported")
+    );
+    assert_eq!(status["pending_global"]["count"], 0);
+}
