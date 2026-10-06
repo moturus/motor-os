@@ -560,6 +560,17 @@ standard library, without the temporary runtime-feature override. Logs are
 The SDK's native tools and images are still being assembled; the tracked
 selector and full cutover gates remain pending.
 
+### Durable review marks
+
+Review marks now persist by session, saved entry, trigger, focus and executor
+pair. Duplicate triggers retain completion or dismissal; interrupted runs
+leave a mark due. New sessions cannot consume another session's marks.
+Damaged, oversized or changed records are refused without overwriting them.
+The portable workflow tests these rules in both host profiles; host and
+Motor-target Clippy and the native release build pass. Native execution is
+included in the pending developer-image gate. Hook triggers and the runner
+remain subsequent patches; this storage API does not start reviews.
+
 ## Next steps
 
 The independent sysbox track continues with numeric/human sort, then field

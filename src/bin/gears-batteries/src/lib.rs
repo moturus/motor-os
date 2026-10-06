@@ -30,6 +30,7 @@ pub mod pending_files;
 pub mod policy;
 pub mod provenance;
 pub mod review_config;
+pub mod review_marks;
 pub mod search;
 pub mod session_search;
 pub mod shell_words;
