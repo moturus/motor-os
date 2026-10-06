@@ -20,7 +20,8 @@ packaged-source builds. Phase 8 has settings, marks, saved-entry snapshots,
 tool policy, triggers, the resume question, the proposal cap and the connected
 review runner. Real-binary compacted reviews preserve the saved prefix on both
 systems, with historical resource checkpoints and current withdrawal corrections
-after resume. Real in-flight interruption and session isolation pass; cleanup remains.
+after resume. Real in-flight interruption and session isolation pass. Phase 8.3
+cleanup stages explicit-cutoff archival proposals and passes the real CLI workflow.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
@@ -1020,3 +1021,18 @@ protect a version. Repeated proposals deduplicate; no live skill is changed.
 Portable proposal fixtures, both host profiles, warnings-denied host/native
 Clippy, native release build and release snapshot VM pass; logs use
 `/tmp/gears-cleanup-proposals-*`.
+
+`cleanup --since YYYY-MM-DD` now exposes the complete flow. A real-process
+fixture rejects missing, invalid, repeated and future cutoffs, inspects the
+pending cutoff and origin evidence, and separately approves archival while
+checking exact preserved bytes. No live file changes during cleanup.
+
+Canonical-layout coverage exposed a Gears batteries bug: history discovery
+skipped the real `<gears-dir>/sessions/` container. The unchanged assertion
+failed with zero rather than one archival candidate. Discovery now handles
+that container and the existing direct layout; usage and CLI fixtures use the
+canonical layout. Failures remain in `/tmp/gears-cleanup-canonical-original.log`
+and the pre-fix `gears-cleanup-cli-host-release.log`. Both fixed host profiles,
+warnings-denied host/native Clippy, native release build and release snapshot
+VM pass; logs use `/tmp/gears-cleanup-cli-*`. Measurement infrastructure is next;
+the quality/cost criterion is required before its first real-model run.

@@ -17,7 +17,11 @@ use gears_batteries::{
 use serde_json::json;
 use std::path::Path;
 
-fn install(context: &ToolContext, name: &str, source: Source) -> Result<Content, String> {
+pub(super) fn install(
+    context: &ToolContext,
+    name: &str,
+    source: Source,
+) -> Result<Content, String> {
     let content = Content {
         skill_md: format!(
             "---\nname: {name}\ndescription: Run checks.\n---\n## When it applies\nRust work.\n## Steps\nRun checks.\n## How to check\nAll pass.\n## Pitfalls\nStale builds.\n"

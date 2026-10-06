@@ -8,6 +8,7 @@ pub const USAGE: &str = "usage: gears-batteries hook | tool NAME
        gears-batteries pending [--list | --approve ID | --deny ID | --postpone ID]
        gears-batteries history [--offset N] [--limit N]
        gears-batteries status
+       gears-batteries cleanup --since YYYY-MM-DD (midnight UTC)
        gears-batteries review (Gears after-turn context)
 Memory and skill commands accept --workspace PATH and --root PATH (the Gears directory).";
 
@@ -22,6 +23,9 @@ pub enum Command {
         limit: usize,
     },
     Status,
+    Cleanup {
+        since_ms: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -34,7 +38,7 @@ pub struct Options {
 impl Options {
     pub fn parse(args: &[String]) -> Result<Self, String> {
         let role = args.first().map(String::as_str).ok_or(USAGE)?;
-        if !matches!(role, "pending" | "history" | "status") {
+        if !matches!(role, "pending" | "history" | "status" | "cleanup") {
             return Err(USAGE.into());
         }
         let mut workspace = None;
@@ -43,6 +47,7 @@ impl Options {
         let mut decision = None;
         let mut offset = None;
         let mut limit = None;
+        let mut since = None;
         let mut rest = args.iter().skip(1);
         while let Some(flag) = rest.next() {
             if role == "pending" && flag == "--list" {
@@ -55,7 +60,8 @@ impl Options {
             match (role, flag.as_str()) {
                 (_, "--workspace" | "--root")
                 | ("pending", "--approve" | "--deny" | "--postpone")
-                | ("history", "--offset" | "--limit") => {}
+                | ("history", "--offset" | "--limit")
+                | ("cleanup", "--since") => {}
                 _ => return Err(format!("unknown {role} option: {flag}")),
             }
             let value = rest
@@ -67,6 +73,7 @@ impl Options {
                 "--root" => set(&mut root, PathBuf::from(value), flag)?,
                 "--offset" => set(&mut offset, number(value, flag)?, flag)?,
                 "--limit" => set(&mut limit, number(value, flag)?, flag)?,
+                "--since" => set(&mut since, crate::skill_cleanup::cutoff(value)?, flag)?,
                 _ => {
                     if list || decision.is_some() {
                         return Err("choose one pending operation".into());
@@ -99,6 +106,9 @@ impl Options {
                     limit,
                 }
             }
+            "cleanup" => Command::Cleanup {
+                since_ms: since.ok_or("cleanup requires --since YYYY-MM-DD")?,
+            },
             _ => Command::Status,
         };
         let current = std::env::current_dir().map_err(|error| error.to_string())?;

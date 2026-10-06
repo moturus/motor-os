@@ -246,6 +246,21 @@ These observations make no causal claim and do not record user acceptance.
 They are evidence of co-occurrence, not proof that a skill improves results.
 
 
+`gears-batteries cleanup --since 2026-09-01` stages archival proposals for
+approved agent-written current versions with no recorded loads or loaded
+snapshots on or after that date, at midnight UTC. Choose the cutoff explicitly;
+there is no automatic retention period. User-managed versions, recent approvals,
+unavailable evidence or damaged history are retained. A prior archival denial
+protects that exact version. The report lists inspected history and its limits:
+deleted sessions and older ephemeral runs cannot be reconstructed, and recorded
+activity does not establish usefulness. Identical normalized `When it applies`
+sections produce inspection hints without automatically merging anything.
+
+Cleanup leaves live files intact. Inspect `gears-batteries pending --list`, then
+use `pending --approve ID`, `--deny ID` or `--postpone ID`. Approval validates the
+captured version and preserves both files under `batteries/archived-skills/`
+before withdrawing them. The pending item shows its cutoff and archive path.
+
 `/review [focus]` records a due review mark at the current saved conversation
 entry. Reviews are disabled by default; user-wide `batteries.toml` must set
 `version = 1`, `[reviews] enabled = true`, and both `[reviews.executor]` and

@@ -11,7 +11,7 @@ use serde_json::json;
 use std::{io::Write, path::Path};
 
 pub fn run(workspace: &Path, root: &Path) -> Result<(), String> {
-    let store = Store::with_root(workspace, root.into())?;
+    let store = Store::with_root(workspace, root.join("sessions"))?;
     let mut session = store.create(false, None)?;
     let parent = session.append_message(&Message::user("Use the skill."))?;
     session.append_message(&Message::assistant_response(

@@ -137,11 +137,24 @@ pub(crate) fn discover(
     unavailable: &mut Vec<(PathBuf, String)>,
 ) -> Result<(), String> {
     let root = directory;
+    let sessions = root.join("sessions");
     let mut pending = vec![directory.to_path_buf()];
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(&directory).map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
-            if directory == root {
+            if directory == root && entry.file_name() == "sessions" {
+                let kind = entry.file_type().map_err(|error| error.to_string())?;
+                if kind.is_symlink() || !kind.is_dir() {
+                    unavailable.push((
+                        entry.path(),
+                        "session directory is not a plain directory".into(),
+                    ));
+                } else {
+                    pending.push(entry.path());
+                }
+                continue;
+            }
+            if directory == root || directory == sessions {
                 let name = entry.file_name();
                 let group = name
                     .to_str()

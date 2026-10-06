@@ -32,7 +32,7 @@ fn run() -> Result<(), String> {
             serde_json::to_writer(&mut stdout, &response).map_err(|error| error.to_string())?;
             stdout.write_all(b"\n").map_err(|error| error.to_string())
         }
-        [role, ..] if matches!(role.as_str(), "pending" | "history" | "status") => {
+        [role, ..] if matches!(role.as_str(), "pending" | "history" | "status" | "cleanup") => {
             gears_batteries::memory_cli::run(
                 &args,
                 std::io::stdin().lock(),

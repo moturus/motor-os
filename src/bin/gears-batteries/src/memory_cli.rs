@@ -113,6 +113,10 @@ pub fn run(args: &[String], mut input: impl BufRead, mut output: impl Write) -> 
             &mut output,
             &crate::memory_history::history(&context, offset, limit)?,
         ),
+        Command::Cleanup { since_ms } => write_json(
+            &mut output,
+            &crate::skill_cleanup::propose(&context, since_ms)?,
+        ),
         Command::Status => write_json(&mut output, &crate::memory_history::status(&context)),
         Command::Pending { list, decision } => {
             let items = items(&context)?;

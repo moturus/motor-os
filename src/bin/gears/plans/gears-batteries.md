@@ -4,7 +4,8 @@ Status: implementation through phase 7, including installed native skills
 and `/accept` validated with the selected `dev.3` SDK. Phase 8 has model-pair
 settings, durable marks, exact saved-entry snapshots, review tool policy and
 command/compaction triggers, the resume question, a durable proposal cap and a
-connected runner that preserves the saved prefix after compaction; cleanup remains.
+connected runner that preserves the saved prefix after compaction, and explicit
+cutoff-based cleanup proposals with approval-only archival.
 Sysbox S1 and S2's byte/numeric/human sorting are complete and
 core-gated; field keys remain. Design revised 2026-10-05. See the
 [implementation record](gears-batteries-progress.md) for completed patches
@@ -610,7 +611,14 @@ evidence it cites, and which past sessions used the old version. `history`
 lists decisions. `status` shows on one screen whether reviews are on and for
 which models, what is pending, and the last review and eval results. `cleanup`
 proposes archiving unused agent-written skills and points out skills whose
-"when" sections overlap; it never archives or merges on its own.
+"when" sections overlap; it never archives or merges on its own. Invoke it
+with `cleanup --since YYYY-MM-DD`, an explicit midnight-UTC cutoff. It stages
+only approved agent-written current versions without recorded loads or loaded
+snapshots since that cutoff. Recent approvals, unavailable origin evidence,
+damaged history and prior archival denials protect a version. The proposal
+states the inspected history and its limits; deleted sessions and old ephemeral
+runs cannot be reconstructed. Identical normalized "when" sections are only
+inspection hints. `pending` supplies the separate archival decision.
 Approved skill removals retain both files in a versioned, content-addressed
 archive before withdrawing the live version. Successful `skill_view` loads
 are recorded separately from saved conversations, including ephemeral runs;
