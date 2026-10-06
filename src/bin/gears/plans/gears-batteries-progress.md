@@ -20,8 +20,12 @@ rollout described below.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
-test-only correction is committed and validated. Steps S2–S6 and phases
-8–12 are not implemented.
+test-only correction is committed and validated. The first S2 patch is
+committed in `399cf0a5`: byte-order `sort` with `-r -u -f -s -c -o`, literal
+operands and a quoted executable wrapper. Its native regression and
+warnings-denied Clippy pass, as do three debug and three release full core
+runs after the diagnosed kernel-log test correction (`9adb3ddf`). Numeric,
+human and field-key sorting, steps S3–S6 and phases 8–12 remain.
 
 The phase 3 manual checklist is not marked complete. Automated host tests
 cover the runtime and both UIs; native gates cover shipped tools, literal
@@ -439,6 +443,50 @@ rollback. Formatting, diff checks and warnings-denied Clippy pass.
 | Debug | 22.6, 22.6, 22.7 minutes |
 | Release | 10.5, 10.6, 10.6 minutes |
 
+## Sysbox step S2: byte-order sort
+
+Commit `399cf0a5` adds byte-order sorting with `-r -u -f -s -c -o`, raw-byte
+order diagnostics, literal operands, and output opened only after reading
+the inputs. Its native systest runs transitively in the full core suite.
+Numeric/human comparison and field keys are separate subsequent patches.
+The focused native regression and warnings-denied Clippy pass. A temporary
+host build agrees with GNU for 555 input, flag, file and output cases.
+
+The initial full-gate preparation failed because the rust-analyzer smoke
+fixture still locked local moto-rt 0.17.6 after its approved version bump.
+The mechanical test-only lock refresh is committed in `e82159f7`, and the
+existing release smoke gate passes without weakening `--locked` checks.
+The original failure is `/tmp/gears-sort-full-release-1-isolated.log`;
+the smoke gate is `/tmp/gears-sort-ra-fixture-gate.log`. The restarted six
+full runs use `/tmp/gears-sort-full-{debug,release}-{1,2,3}-runtime-lock.log`.
+All three release and the first two debug runs passed. The third debug run
+failed at `kernel_log::file_mode_end_to_end` before sort ran; its original
+log is `/tmp/gears-sort-full-debug-3-runtime-lock.log`. Targeted native
+instrumentation showed that whole-file reads and byte scans consumed 45.6
+of 47.7 seconds while the test emitted only 1.42 MiB. Rotation itself occurred
+at the existing 4 MiB limit. Whether the old flood loop fills the file in
+time therefore depends on its starting size and debug scan cost. The small
+test-only correction in `9adb3ddf` retains the 60-second deadline and all
+assertions, and emits several paced bursts between scans; each burst fits
+in the ring. The corrected focused native test passes. Temporary diagnostics
+are removed, and the final unchanged sources pass three debug and three
+release full runs. Every run passes both the rotation and sort regressions.
+The original failure and diagnostic log
+(`/tmp/gears-kernel-rotation-diagnostic-run.log`) remain preserved.
+
+Final full-gate logs:
+`/tmp/gears-sort-full-{debug,release}-{1,2,3}-rotation-fixed.log`.
+
+| Profile | Testing times |
+| --- | --- |
+| Debug | 22.1, 21.9, 21.7 minutes |
+| Release | 11.0, 10.6, 10.6 minutes |
+
+Numeric/human and field-key sort, plus `uniq`, are prepared only in temporary
+source trees. Their host comparisons with GNU and native builds and Clippy
+pass; native execution and each patch's full core gate remain before shipping.
+No additional sysbox implementation is installed by those temporary builds.
+
 ## Task acceptance decision
 
 The user wants `/accept` as a clear signal rather than inferring acceptance
@@ -482,10 +530,24 @@ The original log is `/tmp/gears-accept-native-gate.log`; final logs are
 does not update the installed SDK or replace the pending packaged-source
 developer-image gate.
 
+### Acceptance upgrade compatibility
+
+The first `/accept` implementation registered a command even when an older
+configuration did not subscribe to `command`, making Gears reject the entire
+hook at startup. `89d14ee7` fixes this defect: initialization reports the
+configured subscriptions, and batteries register `/accept` only when allowed.
+Older configurations keep their other tools and receive an enabling notice;
+older Gears senders receive an upgrade notice. Startup and resume, unrestricted
+subscriptions, saved acceptance and preserved tool requests pass in the real
+portable workflow on Linux and Motor OS. Unit, integration and warnings-denied
+Clippy gates pass. Original failure:
+`/tmp/gears-accept-subscriptions-original.log`; native validation:
+`/tmp/gears-accept-subscriptions-native-gate.log`.
+
 ## Next steps
 
-Independent sysbox steps S2–S6 remain, starting with sort. The batteries
-track needs the SDK rollout below.
+The independent sysbox track continues with numeric/human sort, then field
+keys and S3–S6. The batteries track needs the SDK rollout below.
 
 The user has published moto-rt 0.17.7; its registry checksum and weak strlen
 export are verified in [the runtime record](gears-yaml-runtime.md#published-runtime-verification).
@@ -496,8 +558,10 @@ The user requested continuation with the SDK rollout. The external Rust
 fork's [AGENTS.md](/home/posk/motor-dev/toolchain-src/rust/AGENTS.md:85)
 requires another reviewer to be named before any repository edit. That
 name has been requested; the fork and SDK remain unchanged while awaiting
-it. Phase 7 is complete at the component level. Phase 8 needs the discussion
-of question 7 before implementation.
+it. The exact two-field proposal is `/tmp/gears-sdk-runtime-lock.patch`;
+its read-only applicability check passes. Phase 7 is complete at the
+component level. Phase 8 will discuss question 7; phase 9 requires the
+user's criterion before evaluation.
 
 The optional Hermes import has not been performed. Automated mock tests
 establish behavior, not real-model usefulness. Keep the outstanding native

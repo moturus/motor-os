@@ -787,8 +787,11 @@ in question 1; replace references to the old G and Q labels and to "step
 Each covers the flags models use, matches GNU's output and exit statuses for
 them, and refuses any other flag with a message naming it.
 - S1. `mkdir -p` through `create_dir_all`.
-- S2. `sort`: `-n -r -u -k -t -f -h -s -c -o`, byte order, no locale (one or
-  two patches).
+- S2. `sort`: `-n -r -u -k -t -f -h -s -c -o`, byte order, no locale, in
+  three patches. First add byte comparisons, `-r -u -f -s -c -o`, literal
+  operands and output handling; then exact numeric/human comparisons
+  (`-n -h`); finally field keys (`-k -t`). Each patch receives the full
+  core gate.
 - S3. `uniq`: `-c -d -u -i`.
 - S4. `cut`: `-b -c -d -f -s --complement`.
 - S5. `tr`: `-d -s -c`, ranges and POSIX classes.
