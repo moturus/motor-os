@@ -1241,13 +1241,13 @@ async fn on_cmd_metadata(
 
     let fs = runtime.fs.read().await;
     let metadata = fs.metadata(role, entry_id).await?;
+    // A full response-page pool must not block filesystem writers.
+    core::mem::drop(fs);
 
     let io_page = sender
         .alloc_page(u64::MAX)
         .await
         .map_err(map_native_error)?;
-    core::mem::drop(fs);
-
     let resp = api_fs::metadata_resp_encode(msg.id, metadata, io_page);
     let _ = sender.send(resp).await;
     Ok(())
