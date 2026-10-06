@@ -16,6 +16,14 @@ session reading. The auxiliary summarization request has its own instructions
 and is not itself the review request. Prefix tokens still count toward context
 capacity. A prefix alone that exceeds the limit must be refused explicitly.
 
+An actual request also checkpoints its hook state without repeating unchanged
+prefix bytes. A preserved fork receives each hook's historical state as
+`prefix_state`, separately from its current state. This lets batteries retain
+the resource references needed to correct withdrawn memory and skills even
+when a normal resume has already reconciled current snapshots. Permissions and
+review-role state remain current. Older prefix records without a checkpoint
+use their creation snapshot with a visible notice.
+
 ## Evidence
 
 `Runtime::maybe_compact` compares the estimated prompt, history and tools

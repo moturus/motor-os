@@ -61,6 +61,12 @@ pub struct RequestPrefix {
     pub tools: Vec<ToolSpec>,
 }
 
+pub struct PrefixHookStates {
+    pub states: BTreeMap<String, Value>,
+    /// Older sessions can only recover states from the prefix's creation.
+    pub checkpointed: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct HookState {
     pub hook: String,
@@ -739,6 +745,11 @@ impl Session {
         if self.request_prefix()?.as_ref() != Some(prefix) {
             self.append("request_prefix", prefix)?;
         }
+        // Hook resources can change even when the advertised prefix is identical.
+        self.append(
+            "request_prefix_checkpoint",
+            &serde_json::json!({"version": 1}),
+        )?;
         Ok(())
     }
 
@@ -753,6 +764,40 @@ impl Session {
                     .map_err(|error| format!("entry {}: bad request prefix: {error}", entry.id))
             })
             .transpose()
+    }
+
+    /// Recover hook states at the last actual request, before later hook refreshes.
+    pub fn request_prefix_hook_states(&self) -> Result<Option<PrefixHookStates>, String> {
+        let entries = self.active_entries()?;
+        let Some(prefix) = entries
+            .iter()
+            .rposition(|entry| entry.kind == "request_prefix")
+        else {
+            return Ok(None);
+        };
+        serde_json::from_value::<RequestPrefix>(entries[prefix].data.clone())
+            .map_err(|error| format!("bad request prefix: {error}"))?;
+        let checkpoint = entries[prefix..]
+            .iter()
+            .rposition(|entry| entry.kind == "request_prefix_checkpoint")
+            .map(|index| prefix + index);
+        if let Some(index) = checkpoint
+            && entries[index].data != serde_json::json!({"version": 1})
+        {
+            return Err("unsupported request prefix checkpoint".into());
+        }
+        let mut states = BTreeMap::new();
+        for entry in entries[..checkpoint.unwrap_or(prefix)].iter().rev() {
+            if entry.kind == "hook_state" {
+                let saved: HookState = serde_json::from_value(entry.data.clone())
+                    .map_err(|error| format!("entry {}: bad hook state: {error}", entry.id))?;
+                states.entry(saved.hook).or_insert(saved.state);
+            }
+        }
+        Ok(Some(PrefixHookStates {
+            states,
+            checkpointed: checkpoint.is_some(),
+        }))
     }
 
     pub fn latest_runtime_identity(&self) -> Option<RuntimeIdentity> {

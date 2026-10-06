@@ -892,6 +892,20 @@ native gates retain the settings-change regression.
 
 ### Corrections after a frozen prefix
 
+Each actual request now records a small hook-state checkpoint, including when
+prefix bytes are unchanged. Preserved forks receive only their own hook's
+historical state alongside current state. The session regression checks changed
+resources, selected entries, compaction and unchanged parent bytes; the real
+CLI checks historical resources without losing its current review-role overlay
+or exposing another hook's state. Legacy checkpoints fall back explicitly to
+the prefix's creation snapshot.
+
+Both host Gears HTTP profiles, warnings-denied host/native Clippy, the native
+release build and release snapshot VM shipped-tool workflow pass. Logs use
+`/tmp/gears-prefix-checkpoints-*`. An initial standalone example-test command
+lacked Cargo's integration-test executable variable; the regular component
+gate runs these fixtures through `tests/shipped_tools.rs` and passes.
+
 Batteries hooks recognize `preserve_prefix` during initialization. They retain
 the historical prompt and skill snapshots, deliver withdrawals through current
 context, and reset correction views after compaction so removed notes are sent

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use gears::config::{Config, ContextConfig};
 use gears::provider::{Completion, EventSink, Message, Provider, ProviderError, Request, ToolSpec};
 use gears::runtime::{Approval, Permission, Runtime};
-use gears::session::{RequestPrefix, Store};
+use gears::session::{HookState, RequestPrefix, Store};
 use gears::tools::Registry;
 
 #[derive(Default)]
@@ -34,6 +34,7 @@ impl Provider for Capture {
 }
 
 pub fn smoke() -> Result<(), String> {
+    checkpoint_states()?;
     let base = std::env::temp_dir().join(format!("gears-request-prefix-{}", std::process::id()));
     std::fs::create_dir(&base).map_err(|error| error.to_string())?;
     let store = Store::with_root(&base, base.join("sessions"))?;
@@ -232,5 +233,72 @@ pub fn smoke() -> Result<(), String> {
     drop(parent);
     std::fs::remove_dir_all(base).map_err(|error| error.to_string())?;
     println!("gears saved request prefix ALL PASS");
+    Ok(())
+}
+
+fn checkpoint_states() -> Result<(), String> {
+    let base = std::env::temp_dir().join(format!("gears-prefix-checkpoint-{}", std::process::id()));
+    std::fs::create_dir(&base).map_err(|error| error.to_string())?;
+    let store = Store::with_root(&base, base.join("sessions"))?;
+    let mut parent = store.create(false, None)?;
+    let prefix = RequestPrefix {
+        system: vec!["Stable".into()],
+        tools: Vec::new(),
+    };
+    assert!(parent.request_prefix_hook_states()?.is_none());
+    let state = |value: &str| HookState {
+        hook: "batteries".into(),
+        state: serde_json::json!({"resource": value}),
+        context: None,
+    };
+    parent.append_hook_state(&state("first"))?;
+    parent.record_request_prefix(&prefix)?;
+    let first = parent.append_message(&Message::assistant("First request"))?;
+    parent.append_hook_state(&state("loaded"))?;
+    parent.record_request_prefix(&prefix)?;
+    let second = parent.append_message(&Message::assistant("Second request"))?;
+    parent.append_hook_state(&state("resumed"))?;
+    parent.append_compaction(&gears::session::Compaction {
+        summary: "Later history".into(),
+        retained_tail: Vec::new(),
+        tokens_before: 10,
+    })?;
+    assert_eq!(
+        parent.request_prefix_hook_states()?.unwrap().states["batteries"]["resource"],
+        "loaded"
+    );
+    assert_eq!(
+        parent
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == "request_prefix")
+            .count(),
+        1
+    );
+    let before = std::fs::read(parent.path().unwrap()).map_err(|error| error.to_string())?;
+    for (entry, expected) in [(&first, "first"), (&second, "loaded")] {
+        let selected = store
+            .read(parent.path().unwrap().to_str().unwrap())?
+            .at(entry)?;
+        let child = store.clone_active_with_options(&selected, true)?;
+        let saved = child.request_prefix_hook_states()?.unwrap();
+        assert!(saved.checkpointed);
+        assert_eq!(saved.states["batteries"]["resource"], expected);
+    }
+    assert_eq!(std::fs::read(parent.path().unwrap()).unwrap(), before);
+    let mut legacy = store.create(true, None)?;
+    legacy.append_hook_state(&state("creation"))?;
+    legacy.append("request_prefix", &prefix)?;
+    legacy.append_hook_state(&state("later"))?;
+    let saved = legacy.request_prefix_hook_states()?.unwrap();
+    assert!(!saved.checkpointed);
+    assert_eq!(saved.states["batteries"]["resource"], "creation");
+    legacy.append(
+        "request_prefix_checkpoint",
+        &serde_json::json!({"version":2}),
+    )?;
+    assert!(legacy.request_prefix_hook_states().is_err());
+    drop(parent);
+    std::fs::remove_dir_all(base).map_err(|error| error.to_string())?;
     Ok(())
 }

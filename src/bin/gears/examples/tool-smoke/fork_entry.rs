@@ -19,12 +19,22 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
     let mut parent = store.create(false, None)?;
     parent.append_hook_state(&HookState {
         hook: "fixture".into(),
-        state: serde_json::json!({"run_kind":"executor", "retained":"source"}),
+        state: serde_json::json!({"run_kind":"executor", "retained":"source", "resource":"original"}),
+        context: None,
+    })?;
+    parent.append_hook_state(&HookState {
+        hook: "other".into(),
+        state: serde_json::json!({"private":"other hook"}),
         context: None,
     })?;
     parent.record_request_prefix(&RequestPrefix {
         system: vec!["Frozen parent instructions".into()],
         tools: Vec::new(),
+    })?;
+    parent.append_hook_state(&HookState {
+        hook: "fixture".into(),
+        state: serde_json::json!({"run_kind":"executor", "retained":"current", "resource":"changed"}),
+        context: None,
     })?;
     parent.append_message(&Message::user("Saved original task"))?;
     let entry = parent.append_message(&Message::assistant("Saved original answer"))?;
@@ -112,8 +122,12 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     assert_eq!(event["session"]["state"]["run_kind"], "review");
     assert_eq!(event["session"]["state"]["review_run"]["mark"], "test");
-    assert_eq!(event["session"]["state"]["retained"], "source");
+    assert_eq!(event["session"]["state"]["retained"], "current");
     assert_eq!(event["payload"]["preserve_prefix"], true);
+    assert_eq!(event["payload"]["prefix_state"]["resource"], "original");
+    assert_eq!(event["payload"]["prefix_state"]["run_kind"], "executor");
+    assert!(event["payload"].get("prefix_hook_states").is_none());
+    assert!(!event["payload"].to_string().contains("other hook"));
     assert_ne!(event["session"]["id"], parent.id());
     assert_eq!(server.requests().len(), 1);
     let body: serde_json::Value =

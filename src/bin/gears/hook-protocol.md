@@ -17,6 +17,13 @@ register tools must subscribe to both `initialize` and `tool_execute`.
 `preserve_prefix: true` means the model keeps its saved system/tool prefix;
 current corrections must be delivered as context after that prefix. Compaction
 may discard earlier correction notes, so hooks must supply them again then.
+When the prefix matches a saved request, `prefix_state` contains this hook's
+state at that request, or `null` if the hook was absent. Hooks should recover
+only historical resource references from it, keeping current permissions and
+run state. Prefix bytes are saved only when changed, but each actual request
+checkpoints its hook states. Older sessions without checkpoints use the
+prefix's creation snapshot and emit a notice. An absent `prefix_state` means
+the caller supplied a prefix without matching saved provenance.
 The subscription field is the hook's configured event list, or `null` when
 all events are subscribed. A hook should register commands only when
 `command` is subscribed; older senders omit the subscription field.

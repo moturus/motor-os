@@ -307,8 +307,8 @@ impl Runtime {
         let provider_name = session.provider().unwrap_or_else(|| "default".to_string());
         let mut payload =
             serde_json::json!({"reason": "startup", "provider": provider_name, "model": model});
-        if preserved_prefix.is_some() {
-            payload["preserve_prefix"] = serde_json::json!(true);
+        if let Some(prefix) = &preserved_prefix {
+            preserve_hook_payload(&session, prefix, &mut payload, &mut startup_notices)?;
         }
         let hooks = Hooks::initialize_with_payload(
             config.hooks.clone(),
@@ -1231,8 +1231,13 @@ impl Runtime {
             .collect::<Vec<_>>();
         let mut payload =
             serde_json::json!({"reason": reason, "provider": provider, "model": model});
-        if self.preserved_prefix.is_some() {
-            payload["preserve_prefix"] = serde_json::json!(true);
+        if let Some(prefix) = &self.preserved_prefix {
+            preserve_hook_payload(
+                &self.session,
+                prefix,
+                &mut payload,
+                &mut self.startup_notices,
+            )?;
         }
         let hooks = self.hooks.setup_again(
             &reserved,
@@ -1911,6 +1916,24 @@ impl Runtime {
         emit_notices(observer, notices)?;
         self.emit_hook_hint(observer)
     }
+}
+
+fn preserve_hook_payload(
+    session: &Session,
+    prefix: &RequestPrefix,
+    payload: &mut Value,
+    notices: &mut Vec<String>,
+) -> Result<(), String> {
+    payload["preserve_prefix"] = serde_json::json!(true);
+    if session.request_prefix()?.as_ref() == Some(prefix)
+        && let Some(saved) = session.request_prefix_hook_states()?
+    {
+        payload["prefix_hook_states"] = serde_json::json!(saved.states);
+        if !saved.checkpointed {
+            notices.push("saved request checkpoint unavailable; prefix resources use their creation snapshot".into());
+        }
+    }
+    Ok(())
 }
 
 fn call_detail(call: &ToolCall) -> String {
