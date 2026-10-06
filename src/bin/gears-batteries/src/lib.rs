@@ -54,6 +54,7 @@ pub mod skill_pending;
 pub mod skill_snapshot;
 pub mod skill_sources;
 pub mod skill_store;
+pub mod skill_usage;
 pub mod skill_view;
 pub mod snapshot;
 pub mod todo;

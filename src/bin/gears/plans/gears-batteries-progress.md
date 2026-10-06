@@ -1004,3 +1004,11 @@ normalization without claiming semantic equivalence. Cutoffs parse explicit
 calendar dates at midnight UTC, with leap-year validation. Portable fixtures,
 both host profiles, warnings-denied host/native Clippy, native release build
 and release snapshot VM pass; logs use `/tmp/gears-cleanup-candidates-*`.
+
+Cleanup usage scanning reads saved skill-view results across all branches and
+the separate ephemeral-load journal. It reports malformed or incomplete history,
+without repairing a file or taking its writer lock, and requires source entries
+to be available before an archival proposal can cite them. Session sizes, count
+and total entries are bounded. Portable fixtures, both host profiles,
+warnings-denied host/native Clippy, native release build and release snapshot VM
+pass; logs use `/tmp/gears-cleanup-usage-*`.
