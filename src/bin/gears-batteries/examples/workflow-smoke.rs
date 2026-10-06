@@ -51,11 +51,17 @@ mod review_instructions;
 #[path = "workflow-smoke/review_runner.rs"]
 mod review_runner;
 
+#[path = "workflow-smoke/review_cli.rs"]
+mod review_cli;
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
-    let binary =
-        std::path::PathBuf::from(args.next().ok_or("usage: workflow-smoke BATTERIES RUSTC")?);
+    let binary = std::path::PathBuf::from(
+        args.next()
+            .ok_or("usage: workflow-smoke BATTERIES RUSTC GEARS")?,
+    );
     let compiler = args.next().ok_or("missing check compiler")?;
+    let gears = std::path::PathBuf::from(args.next().ok_or("missing Gears binary")?);
     let fixture = support::Fixture::new(&binary, &compiler)?;
     let store = Store::with_root(&fixture.workspace, fixture.state.clone())?;
     let session = store.create(false, None)?;
@@ -221,6 +227,7 @@ fn run() -> Result<(), String> {
     assert_eq!(approvals.0.len(), 4);
     drop(runtime);
     memory::run(&binary, &fixture.root)?;
+    review_cli::run(&binary, &gears, &fixture.root)?;
     review_marks::run(&fixture.workspace, &fixture.root.join("review-state"))?;
     review_launch::run(&fixture.workspace, &fixture.root.join("review-launch"))?;
     review_instructions::run(

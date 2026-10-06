@@ -16,6 +16,9 @@ key_file = "local.key"
 egress_allowlist = ["127.0.0.1", "openrouter.ai"]
 plain_http_allowlist = ["127.0.0.1"]
 
+[after_turn]
+command = ["gears-batteries", "review"]
+
 [[hooks]]
 name = "batteries"
 command = ["gears-batteries", "hook"]

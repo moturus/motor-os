@@ -8,6 +8,7 @@ pub const USAGE: &str = "usage: gears-batteries hook | tool NAME
        gears-batteries pending [--list | --approve ID | --deny ID | --postpone ID]
        gears-batteries history [--offset N] [--limit N]
        gears-batteries status
+       gears-batteries review (Gears after-turn context)
 Memory and skill commands accept --workspace PATH and --root PATH (the Gears directory).";
 
 #[derive(Debug, PartialEq, Eq)]

@@ -17,8 +17,9 @@ and user commands are implemented. Phase 6.5 skills and phase 7's explicit
 `dev.3` SDK. The SDK rollout is complete: three debug and three release
 main-image gates and `full-test-dev.sh --release` pass, including native
 packaged-source builds. Phase 8 has settings, marks, saved-entry snapshots,
-tool policy, triggers, the resume question and the proposal cap; its runner,
-first-request prefix test and cleanup proposals remain.
+tool policy, triggers, the resume question, the proposal cap and the connected
+review runner. Real-binary compacted reviews preserve the saved prefix on both
+systems. Status, an in-flight interruption regression and cleanup remain.
 Sysbox step S1 is implemented and passes the focused native regression;
 its final source passes three debug and three release full core gates.
 Those gates exposed a preexisting TCP test isolation defect; its small
@@ -820,6 +821,21 @@ build and release snapshot VM workflow pass. Final logs use
 and a native script without execute permission. The corrected fixture copies
 a compiled child, preserving its permissions. CLI and sample wiring are next.
 
+### Connected real-binary reviews
+
+The companion `review` command uses Gears' after-turn environment and a sibling
+Gears executable. The sample now starts it after foreground turns and hook
+commands; review settings remain disabled by default. The component gate builds
+both actual binaries and passes Gears to the portable workflow. Native packaging
+reuses its existing workflow executable and installed Gears binary.
+
+The loopback fixture forces history compaction, then verifies the exact saved
+system prefix, reviewer model, absence of later parent turns, unchanged parent
+bytes, no new pending proposals and no model call for a handled mark. Both host
+batteries and Gears profiles, warnings-denied batteries host/native Clippy,
+the native release build and release snapshot VM workflow pass. Logs use
+`/tmp/gears-review-cli-*`; no external provider is contacted.
+
 ### Corrections after a frozen prefix
 
 Batteries hooks recognize `preserve_prefix` during initialization. They retain
@@ -867,8 +883,9 @@ pass. See [the rollout record](gears-yaml-runtime.md#rollout-sequence) for the
 exact SDK name and logs. The earlier failures remain preserved in that record.
 
 The independent sysbox track continues with field keys and S3–S6 after the
-numeric/human patch. Phase 8 continues with the runner, first-request prefix test and cleanup
-proposals. Phase 9 requires
+numeric/human patch. Phase 8 continues with status, an in-flight interruption
+regression and cleanup proposals. Guidance is requested on the cleanup cutoff.
+Phase 9 requires
 the user's quality/cost criterion in question 7; keep reviews disabled until
 an explicit model-pair decision and real-model evidence justify enabling them.
 

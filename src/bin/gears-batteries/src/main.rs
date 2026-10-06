@@ -18,6 +18,13 @@ fn run() -> Result<(), String> {
             println!();
             Ok(())
         }
+        [role] if role == "review" => {
+            let completed = gears_batteries::review_runner::from_env()?;
+            if completed != 0 {
+                println!("Completed {completed} review(s).");
+            }
+            Ok(())
+        }
         [role] if role == "hook" => {
             let event = gears_batteries::read_event(std::io::stdin().lock())?;
             let response = gears_batteries::hook(event)?;

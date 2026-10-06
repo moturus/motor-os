@@ -3,8 +3,9 @@
 Status: implementation through phase 7, including installed native skills
 and `/accept` validated with the selected `dev.3` SDK. Phase 8 has model-pair
 settings, durable marks, exact saved-entry snapshots, review tool policy and
-command/compaction triggers, the resume question and a durable proposal cap;
-the runner remains. Sysbox S1 and S2's byte/numeric/human sorting are complete and
+command/compaction triggers, the resume question, a durable proposal cap and a
+connected runner that preserves the saved prefix after compaction; cleanup remains.
+Sysbox S1 and S2's byte/numeric/human sorting are complete and
 core-gated; field keys remain. Design revised 2026-10-05. See the
 [implementation record](gears-batteries-progress.md) for completed patches
 and validation still outstanding. Two questions wait

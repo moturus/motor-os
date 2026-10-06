@@ -34,6 +34,26 @@ struct Usage {
     cost_is_partial: bool,
 }
 
+pub fn from_env() -> Result<usize, String> {
+    if !gears::platform::install_interrupt_handler() {
+        return Err("cannot install review interrupt handler".into());
+    }
+    let context = ToolContext::from_env()?;
+    let parent = std::env::var_os("GEARS_SESSION_PATH").ok_or("review needs GEARS_SESSION_PATH")?;
+    let path = std::env::var_os("GEARS_CONFIG_PATH").map(std::path::PathBuf::from);
+    let config = Config::load_user(path.as_deref())?;
+    let gears = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .with_file_name("gears");
+    run(
+        &context,
+        Path::new(&parent),
+        &config,
+        &gears,
+        &Cancellation::new(),
+    )
+}
+
 pub fn run(
     context: &ToolContext,
     parent: &Path,

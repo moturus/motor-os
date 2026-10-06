@@ -25,7 +25,7 @@ if printf '{}' | "${SSH[@]}" "$BATTERIES_BIN" hook; then
   exit 1
 fi
 "${SSH[@]}" "${GEARS_BATTERIES_VM_SMOKE:-/devtools/tests/gears/gears-batteries-smoke}" \
-  "$BATTERIES_BIN" /devtools/bin/rustc
+  "$BATTERIES_BIN" /devtools/bin/rustc "${GEARS_BATTERIES_VM_GEARS_BIN:-/devtools/bin/gears}"
 # No chat prompt: load the installed config and its sibling hook without a
 # provider request or a persistent session. The key is a fixture placeholder.
 OUTPUT="$(printf '/tools\n/quit\n' | "${SSH[@]}" \

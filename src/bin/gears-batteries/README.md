@@ -253,7 +253,15 @@ marks too. Recording does not call a model or change the conversation.
 On startup or `/resume`, unfinished reviews ask whether to run or dismiss them.
 An unanswered question keeps them paused. Dismissal affects only the displayed
 marks; other sessions do not consume them. Workspace-memory admission is asked
-first if it is pending. Background execution is not implemented yet.
+first if it is pending. The sample after-turn command runs due reviews in
+ephemeral forks and stops them before the next foreground turn or on exit.
+Copy the updated sample or add `[after_turn] command = ["gears-batteries", "review"]`
+to your Gears configuration. The batteries hook must directly invoke the
+`gears-batteries hook` command and include its policy and context subscriptions.
+Reviews keep the marked system/tool prefix while compacting oversized history.
+User focus, denied changes and mechanical evidence follow that prefix; evidence
+over 64 KiB is refused explicitly, leaving the mark due. Failed or interrupted
+reviews stay due; successful marks are handled once. Nothing to save is normal.
 
 `gears-batteries status` shows the configured review pair and proposal limit
 under `review_settings`, and separately reports that execution is unavailable.
