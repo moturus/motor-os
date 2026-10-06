@@ -101,18 +101,20 @@ pub fn smoke() -> Result<(), String> {
             .iter()
             .any(|m| m.text_content().contains("Original answer"))
     );
-    assert!(runtime.preserve_request_prefix(prefix.clone()).is_err());
+    assert!(
+        Runtime::new_with_registry_preserving_prefix(
+            provider.clone(),
+            store.clone(),
+            store.create(false, None)?,
+            &config,
+            "executor".into(),
+            Registry::default(),
+            prefix.clone(),
+        )
+        .is_err()
+    );
     let child = store.clone_active_with_options(&selected, true)?;
     let reader = Arc::new(Capture::default());
-    let mut review = Runtime::new_with_registry_at(
-        reader.clone(),
-        store.clone(),
-        child,
-        &config,
-        "reviewer".into(),
-        Registry::default(),
-        base.join("reader-tools"),
-    )?;
     let mut review_prefix = prefix.clone();
     review_prefix
         .system
@@ -122,7 +124,15 @@ pub fn smoke() -> Result<(), String> {
         "Frozen schema",
         serde_json::json!({"type":"object"}),
     ));
-    review.preserve_request_prefix(review_prefix.clone())?;
+    let mut review = Runtime::new_with_registry_preserving_prefix(
+        reader.clone(),
+        store.clone(),
+        child,
+        &config,
+        "reviewer".into(),
+        Registry::default(),
+        review_prefix.clone(),
+    )?;
     let before = std::fs::read(&path).map_err(|error| error.to_string())?;
     review.turn(
         "Review this task; nothing to save is the default.".into(),
@@ -157,10 +167,18 @@ pub fn smoke() -> Result<(), String> {
         tools: Vec::new(),
     };
     assert!(
-        review
-            .preserve_request_prefix(oversized)
-            .unwrap_err()
-            .contains("prefix exceeds")
+        Runtime::new_with_registry_preserving_prefix(
+            reader.clone(),
+            store.clone(),
+            store.create(true, None)?,
+            &config,
+            "reviewer".into(),
+            Registry::default(),
+            oversized,
+        )
+        .err()
+        .unwrap()
+        .contains("prefix exceeds")
     );
     assert_eq!(reader.requests.lock().unwrap().len(), 2);
     assert_eq!(review.session().request_prefix()?, Some(review_prefix));

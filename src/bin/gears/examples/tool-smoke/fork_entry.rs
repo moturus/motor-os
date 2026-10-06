@@ -6,7 +6,7 @@ use std::time::Duration;
 use gears::mock::{MockServer, sse_response};
 use gears::process::{Cancellation, Request, run};
 use gears::provider::Message;
-use gears::session::{Compaction, HookState, Store};
+use gears::session::{Compaction, HookState, RequestPrefix, Store};
 
 pub fn smoke(gears: &Path) -> Result<(), String> {
     let root = std::env::temp_dir().join(format!("gears-fork-entry-{}", std::process::id()));
@@ -21,6 +21,10 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
         hook: "fixture".into(),
         state: serde_json::json!({"run_kind":"executor", "retained":"source"}),
         context: None,
+    })?;
+    parent.record_request_prefix(&RequestPrefix {
+        system: vec!["Frozen parent instructions".into()],
+        tools: Vec::new(),
     })?;
     parent.append_message(&Message::user("Saved original task"))?;
     let entry = parent.append_message(&Message::assistant("Saved original answer"))?;
@@ -109,8 +113,12 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
     assert_eq!(event["session"]["state"]["run_kind"], "review");
     assert_eq!(event["session"]["state"]["review_run"]["mark"], "test");
     assert_eq!(event["session"]["state"]["retained"], "source");
+    assert_eq!(event["payload"]["preserve_prefix"], true);
     assert_ne!(event["session"]["id"], parent.id());
     assert_eq!(server.requests().len(), 1);
+    let body: serde_json::Value =
+        serde_json::from_slice(&server.requests()[0].body).map_err(|error| error.to_string())?;
+    assert_eq!(body["messages"][0]["content"], "Frozen parent instructions");
     // An unknown hook must fail before initialization or a provider request.
     let position = request
         .args

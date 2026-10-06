@@ -14,6 +14,9 @@ Unsubscribed events do not start a process, including `initialize`; hooks that
 register tools must subscribe to both `initialize` and `tool_execute`.
 
 `initialize` carries `reason`, `provider`, `model`, and `subscribed_events`.
+`preserve_prefix: true` means the model keeps its saved system/tool prefix;
+current corrections must be delivered as context after that prefix. Compaction
+may discard earlier correction notes, so hooks must supply them again then.
 The subscription field is the hook's configured event list, or `null` when
 all events are subscribed. A hook should register commands only when
 `command` is subscribed; older senders omit the subscription field.

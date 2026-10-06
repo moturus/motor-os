@@ -792,6 +792,20 @@ path, which cannot resolve from the fixture workspace; the component script's
 absolute paths fix setup. The initial unused-mut warning is removed. The Gears
 initialization patch supplies this flag before the first hook call.
 
+Gears now installs a preserved prefix before initialization, rather than after
+hooks have rebuilt their snapshots. The initialization payload includes
+`preserve_prefix: true` at startup and compaction; ordinary sessions retain the
+previous payload shape. The runtime checks ephemeral use and prefix capacity
+before initializing any hook. The real CLI fixture verifies the first hook's
+flag and the exact system text sent to the mock provider.
+
+Host debug/release HTTP gates, warnings-denied host/native Clippy, native
+release build and the combined release snapshot VM's Gears/batteries gates
+pass. Logs use `/tmp/gears-prefix-corrections-gears-*` and `native-gate.log`.
+The original debug failure is preserved: an ordinary-hook contract rejected
+the extra false field. Omitting that field fixes compatibility without changing
+its assertion; the corrected debug log is `host-debug-fixed.log`.
+
 The user published moto-rt 0.17.7 and pushed the authorized external Rust-fork
 commit `f046f257239`. It changes only std's runtime version and checksum;
 compiler, LLVM and std implementation sources are unchanged. The managed

@@ -176,6 +176,11 @@ pub struct Runtime {
     questions_answered: usize,
 }
 
+struct Initialization {
+    tool_state_directory: PathBuf,
+    preserved_prefix: Option<RequestPrefix>,
+}
+
 impl Runtime {
     pub fn new(
         provider: Arc<dyn Provider>,
@@ -210,12 +215,75 @@ impl Runtime {
     pub fn new_with_registry_at(
         provider: Arc<dyn Provider>,
         store: Store,
+        session: Session,
+        config: &Config,
+        model: String,
+        tools: Registry,
+        tool_state_directory: PathBuf,
+    ) -> Result<Self, String> {
+        Self::initialize(
+            provider,
+            store,
+            session,
+            config,
+            model,
+            tools,
+            Initialization {
+                tool_state_directory,
+                preserved_prefix: None,
+            },
+        )
+    }
+
+    /// Inform hooks before initialization so corrections follow the frozen prefix.
+    pub fn new_with_registry_preserving_prefix(
+        provider: Arc<dyn Provider>,
+        store: Store,
+        session: Session,
+        config: &Config,
+        model: String,
+        tools: Registry,
+        prefix: RequestPrefix,
+    ) -> Result<Self, String> {
+        Self::initialize(
+            provider,
+            store,
+            session,
+            config,
+            model,
+            tools,
+            Initialization {
+                tool_state_directory: Overrides::default_directory()?,
+                preserved_prefix: Some(prefix),
+            },
+        )
+    }
+
+    fn initialize(
+        provider: Arc<dyn Provider>,
+        store: Store,
         mut session: Session,
         config: &Config,
         model: String,
         mut tools: Registry,
-        tool_state_directory: PathBuf,
+        initialization: Initialization,
     ) -> Result<Self, String> {
+        let Initialization {
+            tool_state_directory,
+            preserved_prefix,
+        } = initialization;
+        if let Some(prefix) = &preserved_prefix {
+            if !session.is_ephemeral() {
+                return Err("preserving a saved prefix requires an ephemeral session".into());
+            }
+            let limit = config
+                .context
+                .window_tokens
+                .saturating_sub(config.context.output_reserve_tokens);
+            if estimate_request_tokens(&prefix.system, &[], &prefix.tools) > limit {
+                return Err("saved request prefix exceeds the model input limit".into());
+            }
+        }
         crate::process::ensure_cleanup()?;
         let cancellation = Cancellation::new();
         let previous_identity = session.latest_runtime_identity();
@@ -237,11 +305,16 @@ impl Runtime {
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
         let provider_name = session.provider().unwrap_or_else(|| "default".to_string());
+        let mut payload =
+            serde_json::json!({"reason": "startup", "provider": provider_name, "model": model});
+        if preserved_prefix.is_some() {
+            payload["preserve_prefix"] = serde_json::json!(true);
+        }
         let hooks = Hooks::initialize_with_payload(
             config.hooks.clone(),
             store.workspace().to_path_buf(),
             &reserved_names,
-            serde_json::json!({"reason": "startup", "provider": provider_name, "model": model}),
+            payload,
             &mut session,
             &cancellation,
             &mut |notice| startup_notices.push(notice),
@@ -280,7 +353,7 @@ impl Runtime {
             tools,
             tool_state_directory,
             prompt,
-            preserved_prefix: None,
+            preserved_prefix,
             model,
             max_tool_rounds: config.max_tool_rounds,
             context: config.context,
@@ -298,24 +371,6 @@ impl Runtime {
 
     pub fn cancellation(&self) -> Cancellation {
         self.cancellation.clone()
-    }
-
-    /// An ephemeral reader may retain its source instructions and advertised schemas.
-    /// Execution still uses the current registry, hooks and permission policy.
-    pub fn preserve_request_prefix(&mut self, prefix: RequestPrefix) -> Result<(), String> {
-        self.prepare_write()?;
-        if !self.session.is_ephemeral() {
-            return Err("preserving a saved prefix requires an ephemeral session".into());
-        }
-        let limit = self
-            .context
-            .window_tokens
-            .saturating_sub(self.context.output_reserve_tokens);
-        if estimate_request_tokens(&prefix.system, &[], &prefix.tools) > limit {
-            return Err("saved request prefix exceeds the model input limit".into());
-        }
-        self.preserved_prefix = Some(prefix);
-        Ok(())
     }
 
     pub fn tools(&self) -> &Registry {
@@ -1174,9 +1229,14 @@ impl Runtime {
             .iter()
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
+        let mut payload =
+            serde_json::json!({"reason": reason, "provider": provider, "model": model});
+        if self.preserved_prefix.is_some() {
+            payload["preserve_prefix"] = serde_json::json!(true);
+        }
         let hooks = self.hooks.setup_again(
             &reserved,
-            serde_json::json!({"reason": reason, "provider": provider, "model": model}),
+            payload,
             &mut self.session,
             &self.cancellation,
             &mut |notice| self.startup_notices.push(notice),

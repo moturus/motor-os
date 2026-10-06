@@ -184,13 +184,17 @@ fn agent(
         .or_else(|| selected_provider.model.clone())
         .or_else(|| config.models.first().cloned())
         .ok_or("no model selected; use --model or provider.model in the config")?;
-    let mut runtime = Runtime::new_with_registry(provider, store, session, config, model, tools)?;
-    if args.preserve_prefix {
-        match saved_prefix {
-            Some(prefix) => runtime.preserve_request_prefix(prefix)?,
-            None => diagnostic("saved prefix unavailable; using reconstructed instructions"),
+    let mut runtime = match saved_prefix {
+        Some(prefix) => Runtime::new_with_registry_preserving_prefix(
+            provider, store, session, config, model, tools, prefix,
+        )?,
+        None => {
+            if args.preserve_prefix {
+                diagnostic("saved prefix unavailable; using reconstructed instructions");
+            }
+            Runtime::new_with_registry(provider, store, session, config, model, tools)?
         }
-    }
+    };
     let factory_config = config.clone();
     let verbosity = args.verbosity;
     let factory: ProviderFactory = Arc::new(move |name| {
