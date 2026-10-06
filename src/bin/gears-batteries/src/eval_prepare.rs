@@ -92,6 +92,9 @@ pub fn prepare(
     source.exclude.sort();
     source.exclude.dedup();
     root.directory(Path::new(""))?;
+    let task_input = json!({"version":1,"source_path":task.path,"source_hash":task.hash,"task":task.task,"source_gears_directory":context.state.path()});
+    let task_bytes = serde_json::to_vec_pretty(&task_input).map_err(|e| e.to_string())?;
+    root.replace_file(Path::new("task.json"), &task_bytes)?;
     let workspace = crate::eval_copy::copy(
         &source.workspace,
         &root.path().join("template"),
@@ -105,7 +108,7 @@ pub fn prepare(
         batteries,
     )?;
     let identity = json!({"version":1,"task":task.name,"task_hash":task.hash,
-        "source_workspace":workspace,"exclusions":source.exclude,"configuration":pinned.identity});
+        "source_workspace":workspace,"task_input":{"path":"task.json","hash":crate::snapshot::digest(&task_bytes)},"exclusions":source.exclude,"configuration":pinned.identity});
     source.workspace = root.path().join("template");
     source.exclude.clear();
     root.replace_file(

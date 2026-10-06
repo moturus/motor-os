@@ -1213,3 +1213,9 @@ release snapshot VM pass; corrected logs use `root-fixed`, native fixture log is
 `/tmp/gears-eval-cli-native.log`. This patch keeps the CLI and its actual-process
 integration test together; options, copying, pinning and paired execution were
 committed separately.
+
+Normalized task inputs are now saved outside model workspaces, with original
+source hashes/paths and a manifest hash. This preserves the prompt and vectors
+for later inspection without relying on an unchanged source TOML file. Both
+host profiles, warnings-denied host/native Clippy, native release build and
+release snapshot VM pass; logs use `/tmp/gears-eval-task-artifact-*`.

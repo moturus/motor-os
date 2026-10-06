@@ -30,6 +30,16 @@ pub fn run_fixture(root: &Path, batteries: &Path) -> Result<(), String> {
         batteries,
     )?;
     std::fs::write(source.workspace.join("a file*"), "changed after freeze").unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.root.path().join("task.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["task"]["prompt"], prepared.task.task.prompt);
+    assert_eq!(saved["source_hash"], prepared.task.hash);
+    assert_eq!(
+        saved["task"]["workspace"],
+        serde_json::json!(source.workspace)
+    );
+    assert!(!prepared.root.path().join("template/task.json").exists());
     let baseline = prepared.trial(0, false)?;
     let learning = prepared.trial(1, true)?;
     for trial in [&baseline, &learning] {

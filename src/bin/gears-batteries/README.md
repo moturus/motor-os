@@ -450,3 +450,8 @@ not parse a statistical decision rule or fabricate missing review costs/human
 seconds. Real-model runs are manual and outside regular tests, whose providers
 are loopback mocks. Keep held-out answers/judge assets out of source learning and
 model-visible copies.
+
+Each task output also preserves `task.json`: the normalized input, original
+file hash/path and selected source directory. Its hash is included in the input
+manifest. This keeps the prompt/check/criterion vectors available for inspection
+after the original task file changes; the model template never receives it.
