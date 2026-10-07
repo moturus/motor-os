@@ -3217,9 +3217,58 @@ fn unknown_integration_test(manifest: &Manifest, name: &str) -> Error {
 }
 
 fn install_primary(source: &Path, destination: &Path, package: &PackageKey) -> Result<()> {
+    // Where executables are copied (Motor), reinstalling the same bytes would
+    // only move the mtime, which makes other selections' records stale.
+    if crate::artifact_owner::matches_primary(destination, package)
+        && same_contents(source, destination)
+    {
+        return Ok(());
+    }
     crate::artifact_owner::invalidate_primary(destination)?;
     AtomicFile::from_executable(source, destination)?.commit()?;
     crate::artifact_owner::write_primary(destination, package)
+}
+
+fn same_contents(left: &Path, right: &Path) -> bool {
+    let (Ok(left_metadata), Ok(right_metadata)) =
+        (fs::symlink_metadata(left), fs::symlink_metadata(right))
+    else {
+        return false;
+    };
+    if !left_metadata.file_type().is_file()
+        || !right_metadata.file_type().is_file()
+        || left_metadata.len() != right_metadata.len()
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (left_metadata.dev(), left_metadata.ino())
+            == (right_metadata.dev(), right_metadata.ino())
+        {
+            return true;
+        }
+    }
+    let (Ok(mut left), Ok(mut right)) = (fs::File::open(left), fs::File::open(right)) else {
+        return false;
+    };
+    let mut left_buffer = vec![0; 1 << 16];
+    let mut right_buffer = vec![0; 1 << 16];
+    loop {
+        let Ok(read) = std::io::Read::read(&mut left, &mut left_buffer) else {
+            return false;
+        };
+        // The lengths match, so both files end together.
+        if read == 0 {
+            return true;
+        }
+        if std::io::Read::read_exact(&mut right, &mut right_buffer[..read]).is_err()
+            || left_buffer[..read] != right_buffer[..read]
+        {
+            return false;
+        }
+    }
 }
 
 pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {
@@ -3917,6 +3966,37 @@ mod tests {
         invalidate_fresh_profile(&profile, &owner(&fixture.0.join("first"))).unwrap();
         assert!(!first.exists());
         assert_eq!(fs::read(second).unwrap(), b"second");
+    }
+
+    #[test]
+    fn reinstalling_an_identical_copied_executable_keeps_it() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = Fixture::new();
+        let package = PackageKey {
+            name: "app".to_owned(),
+            version: "1.0.0".parse().unwrap(),
+            source: crate::resolver::PackageSourceKey::Path(fixture.0.clone()),
+        };
+        let source = fixture.0.join("built");
+        let installed = fixture.0.join("app");
+        fs::write(&source, b"executable").unwrap();
+        // A copy, as on Motor, rather than a hard link to the unit output.
+        fs::copy(&source, &installed).unwrap();
+        crate::artifact_owner::write_primary(&installed, &package).unwrap();
+        let identity = || {
+            fs::metadata(&installed)
+                .map(|metadata| metadata.ino())
+                .unwrap()
+        };
+        let copied = identity();
+
+        install_primary(&source, &installed, &package).unwrap();
+        assert_eq!(identity(), copied);
+
+        fs::write(&source, b"different!").unwrap();
+        install_primary(&source, &installed, &package).unwrap();
+        assert_ne!(identity(), copied);
+        assert_eq!(fs::read(&installed).unwrap(), b"different!");
     }
 
     #[test]

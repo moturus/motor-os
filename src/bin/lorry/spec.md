@@ -1723,7 +1723,8 @@ hard-links completed compiler output, preserving its permissions and sharing
 the inode with the unit artifact, as Cargo does. This avoids writable
 descriptors inherited by fork children keeping the installed executable busy.
 Filesystems that cannot hard-link fall back to a copy, as Cargo does. Motor
-uses independent copies.
+uses independent copies. A reinstall whose bytes and owner match the installed
+file keeps it, so its mtime, and other selections' records, stay valid.
 Staging names use one leading dot even when the destination is a hidden file,
 so they remain valid on Motor.
 Copied executables are made read/execute on Motor before publication.
