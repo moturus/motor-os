@@ -57,7 +57,7 @@ endif
 else
 
 all: base.img main.img
-images: base.img main.img dev.img
+images: base.img main.img dev.img wasm.img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
 sys-base: strobe sys-io sys-init sys-tty
@@ -68,7 +68,7 @@ user-dev: user curl gears gears-mock-provider gix lorry mdbg rnetbench crossbenc
 	systest mio-test tokio-tests crossterm-smoke
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
-.PHONY: base.img main.img raw.img dev.img system-tty.img vsock-test.img
+.PHONY: base.img main.img raw.img dev.img wasm.img system-tty.img vsock-test.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
@@ -352,6 +352,17 @@ dev.img: assembly-resolved boot core sys user-dev
 		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS dev image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2"
+
+# Release wasm add-ons are prepared by src/build-motor-os.sh --javy-only.
+wasm.img: assembly-resolved boot core sys user
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
+	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-wasm.qcow2" && \
+	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
+		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
+		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-wasm.yaml ) 9>"$(IMAGER_LOCK)"
+	$(INSTALL_VM_SCRIPTS)
+	@echo "built the Motor OS wasm image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-wasm.qcow2"
 
 clippy: vdso
 	cd src/sys/sys-io && $(DO_CLIPPY)

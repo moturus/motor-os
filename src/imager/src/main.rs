@@ -987,10 +987,11 @@ mod tests {
                 "helix",
                 "lua",
                 "sed",
-                "rust-analyzer"
+                "rust-analyzer",
+                "javy"
             ]
         );
-        assert_eq!(config.assembly_required_executables.len(), 11);
+        assert_eq!(config.assembly_required_executables.len(), 13);
         assert!(config
             .assembly_required_executables
             .iter()

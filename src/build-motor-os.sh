@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # build-motor-os.sh — build the complete Motor OS release environment and the
-# base, standard, and development VM images.
+# base, standard, development, and wasm VM images.
 #
 # This is the single entry point for the exact toolchain pipeline: it provisions
 # the host, resolves the declared Rust/LLVM source tuple, builds and validates a
@@ -36,10 +36,11 @@ trap 'die "failed at line $LINENO"' ERR
 usage() {
 	cat << 'EOF'
 Usage: src/build-motor-os.sh [--source-mode managed]
+       src/build-motor-os.sh --javy-only
        src/build-motor-os.sh --source-mode authoring \
          --rust-source /absolute/path/to/rust --authoring-base FULL_COMMIT
 
-Build the complete Motor OS release environment and all three images, including:
+Build the complete Motor OS release environment and all four images, including:
   - the exact key-qualified Rust 1.99 Motor toolchain;
   - Linux-host rust-analyzer and its matching proc-macro server;
   - host cross LLVM/Clang and the mlibc/libc++ sysroot;
@@ -48,8 +49,12 @@ Build the complete Motor OS release environment and all three images, including:
   - Helix as /devtools/helix/hx in the development image;
   - uutils sed as /devtools/bin/sed in the development image;
   - native rust-analyzer and matching rust-src in the development image;
+  - Javy and Wasmi in the development and small wasm images;
   - all standard and dev-image Motor OS binaries;
-  - base, standard, and dev images under vm_images/release.
+  - base, standard, dev, and wasm images under vm_images/release.
+
+--javy-only builds the Javy/Wasmi add-on with the selected installed assembly;
+it skips toolchain provisioning and image construction.
 
 Environment:
   MOTORH  Development root for sibling checkouts and build trees.
@@ -69,11 +74,13 @@ EOF
 
 parse_options() {
 	SOURCE_MODE=managed
+	JAVY_ONLY=false
 	RUST_SOURCE=
 	AUTHORING_BASE=
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			-h|--help) usage; return 2 ;;
+			--javy-only) JAVY_ONLY=true; shift ;;
 			--source-mode) [ "$#" -ge 2 ] || die "--source-mode needs a value"; SOURCE_MODE="$2"; shift 2 ;;
 			--rust-source) [ "$#" -ge 2 ] || die "--rust-source needs a value"; RUST_SOURCE="$2"; shift 2 ;;
 			--authoring-base) [ "$#" -ge 2 ] || die "--authoring-base needs a value"; AUTHORING_BASE="$2"; shift 2 ;;
@@ -113,6 +120,7 @@ MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/toolchain-patched-crates.sh"
 . "$SCRIPT_DIR/toolchain-rust-analyzer.sh"
 . "$SCRIPT_DIR/patches/crates.sh"
+. "$SCRIPT_DIR/build-javy.sh"
 toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
 
 MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
@@ -868,6 +876,7 @@ build_addons() {
 	update_addon_source sed "$SED" "$SED_REPOSITORY" "$SED_BRANCH"
 	ensure_addon sed "$(git -C "$SED" rev-parse HEAD)" \
 		"$SED_IMG" devtools/bin/sed build_sed
+	build_javy_addon
 }
 
 build_helix() {
@@ -894,7 +903,7 @@ build_helix() {
 	stage_helix
 }
 
-# --- rebuild the OS and all three images -------------------------------------
+# --- rebuild the OS and images ----------------------------------------------
 build_images() {
 	log "rebuilding Motor OS and all images (make images BUILD=release)"
 	# Keep make's output visible: when a component fails, the compiler diagnostic
@@ -904,8 +913,9 @@ build_images() {
 		2>&1 | tee "$MAKE_LOG"
 	grep -q 'built the Motor OS base image' "$MAKE_LOG" &&
 		grep -q 'built the standard Motor OS image' "$MAKE_LOG" &&
-		grep -q 'built the Motor OS dev image' "$MAKE_LOG" ||
-		die "make finished without all three imagers running — see $MAKE_LOG"
+		grep -q 'built the Motor OS dev image' "$MAKE_LOG" &&
+		grep -q 'built the Motor OS wasm image' "$MAKE_LOG" ||
+		die "make finished without all four imagers running — see $MAKE_LOG"
 }
 
 main() {
@@ -915,6 +925,14 @@ main() {
 		[ "$parse_status" -eq 2 ] && return 0
 		return "$parse_status"
 	}
+	if [ "$JAVY_ONLY" = true ]; then
+		[ "$SOURCE_MODE" = managed ] || die "--javy-only uses the selected installed toolchain"
+		ASSEMBLY_IMAGE_ROOT="$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)"
+		ASSEMBLY_ROOT="${ASSEMBLY_IMAGE_ROOT%/images}"
+		ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
+		build_javy_addon
+		return
+	fi
 	log "complete Motor OS build starting"
 	log "Motor OS checkout: $MOTOR"
 	log "development root:  $MOTORH"
@@ -997,12 +1015,15 @@ main() {
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
+		"$MOTOR/vm_images/release/motor-os-wasm.qcow2"
+		"$JAVY_IMG/user/bin/javy"
+		"$JAVY_IMG/user/bin/wasmi"
 	)
 	local output
 	for output in "${required_outputs[@]}"; do
 		[ -f "$output" ] || die "final build output is missing: $output"
 	done
-	log "base, standard, and dev release images built successfully"
+	log "base, standard, dev, and wasm release images built successfully"
 	[ "$caller_has_rustup" = true ] ||
 		warn "this shell's PATH lacks rustup: open a new shell or run '. \"\$HOME/.cargo/env\"' before make or the tests"
 	return 0
