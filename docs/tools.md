@@ -82,10 +82,13 @@ The shell is somewhat barebones now (contributions are welcome!).
   retaining the first line's spelling. `-c` counts, `-d` keeps repeated groups,
   `-u` keeps single lines and `-i` folds ASCII case; `-` selects standard I/O.
   It streams input; use `sort` first to group nonadjacent duplicates;
-- `cut (-b LIST | -c LIST) [--complement] [--] [FILE]...` selects bytes
-  in the C locale (`-c` also counts bytes). Lists contain one-based positions,
+- `cut (-b LIST | -c LIST | -f LIST) [-d BYTE] [-s] [--complement] [--] [FILE]...`
+  selects bytes or fields. Byte selection uses the C locale (`-c` also counts bytes). Lists contain one-based positions,
   `N-M`, `-M` or `N-`; overlapping selections appear once in input order.
-  No files or `-` reads standard input; `--complement` selects other positions;
+  No files or `-` reads standard input; `--complement` selects other positions.
+  `-f LIST` selects fields, with TAB by default or a single-byte `-d` delimiter
+  (empty `-d` means NUL). `-s` suppresses undelimited lines; otherwise they pass
+  through. Selected fields retain their input order and delimiter;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
   numeric IPv4 and IPv6 addresses, `localhost`, and DNS names;
 - `head [-n [-]NUM | -c [-]NUM] [-q | -v] [-z] [FILE]...` prints the first 10

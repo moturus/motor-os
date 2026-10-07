@@ -143,6 +143,7 @@ fn main() {
     sort_key_flags::run_test(&root);
     uniq::run_test(&root);
     cut::bytes(&root);
+    cut::fields(&root);
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox utility-tests: ALL PASS");
 }

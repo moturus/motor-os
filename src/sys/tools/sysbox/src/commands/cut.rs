@@ -1,27 +1,47 @@
-//! Selected byte positions in the C locale, without locale-dependent character counts.
+//! Selected byte positions or delimiter-separated fields in the C locale.
 use std::io::{BufRead, Write};
 
 #[derive(Default)]
 struct Options {
+    fields: bool,
     ranges: Vec<(u64, u64)>,
     complement: bool,
+    suppress: bool,
+    delimiter: Option<u8>,
 }
 fn fail(message: &str) -> ! {
     eprintln!("cut: {message}\nTry 'cut --help' for more information.");
     std::process::exit(1)
 }
-fn ranges(list: &str) -> Vec<(u64, u64)> {
+fn ranges(list: &str, fields: bool) -> Vec<(u64, u64)> {
+    let invalid = if fields {
+        "invalid field range"
+    } else {
+        "invalid byte or character range"
+    };
+    let zero = if fields {
+        "fields are numbered from 1"
+    } else {
+        "byte/character positions are numbered from 1"
+    };
     let number = |text: &str| {
         if text.is_empty() {
-            fail("byte/character positions are numbered from 1");
+            fail(zero);
         }
         if !text.bytes().all(|b| b.is_ascii_digit()) {
-            fail("invalid byte or character range");
+            fail(invalid);
         }
         text.parse::<u64>()
             .ok()
             .filter(|n| *n < u64::MAX)
-            .unwrap_or_else(|| fail(&format!("byte/character offset '{text}' is too large")))
+            .unwrap_or_else(|| {
+                let kind = if fields {
+                    "field number"
+                } else {
+                    "byte/character offset"
+                };
+                fail(&format!("{kind} '{text}' is too large"))
+            })
     };
     let mut ranges = Vec::new();
     for part in list.split([',', ' ', '\t']) {
@@ -41,7 +61,7 @@ fn ranges(list: &str) -> Vec<(u64, u64)> {
             (n, n)
         };
         if low == 0 {
-            fail("byte/character positions are numbered from 1");
+            fail(zero);
         }
         if high < low {
             fail("invalid decreasing range");
@@ -78,24 +98,35 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
             continue;
         }
         if argument == "--help" {
-            println!("usage: cut (-b LIST | -c LIST) [--complement] [--] [FILE]...\nLists use one-based positions, N-M, -M, or N-, separated by commas.\n-b and -c select bytes in the C locale.");
+            println!("usage: cut (-b LIST | -c LIST | -f LIST) [-d BYTE] [-s] [--complement] [--] [FILE]...\nLists use one-based positions, N-M, -M, or N-, separated by commas.\n-b and -c select bytes in the C locale; -f selects fields (default TAB).\n-d selects a single-byte delimiter; -s suppresses undelimited lines.");
             std::process::exit(0);
         }
         if argument == "--complement" {
             options.complement = true;
             continue;
         }
-        let (name, value) = argument
-            .split_once('=')
-            .map_or((argument.as_str(), None), |(n, v)| (n, Some(v)));
+        let (name, value) = if argument.starts_with("--") {
+            argument
+                .split_once('=')
+                .map_or((argument.as_str(), None), |(n, v)| (n, Some(v)))
+        } else {
+            (argument.as_str(), None)
+        };
         let flags = match name {
             "--bytes" => "b",
             "--characters" => "c",
+            "--fields" => "f",
+            "--delimiter" => "d",
+            "--only-delimited" if value.is_none() => "s",
             name if !name.starts_with("--") => &argument[1..],
             _ => fail(&format!("unsupported option '{argument}'")),
         };
-        if let Some((position, flag)) = flags.char_indices().next() {
-            if !matches!(flag, 'b' | 'c') {
+        for (position, flag) in flags.char_indices() {
+            if flag == 's' {
+                options.suppress = true;
+                continue;
+            }
+            if !matches!(flag, 'b' | 'c' | 'f' | 'd') {
                 fail(&format!("unsupported option '{argument}'"));
             }
             let rest = &flags[position + 1..];
@@ -108,15 +139,31 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
                     })
                 }
             });
-            if list.is_some() {
-                fail("only one list may be specified");
+            if flag == 'd' {
+                options.delimiter = Some(match value.as_bytes() {
+                    [] => 0,
+                    [byte] => *byte,
+                    _ => fail("the delimiter must be a single character"),
+                });
+            } else {
+                if list.is_some() {
+                    fail("only one list may be specified");
+                }
+                options.fields = flag == 'f';
+                list = Some(());
+                options.ranges = ranges(value, options.fields);
             }
-            list = Some(());
-            options.ranges = ranges(value);
+            break;
         }
     }
     if list.is_none() {
         fail("you must specify a list of bytes, characters, or fields");
+    }
+    if !options.fields && options.delimiter.is_some() {
+        fail("an input delimiter makes sense\n\tonly when operating on fields");
+    }
+    if !options.fields && options.suppress {
+        fail("suppressing non-delimited lines makes sense\n\tonly when operating on fields");
     }
     if files.is_empty() {
         files.push("-".into());
@@ -133,16 +180,62 @@ impl Options {
             .is_some_and(|range| range.0 <= position);
         selected != self.complement
     }
-    fn line(&self, line: &[u8], output: &mut dyn Write) -> std::io::Result<()> {
-        for (index, byte) in line.iter().enumerate() {
-            if self.selected(index) {
-                output.write_all(&[*byte])?;
+    fn line(&self, line: &[u8], delimited: bool, output: &mut dyn Write) -> std::io::Result<()> {
+        if self.fields {
+            if self.suppress && self.complement && self.ranges == [(1, u64::MAX)] {
+                return Ok(());
+            }
+            if !delimited {
+                if self.suppress {
+                    return Ok(());
+                }
+                output.write_all(line)?;
+            } else {
+                let delimiter = self.delimiter.unwrap_or(b'\t');
+                let mut first = true;
+                for (index, field) in line.split(|byte| *byte == delimiter).enumerate() {
+                    if self.selected(index) {
+                        if !first {
+                            output.write_all(&[delimiter])?;
+                        }
+                        output.write_all(field)?;
+                        first = false;
+                    }
+                }
+            }
+        } else {
+            for (index, byte) in line.iter().enumerate() {
+                if self.selected(index) {
+                    output.write_all(&[*byte])?;
+                }
             }
         }
         output.write_all(b"\n")
     }
     fn input(&self, input: &mut dyn BufRead, output: &mut dyn Write) -> std::io::Result<()> {
+        let delimiter = self.delimiter.unwrap_or(b'\t');
         let mut bytes = Vec::new();
+        // A newline separator makes the file one field record, not one record per line.
+        if self.fields && delimiter == b'\n' {
+            input.read_to_end(&mut bytes)?;
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            let raw_delimited = bytes.contains(&delimiter);
+            if bytes.last() == Some(&b'\n') {
+                bytes.pop();
+            }
+            let delimited = if self.suppress && !self.selected(0) {
+                bytes.contains(&delimiter)
+            } else {
+                raw_delimited
+            };
+            self.line(&bytes, delimited, output)
+                .unwrap_or_else(|error| {
+                    fail(&format!("write error: {}", super::wc::strerror(&error)))
+                });
+            return Ok(());
+        }
         loop {
             bytes.clear();
             if input.read_until(b'\n', &mut bytes)? == 0 {
@@ -151,9 +244,10 @@ impl Options {
             if bytes.last() == Some(&b'\n') {
                 bytes.pop();
             }
-            self.line(&bytes, output).unwrap_or_else(|error| {
-                fail(&format!("write error: {}", super::wc::strerror(&error)))
-            });
+            self.line(&bytes, bytes.contains(&delimiter), output)
+                .unwrap_or_else(|error| {
+                    fail(&format!("write error: {}", super::wc::strerror(&error)))
+                });
         }
     }
 }

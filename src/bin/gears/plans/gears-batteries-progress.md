@@ -18,7 +18,7 @@ that Gears works with OpenRouter on Motor OS.
 | --- | --- |
 | First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
 | Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
-| Motor OS command utilities | Separate coding work remains: `cut` field selection, `tr` and `xargs`. `mkdir -p`, `sort`, `uniq` and `cut` byte selection are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Motor OS command utilities | Separate coding work remains: `tr` and `xargs`. `mkdir -p`, `sort`, `uniq` and `cut` are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
 | Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
 | Optional orchestration (10) | Implement supervised worker agents and their budgets. |
 | Optional web tools (11) | Implement web search and page extraction using curl. |
@@ -1319,5 +1319,31 @@ byte-selection cases.
 The final installed fixture and `full-test.sh` pass three times each in
 debug and release on unchanged source. Warnings-denied native Clippy passes.
 Gate logs: `/tmp/gears-sysbox-cut-bytes/final-gates/`. Authored crate changes are limited to sysbox;
+verified build-generated locks are restored and the user's existing sys lock
+is preserved.
+
+
+### S4 cut field selection
+
+`cut -f` selects fields separated by TAB or a single-byte `-d` delimiter;
+an empty delimiter means NUL. `-s` suppresses undelimited records. Selected
+fields keep their input order and delimiter, including empty fields, and
+complementary selection works with the same range parser. Native regressions
+cover those cases and newline-delimiter behavior, plus invalid field numbers
+and byte-selection/delimiter combinations with no partial output. The installed
+cut source passes 3,520 GNU output/status comparisons.
+
+Review reproduced a new parser defect: `-d=` selected NUL instead of the
+literal equals byte, while short forms such as `-b=1` were incorrectly accepted.
+Only long options now split on `=`; short arguments retain it as data. Native
+fixtures cover the equals delimiter, equivalent long options, and invalid short
+lists. The earlier four full-suite passes used faulty source and do not count;
+that gate was stopped before editing. Original comparisons and canceled-gate
+logs remain in `/tmp/gears-sysbox-cut/original-short-equals.log` and
+`/tmp/gears-sysbox-cut/final-gates/`. All six final gates use corrected source.
+
+The final installed fixture and `full-test.sh` pass three times each in
+debug and release on unchanged source. Warnings-denied native Clippy passes.
+Gate logs: `/tmp/gears-sysbox-cut/short-equals-fixed-gates/`. Authored crate changes are limited to sysbox;
 verified build-generated locks are restored and the user's existing sys lock
 is preserved.
