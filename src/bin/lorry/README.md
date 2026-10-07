@@ -497,7 +497,8 @@ single-package review format 3 is rejected; workspace-root
 `lorry vendor --locked` replaces it with a new review.
 
 The offline, non-mutating `lorry review` command reconstructs the committed
-document, verifies its hash, and writes exact canonical TOML to stdout:
+document, verifies its hash, and writes exact canonical TOML to stdout. It
+covers the scope recorded by `vendor` and rejects package or feature selectors:
 
 ```sh
 lorry review > dependency-review.toml

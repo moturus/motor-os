@@ -49,13 +49,4 @@ impl FeatureSelection {
             no_default: flag("no-default-features"),
         })
     }
-
-    pub(crate) fn require_default(&self) -> Result<()> {
-        if self.all || self.no_default || !self.features.is_empty() {
-            return Err(Error::failure(
-                "feature selection is not yet supported by workspace resolution",
-            ));
-        }
-        Ok(())
-    }
 }

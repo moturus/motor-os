@@ -112,7 +112,7 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
     # The root record must cover every member compiled below, while leaving
     # the scripted member outside this ordinary execution contract.
     "$LORRY" vendor -p app -p tool -p shared --accept-all
-    "$LORRY" review -p app >/dev/null
+    "$LORRY" review >/dev/null
     "$LORRY" -v build -j2 -p app 2>"$WORK/app-build.stderr"
     grep -F 'panic=abort' "$WORK/app-build.stderr" >/dev/null
     [ "$(grep -Fc 'profiles for the non root package will be ignored' "$WORK/app-build.stderr")" -eq 1 ]
@@ -188,7 +188,7 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
     cd "$WORK"
     manifest="$WORK/project/Cargo.toml"
     "$LORRY" vendor --manifest-path "$manifest" -p app -p tool -p shared --accept-all
-    "$LORRY" review --manifest-path "$manifest" -p app >/dev/null
+    "$LORRY" review --manifest-path "$manifest" >/dev/null
     "$LORRY" build --manifest-path "$manifest" -p app
     [ "$("$LORRY" run --manifest-path "$manifest" -p app)" = app ]
     "$LORRY" test --manifest-path "$manifest" -p app --no-run

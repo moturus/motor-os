@@ -489,6 +489,14 @@ impl Cli {
                 "remove `--use-cargo-registry`",
             ));
         }
+        if matches!(command, Command::Review)
+            && (selection != PackageSelection::default() || features != FeatureSelection::default())
+        {
+            return Err(Error::usage(
+                "`review` does not accept package or feature selection",
+                "review writes the committed review of the scope recorded by `lorry vendor`; pass selectors to vendor to change that scope",
+            ));
+        }
         if use_cargo_registry && matches!(command, Command::Review) {
             return Err(Error::usage(
                 "`--use-cargo-registry` cannot be combined with `review`",
@@ -1436,7 +1444,7 @@ mod tests {
     #[test]
     fn parses_shared_feature_syntax_without_losing_qualified_or_weak_names() {
         for command in [
-            "build", "check", "clippy", "run", "test", "tree", "metadata", "vendor", "review",
+            "build", "check", "clippy", "run", "test", "tree", "metadata", "vendor",
         ] {
             let cli = parse(&[
                 command,
@@ -1456,7 +1464,6 @@ mod tests {
                     .collect()
             );
             assert!(cli.features.all && cli.features.no_default);
-            assert!(cli.features.require_default().is_err());
             assert_eq!(
                 parse(&[command, "--features", " , "]).unwrap().features,
                 FeatureSelection::default()
@@ -2195,6 +2202,22 @@ mod tests {
         assert!(parse(&["review", "extra"]).is_err());
         assert!(parse(&["review", "--anything"]).is_err());
         assert!(parse(&["--use-cargo-registry", "review"]).is_err());
+        for selector in [
+            &["review", "-p", "app"][..],
+            &["review", "--package", "app"],
+            &["review", "--features", "extra"],
+            &["review", "--all-features"],
+            &["review", "--no-default-features"],
+        ] {
+            let error = parse(selector).unwrap_err();
+            assert!(error.is_usage(), "{selector:?}");
+            assert!(
+                error
+                    .render()
+                    .contains("does not accept package or feature selection"),
+                "{selector:?}"
+            );
+        }
     }
 
     #[test]

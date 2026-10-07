@@ -171,7 +171,7 @@ lorry [+toolchain] [GLOBAL] locate-project [--workspace] [--manifest-path PATH]
 lorry [+toolchain] [GLOBAL] metadata [--format-version 1]
                                     [--manifest-path PATH] [--no-deps]
                                     [--filter-platform TRIPLE]
-lorry [+toolchain] [GLOBAL] review [-p NAME]
+lorry [+toolchain] [GLOBAL] review [--manifest-path PATH]
 lorry [+toolchain] [GLOBAL] run    [-p NAME] [--bin NAME|--example NAME]
                                   [--release|-r] [--target TRIPLE]
                                   [--target-dir DIRECTORY] [--strict-validation] [-- ARGS...]
@@ -304,12 +304,12 @@ root compilation, freshness validation, and artifact publication.
   dev-dependencies. Library examples cannot be executed. Run rejects target
   glob patterns and simultaneous binary/example selectors, as Cargo does.
 - `-p NAME`/`--package NAME` selects matching workspace members for
-  build, check, Clippy, clean, run, test, vendor, and review. Supported repeated
+  build, check, Clippy, clean, run, test, and vendor. Supported repeated
   selectors combine and deduplicate their selections.
 - `review` is offline and non-mutating. It reconstructs and verifies the
   committed canonical dependency review, then writes its exact TOML to stdout.
-  It accepts no command-specific arguments and rejects
-  `--use-cargo-registry`.
+  The review covers the scope recorded by `vendor`, so package and feature
+  selectors are usage errors. It also rejects `--use-cargo-registry`.
 - `test` builds all selected harnesses before running them in Cargo-compatible
   fail-fast target order: packages by name, then each package's library,
   binaries by name, and integration tests by name. Ordinary tests accept the
@@ -386,7 +386,7 @@ but all members are selected; with exclusions `-p` is ignored. Unmatched
 exclusions warn, except in quiet mode. Empty selections fail explicitly.
 Workspace test targets execute through the shared graph. Run accepts one `-p` and
 rejects package patterns. Package IDs do not require a manifest-path option.
-Build, check, Clippy, run, test, tree, metadata, vendor, and review share
+Build, check, Clippy, run, test, tree, metadata, and vendor share
 repeated `--features`/`-F`, comma/space lists, qualified and weak dependency
 features, `--all-features`, and `--no-default-features`. Explicit `dep:`
 names and multiple slashes fail as in Cargo. Source-only metadata describes

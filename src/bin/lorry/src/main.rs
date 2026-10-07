@@ -210,7 +210,7 @@ fn print_help(topic: Option<&str>) {
             println!("Create a binary package\n\nUsage: lorry [+toolchain] [GLOBAL] new PATH")
         }
         Some("review") => println!(
-            "Write the verified dependency review\n\nUsage: lorry [+toolchain] [GLOBAL] review [-p NAME]"
+            "Write the verified dependency review\n\nUsage: lorry [+toolchain] [GLOBAL] review [--manifest-path PATH]"
         ),
         Some("run") => println!(
             "Build and run a package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [-p NAME] [--release|-r] [--target TRIPLE] [--bin NAME] [--strict-validation] [-- ARGS...]"

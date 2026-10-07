@@ -13,20 +13,17 @@ use crate::repository::RepositorySet;
 use crate::toolchain::Toolchain;
 
 pub fn execute(cli: &Cli) -> Result<i32> {
-    cli.features.require_default()?;
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let mut workspace = SourceWorkspace::load(
         &current,
         cli.manifest_path.as_deref().map(std::path::Path::new),
     )?;
-    cli.selection.select(
-        workspace
-            .packages
-            .iter()
-            .map(|member| (member.name.as_str(), &member.version, member.root.as_path())),
-        workspace.default_members.iter().map(|root| root.as_path()),
-    )?;
+    if workspace.packages.is_empty() {
+        return Err(Error::failure(
+            "the manifest is virtual, and the workspace contains no package",
+        ));
+    }
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
     let compact = CompactState::load(&workspace.root)?.ok_or_else(|| {
         Error::failure("dependency review requires workspace-root Lorry admission").with_help(

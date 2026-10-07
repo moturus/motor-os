@@ -370,7 +370,7 @@ chmod 000 "$WORK/bin/git-curl"
     HOME="$HOME_DIR" "$LORRY" build -p app
     [ "$(HOME="$HOME_DIR" "$LORRY" run -p app)" = 44 ]
     HOME="$HOME_DIR" "$LORRY" test -p app -- --quiet
-    HOME="$HOME_DIR" "$LORRY" review -p app >"$WORK/review.toml"
+    HOME="$HOME_DIR" "$LORRY" review >"$WORK/review.toml"
     HOME="$HOME_DIR" "$LORRY" metadata --format-version 1 \
         --filter-platform x86_64-unknown-linux-gnu --locked >"$WORK/metadata.json"
     HOME="$HOME_DIR" "$LORRY" tree -p app \

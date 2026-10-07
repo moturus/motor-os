@@ -150,6 +150,11 @@ commitment="$(sed -n 's/^review-sha256 = "\([0-9a-f]*\)"/\1/p' \
 }
 expect_failure cargo-registry 'cannot be combined with `review`' \
     --use-cargo-registry review
+for selector in "-p review-fixture" "--features extra" "--all-features"; do
+    # shellcheck disable=SC2086
+    expect_failure selected-review 'does not accept package or feature selection' \
+        review $selector
+done
 sed -i 's/^review-sha256 = ".*"/review-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"/' \
     "$PROJECT/.lorry/dependencies-v2.toml"
 expect_failure stale-commitment "workspace admission commitment does not match" review
