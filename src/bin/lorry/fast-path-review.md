@@ -2,6 +2,11 @@
 
 Date: 2026-10-07. Measured code: `78a0b867` (later commits change only docs).
 
+Status: step 1 below is done (1887b34d, d359aa63). Warm `build`, `run` and
+`check` on the shared path now reuse a completed-profile record. On the host,
+Lorry's own source forced onto the shared path went from 3.3 s to 2.2 s
+(`check`: 3.6 s to 2.3 s). Step 2 is not started.
+
 ## Question
 
 Lorry still has two build paths. The shared workspace path can build
