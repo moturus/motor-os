@@ -2133,20 +2133,17 @@ fn restore_fresh_profile(
         .iter()
         .map(|(name, artifact)| (name.clone(), profile.join(&artifact.path)))
         .collect::<BTreeMap<_, _>>();
-    let valid = if validation.is_strict() {
+    let inputs = if validation.is_strict() {
         fresh_input_digest(profile, package_root, base, &record.dep_info).ok()
-            == Some(record.inputs)
-            && sha256_regular(&primary).ok() == Some(record.primary.sha256)
-            && binaries.iter().all(|(name, path)| {
-                sha256_regular(path).ok()
-                    == record.binaries.get(name).map(|artifact| artifact.sha256)
-            })
     } else {
         trusted_input_digest(profile, package_root, &record.dep_info, &record.local_roots).ok()
-            == Some(record.inputs)
-            && primary.is_file()
-            && binaries.values().all(|path| path.is_file())
     };
+    let valid = inputs == Some(record.inputs)
+        && artifact_identity(&primary, validation).ok() == Some(record.primary.sha256)
+        && binaries.iter().all(|(name, path)| {
+            artifact_identity(path, validation).ok()
+                == record.binaries.get(name).map(|artifact| artifact.sha256)
+        });
     if !valid {
         return None;
     }
@@ -2185,13 +2182,7 @@ fn write_fresh_profile(
     } else {
         trusted_input_digest(profile, package_root, &dep_info, local_roots)?
     };
-    let artifact_sha256 = |path: &Path| {
-        if validation.is_strict() {
-            sha256_regular(path)
-        } else {
-            Ok([0; 32])
-        }
-    };
+    let artifact_sha256 = |path: &Path| artifact_identity(path, validation);
     let primary_sha256 = artifact_sha256(&artifacts.primary)?;
     let environment = tracked_env::encode(&artifacts.environment);
     let mut document = format!(
@@ -2632,6 +2623,27 @@ fn metadata_time(path: &Path, metadata: &fs::Metadata, digest: &mut FreshDigest)
     digest.bytes("mtime-secs", &modified.as_secs().to_le_bytes());
     digest.bytes("mtime-nanos", &modified.subsec_nanos().to_le_bytes());
     Ok(())
+}
+
+/// Strict records bind installed root artifacts by content; trusted records
+/// by size and mtime, so another selection's reinstall invalidates them.
+fn artifact_identity(path: &Path, validation: ValidationMode) -> Result<[u8; 32]> {
+    if validation.is_strict() {
+        return sha256_regular(path);
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::failure(format!("failed to inspect `{}`: {error}", path.display()))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(Error::failure(format!(
+            "expected a regular file at `{}`",
+            path.display()
+        )));
+    }
+    let mut digest = FreshDigest::new();
+    digest.bytes("artifact-length", &metadata.len().to_le_bytes());
+    metadata_time(path, &metadata, &mut digest)?;
+    Ok(digest.finish())
 }
 
 fn sha256_regular(path: &Path) -> Result<[u8; 32]> {
@@ -3810,7 +3822,14 @@ mod tests {
             ValidationMode::Trusted,
         )
         .unwrap();
+        let installed = fs::metadata(&artifact).unwrap().modified().unwrap();
         fs::write(&artifact, b"tampered-artifact").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&artifact)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(installed))
+            .unwrap();
         assert!(
             restore_fresh_profile(
                 &profile,
@@ -3828,6 +3847,23 @@ mod tests {
                 &fixture.0,
                 base,
                 ValidationMode::Strict
+            )
+            .is_none()
+        );
+        // Another selection reinstalling the artifact changes its mtime.
+        fs::File::options()
+            .write(true)
+            .open(&artifact)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::now()))
+            .unwrap();
+        assert!(
+            restore_fresh_profile(
+                &profile,
+                &fixture.0,
+                &fixture.0,
+                base,
+                ValidationMode::Trusted
             )
             .is_none()
         );

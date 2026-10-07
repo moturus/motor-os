@@ -1699,8 +1699,10 @@ ordinary unchanged `build` or `run` validates parsed manifest, lock, compact
 admission, configuration, compiler, target, flags, tracked variables, and
 tool metadata plus rustc dep-info and mutable path-source path/size/mtime
 fingerprints. Tracked variables are those that any unit read and the caller
-variables granted to build scripts. It requires the installed artifact to exist but does not read
-artifact or dependency source contents. A matching record is checked after
+variables granted to build scripts. It checks the size and mtime of each
+installed root artifact, so a binary that another selection reinstalls
+invalidates the record. It does not read artifact or dependency source
+contents. A matching record is checked after
 admission verification. The profile is then reused without invoking build
 scripts, rustc, native tools, or the linker. Strict mode also rehashes all of
 those contents before reuse. A missing, malformed, stale, or differently-modeled
