@@ -1,4 +1,6 @@
 //! Real sysbox command regressions; run against the installed native executable.
+#[path = "utility-tests/cut.rs"]
+mod cut;
 #[path = "utility-tests/sort-keys.rs"]
 mod sort_key_flags;
 #[path = "utility-tests/uniq.rs"]
@@ -140,6 +142,7 @@ fn main() {
     sort_fields(&root);
     sort_key_flags::run_test(&root);
     uniq::run_test(&root);
+    cut::bytes(&root);
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox utility-tests: ALL PASS");
 }

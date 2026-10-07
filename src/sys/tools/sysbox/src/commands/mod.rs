@@ -1,6 +1,7 @@
 pub mod cat;
 pub mod chmod;
 pub mod cp;
+pub mod cut;
 pub mod date;
 pub mod diff;
 pub mod find;
