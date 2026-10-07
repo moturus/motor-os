@@ -879,9 +879,10 @@ pub(crate) fn fresh_record_prefix(package_root: &Path) -> String {
     format!("{FRESH_PROFILE_FILE}-{}", hex(&hash.finish()))
 }
 
-/// Names the completed-profile record of one selection. Each selection keeps
-/// its own record, so alternating `build`, `run --bin`, and other selections
-/// all stay fresh. The name starts with the owning package's prefix.
+/// Names the completed-profile record of one selection. Selections whose
+/// digests differ keep separate records, so alternating `build`, `run --bin`,
+/// and other selections all stay fresh, while `build` and the `run` of a
+/// single binary share one. The name starts with the owning package's prefix.
 fn fresh_record_name(
     manifest: &Manifest,
     members: Option<&[Manifest]>,
@@ -890,10 +891,13 @@ fn fresh_record_name(
 ) -> String {
     let mut digest = FreshDigest::new();
     digest.bytes("schema", b"lorry-fresh-selection-v1");
-    for member in members.unwrap_or_default() {
-        digest.os("member", member.root.as_os_str());
+    // Only the shared path digests its target selection.
+    if let Some(members) = members {
+        for member in members {
+            digest.os("member", member.root.as_os_str());
+        }
+        digest.debug("targets", &targets);
     }
-    digest.debug("targets", &targets);
     digest.debug("binary", &binary);
     let selection = hex(&digest.finish());
     format!(
