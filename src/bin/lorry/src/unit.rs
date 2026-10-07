@@ -403,7 +403,6 @@ impl CompilationPlan {
 pub struct PlanOptions<'a> {
     pub workspace_root: &'a Path,
     pub release: bool,
-    pub test_profile: bool,
     pub panic_abort: bool,
     pub dev_profile: &'a DevProfile,
     pub release_profile: &'a ReleaseProfile,
@@ -979,10 +978,9 @@ pub fn selected_check_units(
     manifests: &BTreeMap<PackageKey, Manifest>,
     selected: &Manifest,
     selection: &CheckTargetSelection<'_>,
-    panic_abort: bool,
 ) -> Result<UnitGraph> {
     let package = selected_library_key(selected)?.package;
-    let mut normal = if selection.normal {
+    if selection.normal {
         let mut graph = dependency_units(resolution, manifests)?;
         if selected.library.is_some() {
             add_selected_library(&mut graph, resolution, manifests, selected)?;
@@ -996,38 +994,15 @@ pub fn selected_check_units(
                 selection.binary_name,
             )?;
         }
-        graph.with_selected_check_mode(&package)?
+        graph.with_selected_check_mode(&package)
     } else {
-        UnitGraph {
+        Ok(UnitGraph {
             units: BTreeMap::new(),
             order: Vec::new(),
             selected_packages: BTreeSet::new(),
             primary_macros: BTreeSet::new(),
-        }
-    };
-    if selection.harnesses || selection.integrations {
-        let mut test = dependency_units(resolution, manifests)?;
-        if selected.library.is_some() {
-            add_selected_library(&mut test, resolution, manifests, selected)?;
-        }
-        if selection.harnesses {
-            add_selected_harnesses(&mut test, resolution, manifests, selected)?;
-        }
-        test = test.with_profile(ProfileContext::Test, panic_abort);
-        if selection.integrations {
-            add_selected_integration_harnesses(
-                &mut test,
-                resolution,
-                manifests,
-                selected,
-                selection.integration_name,
-                panic_abort,
-                false,
-            )?;
-        }
-        normal.merge(test.with_selected_check_mode(&package)?)?;
+        })
     }
-    Ok(normal)
 }
 
 pub fn dependency_units(
@@ -1743,7 +1718,7 @@ pub fn add_selected_library(
         ));
     }
     insert_unit(&mut graph.units, key.clone());
-    add_selected_normal_edges(graph, resolution, manifests, manifest, &key, false)?;
+    add_selected_normal_edges(graph, resolution, manifests, manifest, &key)?;
     graph.order = topological_order(&graph.units)?;
     Ok(key)
 }
@@ -1801,7 +1776,7 @@ pub fn add_selected_binaries(
         key.kind = UnitKind::Binary;
         key.target = Some(target.name.clone());
         insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, manifest, &key, false)?;
+        add_selected_normal_edges(graph, resolution, manifests, manifest, &key)?;
         if let Some(library) = &library {
             add_edge(
                 &mut graph.units,
@@ -1817,135 +1792,12 @@ pub fn add_selected_binaries(
     Ok(binaries)
 }
 
-pub fn add_selected_harnesses(
-    graph: &mut UnitGraph,
-    resolution: &Resolution,
-    manifests: &BTreeMap<PackageKey, Manifest>,
-    manifest: &Manifest,
-) -> Result<Vec<UnitKey>> {
-    let library = manifest
-        .library
-        .as_ref()
-        .map(|_| selected_library_key(manifest))
-        .transpose()?;
-    let mut harnesses = Vec::new();
-    if let Some(target) = manifest.library.as_ref().filter(|target| target.test) {
-        let mut key = selected_library_key(manifest)?;
-        key.kind = UnitKind::LibraryHarness;
-        key.mode = UnitMode::Test;
-        key.target = Some(target.name.clone());
-        insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, manifest, &key, false)?;
-        harnesses.push(key);
-    }
-    for target in manifest.binaries.iter().filter(|target| target.test) {
-        let mut key = selected_library_key(manifest)?;
-        if !target_enabled(
-            resolution,
-            manifest,
-            &key.features,
-            &target.name,
-            target.required_features.as_deref(),
-            false,
-        )? {
-            continue;
-        }
-        key.kind = UnitKind::BinaryHarness;
-        key.mode = UnitMode::Test;
-        key.target = Some(target.name.clone());
-        insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, manifest, &key, false)?;
-        if let Some(library) = &library {
-            add_edge(
-                &mut graph.units,
-                &key,
-                library.clone(),
-                UnitEdgeKind::RustDependency,
-                manifest.library.as_ref().map(|target| target.name.clone()),
-            )?;
-        }
-        harnesses.push(key);
-    }
-    graph.order = topological_order(&graph.units)?;
-    Ok(harnesses)
-}
-
-pub fn add_selected_integration_harnesses(
-    graph: &mut UnitGraph,
-    resolution: &Resolution,
-    manifests: &BTreeMap<PackageKey, Manifest>,
-    manifest: &Manifest,
-    selected_name: Option<&str>,
-    panic_abort: bool,
-    program_artifacts: bool,
-) -> Result<Vec<UnitKey>> {
-    let library = manifest
-        .library
-        .as_ref()
-        .map(|_| selected_library_key(manifest))
-        .transpose()?
-        .map(|key| key.with_profile(ProfileContext::Test, panic_abort));
-    let mut harnesses = Vec::new();
-    let features = selected_root_features(manifest)?;
-    for target in manifest
-        .integration_tests
-        .iter()
-        .filter(|target| selected_name.is_none_or(|name| name == target.name))
-        .filter(|target| !program_artifacts || selected_name.is_some() || target.test)
-    {
-        if !target_enabled(
-            resolution,
-            manifest,
-            &features,
-            &target.name,
-            target.required_features.as_deref(),
-            selected_name.is_some(),
-        )? {
-            continue;
-        }
-        let mut key =
-            selected_library_key(manifest)?.with_profile(ProfileContext::Test, panic_abort);
-        key.kind = UnitKind::IntegrationHarness;
-        key.mode = UnitMode::Test;
-        key.target = Some(target.name.clone());
-        insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, manifest, &key, panic_abort)?;
-        if let Some(library) = &library {
-            add_edge(
-                &mut graph.units,
-                &key,
-                library.clone(),
-                UnitEdgeKind::RustDependency,
-                manifest.library.as_ref().map(|target| target.name.clone()),
-            )?;
-        }
-        if program_artifacts {
-            for binary in &manifest.binaries {
-                let mut program = selected_library_key(manifest)?;
-                program.kind = UnitKind::Binary;
-                program.target = Some(binary.name.clone());
-                add_edge(
-                    &mut graph.units,
-                    &key,
-                    program,
-                    UnitEdgeKind::ArtifactDependency,
-                    Some(binary.name.clone()),
-                )?;
-            }
-        }
-        harnesses.push(key);
-    }
-    graph.order = topological_order(&graph.units)?;
-    Ok(harnesses)
-}
-
 fn add_selected_normal_edges(
     graph: &mut UnitGraph,
     resolution: &Resolution,
     manifests: &BTreeMap<PackageKey, Manifest>,
     manifest: &Manifest,
     parent: &UnitKey,
-    panic_abort: bool,
 ) -> Result<()> {
     let packages = resolution
         .packages
@@ -1974,8 +1826,7 @@ fn add_selected_normal_edges(
             library_unit_kind(child_manifest),
             edge.compile_kind,
             &features_for(package, edge.compile_kind),
-        )
-        .with_profile(parent.profile, panic_abort);
+        );
         add_edge(
             &mut graph.units,
             parent,
@@ -3064,24 +2915,6 @@ mod tests {
         let binaries =
             add_selected_binaries(&mut graph, &resolution, &manifests, &root, None).unwrap();
         assert_eq!(binaries.len(), 2);
-        let harnesses = add_selected_harnesses(&mut graph, &resolution, &manifests, &root).unwrap();
-        assert_eq!(harnesses.len(), 3);
-        assert!(
-            harnesses
-                .iter()
-                .any(|key| key.kind == UnitKind::LibraryHarness)
-        );
-        assert!(
-            harnesses
-                .iter()
-                .filter(|key| key.kind == UnitKind::BinaryHarness)
-                .all(|key| {
-                    graph.units[key]
-                        .dependencies
-                        .iter()
-                        .any(|edge| edge.unit == selected)
-                })
-        );
         assert_eq!(binaries[0].target.as_deref(), Some("one"));
         assert_eq!(binaries[1].target.as_deref(), Some("two"));
         for binary in &binaries {
@@ -3116,7 +2949,6 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
-                test_profile: false,
                 panic_abort: false,
                 dev_profile: &root.dev,
                 release_profile: &root.release,
@@ -3146,7 +2978,6 @@ mod tests {
         let options = PlanOptions {
             workspace_root: &fixture.0,
             release: true,
-            test_profile: false,
             panic_abort: true,
             dev_profile: &root.dev,
             release_profile: &root.release,
@@ -3215,40 +3046,6 @@ mod tests {
         assert_eq!(invocation.environment["CARGO_BIN_NAME"], "one");
         assert_eq!(invocation.environment["CARGO_PRIMARY_PACKAGE"], "1");
         assert!(matches!(invocation.output, RustcOutput::Binary { .. }));
-        let harness = dependency_rustc_invocation(
-            &plan,
-            &manifests,
-            &harnesses[0],
-            &CommandOptions {
-                cargo: Path::new("/cargo"),
-                workspace_root: &fixture.0,
-                selected_packages: std::slice::from_ref(&selected.package),
-                host_profile: Path::new("/target/debug"),
-                target_profile: Path::new("/target/debug"),
-                host_incremental: Path::new("/incremental/host"),
-                target_incremental: Path::new("/incremental/target"),
-                physical_target: None,
-                host_linker: None,
-                target_linker: None,
-                integration_binaries: None,
-                integration_temp_dirs: None,
-                verbose: false,
-            },
-        )
-        .unwrap()
-        .unwrap();
-        assert!(
-            harness
-                .arguments
-                .iter()
-                .any(|argument| argument == "--test")
-        );
-        assert!(
-            !harness
-                .arguments
-                .iter()
-                .any(|argument| argument == "--crate-type")
-        );
     }
 
     #[test]
@@ -3320,7 +3117,6 @@ mod tests {
             &PlanOptions {
                 workspace_root: &workspace,
                 release: false,
-                test_profile: false,
                 panic_abort: false,
                 dev_profile: &root.dev,
                 release_profile: &root.release,
@@ -3579,7 +3375,6 @@ mod tests {
         let options = PlanOptions {
             workspace_root: &fixture.0,
             release: false,
-            test_profile: false,
             panic_abort: false,
             dev_profile: &DevProfile::default(),
             release_profile: &ReleaseProfile::default(),
@@ -3838,7 +3633,6 @@ mod tests {
                     &PlanOptions {
                         workspace_root: &fixture.0,
                         release: false,
-                        test_profile: false,
                         panic_abort: false,
                         dev_profile: &workspace.packages[0].dev,
                         release_profile: &workspace.packages[0].release,
@@ -4150,7 +3944,6 @@ mod tests {
         let options = PlanOptions {
             workspace_root: &fixture.0,
             release: false,
-            test_profile: false,
             panic_abort: false,
             dev_profile: &crate::manifest::DevProfile::default(),
             release_profile: &ReleaseProfile::default(),
@@ -4532,7 +4325,6 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
-                test_profile: false,
                 panic_abort: true,
                 dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &release_profile,
@@ -4600,7 +4392,6 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: false,
-                test_profile: false,
                 panic_abort: true,
                 dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile::default(),
@@ -4838,7 +4629,6 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
-                test_profile: false,
                 panic_abort: true,
                 dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile {

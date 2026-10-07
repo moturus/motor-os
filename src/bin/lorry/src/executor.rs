@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,7 +69,7 @@ pub struct Options<'a> {
     pub build_script_timeout: Duration,
     pub build_script_output_bytes: u64,
     pub out_dir_limits: TreeLimits,
-    pub cache: Option<&'a BuildCaches>,
+    pub cache: &'a BuildCaches,
     pub admission: &'a Admission,
     pub native_tools:
         &'a BTreeMap<(String, crate::config::NativeToolRole), crate::config::NativeTool>,
@@ -79,7 +77,7 @@ pub struct Options<'a> {
     /// plan-order execution.
     pub jobs: usize,
     pub keep_going: bool,
-    pub reporter: Option<&'a dyn EventReporter>,
+    pub reporter: &'a dyn EventReporter,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,35 +96,12 @@ pub struct Outputs {
     pub cache_keys: BTreeMap<UnitKey, CacheKey>,
 }
 
-pub fn execute(
-    plan: &CompilationPlan,
-    manifests: &BTreeMap<PackageKey, Manifest>,
-    options: &Options<'_>,
-) -> Result<Outputs> {
-    execute_inner(plan, manifests, options, None)
-}
-
-pub fn execute_reusing(
-    plan: &CompilationPlan,
-    manifests: &BTreeMap<PackageKey, Manifest>,
-    options: &Options<'_>,
-    previous_plan: &CompilationPlan,
-    previous_outputs: &Outputs,
-) -> Result<Outputs> {
-    execute_inner(
-        plan,
-        manifests,
-        options,
-        Some((previous_plan, previous_outputs)),
-    )
-}
-
 /// One executed unit's result, recorded into `Outputs` by the scheduler.
 enum Executed {
     BuildScript(ExecutedBuildScript),
     Artifact {
         output: RustcOutput,
-        cache_key: Option<CacheKey>,
+        cache_key: CacheKey,
     },
 }
 
@@ -155,9 +130,7 @@ impl Scheduler {
             }
             Executed::Artifact { output, cache_key } => {
                 self.outputs.artifacts.insert(key.clone(), output);
-                if let Some(cache_key) = cache_key {
-                    self.outputs.cache_keys.insert(key.clone(), cache_key);
-                }
+                self.outputs.cache_keys.insert(key.clone(), cache_key);
             }
         }
         for child in dependents.get(key).map(Vec::as_slice).unwrap_or(&[]) {
@@ -200,11 +173,10 @@ fn snapshot_inputs(planned: &crate::unit::PlannedUnit, outputs: &Outputs) -> Out
     snapshot
 }
 
-fn execute_inner(
+pub fn execute(
     plan: &CompilationPlan,
     manifests: &BTreeMap<PackageKey, Manifest>,
     options: &Options<'_>,
-    previous: Option<(&CompilationPlan, &Outputs)>,
 ) -> Result<Outputs> {
     let commands = CommandOptions {
         cargo: options.cargo,
@@ -329,41 +301,6 @@ fn execute_inner(
                         wakeup.notify_all();
                         return;
                     };
-                    if let Some((previous_plan, previous_outputs)) = previous
-                        && previous_plan.units.get(&key) == Some(planned)
-                    {
-                        let reused = match key.kind {
-                            UnitKind::BuildScriptRun => previous_outputs
-                                .build_scripts
-                                .get(&key)
-                                .cloned()
-                                .map(Executed::BuildScript),
-                            UnitKind::Library
-                            | UnitKind::Binary
-                            | UnitKind::LibraryHarness
-                            | UnitKind::BinaryHarness
-                            | UnitKind::IntegrationHarness
-                            | UnitKind::Example
-                            | UnitKind::Bench
-                            | UnitKind::ProcMacro
-                            | UnitKind::BuildScriptCompile => {
-                                previous_outputs.artifacts.get(&key).cloned().map(|output| {
-                                    Executed::Artifact {
-                                        output,
-                                        cache_key: previous_outputs.cache_keys.get(&key).copied(),
-                                    }
-                                })
-                            }
-                        };
-                        if let Some(executed) = reused {
-                            let recorded = guard.record(&dependents, &index_of, &key, executed);
-                            if let Err(error) = recorded {
-                                guard.failures.push((index, error));
-                            }
-                            wakeup.notify_all();
-                            continue;
-                        }
-                    }
                     let inputs = snapshot_inputs(planned, &guard.outputs);
                     drop(guard);
                     let outcome = execute_unit(
@@ -591,9 +528,7 @@ fn execute_unit(
                     out_dir,
                     temp_dir,
                 };
-                if let Some(reporter) = options.reporter {
-                    reporter.build_script_executed(key, &executed)?;
-                }
+                options.reporter.build_script_executed(key, &executed)?;
                 Ok(Executed::BuildScript(executed))
             }
             UnitKind::Library
@@ -694,6 +629,7 @@ fn execute_unit(
                     });
                 let cache_build_script = executed_build_script.map(cache_build_script_input);
                 let caches = options.cache;
+                let cache = caches.for_unit(planned);
                 let restorable = matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
                     && matches!(
                         &planned_invocation.output,
@@ -701,59 +637,43 @@ fn execute_unit(
                             | RustcOutput::StaticLibrary { .. }
                             | RustcOutput::ProcMacro { .. }
                     );
-                let cache_key = caches
-                    .map(|caches| {
-                        caches.for_unit(planned).key(&UnitInput {
-                            key,
-                            selected,
-                            planned,
-                            manifest,
-                            invocation: &planned_invocation,
-                            host_profile: options.host_profile,
-                            target_profile: options.target_profile,
-                            dependencies: &dependencies,
-                            build_script: cache_build_script,
-                        })
-                    })
-                    .transpose()?;
-                if let (Some(caches), Some(cache_key)) = (caches, cache_key) {
-                    let cache = caches.for_unit(planned);
-                    if cache.published_fresh(
-                        cache_key,
-                        &planned_invocation.output,
-                        selected_inputs,
-                        &key.package,
-                        true,
-                    )? {
-                        if options.verbose {
-                            eprintln!(
-                                "Fresh {} v{} (published Lorry unit)",
-                                key.package.name, key.package.version
-                            );
-                        }
-                        let (stdout, stderr) =
-                            cache.published_messages(&planned_invocation.output)?;
-                        if let Some(reporter) = options.reporter {
-                            reporter.compiler_messages(key, planned, &stdout, &stderr)?;
-                        } else {
-                            let _guard = print
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            RustcCommand::render_messages(&stdout, &stderr, options.color);
-                        }
-                        if let Some(reporter) = options.reporter {
-                            reporter.compiler_artifact(
-                                key,
-                                planned,
-                                &planned_invocation.output,
-                                true,
-                            )?;
-                        }
-                        return Ok(Executed::Artifact {
-                            output: planned_invocation.output,
-                            cache_key: Some(cache_key),
-                        });
+                let cache_key = cache.key(&UnitInput {
+                    key,
+                    selected,
+                    planned,
+                    manifest,
+                    invocation: &planned_invocation,
+                    host_profile: options.host_profile,
+                    target_profile: options.target_profile,
+                    dependencies: &dependencies,
+                    build_script: cache_build_script,
+                })?;
+                if cache.published_fresh(
+                    cache_key,
+                    &planned_invocation.output,
+                    selected_inputs,
+                    &key.package,
+                )? {
+                    if options.verbose {
+                        eprintln!(
+                            "Fresh {} v{} (published Lorry unit)",
+                            key.package.name, key.package.version
+                        );
                     }
+                    let (stdout, stderr) = cache.published_messages(&planned_invocation.output)?;
+                    options
+                        .reporter
+                        .compiler_messages(key, planned, &stdout, &stderr)?;
+                    options.reporter.compiler_artifact(
+                        key,
+                        planned,
+                        &planned_invocation.output,
+                        true,
+                    )?;
+                    return Ok(Executed::Artifact {
+                        output: planned_invocation.output,
+                        cache_key,
+                    });
                 }
                 let staging = AtomicDirectory::new(parent, label)?;
                 let invocation = planned_invocation.with_output_directory(
@@ -764,55 +684,47 @@ fn execute_unit(
                     ),
                 )?;
                 create_output_directories(&invocation.output)?;
-                if let (Some(caches), Some(cache_key)) = (caches, cache_key) {
-                    let cache = caches.for_unit(planned);
-                    if restorable
-                        && let Some((stdout, stderr)) =
-                            cache.restore(cache_key, &invocation.output, selected_inputs)?
-                    {
-                        cache.record_cache_owner(cache_key, &key.package)?;
-                        cache.record_published(
-                            cache_key,
-                            &invocation.output,
-                            selected_inputs,
-                            &key.package,
-                            Some((&stdout, &stderr)),
-                        )?;
-                        staging.commit(unit_dir)?;
-                        if options.verbose {
-                            eprintln!(
-                                "Fresh {} v{} (verified Lorry cache)",
-                                key.package.name, key.package.version
-                            );
-                        }
-                        if let Some(reporter) = options.reporter {
-                            reporter.compiler_messages(key, planned, &stdout, &stderr)?;
-                            reporter.compiler_artifact(
-                                key,
-                                planned,
-                                &planned_invocation.output,
-                                true,
-                            )?;
-                        } else {
-                            let _guard = print
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            RustcCommand::render_messages(&stdout, &stderr, options.color);
-                        }
-                        return Ok(Executed::Artifact {
-                            output: planned_invocation.output,
-                            cache_key: Some(cache_key),
-                        });
+                if restorable
+                    && let Some((stdout, stderr)) =
+                        cache.restore(cache_key, &invocation.output, selected_inputs)?
+                {
+                    cache.record_cache_owner(cache_key, &key.package)?;
+                    cache.record_published(
+                        cache_key,
+                        &invocation.output,
+                        selected_inputs,
+                        &key.package,
+                        (&stdout, &stderr),
+                    )?;
+                    staging.commit(unit_dir)?;
+                    if options.verbose {
+                        eprintln!(
+                            "Fresh {} v{} (verified Lorry cache)",
+                            key.package.name, key.package.version
+                        );
                     }
-                    if restorable && !options.quiet && caches.report_shared_rebuild(planned) {
-                        let _guard = print
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        eprintln!("Rebuilding global dependency cache");
-                    }
-                    if restorable && options.verbose {
-                        eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
-                    }
+                    options
+                        .reporter
+                        .compiler_messages(key, planned, &stdout, &stderr)?;
+                    options.reporter.compiler_artifact(
+                        key,
+                        planned,
+                        &planned_invocation.output,
+                        true,
+                    )?;
+                    return Ok(Executed::Artifact {
+                        output: planned_invocation.output,
+                        cache_key,
+                    });
+                }
+                if restorable && !options.quiet && caches.report_shared_rebuild(planned) {
+                    let _guard = print
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    eprintln!("Rebuilding global dependency cache");
+                }
+                if restorable && options.verbose {
+                    eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
                 }
                 if !options.quiet {
                     let _guard = print
@@ -864,20 +776,13 @@ fn execute_unit(
                     color: options.color,
                 }
                 .execute()?;
-                if let Some(reporter) = options.reporter {
-                    reporter.compiler_messages(
-                        key,
-                        planned,
-                        &rustc_output.stdout,
-                        &rustc_output.stderr,
-                    )?;
-                    RustcCommand::require_success(&rustc_output)?;
-                } else {
-                    let _guard = print
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    RustcCommand::finish(&rustc_output, options.color)?;
-                }
+                options.reporter.compiler_messages(
+                    key,
+                    planned,
+                    &rustc_output.stdout,
+                    &rustc_output.stderr,
+                )?;
+                RustcCommand::require_success(&rustc_output)?;
                 verify_outputs(&invocation.output)?;
                 let diagnostics = (
                     Vec::new(),
@@ -892,17 +797,15 @@ fn execute_unit(
                     planned.source_remap.as_ref(),
                     &clippy_inputs,
                 )?;
-                if restorable && let (Some(caches), Some(cache_key)) = (options.cache, cache_key) {
-                    caches.for_unit(planned).store(
+                if restorable {
+                    cache.store(
                         cache_key,
                         &invocation.output,
                         cache_build_script.as_ref(),
                         selected_inputs,
                         (&diagnostics.0, &diagnostics.1),
                     )?;
-                    caches
-                        .for_unit(planned)
-                        .record_cache_owner(cache_key, &key.package)?;
+                    cache.record_cache_owner(cache_key, &key.package)?;
                 }
                 if let RustcOutput::BuildScript {
                     executable,
@@ -912,19 +815,20 @@ fn execute_unit(
                 {
                     install_unhashed(executable, unhashed_executable)?;
                 }
-                if let (Some(caches), Some(cache_key)) = (options.cache, cache_key) {
-                    caches.for_unit(planned).record_published(
-                        cache_key,
-                        &invocation.output,
-                        selected_inputs,
-                        &key.package,
-                        Some((&diagnostics.0, &diagnostics.1)),
-                    )?;
-                }
+                cache.record_published(
+                    cache_key,
+                    &invocation.output,
+                    selected_inputs,
+                    &key.package,
+                    (&diagnostics.0, &diagnostics.1),
+                )?;
                 staging.commit(unit_dir)?;
-                if let Some(reporter) = options.reporter {
-                    reporter.compiler_artifact(key, planned, &planned_invocation.output, false)?;
-                }
+                options.reporter.compiler_artifact(
+                    key,
+                    planned,
+                    &planned_invocation.output,
+                    false,
+                )?;
                 Ok(Executed::Artifact {
                     output: planned_invocation.output,
                     cache_key,
@@ -1386,6 +1290,34 @@ mod tests {
         }
     }
 
+    struct SilentReporter;
+
+    impl EventReporter for SilentReporter {
+        fn compiler_messages(
+            &self,
+            _: &UnitKey,
+            _: &PlannedUnit,
+            _: &[u8],
+            _: &[u8],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn compiler_artifact(
+            &self,
+            _: &UnitKey,
+            _: &PlannedUnit,
+            _: &RustcOutput,
+            _: bool,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn build_script_executed(&self, _: &UnitKey, _: &ExecutedBuildScript) -> Result<()> {
+            Ok(())
+        }
+    }
+
     fn actual_toolchain() -> (Toolchain, TargetInfo) {
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
@@ -1465,7 +1397,6 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: false,
-                test_profile: false,
                 panic_abort: false,
                 dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile::default(),
@@ -1477,6 +1408,22 @@ mod tests {
         .unwrap();
         let profile = fixture.0.join("output/debug");
         let cargo = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let cache = BuildCaches::new(
+            &fixture.0.join("global-cache"),
+            &fixture.0.join("local-cache"),
+            &crate::cache::Options {
+                cargo: &cargo,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_linker: None,
+                target_linker: None,
+                root_manifest: manifests.values().next().unwrap(),
+                source_limits: DEFAULT_LIMITS,
+                validation: crate::validation::ValidationMode::Trusted,
+            },
+        )
+        .unwrap();
         let outputs = execute(
             &plan,
             &manifests,
@@ -1505,12 +1452,12 @@ mod tests {
                 build_script_timeout: Duration::from_secs(10),
                 build_script_output_bytes: 64 * 1024,
                 out_dir_limits: DEFAULT_LIMITS,
-                cache: None,
+                cache: &cache,
                 admission: &admission,
                 native_tools: &native_tools,
                 jobs: 2,
                 keep_going: false,
-                reporter: None,
+                reporter: &SilentReporter,
             },
         )
         .unwrap();

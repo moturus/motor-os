@@ -441,7 +441,6 @@ impl BuildCache {
         output: &RustcOutput,
         selected: Option<SelectedInputs<'_>>,
         package: &crate::resolver::PackageKey,
-        replay_diagnostics: bool,
     ) -> Result<bool> {
         let directory = published_unit_directory(output)?;
         if !artifact_owner::matches(directory, package) {
@@ -452,8 +451,7 @@ impl BuildCache {
             Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 32 => {}
             _ => return Ok(false),
         }
-        let Some(current) =
-            published_fingerprint(key, output, selected, self.validation, replay_diagnostics).ok()
+        let Some(current) = published_fingerprint(key, output, selected, self.validation).ok()
         else {
             return Ok(false);
         };
@@ -466,20 +464,12 @@ impl BuildCache {
         output: &RustcOutput,
         selected: Option<SelectedInputs<'_>>,
         package: &crate::resolver::PackageKey,
-        diagnostics: Option<(&[u8], &[u8])>,
+        (stdout, stderr): (&[u8], &[u8]),
     ) -> Result<()> {
         let directory = published_unit_directory(output)?;
-        if let Some((stdout, stderr)) = diagnostics {
-            write_synced(&directory.join(PUBLISHED_STDOUT), stdout)?;
-            write_synced(&directory.join(PUBLISHED_STDERR), stderr)?;
-        }
-        let fingerprint = published_fingerprint(
-            key,
-            output,
-            selected,
-            self.validation,
-            diagnostics.is_some(),
-        )?;
+        write_synced(&directory.join(PUBLISHED_STDOUT), stdout)?;
+        write_synced(&directory.join(PUBLISHED_STDERR), stderr)?;
+        let fingerprint = published_fingerprint(key, output, selected, self.validation)?;
         artifact_owner::write(directory, package)?;
         write_synced(&directory.join(PUBLISHED_RECORD), &fingerprint)
     }
@@ -1170,7 +1160,6 @@ fn published_fingerprint(
     output: &RustcOutput,
     selected: Option<SelectedInputs<'_>>,
     validation: ValidationMode,
-    replay_diagnostics: bool,
 ) -> Result<[u8; 32]> {
     let files: Vec<&Path> = match output {
         RustcOutput::Library {
@@ -1260,18 +1249,16 @@ fn published_fingerprint(
             );
         }
     }
-    if replay_diagnostics {
-        let directory = published_unit_directory(output)?;
-        for name in [PUBLISHED_STDOUT, PUBLISHED_STDERR] {
-            let path = directory.join(name);
-            let metadata = fs::symlink_metadata(&path).map_err(|error| {
-                Error::failure(format!("failed to inspect compiler messages: {error}"))
-            })?;
-            if !metadata.file_type().is_file() {
-                return Err(Error::failure("compiler messages are not a regular file"));
-            }
-            digest.file_contents(name, &path)?;
+    let directory = published_unit_directory(output)?;
+    for name in [PUBLISHED_STDOUT, PUBLISHED_STDERR] {
+        let path = directory.join(name);
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::failure(format!("failed to inspect compiler messages: {error}"))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::failure("compiler messages are not a regular file"));
         }
+        digest.file_contents(name, &path)?;
     }
     if let Some(inputs) = selected {
         digest.bytes(
@@ -1829,17 +1816,17 @@ mod tests {
                 source: crate::resolver::PackageSourceKey::Path(fixture.0.join("source")),
             };
             cache
-                .record_published(key, &restored, None, &package, None)
+                .record_published(key, &restored, None, &package, (b"", b""))
                 .unwrap();
             assert!(
                 cache
-                    .published_fresh(key, &restored, None, &package, false)
+                    .published_fresh(key, &restored, None, &package)
                     .unwrap()
             );
             fs::remove_file(archive_path(&restored).unwrap()).unwrap();
             assert!(
                 !cache
-                    .published_fresh(key, &restored, None, &package, false)
+                    .published_fresh(key, &restored, None, &package)
                     .unwrap()
             );
             fs::remove_file(cache.entry_path(key).join("payload/library.a")).unwrap();
@@ -2049,28 +2036,28 @@ mod tests {
 
         assert!(
             !cache
-                .published_fresh(key, &output, Some(inputs), &package, false)
+                .published_fresh(key, &output, Some(inputs), &package)
                 .unwrap()
         );
         cache
-            .record_published(key, &output, Some(inputs), &package, None)
+            .record_published(key, &output, Some(inputs), &package, (b"", b""))
             .unwrap();
         assert!(
             cache
-                .published_fresh(key, &output, Some(inputs), &package, false)
+                .published_fresh(key, &output, Some(inputs), &package)
                 .unwrap()
         );
         fs::write(&external, b"second").unwrap();
         assert!(
             !cache
-                .published_fresh(key, &output, Some(inputs), &package, false)
+                .published_fresh(key, &output, Some(inputs), &package)
                 .unwrap()
         );
         fs::write(&external, b"first").unwrap();
         fs::write(library_paths(&output).unwrap().0, b"tampered").unwrap();
         assert!(
             !cache
-                .published_fresh(key, &output, Some(inputs), &package, false)
+                .published_fresh(key, &output, Some(inputs), &package)
                 .unwrap()
         );
     }
@@ -2087,26 +2074,14 @@ mod tests {
             source: crate::resolver::PackageSourceKey::Path(fixture.0.clone()),
         };
         let warning = b"{\"message\":\"warning marker\"}\n";
-        assert!(
-            !cache
-                .published_fresh(key, &output, None, &package, true)
-                .unwrap()
-        );
+        assert!(!cache.published_fresh(key, &output, None, &package).unwrap());
         cache
-            .record_published(key, &output, None, &package, Some((warning, b"")))
+            .record_published(key, &output, None, &package, (warning, b""))
             .unwrap();
-        assert!(
-            cache
-                .published_fresh(key, &output, None, &package, true)
-                .unwrap()
-        );
+        assert!(cache.published_fresh(key, &output, None, &package).unwrap());
         assert_eq!(cache.published_messages(&output).unwrap().0, warning);
         fs::write(fixture.0.join("unit").join(PUBLISHED_STDOUT), b"changed").unwrap();
-        assert!(
-            !cache
-                .published_fresh(key, &output, None, &package, true)
-                .unwrap()
-        );
+        assert!(!cache.published_fresh(key, &output, None, &package).unwrap());
     }
 
     #[cfg(unix)]

@@ -862,10 +862,15 @@ mod tests {
         let cfg = CfgSet::parse("unix\n").unwrap();
         let staging = fixture.0.join("graph-staging");
         fs::create_dir(&staging).unwrap();
-        let prepared = dependency::prepare_locked_cargo_registry(
+        let registry = fixture.registry();
+        let prepared = dependency::prepare_locked_source(
             &manifest,
             &config,
-            &fixture.registry(),
+            dependency::LockedSource {
+                registry: dependency::RegistrySource::Cargo(&registry),
+                direct: &crate::git::DirectCatalog::default(),
+                verified_resolution: None,
+            },
             &Options {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),

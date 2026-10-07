@@ -1452,7 +1452,6 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
-                test_profile: false,
                 panic_abort: true,
                 dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile {
@@ -1792,7 +1791,6 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
-                test_profile: false,
                 panic_abort: true,
                 dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile {
@@ -1948,7 +1946,6 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: false,
-                test_profile: false,
                 panic_abort: false,
                 dev_profile: &crate::manifest::DevProfile::default(),
                 release_profile: &ReleaseProfile::default(),

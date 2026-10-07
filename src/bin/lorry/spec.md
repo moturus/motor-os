@@ -571,8 +571,7 @@ path grants. Script outputs provide cfgs, environment, search paths, and
 `OUT_DIR` to every consuming target. Link libraries follow Cargo: the package
 library receives them when present; otherwise its other targets receive them.
 
-Run still rejects a selected package with a build script before compilation.
-Workspace tests execute member scripts after validating their grants.
+Run and workspace tests execute member scripts after validating their grants.
 Descriptive commands accept these manifests without execution.
 
 Libraries support `lib`, `rlib`, `staticlib`, and mixed `rlib`/`staticlib`
@@ -1400,10 +1399,10 @@ The key also names the compiler mode, keeping build, test harness, and check
 invocations of the same target distinct.
 Equivalent units from those contexts merge into one dependency DAG; conflicting
 edges for the same unit key are rejected.
-The mixed test planner includes normal-profile programs and test-profile
+The test planner includes normal-profile programs and test-profile
 libraries and harnesses in that DAG. It deduplicates shared dependency units
 before computing identities.
-Selected integration harnesses are distinct test targets in the mixed plan.
+Selected integration harnesses are distinct test targets in the test plan.
 They depend on test-profile Rust libraries and normal-profile program
 artifacts, and the program edges do not become rustc `--extern` arguments.
 The integration compiler invocation receives `CARGO_BIN_EXE_<name>` for each

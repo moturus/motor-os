@@ -24,10 +24,9 @@ use crate::toolchain::Toolchain;
 pub(crate) mod workspace;
 
 use crate::unit::{
-    CheckTargetSelection, CompilationPlan, PlanOptions, ProfileContext, SourceRemap, UnitGraph,
-    add_selected_binaries, add_selected_harnesses, add_selected_integration_harnesses,
-    add_selected_library, dependency_units, plan_dependency_units_with_remaps,
-    selected_check_units, selected_library_key,
+    CheckTargetSelection, CompilationPlan, PlanOptions, SourceRemap, UnitGraph,
+    add_selected_binaries, add_selected_library, dependency_units,
+    plan_dependency_units_with_remaps, selected_check_units, selected_library_key,
 };
 
 #[derive(Debug)]
@@ -146,44 +145,36 @@ impl PreparedGraph {
         dependency_units(&self.resolution, &manifests)
     }
 
-    pub fn dependency_plan(&self, options: &PlanOptions<'_>) -> Result<CompilationPlan> {
-        self.plan(options, None, false, None)
-    }
-
     pub fn selected_targets_plan(
         &self,
         options: &PlanOptions<'_>,
         selected: &Manifest,
         binary_name: Option<&str>,
-        include_binaries: bool,
-        include_harnesses: bool,
     ) -> Result<CompilationPlan> {
-        self.plan(
-            options,
-            Some((selected, binary_name, include_binaries, include_harnesses)),
-            false,
-            None,
-        )
-    }
-
-    pub fn selected_mixed_test_plan(
-        &self,
-        options: &PlanOptions<'_>,
-        selected: &Manifest,
-        include_harnesses: bool,
-        integration_name: Option<&str>,
-    ) -> Result<CompilationPlan> {
-        if options.test_profile {
+        let mut manifests = self
+            .packages
+            .iter()
+            .map(|(key, package)| (key.clone(), package.manifest.clone()))
+            .collect();
+        let mut graph = dependency_units(&self.resolution, &manifests)?;
+        let key = if selected.library.is_some() {
+            add_selected_library(&mut graph, &self.resolution, &manifests, selected)?
+        } else {
+            selected_library_key(selected)?
+        };
+        add_selected_binaries(
+            &mut graph,
+            &self.resolution,
+            &manifests,
+            selected,
+            binary_name,
+        )?;
+        if manifests.insert(key.package, selected.clone()).is_some() {
             return Err(Error::failure(
-                "mixed test plan requires normal profile options",
+                "selected package duplicates a dependency package",
             ));
         }
-        self.plan(
-            options,
-            Some((selected, None, true, include_harnesses)),
-            true,
-            integration_name,
-        )
+        self.finish_plan(options, manifests, graph)
     }
 
     pub fn selected_check_plan(
@@ -197,94 +188,12 @@ impl PreparedGraph {
             .iter()
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
-        let graph = selected_check_units(
-            &self.resolution,
-            &manifests,
-            selected,
-            selection,
-            options.panic_abort,
-        )?;
+        let graph = selected_check_units(&self.resolution, &manifests, selected, selection)?;
         let key = selected_library_key(selected)?;
         if manifests.insert(key.package, selected.clone()).is_some() {
             return Err(Error::failure(
                 "selected package duplicates a dependency package",
             ));
-        }
-        self.finish_plan(options, manifests, graph)
-    }
-
-    fn plan(
-        &self,
-        options: &PlanOptions<'_>,
-        selected: Option<(&Manifest, Option<&str>, bool, bool)>,
-        mixed_profile: bool,
-        integration_name: Option<&str>,
-    ) -> Result<CompilationPlan> {
-        let mut manifests = self
-            .packages
-            .iter()
-            .map(|(key, package)| (key.clone(), package.manifest.clone()))
-            .collect();
-        let normal_needed = !mixed_profile
-            || selected.is_some_and(|(manifest, _, _, _)| !manifest.binaries.is_empty());
-        let base_graph = dependency_units(&self.resolution, &manifests)?;
-        let mut test_graph = mixed_profile.then(|| base_graph.clone());
-        let mut graph = if normal_needed {
-            base_graph
-        } else {
-            UnitGraph {
-                units: BTreeMap::new(),
-                order: Vec::new(),
-                selected_packages: BTreeSet::new(),
-                primary_macros: BTreeSet::new(),
-            }
-        };
-        if let Some((selected, binary_name, include_binaries, include_harnesses)) = selected {
-            let key = if normal_needed && selected.library.is_some() {
-                add_selected_library(&mut graph, &self.resolution, &manifests, selected)?
-            } else {
-                selected_library_key(selected)?
-            };
-            if include_binaries && normal_needed {
-                add_selected_binaries(
-                    &mut graph,
-                    &self.resolution,
-                    &manifests,
-                    selected,
-                    binary_name,
-                )?;
-            }
-            if include_harnesses && !mixed_profile {
-                add_selected_harnesses(&mut graph, &self.resolution, &manifests, selected)?;
-            }
-            if let Some(test_graph) = test_graph.as_mut() {
-                if selected.library.is_some() {
-                    add_selected_library(test_graph, &self.resolution, &manifests, selected)?;
-                }
-                if include_harnesses {
-                    add_selected_harnesses(test_graph, &self.resolution, &manifests, selected)?;
-                }
-            }
-            if manifests.insert(key.package, selected.clone()).is_some() {
-                return Err(Error::failure(
-                    "selected package duplicates a dependency package",
-                ));
-            }
-        }
-        if let Some(test_graph) = test_graph {
-            graph.merge(test_graph.with_profile(ProfileContext::Test, options.panic_abort))?;
-            let selected = selected.unwrap().0;
-            add_selected_integration_harnesses(
-                &mut graph,
-                &self.resolution,
-                &manifests,
-                selected,
-                integration_name,
-                options.panic_abort,
-                true,
-            )?;
-        } else if options.test_profile {
-            graph = graph.with_profile(ProfileContext::Test, options.panic_abort);
         }
         self.finish_plan(options, manifests, graph)
     }
@@ -432,44 +341,6 @@ impl PreparedPackage {
     }
 }
 
-pub fn prepare_locked(
-    manifest: &Manifest,
-    config: &Config,
-    repositories: &RepositorySet,
-    options: &Options,
-    selection: TargetSelection<'_>,
-    staging_parent: &Path,
-) -> Result<PreparedGraph> {
-    prepare_locked_with(
-        manifest,
-        config,
-        RegistrySource::Lorry(repositories),
-        options,
-        selection,
-        staging_parent,
-        None,
-    )
-}
-
-pub fn prepare_locked_cargo_registry(
-    manifest: &Manifest,
-    config: &Config,
-    registry: &CargoRegistry,
-    options: &Options,
-    selection: TargetSelection<'_>,
-    staging_parent: &Path,
-) -> Result<PreparedGraph> {
-    prepare_locked_with(
-        manifest,
-        config,
-        RegistrySource::Cargo(registry),
-        options,
-        selection,
-        staging_parent,
-        None,
-    )
-}
-
 pub fn prepare_locked_source(
     manifest: &Manifest,
     config: &Config,
@@ -491,13 +362,7 @@ pub fn prepare_locked_source(
     if matches!(source.registry, RegistrySource::Lorry(_))
         && CompactState::load(&manifest.workspace_root)?.is_none()
     {
-        let catalog = locked_catalog(
-            manifest,
-            config,
-            source.registry,
-            Some(source.direct),
-            false,
-        )?;
+        let catalog = locked_catalog(manifest, source.registry, source.direct, false)?;
         let resolution = resolve_selected(
             manifest,
             &catalog,
@@ -522,7 +387,7 @@ pub fn prepare_locked_source(
         options,
         selection,
         staging_parent,
-        Some(source.direct),
+        source.direct,
     )
 }
 
@@ -600,12 +465,9 @@ pub fn inspect_git_package_evidence(
 }
 
 fn git_package_evidence(
-    direct: Option<&crate::git::DirectCatalog>,
+    direct: &crate::git::DirectCatalog,
     packages: &[&ResolvedPackage],
 ) -> Result<BTreeMap<PackageKey, PackageEvidence>> {
-    let Some(direct) = direct else {
-        return inspect_git_package_evidence(packages);
-    };
     packages
         .iter()
         .map(|package| Ok((package.key.clone(), direct.evidence(package)?)))
@@ -668,9 +530,8 @@ fn registry_package_evidence_set(
 
 fn locked_catalog(
     manifest: &Manifest,
-    config: &Config,
     source: RegistrySource<'_>,
-    direct: Option<&crate::git::DirectCatalog>,
+    direct: &crate::git::DirectCatalog,
     describe: bool,
 ) -> Result<Catalog> {
     let mut catalog = match source {
@@ -691,11 +552,7 @@ fn locked_catalog(
     } else {
         patch::configure(manifest, &mut catalog)?;
     }
-    if let Some(direct) = direct {
-        direct.configure(&mut catalog)?;
-    } else {
-        crate::git::configure_direct(manifest, &config.policy.limits, &mut catalog)?;
-    }
+    direct.configure(&mut catalog)?;
     Ok(catalog)
 }
 
@@ -764,7 +621,7 @@ fn prepare_resolution_packages(
         .iter()
         .filter(|package| matches!(package.source, ResolvedSource::Git { .. }))
         .collect::<Vec<_>>();
-    let mut git_evidence = git_package_evidence(Some(direct), &git)?;
+    let mut git_evidence = git_package_evidence(direct, &git)?;
     let registry = resolution
         .packages
         .iter()
@@ -917,9 +774,9 @@ fn prepare_locked_with(
     options: &Options,
     selection: TargetSelection<'_>,
     staging_parent: &Path,
-    direct: Option<&crate::git::DirectCatalog>,
+    direct: &crate::git::DirectCatalog,
 ) -> Result<PreparedGraph> {
-    let mut catalog = locked_catalog(manifest, config, source, direct, false)?;
+    let mut catalog = locked_catalog(manifest, source, direct, false)?;
     let locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
     let mut packages = BTreeMap::new();
     let (resolution, preflight) = loop {
@@ -1033,7 +890,7 @@ mod tests {
     use crate::resolver::PackageSourceKey;
     use crate::source_tree::DEFAULT_LIMITS;
     use crate::toolchain::{CfgSet, Toolchain};
-    use crate::unit::{CheckTargetSelection, ProfileContext, UnitEdgeKind, UnitKind, UnitMode};
+    use crate::unit::{CheckTargetSelection, ProfileContext, UnitKind, UnitMode};
     use semver::Version;
     use serde_json::Value;
     use std::fs;
@@ -1323,17 +1180,25 @@ mod tests {
                 .unwrap();
         let cfg = CfgSet::parse("unix\n").unwrap();
         let staging = fixture.0.join("unused-staging");
-        let graph = prepare_locked(
+        let selection = TargetSelection {
+            target_triple: "x86_64-unknown-linux-musl",
+            target_cfg: &cfg,
+            host_triple: "x86_64-unknown-linux-gnu",
+            host_cfg: &cfg,
+        };
+        let source = RegistrySource::Lorry(&repositories);
+        let direct = crate::git::DirectCatalog::default();
+        let resolver_options = options(&manifest);
+        let graph = prepare_locked_source(
             &manifest,
             &config,
-            &repositories,
-            &options(&manifest),
-            TargetSelection {
-                target_triple: "x86_64-unknown-linux-musl",
-                target_cfg: &cfg,
-                host_triple: "x86_64-unknown-linux-gnu",
-                host_cfg: &cfg,
+            LockedSource {
+                registry: source,
+                direct: &direct,
+                verified_resolution: None,
             },
+            &resolver_options,
+            selection,
             &staging,
         )
         .unwrap();
@@ -1348,7 +1213,6 @@ mod tests {
         let options = PlanOptions {
             workspace_root: &manifest.root,
             release: true,
-            test_profile: false,
             panic_abort: manifest.release.panic_abort,
             dev_profile: &manifest.dev,
             release_profile: &manifest.release,
@@ -1356,66 +1220,71 @@ mod tests {
             logical_target: None,
             rustflags: &[],
         };
-        let plan = graph.dependency_plan(&options).unwrap();
+        let plan = graph
+            .selected_targets_plan(&options, &manifest, None)
+            .unwrap();
         assert!(plan.units.values().all(|unit| unit.source_remap.is_none()));
-        let mixed = graph
-            .selected_mixed_test_plan(&options, &manifest, true, None)
+        let check_plan = graph
+            .selected_check_plan(
+                &options,
+                &manifest,
+                &CheckTargetSelection {
+                    normal: true,
+                    binaries: true,
+                    ..CheckTargetSelection::default()
+                },
+            )
             .unwrap();
-        let library = selected_library_key(&manifest).unwrap();
-        let test_library = library
-            .clone()
-            .with_profile(ProfileContext::Test, options.panic_abort);
-        assert!(mixed.units.contains_key(&library));
-        assert!(mixed.units.contains_key(&test_library));
-        assert_eq!(
-            mixed
-                .units
-                .keys()
-                .filter(|key| key.package == library.package && key.kind == UnitKind::Binary)
-                .count(),
-            1
-        );
-        assert!(mixed.units.keys().any(|key| {
-            key.package == library.package
-                && key.kind == UnitKind::BinaryHarness
-                && key.profile == ProfileContext::Test
-        }));
-        assert_ne!(
-            mixed.units[&library].identity,
-            mixed.units[&test_library].identity
-        );
-        let integration = mixed
-            .units
-            .keys()
-            .find(|key| key.kind == UnitKind::IntegrationHarness)
-            .unwrap();
-        assert_eq!(integration.profile, ProfileContext::Test);
-        let edges = &mixed.units[integration].unit.dependencies;
-        assert!(edges.iter().any(|edge| {
-            edge.kind == UnitEdgeKind::RustDependency && edge.unit == test_library
-        }));
-        assert!(edges.iter().any(|edge| {
-            edge.kind == UnitEdgeKind::ArtifactDependency
-                && edge.unit.kind == UnitKind::Binary
-                && edge.unit.profile == ProfileContext::Normal
-        }));
+        assert_check_graph_matches_cargo(&fixture.0, &check_plan, &[]);
 
-        let focused = graph
-            .selected_mixed_test_plan(&options, &manifest, false, Some("integration"))
+        // Integration harness environments come from the shared test plan.
+        let mut workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        let (complete, catalog) =
+            workspace::resolve_locked(&workspace, &config, source, &direct, &resolver_options)
+                .unwrap();
+        let requests = crate::resolver::workspace::features::member_requests(
+            &workspace,
+            &[fixture.0.clone()].into(),
+            &crate::cli::FeatureSelection::default(),
+            true,
+        )
+        .unwrap();
+        let resolution = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &resolver_options,
+            &requests,
+            selection,
+        )
+        .unwrap();
+        let shared =
+            workspace::prepare_compilation(resolution, &config, source, &staging, &direct).unwrap();
+        let library = selected_library_key(&manifest).unwrap();
+        let focused = shared
+            .workspace_test_plan(
+                &options,
+                std::slice::from_ref(&library.package),
+                Some("integration"),
+            )
             .unwrap();
         let integration = focused
             .units
             .keys()
             .find(|key| key.kind == UnitKind::IntegrationHarness)
             .unwrap();
-        let mut manifests = graph
+        let manifests = shared
             .packages
             .iter()
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect::<BTreeMap<_, _>>();
-        manifests.insert(library.package.clone(), manifest.clone());
         let binary_path = fixture.0.join("output/root");
-        let other_package = graph.packages.keys().next().unwrap().clone();
+        let other_package = shared
+            .packages
+            .keys()
+            .find(|key| key.name == "local")
+            .unwrap()
+            .clone();
         let binary_paths = BTreeMap::from([
             (
                 library.package.clone(),
@@ -1459,6 +1328,12 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "--test")
         );
+        assert!(
+            !invocation
+                .arguments
+                .iter()
+                .any(|argument| argument == "--crate-type")
+        );
         assert_eq!(invocation.environment["CARGO_BIN_EXE_root"], binary_path);
         assert!(!invocation.environment.contains_key("CARGO_BIN_EXE_foreign"));
         assert_eq!(invocation.environment["CARGO_TARGET_TMPDIR"], temp_dir);
@@ -1472,230 +1347,5 @@ mod tests {
             dependency_rustc_invocation(&focused, &manifests, integration, &missing_options)
                 .unwrap_err();
         assert!(error.to_string().contains("no program environment"));
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let output = Command::new(cargo)
-            .args([
-                "-Z",
-                "unstable-options",
-                "test",
-                "--release",
-                "--test",
-                "integration",
-                "--unit-graph",
-                "--offline",
-            ])
-            .arg("--manifest-path")
-            .arg(fixture.0.join("Cargo.toml"))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let units = cargo["units"].as_array().unwrap();
-        let cargo_nodes = units
-            .iter()
-            .map(|unit| {
-                let package_id = unit["pkg_id"].as_str().unwrap();
-                let package =
-                    if package_id.starts_with(&format!("path+file://{}#", fixture.0.display())) {
-                        manifest.name.as_str()
-                    } else {
-                        package_id
-                            .rsplit('/')
-                            .next()
-                            .unwrap()
-                            .split('#')
-                            .next()
-                            .unwrap()
-                    };
-                (
-                    package.to_owned(),
-                    unit["target"]["kind"][0].as_str().unwrap().to_owned(),
-                    unit["target"]["name"].as_str().unwrap().to_owned(),
-                    unit["profile"]["panic"].as_str().unwrap().to_owned(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let lorry_node = |key: &crate::unit::UnitKey| {
-            let unit = &focused.units[key];
-            let kind = match key.kind {
-                UnitKind::Library => "lib",
-                UnitKind::Binary => "bin",
-                UnitKind::IntegrationHarness => "test",
-                _ => panic!("unexpected unit in integration oracle: {:?}", key.kind),
-            };
-            let name = key.target.as_deref().unwrap_or_else(|| {
-                if key.package == library.package {
-                    manifest.library.as_ref().unwrap().name.as_str()
-                } else {
-                    graph.packages[&key.package]
-                        .manifest
-                        .library
-                        .as_ref()
-                        .unwrap()
-                        .name
-                        .as_str()
-                }
-            });
-            (
-                key.package.name.clone(),
-                kind.to_owned(),
-                name.to_owned(),
-                match unit.settings.profile.panic {
-                    crate::identity::CargoPanicStrategy::Abort => "abort",
-                    crate::identity::CargoPanicStrategy::Unwind => "unwind",
-                    _ => unreachable!(),
-                }
-                .to_owned(),
-            )
-        };
-        let lorry_nodes = focused
-            .units
-            .keys()
-            .map(lorry_node)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(lorry_nodes, cargo_nodes.iter().cloned().collect());
-        let mut cargo_edges = BTreeSet::new();
-        for (parent, unit) in units.iter().enumerate() {
-            for edge in unit["dependencies"].as_array().unwrap() {
-                cargo_edges.insert((
-                    cargo_nodes[parent].clone(),
-                    cargo_nodes[edge["index"].as_u64().unwrap() as usize].clone(),
-                    edge["extern_crate_name"].as_str().unwrap().to_owned(),
-                ));
-            }
-        }
-        let lorry_edges = focused
-            .units
-            .values()
-            .flat_map(|unit| {
-                unit.unit.dependencies.iter().map(|edge| {
-                    (
-                        lorry_node(&unit.unit.key),
-                        lorry_node(&edge.unit),
-                        edge.alias.clone().unwrap(),
-                    )
-                })
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(lorry_edges, cargo_edges);
-        let cargo_roots = cargo["roots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|index| cargo_nodes[index.as_u64().unwrap() as usize].clone())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            cargo_roots,
-            focused
-                .units
-                .keys()
-                .filter(|key| key.kind == UnitKind::IntegrationHarness)
-                .map(lorry_node)
-                .collect()
-        );
-
-        let check_plan = graph
-            .selected_check_plan(
-                &options,
-                &manifest,
-                &CheckTargetSelection {
-                    normal: false,
-                    binaries: false,
-                    binary_name: None,
-                    harnesses: false,
-                    harness_filter: crate::unit::HarnessFilter::All,
-                    integrations: true,
-                    integration_name: Some("integration"),
-                    examples: false,
-                    example_name: None,
-                    benches: false,
-                    bench_name: None,
-                },
-            )
-            .unwrap();
-        assert!(
-            check_plan.units.keys().all(|key| {
-                key.package != library.package || key.profile == ProfileContext::Test
-            })
-        );
-        assert!(check_plan.units.keys().any(|key| {
-            key.kind == UnitKind::IntegrationHarness && key.mode == UnitMode::CheckTest
-        }));
-        assert!(check_plan.units.keys().any(|key| {
-            key.kind == UnitKind::Library
-                && key.package == library.package
-                && key.mode == UnitMode::Check
-        }));
-        assert!(
-            !check_plan
-                .units
-                .keys()
-                .any(|key| key.kind == UnitKind::Binary)
-        );
-        assert!(check_plan.units.values().any(|unit| {
-            unit.unit.key.kind == UnitKind::IntegrationHarness
-                && unit.settings.mode == crate::identity::CargoCompileMode::Check { test: true }
-        }));
-        let check_key = check_plan
-            .units
-            .keys()
-            .find(|key| key.kind == UnitKind::IntegrationHarness)
-            .unwrap();
-        let check_invocation =
-            dependency_rustc_invocation(&check_plan, &manifests, check_key, &command_options)
-                .unwrap()
-                .unwrap();
-        assert!(matches!(
-            check_invocation.output,
-            crate::compile::RustcOutput::Metadata { .. }
-        ));
-        assert!(
-            check_invocation
-                .arguments
-                .iter()
-                .any(|argument| argument == "--emit=dep-info,metadata")
-        );
-        assert_check_graph_matches_cargo(&fixture.0, &check_plan, &["--test", "integration"]);
-        let all_check = graph
-            .selected_check_plan(
-                &options,
-                &manifest,
-                &CheckTargetSelection {
-                    normal: true,
-                    binaries: true,
-                    binary_name: None,
-                    harnesses: true,
-                    harness_filter: crate::unit::HarnessFilter::All,
-                    integrations: true,
-                    integration_name: None,
-                    examples: false,
-                    example_name: None,
-                    benches: false,
-                    bench_name: None,
-                },
-            )
-            .unwrap();
-        assert_check_graph_matches_cargo(&fixture.0, &all_check, &["--all-targets"]);
-
-        fs::remove_file(fixture.0.join("src/main.rs")).unwrap();
-        let library_only = Manifest::load_for_build(&fixture.0).unwrap();
-        let library_only_plan = graph
-            .selected_mixed_test_plan(&options, &library_only, false, Some("integration"))
-            .unwrap();
-        assert!(
-            library_only_plan.units.keys().all(|key| {
-                key.package != library.package || key.profile == ProfileContext::Test
-            })
-        );
-        assert!(
-            library_only_plan
-                .units
-                .keys()
-                .any(|key| { key.kind == UnitKind::IntegrationHarness })
-        );
     }
 }

@@ -9,7 +9,6 @@ use crate::diagnostic::{Error, Result};
 use crate::identity::CargoDebugInfo;
 use crate::sparse::DependencyKind;
 use crate::toml::Document;
-use crate::toolchain::TargetInfo;
 
 mod inheritance;
 pub(crate) mod profiles;
@@ -426,28 +425,6 @@ impl Manifest {
         let document = Document::parse(&path, "Cargo lockfile", source)?;
         self.lock = Some(parse_lock_document(Some(&self), &path, &document)?);
         Ok(self)
-    }
-
-    pub fn require_dev_targets_supported(&self, target: &TargetInfo) -> Result<()> {
-        for dependency in self
-            .dependencies
-            .iter()
-            .filter(|dependency| dependency.kind == DependencyKind::Dev)
-        {
-            let selected = match dependency.target.as_deref() {
-                Some(selector) if selector.starts_with("cfg(") => {
-                    target.cfg.matches_selector(selector)?
-                }
-                Some(selector) => selector == target.triple,
-                None => true,
-            };
-            if selected {
-                return Err(Error::failure(format!(
-                    "dev-dependency targets for package `{}` are not yet supported by workspace execution", self.name
-                )).with_help("ordinary build/check selections do not use dev-dependencies"));
-            }
-        }
-        Ok(())
     }
 
     fn finish_root(
@@ -3426,7 +3403,6 @@ fn type_error(path: &Path, line: usize, name: &str, expected: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::toolchain::CfgSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_VENDOR_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -4723,33 +4699,17 @@ bench = false
     }
 
     #[test]
-    fn retains_root_dev_dependencies_and_gates_their_execution() {
+    fn retains_root_dev_dependencies() {
         let source = format!("{RED}\n[target.'cfg(unix)'.dev-dependencies]\nlibc = \"0.2\"\n");
         let manifest = parsed(&source).unwrap();
-        let linux = TargetInfo {
-            triple: "x86_64-unknown-linux-gnu".to_owned(),
-            cfg: CfgSet::parse("target_os=\"linux\"\nunix\n").unwrap(),
-        };
         assert_eq!(manifest.dependencies.len(), 1);
         assert_eq!(manifest.dependencies[0].kind, DependencyKind::Dev);
         assert_eq!(
             manifest.dependencies[0].target.as_deref(),
             Some("cfg(unix)")
         );
-        let error = manifest.require_dev_targets_supported(&linux).unwrap_err();
-        assert!(
-            error.to_string().contains("dev-dependency targets"),
-            "{error}"
-        );
-
-        let motor = TargetInfo {
-            triple: "x86_64-unknown-motor".to_owned(),
-            cfg: CfgSet::parse("target_os=\"motor\"\n").unwrap(),
-        };
-        manifest.require_dev_targets_supported(&motor).unwrap();
         let regular = parsed(&format!("{RED}\n[dev-dependencies]\nhelper = \"1\"\n")).unwrap();
         assert_eq!(regular.dependencies[0].kind, DependencyKind::Dev);
-        assert!(regular.require_dev_targets_supported(&motor).is_err());
     }
 
     #[test]
