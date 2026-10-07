@@ -1,4 +1,6 @@
 //! Real sysbox command regressions; run against the installed native executable.
+#[path = "utility-tests/sort-keys.rs"]
+mod sort_key_flags;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -124,6 +126,7 @@ fn main() {
     std::fs::create_dir(&root).unwrap();
     eprintln!("sysbox utility test artifacts: {}", root.display());
     sort_fields(&root);
+    sort_key_flags::run_test(&root);
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox utility-tests: ALL PASS");
 }

@@ -1,17 +1,48 @@
-//! GNU field and byte ranges under byte-order collation.
+//! GNU field/byte ranges and ordering modifiers, under byte-order collation.
+
+use std::cmp::Ordering;
+
+#[derive(Clone, Copy, Default)]
+pub struct Flags {
+    pub reverse: bool,
+    pub fold: bool,
+    pub numeric: bool,
+    pub human: bool,
+}
+
+impl Flags {
+    pub fn compare(self, left: &[u8], right: &[u8]) -> Ordering {
+        let order = if self.numeric || self.human {
+            super::numeric::compare(left, right, self.human, self.fold)
+        } else if self.fold {
+            left.iter()
+                .map(u8::to_ascii_uppercase)
+                .cmp(right.iter().map(u8::to_ascii_uppercase))
+        } else {
+            left.cmp(right)
+        };
+        if self.reverse {
+            order.reverse()
+        } else {
+            order
+        }
+    }
+}
 
 struct Point {
     field: usize,
     character: usize,
+    blanks: bool,
 }
 pub struct Key {
     start: Point,
     end: Option<Point>,
+    pub flags: Option<Flags>,
 }
 
 fn count<'a>(text: &'a str, label: &str) -> Result<(usize, &'a str), String> {
     let input = text;
-    let text = text.trim_ascii_start();
+    let text = text.trim_start_matches(|character| matches!(character, ' ' | '\t'..='\r'));
     let text = text.strip_prefix('+').unwrap_or(text);
     let digits = text.bytes().take_while(u8::is_ascii_digit).count();
     if digits == 0 {
@@ -27,7 +58,13 @@ fn count<'a>(text: &'a str, label: &str) -> Result<(usize, &'a str), String> {
     Ok((number, &text[digits..]))
 }
 
-fn point(text: &str, start: bool, spec: &str) -> Result<Point, String> {
+fn point(
+    text: &str,
+    start: bool,
+    spec: &str,
+    flags: &mut Flags,
+    explicit: &mut bool,
+) -> Result<Point, String> {
     let (field, rest) = count(
         text,
         if start {
@@ -51,12 +88,22 @@ fn point(text: &str, start: bool, spec: &str) -> Result<Point, String> {
     if let Some(reason) = invalid {
         return Err(format!("{reason}: invalid field specification '{spec}'"));
     }
-    if let Some(flag) = rest.chars().next() {
-        return Err(format!("unsupported key option '{flag}' in '{spec}'"));
+    let mut blanks = false;
+    for flag in rest.chars() {
+        *explicit = true;
+        match flag {
+            'b' => blanks = true,
+            'r' => flags.reverse = true,
+            'f' => flags.fold = true,
+            'n' => flags.numeric = true,
+            'h' => flags.human = true,
+            _ => return Err(format!("unsupported key option '{flag}' in '{spec}'")),
+        }
     }
     Ok(Point {
         field: field - 1,
         character,
+        blanks,
     })
 }
 
@@ -65,9 +112,20 @@ impl Key {
         let (start, end) = spec
             .split_once(',')
             .map_or((spec, None), |(start, end)| (start, Some(end)));
-        let start = point(start, true, spec)?;
-        let end = end.map(|end| point(end, false, spec)).transpose()?;
-        Ok(Self { start, end })
+        let mut flags = Flags::default();
+        let mut explicit = false;
+        let start = point(start, true, spec, &mut flags, &mut explicit)?;
+        let end = end
+            .map(|end| point(end, false, spec, &mut flags, &mut explicit))
+            .transpose()?;
+        if flags.numeric && flags.human {
+            return Err("options '-hn' are incompatible".into());
+        }
+        Ok(Self {
+            start,
+            end,
+            flags: explicit.then_some(flags),
+        })
     }
 
     pub fn slice<'a>(&self, line: &'a [u8], delimiter: Option<u8>) -> &'a [u8] {
@@ -111,6 +169,11 @@ fn position(line: &[u8], point: &Point, end: bool, delimiter: Option<u8>) -> usi
     }
     if end && point.character == 0 {
         return field_end(line, position, delimiter);
+    }
+    if point.blanks {
+        while position < line.len() && blank(line[position]) {
+            position += 1;
+        }
     }
     position
         .saturating_add(point.character - usize::from(!end))

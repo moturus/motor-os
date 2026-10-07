@@ -74,8 +74,10 @@ The shell is somewhat barebones now (contributions are welcome!).
   Neither rounds through floating point. Input is read before opening output.
   Keys use `FIELD[.BYTE][,FIELD[.BYTE]]`, with repeated `-k` for tie breakers;
   `-t` selects a single-byte separator (including `\0`), otherwise fields
-  start with their leading spaces/tabs. Ordering flags apply to all keys;
-  per-key flags are a later patch;
+  start with their leading spaces/tabs. A local `b/n/h/f/r` key modifier
+  overrides global ordering flags for that key; `b` skips leading blanks at
+  its position. For example, `sort -t: -k2,2n -k1,1r` sorts field 2 numerically,
+  then field 1 in reverse byte order;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
   numeric IPv4 and IPv6 addresses, `localhost`, and DNS names;
 - `head [-n [-]NUM | -c [-]NUM] [-q | -v] [-z] [FILE]...` prints the first 10

@@ -45,8 +45,8 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
             println!(
                 "usage: sort [-nhrufsc] [-k KEY] [-t BYTE] [-o FILE] [--] [FILE]...\n\
                       Sort lines (byte order by default); no files or '-' reads standard input.\n\
-                      -k FIELD[.BYTE][,FIELD[.BYTE]] select a key; -t BYTE separate fields.\n\
-                      -n decimal prefix; -h human sizes;\n\
+                      -k FIELD[.BYTE][FLAGS][,FIELD[.BYTE][FLAGS]] select a key; -t BYTE separate fields.\n\
+                      -n decimal prefix; -h human sizes; key flags b/n/h/f/r override global ordering;\n\
                       -r reverse; -u unique; -f fold ASCII case; -s stable;\n\
                       -c check order without output; -o FILE write sorted lines to FILE."
             );
@@ -135,7 +135,10 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
             }
         }
     }
-    if options.numeric && options.human {
+    if options.numeric
+        && options.human
+        && (options.keys.is_empty() || options.keys.iter().any(|key| key.flags.is_none()))
+    {
         fail("options '-hn' are incompatible");
     }
     if files.is_empty() {
@@ -152,24 +155,19 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
 
 impl Options {
     fn compare(&self, left: &[u8], right: &[u8]) -> Ordering {
-        let compare_key = |left: &[u8], right: &[u8]| {
-            if self.numeric || self.human {
-                numeric::compare(left, right, self.human, self.fold)
-            } else if self.fold {
-                left.iter()
-                    .map(u8::to_ascii_uppercase)
-                    .cmp(right.iter().map(u8::to_ascii_uppercase))
-            } else {
-                left.cmp(right)
-            }
+        let global = keys::Flags {
+            reverse: self.reverse,
+            fold: self.fold,
+            numeric: self.numeric,
+            human: self.human,
         };
         let mut order = if self.keys.is_empty() {
-            compare_key(left, right)
+            global.compare(left, right)
         } else {
             self.keys
                 .iter()
                 .map(|key| {
-                    compare_key(
+                    key.flags.unwrap_or(global).compare(
                         key.slice(left, self.delimiter),
                         key.slice(right, self.delimiter),
                     )
@@ -179,12 +177,11 @@ impl Options {
         };
         if order == Ordering::Equal && !self.stable && !self.unique {
             order = left.cmp(right);
+            if self.reverse {
+                order = order.reverse();
+            }
         }
-        if self.reverse {
-            order.reverse()
-        } else {
-            order
-        }
+        order
     }
 }
 

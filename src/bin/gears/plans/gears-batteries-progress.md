@@ -18,7 +18,7 @@ that Gears works with OpenRouter on Motor OS.
 | --- | --- |
 | First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
 | Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
-| Motor OS command utilities | Separate coding work remains: local sort-key modifiers, then `uniq`, `cut`, `tr` and `xargs`. `mkdir -p`, byte/numeric/human-size comparisons and `sort -k/-t` field ranges/separators are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Motor OS command utilities | Separate coding work remains: `uniq`, `cut`, `tr` and `xargs`. `mkdir -p` and the planned `sort` options, including local key modifiers, are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
 | Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
 | Optional orchestration (10) | Implement supervised worker agents and their budgets. |
 | Optional web tools (11) | Implement web search and page extraction using curl. |
@@ -1251,3 +1251,26 @@ that driver error and its passing release log are preserved. GNU output/status/
 diagnostic comparisons (3,888 cases), native Clippy with warnings denied and the
 focused native fixtures pass. Build-generated lockfiles are restored only after
 matching their recorded hashes; the user's sys workspace lock is preserved.
+
+
+### S2 local sort-key modifiers
+
+Keys now support their own `n`, `h`, `r`, `f` and boundary `b` modifiers.
+Explicit key ordering overrides inherited global flags for that key; stable
+sorting and uniqueness use the selected keys, while the final whole-line tie
+breaker retains global reverse order. Invalid or conflicting modifiers fail
+before an output file is opened. Regression cases cover local numeric/human
+ordering, reversed secondary keys, case folding and blank/byte boundaries.
+
+Review found that the new field-position parser omitted vertical tab when
+skipping C-locale whitespace. The parser now recognizes all six C whitespace
+characters, and real-command regressions exercise each at both field and byte
+positions. This is a bug in the new sysbox utility code and was fixed in scope.
+
+The final source passes 6,480 GNU output/status/diagnostic comparisons, six
+focused C-whitespace comparisons, the actual host fixture and warnings-denied
+native Clippy. The installed fixture and `full-test.sh` pass three times each
+in debug and release without source changes. Logs are under
+`/tmp/gears-sysbox-sort-per-key/`. Only sysbox and its documentation/test wiring
+are authored changes; verified generated locks are restored and the user's
+existing sys workspace lock remains unchanged.
