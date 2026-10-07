@@ -1,6 +1,6 @@
 # Review: delete the single-package build path?
 
-Date: 2026-10-07. Branch head at measurement: `e4ff443e`.
+Date: 2026-10-07. Measured code: `78a0b867` (later commits change only docs).
 
 ## Question
 
