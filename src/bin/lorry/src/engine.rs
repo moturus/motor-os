@@ -56,30 +56,21 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         cli.manifest_path.as_deref().map(Path::new),
         &cli.selection,
     )?;
-    let (release, testing, requested_profile) = match &cli.command {
-        Command::Build(options) => (options.release, false, options.profile.as_deref()),
-        Command::Check(options) => (options.release, false, options.profile.as_deref()),
-        Command::Run(options) => (
-            options.build.release,
-            false,
-            options.build.profile.as_deref(),
-        ),
-        Command::Test(options) => (
-            options.build.release,
-            true,
-            options.build.profile.as_deref(),
-        ),
-        _ => unreachable!("non-build command passed to engine"),
+    let Some(build_options) = cli.command.build_options() else {
+        unreachable!("non-build command passed to engine")
     };
     let profile = crate::manifest::profiles::SelectedProfile::load(
         &workspace,
-        requested_profile.unwrap_or(if release {
-            "release"
-        } else if testing {
-            "test"
-        } else {
-            "dev"
-        }),
+        build_options
+            .profile
+            .as_deref()
+            .unwrap_or(if build_options.release {
+                "release"
+            } else if matches!(cli.command, Command::Test(_)) {
+                "test"
+            } else {
+                "dev"
+            }),
     )?;
     for member in &mut selected {
         profile.apply(member);
@@ -87,7 +78,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let mut expanded_cli = cli.clone();
     match &mut expanded_cli.command {
         Command::Build(options) => options.targets.expand_patterns(&selected)?,
-        Command::Check(options) => options.targets.expand_patterns(&selected)?,
+        Command::Check(options) => options.build.targets.expand_patterns(&selected)?,
         Command::Test(options) => options.build.targets.expand_patterns(&selected)?,
         _ => {}
     }
@@ -100,7 +91,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         matches!(&cli.command, Command::Run(options) if !options.build.targets.example.is_empty());
     let shared_tests = matches!(&cli.command, Command::Test(_));
     let shared_auxiliary_builds = matches!(&cli.command, Command::Build(options) if options.targets.has_target_selector() && options.targets.single_binary().is_none());
-    let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.targets.selects_dev_targets() || options.targets.bin.len() > 1 || options.profile.as_deref() == Some("test"));
+    let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.build.targets.selects_dev_targets() || options.build.targets.bin.len() > 1 || options.build.profile.as_deref() == Some("test"));
     let shared = shared_tests
         || run_example
         || shared_auxiliary_builds
@@ -138,7 +129,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         .clone();
     Manifest::report_warnings(&selected, cli.verbosity);
     let requested_targets = match &cli.command {
-        Command::Check(options) => Some(&options.targets),
+        Command::Check(options) => Some(&options.build.targets),
         Command::Build(options) => Some(&options.targets),
         Command::Test(options) => Some(&options.build.targets),
         _ => None,
@@ -183,17 +174,10 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let compact_state = CompactState::load(&manifest.workspace_root)?;
     let mut config = Config::load(&current, &manifest)?;
     config.apply_max_packages(cli.max_packages)?;
-    let requested_target_directory = match &cli.command {
-        Command::Build(options) => options.target_dir.as_deref(),
-        Command::Check(options) => options.target_dir.as_deref(),
-        Command::Run(options) => options.build.target_dir.as_deref(),
-        Command::Test(options) => options.build.target_dir.as_deref(),
-        _ => unreachable!("non-build command passed to engine"),
-    };
     let target_directory = config.target_directory(
         &current,
         &manifest.workspace_root,
-        requested_target_directory,
+        build_options.target_dir.as_deref(),
     );
     let target_root = artifact_root_in(&manifest, &target_directory);
     let artifact_lock = crate::artifact_lock::ArtifactLock::acquire(&target_directory)?;
@@ -219,29 +203,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         );
     }
 
-    let (_, command_target, validation) = match &cli.command {
-        Command::Build(options) => (
-            options.release,
-            options.target.as_deref(),
-            options.validation,
-        ),
-        Command::Run(options) => (
-            options.build.release,
-            options.build.target.as_deref(),
-            options.build.validation,
-        ),
-        Command::Check(options) => (
-            options.release,
-            options.target.as_deref(),
-            ValidationMode::Trusted,
-        ),
-        Command::Test(options) => (
-            options.build.release,
-            options.build.target.as_deref(),
-            options.build.validation,
-        ),
-        _ => unreachable!("non-build command passed to engine"),
-    };
+    let validation = build_options.validation;
     let release = profile.release;
     let run_binary = run_selection.map(|(_, name)| name);
     let binary_selection = match &cli.command {
@@ -264,7 +226,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             .collect(),
         ..Default::default()
     };
-    let physical_target = config.selected_target(command_target)?;
+    let physical_target = config.selected_target(build_options.target.as_deref())?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
     let host_info = if physical_target.is_some() {
         toolchain.target_info(None)?
@@ -510,7 +472,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 color,
                 verbosity: cli.verbosity,
                 jobs,
-                keep_going: false,
+                keep_going: options.build.keep_going,
                 use_cargo_registry: cli.use_cargo_registry,
                 source: (source, direct, verified_resolution),
                 bundle: false,
@@ -1064,7 +1026,7 @@ fn build_reported(build: Build<'_>, format: MessageFormat) -> Result<BuildArtifa
 }
 
 fn check(build: Build<'_>, options: &CheckOptions) -> Result<i32> {
-    match build_inner(build, Some(options), options.message_format)? {
+    match build_inner(build, Some(options), options.build.message_format)? {
         BuildOutcome::Check(code) => Ok(code),
         BuildOutcome::Artifacts(_) => unreachable!("check returned ordinary build artifacts"),
         BuildOutcome::NoTargets => unreachable!("check returned an ordinary no-target build"),
@@ -1423,9 +1385,9 @@ fn build_inner(
                     })
             });
     let check_integration = check.is_some_and(|options| {
-        (options.targets.selects_tests()
-            || options.targets.benches
-            || !options.targets.bench.is_empty())
+        (options.build.targets.selects_tests()
+            || options.build.targets.benches
+            || !options.build.targets.bench.is_empty())
             && build
                 .members
                 .unwrap_or_else(|| std::slice::from_ref(build.manifest))
@@ -1525,20 +1487,20 @@ fn build_inner(
         admission: &prepared.admission,
         native_tools: &build.config.native_tools,
         jobs: build.jobs,
-        keep_going: build.keep_going || check.is_some_and(|options| options.keep_going),
+        keep_going: build.keep_going,
         reporter: &message_reporter,
     };
     if let Some(options) = check {
         let members = build
             .members
             .unwrap_or_else(|| std::slice::from_ref(build.manifest));
-        if options.targets.lib
-            && !options.targets.all_targets
+        if options.build.targets.lib
+            && !options.build.targets.all_targets
             && members.iter().all(|member| member.library.is_none())
         {
             return Err(Error::failure("selected package has no library target"));
         }
-        let plan = selected_check_plan(&options.targets)?;
+        let plan = selected_check_plan(&options.build.targets)?;
         let plan = if options.compile_time_deps {
             plan.compile_time_dependencies()?
         } else {

@@ -163,11 +163,9 @@ fn run(cli: Cli) -> Result<i32> {
             cli.manifest_path.as_deref(),
             cli.verbosity,
         ),
-        Command::LocateProject {
-            manifest_path,
-            workspace,
-            plain,
-        } => compatibility::locate_project(manifest_path.as_deref(), *workspace, *plain),
+        Command::LocateProject { workspace, plain } => {
+            compatibility::locate_project(cli.manifest_path.as_deref(), *workspace, *plain)
+        }
         Command::Metadata(options) => metadata::execute(&cli, options),
         Command::Fetch(options) => vendor::workspace::fetch(&cli, options),
         Command::Tree(options) => tree::execute(&cli, options),

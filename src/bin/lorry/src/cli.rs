@@ -44,15 +44,9 @@ pub enum Command {
     Check(CheckOptions),
     Clean(CleanOptions),
     Fetch(FetchOptions),
-    LocateProject {
-        manifest_path: Option<String>,
-        workspace: bool,
-        plain: bool,
-    },
+    LocateProject { workspace: bool, plain: bool },
     Metadata(MetadataOptions),
-    New {
-        path: String,
-    },
+    New { path: String },
     Review,
     Run(RunOptions),
     RustcQuery(RustcQueryOptions),
@@ -61,6 +55,19 @@ pub enum Command {
     Vendor(VendorOptions),
     Help(Option<String>),
     Version,
+}
+
+impl Command {
+    /// The options shared by the compiling commands: build, check, clippy, run, and test.
+    pub fn build_options(&self) -> Option<&BuildOptions> {
+        match self {
+            Self::Build(options) => Some(options),
+            Self::Check(CheckOptions { build, .. })
+            | Self::Run(RunOptions { build, .. })
+            | Self::Test(TestOptions { build, .. }) => Some(build),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,7 +130,6 @@ pub struct CleanOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetadataOptions {
-    pub manifest_path: Option<String>,
     pub no_deps: bool,
     pub filter_platform: Option<String>,
     pub format_version_explicit: bool,
@@ -144,17 +150,9 @@ pub enum MessageFormat {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckOptions {
-    pub release: bool,
-    pub profile: Option<String>,
+    pub build: BuildOptions,
     pub clippy: Option<Vec<String>>,
-    pub manifest_path: Option<String>,
-    pub target_dir: Option<String>,
-    pub target: Option<String>,
-    pub keep_going: bool,
     pub compile_time_deps: bool,
-    pub targets: TargetSelection,
-    pub message_format: MessageFormat,
-    pub jobs: Option<Jobs>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -262,7 +260,6 @@ impl TargetSelection {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeOptions {
-    pub manifest_path: Option<String>,
     pub target: Option<String>,
 }
 
@@ -315,23 +312,15 @@ impl Cli {
     }
 
     pub fn jobs(&self) -> Option<Jobs> {
-        match &self.command {
-            Command::Build(options) => options.jobs,
-            Command::Check(options) => options.jobs,
-            Command::Run(options) => options.build.jobs,
-            Command::Test(options) => options.build.jobs,
-            _ => None,
-        }
+        self.command
+            .build_options()
+            .and_then(|options| options.jobs)
     }
 
     pub fn message_format(&self) -> MessageFormat {
-        match &self.command {
-            Command::Build(options) => options.message_format,
-            Command::Check(options) => options.message_format,
-            Command::Run(options) => options.build.message_format,
-            Command::Test(options) => options.build.message_format,
-            _ => MessageFormat::Human,
-        }
+        self.command
+            .build_options()
+            .map_or(MessageFormat::Human, |options| options.message_format)
     }
 
     pub fn parse<I>(arguments: I) -> Result<Self>
@@ -410,14 +399,9 @@ impl Cli {
         let selection = matches
             .subcommand()
             .map(|(_, command)| PackageSelection {
-                packages: optional_values(command, "selected-package"),
-                workspace: command
-                    .try_get_one::<bool>("workspace")
-                    .ok()
-                    .flatten()
-                    .copied()
-                    .unwrap_or(false),
-                exclude: optional_values(command, "exclude"),
+                packages: values(command, "selected-package"),
+                workspace: flag_set(command, "workspace"),
+                exclude: values(command, "exclude"),
             })
             .unwrap_or_default();
         let features = matches
@@ -524,12 +508,7 @@ fn command_line() -> ClapCommand {
         .disable_version_flag(true)
         .disable_help_subcommand(true)
         .args_override_self(false)
-        .arg(
-            Arg::new("lorry-messages")
-                .long("lorry-messages")
-                .global(true)
-                .action(ArgAction::SetTrue),
-        )
+        .arg(flag("lorry-messages").global(true))
         .arg(
             Arg::new("max-packages")
                 .long("max-packages")
@@ -538,19 +517,15 @@ fn command_line() -> ClapCommand {
                 .value_parser(clap::value_parser!(u64).range(1..)),
         )
         .arg(
-            Arg::new("quiet")
-                .long("quiet")
+            flag("quiet")
                 .short('q')
                 .global(true)
-                .action(ArgAction::SetTrue)
                 .conflicts_with("verbose"),
         )
         .arg(
-            Arg::new("verbose")
-                .long("verbose")
+            flag("verbose")
                 .short('v')
                 .global(true)
-                .action(ArgAction::SetTrue)
                 .conflicts_with("quiet"),
         )
         .arg(
@@ -562,32 +537,14 @@ fn command_line() -> ClapCommand {
                 .action(ArgAction::Set)
                 .value_parser(PossibleValuesParser::new(["auto", "always", "never"])),
         )
-        .arg(
-            Arg::new("use-cargo-registry")
-                .long("use-cargo-registry")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("help")
-                .long("help")
-                .short('h')
-                .action(ArgAction::SetTrue)
-                .exclusive(true),
-        )
-        .arg(
-            Arg::new("version")
-                .long("version")
-                .short('V')
-                .action(ArgAction::SetTrue)
-                .exclusive(true),
-        )
+        .arg(flag("use-cargo-registry"))
+        .arg(flag("help").short('h').exclusive(true))
+        .arg(flag("version").short('V').exclusive(true))
         .subcommand(
-            compile_command("build", true)
-                .arg(
-                    Arg::new("keep-going")
-                        .long("keep-going")
-                        .action(ArgAction::SetTrue),
-                )
+            compile_command("build")
+                .args(workspace_selection_arguments())
+                .args(target_selection_arguments())
+                .arg(flag("keep-going"))
                 .arg(message_format_argument())
                 .dont_delimit_trailing_values(true),
         )
@@ -602,14 +559,10 @@ fn command_line() -> ClapCommand {
                         .dont_delimit_trailing_values(true),
                 ),
         )
-        .subcommand(check_command("check"))
+        .subcommand(check_command("check").arg(flag("compile-time-deps")))
         .subcommand(
             check_command("clippy")
-                .arg(
-                    Arg::new("no-deps")
-                        .long("no-deps")
-                        .action(ArgAction::SetTrue),
-                )
+                .arg(flag("no-deps"))
                 .arg(child_arguments()),
         )
         .subcommand(clean_command().dont_delimit_trailing_values(true))
@@ -669,6 +622,10 @@ fn command_line() -> ClapCommand {
         )
 }
 
+fn flag(name: &'static str) -> Arg {
+    Arg::new(name).long(name).action(ArgAction::SetTrue)
+}
+
 fn manifest_path_argument() -> Arg {
     Arg::new("manifest-path")
         .long("manifest-path")
@@ -690,11 +647,7 @@ fn metadata_command() -> ClapCommand {
                 .long("format-version")
                 .value_parser(PossibleValuesParser::new(["1"])),
         )
-        .arg(
-            Arg::new("no-deps")
-                .long("no-deps")
-                .action(ArgAction::SetTrue),
-        )
+        .arg(flag("no-deps"))
         .arg(
             Arg::new("filter-platform")
                 .long("filter-platform")
@@ -708,11 +661,12 @@ fn metadata_command() -> ClapCommand {
 
 fn locked_offline_arguments() -> [Arg; 3] {
     // These commands already forbid acquisition and lock-file changes.
-    ["locked", "offline", "frozen"].map(|name| Arg::new(name).long(name).action(ArgAction::SetTrue))
+    ["locked", "offline", "frozen"].map(flag)
 }
 
+/// Not built on `build_command`: argument order breaks ties between Clap's suggestions.
 fn check_command(name: &'static str) -> ClapCommand {
-    let command = ClapCommand::new(name)
+    ClapCommand::new(name)
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
         .arg(package_argument())
@@ -721,45 +675,13 @@ fn check_command(name: &'static str) -> ClapCommand {
         .args(locked_offline_arguments())
         .arg(jobs_argument())
         .arg(profile_argument())
-        .arg(
-            Arg::new("release")
-                .long("release")
-                .short('r')
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("target-dir")
-                .long("target-dir")
-                .value_name("DIRECTORY")
-                .num_args(1)
-                .action(ArgAction::Set)
-                .value_parser(NonEmptyStringValueParser::new()),
-        )
-        .arg(
-            Arg::new("target")
-                .long("target")
-                .value_name("TRIPLE")
-                .num_args(1)
-                .action(ArgAction::Set)
-                .value_parser(NonEmptyStringValueParser::new()),
-        )
+        .arg(flag("release").short('r'))
+        .arg(target_dir_argument())
+        .arg(target_argument().value_parser(NonEmptyStringValueParser::new()))
         .args(workspace_selection_arguments())
-        .arg(
-            Arg::new("keep-going")
-                .long("keep-going")
-                .action(ArgAction::SetTrue),
-        )
+        .arg(flag("keep-going"))
         .args(target_selection_arguments())
-        .arg(message_format_argument());
-    if name == "check" {
-        command.arg(
-            Arg::new("compile-time-deps")
-                .long("compile-time-deps")
-                .action(ArgAction::SetTrue),
-        )
-    } else {
-        command
-    }
+        .arg(message_format_argument())
 }
 
 fn profile_argument() -> Arg {
@@ -770,8 +692,24 @@ fn profile_argument() -> Arg {
         .value_parser(NonEmptyStringValueParser::new())
 }
 
+fn target_argument() -> Arg {
+    Arg::new("target")
+        .long("target")
+        .value_name("TRIPLE")
+        .num_args(1)
+        .action(ArgAction::Set)
+}
+
+fn target_dir_argument() -> Arg {
+    Arg::new("target-dir")
+        .long("target-dir")
+        .value_name("DIRECTORY")
+        .num_args(1)
+        .action(ArgAction::Set)
+        .value_parser(NonEmptyStringValueParser::new())
+}
+
 fn target_selection_arguments() -> [Arg; 10] {
-    let flag = |name: &'static str| Arg::new(name).long(name).action(ArgAction::SetTrue);
     let named = |name: &'static str| {
         Arg::new(name)
             .long(name)
@@ -794,24 +732,16 @@ fn target_selection_arguments() -> [Arg; 10] {
 }
 
 fn target_selection(options: &ArgMatches) -> TargetSelection {
-    let flag = |name| {
-        options
-            .try_get_one::<bool>(name)
-            .ok()
-            .flatten()
-            .copied()
-            .unwrap_or(false)
-    };
     TargetSelection {
-        all_targets: flag("all-targets"),
-        lib: flag("lib"),
-        bins: flag("bins"),
+        all_targets: flag_set(options, "all-targets"),
+        lib: flag_set(options, "lib"),
+        bins: flag_set(options, "bins"),
         bin: values(options, "bin"),
-        tests: flag("tests"),
+        tests: flag_set(options, "tests"),
         test: values(options, "test"),
-        examples: flag("examples"),
+        examples: flag_set(options, "examples"),
         example: values(options, "example"),
-        benches: flag("benches"),
+        benches: flag_set(options, "benches"),
         bench: values(options, "bench"),
     }
 }
@@ -853,25 +783,14 @@ fn tree_command() -> ClapCommand {
         .args(workspace_selection_arguments())
         .arg(manifest_path_argument())
         .args(locked_offline_arguments())
-        .arg(
-            Arg::new("target")
-                .long("target")
-                .value_name("TRIPLE")
-                .num_args(1)
-                .action(ArgAction::Set)
-                .value_parser(NonEmptyStringValueParser::new()),
-        )
+        .arg(target_argument().value_parser(NonEmptyStringValueParser::new()))
 }
 
 fn locate_project_command() -> ClapCommand {
     ClapCommand::new("locate-project")
         .disable_help_flag(true)
         .dont_delimit_trailing_values(true)
-        .arg(
-            Arg::new("workspace")
-                .long("workspace")
-                .action(ArgAction::SetTrue),
-        )
+        .arg(flag("workspace"))
         .arg(manifest_path_argument())
         .arg(
             Arg::new("message-format")
@@ -921,33 +840,15 @@ fn build_command(name: &'static str) -> ClapCommand {
         .arg(manifest_path_argument())
         .args_override_self(false)
         .args(locked_offline_arguments())
-        .arg(
-            Arg::new("release")
-                .long("release")
-                .short('r')
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("target")
-                .long("target")
-                .value_name("TRIPLE")
-                .num_args(1)
-                .action(ArgAction::Set),
-        )
-        .arg(
-            Arg::new("target-dir")
-                .long("target-dir")
-                .value_name("DIRECTORY")
-                .num_args(1)
-                .action(ArgAction::Set)
-                .value_parser(NonEmptyStringValueParser::new()),
-        )
+        .arg(flag("release").short('r'))
+        .arg(target_argument())
+        .arg(target_dir_argument())
         .arg(package_argument())
 }
 
 fn clean_command() -> ClapCommand {
     build_command("clean")
-        .arg(workspace_argument())
+        .arg(flag("workspace"))
         .arg(profile_argument())
 }
 
@@ -960,15 +861,9 @@ fn package_argument() -> Arg {
         .action(ArgAction::Append)
 }
 
-fn workspace_argument() -> Arg {
-    Arg::new("workspace")
-        .long("workspace")
-        .action(ArgAction::SetTrue)
-}
-
 fn workspace_selection_arguments() -> [Arg; 2] {
     [
-        workspace_argument(),
+        flag("workspace"),
         Arg::new("exclude")
             .long("exclude")
             .value_name("SPEC")
@@ -986,58 +881,18 @@ fn feature_selection_arguments() -> [Arg; 3] {
             .value_name("FEATURES")
             .num_args(1)
             .action(ArgAction::Append),
-        Arg::new("all-features")
-            .long("all-features")
-            .action(ArgAction::SetTrue),
-        Arg::new("no-default-features")
-            .long("no-default-features")
-            .action(ArgAction::SetTrue),
+        flag("all-features"),
+        flag("no-default-features"),
     ]
 }
 
-fn compile_command(name: &'static str, supports_bin: bool) -> ClapCommand {
-    let command = build_command(name)
+/// Declares the options that build, run, and test share.
+fn compile_command(name: &'static str) -> ClapCommand {
+    build_command(name)
         .arg(profile_argument())
         .args(feature_selection_arguments())
         .arg(jobs_argument())
-        .arg(
-            Arg::new("strict-validation")
-                .long("strict-validation")
-                .action(ArgAction::SetTrue),
-        );
-    let command = if name == "run" {
-        command.mut_arg("selected-package", |argument| {
-            argument.action(ArgAction::Set)
-        })
-    } else {
-        command.args(workspace_selection_arguments())
-    };
-    if matches!(name, "build" | "test") {
-        return command.args(target_selection_arguments());
-    }
-    if supports_bin {
-        let command = command.arg(
-            Arg::new("bin")
-                .long("bin")
-                .value_name("NAME")
-                .num_args(1)
-                .action(ArgAction::Set),
-        );
-        if name == "run" {
-            command.arg(
-                Arg::new("example")
-                    .long("example")
-                    .value_name("NAME")
-                    .action(ArgAction::Set)
-                    .conflicts_with("bin")
-                    .value_parser(NonEmptyStringValueParser::new()),
-            )
-        } else {
-            command
-        }
-    } else {
-        command
-    }
+        .arg(flag("strict-validation"))
 }
 
 fn jobs_argument() -> Arg {
@@ -1051,28 +906,39 @@ fn jobs_argument() -> Arg {
 }
 
 fn run_command() -> ClapCommand {
-    compile_command("run", true)
+    compile_command("run")
+        .mut_arg("selected-package", |argument| {
+            argument.action(ArgAction::Set)
+        })
+        .arg(
+            Arg::new("bin")
+                .long("bin")
+                .value_name("NAME")
+                .num_args(1)
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("example")
+                .long("example")
+                .value_name("NAME")
+                .action(ArgAction::Set)
+                .conflicts_with("bin")
+                .value_parser(NonEmptyStringValueParser::new()),
+        )
         .arg(message_format_argument())
         .arg(child_arguments())
 }
 
 fn test_command() -> ClapCommand {
-    compile_command("test", false)
+    compile_command("test")
+        .args(workspace_selection_arguments())
+        .args(target_selection_arguments())
         .arg(message_format_argument())
         .arg(Arg::new("filter").value_name("NAME").num_args(0..=1))
-        .arg(Arg::new("no-run").long("no-run").action(ArgAction::SetTrue))
-        .arg(
-            Arg::new("no-fail-fast")
-                .long("no-fail-fast")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("keep-going")
-                .long("keep-going")
-                .hide(true)
-                .action(ArgAction::SetTrue),
-        )
-        .arg(Arg::new("bundle").long("bundle").action(ArgAction::SetTrue))
+        .arg(flag("no-run"))
+        .arg(flag("no-fail-fast"))
+        .arg(flag("keep-going").hide(true))
+        .arg(flag("bundle"))
         .arg(child_arguments())
 }
 
@@ -1086,11 +952,7 @@ fn vendor_command() -> ClapCommand {
         .args(locked_offline_arguments())
         .args(feature_selection_arguments())
         .arg(manifest_path_argument())
-        .arg(
-            Arg::new("accept-all")
-                .long("accept-all")
-                .action(ArgAction::SetTrue),
-        )
+        .arg(flag("accept-all"))
         .subcommand(
             ClapCommand::new("upgrade")
                 .disable_help_flag(true)
@@ -1116,15 +978,14 @@ fn child_arguments() -> Arg {
 
 fn parse_command(matches: &ArgMatches) -> Result<Command> {
     match matches.subcommand() {
-        Some(("build", options)) => Ok(Command::Build(build_options(options, true))),
+        Some(("build", options)) => Ok(Command::Build(build_options(options))),
         Some(("cache", options)) => match options.subcommand() {
             Some(("clean", _)) => Ok(Command::CacheClean),
             Some((name, _)) => unreachable!("unexpected cache subcommand {name}"),
             None => unreachable!("Clap requires a cache subcommand"),
         },
         Some((name @ ("check" | "clippy"), options)) => Ok(Command::Check(CheckOptions {
-            release: options.get_flag("release"),
-            profile: options.get_one::<String>("profile").cloned(),
+            build: build_options(options),
             clippy: (name == "clippy").then(|| {
                 let mut arguments = values(options, "arguments");
                 if options.get_flag("no-deps") {
@@ -1132,31 +993,22 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                 }
                 arguments
             }),
-            manifest_path: options.get_one::<String>("manifest-path").cloned(),
-            target_dir: options.get_one::<String>("target-dir").cloned(),
-            target: options.get_one::<String>("target").cloned(),
-            keep_going: options.get_flag("keep-going"),
             compile_time_deps: name == "check" && options.get_flag("compile-time-deps"),
-            targets: target_selection(options),
-            message_format: message_format(options),
-            jobs: options.get_one::<Jobs>("jobs").copied(),
         })),
         Some(("clean", options)) => Ok(Command::Clean(CleanOptions {
-            build: build_options(options, false),
+            build: build_options(options),
         })),
         Some(("fetch", options)) => Ok(Command::Fetch(FetchOptions {
             targets: values(options, "target"),
             offline: options.get_flag("offline") || options.get_flag("frozen"),
         })),
         Some(("locate-project", options)) => Ok(Command::LocateProject {
-            manifest_path: options.get_one::<String>("manifest-path").cloned(),
             workspace: options.get_flag("workspace"),
             plain: options
                 .get_one::<String>("message-format")
                 .is_some_and(|format| format.eq_ignore_ascii_case("plain")),
         }),
         Some(("metadata", options)) => Ok(Command::Metadata(MetadataOptions {
-            manifest_path: options.get_one::<String>("manifest-path").cloned(),
             no_deps: options.get_flag("no-deps"),
             filter_platform: options.get_one::<String>("filter-platform").cloned(),
             format_version_explicit: options.contains_id("format-version"),
@@ -1169,7 +1021,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
         }),
         Some(("review", _)) => Ok(Command::Review),
         Some(("run", options)) => Ok(Command::Run(RunOptions {
-            build: build_options(options, true),
+            build: build_options(options),
             arguments: values(options, "arguments"),
         })),
         Some(("test", options)) => {
@@ -1184,7 +1036,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                 arguments.insert(0, filter.clone());
             }
             Ok(Command::Test(TestOptions {
-                build: build_options(options, true),
+                build: build_options(options),
                 no_run: options.get_flag("no-run"),
                 no_fail_fast: options.get_flag("no-fail-fast"),
                 bundle: options.get_flag("bundle"),
@@ -1192,7 +1044,6 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             }))
         }
         Some(("tree", options)) => Ok(Command::Tree(TreeOptions {
-            manifest_path: options.get_one::<String>("manifest-path").cloned(),
             target: options.get_one::<String>("target").cloned(),
         })),
         Some(("rustc", options)) => {
@@ -1262,7 +1113,7 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
     }
 }
 
-fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOptions {
+fn build_options(matches: &ArgMatches) -> BuildOptions {
     BuildOptions {
         release: matches.get_flag("release"),
         profile: matches
@@ -1270,18 +1121,13 @@ fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOption
             .ok()
             .flatten()
             .cloned(),
-        keep_going: matches
-            .try_get_one::<bool>("keep-going")
-            .ok()
-            .flatten()
-            .copied()
-            .unwrap_or(false),
+        keep_going: flag_set(matches, "keep-going"),
         target: matches.get_one::<String>("target").cloned(),
         target_dir: matches.get_one::<String>("target-dir").cloned(),
         targets: target_selection(matches),
         message_format: message_format(matches),
         jobs: matches.try_get_one::<Jobs>("jobs").ok().flatten().copied(),
-        validation: if supports_validation && matches.get_flag("strict-validation") {
+        validation: if flag_set(matches, "strict-validation") {
             ValidationMode::Strict
         } else {
             ValidationMode::Trusted
@@ -1289,16 +1135,17 @@ fn build_options(matches: &ArgMatches, supports_validation: bool) -> BuildOption
     }
 }
 
-fn values(matches: &ArgMatches, name: &str) -> Vec<String> {
+/// False when the flag is absent or the command does not declare it.
+fn flag_set(matches: &ArgMatches, name: &str) -> bool {
     matches
-        .try_get_many::<String>(name)
+        .try_get_one::<bool>(name)
         .ok()
         .flatten()
-        .map(|values| values.cloned().collect())
-        .unwrap_or_default()
+        .copied()
+        .unwrap_or(false)
 }
 
-fn optional_values(matches: &ArgMatches, name: &str) -> Vec<String> {
+fn values(matches: &ArgMatches, name: &str) -> Vec<String> {
     matches
         .try_get_many::<String>(name)
         .ok()
@@ -1517,17 +1364,17 @@ mod tests {
 
     #[test]
     fn parses_exact_rust_analyzer_compatibility_queries() {
+        let locate = parse(&[
+            "locate-project",
+            "--workspace",
+            "--manifest-path",
+            "/project/Cargo.toml",
+        ])
+        .unwrap();
+        assert_eq!(locate.manifest_path.as_deref(), Some("/project/Cargo.toml"));
         assert_eq!(
-            parse(&[
-                "locate-project",
-                "--workspace",
-                "--manifest-path",
-                "/project/Cargo.toml",
-            ])
-            .unwrap()
-            .command,
+            locate.command,
             Command::LocateProject {
-                manifest_path: Some("/project/Cargo.toml".to_owned()),
                 workspace: true,
                 plain: false,
             }
@@ -1576,7 +1423,6 @@ mod tests {
             assert_eq!(
                 parse(input).unwrap().command,
                 Command::LocateProject {
-                    manifest_path: None,
                     workspace: input.contains(&"--workspace"),
                     plain: false,
                 }
@@ -1587,7 +1433,6 @@ mod tests {
                 .unwrap()
                 .command,
             Command::LocateProject {
-                manifest_path: None,
                 workspace: false,
                 plain: true,
             }
@@ -1664,11 +1509,14 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(metadata.selection, PackageSelection::default());
+        assert_eq!(
+            metadata.manifest_path.as_deref(),
+            Some("/project/Cargo.toml")
+        );
         assert!(parse(&["metadata", "-p", "app"]).unwrap_err().is_usage());
         assert_eq!(
             metadata.command,
             Command::Metadata(MetadataOptions {
-                manifest_path: Some("/project/Cargo.toml".to_owned()),
                 no_deps: true,
                 filter_platform: Some("x86_64-unknown-motor".to_owned()),
                 format_version_explicit: true,
@@ -1682,10 +1530,10 @@ mod tests {
             "x86_64-unknown-motor",
         ])
         .unwrap();
+        assert_eq!(tree.manifest_path.as_deref(), Some("/project/Cargo.toml"));
         assert_eq!(
             tree.command,
             Command::Tree(TreeOptions {
-                manifest_path: Some("/project/Cargo.toml".to_owned()),
                 target: Some("x86_64-unknown-motor".to_owned()),
             })
         );
@@ -1707,23 +1555,26 @@ mod tests {
         .unwrap();
         assert_eq!(check.verbosity, Verbosity::Quiet);
         assert!(check.selection.workspace);
+        assert_eq!(check.manifest_path.as_deref(), Some("/project/Cargo.toml"));
         assert_eq!(
             check.command,
             Command::Check(CheckOptions {
-                release: false,
-                profile: None,
-                clippy: None,
-                manifest_path: Some("/project/Cargo.toml".to_owned()),
-                target_dir: Some("/project/target/rust-analyzer".to_owned()),
-                target: Some("x86_64-unknown-motor".to_owned()),
-                keep_going: true,
-                compile_time_deps: false,
-                targets: TargetSelection {
-                    all_targets: true,
-                    ..TargetSelection::default()
+                build: BuildOptions {
+                    release: false,
+                    profile: None,
+                    keep_going: true,
+                    target: Some("x86_64-unknown-motor".to_owned()),
+                    target_dir: Some("/project/target/rust-analyzer".to_owned()),
+                    targets: TargetSelection {
+                        all_targets: true,
+                        ..TargetSelection::default()
+                    },
+                    validation: ValidationMode::Trusted,
+                    message_format: MessageFormat::Json,
+                    jobs: None,
                 },
-                message_format: MessageFormat::Json,
-                jobs: None,
+                clippy: None,
+                compile_time_deps: false,
             })
         );
 
@@ -1742,6 +1593,7 @@ mod tests {
         else {
             panic!("expected check");
         };
+        let flycheck = flycheck.build;
         assert!(
             flycheck.targets.all_targets
                 && flycheck.targets.lib
@@ -1764,8 +1616,8 @@ mod tests {
             else {
                 panic!("expected check");
             };
-            assert_eq!(options.targets.example, ["demo"]);
-            assert_eq!(options.targets.bench, ["measure"]);
+            assert_eq!(options.build.targets.example, ["demo"]);
+            assert_eq!(options.build.targets.bench, ["measure"]);
             for selector in ["--example", "--bench"] {
                 assert!(parse(&[command, selector]).is_err());
                 assert!(parse(&[command, selector, ""]).is_err());
@@ -1878,10 +1730,10 @@ mod tests {
             else {
                 panic!("expected check");
             };
-            assert_eq!(options.targets.bin, ["one", "two"]);
-            assert_eq!(options.targets.test, ["first", "second"]);
-            assert_eq!(options.targets.example, ["demo", "library"]);
-            assert_eq!(options.targets.bench, ["a", "b"]);
+            assert_eq!(options.build.targets.bin, ["one", "two"]);
+            assert_eq!(options.build.targets.test, ["first", "second"]);
+            assert_eq!(options.build.targets.example, ["demo", "library"]);
+            assert_eq!(options.build.targets.bench, ["a", "b"]);
         }
     }
 
@@ -1893,9 +1745,10 @@ mod tests {
             else {
                 panic!("expected check");
             };
-            assert!(options.targets.tests && options.targets.benches);
-            assert!(options.targets.selects_dev_targets());
-            assert!(!options.targets.selects_library() && !options.targets.selects_binaries());
+            let targets = options.build.targets;
+            assert!(targets.tests && targets.benches);
+            assert!(targets.selects_dev_targets());
+            assert!(!targets.selects_library() && !targets.selects_binaries());
         }
     }
 
@@ -1915,10 +1768,11 @@ mod tests {
         ])
         .unwrap();
         assert!(cli.is_clippy());
+        assert_eq!(cli.manifest_path.as_deref(), Some("/project/Cargo.toml"));
         let Command::Check(options) = cli.command else {
             panic!("expected the shared check path")
         };
-        assert!(options.targets.lib);
+        assert!(options.build.targets.lib);
         assert_eq!(
             options.clippy.unwrap(),
             [
@@ -1927,10 +1781,6 @@ mod tests {
                 "clippy::needless_return",
                 "--color=always"
             ]
-        );
-        assert_eq!(
-            options.manifest_path.as_deref(),
-            Some("/project/Cargo.toml")
         );
         assert!(parse(&["clippy", "--fix"]).is_err());
         assert!(parse(&["check", "--no-deps"]).is_err());
@@ -1985,7 +1835,7 @@ mod tests {
             let cli = parse(&[command, "--profile", "custom"]).unwrap();
             let profile = match cli.command {
                 Command::Build(options) => options.profile,
-                Command::Check(options) => options.profile,
+                Command::Check(options) => options.build.profile,
                 Command::Run(options) => options.build.profile,
                 Command::Test(options) => options.build.profile,
                 Command::Clean(options) => options.build.profile,

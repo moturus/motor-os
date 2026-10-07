@@ -22,7 +22,7 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let mut workspace = SourceWorkspace::load(
         &current,
-        options.manifest_path.as_deref().map(std::path::Path::new),
+        cli.manifest_path.as_deref().map(std::path::Path::new),
     )?;
     let (roots, warnings) = cli.selection.select(
         workspace

@@ -14,7 +14,7 @@ pub(crate) struct FeatureSelection {
 impl FeatureSelection {
     pub(super) fn parse(arguments: &ArgMatches) -> Result<Self> {
         let mut features = BTreeSet::new();
-        for list in super::optional_values(arguments, "features") {
+        for list in super::values(arguments, "features") {
             for feature in list.split_whitespace().flat_map(|value| value.split(',')) {
                 if feature.is_empty() {
                     continue;
@@ -35,18 +35,10 @@ impl FeatureSelection {
                 features.insert(feature.to_owned());
             }
         }
-        let flag = |name| {
-            arguments
-                .try_get_one::<bool>(name)
-                .ok()
-                .flatten()
-                .copied()
-                .unwrap_or(false)
-        };
         Ok(Self {
             features,
-            all: flag("all-features"),
-            no_default: flag("no-default-features"),
+            all: super::flag_set(arguments, "all-features"),
+            no_default: super::flag_set(arguments, "no-default-features"),
         })
     }
 }

@@ -25,7 +25,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let mut workspace = SourceWorkspace::load(
         &current,
-        options.manifest_path.as_deref().map(std::path::Path::new),
+        cli.manifest_path.as_deref().map(std::path::Path::new),
     )?;
     warn_default_format(cli, options);
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
