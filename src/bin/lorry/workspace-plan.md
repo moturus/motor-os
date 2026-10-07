@@ -1,319 +1,44 @@
 # Lorry workspace support
 
-Status: all nine milestones are complete, including native editor and
-real-project acceptance with the user-approved external test deferrals below.
-This plan was updated after review on 2026-10-02 and revises the committed v3
-(`3c90c8cf`).
+This file records the project that added Cargo workspace support to Lorry.
+The project is complete. All nine milestones were done as of commit
+`9fbc95ea`.
 
-The real-project acceptance status is:
+The per-milestone history lives in git history, in the commit messages.
+This file keeps the goal, the decisions, and what each milestone built.
+[workspace-plan-details.md](workspace-plan-details.md) keeps the reference
+material, such as Cargo's rules, the policies, and the numbered decisions.
 
-| Project | Completed | Accepted limitations and required settings on Motor |
+## Status
+
+The real projects passed on Motor as shown below. The user approved each
+listed limit. Deferred tests are not counted as passing. The details file
+records each project's
+[commands, grants, and tool settings](workspace-plan-details.md#real-project-acceptance-settings).
+
+| Project | Passed natively on Motor | Accepted limits and required settings |
 | --- | --- | --- |
-| sed | Native release build | Native upstream tests deferred: uucore/errno and tempfile gaps are in the test setup. |
-| ripgrep | Native release build, library tests, and 118 binary unit tests | Known `ignore` leading-dot-slash test failure allowed for this milestone; symlink integration helper deferred. |
-| Helix | Native online vendoring, release build, and executable startup | Use Motor's cc-rs fork and an explicit Rust/C runtime linker for host and target units. |
+| sed | Release build | Upstream tests deferred. Test-only dependencies (errno through uucore, and tempfile) lack Motor support. |
+| ripgrep | Release build, library tests, and the `rg` binary's unit tests | The known `ignore` leading-dot-slash test failure is allowed. The symlink integration helper is deferred. |
+| Helix | Online vendoring, release build, and startup | Uses Motor's cc-rs fork. The native fixture sets an explicit Rust/C runtime linker for host and target units. |
 
-Helix's dependency configuration and lockfile select the existing Motor cc-rs
-fork, committed in the external Helix checkout as `73c0876c`. Native online
-vendoring passed in 70 seconds without retries. The full native release build
-passed in 259 seconds with the existing cross-build Rust/C linker recipe adapted
-to native paths. The resulting editor starts and finds its compiled YAML parser
-and queries. The linker configuration is confined to the isolated native fixture;
-no additional Helix or toolchain product source was changed.
-Diagnosed failures, required commands, and tool settings are recorded in
-[the milestone-9 details](workspace-plan-details.md#srcsys-and-the-real-projects).
-The user accepts ripgrep's known `ignore` matcher test failure for this milestone;
-it remains a recorded matching limitation and does not require a product port.
-Its symlink integration helper remains deferred. Other applicable ripgrep tests
-have run, and the current Lorry host and native gates pass. Original failures and
-their diagnoses remain recorded; the approved deferrals are not counted as
-successful test executions. No required milestone work remains.
-Lorry acceptance does not require compiling and running all sed tests natively
-on Motor. The successful native release build is accepted, and the upstream
-test suite is deferred because of unsupported test-only dependencies. Porting
-those dependencies is outside this milestone. All Lorry-owned test gates remain
-required.
+The project also made these changes outside Lorry, each as a separate commit:
 
-The four first patches and milestone 1 are committed. The selected package's
-library, binaries, test harnesses, integration tests, and check targets use
-one unit planner and executor. Cargo build, test, and check unit graphs and
-byte identity are covered. The complete Lorry suite passed in 556 seconds
-on 2026-10-02, including native Motor self-build and identity checks.
-Milestone 2 is complete. An artifact lock now serializes builds and clean
-for one target directory, Cargo's target-directory precedence is supported,
-unsupported build-setting environment variables fail explicitly, and selected
-libraries use the verified local unit cache with dep-info. Selected-library
-cache entries track external dep-info inputs, including edits and symlink
-retargets. Compiler units publish into the final profile after validation,
-and build scripts use a stable published `OUT_DIR`. Successful units survive
-a later failure. Published compiler units reuse their validated artifacts in
-place. Published unit directories and cache entries now record package
-ownership. Unchanged ordinary build and run commands reuse a validated
-completed profile without starting build scripts or compilers.
-Completed-profile freshness records are scoped by package path so members
-can coexist in the shared profile. Top-level executables also carry owner
-sidecars. Members now use the shared profile, and `clean -p` removes only the
-selected package's owned files and project-local cache entries. The old Lorry
-artifact tree is reset under the artifact lock on first use.
-An interrupted compiler-unit replacement restores its previous completed
-directory before the next build tries to reuse it; after child-lifetime proof,
-the next build discards that unit's abandoned staging.
-On Linux, a lease passed only to compiler and build-script children keeps
-subsequent Lorry commands from entering the artifact tree while a child
-survives a killed parent.
-On Motor, an owner-PID record and retained process-tree query make the next
-command wait for interrupted children before touching artifacts. The native
-probe kills Lorry during compilation, checks recovery after its child exits,
-verifies a controlled live child holds the barrier, and checks abandoned
-staging removal. The complete Lorry suite passed in 566 seconds on
-2026-10-03, including online native vendoring and Motor self-build. An earlier
-parallel Rust-test run intermittently failed to execute a just-published
-workspace-member binary with `ETXTBSY`. A deterministic reproducer now shows
-that a forked child inherits the writable staging descriptor and keeps the
-published executable busy after the parent closes its descriptor. The owner
-approved Cargo's policy, and Linux executable publication now stages an
-atomic hard link, with a copy fallback when linking is unavailable. Motor
-retains independent copies. The regression launches the executable while
-the fork child is still held before exec. The full suite passed with 362
-Rust tests and 10 intentionally ignored contract tests; the latter run in
-their dedicated drivers. The Lorry-local `AGENTS.md` makes preexisting Lorry
-issues part of this work.
-The milestone-2 native measurements are recorded: cold `sysbox check` took
-22.623 seconds, warm check 1.424 seconds, and resolved metadata 1.411 seconds.
-They exposed and led to fixes for inert `lib.doc-scrape-examples` metadata
-and sparse-index/manifest dependency-order mismatches. The final milestone
-gate covers both fixes and executable publication.
-Published check units retain and replay compiler messages, keeping
-rust-analyzer flycheck diagnostics visible when those units are reused.
-
-Milestone 3 is complete. Build, check, run, and
-test share Cargo JSON reporting and approved format combinations. Run and
-test finish the build stream before starting children; `test --no-run`
-reports harness executables. Programs and harnesses receive Cargo package
-metadata, run preserves its caller's directory, and global presentation
-options work after command names. Offline commands now accept `--locked`,
-`--offline`, and `--frozen`; metadata defaults to version 1 with Cargo's
-warning. Compiler commands accept Cargo's positive, relative negative, and
-`default` job counts, and build scripts receive the effective `NUM_JOBS`.
-These patches passed focused CLI, metadata, workspace, and script contracts.
-The owner approved `--lorry-messages`; its usage, failure, and interrupted
-error records are emitted on stderr, separately from Cargo JSON stdout.
-`test NAME` and the default/plain locate-project forms are implemented.
-Published units and library-cache restores replay warnings, and completed
-profiles replay Cargo events without starting compilers or build scripts.
-Diagnostic paths are translated back to physical sources, and programs and
-harnesses receive Cargo runtime library search paths. The paired Cargo
-contracts cover cold and fresh build/check/test streams and failed builds.
-They found and fixed the build-script artifact's `executable` field; Cargo
-reports null there. Check comparisons explicitly account for the plan's
-deferred metadata-only dependency checking. The complete Lorry suite passed
-in 629 seconds on 2026-10-03: 371 Rust tests, 3 own-message integration
-tests, the dedicated contracts, Cargo native/cross identity, and native
-Motor self-build, cross/native identity, and child-recovery checks. Online
-vendoring succeeded without retries. Strict Clippy validation also passed.
-The first milestone run failed when a procedural macro printed plain text:
-the newly shared reporter incorrectly parsed compiler stdout as JSON.
-Diagnosis against the pinned Cargo source and an actual Cargo build showed
-that stdout is forwarded without caching, while plain stderr is replayed.
-Lorry now preserves compiler stdout's existing human presentation, forwards
-it unchanged in JSON mode, and replays only stderr. The enhanced procedural
-macro contract proves cold output and fresh stderr-only replay. The original
-failure and diagnosis are retained in the milestone evidence below.
-
-Milestone 4 is complete. Clippy manifest lints and sibling-driver
-discovery are committed. The driver must embed the selected rustc, and its
-content hash binds member compiler caches. `clippy` now uses the check path,
-with separate outputs and incremental state. The paired Cargo contract covers
-member dependencies and build scripts, external-package exclusion, fresh
-warnings, `--no-deps`, and denied trailing lint arguments. Configuration
-freshness also tracks parent-directory files and absent candidates. Cargo
-comparisons prove edits, nearer-file creation/removal, and a relative
-`CLIPPY_CONF_DIR` override. A metadata lint also matches Cargo and reaches
-Lorry through `$CARGO`. The native driver compiled from the selected Rust
-sources, passed compiler-identity and ELF validation, and is staged in the
-new keyed assembly and release developer image. Its stripped size is
-131,375,832 bytes, compared with rustc's 119,030,776 bytes. The full debug
-gate passed with 0.9 minutes of preparation and 16.8 minutes of testing.
-The full release gate passed with 0.6 minutes of preparation and 9.6 minutes
-of testing. The release developer-image gate passed, including native Clippy
-human and JSON diagnostics, metadata linting, and denied-lint own messages.
-Its repository phase took 0.2 minutes of preparation and 12.8 minutes of
-testing; the complete Lorry suite passed in 516 seconds with 377 Rust tests
-and 3 own-message integration tests. Online vendoring needed no retries.
-The first developer gate exposed an ordering assumption in the failed-build
-contract. Diagnosis showed that Cargo stops before an independent warning
-unit when the other binary fails first. The committed test fix puts that
-warning in the failing binary's prerequisite and retains exact comparisons.
-
-[workspace-plan-details.md](workspace-plan-details.md) is the reference. It
-has the evidence, the contract of each milestone, the list of defects, the
-policy choices, the decisions, and the reason for each revision.
-
-Milestone 5 is complete. Builds and source metadata now share membership
-discovery and default-member rules. Implicit path members receive Clippy
-coverage. Focused Cargo contracts prove implicit membership, duplicate-name
-rejection, exclusions, singleton defaults, and package-limit accounting.
-The shared discovery also serves path/Git dependency inheritance. All 16
-package fields inherit, with rebased file paths and Cargo's readme and publish
-rules. Focused metadata comparisons and strict Clippy validation passed.
-Workspace dependencies and all lint namespaces now inherit too. Cargo
-configuration follows the invocation directory, while project policy belongs
-at the workspace root. Parent manifest discovery, manifest paths on every
-reading command, version/ID/pattern package selectors, ignored member settings,
-unused profiles, custom metadata, and example/bench descriptions have focused
-Cargo coverage. Compiler queries work at virtual and empty roots without
-selecting a package. Metadata rejects package selectors and source metadata
-always describes every member. The full milestone gate passed in 677 seconds
-on 2026-10-04: 381 Rust tests, three own-message tests, all host contracts,
-Cargo native/cross identity, and native Motor self-build, identity, and
-child-recovery checks. Host and native online vendoring needed no retries.
-
-Repeated package selectors, workspace exclusions, and shared Cargo feature
-syntax are implemented, with explicit errors for execution or feature
-resolution still assigned to later milestones. Editable member files use
-Cargo package boundaries and participate in cache and completed-profile
-freshness, including external reads and symlink retargets. The local corpus
-scan matches all 128 source-metadata projections. Build-capable loading was
-audited separately and reports the remaining target/dependency restrictions.
-
-Milestone 6 is complete. The resolver can solve every member together,
-including optional, development, and platform edges, then project selected
-features without changing the chosen dependency identities. Workspace MSRV
-ranking, Cargo lock formats, and exact lock validation have focused tests;
-offline Cargo locks match across the format thresholds. Resolved metadata now
-uses the shared graph without execution admission, resolves CLI features across
-members, and filters package reachability without narrowing feature lists.
-Focused offline command contracts match Cargo and preserve the lock, admission,
-and output state. Locked fetch, targeted acquisition, scoped root admission,
-record migration, source-only tree, and human/machine reviews are implemented.
-Compilation verifies approval and requested coverage before completed-profile
-reuse. The approved isolated `src/sys` fetch and offline metadata now pass
-with unchanged lock bytes and no admission. Diagnosed fixes cover prerelease
-paths, resolver stack use, exact parent edges, weak feature references, and
-missing unused target files. Whole-workspace metadata also passes the offline
-Cargo projection comparison. Gate failures exposed stale fixture expectations
-and a compilation projection that lost member source ownership; those are
-fixed. The native gate then found complete dependency depth 20 against the
-inherited limit of 16. The owner approved Cargo's default: dependency depth has
-no cap unless `max-depth` is explicitly configured. The Cargo-paired deep-chain
-regression passes. The native host fixture now uses the developer image's exact
-execution grants. The complete Lorry suite passed in 674 seconds on 2026-10-04:
-427 Rust tests, three own-message tests, all host contracts, Cargo native/cross
-identity, native Motor self-build, cross/native identity, Clippy, and recovery.
-Online host and native vendoring succeeded without retries.
-
-Milestone 7 is complete. Compiler and executor options accept several
-primary packages. The ordinary shared unit planner matches Cargo for build and
-check across default selection, all members, repeated package selectors, and
-exclusions. The engine now executes shared ordinary graphs, verifies admission
-for all selected roots and features, publishes each binary with its package
-owner, and supports workspace build, check, and Clippy selection. Cargo-style
-binary collision warnings and build/check keep-going are covered. The complete
-Lorry suite passed in 633 seconds on 2026-10-04: 434 Rust tests, three own-message
-tests, all host contracts, Cargo native/cross identity, and native Motor
-self-build, shared workspace identity, Clippy, and recovery. Online host and
-native vendoring needed no retries. The two earlier gate failures were fixture
-mismatches: unequal Rust flags and unequal incremental-cache state. Their
-diagnoses and preserved evidence are in the details file.
-
-Milestone 8 is complete. Named member execution grants, unpinned member
-native-tool grants, path-script caller allowlists, and read-only workspace
-script inputs are implemented. Ordinary build, check, and Clippy now execute
-selected members' scripts and host build-dependencies. Focused Cargo contracts
-cover executable bytes, JSON, primary-package variables, and caller isolation.
-Selected procedural-macro members now build and check too, including separate
-root/dependency profiles and check metadata. Native and cross-Motor debug and
-release comparisons cover their artifacts and consumers.
-Registry and Git caller-variable grants now round-trip through portable
-admission and appear in capability change reviews.
-Explicit `rlib` and `staticlib`, mixed archives, Motor dynamic-type dropping,
-and single-member explicit/harness-free integration tests have paired Cargo
-contracts. Release `debug` and `opt-level` settings now match Cargo, including
-host-profile reduction and automatic stripping.
-The common compile-time check pass from milestone 9 is implemented and has
-paired native/Motor Cargo coverage for scripts, macros, and skipped ordinary
-sources. Native project acceptance is complete with the deferrals listed above.
-
-The fresh milestone-8 gate passed in 1,176 seconds at `63599485`: 474 Rust
-tests, three own-message tests, all host contracts, Cargo native/cross identity,
-native self-build, cross/native identity, Clippy, and interrupted-child recovery.
-Host and native online vendoring needed no retries. Milestone 9's hermetic
-editor cases also pass on Linux and Motor, including custom features and target
-directories. Subsequent sandbox-descriptor and editor-helper fixes are now
-covered by another complete Lorry gate, passing in 926 seconds as part of the
-release developer-image gate for the approved filesystem repair.
-
-The actual system workspace's fetched navigation, generated application view,
-and default sysbox save checks pass on Linux. All views now share one Cargo
-wrapper path; the generated pass reuses all 51 compiler artifacts. The helper
-and a Linux sandbox descriptor-lifetime fix are committed.
-Earlier native runs passed under observation, but silent runs reproduced the
-stall. Targeted service traces establish a filesystem deadlock: metadata holds
-the global read lock while waiting for a response page; reads holding response pages wait
-behind a writer that needs metadata to release the lock. A controlled probe
-on the unmodified image confirms that releasing one page unblocks metadata
-and a writer on another connection. The approved minimal repair releases the
-metadata lock before allocating its response page. It is committed as `8be0fc76`
-with a native regression, and passes three debug and three release core gates plus
-the release developer-image gate. The actual native system editor workload
-now passes all three views with the original deadlines and scheduling stress.
-See the detailed plan's diagnosis and validation evidence. Retained disk-capacity
-failures are separate evidence.
-
-Native ripgrep and sed release builds pass. Ripgrep's tests expose an external
-ignore path-matching defect, now allowed for this milestone, alongside the
-deferred integration helper. Sed's deferred tests encounter errno's platform
-guard. The shipped native cc wrapper compiles and runs C successfully. Helix's
-original native build encountered the upstream Rust cc platform guard; the
-approved Helix dependency update now selects Motor's existing cc-rs fork.
-Full native Helix validation now passes with the explicit Rust/C runtime linker
-configuration recorded in the details. No new external product code port was needed.
-A separate interrupted-build bug can mistake a PID reused after reboot for an
-old artifact owner. The user added `KernelStaticPage::boot_random_id` and
-authorized kernel initialization, now committed as `4debacaa`. Lorry records
-that identity with the owner PID. Three debug and three release core gates passed,
-including nonzero identity, cross-process agreement, and stability; all six
-boots produced distinct IDs. The release developer-image gate failed in Helix's
-diagnostic-on-save check when Lorry's same-boot child barrier timed out. That
-original failure is preserved; that run did not reach the complete
-Lorry suite or native source-build phase.
-The direct native boot-owner recovery regression passed, and Lorry's boot-owner
-repair is committed as `d51738b4` after focused checks. A separate cancellation
-diagnostic exposed concurrent output-directory iteration failing during recovery.
-Recovery now finishes before parallel workers start; its regression fails on the
-old executor and passes on Linux and Motor. Focused artifact-lock checks and
-strict host/Motor Clippy pass.
-Further diagnosis reproduced the child timeout with a dead native process.
-The kernel's direct-switch path retains a wakee `Arc` on a killed caller's
-discarded stack, keeping the dead process in its former owner's child list.
-The ordinary-wake control clears its record within 100 ms. Lorry reproduces
-the original 30-second error against the retained record; the original Helix run
-did not capture its child state, so attribution of that particular run remains
-unproven. The authorized kernel fix transfers that reference to the incoming
-context, which releases it independently of the killed caller's stack cleanup.
-Dropping it only after the caller resumes proved insufficient.
-The new systest regression fails on the old kernel and passes with the handoff.
-Three debug and three release full core gates pass, as does the release developer
-gate, including Helix save diagnostics, native source builds, and the complete
-Lorry suite (1,054 seconds). The user committed the kernel fix and regression as
-`baa0349e`, then committed the follow-up handoff, wait-handle cleanup, and test
-improvements as `80c216f2`. No timeout, descendant check, or failure assertion has
-been weakened. Evidence for the initial fix is in `/tmp/lorry-m9-wakee-gates`.
-Milestone 9 is complete with the external test exceptions listed above.
-The filesystem repair and regression are committed; the latest
-validation evidence is recorded below and in the details file. No external-project
-product source changed beyond Helix's authorized manifest and lockfile update.
-After the kernel follow-up commit, all Lorry host contracts and the native gate
-passed. The complete driver first stopped because an independent core gate was
-using the shared VM; a separate developer VM completed the native tests in 605
-seconds. The original failure and the routing-only test adaptation are preserved
-in `/tmp/lorry-m9-final-acceptance`. The README and design now describe the
-compile-time pass and current recovery behavior; native project grants and tool
-settings are recorded in the milestone details.
+- Helix, an external checkout: `73c0876c` changes only `Cargo.toml` and
+  `Cargo.lock`, to select Motor's existing cc-rs fork.
+- Kernel: `4debacaa` adds a random boot ID. Lorry stores it with an
+  artifact owner's PID, so a PID reused after a reboot is not taken for
+  the old owner.
+- sys-io: `8be0fc76` fixes a filesystem deadlock found by the native editor
+  tests.
+- Kernel: `baa0349e` and `80c216f2` fix a thread reference leaked when a
+  thread is killed during a direct CPU handoff. The leak kept a dead
+  process in its parent's child list.
 
 ## Goal
 
-Make Lorry build, check, and test Cargo workspaces on Linux and on Motor.
+The goal was to make Lorry build, check, and test Cargo workspaces on Linux
+and on Motor. Lorry had to:
 
 - Find the same members and select the same packages as the pinned Cargo
   1.99. This includes inheritance, `default-members`, repeated `-p`,
@@ -327,9 +52,9 @@ Make Lorry build, check, and test Cargo workspaces on Linux and on Motor.
 - Report Cargo's JSON messages. Name real files in diagnostics. Give
   programs the environment that Cargo gives them.
 - Lint with `lorry clippy` the way `cargo clippy` does.
-- Keep today's byte-identity guarantees, against Cargo and between Linux
-  and Motor.
-- Keep downloads explicit. Code that runs at build time stays subject to
+- Keep the byte-identity guarantees, against Cargo and between Linux and
+  Motor.
+- Keep downloads explicit. Keep code that runs at build time subject to
   policy and admission.
 
 A command or manifest feature that Lorry does not support must fail with a
@@ -337,7 +62,7 @@ clear message. An option must never be accepted and then ignored.
 
 ## Acceptance
 
-The work is done when all of these pass:
+The project was done when all of these passed:
 
 - **Selection and features.** Lorry agrees with Cargo for virtual roots,
   roots that are also packages, commands run from a member, default
@@ -353,8 +78,8 @@ The work is done when all of these pass:
   command all leave finished outputs intact.
 - **Freshness.** Editing a file that a member includes from outside its
   directory rebuilds the units that read it, and their dependents.
-  An unchanged `build` or `run` starts no build-script processes in cases
-  covered by today's fast path, with input and policy validation intact.
+  An unchanged `build` or `run` starts no build-script processes in the
+  cases the fast path covers, with input and policy validation intact.
 - **Identity.** A small workspace fixture passes the Cargo byte-identity
   suite and the cross/native Motor identity suite.
 - **Tools and agents.** An agent drives `build`, `test`, and `clippy`
@@ -362,27 +87,21 @@ The work is done when all of these pass:
   What a test or a program prints stays plain text, as under Cargo.
 - **Clippy.** `lorry clippy` agrees with `cargo clippy` on a fixture on
   Linux, and runs natively on Motor.
-- **Real projects, on Motor.** sed builds in release mode. Compiling and running
-  its full test suite natively is not required; unsupported external test
-  dependencies and the upstream test suite are deferred. ripgrep builds in
-  release mode and exercises applicable workspace tests, excluding `grep-pcre2`;
-  the known `ignore` leading-dot-slash test failure is allowed, and the Unix
-  symlink integration helper is deferred. Helix
-  builds with `-p helix-term --bin hx --release --no-default-features`.
-  Each project's tool grants and settings are written down.
+- **Real projects, on Motor.** sed and ripgrep build in release mode.
+  Helix builds with `-p helix-term --bin hx --release --no-default-features`.
+  ripgrep runs its applicable workspace tests, excluding `grep-pcre2`. The
+  status section lists the approved test limits. Each project's tool
+  grants and settings are written down.
 - **Editor, on Motor.** After `lorry fetch` in `src/sys`, Helix jumps
   between members and into dependencies. After admission, saving a `sysbox`
   file shows compiler diagnostics, and Helix finds the code that build
-  scripts generate. Metadata and the build-script pass use consistent
-  feature and target settings; the pass uses its configured target directory.
-
-There is one earlier checkpoint. Two selected members share a library, and
-`build --workspace` and `check --workspace` run through one unit graph. It
-lands in milestone 7.
+  scripts generate. Metadata and the build-script pass use the same
+  feature and target settings. The pass uses its configured target
+  directory.
 
 `src/sys` stays a member-by-member build. Even Cargo cannot check it as one
 workspace for Motor. Its `kernel` and `rt` builds need features outside
-this plan.
+this project.
 
 ## Scope
 
@@ -396,13 +115,13 @@ Not included:
 - Source changes in `src/sys`, the Helix or rust-analyzer forks, Rust's
   standard library, or moto-rt.
 
-Separate work, which does not hold up this plan:
+Separate work, not part of this project:
 
 - `lorry fmt`, and `clippy --fix`.
 - Inverse dependency trees, and a general option to override
   configuration. The option to raise the package limit for one run is the
   narrow `--max-packages N`.
-- Speed work beyond what the milestones need.
+- Speed work beyond what the milestones needed.
 
 Left for later: more JSON rendering modes, the `rustc-link-arg-*` forms for
 one kind of target, per-package profile overrides, `cdylib` and `dylib` on
@@ -411,32 +130,34 @@ without building them fully.
 
 ## Decisions
 
-Decisions 1 to 14, 19, and 36 are in the details file, word for word. These
-were added on 2026-10-02, after the review of v2:
+Decisions 1 to 14, 19, and 36 are
+[in the details file](workspace-plan-details.md#decisions-1-to-14-19-and-36),
+word for word. These were added on 2026-10-02, after the review of v2:
 
 - **Be more like Cargo.** Lorry accepts `CARGO_TARGET_DIR` and
   `build.target-dir`. It accepts an `[alias]` table and still runs no
   alias. It looks for `Cargo.toml` in parent directories. It uses one
-  output layout for every selection. The spec changes with each of these.
-- **Clippy and Lorry's own messages** are part of this plan again.
+  output layout for every selection. The spec changed with each of these.
+- **Clippy and Lorry's own messages** are part of the plan again.
 - **Order.** The milestones are in the order that is simplest to
-  implement. The editor does not have to come first.
-- **First patches.** Early fixes 7, 9, 11, and 15 land before milestone 1.
+  implement. The editor did not have to come first.
+- **First patches.** Early fixes 7, 9, 11, and 15 landed before
+  milestone 1.
 - **Fetch** downloads the complete lock by default. It is the simpler rule.
 - **A fresh unit** in the target directory is reused where it is.
-- **No size estimates and no risk list** in this plan.
+- **No size estimates and no risk list** in the plan.
 - **Structured output is milestone 3.** This replaces the timing in
-  decision 10, which placed it second. It comes after milestones 1 and 2
+  decision 10, which placed it second. It came after milestones 1 and 2
   because it builds on both, and before all workspace work.
 
 ## Milestones
 
-Each milestone is a series of small patches, normally 100 to 300 lines with
-their tests. Each patch updates the spec for the behavior it changes. The
-single-package contracts keep passing throughout.
+Each milestone was a series of small patches, normally 100 to 300 lines
+with their tests. Each patch updated the spec for the behavior it changed.
+The single-package contracts kept passing throughout.
 
-Milestones 1 and 2 come first, because everything else builds on them.
-Each later feature is then written once.
+Milestones 1 and 2 came first, because everything else builds on them.
+Each later feature was then written once.
 
 | # | Milestone | Result |
 |---|---|---|
@@ -450,62 +171,58 @@ Each later feature is then written once.
 | 8 | Remaining targets and commands | Member build scripts, dev-dependencies, examples, benches, workspace tests, `run`, `clean` |
 | 9 | Editor integration and native acceptance | Full rust-analyzer support, and the acceptance cases on Motor |
 
-For milestone 2, build scripts use Cargo's stable `OUT_DIR` for the same
-unit. A failed replacement may change files there; Lorry invalidates its
-freshness before rerunning the script and never reuses a failed result.
-Other completed units survive an unrelated failure.
-
 ### First patches
 
-Four small fixes depend on nothing else. They land before milestone 1.
-
-- **Fix 7.** Cap lints for Git dependencies, as for crates.io
-  dependencies.
-- **Fix 9.** Allow up to 1,024 described targets in a dependency. The
-  limit of 64 blocks every graph that contains tokio.
-- **Fix 11.** Reject the lint level `force-warn`. Today it makes Lorry
-  panic.
-- **Fix 15.** Leave three variables out of the cache key. Lorry removes
-  them before it starts rustc, so they cannot change a build. Today they
-  keep rust-analyzer's two kinds of check from sharing what they build.
+Four small fixes depended on nothing else. They landed before milestone 1.
+Fix 7 caps lints for Git dependencies. Fix 9 allows up to 1,024 described
+targets in a dependency, which tokio needs. Fix 11 rejects the lint level
+`force-warn`, which used to make Lorry panic. Fix 15 leaves out of the
+cache key three variables that rustc never sees.
 
 ### 1. One unit graph
 
 - A unit is one compiler run or one build-script run. It names its
   package, target, mode, platform, features, and settings.
-- Move the selected package's library, binaries, test harnesses, and check
-  targets onto the existing planner and executor. Move one kind in each
-  patch. Then delete the separate code that compiles the selected package.
-- Compile a package inside the workspace root the way Cargo does: rustc
-  runs in the workspace root and gets a relative path (early fix 5). Add a
-  member to the Cargo byte-identity fixture.
-- Nothing else changes for the user. The byte-identity suites and the
-  existing contracts are the proof.
+- The selected package's library, binaries, test harnesses, and check
+  targets moved onto the existing planner and executor, one kind in each
+  patch. The separate code that compiled the selected package was then
+  deleted.
+- A package inside the workspace root is compiled the way Cargo does it.
+  rustc runs in the workspace root and gets a relative path (early fix 5).
+  A member was added to the Cargo byte-identity fixture.
+- Nothing else changed for the user. The byte-identity suites and the
+  existing contracts were the proof.
 
 ### 2. Per-unit publication
 
-- Use one layout below `<target-dir>/lorry/` for every selection. The old
-  per-member directories go away, with an explicit migration.
-- Publish each finished unit by itself. Stop replacing the whole profile
-  directory. Outputs of an earlier selection stay. So do the outputs of a
-  command that fails later.
-- Report a file only after it exists in its final place.
-- Reuse a fresh unit where it is in the target directory. Do not copy it
-  from the cache again. Preserve the existing unchanged-build shortcut
-  for `build` and `run`, including its input and policy validation.
-  Outside that shortcut, scripts run as today; general script-result
-  caching remains optional.
+- One layout below `<target-dir>/lorry/` serves every selection. The old
+  per-member directories are gone. The old artifact tree is reset under
+  the artifact lock on first use.
+- Each finished unit is published by itself. Lorry no longer replaces the
+  whole profile directory. Outputs of an earlier selection stay. So do the
+  outputs of a command that fails later.
+- A file is reported only after it exists in its final place.
+- A fresh unit is reused where it is in the target directory. It is not
+  copied from the cache again. The unchanged-build shortcut for `build`
+  and `run` stayed, with its input and policy validation. Outside that
+  shortcut, scripts run as before. General script-result caching remains
+  optional.
+- Build scripts use Cargo's stable `OUT_DIR` for the same unit. A failed
+  replacement may change files there. Lorry invalidates the script's
+  freshness before it reruns the script, and never reuses a failed result.
 - One lock for each target directory covers every change to its files.
   `clean` takes the same lock. Lorry releases it before it runs a program
   or a test.
-- A killed command must not damage the next one. Lorry removes leftover
-  files only when no process can still write to them. This is checked on
-  Motor.
+- A killed command does not damage the next one. Lorry removes leftover
+  files only when no process can still write to them. On Linux, a lease
+  held by compiler and build-script children blocks the next command
+  while such a child lives. On Motor, a record of the owner's PID and boot
+  ID, and a query of the process tree, do the same.
 - A unit is fresh only if every file it really read is unchanged. That
   includes files outside its package.
-- Accept `--target-dir`, `CARGO_TARGET_DIR`, and `build.target-dir`. Reject
-  Cargo settings in the environment that change a build and that Lorry
-  does not implement (early fix 14).
+- Lorry accepts `--target-dir`, `CARGO_TARGET_DIR`, and `build.target-dir`.
+  It rejects Cargo settings in the environment that change a build and
+  that it does not implement (early fix 14).
 - `clean -p` removes only what belongs to that package.
 
 ### 3. Structured output
@@ -515,39 +232,40 @@ Four small fixes depend on nothing else. They land before milestone 1.
 - Diagnostics name real files. A unit that is not rebuilt prints its
   stored warnings again.
 - `run` and `test` give the program the environment that Cargo gives it
-  (early fix 6).
-- Lorry's own errors become messages behind a separate option.
-  rust-analyzer never sees them. `vendor`'s change summary follows in
+  (early fix 6). `run` keeps the caller's working directory.
+- Lorry's own errors are messages behind a separate option,
+  `--lorry-messages`. They go to stderr, apart from Cargo's JSON on stdout.
+  rust-analyzer never sees them. `vendor`'s change summary followed in
   milestone 6.
-- Accept the Cargo options that scripts pass out of habit, such as
+- Lorry accepts the Cargo options that scripts pass out of habit, such as
   `--locked`, `--offline`, `-j`, and `test NAME`.
-- Describe all of this for tools and agents in the README.
+- The README describes all of this for tools and agents.
 
 ### 4. `lorry clippy`
 
 - `lorry clippy` is `check` run through `clippy-driver`, with the same
   options and messages.
 - Units of workspace members go through the driver. Other packages are
-  compiled by plain rustc. Later milestones widen which packages count as
-  members. The Clippy code does not change for that.
-- Pass `[lints.clippy]` and the options after `--` the way Cargo does.
-- Build a native `clippy-driver` and put it into the developer image. This
-  is toolchain and image work outside Lorry. It is approved, it has a
-  long lead time, and it can start at any time.
+  compiled by plain rustc. Later milestones widened which packages count
+  as members. The Clippy code did not change for that.
+- `[lints.clippy]` and the options after `--` are passed the way Cargo
+  passes them.
+- A native `clippy-driver` is built from the selected Rust sources and
+  staged in the developer image. This was approved toolchain and image
+  work outside Lorry.
 
 ### 5. Workspace model and selection
 
 - One piece of code reads the `[workspace]` table for every command.
   `metadata` describes every member, also one that Lorry cannot build,
   such as `kernel`.
-- Inheritance from `workspace.package`, `workspace.dependencies`, and
+- Members inherit from `workspace.package`, `workspace.dependencies`, and
   `workspace.lints`.
-- Members that are listed, and members that are found through path
-  dependencies. `default-members`, `exclude`, and glob patterns.
-- A member may read files outside its own directory, as the selected
-  package can today. Lorry decides which files belong to a member the way
-  Cargo does. It follows symbolic links, and it stops at another package's
-  directory.
+- Members can be listed, or found through path dependencies.
+  `default-members`, `exclude`, and glob patterns work.
+- A member may read files outside its own directory. Lorry decides which
+  files belong to a member the way Cargo does. It follows symbolic links,
+  and it stops at another package's directory.
 - Cargo configuration is read from the directory the command runs in. The
   project's `lorry.toml` is read from the workspace root or above.
 - `--manifest-path` works on every command. Without it, Lorry looks for
@@ -558,12 +276,13 @@ Four small fixes depend on nothing else. They land before milestone 1.
 - A member's `[profile]`, `[patch]`, or `[replace]` table gets Cargo's
   warning and is then ignored. An `[alias]` table in Cargo's configuration
   is accepted, and no alias is run.
-- `check -p MEMBER` works from the workspace root. Selecting several
-  members, or naming a target that Lorry cannot build yet, is an error.
+- `check -p MEMBER` works from the workspace root. At this milestone,
+  selecting several members, or naming a target that Lorry could not build
+  yet, was an error. Milestones 7 and 8 lifted those limits.
 
 ### 6. Shared resolution, metadata, and admission
 
-Three graphs stay apart:
+Three graphs are kept apart:
 
 1. The complete lock graph: all members, every optional feature of a
    member, all kinds of dependency, all platforms.
@@ -578,16 +297,18 @@ Three graphs stay apart:
 - Resolved `metadata` stays offline. It gives Cargo's exact answer, or it
   says what is missing. It never gives a partial answer.
 - `vendor --locked` reviews the existing lock and moves no Git branch.
-  With `--offline` it uses no network at all. Deliver both before requiring
-  admission records for compilation.
+  With `--offline` it uses no network at all. Both came before admission
+  records became required for compilation.
 - One admission record covers the workspace. A build checks that what it
-  needs is covered, including on cache hits. The same requirement applies
-  to Clippy and `check --compile-time-deps`. Policies A and B below define
-  the record and its use.
+  needs is covered, including on cache hits. The same applies to Clippy
+  and `check --compile-time-deps`. Policies A and B below define the
+  record and its use.
 - The first record covers the whole workspace with default features. A
   smaller review can follow. It never changes the lock or `metadata`.
 - The package limit applies to the complete lock graph. The developer
-  image's limit becomes 384. `--max-packages N` raises it for one run.
+  image's limit is 384. `--max-packages N` raises it for one run.
+- Dependency depth has no cap unless `max-depth` is configured, as in
+  Cargo. The owner chose this after the native gate found a depth of 20.
 - Resolver 3 prefers versions that suit the members' `rust-version`, as
   Cargo does. A new lock gets the format version that Cargo would write
   (early fix 10).
@@ -599,11 +320,13 @@ Three graphs stay apart:
   the default members.
 - Several selected members are planned as one unit graph. A member can be
   selected and be a dependency at the same time.
-- Start with ordinary libraries and binaries. This is the first working
+- Ordinary libraries and binaries came first. This was the first working
   multi-member build.
 - Messages name every selected member.
 
 ### 8. Remaining targets and commands
+
+Milestone 8 added the rest:
 
 - Build scripts and build-dependencies of members, under policy C below.
 - Procedural-macro members, `staticlib` and `rlib`, examples, and benches.
@@ -611,79 +334,79 @@ Three graphs stay apart:
   rules.
 - Cargo's options for choosing targets, `required-features`, and the
   profile settings that the acceptance projects need.
-- Workspace tests run in Cargo's order, with `--no-run`, `--no-fail-fast`,
-  and one bundle for each selected member.
-- `run`, `clean`, and `new` follow Cargo's rules for workspaces.
+- Workspace tests in Cargo's order, with `--no-run`, `--no-fail-fast`, and
+  one bundle for each selected member.
+- Cargo's workspace rules for `run`, `clean`, and `new`.
 
 ### 9. Editor integration and native acceptance
 
 - `check --compile-time-deps` runs build scripts and builds procedural
   macros, and skips everything else. It includes members' own build
-  scripts. Cargo's own pass succeeds on `src/sys`.
+  scripts.
 - The developer image's Helix configuration passes that option to
-  rust-analyzer's build-script pass. The override explicitly supplies the
-  complete invocation; rust-analyzer does not append its configured
-  features or target directory. Projects with different settings supply
-  a complete project override. Test nondefault features and a custom
+  rust-analyzer's build-script pass. The override supplies the complete
+  command, because rust-analyzer does not add its configured features or
+  target directory to it. Projects with different settings supply a
+  complete project override. Tests cover nondefault features and a custom
   target directory.
 - `check.workspace = false` is set for the Motor OS checkout only.
-- A member's manifest starts to stand for the whole workspace in
-  `metadata` and `locate-project`. This switch waits until here, so the
-  editor never loses what works today.
-- Run the acceptance cases on Motor. Bring the README, `design.md`, and
-  the editor documentation up to date.
+- A member's manifest stands for the whole workspace in `metadata` and
+  `locate-project --workspace`. This switch waited until this milestone,
+  so the editor never lost what worked before.
+- The acceptance cases ran on Motor. The README, `design.md`, and the
+  editor documentation were brought up to date.
 
 ## Defects and performance
 
-The details file keeps all 25 findings and the early-fix numbers. Four
-fixes land first. Fix 13 is optional. Every other open fix lands with the
-milestone that touches its code. A table in the details file says which.
+The plan tracked defects by early-fix number, 1 to 15. Fixes 1 to 4 were
+done before the plan. Fixes 7, 9, 11, and 15 landed first. Fix 13 was
+optional and was not done. Each other fix landed with the milestone that
+touched its code. The details file lists
+[every fix and its outcome](workspace-plan-details.md#early-fixes).
 
-Today checks and rebuilds copy every cached dependency file into a new
-directory. Milestone 2 stops that and preserves the unchanged-build
-shortcut. Measure on Motor after it: cold and warm `check`, `metadata`,
-and disk use.
-
-More speed-ups are possible, such as reuse of build-script results,
-reading cached artifacts in place, and tracking only the variables that
-rustc reads (fix 13). Each needs its own proof. Add one only if the
-measurements call for it.
+Before the project, checks and rebuilds copied every cached dependency
+file into a new directory. Milestone 2 stopped that and kept the
+unchanged-build shortcut. On Motor, after milestone 2, a cold `sysbox`
+check took about 23 seconds. A warm check and resolved metadata each took
+about 1.4 seconds. More speed-ups are possible, such as reuse of
+build-script results, reading cached artifacts in place, and fix 13. Each
+needs its own proof.
 
 ## Policy decisions
 
-The recommended answers to A, B, and C are incorporated after the v3
-review. They define the planned behavior; this revision changes no code.
-The details file records their trust implications and alternatives.
+The recommended answers to A, B, and C were adopted after the v3 review.
+[The details file](workspace-plan-details.md#policy-decisions) records
+their trust implications and the alternatives.
 
 | Policy | Answer | Implemented in |
 |---|---|---|
 | A. Source access and admission (v1 questions 40 and 49) | Metadata may read verified sources without a record. Compilation using crates.io or Git packages requires admission, including Clippy, the compile-time pass, and cache hits. The explicit `--use-cargo-registry` mode keeps its rules | Milestone 6 |
-| B. Record contents (v1 question 53) | Exact outside-package/source identities, verified content, host/target contexts, features, grants, and review scope. Omit members' declaration text; verify the recorded review, then check the requested build's coverage | Milestone 6 |
-| C. Member build-time code (v1 questions 20, 21, and 56) | Named member grants; unpinned native-tool grants only for editable workspace members; caller-variable allowlists on the relevant package rules, empty by default. Keep nonmember restrictions and treat project configuration as trusted input | Milestone 8 |
+| B. Record contents (v1 question 53) | Exact outside-package/source identities, verified content, host/target contexts, features, grants, and review scope. Omit members' declaration text. Verify the recorded review, then check the requested build's coverage | Milestone 6 |
+| C. Member build-time code (v1 questions 20, 21, and 56) | Named member grants. Unpinned native-tool grants only for editable workspace members. Caller-variable allowlists on the relevant package rules, empty by default. Keep nonmember restrictions and treat project configuration as trusted input | Milestone 8 |
 
-V1 had forty open questions. The six combined into A, B, and C now have
-answers. Of the other thirty-four, some were decided and the rest are
-written into the milestones as proposals. Approving the plan approves
-those remaining proposals. The details file gives each one's status.
+V1 had forty open questions. Six became A, B, and C. The owner decided
+some others. The milestones answered the rest, and approving the plan
+approved them. These answers went beyond "do what Cargo does", and none
+was confirmed one by one:
 
-These proposals are more than "do what Cargo does", and none has been
-confirmed one by one:
-
-- One admission record covers the workspace. An old per-member record is
-  rejected with instructions (milestone 6).
-- `vendor` can later review less than the whole workspace, and `vendor -p`
-  changes its meaning. A build outside the reviewed graph is an error
+- One admission record covers the workspace. An old per-member record
+  gives no approval. It needs a new review from the workspace root
   (milestone 6).
-- The developer image's package limit rises from 192 to 384 (milestone 6).
-- A `lorry.toml` inside a member becomes an error (milestone 5).
-- `check.workspace = false` is set for the Motor OS checkout only, in a
-  new `.helix/languages.toml` (milestone 9).
+- `vendor` can review less than the whole workspace, and `vendor -p`
+  changed its meaning. A build outside the reviewed graph is an error
+  (milestone 6).
+- The developer image's package limit rose from 192 to 384 (milestone 6).
+- A `lorry.toml` inside a member is an error (milestone 5).
+- `check.workspace = false` is set for the Motor OS checkout only, in
+  `.helix/languages.toml` (milestone 9).
 - For `src/sys`, Git ignores local `.lorry/` state, `src/sys/lorry.toml`
   carries the grants for member build scripts, and no admission record is
   committed (milestones 6 and 9).
 - The test gates in "Validation".
 
 ## Changes outside Lorry
+
+The plan named these changes. The status section lists the others.
 
 | Change | Where | When |
 |---|---|---|
@@ -692,37 +415,36 @@ confirmed one by one:
 | The build-script command with `--compile-time-deps` | The developer image's Helix configuration | Milestone 9 |
 | `check.workspace = false` | A new `.helix/languages.toml` in the Motor OS checkout | Milestone 9 |
 | Ignore local `.lorry/` state, and grants for member build scripts | Motor OS's `.gitignore` and `src/sys/lorry.toml` | Milestones 6 and 9 |
-| Grants, tool settings, and allowed variables for each project | The Helix, ripgrep, and sed checkouts, or the user's configuration | Milestone 9 |
+| Grants, tool settings, and allowed variables for each project | The acceptance fixtures, recorded in the details file | Milestone 9 |
 | Native acceptance cases | The image's test entry points and the rust-analyzer smoke test | Milestones 2, 4, 7, and 9 |
 | Documentation | `docs/helix.md`, `docs/build-rustc.md` | Milestones 4 and 9 |
 
-Helix, ripgrep, and sed are repositories outside Motor OS. Any change
-there must be named before it is made.
+Helix, ripgrep, and sed are repositories outside Motor OS. The only change
+made in their checkouts is Helix commit `73c0876c`.
 
 ## Validation
 
-- Compare with Cargo, offline: membership, selection, metadata, features,
-  lockfiles, messages, and command behavior.
-- Compare Lorry's unit plan with Cargo's `--unit-graph` output for `build`,
-  `check`, and `test`. Compare the units, the edges between them, and
-  their settings.
-- Add a selected member to the Cargo identity fixture in milestone 1. Add
-  shared and multi-member builds in milestone 7. Add the same small
-  workspace to the cross/native Motor suite.
-- Test what can go wrong with outputs: a failed build, a killed command,
-  two commands at once, `clean`, and an edit to a file outside the
-  package.
-- Prove that unchanged builds skip build-script processes without skipping
-  input or policy validation. Test editor-generated code with nondefault
-  features and a custom target directory.
-- Run focused contracts for individual patches, and `tests/test-all.sh` for
-  milestone gates, within its 30-minute budget. Markdown-only changes need
-  no test.
-- Run `src/tests/full-test-dev.sh --release` for changes to native editor
-  behavior and for native acceptance. Changes outside Lorry follow the
-  repository's gates for their scope. The native Clippy driver needs the
-  full debug and release gates.
-- Keep regular tests offline. The one approved manual fetch on a copy of
-  `src/sys` stays a separate check.
-- Diagnose failures. Do not add retries, longer timeouts, or weaker
-  checks.
+- Offline comparisons with Cargo covered membership, selection, metadata,
+  features, lockfiles, messages, and command behavior.
+- Lorry's unit plan was compared with Cargo's `--unit-graph` output for
+  `build`, `check`, and `test`. The comparison covered the units, the edges
+  between them, and their settings.
+- Milestone 1 added a selected member to the Cargo identity fixture.
+  Milestone 7 added shared and multi-member builds. The same small
+  workspace is in the cross/native Motor suite.
+- Tests cover what can go wrong with outputs: a failed build, a killed
+  command, two commands at once, `clean`, and an edit to a file outside
+  the package.
+- Tests prove that unchanged builds skip build-script processes without
+  skipping input or policy validation. Editor-generated code is tested
+  with nondefault features and a custom target directory.
+- Patches used focused contracts. Milestone gates used `tests/test-all.sh`,
+  within its 30-minute budget.
+- Native editor behavior and native acceptance used
+  `src/tests/full-test-dev.sh --release`. Changes outside Lorry followed
+  the repository's gates for their scope. The native Clippy driver used
+  the full debug and release gates.
+- Regular tests stay offline. The one approved manual fetch on a copy of
+  `src/sys` was a separate check.
+- Failures were diagnosed. No retries, longer timeouts, or weaker checks
+  were added.
