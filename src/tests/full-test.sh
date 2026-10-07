@@ -1588,4 +1588,9 @@ vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/tokio-tests"
 kill -0 "$VMM_PID" 2>/dev/null ||
   fail "owned $TEST_VM_LABEL exited before final teardown"
 cleanup_full_test 0 || exit "$?"
+if [ "$BUILD" = release ]; then
+  javy_image=wasm
+  [ "$TEST_VM_PHASE" != developer ] || javy_image=dev
+  "$WD/test-javy.sh" --image "$javy_image"
+fi
 echo "-------- MOTOR OS FULL TEST PASS ---------"

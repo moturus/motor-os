@@ -1,0 +1,18 @@
+[package]
+name = "javy-smoke"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-sys = { path = "../../sys/lib/moto-sys" }
+moto-stats = { path = "../../sys/lib/moto-stats" }
+
+[build-dependencies]
+wat = "=1.245.1"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+codegen-units = 1
+strip = true
