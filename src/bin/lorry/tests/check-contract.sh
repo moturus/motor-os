@@ -581,4 +581,42 @@ grep -F -- '--> '"$DEPENDENCY/src/lib.rs" "$WORK/dependency-human.err" >/dev/nul
 )
 [ ! -e "$TARGET/lorry" ]
 
+# Without --target, a library that both a build script and the program use is
+# one unit, as in Cargo, and compiles once.
+TWIN="$WORK/twin"
+mkdir -p "$TWIN/app/src" "$TWIN/shared/src"
+printf '[package]\nname = "shared"\nversion = "0.1.0"\nedition = "2024"\n' \
+    >"$TWIN/shared/Cargo.toml"
+printf 'pub fn value() -> u8 { 7 }\n' >"$TWIN/shared/src/lib.rs"
+printf '%s\n' \
+    '[package]' \
+    'name = "app"' \
+    'version = "0.1.0"' \
+    'edition = "2024"' \
+    '' \
+    '[dependencies]' \
+    'shared = { path = "../shared" }' \
+    '' \
+    '[build-dependencies]' \
+    'shared = { path = "../shared" }' \
+    >"$TWIN/app/Cargo.toml"
+printf 'fn main() { assert_eq!(shared::value(), 7); }\n' >"$TWIN/app/build.rs"
+printf 'fn main() { println!("{}", shared::value()); }\n' >"$TWIN/app/src/main.rs"
+printf '%s\n' 'version = 4' '[[package]]' 'name = "app"' 'version = "0.1.0"' \
+    'dependencies = [' ' "shared",' ']' '[[package]]' 'name = "shared"' 'version = "0.1.0"' \
+    >"$TWIN/app/Cargo.lock"
+printf '%s\n' 'config-version = 1' '[policy.rules.app]' 'action = "allow"' 'name = "app"' \
+    'source = "path"' 'allow-build-script = true' >"$TWIN/app/lorry.toml"
+(
+    cd "$TWIN/app"
+    "$LORRY" vendor --accept-all >/dev/null 2>&1
+    : >"$LOG"
+    "$LORRY" --quiet build
+    [ "$(target/lorry/debug/app)" = 7 ]
+)
+if [ "$(grep -Fc -- '<--crate-name> <shared>' "$LOG")" -ne 1 ]; then
+    echo "check-contract: a library shared by a build script and the program compiled twice" >&2
+    exit 1
+fi
+
 echo "PASS: check selects root targets, links none, and honors keep-going"

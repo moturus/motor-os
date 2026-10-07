@@ -2045,10 +2045,61 @@ pub fn plan_dependency_units_with_remaps(
             "dependency compilation order does not cover every unit",
         ));
     }
-    Ok(CompilationPlan {
+    let mut plan = CompilationPlan {
         units: planned,
         order: graph.order.clone(),
-    })
+    };
+    if options.logical_target.is_none() {
+        merge_identical_host_units(&mut plan);
+    }
+    Ok(plan)
+}
+
+/// Without `--target`, Cargo builds a host unit and its target twin once when
+/// their identities match. Merges such pairs, which would otherwise compile
+/// twice into the same output directory.
+fn merge_identical_host_units(plan: &mut CompilationPlan) {
+    let merged = plan
+        .units
+        .iter()
+        .filter(|(key, _)| {
+            key.compile_kind == CompileKind::Host
+                && matches!(key.kind, UnitKind::Library | UnitKind::BuildScriptRun)
+        })
+        .filter_map(|(key, unit)| {
+            let twin = UnitKey {
+                compile_kind: CompileKind::Target,
+                ..key.clone()
+            };
+            (plan.units.get(&twin)?.identity == unit.identity).then(|| (key.clone(), twin))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if merged.is_empty() {
+        return;
+    }
+    for key in merged.keys() {
+        plan.units.remove(key);
+    }
+    for planned in plan.units.values_mut() {
+        planned.unit.dependencies = std::mem::take(&mut planned.unit.dependencies)
+            .into_iter()
+            .map(|mut edge| {
+                if let Some(twin) = merged.get(&edge.unit) {
+                    edge.unit = twin.clone();
+                }
+                edge
+            })
+            .collect();
+    }
+    // A twin takes the earlier position, so dependencies still come first.
+    let mut placed = BTreeSet::new();
+    plan.order = plan
+        .order
+        .iter()
+        .map(|key| merged.get(key).unwrap_or(key))
+        .filter(|key| placed.insert((*key).clone()))
+        .cloned()
+        .collect();
 }
 
 fn selected_macro_script_units(
