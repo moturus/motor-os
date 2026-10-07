@@ -1694,11 +1694,12 @@ and `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS` before starting rustc, so
 a unit always sees them unset.
 
 After a successful build or run, the completed root profile contains a
-freshness record. A single-member build scopes it to the selected package
-path. A shared workspace build scopes it to the selected members, target
-selection, and binary selection, and also digests every selected member's
-manifest and the feature requests. So alternating selections keep separate
-records. An
+freshness record. Each selection keeps its own record, named by the owning
+package, the selected members of a shared workspace build, and the target and
+binary selection. So alternating selections, such as `build` and
+`run --bin NAME`, stay fresh. A shared build also digests every selected
+member's manifest and the feature requests. `clean -p` removes every record of
+the package. An
 ordinary unchanged `build` or `run` validates parsed manifest, lock, compact
 admission, configuration, compiler, target, flags, tracked variables, and
 tool metadata plus rustc dep-info and mutable path-source path/size/mtime

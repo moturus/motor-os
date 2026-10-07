@@ -205,15 +205,7 @@ fn clean_package_artifacts(
                 }
             }
         }
-        let freshness = crate::engine::fresh_record_path(&profile, &manifest.root);
-        if freshness.exists() {
-            fs::remove_file(&freshness).map_err(|error| {
-                Error::failure(format!(
-                    "failed to remove package freshness record: {error}"
-                ))
-            })?;
-            removed = true;
-        }
+        removed |= crate::engine::remove_fresh_records(&profile, &manifest.root)?;
     }
     let units = root.join(".cache/v1/units/sha256");
     if real_directory(&units, "project unit cache")? {
@@ -479,8 +471,13 @@ mod tests {
         fs::write(&other_primary, b"other").unwrap();
         crate::artifact_owner::write_primary(&primary, &package).unwrap();
         crate::artifact_owner::write_primary(&other_primary, &other).unwrap();
-        let fresh = crate::engine::fresh_record_path(&profile, &manifest.root);
-        fs::write(&fresh, b"record").unwrap();
+        let prefix = crate::engine::fresh_record_prefix(&manifest.root);
+        let fresh = profile.join(&prefix);
+        let selection = profile.join(format!("{prefix}-0123456789abcdef"));
+        let unrelated = profile.join(format!("{prefix}0"));
+        for record in [&fresh, &selection, &unrelated] {
+            fs::write(record, b"record").unwrap();
+        }
 
         assert!(
             clean_manifest_artifacts(&manifest, &fixture.0.join("target"), false, None, true,)
@@ -494,6 +491,8 @@ mod tests {
         assert!(!primary.exists());
         assert!(other_primary.exists());
         assert!(!fresh.exists());
+        assert!(!selection.exists());
+        assert!(unrelated.exists());
     }
 
     #[test]

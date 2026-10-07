@@ -270,7 +270,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         _ => None,
     };
     let shared_members = shared.then_some(selected.as_slice());
-    let fresh_owner = fresh_owner(&manifest, shared_members, fresh_targets, binary_selection);
+    let fresh_owner = fresh_record_name(&manifest, shared_members, fresh_targets, binary_selection);
     let ordinary_freshness_base = (!validation.is_strict()
         && !(compact_state.is_none()
             && manifest
@@ -872,42 +872,68 @@ fn create_published_profile(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn fresh_record_path(profile: &Path, package_root: &Path) -> PathBuf {
-    fresh_record_path_for(profile, package_root.as_os_str().as_encoded_bytes())
-}
-
-fn fresh_record_path_for(profile: &Path, owner: &[u8]) -> PathBuf {
+pub(crate) fn fresh_record_prefix(package_root: &Path) -> String {
     let mut hash = Sha256::new();
     hash.update(b"lorry-fresh-owner-v1");
-    hash.update(owner);
-    profile.join(format!("{FRESH_PROFILE_FILE}-{}", hex(&hash.finish())))
+    hash.update(package_root.as_os_str().as_encoded_bytes());
+    format!("{FRESH_PROFILE_FILE}-{}", hex(&hash.finish()))
 }
 
-/// Names the completed-profile record. A single-package build keeps its
-/// package root; a shared selection is named by its members and targets, so
-/// alternating selections do not overwrite one another's record.
-fn fresh_owner(
+/// Names the completed-profile record of one selection. Each selection keeps
+/// its own record, so alternating `build`, `run --bin`, and other selections
+/// all stay fresh. The name starts with the owning package's prefix.
+fn fresh_record_name(
     manifest: &Manifest,
     members: Option<&[Manifest]>,
     targets: Option<&crate::cli::TargetSelection>,
     binary: Option<&str>,
-) -> Vec<u8> {
-    let Some(members) = members else {
-        return manifest.root.as_os_str().as_encoded_bytes().to_vec();
-    };
+) -> String {
     let mut digest = FreshDigest::new();
-    digest.bytes("schema", b"lorry-shared-selection-v1");
-    digest.os("primary", manifest.root.as_os_str());
-    for member in members {
+    digest.bytes("schema", b"lorry-fresh-selection-v1");
+    for member in members.unwrap_or_default() {
         digest.os("member", member.root.as_os_str());
     }
     digest.debug("targets", &targets);
     digest.debug("binary", &binary);
-    format!("shared:{}", hex(&digest.finish())).into_bytes()
+    let selection = hex(&digest.finish());
+    format!(
+        "{}-{}",
+        fresh_record_prefix(&manifest.root),
+        &selection[..16]
+    )
 }
 
-fn invalidate_fresh_profile(profile: &Path, owner: &[u8]) -> Result<()> {
-    let path = fresh_record_path_for(profile, owner);
+/// Removes every completed-profile record owned by a package.
+pub(crate) fn remove_fresh_records(profile: &Path, package_root: &Path) -> Result<bool> {
+    let prefix = fresh_record_prefix(package_root);
+    let entries = match fs::read_dir(profile) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(Error::failure(format!(
+                "failed to list build profile `{}`: {error}",
+                profile.display()
+            )));
+        }
+    };
+    let mut removed = false;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| Error::failure(format!("failed to read build profile: {error}")))?;
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|name| {
+            name.strip_prefix(&prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+        }) {
+            invalidate_fresh_profile(profile, name.to_str().unwrap())?;
+            removed = true;
+        }
+    }
+    Ok(removed)
+}
+
+fn invalidate_fresh_profile(profile: &Path, name: &str) -> Result<()> {
+    let path = profile.join(name);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(Error::failure(format!(
@@ -1196,7 +1222,7 @@ fn build_inner(
     manifests.insert(selected_root.package.clone(), build.manifest.clone());
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
-    let fresh_owner = fresh_owner(
+    let fresh_owner = fresh_record_name(
         build.manifest,
         build.members,
         build
@@ -2259,7 +2285,7 @@ fn compiler_environment_digest(digest: &mut FreshDigest) {
 fn restore_fresh_profile(
     profile: &Path,
     package_root: &Path,
-    owner: &[u8],
+    owner: &str,
     base: [u8; 32],
     validation: ValidationMode,
 ) -> Option<BuildArtifacts> {
@@ -2330,7 +2356,7 @@ fn restore_fresh_profile(
 fn write_fresh_profile(
     profile: &Path,
     package_root: &Path,
-    owner: &[u8],
+    owner: &str,
     base: [u8; 32],
     artifacts: &StagedArtifacts,
     local_roots: &[LocalSource],
@@ -2414,13 +2440,13 @@ fn write_fresh_profile(
             document.push_str(&format!("dep-info={}\n", path.display()));
         }
     }
-    let mut record = AtomicFile::new(&fresh_record_path_for(profile, owner))?;
+    let mut record = AtomicFile::new(&profile.join(owner))?;
     record.write_all(document.as_bytes())?;
     record.commit()
 }
 
-fn read_fresh_profile(profile: &Path, owner: &[u8]) -> Option<FreshProfile> {
-    let path = fresh_record_path_for(profile, owner);
+fn read_fresh_profile(profile: &Path, owner: &str) -> Option<FreshProfile> {
+    let path = profile.join(owner);
     let metadata = fs::symlink_metadata(&path).ok()?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_FRESH_PROFILE_BYTES {
         return None;
@@ -3345,8 +3371,8 @@ fn use_color(color: Color) -> bool {
 mod tests {
     use super::*;
 
-    fn owner(path: &Path) -> &[u8] {
-        path.as_os_str().as_encoded_bytes()
+    fn owner(path: &Path) -> String {
+        fresh_record_prefix(path)
     }
     use crate::config::{CargoCompat, PolicyAction, PolicyRule};
     use crate::repository::RepositorySet;
@@ -3883,12 +3909,12 @@ mod tests {
         let fixture = Fixture::new();
         let profile = fixture.0.join("target/lorry/debug");
         fs::create_dir_all(&profile).unwrap();
-        let first = fresh_record_path(&profile, &fixture.0.join("first"));
-        let second = fresh_record_path(&profile, &fixture.0.join("second"));
+        let first = profile.join(owner(&fixture.0.join("first")));
+        let second = profile.join(owner(&fixture.0.join("second")));
         assert_ne!(first, second);
         fs::write(&first, b"first").unwrap();
         fs::write(&second, b"second").unwrap();
-        invalidate_fresh_profile(&profile, owner(&fixture.0.join("first"))).unwrap();
+        invalidate_fresh_profile(&profile, &owner(&fixture.0.join("first"))).unwrap();
         assert!(!first.exists());
         assert_eq!(fs::read(second).unwrap(), b"second");
     }
@@ -3933,7 +3959,7 @@ mod tests {
             write_fresh_profile(
                 &profile,
                 &fixture.0,
-                owner(&fixture.0),
+                &owner(&fixture.0),
                 base,
                 &staged,
                 &[],
@@ -3941,13 +3967,13 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                read_fresh_profile(&profile, owner(&fixture.0))
+                read_fresh_profile(&profile, &owner(&fixture.0))
                     .unwrap()
                     .script_inputs,
                 staged.script_inputs
             );
             let fresh = || {
-                restore_fresh_profile(&profile, &fixture.0, owner(&fixture.0), base, validation)
+                restore_fresh_profile(&profile, &fixture.0, &owner(&fixture.0), base, validation)
                     .is_some()
             };
             assert!(fresh());
@@ -3997,7 +4023,7 @@ mod tests {
         write_fresh_profile(
             &profile,
             &fixture.0,
-            owner(&fixture.0),
+            &owner(&fixture.0),
             base,
             &staged,
             &[],
@@ -4016,7 +4042,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                owner(&fixture.0),
+                &owner(&fixture.0),
                 base,
                 ValidationMode::Trusted
             )
@@ -4026,7 +4052,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                owner(&fixture.0),
+                &owner(&fixture.0),
                 base,
                 ValidationMode::Strict
             )
@@ -4043,7 +4069,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                owner(&fixture.0),
+                &owner(&fixture.0),
                 base,
                 ValidationMode::Trusted
             )
@@ -4053,7 +4079,7 @@ mod tests {
         write_fresh_profile(
             &profile,
             &fixture.0,
-            owner(&fixture.0),
+            &owner(&fixture.0),
             base,
             &staged,
             &[],
@@ -4064,7 +4090,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                owner(&fixture.0),
+                &owner(&fixture.0),
                 base,
                 ValidationMode::Strict
             )
@@ -4075,7 +4101,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                owner(&fixture.0),
+                &owner(&fixture.0),
                 base,
                 ValidationMode::Strict
             )
@@ -4123,7 +4149,7 @@ mod tests {
         write_fresh_profile(
             &profile,
             &fixture.0,
-            owner(&fixture.0),
+            &owner(&fixture.0),
             base,
             &staged,
             &[],
@@ -4135,7 +4161,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                owner(&fixture.0),
+                &owner(&fixture.0),
                 base,
                 ValidationMode::Trusted
             )
@@ -4145,7 +4171,7 @@ mod tests {
         write_fresh_profile(
             &profile,
             &fixture.0,
-            owner(&fixture.0),
+            &owner(&fixture.0),
             base,
             &staged,
             &[],
@@ -4157,7 +4183,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                owner(&fixture.0),
+                &owner(&fixture.0),
                 base,
                 ValidationMode::Strict
             )

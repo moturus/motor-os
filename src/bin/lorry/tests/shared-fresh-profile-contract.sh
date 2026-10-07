@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # An unchanged shared workspace build or run reuses its completed profile:
-# no rustc compile and no build script. Each input change takes the full path.
+# no rustc compile and no build script. Each input change takes the full path,
+# and alternating selections keep their own records.
 set -euo pipefail
 export CARGO_NET_OFFLINE=true
 
@@ -208,5 +209,34 @@ expect_rebuilt "member set and lock"
 compiled added
 lorry build
 expect_fresh
+
+# Alternating selections that install the same binaries keep separate
+# records, so after one round each stays fresh. (The default selection is
+# different: it enables util/extra.) A single package takes the narrow path.
+lorry build -p app
+lorry run -p app
+for round in 1 2; do
+    for selection in "build -p app" "run -p app"; do
+        lorry $selection
+        expect_fresh
+    done
+done
+mkdir -p "$WORK/single/src/bin"
+printf '[package]\nname = "single"\nversion = "0.1.0"\nedition = "2024"\n' \
+    >"$WORK/single/Cargo.toml"
+printf 'fn main() { println!("a"); }\n' >"$WORK/single/src/bin/a.rs"
+printf 'fn main() { println!("b"); }\n' >"$WORK/single/src/bin/b.rs"
+cd "$WORK/single"
+"$LORRY_TEST_CARGO" generate-lockfile --offline
+for selection in build "run --bin a" "run --bin b"; do
+    lorry $selection
+done
+for round in 1 2; do
+    for selection in build "run --bin a" "run --bin b"; do
+        lorry $selection
+        expect_fresh
+    done
+done
+[ "$(cat "$WORK/$step.out")" = b ] || fail "a reused run started the wrong binary"
 
 echo "PASS: shared workspace builds reuse completed profiles and rebuild on each input change"
