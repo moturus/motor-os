@@ -154,7 +154,7 @@ checksum = "f8e7200c0150f580541a80917e0ade7f91c0e76d2d9f81e3735ebdb7a3862bef"
 
 [[package]]
 name = "moto-sys"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "moto-rt 0.17.6",
 ]
