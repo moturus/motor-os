@@ -18,10 +18,7 @@ pub(crate) fn reconstruct(
     inputs: &ReviewInputs<'_>,
     compact: &CompactState,
 ) -> Result<Reconstructed> {
-    let scope = compact
-        .scope
-        .as_ref()
-        .ok_or_else(|| Error::failure("workspace admission has no recorded scope"))?;
+    let scope = &compact.scope;
     let mut workspace = SourceWorkspace::load(&inputs.manifest.root, Some(&inputs.manifest.path))?;
     workspace.load_locked_context()?;
     let direct =
@@ -169,7 +166,7 @@ fn select_requested(
             "workspace compilation admission has no selected members",
         ));
     }
-    let scope = compact.scope.as_ref().unwrap();
+    let scope = &compact.scope;
     for request in members.iter().filter(|member| member.selected) {
         let member = reconstructed
             .workspace
@@ -362,11 +359,7 @@ pub(crate) fn review(
         .as_ref()
         .ok_or_else(|| Error::failure("workspace review requires Cargo.lock"))?;
     let mut review = Review::from_graph(manifest, lock, contexts.to_vec())?;
-    review.direct_registry.clear();
-    review.direct_git.clear();
-    review.root_features.clear();
-    review.crates_io_patches.clear();
-    review.scope = Some(scope);
+    review.scope = scope;
     if contexts.len() != resolutions.len() {
         return Err(Error::failure(
             "workspace review contexts do not match their resolutions",
@@ -472,7 +465,7 @@ mod tests {
         )
         .unwrap();
         let compact = CompactState {
-            scope: Some(scope),
+            scope,
             review_sha256: candidate.commitment().unwrap(),
             contexts: contexts.clone(),
             capabilities: vec![],
@@ -645,13 +638,13 @@ mod tests {
             target: host,
         }];
         let candidate = Review {
-            scope: Some(scope.clone()),
+            scope: scope.clone(),
             resolver_version: 2,
             contexts: contexts.clone(),
             ..Review::default()
         };
         let mut compact = CompactState {
-            scope: Some(scope),
+            scope,
             review_sha256: candidate.commitment().unwrap(),
             contexts,
             capabilities: vec![],
@@ -678,7 +671,7 @@ mod tests {
         // Even a path-only member must stay within the reviewed feature scope.
         fs::write(fixture.0.join("Cargo.toml"), "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\ndefault = [\"unused\"]\nunused = []\n").unwrap();
         let mut narrow = compact.clone();
-        narrow.scope.as_mut().unwrap().no_default_features = true;
+        narrow.scope.no_default_features = true;
         let mut narrowed_review = candidate.clone();
         narrowed_review.scope = narrow.scope.clone();
         narrow.review_sha256 = narrowed_review.commitment().unwrap();

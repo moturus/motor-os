@@ -103,7 +103,8 @@ fn read(root: &Path) -> Result<Option<Vec<u8>>> {
             )));
         }
     }
-    if CompactState::load(root)?.is_none() {
+    // Old member records are replaced unparsed; only the root record is reviewed.
+    if !CompactState::exists(root)? {
         return Ok(None);
     }
     fs::read(CompactState::path(root))
@@ -139,7 +140,7 @@ mod tests {
         fs::write(root.join("member/src/lib.rs"), "").unwrap();
         let workspace = SourceWorkspace::load(root, None).unwrap();
         let mut state = CompactState {
-            scope: None,
+            scope: ReviewScope::default(),
             review_sha256: "1".repeat(64),
             contexts: vec![Context {
                 host: "x86_64-unknown-linux-gnu".into(),

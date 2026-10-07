@@ -114,11 +114,15 @@ PYCODE
 cp .lorry/dependencies-v2.toml "$WORK/workspace.admission"
 cp "$WORK/member.admission" .lorry/dependencies-v2.toml
 if "$LORRY" -q --max-packages 2 build -p app >"$WORK/legacy-root.out" 2>"$WORK/legacy-root.err"; then
-    echo 'build accepted a legacy record as workspace admission' >&2
+    echo 'build accepted a retired format-3 record as workspace admission' >&2
     exit 1
 fi
-grep -F 'legacy admission does not cover a workspace' "$WORK/legacy-root.err" >/dev/null
+grep -F 'retired single-package review format 3' "$WORK/legacy-root.err" >/dev/null
 cmp .lorry/dependencies-v2.toml "$WORK/member.admission"
+# The advice in that error works: vendor replaces the retired record.
+"$LORRY" -q --max-packages 2 vendor --locked --offline --accept-all \
+    >"$WORK/retired.out" 2>"$WORK/retired.err"
+grep -F 'review-format-version = 4' .lorry/dependencies-v2.toml >/dev/null
 cp "$WORK/workspace.admission" .lorry/dependencies-v2.toml
 for package in app shared outside; do
     cp "$WORK/member.admission" "$package/.lorry/dependencies-v2.toml"

@@ -169,7 +169,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     if cli.verbosity == Verbosity::Verbose {
         eprintln!("Locked {}", lock.path().display());
     }
-    let previous = CompactState::load(&workspace.root)?;
+    let previous = CompactState::load_replaceable(&workspace.root)?;
     let forced = match &options.mode {
         VendorMode::Sync => None,
         VendorMode::Upgrade(upgrade) => Some(upgrade::workspace_selection(
@@ -349,7 +349,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     candidate.complete(capabilities.clone())?;
     let commitment = candidate.commitment()?;
     let unchanged = previous.as_ref().is_some_and(|previous| {
-        previous.scope.as_ref() == Some(&scope)
+        previous.scope == scope
             && previous.review_sha256 == commitment
             && previous.contexts == recorded
             && previous.capabilities == capabilities
@@ -376,7 +376,6 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         }
         let baseline = previous
             .as_ref()
-            .filter(|previous| previous.scope.is_some())
             .and_then(|previous| {
                 dependency::workspace::admission::reconstruct(
                     &dependency::ReviewInputs {
@@ -437,7 +436,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         lock.commit()?;
     }
     CompactState {
-        scope: Some(scope),
+        scope,
         review_sha256: commitment,
         contexts: recorded,
         capabilities,
@@ -458,7 +457,7 @@ fn review_scope(
         || cli.features != FeatureSelection::default();
     if !explicit {
         return Ok(previous
-            .and_then(|state| state.scope.clone())
+            .map(|state| state.scope.clone())
             .unwrap_or_default());
     }
     let whole = cli.selection.packages.is_empty() && cli.selection.exclude.is_empty();

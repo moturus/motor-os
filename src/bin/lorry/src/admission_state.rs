@@ -6,10 +6,9 @@ use crate::atomic::AtomicFile;
 use crate::config::{NativeToolRole, Policy, PolicyAction, PolicyRule};
 use crate::diagnostic::{Error, Result};
 use crate::hash::{Sha256, hex};
-use crate::manifest::{DependencySource, GitSelector, LockedPackage, Lockfile, Manifest, Resolver};
+use crate::manifest::{LockedPackage, Lockfile, Manifest, Resolver};
 use crate::policy::{Admission, PackageEvidence};
 use crate::resolver::{CompileKind, PackageKey, Resolution, ResolvedSource};
-use crate::sparse::DependencyKind;
 use crate::toml::Document;
 use toml_edit::{Item, Table};
 
@@ -155,10 +154,10 @@ mod review {
     const MAX_CONTEXT_PACKAGES: usize = 65_536;
     const MAX_EDGES: usize = 131_072;
     const MAX_FEATURES: usize = 262_144;
-    const MAX_CFG_NODES: usize = 4_096;
-    const MAX_CFG_DEPTH: usize = 64;
     const COMPACT_FORMAT_VERSION: u64 = 3;
-    const REVIEW_FORMAT_VERSION: u64 = 3;
+    const REVIEW_FORMAT_VERSION: u64 = 4;
+    // Single-package review records; vendor replaces them with a workspace review.
+    const RETIRED_REVIEW_FORMAT_VERSION: i64 = 3;
 
     /// Empty package selection means the whole workspace. Names and feature
     /// requests are normalized so the same scope reconstructs the same review.
@@ -260,51 +259,6 @@ mod review {
     }
 
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub enum ReviewKind {
-        Build,
-        Development,
-        Normal,
-    }
-
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct DirectRegistry {
-        pub alias: String,
-        pub package: String,
-        pub requirement: String,
-        pub kind: ReviewKind,
-        pub target: Option<String>,
-        pub optional: bool,
-        pub default_features: bool,
-        pub features: Vec<String>,
-    }
-
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct DirectGit {
-        pub alias: String,
-        pub package: String,
-        pub requirement: String,
-        pub url: String,
-        pub selector: String,
-        pub kind: ReviewKind,
-        pub target: Option<String>,
-        pub optional: bool,
-        pub default_features: bool,
-        pub features: Vec<String>,
-    }
-
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct RootFeature {
-        pub name: String,
-        pub values: Vec<String>,
-    }
-
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct CratesIoPatch {
-        pub alias: String,
-        pub package: String,
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub enum ReferenceSource {
         CratesIo,
         Git,
@@ -399,13 +353,9 @@ mod review {
 
     #[derive(Clone, Debug, Default, Eq, PartialEq)]
     pub struct Review {
-        pub scope: Option<ReviewScope>,
+        pub scope: ReviewScope,
         pub resolver_version: u64,
         pub contexts: Vec<Context>,
-        pub direct_registry: Vec<DirectRegistry>,
-        pub direct_git: Vec<DirectGit>,
-        pub root_features: Vec<RootFeature>,
-        pub crates_io_patches: Vec<CratesIoPatch>,
         pub locked_registry: Vec<LockedRegistry>,
         pub locked_git: Vec<LockedGit>,
         pub context_registry: Vec<ContextRegistry>,
@@ -417,7 +367,7 @@ mod review {
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct CompactState {
-        pub scope: Option<ReviewScope>,
+        pub scope: ReviewScope,
         pub review_sha256: String,
         pub contexts: Vec<Context>,
         pub capabilities: Vec<Capability>,
@@ -432,25 +382,47 @@ mod review {
         /// an error: the project then has no registry admission and every
         /// registry package fails closed at policy.
         pub fn load(root: &Path) -> Result<Option<Self>> {
+            Self::document(root)?
+                .map(|(path, document)| Self::from_document(&path, &document))
+                .transpose()
+        }
+
+        /// Loads the state a new workspace review replaces. A retired record
+        /// counts as absent, so vendor can follow its own rejection advice.
+        pub fn load_replaceable(root: &Path) -> Result<Option<Self>> {
+            match Self::document(root)? {
+                Some((_, document)) if retired(&document) => Ok(None),
+                Some((path, document)) => Self::from_document(&path, &document).map(Some),
+                None => Ok(None),
+            }
+        }
+
+        /// Reports whether the state is a regular file without parsing it.
+        pub fn exists(root: &Path) -> Result<bool> {
             let path = Self::path(root);
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    return Err(Error::failure(format!(
+                    Err(Error::failure(format!(
                         "Lorry dependency state `{}` is not a regular file",
                         path.display()
-                    )));
+                    )))
                 }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => {
-                    return Err(Error::failure(format!(
-                        "failed to inspect Lorry dependency state `{}`: {error}",
-                        path.display()
-                    )));
-                }
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(Error::failure(format!(
+                    "failed to inspect Lorry dependency state `{}`: {error}",
+                    path.display()
+                ))),
             }
+        }
+
+        fn document(root: &Path) -> Result<Option<(PathBuf, Document)>> {
+            if !Self::exists(root)? {
+                return Ok(None);
+            }
+            let path = Self::path(root);
             let document = Document::load(&path, "Lorry compact dependency state")?;
-            Self::from_document(&path, &document).map(Some)
+            Ok(Some((path, document)))
         }
 
         pub fn parse(path: &Path, source: String) -> Result<Self> {
@@ -518,6 +490,15 @@ mod review {
         }
 
         fn from_document(path: &Path, document: &Document) -> Result<Self> {
+            if retired(document) {
+                return Err(Error::failure(format!(
+                    "Lorry dependency state `{}` uses the retired single-package review format 3",
+                    path.display()
+                ))
+                .with_help(
+                    "run `lorry vendor --locked` again at the workspace root to review the workspace",
+                ));
+            }
             require_keys(
                 path,
                 document.root(),
@@ -525,9 +506,10 @@ mod review {
                     "format-version",
                     "review-format-version",
                     "review-sha256",
+                    "review-scope",
                     "context",
                 ],
-                &["capability", "review-scope"],
+                &["capability"],
             )?;
             compact_version(
                 path,
@@ -535,26 +517,17 @@ mod review {
                 "format-version",
                 COMPACT_FORMAT_VERSION,
             )?;
-            let scope = document
-                .root()
-                .get("review-scope")
-                .map(|item| {
-                    ReviewScope::parse(
-                        path,
-                        item.as_table()
-                            .ok_or_else(|| invalid("review scope must be a table"))?,
-                    )
-                })
-                .transpose()?;
             compact_version(
                 path,
                 document.root(),
                 "review-format-version",
-                if scope.is_some() {
-                    4
-                } else {
-                    REVIEW_FORMAT_VERSION
-                },
+                REVIEW_FORMAT_VERSION,
+            )?;
+            let scope = ReviewScope::parse(
+                path,
+                required_item(path, document.root(), "review-scope")?
+                    .as_table()
+                    .ok_or_else(|| invalid("review scope must be a table"))?,
             )?;
             let state = Self {
                 scope,
@@ -571,18 +544,9 @@ mod review {
             let mut writer = Writer::compact();
             writer.raw("# Generated by Lorry. Do not edit.\n")?;
             writer.integer("format-version", COMPACT_FORMAT_VERSION)?;
-            writer.integer(
-                "review-format-version",
-                if self.scope.is_some() {
-                    4
-                } else {
-                    REVIEW_FORMAT_VERSION
-                },
-            )?;
+            writer.integer("review-format-version", REVIEW_FORMAT_VERSION)?;
             writer.string("review-sha256", &self.review_sha256)?;
-            if let Some(scope) = &self.scope {
-                scope.write(&mut writer)?;
-            }
+            self.scope.write(&mut writer)?;
             write_contexts(&mut writer, &self.contexts)?;
             write_capabilities(&mut writer, &self.capabilities)?;
             writer.finish()
@@ -590,93 +554,33 @@ mod review {
 
         pub fn validate(&self) -> Result<()> {
             digest(&self.review_sha256, "review digest")?;
-            if let Some(scope) = &self.scope {
-                scope.validate()?;
-            }
+            self.scope.validate()?;
             validate_contexts(&self.contexts)?;
             validate_capabilities(&self.capabilities)
         }
     }
 
     impl Review {
-        /// Builds the graph portion of the canonical document from the parsed
-        /// manifest and lockfile. Contexts come from compact state or the
-        /// vendor candidate set; context resolution, source evidence, and
-        /// capabilities are later builder stages.
+        /// Builds the graph portion of the canonical document from the root
+        /// resolver and the lockfile. Scope and contexts come from compact
+        /// state or the vendor candidate; context resolution, source evidence,
+        /// and capabilities are later builder stages.
         pub fn from_graph(
             manifest: &Manifest,
             lock: &Lockfile,
             contexts: Vec<Context>,
         ) -> Result<Self> {
-            let mut review = Self {
+            let review = Self {
                 resolver_version: match manifest.resolver {
                     Resolver::V1 => 1,
                     Resolver::V2 => 2,
                     Resolver::V3 => 3,
                 },
                 contexts,
+                locked_registry: locked_graph(lock)?,
+                locked_git: locked_git_graph(lock)?,
                 ..Self::default()
             };
-            for dependency in &manifest.dependencies {
-                let common = || match dependency.kind {
-                    DependencyKind::Build => ReviewKind::Build,
-                    DependencyKind::Dev => ReviewKind::Development,
-                    DependencyKind::Normal => ReviewKind::Normal,
-                };
-                if dependency.source == DependencySource::CratesIo {
-                    review.direct_registry.push(DirectRegistry {
-                        alias: dependency.alias.clone(),
-                        package: dependency.package.clone(),
-                        requirement: dependency.requirement.to_string(),
-                        kind: common(),
-                        target: dependency
-                            .target
-                            .as_deref()
-                            .map(canonical_target_selector)
-                            .transpose()?,
-                        optional: dependency.optional,
-                        default_features: dependency.default_features,
-                        features: sorted_set(&dependency.features, "direct dependency features")?,
-                    });
-                } else if let DependencySource::Git(git) = &dependency.source {
-                    review.direct_git.push(DirectGit {
-                        alias: dependency.alias.clone(),
-                        package: dependency.package.clone(),
-                        requirement: dependency.requirement.to_string(),
-                        url: git.url.clone(),
-                        selector: git_selector(&git.selector),
-                        kind: common(),
-                        target: dependency
-                            .target
-                            .as_deref()
-                            .map(canonical_target_selector)
-                            .transpose()?,
-                        optional: dependency.optional,
-                        default_features: dependency.default_features,
-                        features: sorted_set(
-                            &dependency.features,
-                            "direct Git dependency features",
-                        )?,
-                    });
-                }
-            }
-            review.direct_registry.sort();
-            review.direct_git.sort();
-            for (name, values) in &manifest.features {
-                review.root_features.push(RootFeature {
-                    name: name.clone(),
-                    values: sorted_set(values, "root feature values")?,
-                });
-            }
-            for patch in &manifest.patches {
-                review.crates_io_patches.push(CratesIoPatch {
-                    alias: patch.alias.clone(),
-                    package: patch.package.clone(),
-                });
-            }
-            review.crates_io_patches.sort();
-            review.locked_registry = locked_graph(lock)?;
-            review.locked_git = locked_git_graph(lock)?;
             review.validate()?;
             Ok(review)
         }
@@ -918,59 +822,12 @@ mod review {
         pub fn render(&self) -> Result<Vec<u8>> {
             self.validate()?;
             let mut writer = Writer::new();
-            writer.integer(
-                "review-format-version",
-                if self.scope.is_some() {
-                    4
-                } else {
-                    REVIEW_FORMAT_VERSION
-                },
-            )?;
+            writer.integer("review-format-version", REVIEW_FORMAT_VERSION)?;
             writer.integer("source-tree-format-version", 1)?;
             writer.integer("cargo-lock-format-version", 4)?;
             writer.integer("resolver-version", self.resolver_version)?;
-            if let Some(scope) = &self.scope {
-                scope.write(&mut writer)?;
-            }
+            self.scope.write(&mut writer)?;
             write_contexts(&mut writer, &self.contexts)?;
-            for value in &self.direct_registry {
-                writer.table("direct-registry")?;
-                writer.string("alias", &value.alias)?;
-                writer.string("package", &value.package)?;
-                writer.string("requirement", &value.requirement)?;
-                writer.string("kind", review_kind_name(value.kind))?;
-                if let Some(target) = &value.target {
-                    writer.string("target", target)?;
-                }
-                writer.boolean("optional", value.optional)?;
-                writer.boolean("default-features", value.default_features)?;
-                writer.strings("features", &value.features)?;
-            }
-            for value in &self.direct_git {
-                writer.table("direct-git")?;
-                writer.string("alias", &value.alias)?;
-                writer.string("package", &value.package)?;
-                writer.string("requirement", &value.requirement)?;
-                writer.string("url", &value.url)?;
-                writer.string("selector", &value.selector)?;
-                writer.string("kind", review_kind_name(value.kind))?;
-                if let Some(target) = &value.target {
-                    writer.string("target", target)?;
-                }
-                writer.boolean("optional", value.optional)?;
-                writer.boolean("default-features", value.default_features)?;
-                writer.strings("features", &value.features)?;
-            }
-            for value in &self.root_features {
-                writer.table("root-feature")?;
-                writer.string("name", &value.name)?;
-                writer.strings("values", &value.values)?;
-            }
-            for value in &self.crates_io_patches {
-                writer.table("crates-io-patch")?;
-                writer.string("alias", &value.alias)?;
-                writer.string("package", &value.package)?;
-            }
             for value in &self.locked_registry {
                 writer.table("locked-registry")?;
                 write_identity(&mut writer, &value.name, &value.version, &value.checksum)?;
@@ -1026,26 +883,9 @@ mod review {
         }
 
         pub fn validate(&self) -> Result<()> {
-            if let Some(scope) = &self.scope {
-                scope.validate()?;
-                if !self.direct_registry.is_empty()
-                    || !self.direct_git.is_empty()
-                    || !self.root_features.is_empty()
-                    || !self.crates_io_patches.is_empty()
-                {
-                    return Err(invalid("workspace review contains member declarations"));
-                }
-            }
+            self.scope.validate()?;
             validate_contexts(&self.contexts)?;
             validate_capabilities(&self.capabilities)?;
-            limit(
-                self.direct_registry.len(),
-                MAX_TABLES,
-                "direct dependencies",
-            )?;
-            limit(self.direct_git.len(), MAX_TABLES, "direct Git dependencies")?;
-            limit(self.root_features.len(), MAX_TABLES, "root features")?;
-            limit(self.crates_io_patches.len(), MAX_TABLES, "patches")?;
             limit(self.locked_registry.len(), MAX_TABLES, "locked packages")?;
             limit(self.locked_git.len(), MAX_TABLES, "locked Git packages")?;
             limit(
@@ -1063,14 +903,6 @@ mod review {
             if !(1..=3).contains(&self.resolver_version) {
                 return Err(invalid("has an unsupported resolver version"));
             }
-            ordered(&self.direct_registry, "direct dependencies")?;
-            ordered(&self.direct_git, "direct Git dependencies")?;
-            ordered_by(
-                &self.root_features,
-                |a, b| a.name.cmp(&b.name),
-                "root features",
-            )?;
-            ordered(&self.crates_io_patches, "patches")?;
             ordered_by(
                 &self.locked_registry,
                 |a, b| {
@@ -1119,15 +951,6 @@ mod review {
                 },
                 "Git source evidence",
             )?;
-            for value in &self.direct_registry {
-                ordered(&value.features, "direct dependency features")?;
-            }
-            for value in &self.direct_git {
-                ordered(&value.features, "direct Git dependency features")?;
-            }
-            for value in &self.root_features {
-                ordered(&value.values, "root feature values")?;
-            }
             for value in &self.locked_registry {
                 ordered(&value.dependencies, "locked dependency references")?;
             }
@@ -1159,52 +982,6 @@ mod review {
         fn validate_values(&self) -> Result<()> {
             let mut edges = 0;
             let mut features = 0;
-            for value in &self.direct_registry {
-                nonempty(&value.alias, "direct dependency alias")?;
-                nonempty(&value.package, "direct dependency package")?;
-                canonical_requirement(&value.requirement)?;
-                if let Some(target) = &value.target
-                    && canonical_target_selector(target)? != *target
-                {
-                    return Err(invalid(format!(
-                        "has a noncanonical target selector `{target}`"
-                    )));
-                }
-                add(
-                    &mut features,
-                    value.features.len(),
-                    MAX_FEATURES,
-                    "features",
-                )?;
-            }
-            for value in &self.direct_git {
-                nonempty(&value.alias, "direct Git dependency alias")?;
-                nonempty(&value.package, "direct Git dependency package")?;
-                canonical_requirement(&value.requirement)?;
-                nonempty(&value.url, "direct Git dependency URL")?;
-                nonempty(&value.selector, "direct Git dependency selector")?;
-                if let Some(target) = &value.target
-                    && canonical_target_selector(target)? != *target
-                {
-                    return Err(invalid(format!(
-                        "has a noncanonical target selector `{target}`"
-                    )));
-                }
-                add(
-                    &mut features,
-                    value.features.len(),
-                    MAX_FEATURES,
-                    "features",
-                )?;
-            }
-            for value in &self.root_features {
-                nonempty(&value.name, "root feature name")?;
-                add(&mut features, value.values.len(), MAX_FEATURES, "features")?;
-            }
-            for value in &self.crates_io_patches {
-                nonempty(&value.alias, "patch alias")?;
-                nonempty(&value.package, "patch package")?;
-            }
             for value in &self.locked_registry {
                 identity(&value.name, &value.version, &value.checksum)?;
                 add(
@@ -1465,14 +1242,6 @@ mod review {
         Ok(())
     }
 
-    fn review_kind_name(value: ReviewKind) -> &'static str {
-        match value {
-            ReviewKind::Build => "build",
-            ReviewKind::Development => "development",
-            ReviewKind::Normal => "normal",
-        }
-    }
-
     fn unit_kind_name(value: UnitKind) -> &'static str {
         match value {
             UnitKind::Host => "host",
@@ -1522,6 +1291,14 @@ mod review {
             }
         }
         Ok(())
+    }
+
+    fn retired(document: &Document) -> bool {
+        document
+            .root()
+            .get("review-format-version")
+            .and_then(Item::as_integer)
+            == Some(RETIRED_REVIEW_FORMAT_VERSION)
     }
 
     fn compact_version(path: &Path, table: &Table, key: &str, expected: u64) -> Result<()> {
@@ -1659,162 +1436,6 @@ mod review {
         Ok(())
     }
 
-    fn canonical_requirement(value: &str) -> Result<()> {
-        let parsed = semver::VersionReq::parse(value)
-            .map_err(|error| invalid(format!("has invalid requirement `{value}`: {error}")))?;
-        if parsed.to_string() != value {
-            return Err(invalid(format!("has noncanonical requirement `{value}`")));
-        }
-        Ok(())
-    }
-
-    fn canonical_target_selector(value: &str) -> Result<String> {
-        let Some(prefixed) = value.strip_prefix("cfg(") else {
-            let triple = !value.is_empty()
-                && !value.ends_with(".json")
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
-            if !triple {
-                return Err(invalid(format!(
-                    "has an unsupported plain target selector `{value}`"
-                )));
-            }
-            return Ok(value.to_owned());
-        };
-        let Some(expression) = prefixed.strip_suffix(')') else {
-            return Err(invalid(format!(
-                "has an unterminated cfg target selector `{value}`"
-            )));
-        };
-        let mut parser = SelectorParser {
-            source: expression.as_bytes(),
-            position: 0,
-            nodes: 0,
-        };
-        let rendered = parser.expression(1)?;
-        parser.space();
-        if parser.position != parser.source.len() {
-            return Err(parser.error("unexpected trailing cfg syntax"));
-        }
-        Ok(format!("cfg({rendered})"))
-    }
-
-    // Mirrors the operational cfg evaluator's grammar but is frozen with the
-    // review format: reviewed canonical bytes must not change when the
-    // evaluator does.
-    struct SelectorParser<'a> {
-        source: &'a [u8],
-        position: usize,
-        nodes: usize,
-    }
-
-    impl SelectorParser<'_> {
-        fn expression(&mut self, depth: usize) -> Result<String> {
-            limit(depth, MAX_CFG_DEPTH, "cfg-expression nesting levels")?;
-            self.nodes += 1;
-            limit(self.nodes, MAX_CFG_NODES, "cfg-expression nodes")?;
-            self.space();
-            let name = self.identifier()?;
-            self.space();
-            if self.take(b'=') {
-                self.space();
-                let value = self.string()?;
-                return Ok(format!("{name}=\"{value}\""));
-            }
-            if !self.take(b'(') {
-                return Ok(name);
-            }
-            let mut children = Vec::new();
-            loop {
-                self.space();
-                if self.take(b')') {
-                    break;
-                }
-                children.push(self.expression(depth + 1)?);
-                self.space();
-                if self.take(b')') {
-                    break;
-                }
-                if !self.take(b',') {
-                    return Err(self.error("expected `,` or `)`"));
-                }
-            }
-            match name.as_str() {
-                "all" | "any" => {
-                    children.sort();
-                    children.dedup();
-                    Ok(format!("{name}({})", children.join(",")))
-                }
-                "not" if children.len() == 1 => Ok(format!("not({})", children[0])),
-                "not" => Err(self.error("`not` requires exactly one argument")),
-                _ => Err(self.error(format!("unknown cfg predicate `{name}`"))),
-            }
-        }
-
-        fn identifier(&mut self) -> Result<String> {
-            let start = self.position;
-            while self
-                .source
-                .get(self.position)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            {
-                self.position += 1;
-            }
-            if start == self.position {
-                return Err(self.error("expected cfg identifier"));
-            }
-            Ok(String::from_utf8(self.source[start..self.position].to_vec()).unwrap())
-        }
-
-        fn string(&mut self) -> Result<String> {
-            if !self.take(b'"') {
-                return Err(self.error("expected quoted cfg value"));
-            }
-            let start = self.position;
-            while self
-                .source
-                .get(self.position)
-                .is_some_and(|byte| *byte != b'"')
-            {
-                if self.source[self.position] == b'\\' {
-                    return Err(self.error("cfg string escapes are not supported"));
-                }
-                self.position += 1;
-            }
-            if !self.take(b'"') {
-                return Err(self.error("unterminated cfg value"));
-            }
-            Ok(String::from_utf8(self.source[start..self.position - 1].to_vec()).unwrap())
-        }
-
-        fn space(&mut self) {
-            while self
-                .source
-                .get(self.position)
-                .is_some_and(u8::is_ascii_whitespace)
-            {
-                self.position += 1;
-            }
-        }
-
-        fn take(&mut self, byte: u8) -> bool {
-            if self.source.get(self.position) == Some(&byte) {
-                self.position += 1;
-                true
-            } else {
-                false
-            }
-        }
-
-        fn error(&self, message: impl std::fmt::Display) -> Error {
-            invalid(format!(
-                "has an invalid cfg target selector at byte {}: {message}",
-                self.position
-            ))
-        }
-    }
-
     const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
     fn locked_graph(lock: &Lockfile) -> Result<Vec<LockedRegistry>> {
@@ -1890,15 +1511,6 @@ mod review {
             git_key(&a.name, &a.version, &a.source).cmp(&git_key(&b.name, &b.version, &b.source))
         });
         Ok(result)
-    }
-
-    fn git_selector(selector: &GitSelector) -> String {
-        match selector {
-            GitSelector::Head => "head".to_owned(),
-            GitSelector::Branch(value) => format!("branch:{value}"),
-            GitSelector::Tag(value) => format!("tag:{value}"),
-            GitSelector::Revision(value) => format!("rev:{value}"),
-        }
     }
 
     // A lock dependency spelling is `NAME`, `NAME VERSION`, or
@@ -2194,7 +1806,7 @@ mod review {
 
         fn compact_state() -> CompactState {
             CompactState {
-                scope: None,
+                scope: ReviewScope::default(),
                 review_sha256: "44".repeat(32),
                 contexts: empty_review().contexts,
                 capabilities: Vec::new(),
@@ -2210,7 +1822,7 @@ mod review {
                 no_default_features: true,
             };
             let mut compact = compact_state();
-            compact.scope = Some(scope.clone());
+            compact.scope = scope.clone();
             let bytes = compact.render().unwrap();
             let text = String::from_utf8(bytes).unwrap();
             assert!(text.contains("review-format-version = 4"));
@@ -2218,13 +1830,9 @@ mod review {
                 CompactState::parse(Path::new("state.toml"), text.clone()).unwrap(),
                 compact
             );
-            assert!(
-                CompactState::parse(
-                    Path::new("state.toml"),
-                    text.replace("review-format-version = 4", "review-format-version = 3"),
-                )
-                .is_err()
-            );
+            let unscoped = text.split_once("\n[review-scope]").unwrap().0.to_owned()
+                + &text[text.find("\n[[context]]").unwrap()..];
+            assert!(CompactState::parse(Path::new("state.toml"), unscoped).is_err());
             assert!(
                 CompactState::parse(
                     Path::new("state.toml"),
@@ -2236,21 +1844,10 @@ mod review {
                 .is_err()
             );
             let mut review = empty_review();
-            review.scope = Some(scope);
+            review.scope = scope;
             let first = review.commitment().unwrap();
-            review.scope.as_mut().unwrap().no_default_features = false;
+            review.scope.no_default_features = false;
             assert_ne!(review.commitment().unwrap(), first);
-            review.root_features.push(RootFeature {
-                name: "unused".to_owned(),
-                values: vec![],
-            });
-            assert!(
-                review
-                    .render()
-                    .unwrap_err()
-                    .render()
-                    .contains("member declarations")
-            );
         }
 
         fn capability() -> Capability {
@@ -2441,8 +2038,14 @@ mod review {
             state.capabilities.push(capability());
             let expected = br#"# Generated by Lorry. Do not edit.
 format-version = 3
-review-format-version = 3
+review-format-version = 4
 review-sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
+
+[review-scope]
+packages = []
+features = []
+all-features = false
+no-default-features = false
 
 [[context]]
 host = "x86_64-unknown-linux-gnu"
@@ -2482,7 +2085,7 @@ native-tools = ["archiver", "c-compiler"]
 
             let invalid = [
                 source.replace("format-version = 3", "format-version = 4"),
-                source.replace("review-format-version = 3\n", ""),
+                source.replace("review-format-version = 4\n", ""),
                 source.replace(&"44".repeat(32), "invalid"),
                 source.replace("\n[[context]]", "\nunknown = true\n\n[[context]]"),
                 source.replace(
@@ -2499,22 +2102,6 @@ native-tools = ["archiver", "c-compiler"]
             for source in invalid {
                 assert!(CompactState::parse(path, source).is_err());
             }
-        }
-
-        #[test]
-        fn rejects_noncanonical_nested_ordering() {
-            let mut review = empty_review();
-            review.direct_registry.push(DirectRegistry {
-                alias: "demo".to_owned(),
-                package: "demo".to_owned(),
-                requirement: "=1.0.0".to_owned(),
-                kind: ReviewKind::Normal,
-                target: None,
-                optional: false,
-                default_features: true,
-                features: vec!["z".to_owned(), "a".to_owned()],
-            });
-            assert!(review.validate().is_err());
         }
 
         #[test]
@@ -2562,18 +2149,6 @@ native-tools = ["archiver", "c-compiler"]
         fn rejects_noncanonical_identities_and_aggregate_overflow() {
             let mut review = registry_review();
             review.locked_registry[0].version = "1.0".to_owned();
-            assert!(review.validate().is_err());
-            review = registry_review();
-            review.direct_registry.push(DirectRegistry {
-                alias: "demo".to_owned(),
-                package: "demo".to_owned(),
-                requirement: "1.0.0".to_owned(),
-                kind: ReviewKind::Normal,
-                target: None,
-                optional: false,
-                default_features: true,
-                features: Vec::new(),
-            });
             assert!(review.validate().is_err());
 
             let mut total = MAX_FEATURES;
@@ -2660,17 +2235,6 @@ dependencies = ["cc", "libc"]
         fn builds_the_graph_review_from_manifest_and_lockfile() {
             let review = Project::new(BASE_MANIFEST, BASE_LOCK).review().unwrap();
             assert_eq!(review.resolver_version, 1);
-            assert_eq!(review.direct_registry.len(), 2);
-            assert_eq!(review.direct_registry[0].alias, "cc");
-            assert_eq!(review.direct_registry[0].requirement, "^1.0");
-            assert_eq!(
-                review.direct_registry[0].target.as_deref(),
-                Some("cfg(unix)")
-            );
-            assert_eq!(review.direct_registry[1].alias, "libc");
-            assert_eq!(review.direct_registry[1].features, ["extra", "std"]);
-            assert_eq!(review.root_features.len(), 2);
-            assert_eq!(review.crates_io_patches[0].package, "upstream");
             assert_eq!(review.locked_registry.len(), 2);
             assert_eq!(review.locked_registry[0].name, "cc");
             assert_eq!(
@@ -2745,26 +2309,6 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             let helper_node = "[[package]]\nname = \"helper\"\nversion = \"0.1.0\"";
             let variants = [
                 (BASE_MANIFEST.to_owned(), BASE_LOCK.to_owned()),
-                (
-                    BASE_MANIFEST.replace("=0.2.186", "=0.2.185"),
-                    BASE_LOCK.to_owned(),
-                ),
-                (
-                    BASE_MANIFEST.replace("[\"std\", \"extra\"]", "[\"std\"]"),
-                    BASE_LOCK.to_owned(),
-                ),
-                (
-                    BASE_MANIFEST.replace("default = [\"extra\"]", "default = []"),
-                    BASE_LOCK.to_owned(),
-                ),
-                (
-                    BASE_MANIFEST.replace("\"upstream\"", "\"upstream2\""),
-                    BASE_LOCK.to_owned(),
-                ),
-                (
-                    BASE_MANIFEST.replace("cfg( unix )", "cfg( windows )"),
-                    BASE_LOCK.to_owned(),
-                ),
                 (
                     BASE_MANIFEST.to_owned(),
                     BASE_LOCK.replace(&"bb".repeat(32), &"cc".repeat(32)),
@@ -3129,123 +2673,14 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }
 
         #[test]
-        fn canonicalizes_cfg_selectors_and_plain_triples() {
-            let canonical = |value: &str| canonical_target_selector(value).unwrap();
-            assert_eq!(
-                canonical("cfg(all( unix, target_os = \"linux\" ))"),
-                "cfg(all(target_os=\"linux\",unix))"
-            );
-            assert_eq!(
-                canonical("cfg(any(target_os=\"linux\" , unix ,))"),
-                canonical("cfg(any(unix,target_os=\"linux\"))")
-            );
-            assert_eq!(canonical("cfg(all(unix,unix))"), "cfg(all(unix))");
-            assert_eq!(
-                canonical("cfg(not( all( any() , unix ) ))"),
-                "cfg(not(all(any(),unix)))"
-            );
-            assert_eq!(canonical("x86_64-unknown-motor"), "x86_64-unknown-motor");
-            for value in [
-                "cfg(all(target_os=\"linux\",unix))",
-                "cfg(any())",
-                "x86_64-unknown-motor",
-            ] {
-                assert_eq!(canonical(&canonical(value)), canonical(value));
-            }
-        }
-
-        #[test]
-        fn rejects_invalid_selectors_and_enforces_cfg_bounds() {
-            for value in [
-                "",
-                "custom-target.json",
-                "bad triple",
-                "cfg(unix",
-                "cfg()",
-                "cfg(unix) ",
-                "cfg(unix windows)",
-                "cfg(not())",
-                "cfg(not(unix,windows))",
-                "cfg(version(\"1.0\"))",
-                "cfg(target_os=linux)",
-                "cfg(target_os=\"a\\\"b\")",
-                "cfg(target_os=\"open)",
-            ] {
-                assert!(canonical_target_selector(value).is_err(), "{value}");
-            }
-
-            let nested =
-                |count: usize| format!("cfg({}unix{})", "not(".repeat(count), ")".repeat(count));
-            assert!(canonical_target_selector(&nested(MAX_CFG_DEPTH - 1)).is_ok());
-            assert!(canonical_target_selector(&nested(MAX_CFG_DEPTH)).is_err());
-
-            let wide = |count: usize| {
-                let children: Vec<String> = (0..count).map(|index| format!("k{index}")).collect();
-                format!("cfg(any({}))", children.join(","))
-            };
-            assert!(canonical_target_selector(&wide(MAX_CFG_NODES - 1)).is_ok());
-            assert!(canonical_target_selector(&wide(MAX_CFG_NODES)).is_err());
-        }
-
-        #[test]
-        fn target_selector_mutations_change_the_commitment() {
-            let with_target = |target: &str| {
-                let mut review = empty_review();
-                review.direct_registry.push(DirectRegistry {
-                    alias: "demo".to_owned(),
-                    package: "demo".to_owned(),
-                    requirement: "=1.0.0".to_owned(),
-                    kind: ReviewKind::Normal,
-                    target: Some(target.to_owned()),
-                    optional: false,
-                    default_features: true,
-                    features: Vec::new(),
-                });
-                review
-            };
-            assert!(with_target("cfg( unix )").render().is_err());
-            assert!(with_target("cfg(all(unix,unix))").render().is_err());
-
-            let variants = [
-                "cfg(unix)",
-                "cfg(linux)",
-                "cfg(not(unix))",
-                "cfg(target_os=\"linux\")",
-                "cfg(target_os=\"motor\")",
-            ];
-            let hashes: BTreeSet<String> = variants
-                .iter()
-                .map(|target| sha256(&with_target(target).render().unwrap()))
-                .collect();
-            assert_eq!(hashes.len(), variants.len());
-        }
-
-        #[test]
         fn renders_and_hashes_representative_review_golden() {
             let mut review = registry_review();
-            let direct = |alias: &str, kind, target| DirectRegistry {
-                alias: alias.to_owned(),
-                package: "demo".to_owned(),
-                requirement: "=1.0.0".to_owned(),
-                kind,
-                target,
-                optional: false,
-                default_features: true,
-                features: Vec::new(),
+            review.scope = ReviewScope {
+                packages: vec!["app".to_owned()],
+                features: vec!["app/extra".to_owned()],
+                all_features: false,
+                no_default_features: false,
             };
-            review.direct_registry = vec![
-                direct("a", ReviewKind::Build, None),
-                direct("b", ReviewKind::Development, None),
-                direct("c", ReviewKind::Normal, Some("cfg(unix)".to_owned())),
-            ];
-            review.root_features.push(RootFeature {
-                name: "default".to_owned(),
-                values: vec!["feature-a".to_owned()],
-            });
-            review.crates_io_patches.push(CratesIoPatch {
-                alias: "patched".to_owned(),
-                package: "demo".to_owned(),
-            });
             review.locked_registry[0].dependencies = vec![
                 DependencyReference {
                     source: ReferenceSource::CratesIo,
@@ -3276,50 +2711,20 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             });
 
             let bytes = review.render().unwrap();
-            let expected = br#"review-format-version = 3
+            let expected = br#"review-format-version = 4
 source-tree-format-version = 1
 cargo-lock-format-version = 4
 resolver-version = 2
 
+[review-scope]
+packages = ["app"]
+features = ["app/extra"]
+all-features = false
+no-default-features = false
+
 [[context]]
 host = "x86_64-unknown-linux-gnu"
 target = "x86_64-unknown-motor"
-
-[[direct-registry]]
-alias = "a"
-package = "demo"
-requirement = "=1.0.0"
-kind = "build"
-optional = false
-default-features = true
-features = []
-
-[[direct-registry]]
-alias = "b"
-package = "demo"
-requirement = "=1.0.0"
-kind = "development"
-optional = false
-default-features = true
-features = []
-
-[[direct-registry]]
-alias = "c"
-package = "demo"
-requirement = "=1.0.0"
-kind = "normal"
-target = "cfg(unix)"
-optional = false
-default-features = true
-features = []
-
-[[root-feature]]
-name = "default"
-values = ["feature-a"]
-
-[[crates-io-patch]]
-alias = "patched"
-package = "demo"
 
 [[locked-registry]]
 name = "demo"
@@ -3366,17 +2771,23 @@ native-tools = ["archiver", "c-compiler"]
             assert_eq!(bytes, expected);
             assert_eq!(
                 sha256(&bytes),
-                "0d7e36ea7d42bce8a6058e9e101c1e969cdaf851aebe51fe6031d5160275ed84"
+                "bf7f482431fb470e05d678449ebb0895538a74c3ab957bee3be417ead45f6236"
             );
         }
 
         #[test]
         fn renders_and_hashes_empty_registry_review_golden() {
             let bytes = empty_review().render().unwrap();
-            let expected = b"review-format-version = 3\n\
+            let expected = b"review-format-version = 4\n\
 source-tree-format-version = 1\n\
 cargo-lock-format-version = 4\n\
 resolver-version = 2\n\
+\n\
+[review-scope]\n\
+packages = []\n\
+features = []\n\
+all-features = false\n\
+no-default-features = false\n\
 \n\
 [[context]]\n\
 host = \"x86_64-unknown-linux-gnu\"\n\
@@ -3384,7 +2795,7 @@ target = \"x86_64-unknown-motor\"\n";
             assert_eq!(bytes, expected);
             assert_eq!(
                 sha256(&bytes),
-                "d17025c2cce30fe1cca7048cebd939147b4b5ae0a6bd7394159ed95ab35d9f16"
+                "e71c1f4298aba2759f97d2a070ee64e86fbf4b1bae6461d8f165ecc4a7d3387a"
             );
         }
 
@@ -3439,6 +2850,7 @@ mod tests {
     use super::*;
     use crate::config::PolicyDefault;
     use crate::resolver::{FeatureContext, PackageSourceKey, ResolvedEdge, ResolvedPackage};
+    use crate::sparse::DependencyKind;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3472,7 +2884,7 @@ mod tests {
 
     fn state() -> CompactState {
         CompactState {
-            scope: None,
+            scope: ReviewScope::default(),
             review_sha256: "44".repeat(32),
             contexts: vec![context()],
             capabilities: vec![Capability {
@@ -3545,6 +2957,28 @@ mod tests {
         source.push_str("unknown = true\n");
         fs::write(CompactState::path(&fixture.0), source).unwrap();
         assert!(CompactState::load(&fixture.0).is_err());
+    }
+
+    #[test]
+    fn rejects_a_retired_format_3_record_but_lets_vendor_replace_it() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.0.join(".lorry")).unwrap();
+        fs::write(
+            CompactState::path(&fixture.0),
+            format!(
+                "format-version = 3\nreview-format-version = 3\nreview-sha256 = \"{}\"\n\n\
+                 [[context]]\nhost = \"x86_64-unknown-linux-gnu\"\ntarget = \"x86_64-unknown-motor\"\n",
+                "44".repeat(32)
+            ),
+        )
+        .unwrap();
+        let error = CompactState::load(&fixture.0).unwrap_err().render();
+        assert!(
+            error.contains("retired single-package review format 3"),
+            "{error}"
+        );
+        assert!(error.contains("run `lorry vendor --locked` again at the workspace root"));
+        assert_eq!(CompactState::load_replaceable(&fixture.0).unwrap(), None);
     }
 
     #[test]

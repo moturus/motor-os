@@ -142,7 +142,6 @@ mod tests {
         use crate::config::NativeToolRole;
         let checksum = "1".repeat(64);
         let mut previous = Review {
-            scope: Some(crate::admission_state::ReviewScope::default()),
             resolver_version: 2,
             contexts: vec![Context {
                 host: "host".to_owned(),

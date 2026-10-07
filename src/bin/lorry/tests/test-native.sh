@@ -619,8 +619,8 @@ PY
     remote_command "/system/bin/mkdir $REMOTE_ROOT/editor-evidence && $REMOTE_ROOT/editor-workspace $REMOTE_ROOT/lorry-native $REMOTE_ROOT $REMOTE_ROOT/editor-evidence $REMOTE_ROOT/editor-config.json"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
-    # The checked-in legacy record still covers ordinary commands; shared test
-    # planning requires an explicit workspace review without changing the lock.
+    # The committed record already reviews the whole workspace; an offline
+    # locked re-review must still succeed without changing the lock.
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native vendor --workspace --locked --offline --accept-all"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release -- --quiet"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release --bundle -- --quiet"

@@ -32,9 +32,6 @@ pub(crate) fn render(
     resolution: &Resolution,
 ) -> Result<Vec<u8>> {
     next.validate()?;
-    if next.scope.is_none() {
-        return Err(Error::failure("workspace review has no recorded scope"));
-    }
     let users = member_users(resolution);
     let mut output = Vec::new();
     write(&mut output, previous, previous_commitment, next, &users).map_err(|error| {
@@ -94,7 +91,7 @@ fn write(
             )?;
         }
     }
-    writeln!(output, "  {}", next.scope.as_ref().unwrap().description())?;
+    writeln!(output, "  {}", next.scope.description())?;
     writeln!(output, "  Contexts: {:?}", next.contexts)?;
     if let Some(previous) = previous
         && previous.contexts != next.contexts

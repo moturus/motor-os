@@ -492,7 +492,9 @@ scope as a whole. Plain vendor repeats the stored scope; operational flags
 do not reset it. `vendor --locked --workspace` restores the whole-workspace
 default scope. Unused local feature declarations do not invalidate approval.
 Legacy member records require explicit root review; only records replaced by
-the accepted scope are then removed.
+the accepted scope are then removed. A root record in the retired
+single-package review format 3 is rejected; workspace-root
+`lorry vendor --locked` replaces it with a new review.
 
 The offline, non-mutating `lorry review` command reconstructs the committed
 document, verifies its hash, and writes exact canonical TOML to stdout:

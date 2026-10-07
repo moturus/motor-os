@@ -33,12 +33,6 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             "run workspace-root `lorry vendor --locked` to review and migrate member records",
         )
     })?;
-    if compact.scope.is_none() && (workspace.virtual_root || workspace.packages.len() != 1) {
-        return Err(Error::failure(
-            "legacy admission must be migrated to workspace review format 4",
-        )
-        .with_help("run workspace-root `lorry vendor --locked` to review the workspace"));
-    }
     workspace.load_locked_context()?;
     let manifest = &workspace.packages[0];
     let mut config = Config::load_workspace(
@@ -58,7 +52,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         engine::repository_tree_limits(&config.policy.limits)?,
         config.policy.limits.max_package_bytes,
     )?;
-    let review = dependency::verify_compact_admission(
+    let review = dependency::workspace::admission::verify(
         &ReviewInputs {
             manifest,
             config: &config,
