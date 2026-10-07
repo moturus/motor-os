@@ -159,6 +159,7 @@ fn main() {
     tr::one_set(&root);
     tr::translation(&root);
     xargs::basic(&root);
+    xargs::batches(&root);
     echo::run_test(&root);
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox utility-tests: ALL PASS");

@@ -18,7 +18,7 @@ that Gears works with OpenRouter on Motor OS.
 | --- | --- |
 | First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
 | Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
-| Motor OS command utilities | Separate coding work remains: `xargs -d/-n/-I/-t`. Basic `xargs` and sysbox `echo` are implemented and core-gated; Rush's built-in echo remains unchanged. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Motor OS command utilities | Separate coding work remains: `xargs -I/-t`. Sysbox `echo` and `xargs -0/-d/-n/-r` are implemented and core-gated; Rush's built-in echo remains unchanged. These additions are not prerequisites for using the implemented Gears/batteries features. |
 | Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
 | Optional orchestration (10) | Implement supervised worker agents and their budgets. |
 | Optional web tools (11) | Implement web search and page extraction using curl. |
@@ -1452,5 +1452,30 @@ six final gates, which all use the corrected source.
 The final installed fixture and `full-test.sh` pass three times each in
 debug and release on unchanged source. Warnings-denied native Clippy passes.
 Gate logs: `/tmp/gears-sysbox-xargs-basic/final-gates-corrected/`. Authored crate changes are limited to sysbox;
+verified build-generated locks are restored and the user's existing sys lock
+is preserved.
+
+
+### S6 xargs delimiters and argument counts
+
+`xargs -d` accepts a literal or escaped single-byte delimiter without
+quote processing. `-n` limits arguments per invocation, including GNU-style
+leading whitespace and positive integer syntax. Full batches execute as soon
+as they are ready. Ordinary child failures allow later batches to run and
+return 123; exit 255 aborts with 124. Native regressions cover delimiter
+records, empty records, count boundaries, default echo batching and child
+failure behavior and the installed `/system/bin/xargs` wrapper.
+Installed-source host fixtures, 112 explicit-command GNU output/status
+comparisons and 36 default-command output/status/diagnostic comparisons pass.
+Three additional GNU boundary comparisons and native assertions verify the
+literal `-d=` delimiter, equivalent `--delimiter==`, and rejected `-n=2`.
+Review caught unconditional equals splitting in the new parser before OS
+gating; only long options now split on `=`. Original mismatches are preserved
+in `/tmp/gears-sysbox-xargs-batches/original-short-equals.log`. The correction
+is also carried into the following replacement patch.
+
+The final installed fixture and `full-test.sh` pass three times each in
+debug and release on unchanged source. Warnings-denied native Clippy passes.
+Gate logs: `/tmp/gears-sysbox-xargs-batches/final-gates/`. Authored crate changes are limited to sysbox;
 verified build-generated locks are restored and the user's existing sys lock
 is preserved.

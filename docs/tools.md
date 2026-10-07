@@ -100,9 +100,10 @@ The shell is somewhat barebones now (contributions are welcome!).
   Escapes include octal/hex bytes and `\c` to stop output. `POSIXLY_CORRECT`
   enables escapes and restricts option parsing. Rush retains its built-in echo;
   use `sysbox echo` or `/system/bin/echo` to select this implementation;
-- `xargs [-0r] [--] [COMMAND [ARG]...]` reads UTF-8 arguments and runs the
+- `xargs [-0r] [-d BYTE] [-n COUNT] [--] [COMMAND [ARG]...]` reads UTF-8 arguments and runs the
   command directly. Default input recognizes quotes and backslashes; `-0`
-  reads literal NUL-separated arguments. `-r` skips empty input. Batches are
+  reads literal NUL-separated arguments. `-d` uses a single-byte or escaped
+  delimiter without quoting; `-n` limits arguments per invocation. `-r` skips empty input. Batches are
   bounded to 128 KiB and children receive EOF on stdin. With no command it runs sysbox `echo`.
   Child failure statuses are 123 (ordinary failure), 124 (exit 255),
   125 (signal where reported), 126 (cannot execute) and 127 (not found);

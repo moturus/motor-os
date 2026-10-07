@@ -105,3 +105,87 @@ pub fn basic(root: &Path) {
     expect(output, 0, &bytes, b"");
     println!("sysbox utility-tests: xargs basic PASS");
 }
+
+pub fn batches(root: &Path) {
+    let executable = std::env::current_exe().unwrap();
+    let executable = executable.to_str().unwrap();
+    expect(run(root, &["xargs", "-n2"], b"a b c"), 0, b"a b\nc\n", b"");
+    #[cfg(target_os = "motor")]
+    {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("/system/bin/xargs")
+            .args(["-n2"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"a b c").unwrap();
+        expect(child.wait_with_output().unwrap(), 0, b"a b\nc\n", b"");
+    }
+    for (flags, input, output) in [
+        (
+            &["-n2"][..],
+            &b"a b c"[..],
+            &b"[\"a\", \"b\"]\n[\"c\"]\n"[..],
+        ),
+        (&["-d:", "-n2"], b"a b:'c':", b"[\"a b\", \"'c'\"]\n"),
+        (&["-d="], b"a=b=c", b"[\"a\", \"b\", \"c\"]\n"),
+        (&["--delimiter=="], b"a=b=c", b"[\"a\", \"b\", \"c\"]\n"),
+        (
+            &["--delimiter=\\n", "--max-args=1"],
+            b"a b\nx\n",
+            b"[\"a b\"]\n[\"x\"]\n",
+        ),
+        (&["-n", " \t+2"], b"a b c", b"[\"a\", \"b\"]\n[\"c\"]\n"),
+        (
+            &["-n99999999999999999999999999999999"],
+            b"a b",
+            b"[\"a\", \"b\"]\n",
+        ),
+    ] {
+        let args: Vec<_> = std::iter::once("xargs")
+            .chain(flags.iter().copied())
+            .chain([executable, "--probe", "args"])
+            .collect();
+        expect(run(root, &args, input), 0, output, b"");
+    }
+    expect(
+        run(
+            root,
+            &["xargs", "-n1", executable, "--probe", "status", "7"],
+            b"a b c",
+        ),
+        123,
+        b"ran\nran\nran\n",
+        b"",
+    );
+    expect(
+        run(
+            root,
+            &["xargs", "-n1", executable, "--probe", "status", "255"],
+            b"a b",
+        ),
+        124,
+        b"ran\n",
+        format!("xargs: {executable}: exited with status 255; aborting\n").as_bytes(),
+    );
+    expect(
+        run(root, &["xargs", "-n0", executable, "--probe", "args"], b""),
+        1,
+        b"",
+        b"xargs: max-args must be a positive integer\n",
+    );
+    expect(
+        run(
+            root,
+            &["xargs", "-n=2", executable, "--probe", "args"],
+            b"a b",
+        ),
+        1,
+        b"",
+        b"xargs: max-args must be a positive integer\n",
+    );
+    println!("sysbox utility-tests: xargs batches PASS");
+}

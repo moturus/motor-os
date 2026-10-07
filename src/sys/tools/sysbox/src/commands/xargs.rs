@@ -10,7 +10,58 @@ fn fail(message: &str) -> ! {
 #[derive(Default)]
 struct Options {
     delimiter: Option<u8>,
+    maximum: Option<usize>,
     empty: bool,
+}
+fn delimiter(text: &str) -> u8 {
+    let bytes = text.as_bytes();
+    if let [byte] = bytes {
+        return *byte;
+    }
+    if let [b'\\', byte] = bytes {
+        match byte {
+            b'a' => return 7,
+            b'b' => return 8,
+            b'f' => return 12,
+            b'n' => return 10,
+            b'r' => return 13,
+            b't' => return 9,
+            b'v' => return 11,
+            b'\\' => return b'\\',
+            _ => {}
+        }
+    }
+    if let Some(octal) = text
+        .strip_prefix('\\')
+        .filter(|s| s.len() <= 3 && !s.is_empty() && s.bytes().all(|b| (b'0'..=b'7').contains(&b)))
+    {
+        return u8::from_str_radix(octal, 8)
+            .unwrap_or_else(|_| fail("delimiter value is too large"));
+    }
+    if let Some(hex) = text
+        .strip_prefix("\\x")
+        .filter(|s| s.len() <= 2 && !s.is_empty())
+    {
+        return u8::from_str_radix(hex, 16)
+            .unwrap_or_else(|_| fail("invalid hexadecimal delimiter"));
+    }
+    fail("delimiter must be one byte or a backslash escape")
+}
+fn maximum(text: &str) -> usize {
+    let text = text.trim_start_matches(|character| matches!(character, ' ' | '\t'..='\r'));
+    let digits = text.strip_prefix('+').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        fail("max-args must be a positive integer");
+    }
+    let number = digits.bytes().fold(0usize, |number, digit| {
+        number
+            .saturating_mul(10)
+            .saturating_add((digit - b'0') as usize)
+    });
+    if number == 0 {
+        fail("max-args must be a positive integer");
+    }
+    number
 }
 fn parse(args: &[String]) -> (Options, Vec<String>) {
     let mut options = Options::default();
@@ -28,19 +79,46 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
             );
         }
         if argument == "--help" {
-            println!("usage: xargs [-0r] [COMMAND [ARG]...]\nRead UTF-8 arguments from stdin and run COMMAND directly.\nDefault input recognizes quotes and backslashes; -0 reads literal NUL-delimited arguments.\n-r skips empty input. With no command, run sysbox echo. Command lines are bounded to 128 KiB.");
+            println!("usage: xargs [-0r] [-d BYTE] [-n COUNT] [COMMAND [ARG]...]\nRead UTF-8 arguments from stdin and run COMMAND directly, without a shell.\nDefault input recognizes quotes and backslashes; -0/-d are literal.\n-n limits each batch; -r skips empty input. With no command, run sysbox echo.\nCommand lines are bounded to 128 KiB.");
             std::process::exit(0);
         }
-        let flags = match argument.as_str() {
-            "--null" => "0",
-            "--no-run-if-empty" => "r",
+        let (name, value) = if argument.starts_with("--") {
+            argument
+                .split_once('=')
+                .map_or((argument.as_str(), None), |(n, v)| (n, Some(v)))
+        } else {
+            (argument.as_str(), None)
+        };
+        let flags = match name {
+            "--null" if value.is_none() => "0",
+            "--no-run-if-empty" if value.is_none() => "r",
+            "--delimiter" => "d",
+            "--max-args" => "n",
             name if !name.starts_with("--") => &argument[1..],
             _ => fail(&format!("unsupported option '{argument}'")),
         };
-        for flag in flags.chars() {
+        for (position, flag) in flags.char_indices() {
             match flag {
                 '0' => options.delimiter = Some(0),
                 'r' => options.empty = true,
+                'd' | 'n' => {
+                    let rest = &flags[position + 1..];
+                    let value = value.unwrap_or_else(|| {
+                        if !rest.is_empty() {
+                            rest
+                        } else {
+                            arguments.next().unwrap_or_else(|| {
+                                fail(&format!("option requires an argument -- '{flag}'"))
+                            })
+                        }
+                    });
+                    if flag == 'd' {
+                        options.delimiter = Some(delimiter(value));
+                    } else {
+                        options.maximum = Some(maximum(value));
+                    }
+                    break;
+                }
                 _ => fail(&format!("unsupported option '{argument}'")),
             }
         }
@@ -114,6 +192,12 @@ pub fn do_command(args: &[String]) {
         }
         bytes += size;
         batch.push(argument);
+        if batch.len() - initial.len() == options.maximum.unwrap_or(usize::MAX) {
+            result = result.max(execute(&batch));
+            ran = true;
+            batch.truncate(initial.len());
+            bytes = base;
+        }
     });
     if batch.len() > initial.len() || (!ran && !options.empty) {
         result = result.max(execute(&batch));
