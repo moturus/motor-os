@@ -52,3 +52,25 @@ pub fn one_set(root: &Path) {
     expect(run(root, &["tr", "-d", ""], &input), 0, &input, b"");
     println!("sysbox utility-tests: tr one set PASS");
 }
+pub fn translation(root: &Path) {
+    for (args, input, output) in [
+        (
+            &["tr", "[:lower:]", "[:upper:]"][..],
+            &b"aZ\0\xffz"[..],
+            &b"AZ\0\xffZ"[..],
+        ),
+        (&["tr", "a-c", "XY"], b"abcab\n", b"XYYXY\n"),
+        (
+            &["tr", "-cs", "[:alnum:]", r"\n"],
+            b"a _!b\n\nC",
+            b"a\nb\nC",
+        ),
+        (&["tr", "-ds", "a", "b"], b"abbabbbc", b"bc"),
+        (&["tr", "", ""], b"abc", b"abc"),
+        (&["tr", "a", "abc[:lower:]"], b"aZ", b"aZ"),
+        (&["tr", "-c", "a", "[:upper:]abc"], b"\0\x01ab", b"ABac"),
+    ] {
+        expect(run(root, args, input), 0, output, b"");
+    }
+    println!("sysbox utility-tests: tr translation PASS");
+}

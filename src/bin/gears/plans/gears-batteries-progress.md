@@ -18,7 +18,7 @@ that Gears works with OpenRouter on Motor OS.
 | --- | --- |
 | First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
 | Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
-| Motor OS command utilities | Separate coding work remains: `tr` translation and `xargs`. `mkdir -p`, `sort`, `uniq`, `cut` and single-set `tr` filtering are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Motor OS command utilities | Separate coding work remains: `xargs`, awaiting the default-command choice: add sysbox `echo` (recommended), or require an explicit command. `mkdir -p`, `sort`, `uniq`, `cut` and `tr` are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
 | Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
 | Optional orchestration (10) | Implement supervised worker agents and their budgets. |
 | Optional web tools (11) | Implement web search and page extraction using curl. |
@@ -1374,3 +1374,35 @@ debug and release on unchanged source. Warnings-denied native Clippy passes.
 Gate logs: `/tmp/gears-sysbox-tr-one-set/final-gates/`. Authored crate changes are limited to sysbox;
 verified build-generated locks are restored and the user's existing sys lock
 is preserved.
+
+
+### S5 tr translation and two-set filtering
+
+`tr` now translates between two sets, pads a short destination with its
+last byte, and supports translation-plus-squeezing and deletion-plus-squeezing.
+Upper/lower classes and complement rules are validated before processing input.
+Regressions cover class conversion, padding, empty sets, binary translation,
+complemented sets and two-set filtering. The installed source passes 6,904 GNU
+output/status comparisons and 2,960 literal/class-boundary comparisons that
+also assert diagnostics. Prototype defects found by those comparisons were
+fixed before installing or gating the source.
+
+The final installed fixture and `full-test.sh` pass three times each in
+debug and release on unchanged source. Warnings-denied native Clippy passes.
+Gate logs: `/tmp/gears-sysbox-tr/final-gates/`. Authored crate changes are limited to sysbox;
+verified build-generated locks are restored and the user's existing sys lock
+is preserved.
+
+The final debug run logged one message from the existing virtio queue monitor
+at guest time 388:840. Inspection found no second report or monitor-triggered
+recovery. The monitor samples driver/device cursors without measuring the
+completion's age; one sample alone does not establish a persistent stall.
+The diagnostic, source inspection and original log are retained in
+`/tmp/gears-sysbox-tr/final-gates/virtio-monitor-note.md` and `full-debug-3.log`.
+No non-sysbox crate was modified and no tests were retried or weakened.
+
+S6 still needs a behavior choice: GNU xargs defaults to echo, but Motor OS
+currently supplies echo as a Rush builtin. To obey the direct-execution rule,
+add a small sysbox echo command (recommended), or require an explicit command.
+The choice was requested while the independent utility patches continued;
+no default policy or xargs implementation has been installed without an answer.

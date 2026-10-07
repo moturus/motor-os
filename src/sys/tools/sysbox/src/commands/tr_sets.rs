@@ -1,6 +1,7 @@
 //! Byte arrays, C-locale classes and ranges used by tr.
 pub struct Array {
     pub bytes: Vec<u8>,
+    pub classes: Vec<(usize, String)>,
 }
 fn class(name: &str, byte: u8) -> bool {
     match name {
@@ -61,7 +62,10 @@ fn byte(input: &[u8], position: &mut usize) -> u8 {
 impl Array {
     pub fn parse(text: &str) -> Self {
         let input = text.as_bytes();
-        let mut array = Self { bytes: Vec::new() };
+        let mut array = Self {
+            bytes: Vec::new(),
+            classes: Vec::new(),
+        };
         let mut position = 0;
         while position < input.len() {
             let rest = &input[position..];
@@ -73,6 +77,7 @@ impl Array {
                     }
                     let name = std::str::from_utf8(&rest[2..end])
                         .unwrap_or_else(|_| super::fail("invalid character class"));
+                    array.classes.push((array.bytes.len(), name.to_owned()));
                     array.bytes.extend((0..=255).filter(|b| class(name, *b)));
                     position += end + 2;
                     continue;

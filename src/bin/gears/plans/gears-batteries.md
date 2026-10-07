@@ -9,9 +9,9 @@ cutoff-based cleanup proposals with approval-only archival. Phase 9's manual
 multi-task evaluation command, frozen workspace/state copies, repeated arms and
 reports pass focused host/native fixtures and the release developer-image gate;
 the first real-model run is pending.
-Sysbox S1–S4 and S5 single-set filtering are complete and core-gated,
-including local sort-key modifiers.
-The utility track continues with `tr` translation and `xargs`.
+Sysbox S1–S5 are complete and core-gated, including local sort-key modifiers.
+The utility track continues with `xargs`. Its default-command choice is pending
+(see the remaining-work checklist).
 Design revised 2026-10-06. See the
 [remaining-work checklist](gears-batteries-progress.md#what-remains) for current
 status; that document also retains the implementation history. Two questions wait

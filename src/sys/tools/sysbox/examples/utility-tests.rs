@@ -147,6 +147,7 @@ fn main() {
     cut::bytes(&root);
     cut::fields(&root);
     tr::one_set(&root);
+    tr::translation(&root);
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox utility-tests: ALL PASS");
 }

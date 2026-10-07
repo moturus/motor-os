@@ -89,8 +89,10 @@ The shell is somewhat barebones now (contributions are welcome!).
   `-f LIST` selects fields, with TAB by default or a single-byte `-d` delimiter
   (empty `-d` means NUL). `-s` suppresses undelimited lines; otherwise they pass
   through. Selected fields retain their input order and delimiter;
-- `tr (-d | -s) [-c] [--] SET` streams bytes, deleting (`-d`) or squeezing
-  (`-s`) the selected set; `-c` complements it. Sets support byte ranges,
+- `tr [-dsc] [--] SET1 [SET2]` streams bytes, translating, deleting (`-d`)
+  or squeezing (`-s`); `-c` complements SET1. Two sets translate or combine
+  deletion/squeezing. Short destinations repeat their last byte; aligned
+  `[:lower:]/[:upper:]` pairs convert ASCII case. Sets support byte ranges,
   backslash/octal escapes and C-locale POSIX classes, including `[:space:]`.
   Repetition/equivalence constructs are refused;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
