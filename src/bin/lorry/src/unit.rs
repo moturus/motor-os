@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -9,7 +7,7 @@ use crate::hash::{Sha256, hex};
 use crate::identity::{
     CargoCompileMode, CargoCrateType, CargoDebugInfo, CargoPanicStrategy, CargoProfile,
     CargoProfileLto, CargoSource, CargoStrip, CargoTargetKind, CargoUnitIdentityInput,
-    CargoUnitLto, Identity, RootTargetKind, cargo_unit_identity, root_lto,
+    CargoUnitLto, Identity, cargo_unit_identity,
 };
 use crate::manifest::{
     DevProfile, Lto as ManifestLto, Manifest, ReleaseProfile, Target, TargetKind,
@@ -762,23 +760,6 @@ pub(crate) fn workspace_compiler_targets(
     Ok(graph)
 }
 
-pub(crate) fn workspace_check_units(
-    resolution: &Resolution,
-    manifests: &BTreeMap<PackageKey, Manifest>,
-    selected: &[PackageKey],
-    selection: &CheckTargetSelection<'_>,
-    options: &PlanOptions<'_>,
-) -> Result<UnitGraph> {
-    workspace_target_units(
-        resolution,
-        manifests,
-        selected,
-        selection,
-        options,
-        UnitMode::Check,
-    )
-}
-
 fn workspace_target_units(
     resolution: &Resolution,
     manifests: &BTreeMap<PackageKey, Manifest>,
@@ -968,26 +949,24 @@ fn workspace_target_units(
     Ok(graph)
 }
 
+/// Checks the selected library and, with `binaries`, its binaries.
+/// Without `normal`, nothing is selected.
 pub fn selected_check_units(
     resolution: &Resolution,
     manifests: &BTreeMap<PackageKey, Manifest>,
     selected: &Manifest,
-    selection: &CheckTargetSelection<'_>,
+    normal: bool,
+    binaries: bool,
+    binary_name: Option<&str>,
 ) -> Result<UnitGraph> {
     let package = selected_library_key(selected)?.package;
-    if selection.normal {
+    if normal {
         let mut graph = dependency_units(resolution, manifests)?;
         if selected.library.is_some() {
             add_selected_library(&mut graph, resolution, manifests, selected)?;
         }
-        if selection.binaries {
-            add_selected_binaries(
-                &mut graph,
-                resolution,
-                manifests,
-                selected,
-                selection.binary_name,
-            )?;
+        if binaries {
+            add_selected_binaries(&mut graph, resolution, manifests, selected, binary_name)?;
         }
         graph.with_selected_check_mode(&package)
     } else {
@@ -1366,45 +1345,42 @@ pub(crate) fn workspace_test_units(
     manifests: &BTreeMap<PackageKey, Manifest>,
     selected: &[PackageKey],
     options: &PlanOptions<'_>,
-    integration_name: Option<&str>,
 ) -> Result<UnitGraph> {
     let mut graph = workspace_harness_units(
         resolution,
         manifests,
         selected,
         options,
-        integration_name,
+        None,
         HarnessFilter::Tests,
     )?;
-    if integration_name.is_none() {
-        for (kind, tested, mode) in [
-            ("example", false, UnitMode::Build),
-            ("example", true, UnitMode::Test),
-            ("bench", true, UnitMode::Test),
-        ] {
-            if !selected.iter().any(|key| {
-                manifests[key]
-                    .targets
-                    .iter()
-                    .any(|target| target.kind.as_str() == kind && target.test == tested)
-            }) {
-                continue;
-            }
-            graph.merge(workspace_auxiliary_units(
-                resolution,
-                manifests,
-                selected,
-                options,
-                &AuxiliarySelection {
-                    kind,
-                    name: None,
-                    mode,
-                    tested: Some(tested),
-                    benched: None,
-                    test_profile: true,
-                },
-            )?)?;
+    for (kind, tested, mode) in [
+        ("example", false, UnitMode::Build),
+        ("example", true, UnitMode::Test),
+        ("bench", true, UnitMode::Test),
+    ] {
+        if !selected.iter().any(|key| {
+            manifests[key]
+                .targets
+                .iter()
+                .any(|target| target.kind.as_str() == kind && target.test == tested)
+        }) {
+            continue;
         }
+        graph.merge(workspace_auxiliary_units(
+            resolution,
+            manifests,
+            selected,
+            options,
+            &AuxiliarySelection {
+                kind,
+                name: None,
+                mode,
+                tested: Some(tested),
+                benched: None,
+                test_profile: true,
+            },
+        )?)?;
     }
     Ok(graph)
 }
@@ -1855,6 +1831,7 @@ fn library_unit_kind(manifest: &Manifest) -> UnitKind {
     }
 }
 
+#[cfg(test)]
 pub fn plan_dependency_units(
     graph: &UnitGraph,
     manifests: &BTreeMap<PackageKey, Manifest>,
@@ -2350,7 +2327,7 @@ fn library_lto(
         .iter()
         .all(|kind| matches!(kind.as_str(), "staticlib" | "cdylib"))
     {
-        root_lto(true, configured, RootTargetKind::Binary, false)
+        root_lto(configured)
     } else if types.iter().all(|kind| kind == "dylib") {
         CargoUnitLto::OnlyObject
     } else {
@@ -2485,9 +2462,8 @@ fn unit_lto(
     release: bool,
     configured: ManifestLto,
 ) -> CargoUnitLto<'static> {
-    let release = release || configured != ManifestLto::Default;
     if key.is_harness() {
-        return root_lto(release, configured, RootTargetKind::Binary, true);
+        return root_lto(configured);
     }
     if !library
         && matches!(
@@ -2495,8 +2471,9 @@ fn unit_lto(
             UnitKind::Binary | UnitKind::Example | UnitKind::Bench
         )
     {
-        return root_lto(release, configured, RootTargetKind::Binary, false);
+        return root_lto(configured);
     }
+    let release = release || configured != ManifestLto::Default;
     if !release || key.compile_kind == CompileKind::Host || !library {
         return CargoUnitLto::OnlyObject;
     }
@@ -2504,6 +2481,17 @@ fn unit_lto(
         ManifestLto::Default => CargoUnitLto::OnlyObject,
         ManifestLto::Off => CargoUnitLto::Off,
         ManifestLto::True | ManifestLto::Fat | ManifestLto::Thin => CargoUnitLto::OnlyBitcode,
+    }
+}
+
+/// Cargo's LTO mode for a linked root, which depends only on the profile setting.
+fn root_lto(configured: ManifestLto) -> CargoUnitLto<'static> {
+    match configured {
+        ManifestLto::True => CargoUnitLto::Run(None),
+        ManifestLto::Fat => CargoUnitLto::Run(Some("fat")),
+        ManifestLto::Thin => CargoUnitLto::Run(Some("thin")),
+        ManifestLto::Off => CargoUnitLto::Off,
+        ManifestLto::Default => CargoUnitLto::OnlyObject,
     }
 }
 
@@ -3384,7 +3372,7 @@ mod tests {
             ("all", "", "test", UnitMode::Test),
         ] {
             let graph = if kind == "default" {
-                workspace_test_units(&resolution, &manifests, &selected, &options, None)
+                workspace_test_units(&resolution, &manifests, &selected, &options)
             } else if kind == "all" {
                 workspace_compiler_targets(
                     &resolution,
@@ -3937,13 +3925,19 @@ mod tests {
             logical_target: None,
             rustflags: &[],
         };
+        let named_integration = |name| CheckTargetSelection {
+            integrations: true,
+            integration_name: Some(name),
+            ..CheckTargetSelection::default()
+        };
         assert!(
-            workspace_test_units(
+            workspace_target_units(
                 &resolution,
                 &manifests,
                 &selected,
+                &named_integration("missing"),
                 &options,
-                Some("missing")
+                UnitMode::Test,
             )
             .is_err()
         );
@@ -3991,34 +3985,36 @@ mod tests {
                 logical_target,
                 ..options
             };
-            let graph = if checking {
-                workspace_check_units(
+            let mode = if checking {
+                UnitMode::Check
+            } else {
+                UnitMode::Test
+            };
+            let graph = match integration_name {
+                Some(name) => workspace_target_units(
+                    &resolution,
+                    &manifests,
+                    &selected,
+                    &named_integration(name),
+                    &options,
+                    mode,
+                ),
+                None if checking => workspace_target_units(
                     &resolution,
                     &manifests,
                     &selected,
                     &CheckTargetSelection {
-                        normal: integration_name.is_none(),
+                        normal: true,
                         binaries: true,
-                        binary_name: None,
-                        harnesses: integration_name.is_none(),
+                        harnesses: true,
                         harness_filter: HarnessFilter::All,
                         integrations: true,
-                        integration_name,
-                        examples: false,
-                        example_name: None,
-                        benches: false,
-                        bench_name: None,
+                        ..CheckTargetSelection::default()
                     },
                     &options,
-                )
-            } else {
-                workspace_test_units(
-                    &resolution,
-                    &manifests,
-                    &selected,
-                    &options,
-                    integration_name,
-                )
+                    mode,
+                ),
+                None => workspace_test_units(&resolution, &manifests, &selected, &options),
             }
             .unwrap();
             let plan = plan_dependency_units(&graph, &manifests, &options).unwrap();

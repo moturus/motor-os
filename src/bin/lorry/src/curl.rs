@@ -182,8 +182,6 @@ pub struct Metadata {
 #[derive(Debug)]
 pub struct Download {
     body: ResponseBody,
-    pub diagnostic: Vec<u8>,
-    pub metadata: Metadata,
 }
 
 impl Download {
@@ -266,7 +264,7 @@ where
     let mut redirects = 0;
     loop {
         let (body, destination) = ResponseBody::create(staging_parent)?;
-        let (diagnostic, metadata) = transfer(&current.request_url, destination, max_body_bytes)?;
+        let (_, metadata) = transfer(&current.request_url, destination, max_body_bytes)?;
         let effective = HttpsUrl::parse(&metadata.effective_url).map_err(|error| {
             Error::failure(format!("curl reported an invalid effective URL: {error}"))
         })?;
@@ -285,11 +283,7 @@ where
                     "curl reported a redirect URL for successful HTTP status 200",
                 ));
             }
-            return Ok(Download {
-                body,
-                diagnostic,
-                metadata,
-            });
+            return Ok(Download { body });
         }
         if !matches!(metadata.status, 301 | 302 | 303 | 307 | 308) {
             return Err(Error::failure(format!(

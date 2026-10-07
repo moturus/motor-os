@@ -820,7 +820,6 @@ mod tests {
             package: "demo".to_owned(),
             previous: crate::git::parse_locked_source(&old_source).unwrap(),
             candidate: crate::git::parse_locked_source(&new_source).unwrap(),
-            needs_materialization: true,
             retargeted_tag: false,
         };
 

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -117,7 +115,6 @@ pub struct Admission {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageAdmission {
-    pub matching_allow_rules: Vec<String>,
     pub native_tools: BTreeSet<NativeToolRole>,
     pub caller_env: BTreeSet<String>,
 }
@@ -318,7 +315,6 @@ pub fn inspect(
         admitted.insert(
             package.key.clone(),
             PackageAdmission {
-                matching_allow_rules: allows.into_iter().cloned().collect(),
                 native_tools,
                 caller_env,
             },
@@ -1533,10 +1529,7 @@ mod tests {
         let pass = preflight(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, false))]);
         let admission = inspect(&pass, &resolution, &evidence).unwrap();
-        assert_eq!(
-            admission.packages[&package.key].matching_allow_rules,
-            ["allow-demo"]
-        );
+        assert!(admission.packages.contains_key(&package.key));
 
         policy.rules.insert(
             "deny-demo".to_owned(),

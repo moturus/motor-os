@@ -228,8 +228,7 @@ fn render_sites(output: &mut String, sites: &BTreeSet<Site>) {
 }
 
 struct TrustLock {
-    #[allow(dead_code)]
-    file: File,
+    _file: File,
 }
 
 impl TrustLock {
@@ -256,7 +255,7 @@ impl TrustLock {
                 store.display()
             ))
         })?;
-        Ok(Self { file })
+        Ok(Self { _file: file })
     }
 }
 

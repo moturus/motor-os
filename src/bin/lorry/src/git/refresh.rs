@@ -10,7 +10,6 @@ use crate::manifest::{GitDependency, GitSelector, Manifest, PatchSource};
 use crate::redirect::TrustPolicy;
 
 use super::LockedSource;
-use super::direct::object_root;
 use super::http::Remote;
 use super::materialize::gix_error;
 
@@ -20,7 +19,6 @@ pub(crate) struct PatchRefresh {
     pub(crate) package: String,
     pub(crate) previous: LockedSource,
     pub(crate) candidate: LockedSource,
-    pub(crate) needs_materialization: bool,
     pub(crate) retargeted_tag: bool,
 }
 
@@ -97,8 +95,6 @@ pub(crate) fn resolve_patch_refreshes(
         refreshes.push(PatchRefresh {
             alias,
             package,
-            needs_materialization: !object_root(&manifest.workspace_root, &candidate.cargo_source)
-                .exists(),
             retargeted_tag: changed && matches!(dependency.selector, GitSelector::Tag(_)),
             previous,
             candidate,

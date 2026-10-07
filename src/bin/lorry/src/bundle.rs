@@ -19,7 +19,6 @@ pub struct LayoutOptions<'a> {
     pub toolchain: &'a Toolchain,
     pub target: &'a TargetInfo,
     pub release: bool,
-    pub test_name: Option<&'a str>,
     pub build_inputs: &'a [u8; 32],
     pub source_limits: TreeLimits,
 }
@@ -98,7 +97,8 @@ impl Layout {
             digest.field(value.as_bytes());
         }
         digest.field(if options.release { "release" } else { "debug" }.as_bytes());
-        digest.field(options.test_name.unwrap_or("<all>").as_bytes());
+        // The former integration-test selector, kept so bundle IDs stay stable.
+        digest.field(b"<all>");
         digest.field(options.extraction_root.as_os_str().as_encoded_bytes());
         let id = hex(&digest.finish());
         let directory = options

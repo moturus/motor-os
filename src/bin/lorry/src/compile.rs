@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -558,11 +556,6 @@ fn profile_arguments(arguments: &mut Vec<OsString>, planned: &PlannedUnit, manif
     match profile.panic {
         CargoPanicStrategy::Unwind => {}
         CargoPanicStrategy::Abort => codegen(arguments, "panic=abort"),
-        CargoPanicStrategy::ImmediateAbort => {
-            codegen(arguments, "panic=immediate-abort");
-            push(arguments, "-Z");
-            push(arguments, "unstable-options");
-        }
     }
     match planned.settings.lto {
         CargoUnitLto::Run(None) => codegen(arguments, "lto"),

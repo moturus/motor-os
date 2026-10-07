@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -24,9 +22,9 @@ use crate::toolchain::Toolchain;
 pub(crate) mod workspace;
 
 use crate::unit::{
-    CheckTargetSelection, CompilationPlan, PlanOptions, SourceRemap, UnitGraph,
-    add_selected_binaries, add_selected_library, dependency_units,
-    plan_dependency_units_with_remaps, selected_check_units, selected_library_key,
+    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, add_selected_binaries,
+    add_selected_library, dependency_units, plan_dependency_units_with_remaps,
+    selected_check_units, selected_library_key,
 };
 
 #[derive(Debug)]
@@ -41,32 +39,11 @@ pub struct PreparedGraph {
 pub struct PreparedPackage {
     pub manifest: Manifest,
     pub evidence: PackageEvidence,
-    extracted: Option<ExtractedArchive>,
+    _extracted: Option<ExtractedArchive>,
     cargo_registry: bool,
 }
 
 impl PreparedGraph {
-    pub(crate) fn workspace_check_plan(
-        &self,
-        options: &PlanOptions<'_>,
-        selected: &[PackageKey],
-        selection: &CheckTargetSelection<'_>,
-    ) -> Result<CompilationPlan> {
-        let manifests = self
-            .packages
-            .iter()
-            .map(|(key, package)| (key.clone(), package.manifest.clone()))
-            .collect();
-        let graph = crate::unit::workspace_check_units(
-            &self.resolution,
-            &manifests,
-            selected,
-            selection,
-            options,
-        )?;
-        self.finish_plan(options, manifests, graph)
-    }
-
     pub(crate) fn workspace_compiler_targets(
         &self,
         options: &PlanOptions<'_>,
@@ -94,20 +71,14 @@ impl PreparedGraph {
         &self,
         options: &PlanOptions<'_>,
         selected: &[PackageKey],
-        integration_name: Option<&str>,
     ) -> Result<CompilationPlan> {
         let manifests = self
             .packages
             .iter()
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
-        let graph = crate::unit::workspace_test_units(
-            &self.resolution,
-            &manifests,
-            selected,
-            options,
-            integration_name,
-        )?;
+        let graph =
+            crate::unit::workspace_test_units(&self.resolution, &manifests, selected, options)?;
         self.finish_plan(options, manifests, graph)
     }
 
@@ -134,15 +105,6 @@ impl PreparedGraph {
             options.release || options.dev_profile.opt_level != "0",
         )?;
         self.finish_plan(options, manifests, graph)
-    }
-
-    pub fn dependency_units(&self) -> Result<UnitGraph> {
-        let manifests = self
-            .packages
-            .iter()
-            .map(|(key, package)| (key.clone(), package.manifest.clone()))
-            .collect();
-        dependency_units(&self.resolution, &manifests)
     }
 
     pub fn selected_targets_plan(
@@ -181,14 +143,23 @@ impl PreparedGraph {
         &self,
         options: &PlanOptions<'_>,
         selected: &Manifest,
-        selection: &CheckTargetSelection<'_>,
+        normal: bool,
+        binaries: bool,
+        binary_name: Option<&str>,
     ) -> Result<CompilationPlan> {
         let mut manifests = self
             .packages
             .iter()
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
-        let graph = selected_check_units(&self.resolution, &manifests, selected, selection)?;
+        let graph = selected_check_units(
+            &self.resolution,
+            &manifests,
+            selected,
+            normal,
+            binaries,
+            binary_name,
+        )?;
         let key = selected_library_key(selected)?;
         if manifests.insert(key.package, selected.clone()).is_some() {
             return Err(Error::failure(
@@ -334,10 +305,6 @@ impl PreparedGraph {
 impl PreparedPackage {
     pub fn source_root(&self) -> &Path {
         &self.manifest.root
-    }
-
-    pub fn is_ephemeral(&self) -> bool {
-        self.extracted.is_some()
     }
 }
 
@@ -664,7 +631,7 @@ fn prepare_resolution_packages(
             PreparedPackage {
                 manifest,
                 evidence,
-                extracted: None,
+                _extracted: None,
                 cargo_registry: false,
             },
         );
@@ -735,7 +702,7 @@ fn registry_package_evidence(
             Ok(PreparedPackage {
                 manifest: inspected_manifest,
                 evidence: package_evidence,
-                extracted,
+                _extracted: extracted,
                 cargo_registry: false,
             })
         }
@@ -760,7 +727,7 @@ fn registry_package_evidence(
             Ok(PreparedPackage {
                 manifest,
                 evidence,
-                extracted: None,
+                _extracted: None,
                 cargo_registry: true,
             })
         }
@@ -807,7 +774,7 @@ fn prepare_locked_with(
                 PreparedPackage {
                     manifest,
                     evidence,
-                    extracted: None,
+                    _extracted: None,
                     cargo_registry: false,
                 },
             );
@@ -847,7 +814,7 @@ fn prepare_locked_with(
                         PreparedPackage {
                             manifest: inspected_manifest,
                             evidence: package_evidence,
-                            extracted: None,
+                            _extracted: None,
                             cargo_registry: false,
                         }
                     }
@@ -890,7 +857,7 @@ mod tests {
     use crate::resolver::PackageSourceKey;
     use crate::source_tree::DEFAULT_LIMITS;
     use crate::toolchain::{CfgSet, Toolchain};
-    use crate::unit::{CheckTargetSelection, ProfileContext, UnitKind, UnitMode};
+    use crate::unit::{ProfileContext, UnitKind, UnitMode};
     use semver::Version;
     use serde_json::Value;
     use std::fs;
@@ -1075,7 +1042,6 @@ mod tests {
                 match unit.settings.profile.panic {
                     crate::identity::CargoPanicStrategy::Abort => "abort",
                     crate::identity::CargoPanicStrategy::Unwind => "unwind",
-                    _ => unreachable!(),
                 }
                 .to_owned(),
             )
@@ -1208,7 +1174,6 @@ mod tests {
         let (key, package) = graph.packages.first_key_value().unwrap();
         assert!(matches!(key.source, PackageSourceKey::Path(_)));
         assert_eq!(package.source_root(), fixture.0.join("local"));
-        assert!(!package.is_ephemeral());
         assert!(graph.admission.packages.contains_key(key));
         let options = PlanOptions {
             workspace_root: &manifest.root,
@@ -1225,15 +1190,7 @@ mod tests {
             .unwrap();
         assert!(plan.units.values().all(|unit| unit.source_remap.is_none()));
         let check_plan = graph
-            .selected_check_plan(
-                &options,
-                &manifest,
-                &CheckTargetSelection {
-                    normal: true,
-                    binaries: true,
-                    ..CheckTargetSelection::default()
-                },
-            )
+            .selected_check_plan(&options, &manifest, true, true, None)
             .unwrap();
         assert_check_graph_matches_cargo(&fixture.0, &check_plan, &[]);
 
@@ -1262,16 +1219,15 @@ mod tests {
             workspace::prepare_compilation(resolution, &config, source, &staging, &direct).unwrap();
         let library = selected_library_key(&manifest).unwrap();
         let focused = shared
-            .workspace_test_plan(
-                &options,
-                std::slice::from_ref(&library.package),
-                Some("integration"),
-            )
+            .workspace_test_plan(&options, std::slice::from_ref(&library.package))
             .unwrap();
         let integration = focused
             .units
             .keys()
-            .find(|key| key.kind == UnitKind::IntegrationHarness)
+            .find(|key| {
+                key.kind == UnitKind::IntegrationHarness
+                    && key.target.as_deref() == Some("integration")
+            })
             .unwrap();
         let manifests = shared
             .packages

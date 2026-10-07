@@ -25,17 +25,11 @@ pub struct Config {
     pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
     pub targets: BTreeMap<TargetSelector, TargetOptions>,
     pub cache: CacheConfig,
-    #[allow(dead_code)]
     pub repositories: Repositories,
-    #[allow(dead_code)]
     pub vendor: VendorConfig,
-    #[allow(dead_code)]
     pub network: NetworkConfig,
-    #[allow(dead_code)]
     pub test: TestConfig,
-    #[allow(dead_code)]
     pub native_tools: BTreeMap<(String, NativeToolRole), NativeTool>,
-    #[allow(dead_code)]
     pub policy: Policy,
     constraints: Vec<Constraint>,
 }
@@ -64,7 +58,6 @@ pub enum IncompatibleRustVersions {
     Fallback,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Repositories {
     pub system: Option<PathBuf>,
@@ -86,7 +79,6 @@ impl Default for Repositories {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VendorConfig {
     pub targets: Vec<String>,
@@ -105,7 +97,6 @@ impl Default for VendorConfig {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NetworkConfig {
     pub curl: Option<PathBuf>,
@@ -129,7 +120,6 @@ impl TestConfig {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum NativeToolRole {
     CCompiler,
@@ -137,7 +127,6 @@ pub enum NativeToolRole {
     CxxCompiler,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NativeTool {
     pub cpp_stdlib: Option<String>,
@@ -146,14 +135,12 @@ pub struct NativeTool {
     pub flags: Vec<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolicyDefault {
     Deny,
     Allow,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Policy {
     pub default: PolicyDefault,
@@ -173,7 +160,6 @@ impl Default for Policy {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyLimits {
     pub max_packages: u64,
@@ -212,14 +198,12 @@ impl Default for PolicyLimits {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolicyAction {
     Allow,
     Deny,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyRule {
     pub action: PolicyAction,

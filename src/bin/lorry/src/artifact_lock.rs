@@ -133,27 +133,22 @@ fn motor_boot_id() -> Result<u64> {
 }
 
 #[cfg(any(target_os = "motor", test))]
-fn motor_owner(record: &str) -> Result<(Option<u64>, u64)> {
+fn motor_owner(record: &str) -> Result<(u64, u64)> {
     let malformed = || Error::failure("Motor artifact owner record is malformed");
-    let value = record.strip_suffix('\n').ok_or_else(malformed)?;
-    let (boot_id, pid) = if let Some(value) = value.strip_prefix("2 ") {
-        let (boot, pid) = value.split_once(' ').ok_or_else(malformed)?;
-        if boot.len() != 16 || !boot.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(malformed());
-        }
-        let boot = u64::from_str_radix(boot, 16).map_err(|_| malformed())?;
-        if boot == 0 {
-            return Err(malformed());
-        }
-        (Some(boot), pid)
-    } else {
-        (None, value)
-    };
-    let pid = pid.parse::<u64>().map_err(|_| malformed())?;
-    if pid == 0 {
+    let value = record
+        .strip_suffix('\n')
+        .and_then(|value| value.strip_prefix("2 "))
+        .ok_or_else(malformed)?;
+    let (boot, pid) = value.split_once(' ').ok_or_else(malformed)?;
+    if boot.len() != 16 || !boot.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(malformed());
     }
-    Ok((boot_id, pid))
+    let boot = u64::from_str_radix(boot, 16).map_err(|_| malformed())?;
+    let pid = pid.parse::<u64>().map_err(|_| malformed())?;
+    if boot == 0 || pid == 0 {
+        return Err(malformed());
+    }
+    Ok((boot, pid))
 }
 
 #[cfg(target_os = "motor")]
@@ -171,11 +166,11 @@ fn wait_for_previous_owner(path: &Path, current_boot: u64) -> Result<()> {
     let record = fs::read_to_string(path)
         .map_err(|error| Error::failure(format!("failed to read Motor artifact owner: {error}")))?;
     let (boot_id, pid) = motor_owner(&record)?;
-    if boot_id.is_some_and(|boot| boot != current_boot) {
+    if boot_id != current_boot {
         return Ok(()); // A writer from another boot cannot still be running.
     }
     if pid == u64::from(std::process::id()) {
-        return Ok(()); // A stale record after a reboot reused our PID.
+        return Ok(()); // A stale record from this boot names our reused PID.
     }
 
     let started = Instant::now();
@@ -314,15 +309,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn motor_owner_records_distinguish_boots_and_preserve_legacy_pids() {
+    fn motor_owner_records_distinguish_boots() {
         assert_eq!(
             motor_owner("2 0123456789abcdef 240\n").unwrap(),
-            (Some(0x0123456789abcdef), 240)
+            (0x0123456789abcdef, 240)
         );
-        assert_eq!(motor_owner("240\n").unwrap(), (None, 240));
         for invalid in [
             "",
             "240",
+            "240\n",
             "0\n",
             "2 0000000000000000 240\n",
             "2 0123456789abcdef 0\n",

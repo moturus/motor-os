@@ -1731,7 +1731,7 @@ lock release removes that exact record. The kernel's nonzero `boot_random_id` is
 immutable within one boot. A record from a different boot cannot name a surviving
 writer and is replaced under the lock without interpreting its PID. For the same
 boot, the next command waits for that owner's child process records to disappear
-before changing artifacts. Legacy PID-only records retain that conservative wait.
+before changing artifacts.
 A missing kernel boot identity, malformed record, process-list error, or child
 still present after 30 seconds fails without changing artifacts. Older kernels
 leave `boot_random_id` zero; Lorry rejects that value.

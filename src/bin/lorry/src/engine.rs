@@ -16,9 +16,7 @@ use crate::repository::RepositorySet;
 use crate::resolver::{CompileKind, PackageKey, Resolution, TargetSelection};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
-use crate::unit::{
-    CheckTargetSelection, CompilationPlan, PlanOptions, UnitKey, UnitKind, selected_library_key,
-};
+use crate::unit::{CompilationPlan, PlanOptions, UnitKey, UnitKind, selected_library_key};
 use crate::validation::ValidationMode;
 use std::collections::BTreeMap;
 use std::env;
@@ -491,7 +489,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     rustflags: &rustflags,
                     release,
                     test: false,
-                    test_name: None,
                     color,
                     verbosity: cli.verbosity,
                     jobs,
@@ -527,7 +524,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 rustflags: &rustflags,
                 release,
                 test: false,
-                test_name: None,
                 color,
                 verbosity: cli.verbosity,
                 jobs,
@@ -561,7 +557,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     rustflags: &rustflags,
                     release,
                     test: false,
-                    test_name: None,
                     color,
                     verbosity: cli.verbosity,
                     jobs,
@@ -617,7 +612,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     rustflags: &rustflags,
                     release,
                     test: true,
-                    test_name: None,
                     color,
                     verbosity: cli.verbosity,
                     jobs,
@@ -731,7 +725,6 @@ struct Build<'a> {
     rustflags: &'a [String],
     release: bool,
     test: bool,
-    test_name: Option<&'a str>,
     color: bool,
     verbosity: Verbosity,
     jobs: usize,
@@ -1098,15 +1091,6 @@ fn build_inner(
     check: Option<&CheckOptions>,
     format: MessageFormat,
 ) -> Result<BuildOutcome> {
-    if let Some(name) = build.test_name
-        && !build
-            .members
-            .unwrap_or_else(|| std::slice::from_ref(build.manifest))
-            .iter()
-            .any(|member| member.target(TargetKind::Test, name).is_some())
-    {
-        return Err(unknown_integration_test(build.manifest, name));
-    }
     let target_root = build.target_root;
     let incremental = incremental_roots_in(&build, target_root);
     if if build.release {
@@ -1211,7 +1195,7 @@ fn build_inner(
     manifests.insert(selected_root.package.clone(), build.manifest.clone());
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
-    let completed_freshness_base = (check.is_none() && !build.test && build.members.is_none())
+    let completed_freshness_base = (check.is_none() && build.members.is_none())
         .then(|| freshness_base(&build, &prepared, &cargo))
         .transpose()?;
     if let Some(base) = completed_freshness_base {
@@ -1290,15 +1274,12 @@ fn build_inner(
             prepared.selected_check_plan(
                 &options,
                 build.manifest,
-                &CheckTargetSelection {
-                    normal: targets.selects_library() || targets.selects_binaries(),
-                    binaries: targets.selects_binaries(),
-                    binary_name: if targets.all_targets || targets.bins {
-                        None
-                    } else {
-                        targets.bin.first().map(String::as_str)
-                    },
-                    ..CheckTargetSelection::default()
+                targets.selects_library() || targets.selects_binaries(),
+                targets.selects_binaries(),
+                if targets.all_targets || targets.bins {
+                    None
+                } else {
+                    targets.bin.first().map(String::as_str)
                 },
             )
         }
@@ -1367,7 +1348,7 @@ fn build_inner(
                     crate::unit::UnitMode::Test,
                 )?
             } else {
-                prepared.workspace_test_plan(&options, &selected_packages, build.test_name)?
+                prepared.workspace_test_plan(&options, &selected_packages)?
             },
         )
     } else {
@@ -1425,7 +1406,6 @@ fn build_inner(
             toolchain: build.toolchain,
             target,
             release: build.release,
-            test_name: build.test_name,
             build_inputs: bundle_inputs
                 .as_ref()
                 .ok_or_else(|| Error::failure("bundle layout requires build inputs"))?,
@@ -1449,22 +1429,19 @@ fn build_inner(
         || build.target_selection.is_some_and(|targets| {
             targets.selects_tests() || targets.benches || !targets.bench.is_empty()
         }))
-        && (build.test_name.is_some()
-            || build
-                .members
-                .unwrap_or_else(|| std::slice::from_ref(build.manifest))
-                .iter()
-                .any(|member| {
-                    member.targets_of(TargetKind::Test).next().is_some()
-                        || member.targets_of(TargetKind::Bench).any(|target| {
-                            target.test
-                                || build.target_selection.is_some_and(|targets| {
-                                    targets.benches
-                                        || !targets.bench.is_empty()
-                                        || targets.all_targets
-                                })
-                        })
-                }));
+        && build
+            .members
+            .unwrap_or_else(|| std::slice::from_ref(build.manifest))
+            .iter()
+            .any(|member| {
+                member.targets_of(TargetKind::Test).next().is_some()
+                    || member.targets_of(TargetKind::Bench).any(|target| {
+                        target.test
+                            || build.target_selection.is_some_and(|targets| {
+                                targets.benches || !targets.bench.is_empty() || targets.all_targets
+                            })
+                    })
+            });
     let check_integration = check.is_some_and(|options| {
         (options.targets.selects_tests()
             || options.targets.benches
@@ -3593,7 +3570,6 @@ mod tests {
                     rustflags: &[],
                     release: false,
                     test: false,
-                    test_name: None,
                     color: false,
                     verbosity: Verbosity::Quiet,
                     jobs: 2,
@@ -4021,7 +3997,6 @@ mod tests {
                 rustflags: &[],
                 release: false,
                 test: false,
-                test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
                 jobs: 1,
@@ -4150,7 +4125,6 @@ mod tests {
             rustflags: &[],
             release: false,
             test: false,
-            test_name: None,
             color: false,
             verbosity: Verbosity::Quiet,
             jobs: 1,
@@ -4208,7 +4182,6 @@ mod tests {
                 rustflags: &[],
                 release: false,
                 test: false,
-                test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
                 jobs: 1,
@@ -4282,7 +4255,6 @@ mod tests {
             rustflags: &[],
             release: false,
             test: false,
-            test_name: None,
             color: false,
             verbosity: Verbosity::Quiet,
             jobs: 1,
@@ -4330,7 +4302,6 @@ mod tests {
             rustflags: &[],
             release: false,
             test: false,
-            test_name: None,
             color: false,
             verbosity: Verbosity::Quiet,
             jobs: 1,
@@ -4402,7 +4373,6 @@ mod tests {
                 rustflags: &[],
                 release: false,
                 test: false,
-                test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
                 jobs: 1,
@@ -4507,7 +4477,6 @@ mod tests {
                     rustflags: &[],
                     release: false,
                     test: false,
-                    test_name: None,
                     color: false,
                     verbosity: Verbosity::Quiet,
                     jobs,
@@ -4674,7 +4643,6 @@ mod tests {
                 rustflags: &[],
                 release: false,
                 test: true,
-                test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
                 jobs: 1,
@@ -4781,7 +4749,6 @@ mod tests {
                 rustflags: &[],
                 release: false,
                 test: true,
-                test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
                 jobs: 1,
@@ -4933,7 +4900,6 @@ mod tests {
                 rustflags: &[],
                 release: false,
                 test: true,
-                test_name: None,
                 color: false,
                 verbosity: Verbosity::Quiet,
                 jobs: 1,

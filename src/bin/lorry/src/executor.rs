@@ -1420,7 +1420,6 @@ mod tests {
             packages: BTreeMap::from([(
                 key,
                 PackageAdmission {
-                    matching_allow_rules: Vec::new(),
                     native_tools: BTreeSet::new(),
                     caller_env: Default::default(),
                 },

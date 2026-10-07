@@ -225,7 +225,6 @@ mod tests {
                     packages: BTreeMap::from([(
                         key,
                         crate::policy::PackageAdmission {
-                            matching_allow_rules: vec![],
                             caller_env: ["EMPTY".into(), "PUBLIC".into()].into(),
                             native_tools: [NativeToolRole::CCompiler, NativeToolRole::Archiver]
                                 .into(),

@@ -16,7 +16,6 @@ mod clippy;
 mod compatibility;
 mod compile;
 mod config;
-#[allow(dead_code)]
 mod curl;
 mod dependency;
 mod diagnostic;
@@ -39,7 +38,6 @@ mod policy;
 mod process;
 mod progress;
 mod prompt;
-#[allow(dead_code)]
 mod redirect;
 mod repository;
 mod resolver;

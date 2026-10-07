@@ -35,11 +35,9 @@ pub struct Manifest {
     pub path: PathBuf,
     pub warnings: Vec<String>,
     pub name: String,
-    pub crate_name: String,
     pub version: Version,
     pub edition: Edition,
     pub metadata: PackageMetadata,
-    pub workspace_metadata: serde_json::Value,
     pub default_run: Option<String>,
     pub dev: DevProfile,
     pub release: ReleaseProfile,
@@ -48,26 +46,18 @@ pub struct Manifest {
     profile_errors: BTreeMap<String, Error>,
     /// Dependencies drop unresolved explicit targets; members reject them.
     unresolved_target: Option<Error>,
-    #[allow(dead_code)]
     pub resolver: Resolver,
     pub links: Option<String>,
-    #[allow(dead_code)]
     pub build_script: Option<PathBuf>,
-    #[allow(dead_code)]
     pub library: Option<LibraryTarget>,
     /// Non-library targets, ordered by kind and then by name.
     pub targets: Vec<Target>,
-    #[allow(dead_code)]
     pub dependencies: Vec<Dependency>,
-    #[allow(dead_code)]
     pub features: BTreeMap<String, Vec<String>>,
-    #[allow(dead_code)]
     pub patches: Vec<Patch>,
-    #[allow(dead_code)]
     pub rust_lints: BTreeMap<String, Lint>,
     pub clippy_lints: BTreeMap<String, Lint>,
     pub rustdoc_lints: BTreeMap<String, Lint>,
-    #[allow(dead_code)]
     pub lock: Option<Lockfile>,
 }
 
@@ -191,7 +181,6 @@ impl Default for ReleaseProfile {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LibraryTarget {
     pub name: String,
@@ -222,7 +211,6 @@ impl LibraryTarget {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dependency {
     pub alias: String,
@@ -240,7 +228,6 @@ pub struct Dependency {
     pub kind: DependencyKind,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DependencySource {
     CratesIo,
@@ -262,7 +249,6 @@ pub enum GitSelector {
     Revision(String),
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Patch {
     pub alias: String,
@@ -276,7 +262,6 @@ pub enum PatchSource {
     Git(GitDependency),
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Lint {
     pub level: String,
@@ -284,7 +269,6 @@ pub struct Lint {
     pub check_cfg: Vec<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Lockfile {
     pub format: crate::lockfile::Format,
@@ -298,7 +282,6 @@ impl Lockfile {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LockedPackage {
     pub name: String,
@@ -651,14 +634,10 @@ impl Manifest {
             workspace_members: std::iter::once((name.clone(), root.to_path_buf())).collect(),
             path: path.to_path_buf(),
             warnings,
-            crate_name: name.replace('-', "_"),
             name,
             version,
             edition,
             metadata,
-            workspace_metadata: workspace_metadata(
-                inherited.map_or(document, |values| &values.document),
-            ),
             default_run: optional_string(path, document, package, "package", "default-run")?,
             dev,
             release,
@@ -2949,7 +2928,6 @@ codegen-units = 1
     fn parses_dependency_free_manifest_compatibly() {
         let manifest = parsed(RED).unwrap();
         assert_eq!(manifest.name, "red");
-        assert_eq!(manifest.crate_name, "red");
         assert_eq!(manifest.edition, Edition::E2024);
         assert_eq!(manifest.resolver, Resolver::V3);
         assert_eq!(manifest.metadata.authors, ["A", "B"]);

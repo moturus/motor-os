@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
@@ -7,9 +5,6 @@ use std::process::Command;
 #[cfg(not(target_os = "motor"))]
 use crate::diagnostic::Error;
 use crate::diagnostic::Result;
-
-/// The versioned observable build-script isolation contract.
-pub const CONTRACT_VERSION: &str = "lorry-build-script-sandbox-v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NetworkAccess {
@@ -45,10 +40,6 @@ pub struct Policy {
 /// and child-executable restrictions.
 pub trait Sandbox {
     fn apply(&self, command: &mut Command, policy: &Policy) -> Result<()>;
-
-    fn contract_version(&self) -> &'static str {
-        CONTRACT_VERSION
-    }
 }
 
 pub fn platform() -> impl Sandbox {

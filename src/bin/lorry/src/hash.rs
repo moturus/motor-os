@@ -128,7 +128,6 @@ pub fn hex(bytes: &[u8]) -> String {
     output
 }
 
-#[allow(dead_code)]
 pub fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
     if value.len() != N * 2
         || !value

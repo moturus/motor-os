@@ -141,7 +141,6 @@ pub use review::{Capability, CompactState, Context, Review, ReviewScope, UnitKin
 #[cfg(test)]
 pub use review::{ContextRegistry, LockedRegistry, RegistrySource};
 
-#[allow(dead_code)]
 mod review {
     use super::*;
 
@@ -425,6 +424,7 @@ mod review {
             Ok(Some((path, document)))
         }
 
+        #[cfg(test)]
         pub fn parse(path: &Path, source: String) -> Result<Self> {
             let document = Document::parse(path, "Lorry compact dependency state", source)?;
             Self::from_document(path, &document)

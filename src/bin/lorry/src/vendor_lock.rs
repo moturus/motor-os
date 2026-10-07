@@ -11,8 +11,7 @@ const LOCK_NAME: &str = ".vendor.lock";
 /// including when a vendor transaction returns early.
 #[derive(Debug)]
 pub struct ProjectVendorLock {
-    #[allow(dead_code)]
-    file: File,
+    _file: File,
     path: PathBuf,
 }
 
@@ -46,7 +45,7 @@ impl ProjectVendorLock {
             ))
         })?;
         verify_open_file(&file, &path)?;
-        Ok(Self { file, path })
+        Ok(Self { _file: file, path })
     }
 
     pub fn path(&self) -> &Path {

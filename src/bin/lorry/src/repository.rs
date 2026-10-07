@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -415,10 +413,6 @@ impl RepositoryWriter {
             keep_artifacts: repositories.keep_artifacts,
             keep_sources: repositories.keep_sources,
         })
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     pub fn begin(self) -> Result<RepositoryTransaction> {
@@ -1530,36 +1524,6 @@ fn require_bool(path: &Path, document: &Document, table: &Table, key: &str) -> R
     })
 }
 
-fn require_string_array(
-    path: &Path,
-    document: &Document,
-    table: &Table,
-    key: &str,
-) -> Result<Vec<String>> {
-    let item = require_item(path, table, key)?;
-    let array = item.as_array().ok_or_else(|| {
-        field_error(
-            path,
-            document,
-            item,
-            format!("repository metadata `{key}` must be an array of strings"),
-        )
-    })?;
-    array
-        .iter()
-        .map(|value| {
-            value.as_str().map(str::to_owned).ok_or_else(|| {
-                field_error(
-                    path,
-                    document,
-                    item,
-                    format!("repository metadata `{key}` must contain only strings"),
-                )
-            })
-        })
-        .collect()
-}
-
 fn require_digest(path: &Path, document: &Document, table: &Table, key: &str) -> Result<[u8; 32]> {
     let item = require_item(path, table, key)?;
     let value = item.as_str().ok_or_else(|| {
@@ -1578,36 +1542,6 @@ fn require_digest(path: &Path, document: &Document, table: &Table, key: &str) ->
             format!("invalid repository metadata `{key}`: {error}"),
         )
     })
-}
-
-fn require_hex_string(
-    path: &Path,
-    document: &Document,
-    key: &str,
-    digits: usize,
-) -> Result<String> {
-    let item = require_item(path, document.root(), key)?;
-    let value = item.as_str().ok_or_else(|| {
-        field_error(
-            path,
-            document,
-            item,
-            format!("repository metadata `{key}` must be hexadecimal"),
-        )
-    })?;
-    if value.len() != digits
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(field_error(
-            path,
-            document,
-            item,
-            format!("repository metadata `{key}` must be {digits} lowercase hexadecimal digits"),
-        ));
-    }
-    Ok(value.to_owned())
 }
 
 fn parse_version(path: &Path, document: &Document, table: &Table, key: &str) -> Result<Version> {
@@ -1878,7 +1812,7 @@ mod tests {
             archive_limits(),
         )
         .unwrap();
-        assert_eq!(writer.root(), local);
+        assert_eq!(writer.root, local);
         verify_repository_header(&local).unwrap();
         for relative in ["objects/crates-io/sha256", ".staging"] {
             assert!(local.join(relative).is_dir());

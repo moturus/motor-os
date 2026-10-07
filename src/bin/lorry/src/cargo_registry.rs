@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -40,10 +38,6 @@ pub struct Package {
 }
 
 impl CargoRegistry {
-    pub fn discover(staging_parent: &Path, limits: &PolicyLimits) -> Result<Self> {
-        Self::discover_with_validation(staging_parent, limits, ValidationMode::Strict, None)
-    }
-
     pub fn discover_with_validation(
         staging_parent: &Path,
         limits: &PolicyLimits,
@@ -72,10 +66,6 @@ impl CargoRegistry {
                 .join(home)
         };
         Self::open_with_validation(&home, staging_parent, limits, validation, evidence_root)
-    }
-
-    pub fn open(home: &Path, staging_parent: &Path, limits: &PolicyLimits) -> Result<Self> {
-        Self::open_with_validation(home, staging_parent, limits, ValidationMode::Strict, None)
     }
 
     pub fn open_with_validation(

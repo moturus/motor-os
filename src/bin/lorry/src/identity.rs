@@ -1,7 +1,5 @@
-#![allow(dead_code)]
-
 use crate::hash::StableHasher;
-use crate::manifest::{Lto as ManifestLto, ReleaseProfile, Strip as ManifestStrip, Version};
+use crate::manifest::{Strip as ManifestStrip, Version};
 use crate::toolchain::Toolchain;
 use std::hash::{Hash, Hasher};
 
@@ -11,71 +9,6 @@ pub struct Identity {
     pub extra_filename: String,
     metadata_value: u64,
     unit_id_value: u64,
-}
-
-pub struct IdentityInput<'a> {
-    pub package_name: &'a str,
-    pub version: &'a Version,
-    pub source_path: &'a str,
-    pub target_name: &'a str,
-    pub target_kind: RootTargetKind,
-    pub features: &'a [String],
-    pub release: bool,
-    pub test: bool,
-    pub test_profile: bool,
-    pub panic_abort: bool,
-    /// Cargo's logical compile kind. Native Motor uses an explicit logical
-    /// target here even when rustc itself is invoked without `--target`.
-    pub logical_target: Option<&'a str>,
-    pub release_profile: &'a ReleaseProfile,
-    pub rustc: &'a Toolchain,
-    pub rustflags: &'a [String],
-    pub dependencies: &'a [Identity],
-}
-
-pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
-    let profile = stage_one_profile(input);
-    cargo_unit_identity(&CargoUnitIdentityInput {
-        package_name: input.package_name,
-        version: input.version,
-        source: CargoSource::Path(input.source_path),
-        features: input.features,
-        profile: &profile,
-        mode: if input.test {
-            CargoCompileMode::Test
-        } else {
-            CargoCompileMode::Build
-        },
-        lto: root_lto(
-            input.release,
-            if input.release {
-                input.release_profile.lto
-            } else {
-                ManifestLto::Default
-            },
-            input.target_kind,
-            input.test,
-        ),
-        logical_target: input.logical_target,
-        target_name: input.target_name,
-        target_kind: match input.target_kind {
-            RootTargetKind::Library => CargoTargetKind::Lib(vec![CargoCrateType::Lib]),
-            RootTargetKind::Binary => CargoTargetKind::Bin,
-            RootTargetKind::IntegrationTest => CargoTargetKind::Test,
-        },
-        rustc: input.rustc,
-        rustflags: input.rustflags,
-        extra_arguments: &[],
-        dependencies: input.dependencies,
-        host_configuration_differs: None,
-    })
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RootTargetKind {
-    Library,
-    Binary,
-    IntegrationTest,
 }
 
 pub struct CargoUnitIdentityInput<'a> {
@@ -113,9 +46,14 @@ pub enum CargoSource<'a> {
 pub enum CargoCompileMode {
     Test,
     Build,
-    Check { test: bool },
+    Check {
+        test: bool,
+    },
+    #[expect(dead_code, reason = "keeps Cargo's derived-Hash discriminants")]
     Doc,
+    #[expect(dead_code, reason = "keeps Cargo's derived-Hash discriminants")]
     Doctest,
+    #[expect(dead_code, reason = "keeps Cargo's derived-Hash discriminants")]
     Docscrape,
     RunCustomBuild,
 }
@@ -133,6 +71,7 @@ pub enum CargoTargetKind<'a> {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CargoCrateType<'a> {
+    #[expect(dead_code, reason = "keeps Cargo's derived-Hash discriminants")]
     Bin,
     Lib,
     Rlib,
@@ -163,7 +102,6 @@ pub enum CargoDebugInfo {
 pub enum CargoPanicStrategy {
     Unwind,
     Abort,
-    ImmediateAbort,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -279,54 +217,6 @@ pub fn cargo_unit_identity(input: &CargoUnitIdentityInput<'_>) -> Identity {
     }
 }
 
-fn stage_one_profile<'a>(input: &'a IdentityInput<'a>) -> CargoProfile<'a> {
-    let release = input.release;
-    if release {
-        CargoProfile {
-            opt_level: input.release_profile.opt_level,
-            lto: manifest_profile_lto(input.release_profile.lto),
-            codegen_backend: None,
-            codegen_units: input.release_profile.codegen_units,
-            debuginfo: input.release_profile.debug.unwrap_or(CargoDebugInfo::None),
-            split_debuginfo: None,
-            debug_assertions: input.release_profile.debug_assertions,
-            overflow_checks: input.release_profile.overflow_checks,
-            rpath: false,
-            incremental: input.release_profile.incremental,
-            panic: if input.test_profile || !input.panic_abort {
-                CargoPanicStrategy::Unwind
-            } else {
-                CargoPanicStrategy::Abort
-            },
-            strip: manifest_strip(
-                input.release_profile.strip,
-                input.release_profile.debug.unwrap_or(CargoDebugInfo::None),
-            ),
-            rustflags: &[],
-        }
-    } else {
-        CargoProfile {
-            opt_level: "0",
-            lto: CargoProfileLto::Bool(false),
-            codegen_backend: None,
-            codegen_units: None,
-            debuginfo: CargoDebugInfo::Full,
-            split_debuginfo: None,
-            debug_assertions: true,
-            overflow_checks: true,
-            rpath: false,
-            incremental: true,
-            panic: if input.test_profile || !input.panic_abort {
-                CargoPanicStrategy::Unwind
-            } else {
-                CargoPanicStrategy::Abort
-            },
-            strip: CargoStrip::None,
-            rustflags: &[],
-        }
-    }
-}
-
 fn hash_profile(profile: &CargoProfile<'_>, hasher: &mut StableHasher) {
     profile.opt_level.hash(hasher);
     profile.lto.hash(hasher);
@@ -343,16 +233,6 @@ fn hash_profile(profile: &CargoProfile<'_>, hasher: &mut StableHasher) {
     Option::<&str>::None.hash(hasher);
 }
 
-fn manifest_profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
-    match lto {
-        ManifestLto::Default => CargoProfileLto::Bool(false),
-        ManifestLto::True => CargoProfileLto::Bool(true),
-        ManifestLto::Fat => CargoProfileLto::Named("fat"),
-        ManifestLto::Thin => CargoProfileLto::Named("thin"),
-        ManifestLto::Off => CargoProfileLto::Off,
-    }
-}
-
 pub(crate) fn manifest_strip(strip: ManifestStrip, debug: CargoDebugInfo) -> CargoStrip<'static> {
     match strip {
         ManifestStrip::Default if debug != CargoDebugInfo::None => CargoStrip::None,
@@ -360,39 +240,6 @@ pub(crate) fn manifest_strip(strip: ManifestStrip, debug: CargoDebugInfo) -> Car
         ManifestStrip::None => CargoStrip::None,
         ManifestStrip::Debuginfo => CargoStrip::Named("debuginfo"),
         ManifestStrip::Symbols => CargoStrip::Named("symbols"),
-    }
-}
-
-pub fn root_lto(
-    release: bool,
-    profile_lto: ManifestLto,
-    target_kind: RootTargetKind,
-    test: bool,
-) -> CargoUnitLto<'static> {
-    let release = release || profile_lto != ManifestLto::Default;
-    if target_kind == RootTargetKind::Library && !test {
-        return if release {
-            match profile_lto {
-                ManifestLto::True | ManifestLto::Fat | ManifestLto::Thin => {
-                    CargoUnitLto::OnlyBitcode
-                }
-                ManifestLto::Off => CargoUnitLto::Off,
-                ManifestLto::Default => CargoUnitLto::OnlyObject,
-            }
-        } else {
-            CargoUnitLto::OnlyObject
-        };
-    }
-    if release {
-        match profile_lto {
-            ManifestLto::True => CargoUnitLto::Run(None),
-            ManifestLto::Fat => CargoUnitLto::Run(Some("fat")),
-            ManifestLto::Thin => CargoUnitLto::Run(Some("thin")),
-            ManifestLto::Off => CargoUnitLto::Off,
-            ManifestLto::Default => CargoUnitLto::OnlyObject,
-        }
-    } else {
-        CargoUnitLto::OnlyObject
     }
 }
 
@@ -435,15 +282,11 @@ fn has_remap_path_prefix(arguments: &[String]) -> bool {
     })
 }
 
-#[allow(dead_code)]
 #[derive(Hash)]
 enum SourceKind {
     Git(String),
     Path,
     Registry,
-    SparseRegistry,
-    LocalRegistry,
-    Directory,
 }
 
 #[cfg(test)]
@@ -473,16 +316,6 @@ mod tests {
             extra_filename: extra_filename.to_owned(),
             metadata_value: u64::from_str_radix(metadata, 16).unwrap(),
             unit_id_value: u64::from_str_radix(extra_filename.trim_start_matches('-'), 16).unwrap(),
-        }
-    }
-
-    fn profile() -> ReleaseProfile {
-        ReleaseProfile {
-            panic_abort: true,
-            lto: ManifestLto::Fat,
-            strip: ManifestStrip::Symbols,
-            codegen_units: Some(1),
-            ..ReleaseProfile::default()
         }
     }
 
@@ -604,10 +437,66 @@ mod tests {
         })
     }
 
+    fn dev_profile<'a>() -> CargoProfile<'a> {
+        CargoProfile {
+            opt_level: "0",
+            lto: CargoProfileLto::Bool(false),
+            codegen_backend: None,
+            codegen_units: None,
+            debuginfo: CargoDebugInfo::Full,
+            split_debuginfo: None,
+            debug_assertions: true,
+            overflow_checks: true,
+            rpath: false,
+            incremental: true,
+            panic: CargoPanicStrategy::Unwind,
+            strip: CargoStrip::None,
+            rustflags: &[],
+        }
+    }
+
+    // The release profile as Cargo applies it to test-profile units.
+    fn release_test_profile<'a>() -> CargoProfile<'a> {
+        CargoProfile {
+            panic: CargoPanicStrategy::Unwind,
+            ..release_profile()
+        }
+    }
+
+    // A fat-LTO binary build of a root package at the workspace root.
+    fn root_unit<'a>(
+        version: &'a Version,
+        package_name: &'a str,
+        target_name: &'a str,
+        profile: &'a CargoProfile<'a>,
+        rustc: &'a Toolchain,
+    ) -> CargoUnitIdentityInput<'a> {
+        CargoUnitIdentityInput {
+            package_name,
+            version,
+            source: CargoSource::Path(""),
+            features: &[],
+            profile,
+            mode: CargoCompileMode::Build,
+            lto: CargoUnitLto::Run(Some("fat")),
+            logical_target: None,
+            target_name,
+            target_kind: CargoTargetKind::Bin,
+            rustc,
+            rustflags: &[],
+            extra_arguments: &[],
+            dependencies: &[],
+            host_configuration_differs: None,
+        }
+    }
+
+    fn library() -> CargoTargetKind<'static> {
+        CargoTargetKind::Lib(vec![CargoCrateType::Lib])
+    }
+
     #[test]
-    fn matches_all_stage_one_cargo_oracle_identities() {
+    fn matches_root_binary_cargo_oracle_identities() {
         let version = version();
-        let profile = profile();
         let native = native_toolchain();
         let motor = motor_toolchain();
         for (release, test, toolchain, target, metadata, extra) in [
@@ -676,22 +565,24 @@ mod tests {
                 "-d6ce5b974d464d9b",
             ),
         ] {
-            let identity = cargo_identity(&IdentityInput {
-                package_name: "red",
-                version: &version,
-                source_path: "",
-                target_name: "red",
-                target_kind: RootTargetKind::Binary,
-                features: &[],
-                release,
-                test,
-                test_profile: test,
-                panic_abort: release && profile.panic_abort,
+            let profile = match (release, test) {
+                (false, _) => dev_profile(),
+                (true, false) => release_profile(),
+                (true, true) => release_test_profile(),
+            };
+            let identity = cargo_unit_identity(&CargoUnitIdentityInput {
+                mode: if test {
+                    CargoCompileMode::Test
+                } else {
+                    CargoCompileMode::Build
+                },
+                lto: if release {
+                    CargoUnitLto::Run(Some("fat"))
+                } else {
+                    CargoUnitLto::OnlyObject
+                },
                 logical_target: target,
-                release_profile: &profile,
-                rustc: toolchain,
-                rustflags: &[],
-                dependencies: &[],
+                ..root_unit(&version, "red", "red", &profile, toolchain)
             });
             assert_eq!(
                 identity.metadata, metadata,
@@ -717,24 +608,16 @@ mod tests {
             "host: x86_64-unknown-linux-gnu",
             "host: x86_64-unknown-motor",
         );
+        let version = version();
+        let profile = release_profile();
         let identity = |rustc: &Toolchain| {
-            cargo_identity(&IdentityInput {
-                package_name: "host-build-helper",
-                version: &version(),
-                source_path: "",
-                target_name: "host_build_helper",
-                target_kind: RootTargetKind::Binary,
-                features: &[],
-                release: true,
-                test: false,
-                test_profile: false,
-                panic_abort: true,
-                logical_target: None,
-                release_profile: &profile(),
+            cargo_unit_identity(&root_unit(
+                &version,
+                "host-build-helper",
+                "host_build_helper",
+                &profile,
                 rustc,
-                rustflags: &[],
-                dependencies: &[],
-            })
+            ))
         };
 
         assert_eq!(identity(&linux), identity(&motor));
@@ -748,44 +631,20 @@ mod tests {
     fn matches_the_rush_root_library_and_binary_oracle() {
         let libc = captured_identity("e8cf5400220b6b46", "-4c594f23b34d121c");
         let version = version();
-        let profile = profile();
+        let profile = release_profile();
         let toolchain = native_toolchain();
-        let library = cargo_identity(&IdentityInput {
-            package_name: "moto-rush",
-            version: &version,
-            source_path: "",
-            target_name: "moto_rush",
-            target_kind: RootTargetKind::Library,
-            features: &[],
-            release: true,
-            test: false,
-            test_profile: false,
-            panic_abort: true,
-            logical_target: None,
-            release_profile: &profile,
-            rustc: &toolchain,
-            rustflags: &[],
+        let library = cargo_unit_identity(&CargoUnitIdentityInput {
+            lto: CargoUnitLto::OnlyBitcode,
+            target_kind: library(),
             dependencies: std::slice::from_ref(&libc),
+            ..root_unit(&version, "moto-rush", "moto_rush", &profile, &toolchain)
         });
         assert_eq!(library.metadata, "fe7dad0dd7e45261");
         assert_eq!(library.extra_filename, "-f04486fca22dc62e");
 
-        let binary = cargo_identity(&IdentityInput {
-            package_name: "moto-rush",
-            version: &version,
-            source_path: "",
-            target_name: "rush",
-            target_kind: RootTargetKind::Binary,
-            features: &[],
-            release: true,
-            test: false,
-            test_profile: false,
-            panic_abort: true,
-            logical_target: None,
-            release_profile: &profile,
-            rustc: &toolchain,
-            rustflags: &[],
+        let binary = cargo_unit_identity(&CargoUnitIdentityInput {
             dependencies: &[libc, library],
+            ..root_unit(&version, "moto-rush", "rush", &profile, &toolchain)
         });
         assert_eq!(binary.metadata, "08ff74a380108d7e");
         assert_eq!(binary.extra_filename, "-96c671f6ca98063a");
@@ -795,65 +654,33 @@ mod tests {
     fn matches_the_rush_release_test_target_oracle() {
         let libc = captured_identity("ec62875fe4f4ff0c", "-d93b98bc6485d9ec");
         let version = version();
-        let profile = profile();
+        let profile = release_test_profile();
         let toolchain = native_toolchain();
-        let root_library = cargo_identity(&IdentityInput {
-            package_name: "moto-rush",
-            version: &version,
-            source_path: "",
-            target_name: "moto_rush",
-            target_kind: RootTargetKind::Library,
-            features: &[],
-            release: true,
-            test: false,
-            test_profile: true,
-            panic_abort: true,
-            logical_target: None,
-            release_profile: &profile,
-            rustc: &toolchain,
-            rustflags: &[],
+        let unit =
+            |target_name| root_unit(&version, "moto-rush", target_name, &profile, &toolchain);
+        let root_library = cargo_unit_identity(&CargoUnitIdentityInput {
+            lto: CargoUnitLto::OnlyBitcode,
+            target_kind: library(),
             dependencies: std::slice::from_ref(&libc),
+            ..unit("moto_rush")
         });
         assert_eq!(root_library.metadata, "55b25b27b3369b74");
         assert_eq!(root_library.extra_filename, "-f88387e790a6d3c6");
 
-        let library_harness = cargo_identity(&IdentityInput {
-            package_name: "moto-rush",
-            version: &version,
-            source_path: "",
-            target_name: "moto_rush",
-            target_kind: RootTargetKind::Library,
-            features: &[],
-            release: true,
-            test: true,
-            test_profile: true,
-            panic_abort: true,
-            logical_target: None,
-            release_profile: &profile,
-            rustc: &toolchain,
-            rustflags: &[],
+        let library_harness = cargo_unit_identity(&CargoUnitIdentityInput {
+            mode: CargoCompileMode::Test,
+            target_kind: library(),
             dependencies: std::slice::from_ref(&libc),
+            ..unit("moto_rush")
         });
         assert_eq!(library_harness.metadata, "cf2dd5a9a7673952");
         assert_eq!(library_harness.extra_filename, "-f23575b7d2dff0ba");
 
         let harness_dependencies = [libc, root_library];
-        let binary_harness = cargo_identity(&IdentityInput {
-            package_name: "moto-rush",
-            version: &version,
-            source_path: "",
-            target_name: "rush",
-            target_kind: RootTargetKind::Binary,
-            features: &[],
-            release: true,
-            test: true,
-            test_profile: true,
-            panic_abort: true,
-            logical_target: None,
-            release_profile: &profile,
-            rustc: &toolchain,
-            rustflags: &[],
+        let binary_harness = cargo_unit_identity(&CargoUnitIdentityInput {
+            mode: CargoCompileMode::Test,
             dependencies: &harness_dependencies,
+            ..unit("rush")
         });
         assert_eq!(binary_harness.metadata, "bc16843c2d795727");
         assert_eq!(binary_harness.extra_filename, "-576bb2a69b604b3f");
@@ -864,22 +691,11 @@ mod tests {
             harness_dependencies[1].clone(),
             program,
         ];
-        let integration = cargo_identity(&IdentityInput {
-            package_name: "moto-rush",
-            version: &version,
-            source_path: "",
-            target_name: "phase5",
-            target_kind: RootTargetKind::IntegrationTest,
-            features: &[],
-            release: true,
-            test: true,
-            test_profile: true,
-            panic_abort: true,
-            logical_target: None,
-            release_profile: &profile,
-            rustc: &toolchain,
-            rustflags: &[],
+        let integration = cargo_unit_identity(&CargoUnitIdentityInput {
+            mode: CargoCompileMode::Test,
+            target_kind: CargoTargetKind::Test,
             dependencies: &integration_dependencies,
+            ..unit("phase5")
         });
         assert_eq!(integration.metadata, "f062644c6d042c2e");
         assert_eq!(integration.extra_filename, "-c1332ac83febc65d");

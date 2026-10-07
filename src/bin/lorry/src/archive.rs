@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
@@ -68,17 +66,12 @@ impl Limits {
 #[derive(Debug)]
 pub struct ExtractedArchive {
     staging: AtomicDirectory,
-    archive_root: String,
     tree: Tree,
 }
 
 impl ExtractedArchive {
     pub fn path(&self) -> &Path {
         self.staging.path()
-    }
-
-    pub fn archive_root(&self) -> &str {
-        &self.archive_root
     }
 
     pub fn tree(&self) -> &Tree {
@@ -118,11 +111,7 @@ pub fn extract_crate(
         limits,
     )?;
     let tree = Tree::scan(staging.path(), limits.tree()?, Exclusions::None)?;
-    Ok(ExtractedArchive {
-        staging,
-        archive_root,
-        tree,
-    })
+    Ok(ExtractedArchive { staging, tree })
 }
 
 fn extract_gzip_tar(
@@ -1393,7 +1382,6 @@ mod tests {
             .find(|entry| entry.path == "src/main.rs")
             .unwrap();
         assert!(executable.executable);
-        assert_eq!(extracted.archive_root(), "demo-1.2.3");
     }
 
     #[test]
