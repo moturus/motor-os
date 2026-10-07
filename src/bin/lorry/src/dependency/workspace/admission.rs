@@ -126,7 +126,11 @@ pub(crate) fn verify(
             false,
         )?;
         let selected = select_requested(&reconstructed, inputs, compact, &members)?;
-        Some(legacy_dependency_graph(selected, &inputs.manifest.root)?)
+        Some(legacy_dependency_graph(
+            selected,
+            &inputs.manifest.root,
+            &reconstructed.workspace.documents,
+        )?)
     } else {
         None
     };
@@ -294,7 +298,11 @@ fn cover(review: &Review, context: &Context, selected: &Resolution) -> Result<()
 
 // The existing single-package compiler consumes dependency roots. Milestone 7
 // consumes member roots directly and removes this transitional projection.
-fn legacy_dependency_graph(mut selected: Resolution, root: &Path) -> Result<Resolution> {
+fn legacy_dependency_graph(
+    mut selected: Resolution,
+    root: &Path,
+    documents: &crate::manifest::Documents,
+) -> Result<Resolution> {
     let position = selected
         .packages
         .iter()
@@ -310,7 +318,7 @@ fn legacy_dependency_graph(mut selected: Resolution, root: &Path) -> Result<Reso
             edge
         })
         .collect();
-    compilation_manifests(&mut selected, &[])?;
+    compilation_manifests(&mut selected, &[], documents)?;
     Ok(selected)
 }
 
@@ -589,6 +597,7 @@ mod tests {
                 packages,
             },
             &fixture.0.join("app"),
+            &Default::default(),
         )
         .unwrap();
         let shared = &projected.packages[0];

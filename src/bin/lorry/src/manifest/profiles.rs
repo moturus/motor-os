@@ -1,4 +1,4 @@
-use super::{DevProfile, Manifest, ReleaseProfile, parse_release, require_table};
+use super::{Manifest, Profile, SourceWorkspace, parse_profile, require_table};
 use crate::diagnostic::{Error, Result};
 use crate::identity::CargoDebugInfo;
 use crate::toml::Document;
@@ -24,22 +24,21 @@ pub(crate) struct SelectedProfile {
     name: String,
     pub directory: String,
     pub release: bool,
-    settings: ReleaseProfile,
+    settings: Profile,
     warnings: Vec<String>,
 }
 
 impl SelectedProfile {
-    pub fn load(root: &Path, name: &str) -> Result<Self> {
-        Self::load_checked(root, name, true)
+    pub fn load(workspace: &SourceWorkspace, name: &str) -> Result<Self> {
+        Self::load_checked(workspace, name, true)
     }
 
-    pub fn directory_for_clean(root: &Path, name: &str) -> Result<String> {
-        Ok(Self::load_checked(root, name, false)?.directory)
+    pub fn directory_for_clean(workspace: &SourceWorkspace, name: &str) -> Result<String> {
+        Ok(Self::load_checked(workspace, name, false)?.directory)
     }
 
-    fn load_checked(root: &Path, name: &str, building: bool) -> Result<Self> {
-        let path = root.join("Cargo.toml");
-        let document = Document::load(&path, "workspace profiles")?;
+    fn load_checked(workspace: &SourceWorkspace, name: &str, building: bool) -> Result<Self> {
+        let (path, document) = workspace.root_document()?;
         Self::parse(
             &path,
             &document,
@@ -148,15 +147,15 @@ impl SelectedProfile {
                 merged.insert(key, item.clone());
             }
         }
-        let mut settings = parse_release(
+        let mut settings = parse_profile(
             path,
             document,
             &merged,
             &format!("profile.{name}"),
             if release { "3" } else { "0" },
         )?;
-        // Resolve the inherited root default before applying settings to either
-        // compiler profile; an inherited release profile may publish in debug.
+        // Resolve the inherited root default here; an inherited release
+        // profile may publish in debug.
         settings.debug.get_or_insert(if release {
             CargoDebugInfo::None
         } else {
@@ -177,24 +176,36 @@ impl SelectedProfile {
     }
 
     pub fn apply(&self, manifest: &mut Manifest) {
-        let profile = &self.settings;
-        manifest.dev = DevProfile {
-            panic_abort: profile.panic_abort,
-            opt_level: profile.opt_level,
-            debug: profile.debug,
-            lto: profile.lto,
-            strip: profile.strip,
-            codegen_units: profile.codegen_units,
-            debug_assertions: profile.debug_assertions,
-            overflow_checks: profile.overflow_checks,
-            incremental: profile.incremental,
-        };
-        manifest.release = profile.clone();
+        manifest.profile = self.settings.clone();
         manifest.profile_directory = Some(self.directory.clone());
         manifest.profile_name = Some(self.name.clone());
-        manifest.profile_errors.clear();
         manifest.warnings.extend(self.warnings.iter().cloned());
     }
+}
+
+// Cargo rejects a malformed profile table, and malformed `dev` or `release`
+// settings, whichever profile a command selects.
+pub(super) fn validate(path: &Path, document: &Document) -> Result<()> {
+    let Some(item) = document.root().get("profile") else {
+        return Ok(());
+    };
+    let profiles = require_table(path, document, item, "profile")?;
+    for (key, item) in profiles.iter() {
+        require_table(path, document, item, &format!("profile.{key}"))?;
+    }
+    for (name, default_opt) in [("dev", "0"), ("release", "3")] {
+        if let Some(item) = profiles.get(name) {
+            let table = require_table(path, document, item, &format!("profile.{name}"))?;
+            parse_profile(
+                path,
+                document,
+                table,
+                &format!("profile.{name}"),
+                default_opt,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -271,6 +282,59 @@ mod tests {
             ignored.warnings,
             ["`panic` setting is ignored for `test` profile"]
         );
+    }
+
+    #[test]
+    fn root_profiles_accept_cargo_values() {
+        let text = "[profile.dev]\npanic = 'abort'\n[profile.release]\npanic = 'abort'\nlto = 'fat'\nstrip = true\ncodegen-units = 1\n";
+        assert!(parse(text, "dev").unwrap().settings.panic_abort);
+        let release = parse(text, "release").unwrap().settings;
+        assert!(release.panic_abort);
+        assert_eq!(release.lto, super::super::Lto::Fat);
+        assert_eq!(release.strip, super::super::Strip::Symbols);
+        assert_eq!(release.codegen_units, Some(1));
+        let path = Path::new("Cargo.toml");
+        for profile in ["dev", "release"] {
+            let source = |debug: &str, opt: &str| {
+                format!("[profile.{profile}]\ndebug={debug}\nopt-level={opt}\n")
+            };
+            for (debug, expected) in [
+                ("false", CargoDebugInfo::None),
+                ("true", CargoDebugInfo::Full),
+                ("0", CargoDebugInfo::None),
+                ("1", CargoDebugInfo::Limited),
+                ("2", CargoDebugInfo::Full),
+                ("\"none\"", CargoDebugInfo::None),
+                ("\"limited\"", CargoDebugInfo::Limited),
+                ("\"full\"", CargoDebugInfo::Full),
+                ("\"line-tables-only\"", CargoDebugInfo::LineTablesOnly),
+                (
+                    "\"line-directives-only\"",
+                    CargoDebugInfo::LineDirectivesOnly,
+                ),
+            ] {
+                for opt in ["0", "1", "2", "3", "\"s\"", "\"z\""] {
+                    let settings = parse(&source(debug, opt), profile).unwrap().settings;
+                    assert_eq!(settings.debug, Some(expected));
+                    assert_eq!(settings.opt_level, opt.trim_matches('"'));
+                }
+            }
+            let invalid = [
+                "-1", "4", "false", "\"fast\"", "\"0\"", "\"1\"", "\"2\"", "\"3\"", "[]",
+            ]
+            .map(|opt| source("false", opt))
+            .into_iter()
+            .chain(
+                ["-1", "3", "\"debug\"", "\"0\"", "\"1\"", "\"2\"", "[]"]
+                    .map(|debug| source(debug, "3")),
+            );
+            for text in invalid {
+                // Unselected `dev` and `release` tables are still validated.
+                let document = Document::parse(path, "profiles", text.clone()).unwrap();
+                assert!(validate(path, &document).is_err());
+                assert!(parse(&text, profile).is_err());
+            }
+        }
     }
 
     #[test]

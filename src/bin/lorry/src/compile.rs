@@ -1101,7 +1101,7 @@ fn codegen(arguments: &mut Vec<OsString>, value: &str) {
 mod tests {
     use super::*;
     use crate::config::CargoCompat;
-    use crate::manifest::{Lto, ReleaseProfile, Strip};
+    use crate::manifest::{Lto, Profile, Strip};
     use crate::resolver::{
         FeatureContext, PackageSourceKey, Resolution, ResolvedEdge, ResolvedPackage, ResolvedSource,
     };
@@ -1382,13 +1382,12 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 panic_abort: true,
-                dev_profile: &crate::manifest::DevProfile::default(),
-                release_profile: &ReleaseProfile {
+                profile: &Profile {
                     panic_abort: true,
                     lto: Lto::Fat,
                     strip: Strip::Symbols,
                     codegen_units: Some(1),
-                    ..ReleaseProfile::default()
+                    ..Profile::release()
                 },
                 rustc: &toolchain(),
                 logical_target: None,
@@ -1721,13 +1720,12 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 panic_abort: true,
-                dev_profile: &crate::manifest::DevProfile::default(),
-                release_profile: &ReleaseProfile {
+                profile: &Profile {
                     panic_abort: true,
                     lto: Lto::Fat,
                     strip: Strip::Symbols,
                     codegen_units: Some(1),
-                    ..ReleaseProfile::default()
+                    ..Profile::release()
                 },
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
@@ -1876,8 +1874,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: false,
                 panic_abort: false,
-                dev_profile: &crate::manifest::DevProfile::default(),
-                release_profile: &ReleaseProfile::default(),
+                profile: &Profile::default(),
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
                 rustflags: &[],

@@ -126,13 +126,14 @@ pub(crate) fn prepare_compilation(
     source: RegistrySource<'_>,
     staging_parent: &Path,
     direct: &crate::git::DirectCatalog,
+    documents: &crate::manifest::Documents,
 ) -> Result<PreparedGraph> {
     let selected = resolution
         .root_edges
         .iter()
         .map(|edge| edge.package.clone())
         .collect::<Vec<_>>();
-    compilation_manifests(&mut resolution, &selected)?;
+    compilation_manifests(&mut resolution, &selected, documents)?;
     policy::preflight_sources(&config.policy, &resolution)?;
     let preflight = policy::preflight_workspace(&config.policy, &resolution)?;
     let packages =
@@ -155,15 +156,16 @@ pub(crate) fn prepare_compilation(
 pub(super) fn compilation_manifests(
     resolution: &mut Resolution,
     selected: &[PackageKey],
+    documents: &crate::manifest::Documents,
 ) -> Result<()> {
     for package in &mut resolution.packages {
         if let Some(manifest) = &package.local_manifest {
             let mut compilation = if manifest.editable
                 && (selected.contains(&package.key) || manifest.library.is_none())
             {
-                Manifest::load_compilation_member(manifest)?
+                Manifest::load_compilation_member(manifest, documents)?
             } else {
-                Manifest::load_path_dependency(&manifest.root)?
+                Manifest::load_path_dependency_in(&manifest.root, documents)?
             };
             compilation.editable = manifest.editable;
             compilation
@@ -235,8 +237,15 @@ mod tests {
                 },
             )
             .unwrap();
-            let prepared =
-                prepare_compilation(selected, &config, source, &fixture.0, &direct).unwrap();
+            let prepared = prepare_compilation(
+                selected,
+                &config,
+                source,
+                &fixture.0,
+                &direct,
+                &Default::default(),
+            )
+            .unwrap();
             assert_eq!(prepared.packages.len(), 1);
             let root = &prepared.packages.values().next().unwrap().manifest;
             assert_eq!(root.name, "root");
@@ -327,8 +336,15 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let error = prepare_compilation(selected.clone(), &config, source, &fixture.0, &direct)
-            .unwrap_err();
+        let error = prepare_compilation(
+            selected.clone(),
+            &config,
+            source,
+            &fixture.0,
+            &direct,
+            &Default::default(),
+        )
+        .unwrap_err();
         assert!(
             error
                 .render()
@@ -358,7 +374,15 @@ mod tests {
                 provenance: fixture.0.join("lorry.toml"),
             },
         );
-        let prepared = prepare_compilation(selected, &config, source, &fixture.0, &direct).unwrap();
+        let prepared = prepare_compilation(
+            selected,
+            &config,
+            source,
+            &fixture.0,
+            &direct,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(prepared.resolution.root_edges.len(), 1);
         assert_eq!(prepared.packages.len(), 2);
         for (key, package) in &prepared.packages {
@@ -387,8 +411,7 @@ mod tests {
                     workspace_root: &workspace.root,
                     release: false,
                     panic_abort: false,
-                    dev_profile: &workspace.packages[0].dev,
-                    release_profile: &workspace.packages[0].release,
+                    profile: &crate::manifest::Profile::default(),
                     rustc: &toolchain,
                     logical_target: None,
                     rustflags: &[],

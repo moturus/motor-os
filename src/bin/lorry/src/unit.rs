@@ -9,9 +9,7 @@ use crate::identity::{
     CargoProfileLto, CargoSource, CargoStrip, CargoTargetKind, CargoUnitIdentityInput,
     CargoUnitLto, Identity, cargo_unit_identity,
 };
-use crate::manifest::{
-    DevProfile, Lto as ManifestLto, Manifest, ReleaseProfile, Target, TargetKind,
-};
+use crate::manifest::{Lto as ManifestLto, Manifest, Profile, Target, TargetKind};
 use crate::resolver::{
     CompileKind, FeatureContext, PackageKey, PackageSourceKey, Resolution, ResolvedEdge,
     ResolvedPackage, selected_root_features,
@@ -401,8 +399,7 @@ pub struct PlanOptions<'a> {
     pub workspace_root: &'a Path,
     pub release: bool,
     pub panic_abort: bool,
-    pub dev_profile: &'a DevProfile,
-    pub release_profile: &'a ReleaseProfile,
+    pub profile: &'a Profile,
     pub rustc: &'a Toolchain,
     /// `None` is a native Linux build. Native Motor passes its normalized
     /// explicit Motor target identity here.
@@ -554,7 +551,7 @@ pub(crate) fn workspace_auxiliary_units(
             false,
             true,
             None,
-            options.release || options.dev_profile.opt_level != "0",
+            options.release || options.profile.opt_level != "0",
         )?;
         let keys = programs
             .units
@@ -820,7 +817,7 @@ fn workspace_target_units(
             mode == UnitMode::Check,
             selection.binaries,
             selection.binary_name,
-            options.release || options.dev_profile.opt_level != "0",
+            options.release || options.profile.opt_level != "0",
         )?
     } else {
         UnitGraph {
@@ -2059,11 +2056,7 @@ fn selected_macro_script_units(
     manifests: &BTreeMap<PackageKey, Manifest>,
     options: &PlanOptions<'_>,
 ) -> Result<Option<UnitGraph>> {
-    let root_opt = if options.release {
-        options.release_profile.opt_level
-    } else {
-        options.dev_profile.opt_level
-    };
+    let root_opt = options.profile.opt_level;
     // Equal pre-reduction script profiles share Cargo's host debug adjustment.
     if root_opt == "0" {
         return Ok(None);
@@ -2183,8 +2176,7 @@ fn unit_settings(
     let local = matches!(key.package.source, PackageSourceKey::Path(_));
     let mut profile = base_profile(
         options.release,
-        options.release_profile,
-        options.dev_profile,
+        options.profile,
         options.panic_abort,
         local,
         key.profile == ProfileContext::Test,
@@ -2295,11 +2287,7 @@ fn unit_settings(
                 key,
                 key.library_types(manifest).is_some(),
                 options.release,
-                if options.release {
-                    options.release_profile.lto
-                } else {
-                    options.dev_profile.lto
-                },
+                options.profile.lto,
             )
         },
         logical_target,
@@ -2312,11 +2300,7 @@ fn library_lto(
     types: &[String],
     options: &PlanOptions<'_>,
 ) -> CargoUnitLto<'static> {
-    let configured = if options.release {
-        options.release_profile.lto
-    } else {
-        options.dev_profile.lto
-    };
+    let configured = options.profile.lto;
     let ordinary = unit_lto(key, true, options.release, configured);
     if key.compile_kind == CompileKind::Host
         || matches!(configured, ManifestLto::Default | ManifestLto::Off)
@@ -2337,50 +2321,30 @@ fn library_lto(
 
 fn base_profile(
     release: bool,
-    configured: &ReleaseProfile,
-    dev: &DevProfile,
+    profile: &Profile,
     panic_abort: bool,
     local: bool,
     test_profile: bool,
 ) -> UnitProfile {
-    if release {
-        UnitProfile {
-            opt_level: configured.opt_level,
-            lto: profile_lto(configured.lto),
-            codegen_units: configured.codegen_units,
-            debuginfo: configured.debug.unwrap_or(CargoDebugInfo::None),
-            debug_assertions: configured.debug_assertions,
-            overflow_checks: configured.overflow_checks,
-            incremental: local && configured.incremental,
-            panic: if panic_abort && !test_profile {
-                CargoPanicStrategy::Abort
-            } else {
-                CargoPanicStrategy::Unwind
-            },
-            strip: crate::identity::manifest_strip(
-                configured.strip,
-                configured.debug.unwrap_or(CargoDebugInfo::None),
-            ),
-        }
+    let debuginfo = profile.debug.unwrap_or(if release {
+        CargoDebugInfo::None
     } else {
-        UnitProfile {
-            opt_level: dev.opt_level,
-            lto: profile_lto(dev.lto),
-            codegen_units: dev.codegen_units,
-            debuginfo: dev.debug.unwrap_or(CargoDebugInfo::Full),
-            debug_assertions: dev.debug_assertions,
-            overflow_checks: dev.overflow_checks,
-            incremental: local && dev.incremental,
-            panic: if panic_abort && !test_profile {
-                CargoPanicStrategy::Abort
-            } else {
-                CargoPanicStrategy::Unwind
-            },
-            strip: crate::identity::manifest_strip(
-                dev.strip,
-                dev.debug.unwrap_or(CargoDebugInfo::Full),
-            ),
-        }
+        CargoDebugInfo::Full
+    });
+    UnitProfile {
+        opt_level: profile.opt_level,
+        lto: profile_lto(profile.lto),
+        codegen_units: profile.codegen_units,
+        debuginfo,
+        debug_assertions: profile.debug_assertions,
+        overflow_checks: profile.overflow_checks,
+        incremental: local && profile.incremental,
+        panic: if panic_abort && !test_profile {
+            CargoPanicStrategy::Abort
+        } else {
+            CargoPanicStrategy::Unwind
+        },
+        strip: crate::identity::manifest_strip(profile.strip, debuginfo),
     }
 }
 
@@ -2419,31 +2383,13 @@ fn shared_native_library(
         && *host_profile
             == base_profile(
                 options.release,
-                options.release_profile,
-                options.dev_profile,
+                options.profile,
                 options.panic_abort,
                 matches!(key.package.source, PackageSourceKey::Path(_)),
                 key.profile == ProfileContext::Test,
             )
-        && unit_lto(
-            key,
-            true,
-            options.release,
-            if options.release {
-                options.release_profile.lto
-            } else {
-                options.dev_profile.lto
-            },
-        ) == unit_lto(
-            &target,
-            true,
-            options.release,
-            if options.release {
-                options.release_profile.lto
-            } else {
-                options.dev_profile.lto
-            },
-        )
+        && unit_lto(key, true, options.release, options.profile.lto)
+            == unit_lto(&target, true, options.release, options.profile.lto)
 }
 
 fn profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
@@ -2924,8 +2870,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 panic_abort: false,
-                dev_profile: &root.dev,
-                release_profile: &root.release,
+                profile: &Profile::release(),
                 rustc: &toolchain(),
                 logical_target: None,
                 rustflags: &[],
@@ -2953,8 +2898,7 @@ mod tests {
             workspace_root: &fixture.0,
             release: true,
             panic_abort: true,
-            dev_profile: &root.dev,
-            release_profile: &root.release,
+            profile: &Profile::release(),
             rustc: &toolchain(),
             logical_target: None,
             rustflags: &[],
@@ -3092,8 +3036,7 @@ mod tests {
                 workspace_root: &workspace,
                 release: false,
                 panic_abort: false,
-                dev_profile: &root.dev,
-                release_profile: &root.release,
+                profile: &Profile::default(),
                 rustc: &toolchain(),
                 logical_target: None,
                 rustflags: &[],
@@ -3350,8 +3293,7 @@ mod tests {
             workspace_root: &fixture.0,
             release: false,
             panic_abort: false,
-            dev_profile: &DevProfile::default(),
-            release_profile: &ReleaseProfile::default(),
+            profile: &Profile::default(),
             rustc: &toolchain(),
             logical_target: None,
             rustflags: &[],
@@ -3608,8 +3550,7 @@ mod tests {
                         workspace_root: &fixture.0,
                         release: false,
                         panic_abort: false,
-                        dev_profile: &workspace.packages[0].dev,
-                        release_profile: &workspace.packages[0].release,
+                        profile: &Profile::default(),
                         rustc: &toolchain(),
                         logical_target: None,
                         rustflags: &[],
@@ -3919,8 +3860,7 @@ mod tests {
             workspace_root: &fixture.0,
             release: false,
             panic_abort: false,
-            dev_profile: &crate::manifest::DevProfile::default(),
-            release_profile: &ReleaseProfile::default(),
+            profile: &Profile::default(),
             rustc: &toolchain(),
             logical_target: None,
             rustflags: &[],
@@ -3976,12 +3916,12 @@ mod tests {
                 format!("{workspace_text}\n[profile.dev]\nopt-level = {opt_level}\n"),
             )
             .unwrap();
-            let dev_profile = crate::manifest::DevProfile {
+            let profile = Profile {
                 opt_level,
-                ..crate::manifest::DevProfile::default()
+                ..Profile::default()
             };
             let options = PlanOptions {
-                dev_profile: &dev_profile,
+                profile: &profile,
                 logical_target,
                 ..options
             };
@@ -4293,13 +4233,6 @@ mod tests {
             }
         }
 
-        let release_profile = ReleaseProfile {
-            panic_abort: true,
-            lto: ManifestLto::Fat,
-            strip: ManifestStrip::Symbols,
-            codegen_units: Some(1),
-            ..ReleaseProfile::default()
-        };
         let rustflags = vec!["-Ctarget-cpu=x86-64-v3".to_owned()];
         let plan = plan_dependency_units(
             &graph,
@@ -4308,8 +4241,13 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 panic_abort: true,
-                dev_profile: &crate::manifest::DevProfile::default(),
-                release_profile: &release_profile,
+                profile: &Profile {
+                    panic_abort: true,
+                    lto: ManifestLto::Fat,
+                    strip: ManifestStrip::Symbols,
+                    codegen_units: Some(1),
+                    ..Profile::release()
+                },
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
                 rustflags: &rustflags,
@@ -4375,8 +4313,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: false,
                 panic_abort: true,
-                dev_profile: &crate::manifest::DevProfile::default(),
-                release_profile: &ReleaseProfile::default(),
+                profile: &Profile::default(),
                 rustc: &toolchain(),
                 logical_target: None,
                 rustflags: &rustflags,
@@ -4612,13 +4549,12 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: true,
                 panic_abort: true,
-                dev_profile: &crate::manifest::DevProfile::default(),
-                release_profile: &ReleaseProfile {
+                profile: &Profile {
                     panic_abort: true,
                     lto: ManifestLto::Fat,
                     strip: ManifestStrip::Symbols,
                     codegen_units: Some(1),
-                    ..ReleaseProfile::default()
+                    ..Profile::release()
                 },
                 rustc: &toolchain(),
                 logical_target: None,

@@ -102,7 +102,7 @@ impl PreparedGraph {
             check,
             binaries,
             binary_name,
-            options.release || options.dev_profile.opt_level != "0",
+            options.release || options.profile.opt_level != "0",
         )?;
         self.finish_plan(options, manifests, graph)
     }
@@ -1178,9 +1178,11 @@ mod tests {
         let options = PlanOptions {
             workspace_root: &manifest.root,
             release: true,
-            panic_abort: manifest.release.panic_abort,
-            dev_profile: &manifest.dev,
-            release_profile: &manifest.release,
+            panic_abort: true,
+            profile: &crate::manifest::Profile {
+                panic_abort: true,
+                ..crate::manifest::Profile::release()
+            },
             rustc: &toolchain(),
             logical_target: None,
             rustflags: &[],
@@ -1215,8 +1217,15 @@ mod tests {
             selection,
         )
         .unwrap();
-        let shared =
-            workspace::prepare_compilation(resolution, &config, source, &staging, &direct).unwrap();
+        let shared = workspace::prepare_compilation(
+            resolution,
+            &config,
+            source,
+            &staging,
+            &direct,
+            &Default::default(),
+        )
+        .unwrap();
         let library = selected_library_key(&manifest).unwrap();
         let focused = shared
             .workspace_test_plan(&options, std::slice::from_ref(&library.package))

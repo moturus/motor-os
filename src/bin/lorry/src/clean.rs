@@ -21,7 +21,7 @@ pub fn execute(
         .profile
         .as_deref()
         .map(|name| {
-            crate::manifest::profiles::SelectedProfile::directory_for_clean(&workspace.root, name)
+            crate::manifest::profiles::SelectedProfile::directory_for_clean(&workspace, name)
         })
         .transpose()?;
     for member in &mut workspace.packages {

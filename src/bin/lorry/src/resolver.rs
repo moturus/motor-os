@@ -922,6 +922,7 @@ pub(crate) fn resolve_member(
         default_members: vec![manifest.root.clone()],
         metadata: serde_json::Value::Null,
         virtual_root: false,
+        documents: Default::default(),
     };
     let mut resolution = resolve_complete_workspace(&workspace, catalog, options, locked, loader)?;
     let member = PackageSourceKey::Path(manifest.root.clone());

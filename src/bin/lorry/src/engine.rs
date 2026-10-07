@@ -74,7 +74,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         _ => unreachable!("non-build command passed to engine"),
     };
     let profile = crate::manifest::profiles::SelectedProfile::load(
-        &workspace.root,
+        &workspace,
         requested_profile.unwrap_or(if release {
             "release"
         } else if testing {
@@ -245,9 +245,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         _ => unreachable!("non-build command passed to engine"),
     };
     let release = profile.release;
-    for manifest in &selected {
-        manifest.require_profile(release, matches!(cli.command, Command::Test(_)))?;
-    }
     let run_binary = run_selection.map(|(_, name)| name);
     let binary_selection = match &cli.command {
         Command::Build(options) => options.targets.single_binary(),
@@ -476,6 +473,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     target_root: &target_root,
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
+                    documents: &workspace.documents,
                     members: shared.then_some(selected.as_slice()),
                     global_cache_root: &global_cache_root,
                     config: &config,
@@ -511,6 +509,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 target_root: &target_root,
                 child_lease_fd: artifact_lock.child_lease_fd(),
                 manifest: &manifest,
+                documents: &workspace.documents,
                 members: shared.then_some(selected.as_slice()),
                 global_cache_root: &global_cache_root,
                 config: &config,
@@ -544,6 +543,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     target_root: &target_root,
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
+                    documents: &workspace.documents,
                     members: shared.then_some(selected.as_slice()),
                     global_cache_root: &global_cache_root,
                     config: &config,
@@ -599,6 +599,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     target_root: &target_root,
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
+                    documents: &workspace.documents,
                     members: shared.then_some(selected.as_slice()),
                     global_cache_root: &global_cache_root,
                     config: &config,
@@ -709,6 +710,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
 
 struct Build<'a> {
     manifest: &'a Manifest,
+    documents: &'a crate::manifest::Documents,
     /// Selected workspace roots; legacy single-package callers use `None`.
     members: Option<&'a [Manifest]>,
     target_root: &'a Path,
@@ -1093,11 +1095,7 @@ fn build_inner(
 ) -> Result<BuildOutcome> {
     let target_root = build.target_root;
     let incremental = incremental_roots_in(&build, target_root);
-    if if build.release {
-        build.manifest.release.incremental
-    } else {
-        build.manifest.dev.incremental
-    } {
+    if build.manifest.profile.incremental {
         fs::create_dir_all(&incremental.host).map_err(|error| {
             Error::failure(format!(
                 "failed to create incremental directory `{}`: {error}",
@@ -1156,6 +1154,7 @@ fn build_inner(
             source,
             staging.path(),
             direct,
+            build.documents,
         )?
     } else {
         dependency::prepare_locked_source(
@@ -1219,9 +1218,8 @@ fn build_inner(
         let options = PlanOptions {
             workspace_root: &build.manifest.workspace_root,
             release: build.release,
-            panic_abort: build.manifest.panic_abort(build.release),
-            dev_profile: &build.manifest.dev,
-            release_profile: &build.manifest.release,
+            panic_abort: build.manifest.profile.panic_abort,
+            profile: &build.manifest.profile,
             rustc: build.toolchain,
             logical_target: build.logical_target,
             rustflags: build.rustflags,
@@ -1252,9 +1250,8 @@ fn build_inner(
         let options = PlanOptions {
             workspace_root: &build.manifest.workspace_root,
             release: build.release,
-            panic_abort: build.manifest.panic_abort(build.release),
-            dev_profile: &build.manifest.dev,
-            release_profile: &build.manifest.release,
+            panic_abort: build.manifest.profile.panic_abort,
+            profile: &build.manifest.profile,
             rustc: build.toolchain,
             logical_target: build.logical_target,
             rustflags: build.rustflags,
@@ -1330,9 +1327,8 @@ fn build_inner(
         let options = PlanOptions {
             workspace_root: &build.manifest.workspace_root,
             release: build.release,
-            panic_abort: build.manifest.panic_abort(build.release),
-            dev_profile: &build.manifest.dev,
-            release_profile: &build.manifest.release,
+            panic_abort: build.manifest.profile.panic_abort,
+            profile: &build.manifest.profile,
             rustc: build.toolchain,
             logical_target: build.logical_target,
             rustflags: build.rustflags,
@@ -3553,6 +3549,7 @@ mod tests {
         let build_once = |check_options| {
             build_inner(
                 Build {
+                    documents: &Default::default(),
                     target_selection: None,
                     manifest,
                     members: Some(&members),
@@ -3980,6 +3977,7 @@ mod tests {
         let sources = Sources::open(&config);
         let build_once = || {
             build(Build {
+                documents: &Default::default(),
                 target_selection: None,
                 target_root: &artifact_root(&manifest),
                 child_lease_fd: None,
@@ -4108,6 +4106,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
         let artifact = build(Build {
+            documents: &Default::default(),
             target_selection: None,
             target_root: &artifact_root(&manifest),
             child_lease_fd: None,
@@ -4165,6 +4164,7 @@ mod tests {
         let sources = Sources::open(&config);
         let build_with = |binary_selection| {
             build(Build {
+                documents: &Default::default(),
                 target_selection: None,
                 target_root: &artifact_root(&manifest),
                 child_lease_fd: None,
@@ -4238,6 +4238,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
         let artifacts = build(Build {
+            documents: &Default::default(),
             target_selection: None,
             target_root: &artifact_root(&manifest),
             child_lease_fd: None,
@@ -4285,6 +4286,7 @@ mod tests {
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
         let artifacts = build(Build {
+            documents: &Default::default(),
             target_selection: None,
             target_root: &artifact_root(&manifest),
             child_lease_fd: None,
@@ -4356,6 +4358,7 @@ mod tests {
         let sources = Sources::open(&config);
         let build_once = || {
             build(Build {
+                documents: &Default::default(),
                 target_selection: None,
                 target_root: &artifact_root(&manifest),
                 child_lease_fd: None,
@@ -4460,6 +4463,7 @@ mod tests {
         let build_once = |jobs, format| {
             build_reported(
                 Build {
+                    documents: &Default::default(),
                     target_selection: None,
                     target_root: &artifact_root(&manifest),
                     child_lease_fd: None,
@@ -4626,6 +4630,7 @@ mod tests {
         let target_root = artifact_root(manifest);
         let build_once = || {
             let tests = test_build(Build {
+                documents: &Default::default(),
                 target_selection: None,
                 target_root: &target_root,
                 child_lease_fd: None,
@@ -4732,6 +4737,7 @@ mod tests {
         let manifest = &members[0];
         let build_bundle = || {
             let tests = test_build(Build {
+                documents: &Default::default(),
                 target_selection: None,
                 target_root: &artifact_root(manifest),
                 child_lease_fd: None,
@@ -4883,6 +4889,7 @@ mod tests {
         };
         let build_named = |bundle| {
             let mut tests = test_build(Build {
+                documents: &Default::default(),
                 target_selection: Some(&selection),
                 target_root: &artifact_root(manifest),
                 child_lease_fd: None,

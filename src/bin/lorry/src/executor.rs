@@ -1271,7 +1271,6 @@ fn render_build_script_output(key: &UnitKey, output: &build_script::Output) {
 mod tests {
     use super::*;
     use crate::config::{CargoCompat, Config, NativeTool, NativeToolRole};
-    use crate::manifest::ReleaseProfile;
     use crate::policy::PackageAdmission;
     use crate::resolver::{PackageSourceKey, Resolution, ResolvedPackage, ResolvedSource};
     use crate::source_tree::DEFAULT_LIMITS;
@@ -1443,8 +1442,7 @@ mod tests {
                 workspace_root: &fixture.0,
                 release: false,
                 panic_abort: false,
-                dev_profile: &crate::manifest::DevProfile::default(),
-                release_profile: &ReleaseProfile::default(),
+                profile: &crate::manifest::Profile::default(),
                 rustc: &toolchain,
                 logical_target: None,
                 rustflags: &[],

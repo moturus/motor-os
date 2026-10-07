@@ -16,7 +16,7 @@ mod selection;
 mod source;
 mod targets;
 pub(crate) use selection::PackageSelection;
-pub(crate) use source::SourceWorkspace;
+pub(crate) use source::{Documents, SourceWorkspace};
 pub(crate) use targets::{Target, TargetKind};
 
 const MANIFEST_NAME: &str = "Cargo.toml";
@@ -39,11 +39,10 @@ pub struct Manifest {
     pub edition: Edition,
     pub metadata: PackageMetadata,
     pub default_run: Option<String>,
-    pub dev: DevProfile,
-    pub release: ReleaseProfile,
+    /// The selected profile; build commands apply it after loading.
+    pub profile: Profile,
     pub profile_directory: Option<String>,
     pub profile_name: Option<String>,
-    profile_errors: BTreeMap<String, Error>,
     /// Dependencies drop unresolved explicit targets; members reject them.
     unresolved_target: Option<Error>,
     pub resolver: Resolver,
@@ -123,8 +122,9 @@ pub enum Strip {
     Symbols,
 }
 
+/// One resolved Cargo profile; its defaults are those of `dev`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DevProfile {
+pub struct Profile {
     pub panic_abort: bool,
     pub opt_level: &'static str,
     pub debug: Option<CargoDebugInfo>,
@@ -136,7 +136,7 @@ pub struct DevProfile {
     pub incremental: bool,
 }
 
-impl Default for DevProfile {
+impl Default for Profile {
     fn default() -> Self {
         Self {
             panic_abort: false,
@@ -152,31 +152,15 @@ impl Default for DevProfile {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReleaseProfile {
-    pub opt_level: &'static str,
-    pub debug: Option<CargoDebugInfo>,
-    pub panic_abort: bool,
-    pub lto: Lto,
-    pub strip: Strip,
-    pub codegen_units: Option<u32>,
-    pub debug_assertions: bool,
-    pub overflow_checks: bool,
-    pub incremental: bool,
-}
-
-impl Default for ReleaseProfile {
-    fn default() -> Self {
+#[cfg(test)]
+impl Profile {
+    pub(crate) fn release() -> Self {
         Self {
             opt_level: "3",
-            debug: None,
-            panic_abort: false,
-            lto: Lto::Default,
-            strip: Strip::Default,
-            codegen_units: None,
             debug_assertions: false,
             overflow_checks: false,
             incremental: false,
+            ..Self::default()
         }
     }
 }
@@ -280,6 +264,25 @@ impl Lockfile {
         let document = Document::load(path, "Cargo lockfile")?;
         parse_lock_document(None, path, &document)
     }
+
+    fn require_root(&self, manifest: &Manifest) -> Result<()> {
+        let roots = self
+            .packages
+            .iter()
+            .filter(|package| {
+                package.name == manifest.name
+                    && package.version.original == manifest.version.original
+                    && package.source.is_none()
+            })
+            .count();
+        if roots != 1 {
+            return Err(Error::failure(format!(
+                "Cargo.lock is stale: expected one root path package `{} {}`, found {roots}",
+                manifest.name, manifest.version.original
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -322,30 +325,6 @@ impl Manifest {
         self.unresolved_target.clone().map_or(Ok(()), Err)
     }
 
-    pub fn panic_abort(&self, release: bool) -> bool {
-        if release {
-            self.release.panic_abort
-        } else {
-            self.dev.panic_abort
-        }
-    }
-
-    pub fn require_profile(&self, release: bool, test: bool) -> Result<()> {
-        if !release
-            && test
-            && let Some(error) = self.profile_errors.get("test")
-        {
-            return Err(error.clone());
-        }
-        match self
-            .profile_errors
-            .get(if release { "release" } else { "dev" })
-        {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
-        }
-    }
-
     // Tests load the one package that a build in `current` selects by default.
     #[cfg(test)]
     pub(crate) fn load_for_build(current: &Path) -> Result<Self> {
@@ -373,23 +352,44 @@ impl Manifest {
             .unwrap())
     }
 
-    pub(crate) fn load_compilation_member(source: &Self) -> Result<Self> {
-        let document = Document::load(&source.path, "Cargo workspace member manifest")?;
-        let mut member = Self::finish_root(
-            source.root.clone(),
-            source.path.clone(),
-            document,
-            &source.workspace_root,
-        )?;
-        member
-            .workspace_members
-            .clone_from(&source.workspace_members);
-        member.dev.clone_from(&source.dev);
-        member.release.clone_from(&source.release);
-        member.profile_errors.clone_from(&source.profile_errors);
-        member.resolver = source.resolver;
-        member.patches.clone_from(&source.patches);
-        Ok(member)
+    // A selected member also obeys the build-only rules of a root manifest,
+    // checked in parse order on the documents and lock already loaded.
+    pub(crate) fn load_compilation_member(
+        source: &Self,
+        documents: &source::Documents,
+    ) -> Result<Self> {
+        let path = &source.path;
+        let document = documents.load(path, "Cargo workspace member manifest")?;
+        let inherited = dependency_workspace_package(&source.root, documents)?;
+        let member = inherited
+            .as_ref()
+            .is_some_and(|workspace| workspace.path != *path);
+        validate_manifest_tables(path, &document, ManifestMode::Root, member)?;
+        let package = document.root().get("package").and_then(Item::as_table);
+        validate_package_keys(path, &document, package.unwrap(), ManifestMode::Root)?;
+        let lints = inheritance::lint_table(path, &document, inherited.as_ref())?;
+        parse_lint_namespace(lints.as_ref(), ManifestMode::Root, "rust")?;
+        let mut manifest = source.clone();
+        resolve_target_defaults(&mut manifest, true)?;
+        let lock = match manifest.lock.take() {
+            Some(lock) => lock,
+            None => {
+                let lock_path = manifest.workspace_root.join(LOCK_NAME);
+                if !lock_path.is_file() {
+                    return Err(Error::failure(format!(
+                        "required lockfile `{}` is missing",
+                        lock_path.display()
+                    ))
+                    .with_help(
+                        "create a version-4 Cargo.lock; build commands never resolve or write it",
+                    ));
+                }
+                Lockfile::load(&lock_path)?
+            }
+        };
+        lock.require_root(&manifest)?;
+        manifest.lock = Some(lock);
+        Ok(manifest)
     }
 
     pub fn with_lock_source(mut self, source: String) -> Result<Self> {
@@ -399,39 +399,14 @@ impl Manifest {
         Ok(self)
     }
 
-    fn finish_root(
-        root: PathBuf,
-        path: PathBuf,
-        document: Document,
-        lock_root: &Path,
-    ) -> Result<Self> {
-        let inherited = dependency_workspace_package(&root)?;
-        let mut manifest = Self::parse_document_with_inheritance(
-            &root,
-            &path,
-            &document,
-            ManifestMode::Root,
-            inherited.as_ref(),
-        )?;
-        manifest.root = root;
-        manifest.workspace_root = lock_root.to_owned();
-        manifest.path = manifest.root.join(MANIFEST_NAME);
-        manifest.require_member_targets()?;
-        resolve_target_defaults(&mut manifest, true)?;
-        let lock_path = lock_root.join(LOCK_NAME);
-        if !lock_path.is_file() {
-            return Err(Error::failure(format!(
-                "required lockfile `{}` is missing",
-                lock_path.display()
-            ))
-            .with_help("create a version-4 Cargo.lock; build commands never resolve or write it"));
-        }
-        let document = Document::load(&lock_path, "Cargo lockfile")?;
-        manifest.lock = Some(parse_lock_document(Some(&manifest), &lock_path, &document)?);
-        Ok(manifest)
+    pub fn load_path_dependency(root: &Path) -> Result<Self> {
+        Self::load_path_dependency_in(root, &source::Documents::default())
     }
 
-    pub fn load_path_dependency(root: &Path) -> Result<Self> {
+    pub(crate) fn load_path_dependency_in(
+        root: &Path,
+        documents: &source::Documents,
+    ) -> Result<Self> {
         let root = fs::canonicalize(root).map_err(|error| {
             Error::failure(format!(
                 "failed to canonicalize path dependency directory `{}`: {error}",
@@ -445,8 +420,8 @@ impl Manifest {
                 path.display()
             )));
         }
-        let document = Document::load(&path, "Cargo path dependency manifest")?;
-        let inherited = dependency_workspace_package(&root)?;
+        let document = documents.load(&path, "Cargo path dependency manifest")?;
+        let inherited = dependency_workspace_package(&root, documents)?;
         let mut manifest = Self::parse_document_with_inheritance(
             &root,
             &path,
@@ -467,7 +442,7 @@ impl Manifest {
                 root.display()
             ))
         })?;
-        let mut manifest = source::load_package(&root, &root)?;
+        let mut manifest = source::load_package(&root, &root, &source::Documents::default())?;
         manifest.editable = false;
         Ok(manifest)
     }
@@ -617,15 +592,9 @@ impl Manifest {
         let rust_lints = parse_lint_namespace(lint_table.as_ref(), mode, "rust")?;
         let clippy_lints = parse_lint_namespace(lint_table.as_ref(), mode, "clippy")?;
         let rustdoc_lints = parse_lint_namespace(lint_table.as_ref(), mode, "rustdoc")?;
-        let (dev, release, profile_errors) = if mode == ManifestMode::Root && !member {
-            parse_profiles(path, document)?
-        } else {
-            (
-                DevProfile::default(),
-                ReleaseProfile::default(),
-                BTreeMap::new(),
-            )
-        };
+        if mode == ManifestMode::Root && !member {
+            profiles::validate(path, document)?;
+        }
 
         Ok(Self {
             root: root.to_path_buf(),
@@ -639,9 +608,7 @@ impl Manifest {
             edition,
             metadata,
             default_run: optional_string(path, document, package, "package", "default-run")?,
-            dev,
-            release,
-            profile_errors,
+            profile: Profile::default(),
             unresolved_target,
             profile_directory: None,
             profile_name: None,
@@ -762,15 +729,18 @@ struct InheritedPackage {
     edition: Option<String>,
     rust_version: Option<String>,
     path: PathBuf,
-    document: Document,
+    document: std::rc::Rc<Document>,
 }
 
-fn dependency_workspace_package(root: &Path) -> Result<Option<InheritedPackage>> {
-    let Some(workspace) = source::nearest_workspace(root)? else {
+fn dependency_workspace_package(
+    root: &Path,
+    documents: &source::Documents,
+) -> Result<Option<InheritedPackage>> {
+    let Some(workspace) = source::nearest_workspace(root, documents)? else {
         return Ok(None);
     };
     let path = workspace.root.join(MANIFEST_NAME);
-    let document = Document::load(&path, "Cargo workspace manifest")?;
+    let document = workspace.document;
     let table = require_table(
         &path,
         &document,
@@ -796,7 +766,12 @@ fn dependency_workspace_package(root: &Path) -> Result<Option<InheritedPackage>>
     }))
 }
 
-fn workspace_resolver(root: &Path, path: &Path, document: &Document) -> Result<Resolver> {
+fn workspace_resolver(
+    root: &Path,
+    path: &Path,
+    document: &Document,
+    documents: &source::Documents,
+) -> Result<Resolver> {
     let workspace = require_table(
         path,
         document,
@@ -810,7 +785,7 @@ fn workspace_resolver(root: &Path, path: &Path, document: &Document) -> Result<R
         return Ok(Resolver::V1);
     };
     let package = require_table(path, document, item, "package")?;
-    let inherited = dependency_workspace_package(root)?;
+    let inherited = dependency_workspace_package(root, documents)?;
     let edition = parse_edition(
         path,
         document,
@@ -1960,112 +1935,13 @@ fn parse_lint_namespace(
     Ok(result)
 }
 
-type ParsedProfiles = (DevProfile, ReleaseProfile, BTreeMap<String, Error>);
-
-fn parse_profiles(path: &Path, document: &Document) -> Result<ParsedProfiles> {
-    let Some(item) = document.root().get("profile") else {
-        return Ok((
-            DevProfile::default(),
-            ReleaseProfile::default(),
-            BTreeMap::new(),
-        ));
-    };
-    let profiles = require_table(path, document, item, "profile")?;
-    for (key, item) in profiles.iter() {
-        require_table(path, document, item, &format!("profile.{key}"))?;
-    }
-    let dev = match profiles.get("dev") {
-        Some(dev) => parse_dev(
-            path,
-            document,
-            require_table(path, document, dev, "profile.dev")?,
-        )?,
-        None => DevProfile::default(),
-    };
-    let release = match profiles.get("release") {
-        Some(release) => parse_release(
-            path,
-            document,
-            require_table(path, document, release, "profile.release")?,
-            "profile.release",
-            "3",
-        )?,
-        None => ReleaseProfile::default(),
-    };
-    let mut errors = BTreeMap::new();
-    for (name, allowed) in [
-        (
-            "dev",
-            &[
-                "panic",
-                "debug",
-                "opt-level",
-                "lto",
-                "strip",
-                "codegen-units",
-                "debug-assertions",
-                "overflow-checks",
-                "incremental",
-            ][..],
-        ),
-        (
-            "release",
-            &[
-                "panic",
-                "lto",
-                "strip",
-                "codegen-units",
-                "debug",
-                "opt-level",
-                "debug-assertions",
-                "overflow-checks",
-                "incremental",
-            ][..],
-        ),
-        ("test", &[][..]),
-    ] {
-        if let Some(table) = profiles.get(name).and_then(Item::as_table)
-            && let Some((key, item)) = table.iter().find(|(key, _)| !allowed.contains(key))
-        {
-            errors.insert(
-                name.to_owned(),
-                Error::at(
-                    path,
-                    document.line_of_item(item),
-                    format!("unsupported selected profile key `profile.{name}.{key}`"),
-                    format!(
-                        "the selected {name} profile supports {}",
-                        allowed.join(", ")
-                    ),
-                ),
-            );
-        }
-    }
-    Ok((dev, release, errors))
-}
-
-fn parse_dev(path: &Path, document: &Document, table: &Table) -> Result<DevProfile> {
-    let profile = parse_release(path, document, table, "profile.dev", "0")?;
-    Ok(DevProfile {
-        panic_abort: profile.panic_abort,
-        opt_level: profile.opt_level,
-        debug: profile.debug,
-        lto: profile.lto,
-        strip: profile.strip,
-        codegen_units: profile.codegen_units,
-        debug_assertions: profile.debug_assertions,
-        overflow_checks: profile.overflow_checks,
-        incremental: profile.incremental,
-    })
-}
-
-fn parse_release(
+fn parse_profile(
     path: &Path,
     document: &Document,
     table: &Table,
     profile: &str,
     default_opt: &'static str,
-) -> Result<ReleaseProfile> {
+) -> Result<Profile> {
     let panic_abort = parse_panic_abort(path, document, table, profile)?;
     let lto = match table.get("lto") {
         None => Lto::Default,
@@ -2115,7 +1991,7 @@ fn parse_release(
             }
         },
     };
-    Ok(ReleaseProfile {
+    Ok(Profile {
         opt_level: parse_opt_level(path, document, table, profile, default_opt)?,
         debug: parse_profile_debug(path, document, table, profile)?,
         panic_abort,
@@ -2382,23 +2258,11 @@ fn parse_lock_document(
             dependencies,
         });
     }
+    let lock = Lockfile { format, packages };
     if let Some(manifest) = manifest {
-        let roots = packages
-            .iter()
-            .filter(|package| {
-                package.name == manifest.name
-                    && package.version.original == manifest.version.original
-                    && package.source.is_none()
-            })
-            .count();
-        if roots != 1 {
-            return Err(Error::failure(format!(
-                "Cargo.lock is stale: expected one root path package `{} {}`, found {roots}",
-                manifest.name, manifest.version.original
-            )));
-        }
+        lock.require_root(manifest)?;
     }
-    Ok(Lockfile { format, packages })
+    Ok(lock)
 }
 
 #[derive(Clone, Copy)]
@@ -2931,11 +2795,6 @@ codegen-units = 1
         assert_eq!(manifest.edition, Edition::E2024);
         assert_eq!(manifest.resolver, Resolver::V3);
         assert_eq!(manifest.metadata.authors, ["A", "B"]);
-        assert!(manifest.dev.panic_abort);
-        assert!(manifest.release.panic_abort);
-        assert_eq!(manifest.release.lto, Lto::Fat);
-        assert_eq!(manifest.release.strip, Strip::Symbols);
-        assert_eq!(manifest.release.codegen_units, Some(1));
     }
 
     #[test]
@@ -3319,9 +3178,19 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert_eq!(from_root.root, root.join("app"));
         assert_eq!(from_root.workspace_root, root);
         assert_eq!(from_root.resolver, Resolver::V2);
-        assert!(from_root.dev.panic_abort);
-        assert_eq!(from_root.release.lto, Lto::Thin);
-        assert_eq!(from_root.release.codegen_units, Some(2));
+        let member_workspace = SourceWorkspace::load(&root.join("app"), None).unwrap();
+        for (name, panic_abort, lto, codegen_units) in [
+            ("dev", true, Lto::Default, None),
+            ("release", false, Lto::Thin, Some(2)),
+        ] {
+            let mut member = from_root.clone();
+            profiles::SelectedProfile::load(&member_workspace, name)
+                .unwrap()
+                .apply(&mut member);
+            assert_eq!(member.profile.panic_abort, panic_abort);
+            assert_eq!(member.profile.lto, lto);
+            assert_eq!(member.profile.codegen_units, codegen_units);
+        }
         assert!(from_root.lock.is_some());
         let shared = Manifest::load_for_build(&root.join("shared")).unwrap();
         for selection in [
@@ -3396,8 +3265,6 @@ unsafe_code = { level = "forbid", priority = 1 }
             assert_eq!(member.workspace_root, root);
             assert_eq!(member.workspace_members, from_root.workspace_members);
             assert_eq!(member.lock, from_root.lock);
-            assert_eq!(member.dev, from_root.dev);
-            assert_eq!(member.release, from_root.release);
             assert_eq!(member.patches, from_root.patches);
             assert_eq!(member.patches.len(), 1);
         }
@@ -3477,61 +3344,6 @@ unsafe_code = { level = "forbid", priority = 1 }
                 .iter()
                 .all(|dependency| dependency.kind == DependencyKind::Build)
         );
-    }
-
-    #[test]
-    fn profiles_debug_and_optimization_accept_cargo_values() {
-        let path = Path::new("/profile/Cargo.toml");
-        for profile in ["dev", "release"] {
-            let source = |debug: &str, opt: &str| {
-                format!(
-                    "[package]\nname=\"profile\"\nversion=\"1.0.0\"\n[profile.{profile}]\ndebug={debug}\nopt-level={opt}\n"
-                )
-            };
-            for (debug, expected) in [
-                ("false", CargoDebugInfo::None),
-                ("true", CargoDebugInfo::Full),
-                ("0", CargoDebugInfo::None),
-                ("1", CargoDebugInfo::Limited),
-                ("2", CargoDebugInfo::Full),
-                ("\"none\"", CargoDebugInfo::None),
-                ("\"limited\"", CargoDebugInfo::Limited),
-                ("\"full\"", CargoDebugInfo::Full),
-                ("\"line-tables-only\"", CargoDebugInfo::LineTablesOnly),
-                (
-                    "\"line-directives-only\"",
-                    CargoDebugInfo::LineDirectivesOnly,
-                ),
-            ] {
-                for opt in ["0", "1", "2", "3", "\"s\"", "\"z\""] {
-                    let manifest =
-                        Manifest::parse(path.parent().unwrap(), path, &source(debug, opt)).unwrap();
-                    manifest
-                        .require_profile(profile == "release", false)
-                        .unwrap();
-                    let (debug, optimization) = if profile == "release" {
-                        (manifest.release.debug, manifest.release.opt_level)
-                    } else {
-                        (manifest.dev.debug, manifest.dev.opt_level)
-                    };
-                    assert_eq!(debug, Some(expected));
-                    assert_eq!(optimization, opt.trim_matches('"'));
-                }
-            }
-            for invalid in [
-                "-1", "4", "false", "\"fast\"", "\"0\"", "\"1\"", "\"2\"", "\"3\"", "[]",
-            ] {
-                assert!(
-                    Manifest::parse(path.parent().unwrap(), path, &source("false", invalid))
-                        .is_err()
-                );
-            }
-            for invalid in ["-1", "3", "\"debug\"", "\"0\"", "\"1\"", "\"2\"", "[]"] {
-                assert!(
-                    Manifest::parse(path.parent().unwrap(), path, &source(invalid, "3")).is_err()
-                );
-            }
-        }
     }
 
     #[test]
