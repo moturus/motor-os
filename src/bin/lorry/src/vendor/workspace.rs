@@ -344,6 +344,9 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
                 })?;
             }
         }
+        // Corrupt records already fail in `load_replaceable`. A record that
+        // parses but does not rebuild cannot be told apart from changed inputs,
+        // so the report shows the complete candidate without a warning.
         let baseline = previous
             .as_ref()
             .and_then(|previous| {

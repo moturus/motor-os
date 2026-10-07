@@ -91,8 +91,18 @@ expect_failure() {
     }
 }
 
+expect_no_warning() {
+    if grep -E '^warning:' "$WORK/$1.stderr" >/dev/null; then
+        cat "$WORK/$1.stderr" >&2
+        echo "review-contract: $1 vendor printed a warning" >&2
+        exit 1
+    fi
+}
+
 echo "== Creating deterministic local dependency state =="
-(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all >/dev/null)
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all) \
+    >/dev/null 2>"$WORK/initial.stderr"
+expect_no_warning initial
 
 echo "== Preserving admission for unused member declarations =="
 cat >>"$PROJECT/Cargo.toml" <<'EOF'
@@ -133,6 +143,8 @@ fi
     >"$WORK/retained.stdout" 2>"$WORK/retained.stderr"
 grep -F 'Review scope: all workspace members; default features; features: automated-change' \
     "$WORK/retained.stderr" >/dev/null
+expect_no_warning automated
+expect_no_warning retained
 
 echo "== Proving review is read-only and committed =="
 before="$(find "$PROJECT" "$REPOSITORY" -printf '%y %p %s %T@\n' | sort | sha256sum)"
@@ -158,5 +170,19 @@ done
 sed -i 's/^review-sha256 = ".*"/review-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"/' \
     "$PROJECT/.lorry/dependencies-v2.toml"
 expect_failure stale-commitment "workspace admission commitment does not match" review
+
+echo "== Falling back silently when vendor cannot reconstruct the previous review =="
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all </dev/null) \
+    >/dev/null 2>"$WORK/unreconstructed.stderr"
+grep -F 'Previous review cannot be reconstructed; showing the complete candidate.' \
+    "$WORK/unreconstructed.stderr" >/dev/null
+expect_no_warning unreconstructed
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" review) >/dev/null
+sed -i 's/^review-format-version = 4$/review-format-version = 3/' \
+    "$PROJECT/.lorry/dependencies-v2.toml"
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all </dev/null) \
+    >/dev/null 2>"$WORK/retired.stderr"
+expect_no_warning retired
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" review) >/dev/null
 
 echo "PASS: offline review contract"
