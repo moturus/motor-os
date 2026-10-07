@@ -8,6 +8,10 @@ pub(super) struct Identity {
 }
 
 impl Identity {
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
+
     fn from_locked(package: &crate::manifest::LockedPackage) -> Result<Self> {
         Ok(Self {
             name: package.name.clone(),

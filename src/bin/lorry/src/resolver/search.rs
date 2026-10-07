@@ -215,6 +215,24 @@ impl Frame {
         }))
     }
 
+    /// In an exact locked resolution, fresh candidates are limited to the
+    /// parent's locked identities. When each identity with this name is
+    /// already selected, loading candidates cannot add a choice, so the frame
+    /// need not be kept for backtracking.
+    fn locked_candidates_selected(&self) -> bool {
+        let name = &self.event.as_ref().unwrap().dependency.package;
+        self.allowed.as_ref().is_some_and(|allowed| {
+            allowed
+                .iter()
+                .filter(|identity| identity.name() == name)
+                .all(|identity| {
+                    self.state.nodes.keys().any(|key| {
+                        key.name == *name && locked::Identity::from_key(key) == *identity
+                    })
+                })
+        })
+    }
+
     fn is_preferred(&self, key: &PackageKey) -> bool {
         self.preferred
             .as_ref()
@@ -237,6 +255,7 @@ impl Frame {
                 self.event.as_ref().unwrap().dependency.source,
                 RequirementSource::Path(_)
             )
+            && !self.locked_candidates_selected()
         {
             return true;
         }
