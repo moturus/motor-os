@@ -93,7 +93,7 @@ PY
         status=0
         env HOME="$WORK/home" "$tool" test --test needs --no-run >"$WORK/needs.out" 2>"$WORK/needs.err" || status=$?
         [ "$status" = 101 ]
-        rg -q 'requires the features:.*extra' "$WORK/needs.err"
+        grep -Eq 'requires the features:.*extra' "$WORK/needs.err"
     done
 done
 echo "PASS: explicit, inferred, disabled, feature-gated, and harness-free tests match Cargo native/cross artifacts"

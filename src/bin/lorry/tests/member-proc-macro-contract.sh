@@ -67,7 +67,7 @@ cd "$WORK/project"
 cp lorry.toml "$WORK/grant.toml"
 sed -i 's/name = "derive"/name = "ungranted"/' lorry.toml
 if env HOME="$WORK/home" "$LORRY" build -p derive >"$WORK/denied.out" 2>"$WORK/denied.err"; then exit 1; fi
-rg -F 'procedural macro without an explicit matching policy grant' "$WORK/denied.err" >/dev/null
+grep -F 'procedural macro without an explicit matching policy grant' "$WORK/denied.err" >/dev/null
 [ ! -d target/lorry/debug/deps ]
 cp "$WORK/grant.toml" lorry.toml
 for platform in native motor native-release motor-release; do
@@ -208,8 +208,8 @@ printf '#[test]\nfn imported_macro() { assert_eq!(derive::answer!(), 41); }\n' >
 if env HOME="$WORK/home" "$LORRY" test -p derive --bundle --no-run \
     --target x86_64-unknown-motor --target-dir "$WORK/mixed-bundle" \
     --message-format=json >"$WORK/mixed-bundle.json" 2>"$WORK/mixed-bundle.err"; then exit 1; fi
-rg -F 'cannot bundle tests for `derive` across host' "$WORK/mixed-bundle.err" >/dev/null
-rg -F -- '--lib or --test NAME, or omit --bundle' "$WORK/mixed-bundle.err" >/dev/null
+grep -F 'cannot bundle tests for `derive` across host' "$WORK/mixed-bundle.err" >/dev/null
+grep -F -- '--lib or --test NAME, or omit --bundle' "$WORK/mixed-bundle.err" >/dev/null
 python3 - "$WORK/mixed-bundle" "$WORK/mixed-bundle.json" <<'PYBUNDLE'
 import json, pathlib, sys
 assert not list(pathlib.Path(sys.argv[1]).rglob('*-test-bundle'))

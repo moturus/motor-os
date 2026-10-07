@@ -68,7 +68,7 @@ for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
     [ -x "$prefix/debug/two" ]
     sed -i '/^rpath = true$/d' Cargo.toml
     if env HOME="$WORK/home" "$builder" clean --profile missing --target-dir "$directory" 2>"$WORK/missing.err"; then exit 1; fi
-    rg -F 'profile `missing` is not defined' "$WORK/missing.err"
+    grep -F 'profile `missing` is not defined' "$WORK/missing.err"
     cmp Cargo.lock "$WORK/lock"
 done
 # An unselected member invocation removes the shared tree, as at the root.

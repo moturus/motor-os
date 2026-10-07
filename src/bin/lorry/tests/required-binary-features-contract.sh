@@ -73,7 +73,7 @@ for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
     status=0
     env HOME="$WORK/home" "$builder" build --bin gated >"$WORK/named.out" 2>"$WORK/named.err" || status=$?
     [ "$status" = 101 ]
-    rg -q 'requires the features: `present`, `extra`' "$WORK/named.err"
+    grep -Eq 'requires the features: `present`, `extra`' "$WORK/named.err"
 done
 # No available implicit target is a successful build with no compiler units.
 printf 'autolib = false\nautobins = false\n' >"$WORK/disabled.package"
@@ -84,6 +84,6 @@ sed -i '$d' app/Cargo.toml
 for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
     env HOME="$WORK/home" "$builder" build --message-format=json >"$WORK/empty.json"
     [ "$(wc -l <"$WORK/empty.json")" -eq 1 ]
-    rg -q '"reason":"build-finished","success":true' "$WORK/empty.json"
+    grep -Eq '"reason":"build-finished","success":true' "$WORK/empty.json"
 done
 echo "PASS: binary feature filtering, qualified dependencies, named errors, and empty builds match Cargo"

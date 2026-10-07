@@ -48,7 +48,7 @@ reject_run() {
             echo "run unexpectedly accepted $*: $builder" >&2
             exit 1
         fi
-        rg -F "$expected" "$WORK/rejected.err"
+        grep -F "$expected" "$WORK/rejected.err"
     done
 }
 compare_run -- one 'two words'

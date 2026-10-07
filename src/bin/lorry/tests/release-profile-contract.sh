@@ -178,7 +178,7 @@ EOF
         if [ "${mode[0]:-}" = --release ]; then profile_name=release; fi
         if [ "${mode[0]:-}" = --profile ]; then profile_name="${mode[1]}"; fi
         for builder in lorry cargo; do
-            rg -F "Finished \`$profile_name\` profile" "$WORK/$builder-profile.err" >/dev/null
+            grep -F "Finished \`$profile_name\` profile" "$WORK/$builder-profile.err" >/dev/null
         done
         if [ "$command" = build ]; then cmp "target/$profile/app" "target/lorry/$profile/app"; fi
         if [ "$command" = test ]; then
@@ -210,13 +210,13 @@ for ignored_profile in test bench; do
         for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
             if env HOME="$WORK/home" "$builder" build --profile "$ignored_profile" --workspace --offline \
                 >"$WORK/invalid-panic.out" 2>"$WORK/invalid-panic.err"; then exit 1; fi
-            rg -F 'panic' "$WORK/invalid-panic.err" >/dev/null
+            grep -F 'panic' "$WORK/invalid-panic.err" >/dev/null
         done
     done
 done
 cp "$WORK/manifest.toml" Cargo.toml
 if env HOME="$WORK/home" CARGO_PROFILE_DEV_RPATH=true "$LORRY" check --workspace 2>"$WORK/unsupported.err"; then exit 1; fi
-rg -F 'unsupported selected profile environment variable `CARGO_PROFILE_DEV_RPATH`' "$WORK/unsupported.err"
+grep -F 'unsupported selected profile environment variable `CARGO_PROFILE_DEV_RPATH`' "$WORK/unsupported.err"
 for builder in "$LORRY" "$LORRY_TEST_CARGO"; do
     if env HOME="$WORK/home" CARGO_PROFILE_RELEASE_INCREMENTAL=invalid "$builder" build --release --workspace --offline 2>"$WORK/invalid.err"; then exit 1; fi
 done

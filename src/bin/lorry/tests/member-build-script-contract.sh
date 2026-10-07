@@ -87,7 +87,7 @@ cd "$WORK/project"
 cp lorry.toml "$WORK/grants.toml"
 sed -i 's/name = "a"/name = "ungranted-a"/' lorry.toml
 if env HOME="$WORK/home" "$LORRY" build --message-format=json >"$WORK/denied.json" 2>"$WORK/denied.err"; then exit 1; fi
-rg -F 'build script without an explicit matching policy grant' "$WORK/denied.err" >/dev/null
+grep -F 'build script without an explicit matching policy grant' "$WORK/denied.err" >/dev/null
 [ ! -d target/lorry/debug/build/a ]
 python3 - "$WORK/denied.json" <<'PY'
 import json, sys
@@ -126,8 +126,8 @@ sed -i '/\[policy.rules.b\]/,$ {/caller-env/d;}' lorry.toml
 env HOME="$WORK/home" SCRIPT_INPUT=private-marker "$LORRY" build -j1 2>"$WORK/hidden.err"
 [ "$(target/lorry/debug/a)" = private-marker ]
 [ "$(target/lorry/debug/b)" = absent ]
-rg -F 'hidden caller variable `SCRIPT_INPUT`' "$WORK/hidden.err" >/dev/null
-if rg -F private-marker "$WORK/hidden.err"; then exit 1; fi
+grep -F 'hidden caller variable `SCRIPT_INPUT`' "$WORK/hidden.err" >/dev/null
+if grep -F private-marker "$WORK/hidden.err"; then exit 1; fi
 # Run shares member feature resolution and script output, including fresh units.
 cp "$WORK/grants.toml" lorry.toml
 cat >a/src/main.rs <<'EOF'

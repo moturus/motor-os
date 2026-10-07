@@ -40,20 +40,20 @@ printf 'fn main() { assert_eq!(selected_cache::value(), 42); }\n' \
 (
     cd "$WORK/project"
     "$LORRY" --verbose build >"$WORK/first.log" 2>&1
-    rg -Fq 'function `unused_cache_warning` is never used' "$WORK/first.log"
+    grep -Fq 'function `unused_cache_warning` is never used' "$WORK/first.log"
     test -f target/lorry/debug/selected-cache
     test -d target/lorry/.cache/v1/units/sha256
     rm -rf target/lorry/debug
     "$LORRY" --verbose build >"$WORK/second.log" 2>&1
-    rg -Fq 'Fresh selected-cache v0.1.0 (verified Lorry cache)' "$WORK/second.log"
-    rg -Fq 'function `unused_cache_warning` is never used' "$WORK/second.log"
+    grep -Fq 'Fresh selected-cache v0.1.0 (verified Lorry cache)' "$WORK/second.log"
+    grep -Fq 'function `unused_cache_warning` is never used' "$WORK/second.log"
     "$LORRY" --quiet build >"$WORK/profile-human.log" 2>&1
-    rg -Fq 'function `unused_cache_warning` is never used' "$WORK/profile-human.log"
+    grep -Fq 'function `unused_cache_warning` is never used' "$WORK/profile-human.log"
     for format in json json-diagnostic-rendered-ansi; do
         "$LORRY" --quiet build --message-format="$format" >"$WORK/profile-$format.json"
-        rg -F '"reason":"compiler-message"' "$WORK/profile-$format.json" | \
-            rg -Fq 'function `unused_cache_warning` is never used'
-        if rg -F '"reason":"compiler-artifact"' "$WORK/profile-$format.json" | rg -Fq '"fresh":false'; then
+        grep -F '"reason":"compiler-message"' "$WORK/profile-$format.json" | \
+            grep -F 'function `unused_cache_warning` is never used' >/dev/null
+        if grep -F '"reason":"compiler-artifact"' "$WORK/profile-$format.json" | grep -F '"fresh":false' >/dev/null; then
             echo 'selected-cache-contract: cached profile rebuilt a compiler unit' >&2
             exit 1
         fi
@@ -61,10 +61,10 @@ printf 'fn main() { assert_eq!(selected_cache::value(), 42); }\n' \
     "$LORRY" --quiet test --no-run --message-format=json >"$WORK/tests-cold.json"
     "$LORRY" --quiet test --no-run --message-format=json >"$WORK/tests-fresh.json"
     for transcript in "$WORK/tests-cold.json" "$WORK/tests-fresh.json"; do
-        rg -F '"reason":"compiler-message"' "$transcript" | \
-            rg -Fq 'function `unused_cache_warning` is never used'
+        grep -F '"reason":"compiler-message"' "$transcript" | \
+            grep -F 'function `unused_cache_warning` is never used' >/dev/null
     done
-    if rg -F '"reason":"compiler-artifact"' "$WORK/tests-fresh.json" | rg -Fq '"fresh":false'; then
+    if grep -F '"reason":"compiler-artifact"' "$WORK/tests-fresh.json" | grep -F '"fresh":false' >/dev/null; then
         echo 'selected-cache-contract: repeated test rebuilt a fresh compiler unit' >&2
         exit 1
     fi
@@ -111,7 +111,7 @@ EOF
     test "$(cat "$counter")" = x
     "$LORRY" --quiet build --message-format=json >"$WORK/admitted-fresh.json"
     test "$(cat "$counter")" = x
-    if rg -F '"reason":"compiler-artifact"' "$WORK/admitted-fresh.json" | rg -Fq '"fresh":false'; then
+    if grep -F '"reason":"compiler-artifact"' "$WORK/admitted-fresh.json" | grep -F '"fresh":false' >/dev/null; then
         echo 'selected-cache-contract: admitted profile rebuilt a compiler unit' >&2
         exit 1
     fi
@@ -126,7 +126,7 @@ EOF
         echo 'selected-cache-contract: cached profile bypassed admission verification' >&2
         exit 1
     fi
-    rg -Fq 'workspace admission commitment does not match' "$WORK/stale.err"
+    grep -Fq 'workspace admission commitment does not match' "$WORK/stale.err"
     test "$(cat "$counter")" = x
 )
 echo "PASS: admitted profiles preserve validation and skip build scripts"

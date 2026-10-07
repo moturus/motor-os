@@ -310,12 +310,12 @@ done
 for selector in --example --bench; do
     for tool in "$LORRY" "$LORRY_TEST_CARGO"; do
         if env HOME="$WORK/home" "$tool" check --workspace "$selector" missing --offline >"$WORK/missing.out" 2>"$WORK/missing.err"; then exit 1; fi
-        rg -q 'no (example|bench) target named.*missing' "$WORK/missing.err"
+        grep -Eq 'no (example|bench) target named.*missing' "$WORK/missing.err"
     done
 done
 for tool in "$LORRY" "$LORRY_TEST_CARGO"; do
     if env HOME="$WORK/home" "$tool" check -p alpha --example disabled --offline >"$WORK/disabled.out" 2>"$WORK/disabled.err"; then exit 1; fi
-    rg -q 'requires.*features' "$WORK/disabled.err"
+    grep -Eq 'requires.*features' "$WORK/disabled.err"
     env HOME="$WORK/home" "$tool" check -p alpha --example disabled --features manual --offline
 done
 for member in alpha zeta; do cp "$WORK/$member-integration.rs" "$member/tests/integration.rs"; done
@@ -361,7 +361,7 @@ for policy in default all; do
     set -e
     [ "$lorry_status" = "$expected" ] && [ "$cargo_status" = "$expected" ]
     cmp "$WORK/lorry-failure.out" "$WORK/cargo-failure.out"
-    if [ "$policy" = all ]; then rg -F '1 test targets failed:' "$WORK/lorry-failure.err" >/dev/null; fi
+    if [ "$policy" = all ]; then grep -F '1 test targets failed:' "$WORK/lorry-failure.err" >/dev/null; fi
 done
 set +e
 env HOME="$WORK/home" TEST_ABORT=1 "$LORRY" test --workspace >"$WORK/lorry-signal.out" 2>"$WORK/lorry-signal.err"

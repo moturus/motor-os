@@ -26,8 +26,8 @@ for types in '"rlib","cdylib"' '"rlib","dylib"' '"staticlib","cdylib"' '"cdylib"
         [ "$lorry_status" = "$cargo_status" ]
         if [ "$cargo_status" != 0 ]; then
             [ "$command" = build ] && [ "$cargo_status" = 101 ]
-            rg -q 'does not support these crate types' "$WORK/lorry.err"
-            rg -q 'does not support these crate types' "$WORK/cargo.err"
+            grep -Eq 'does not support these crate types' "$WORK/lorry.err"
+            grep -Eq 'does not support these crate types' "$WORK/cargo.err"
             continue
         fi
         python3 - "$WORK/lorry.json" "$WORK/cargo.json" "$command" <<'PY'
@@ -51,6 +51,6 @@ PY
     status=0
     env HOME="$WORK/home" "$LORRY" build >"$WORK/linux.out" 2>"$WORK/linux.err" || status=$?
     [ "$status" = 101 ]
-    rg -q 'Linux .* execution is not yet supported' "$WORK/linux.err"
+    grep -Eq 'Linux .* execution is not yet supported' "$WORK/linux.err"
 done
 echo "PASS: Motor crate-type dropping, diagnostics, metadata-only checking, and unusable-output errors match Cargo"

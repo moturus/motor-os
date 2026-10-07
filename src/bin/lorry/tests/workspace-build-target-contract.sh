@@ -136,7 +136,7 @@ for command in build check test; do
                 echo "unmatched target pattern succeeded: $builder $command $kind" >&2
                 exit 1
             fi
-            rg -F 'matches pattern `missing-*`' "$WORK/missing.err"
+            grep -F 'matches pattern `missing-*`' "$WORK/missing.err"
         done
     done
 done

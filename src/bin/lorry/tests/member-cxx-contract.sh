@@ -112,7 +112,7 @@ env HOME="$WORK/home" "$LORRY" vendor --locked --accept-all
 cp lorry.toml "$WORK/grants.toml"
 sed -i 's/native-tools = \["cxx-compiler", "archiver"\]/native-tools = ["archiver"]/' lorry.toml
 if env HOME="$WORK/home" PROBE_UNGRANTED=1 "$LORRY" check >"$WORK/denied.out" 2>"$WORK/denied.err"; then exit 1; fi
-rg -F 'C++ capability correctly denied' "$WORK/denied.err" >/dev/null
+grep -F 'C++ capability correctly denied' "$WORK/denied.err" >/dev/null
 cp "$WORK/grants.toml" lorry.toml
 for target in x86_64-unknown-linux-gnu x86_64-unknown-motor; do
     compiler="$HOST_CXX"; archiver="$HOST_AR"; flags=()

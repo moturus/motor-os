@@ -114,7 +114,7 @@ PY
     for tool in "$LORRY" "$LORRY_TEST_CARGO"; do
         if env HOME="$WORK/home" "$tool" check --workspace --all-targets --keep-going \
             "${target[@]}" --offline >"$WORK/ordinary.out" 2>"$WORK/ordinary.err"; then exit 1; fi
-        rg -F 'ordinary source must be skipped' "$WORK/ordinary.err" >/dev/null
+        grep -F 'ordinary source must be skipped' "$WORK/ordinary.err" >/dev/null
     done
 done
 # rustc hashes the physical OUT_DIR used by include!, even with path remapping.
@@ -136,13 +136,13 @@ done
 mv lorry.toml "$WORK/grants.toml"
 if env HOME="$WORK/home" "$LORRY" check --workspace --compile-time-deps \
     --message-format=json >"$WORK/denied.json" 2>"$WORK/denied.err"; then exit 1; fi
-rg -F 'build script' "$WORK/denied.err" >/dev/null
+grep -F 'build script' "$WORK/denied.err" >/dev/null
 python3 - "$WORK/denied.json" <<'PY'
 import json, sys
 events = [json.loads(line) for line in open(sys.argv[1])]
 assert events == [{'reason': 'build-finished', 'success': False}], events
 PY
 if env HOME="$WORK/home" "$LORRY" clippy --compile-time-deps >"$WORK/clippy.out" 2>"$WORK/clippy.err"; then exit 1; fi
-rg -F 'unexpected argument' "$WORK/clippy.err" >/dev/null
+grep -F 'unexpected argument' "$WORK/clippy.err" >/dev/null
 cmp Cargo.lock "$WORK/original.lock"
 echo 'PASS: compile-time checks match Cargo scripts, executable macros, artifacts, and policy without checking ordinary sources'
