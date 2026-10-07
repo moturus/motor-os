@@ -78,6 +78,10 @@ The shell is somewhat barebones now (contributions are welcome!).
   overrides global ordering flags for that key; `b` skips leading blanks at
   its position. For example, `sort -t: -k2,2n -k1,1r` sorts field 2 numerically,
   then field 1 in reverse byte order;
+- `uniq [-cdui] [--] [INPUT [OUTPUT]]` groups consecutive equal byte lines,
+  retaining the first line's spelling. `-c` counts, `-d` keeps repeated groups,
+  `-u` keeps single lines and `-i` folds ASCII case; `-` selects standard I/O.
+  It streams input; use `sort` first to group nonadjacent duplicates;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
   numeric IPv4 and IPv6 addresses, `localhost`, and DNS names;
 - `head [-n [-]NUM | -c [-]NUM] [-q | -v] [-z] [FILE]...` prints the first 10

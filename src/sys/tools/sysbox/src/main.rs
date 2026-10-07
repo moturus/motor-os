@@ -32,6 +32,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox tail");
     println!("\tsysbox time");
     println!("\tsysbox top");
+    println!("\tsysbox uniq");
     println!("\tsysbox uptime");
     println!("\tsysbox wc");
     println!("\tsysbox which");
@@ -97,6 +98,7 @@ fn main() {
         "tail" => commands::tail::do_command(&args[1..]),
         "time" => commands::time::do_command(&args[1..]),
         "top" => commands::top::do_command(&args[1..]),
+        "uniq" => commands::uniq::do_command(&args[1..]),
         "uptime" => commands::uptime::do_command(&args[1..]),
         "wc" => commands::wc::do_command(&args[1..]),
         "which" => commands::which::do_command(&args[1..]),

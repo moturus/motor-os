@@ -18,7 +18,7 @@ that Gears works with OpenRouter on Motor OS.
 | --- | --- |
 | First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
 | Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
-| Motor OS command utilities | Separate coding work remains: `uniq`, `cut`, `tr` and `xargs`. `mkdir -p` and the planned `sort` options, including local key modifiers, are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Motor OS command utilities | Separate coding work remains: `cut`, `tr` and `xargs`. `mkdir -p`, `sort` and `uniq` are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
 | Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
 | Optional orchestration (10) | Implement supervised worker agents and their budgets. |
 | Optional web tools (11) | Implement web search and page extraction using curl. |
@@ -1274,3 +1274,33 @@ in debug and release without source changes. Logs are under
 `/tmp/gears-sysbox-sort-per-key/`. Only sysbox and its documentation/test wiring
 are authored changes; verified generated locks are restored and the user's
 existing sys workspace lock remains unchanged.
+
+
+### S3 consecutive-line uniq
+
+`uniq` implements `-c -d -u -i`, ASCII case folding, literal input/output
+paths and standard-I/O `-`. It preserves the first spelling of consecutive
+equal byte lines and streams with two reusable line buffers. Invalid options
+and missing input fail before output truncation. The real-command fixture
+covers binary/unterminated lines, filtering/counting, literal filenames, output
+protection, directory read diagnostics and the installed command wrapper.
+
+The shared fixture writes child input concurrently with output collection;
+this avoids a pipe deadlock for streaming filters. The streaming and long-line
+cases exercise that path. A broken input pipe is accepted only for a failed
+child, whose exit code, stdout and command diagnostics remain asserted.
+
+The first native fixture exposed a directory diagnostic bug in the new code:
+Motor rejects directories at File::open, while Linux reaches a read error.
+The command now handles both stages without changing other error kinds or
+weakening the assertion. The unchanged snapshot-VM regression passes. The
+original failed gate is preserved in `/tmp/gears-sysbox-uniq/final-gates/`;
+all six final gates use the corrected source. GNU comparisons cover 576
+exact output/status/diagnostic cases.
+
+The final installed fixture and `full-test.sh` pass three times each in
+debug and release on unchanged source. Warnings-denied native Clippy passes.
+Gate logs: `/tmp/gears-sysbox-uniq/directory-fixed-gates/`.
+Authored crate changes are limited to sysbox;
+verified build-generated locks are restored and the user's existing sys lock
+is preserved.

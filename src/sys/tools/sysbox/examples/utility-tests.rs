@@ -1,6 +1,8 @@
 //! Real sysbox command regressions; run against the installed native executable.
 #[path = "utility-tests/sort-keys.rs"]
 mod sort_key_flags;
+#[path = "utility-tests/uniq.rs"]
+mod uniq;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -14,8 +16,18 @@ fn run(root: &Path, arguments: &[&str], input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(input).unwrap();
-    child.wait_with_output().unwrap()
+    let mut pipe = child.stdin.take().unwrap();
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || pipe.write_all(input));
+        let output = child.wait_with_output().unwrap();
+        if let Err(error) = writer.join().unwrap() {
+            assert!(
+                output.status.code() != Some(0) && error.kind() == std::io::ErrorKind::BrokenPipe,
+                "{output:?}: {error}"
+            );
+        }
+        output
+    })
 }
 
 // Debug Motor runtimes deliberately log to the same stderr pipe. Recognize only
@@ -127,6 +139,7 @@ fn main() {
     eprintln!("sysbox utility test artifacts: {}", root.display());
     sort_fields(&root);
     sort_key_flags::run_test(&root);
+    uniq::run_test(&root);
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox utility-tests: ALL PASS");
 }
