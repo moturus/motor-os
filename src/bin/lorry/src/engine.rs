@@ -256,9 +256,17 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
 
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
+    // Clippy and compile-time-dependency checks keep the unit-level path.
+    let fresh_check = match &cli.command {
+        Command::Check(options) if options.clippy.is_none() && !options.compile_time_deps => {
+            Some(options)
+        }
+        _ => None,
+    };
     let fresh_targets = match &cli.command {
         Command::Build(options) => Some(&options.targets),
         Command::Run(_) => Some(&run_targets),
+        Command::Check(options) => Some(&options.build.targets),
         _ => None,
     };
     let shared_members = shared.then_some(selected.as_slice());
@@ -270,7 +278,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 .iter()
                 .flat_map(|lock| &lock.packages)
                 .any(|package| package.source.is_some()))
-        && matches!(&cli.command, Command::Build(_) | Command::Run(_)))
+        && (matches!(&cli.command, Command::Build(_) | Command::Run(_)) || fresh_check.is_some()))
     .then(|| {
         trusted_freshness_base(&TrustedFreshness {
             manifest: &manifest,
@@ -287,6 +295,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             release,
             use_cargo_registry: cli.use_cargo_registry,
             binary_selection,
+            check_targets: fresh_check.map(|options| &options.build.targets),
             jobs,
             cargo: &cargo,
             shared: shared_members.map(|members| SharedSelection {
@@ -372,12 +381,16 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     crate::trace::event("verified dependency admission");
     if let Some(base) = ordinary_freshness_base
         && let Some(artifacts) = restore_fresh_profile(
-            &profile_destination(
-                &target_root,
-                physical_target.as_deref(),
-                release,
-                manifest.profile_directory.as_deref(),
-            ),
+            &if fresh_check.is_some() {
+                check_destination(&target_root, physical_target.as_deref(), false)
+            } else {
+                profile_destination(
+                    &target_root,
+                    physical_target.as_deref(),
+                    release,
+                    manifest.profile_directory.as_deref(),
+                )
+            },
             &manifest.workspace_root,
             &fresh_owner,
             base,
@@ -397,7 +410,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         )?;
         report_build_completion(cli, reported)?;
         return match &cli.command {
-            Command::Build(_) => Ok(0),
+            Command::Build(_) | Command::Check(_) => Ok(0),
             Command::Run(options) => {
                 let artifact = selected_run_artifact(&artifacts, run_binary.unwrap(), run_example)?;
                 drop(artifact_lock);
@@ -417,7 +430,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 crate::trace::event("program exited");
                 Ok(status)
             }
-            _ => unreachable!("only build and run use the ordinary freshness fast path"),
+            _ => unreachable!("only build, check, and run use the ordinary freshness fast path"),
         };
     }
 
@@ -489,7 +502,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 source: (source, direct, verified_resolution),
                 bundle: false,
                 validation,
-                ordinary_freshness_base: None,
+                ordinary_freshness_base,
                 binary_selection: None,
             },
             options,
@@ -829,6 +842,14 @@ fn profile_destination(
     profile
 }
 
+fn check_destination(target_root: &Path, physical_target: Option<&str>, clippy: bool) -> PathBuf {
+    let mut destination = target_root.to_owned();
+    if let Some(target) = physical_target {
+        destination.push(target);
+    }
+    destination.join(if clippy { "clippy" } else { "check" })
+}
+
 fn create_published_profile(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|error| {
         Error::failure(format!(
@@ -1099,15 +1120,11 @@ fn build_inner(
         None => target_root.to_owned(),
     };
     let destination = if check.is_some() {
-        let mut destination = target_root.to_owned();
-        if let Some(target) = build.physical_target {
-            destination.push(target);
-        }
-        destination.join(if build.toolchain.clippy.is_some() {
-            "clippy"
-        } else {
-            "check"
-        })
+        check_destination(
+            target_root,
+            build.physical_target,
+            build.toolchain.clippy.is_some(),
+        )
     } else {
         profile_destination(
             target_root,
@@ -1182,11 +1199,15 @@ fn build_inner(
     let fresh_owner = fresh_owner(
         build.manifest,
         build.members,
-        build.target_selection,
+        build
+            .target_selection
+            .or(check.map(|options| &options.build.targets)),
         build.binary_selection,
     );
-    let completed_freshness_base = (check.is_none() && !build.test)
-        .then(|| freshness_base(&build, &prepared, &cargo))
+    let fresh_check =
+        check.is_none_or(|options| options.clippy.is_none() && !options.compile_time_deps);
+    let completed_freshness_base = (fresh_check && !build.test)
+        .then(|| freshness_base(&build, &prepared, &cargo, check))
         .transpose()?;
     if let Some(base) = completed_freshness_base {
         crate::trace::event("fingerprinted build inputs");
@@ -1199,6 +1220,12 @@ fn build_inner(
         ) {
             crate::trace::event("validated fresh root profile");
             crate::check_message::replay(&artifacts.messages, format, build.color)?;
+            if check.is_some() {
+                if build.verbosity != Verbosity::Quiet {
+                    eprintln!("Finished `{}` profile", active_profile_name(&build));
+                }
+                return Ok(BuildOutcome::Check(0));
+            }
             finish_build(&build, &artifacts)?;
             crate::trace::event("reported build result");
             return Ok(BuildOutcome::Artifacts(artifacts));
@@ -1551,11 +1578,30 @@ fn build_inner(
         } else {
             plan
         };
-        executor::execute(&plan, &manifests, &executor_options)?;
+        if completed_freshness_base.is_some() {
+            invalidate_fresh_profile(&destination, &fresh_owner)?;
+        }
+        let outputs = executor::execute(&plan, &manifests, &executor_options)?;
         if build.validation.is_strict() {
             prepared.revalidate_cargo_registry_sources(repository_tree_limits(
                 &build.config.policy.limits,
             )?)?;
+        }
+        if let Some(base) = completed_freshness_base
+            && let Some(mut compiled) =
+                check_profile_artifacts(&destination, &selected_packages, &plan, &outputs)
+        {
+            record_profile_inputs(&mut compiled, &outputs, &manifests);
+            compiled.messages = message_reporter.messages();
+            write_fresh_profile(
+                &destination,
+                &build.manifest.workspace_root,
+                &fresh_owner,
+                base,
+                &compiled,
+                &local_source_roots(&prepared.resolution),
+                build.validation,
+            )?;
         }
         drop(prepared);
         if build.verbosity != Verbosity::Quiet {
@@ -1757,6 +1803,40 @@ fn build_inner(
         &compiled.messages,
         CompileKind::Target,
     )?;
+    record_profile_inputs(&mut compiled, &outputs, &manifests);
+
+    if let Some(base) = completed_freshness_base {
+        write_fresh_profile(
+            &destination,
+            &build.manifest.workspace_root,
+            &fresh_owner,
+            base,
+            &compiled,
+            &local_source_roots(&prepared.resolution),
+            build.validation,
+        )?;
+        crate::trace::event("wrote root freshness record");
+    }
+
+    drop(prepared);
+    let artifacts = BuildArtifacts {
+        primary: compiled.primary,
+        binaries: compiled.binaries,
+        messages: compiled.messages,
+        library_paths: compiled.library_paths,
+    };
+
+    crate::trace::event("published build profile");
+    finish_build(&build, &artifacts)?;
+    crate::trace::event("reported build result");
+    Ok(BuildOutcome::Artifacts(artifacts))
+}
+
+fn record_profile_inputs(
+    compiled: &mut StagedArtifacts,
+    outputs: &executor::Outputs,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+) {
     // Member inputs outside their directories must also invalidate the
     // completed-profile shortcut before any compiler units are visited.
     compiled.dep_info.extend(
@@ -1784,32 +1864,47 @@ fn build_inner(
     compiled.script_inputs.sort();
     compiled.script_inputs.dedup();
     compiled.environment = tracked_env::snapshot(&outputs.tracked_variables);
+}
 
-    if let Some(base) = completed_freshness_base {
-        write_fresh_profile(
-            &destination,
-            &build.manifest.workspace_root,
-            &fresh_owner,
-            base,
-            &compiled,
-            &local_source_roots(&prepared.resolution),
-            build.validation,
-        )?;
-        crate::trace::event("wrote root freshness record");
-    }
-
-    drop(prepared);
-    let artifacts = BuildArtifacts {
-        primary: compiled.primary,
-        binaries: compiled.binaries,
-        messages: compiled.messages,
-        library_paths: compiled.library_paths,
-    };
-
-    crate::trace::event("published build profile");
-    finish_build(&build, &artifacts)?;
-    crate::trace::event("reported build result");
-    Ok(BuildOutcome::Artifacts(artifacts))
+/// A check has no installed root, so its record binds the first selected
+/// compiler output and every selected unit's dep-info.
+fn check_profile_artifacts(
+    destination: &Path,
+    selected: &[PackageKey],
+    plan: &CompilationPlan,
+    outputs: &executor::Outputs,
+) -> Option<StagedArtifacts> {
+    let selected_outputs = plan
+        .order
+        .iter()
+        .filter(|key| selected.contains(&key.package))
+        .filter_map(|key| outputs.artifacts.get(key))
+        .collect::<Vec<_>>();
+    let primary = selected_outputs.iter().find_map(|output| {
+        let path = match output {
+            crate::compile::RustcOutput::Metadata { metadata, .. } => metadata,
+            crate::compile::RustcOutput::Library { rlib, .. } => rlib,
+            crate::compile::RustcOutput::Binary { executable, .. } => executable,
+            crate::compile::RustcOutput::ProcMacro {
+                dynamic_library, ..
+            } => dynamic_library,
+            crate::compile::RustcOutput::StaticLibrary { archive, .. } => archive,
+            crate::compile::RustcOutput::BuildScript { .. } => return None,
+        };
+        path.starts_with(destination).then(|| path.clone())
+    })?;
+    Some(StagedArtifacts {
+        primary,
+        binaries: BTreeMap::new(),
+        dep_info: selected_outputs
+            .iter()
+            .map(|output| output.dep_info().to_owned())
+            .collect(),
+        script_inputs: Vec::new(),
+        messages: Vec::new(),
+        environment: Tracked::new(),
+        library_paths: Vec::new(),
+    })
 }
 
 fn finish_build(build: &Build<'_>, artifacts: &BuildArtifacts) -> Result<()> {
@@ -1973,6 +2068,7 @@ struct TrustedFreshness<'a> {
     release: bool,
     use_cargo_registry: bool,
     binary_selection: Option<&'a str>,
+    check_targets: Option<&'a crate::cli::TargetSelection>,
     jobs: usize,
     cargo: &'a Path,
     shared: Option<SharedSelection<'a>>,
@@ -2002,6 +2098,9 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
     digest.debug("release", &inputs.release);
     digest.debug("cargo-registry", &inputs.use_cargo_registry);
     digest.debug("binary-selection", &inputs.binary_selection);
+    if let Some(targets) = inputs.check_targets {
+        digest.debug("check-targets", targets);
+    }
     digest.debug("jobs", &inputs.jobs);
     if let Some(shared) = &inputs.shared {
         digest.debug("shared-members", &shared.members);
@@ -2036,6 +2135,7 @@ fn freshness_base(
     build: &Build<'_>,
     prepared: &dependency::PreparedGraph,
     cargo: &Path,
+    check: Option<&CheckOptions>,
 ) -> Result<[u8; 32]> {
     if !build.validation.is_strict()
         && let Some(base) = build.ordinary_freshness_base
@@ -2061,6 +2161,9 @@ fn freshness_base(
     digest.debug("bundle", &build.bundle);
     digest.debug("binary-selection", &build.binary_selection);
     digest.debug("target-selection", &build.target_selection);
+    if let Some(options) = check {
+        digest.debug("check-targets", &options.build.targets);
+    }
     digest.debug("jobs", &build.jobs);
     if let Some(members) = build.members {
         digest.debug("shared-members", &members);
@@ -2127,7 +2230,10 @@ fn bundle_build_inputs(
 ) -> Result<[u8; 32]> {
     let mut digest = FreshDigest::new();
     digest.bytes("schema", b"lorry-bundle-inputs-v1");
-    digest.bytes("build-inputs", &freshness_base(build, prepared, cargo)?);
+    digest.bytes(
+        "build-inputs",
+        &freshness_base(build, prepared, cargo, None)?,
+    );
     for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
         if process::is_removed_cargo_client_environment(&name) {
             continue;

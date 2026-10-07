@@ -1712,6 +1712,9 @@ scripts, rustc, native tools, or the linker. Strict mode also rehashes all of
 those contents before reuse. A missing, malformed, stale, or differently-modeled
 record causes a normal rebuild. Test harnesses and bundle launchers are not
 reused by this profile-level check.
+A plain `check` keeps the same kind of record in its check profile. Its
+digest also covers the check target selection, and reuse replays the recorded
+diagnostics. Clippy and `--compile-time-deps` checks always visit their units.
 The completed-profile record and each top-level selected binary use private
 file staging and atomic installation, so a failed staging or record write
 leaves the preceding complete file in place. On Linux, executable staging

@@ -169,6 +169,31 @@ lorry run -p app
 expect_fresh
 [ "$(cat "$WORK/$step.out")" = "two plain" ] || fail "a reused run printed the wrong output"
 
+# A plain check keeps its own record and replays its diagnostics.
+lorry check
+expect_rebuilt "first check"
+lorry check
+expect_fresh
+printf 'fn unused_marker() {}\n' >>util/src/lib.rs
+lorry check
+expect_rebuilt "checked source edit"
+compiled util
+grep -F 'unused_marker' "$WORK/$step.err" >/dev/null || fail "check lost the new warning"
+lorry check
+expect_fresh
+grep -F 'unused_marker' "$WORK/$step.err" >/dev/null || fail "a reused check lost its warning"
+lorry check --tests
+expect_rebuilt "check target selection"
+lorry check --tests
+expect_fresh
+lorry check
+expect_fresh
+# Clippy needs its driver beside the real rustc.
+RUSTC="$REAL_RUSTC" lorry clippy
+expect_rebuilt "clippy"
+RUSTC="$REAL_RUSTC" lorry clippy
+expect_rebuilt "clippy is not reused"
+
 # A new member changes the member set and the lock.
 mkdir -p added/src
 printf '[package]\nname = "added"\nversion = "0.1.0"\nedition = "2024"\n' >added/Cargo.toml
