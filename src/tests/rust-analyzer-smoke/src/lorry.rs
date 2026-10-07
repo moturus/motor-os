@@ -123,101 +123,102 @@ fn validate_invocations(log: &Path, root: &Path, sysroot: &Path, stderr: &str) -
     let root_manifest = root_manifest.to_string_lossy().into_owned();
     let target_dir = target_dir.to_string_lossy().into_owned();
     let sysroot_manifest = sysroot_manifest.to_string_lossy().into_owned();
-    let mut expected = Vec::new();
-    for _ in 0..2 {
-        expected.push(record(vec!["--version"], root, sysroot, &[]));
-        expected.push(record(
-            vec![
-                "locate-project",
-                "--workspace",
-                "--manifest-path",
-                &root_manifest,
-            ],
-            root,
-            sysroot,
-            &[],
-        ));
-        expected.push(record(
-            vec![
-                "-Z",
-                "unstable-options",
-                "config",
-                "get",
-                "--format",
-                "toml",
-                "--show-origin",
-            ],
-            root,
-            sysroot,
-            &[("RUSTC_BOOTSTRAP", "1")],
-        ));
-        expected.push(record(
-            vec![
-                "rustc",
-                "-Z",
-                "unstable-options",
-                "--print",
-                "cfg",
-                "--target",
-                "x86_64-unknown-motor",
-                "--",
-                "-O",
-            ],
-            root,
+    // rust-analyzer debounces workspace fetches by 100 ms and fetches again when
+    // files appear during a fetch, so the number of loads depends on scheduling.
+    // Each load must make exactly these calls.
+    let mut load = vec![record(vec!["--version"], root, sysroot, &[])];
+    load.push(record(
+        vec![
+            "locate-project",
+            "--workspace",
+            "--manifest-path",
+            &root_manifest,
+        ],
+        root,
+        sysroot,
+        &[],
+    ));
+    load.push(record(
+        vec![
+            "-Z",
+            "unstable-options",
+            "config",
+            "get",
+            "--format",
+            "toml",
+            "--show-origin",
+        ],
+        root,
+        sysroot,
+        &[("RUSTC_BOOTSTRAP", "1")],
+    ));
+    load.push(record(
+        vec![
+            "rustc",
+            "-Z",
+            "unstable-options",
+            "--print",
+            "cfg",
+            "--target",
+            "x86_64-unknown-motor",
+            "--",
+            "-O",
+        ],
+        root,
+        sysroot,
+        &[("__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS", "nightly")],
+    ));
+    load.push(record(
+        vec![
+            "rustc",
+            "-Z",
+            "unstable-options",
+            "--print",
+            "target-spec-json",
+            "--target",
+            "x86_64-unknown-motor",
+            "--",
+            "-Z",
+            "unstable-options",
+        ],
+        root,
+        sysroot,
+        &[("RUSTC_BOOTSTRAP", "1")],
+    ));
+    for no_deps in [false, true] {
+        let mut root_args = vec!["metadata", "--format-version", "1"];
+        if no_deps {
+            root_args.push("--no-deps");
+        }
+        root_args.extend([
+            "--manifest-path",
+            &root_manifest,
+            "--filter-platform",
+            "x86_64-unknown-motor",
+        ]);
+        load.push(record(root_args, root, sysroot, &[]));
+
+        let mut sysroot_args = vec!["metadata", "--format-version", "1"];
+        if no_deps {
+            sysroot_args.push("--no-deps");
+        }
+        sysroot_args.extend([
+            "--manifest-path",
+            &sysroot_manifest,
+            "--filter-platform",
+            "x86_64-unknown-motor",
+        ]);
+        if !no_deps {
+            sysroot_args.push("--locked");
+        }
+        load.push(record(
+            sysroot_args,
+            &sysroot_src,
             sysroot,
             &[("__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS", "nightly")],
         ));
-        expected.push(record(
-            vec![
-                "rustc",
-                "-Z",
-                "unstable-options",
-                "--print",
-                "target-spec-json",
-                "--target",
-                "x86_64-unknown-motor",
-                "--",
-                "-Z",
-                "unstable-options",
-            ],
-            root,
-            sysroot,
-            &[("RUSTC_BOOTSTRAP", "1")],
-        ));
-        for no_deps in [false, true] {
-            let mut root_args = vec!["metadata", "--format-version", "1"];
-            if no_deps {
-                root_args.push("--no-deps");
-            }
-            root_args.extend([
-                "--manifest-path",
-                &root_manifest,
-                "--filter-platform",
-                "x86_64-unknown-motor",
-            ]);
-            expected.push(record(root_args, root, sysroot, &[]));
-
-            let mut sysroot_args = vec!["metadata", "--format-version", "1"];
-            if no_deps {
-                sysroot_args.push("--no-deps");
-            }
-            sysroot_args.extend([
-                "--manifest-path",
-                &sysroot_manifest,
-                "--filter-platform",
-                "x86_64-unknown-motor",
-            ]);
-            if !no_deps {
-                sysroot_args.push("--locked");
-            }
-            expected.push(record(
-                sysroot_args,
-                &sysroot_src,
-                sysroot,
-                &[("__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS", "nightly")],
-            ));
-        }
     }
+    let mut expected = Vec::new();
     expected.push(record(
         vec![
             "check",
@@ -255,8 +256,12 @@ fn validate_invocations(log: &Path, root: &Path, sysroot: &Path, stderr: &str) -
         sysroot,
         &[("CARGO_LOG", "cargo::core::compiler::fingerprint=info")],
     ));
+    let loads = calls.iter().filter(|call| **call == load[0]).count();
+    for _ in 0..loads {
+        expected.extend(load.iter().cloned());
+    }
     expected.sort_by_key(Value::to_string);
-    if calls != expected {
+    if loads < 2 || calls != expected {
         return Err(invalid(format!(
             "rust-analyzer Cargo invocation drift\nexpected: {}\nactual: {}",
             serde_json::to_string_pretty(&expected).unwrap(),
@@ -269,13 +274,13 @@ fn validate_invocations(log: &Path, root: &Path, sysroot: &Path, stderr: &str) -
         .filter(|line| line.contains(" ERROR "))
         .collect::<Vec<_>>();
     let expected_error = format!("`cargo metadata` failed on `{sysroot_manifest}`");
-    if metadata_errors.len() != 2
+    if metadata_errors.len() != loads
         || !metadata_errors
             .iter()
             .all(|line| line.contains(&expected_error))
     {
         return Err(invalid(format!(
-            "rust-analyzer did not report exactly two expected sysroot metadata errors: {stderr}"
+            "rust-analyzer did not report one sysroot metadata error per workspace load: {stderr}"
         )));
     }
     let out_dir = root.join("target/rust-analyzer/lorry");
