@@ -4,6 +4,7 @@ pub mod cp;
 pub mod cut;
 pub mod date;
 pub mod diff;
+pub mod echo;
 pub mod find;
 pub mod free;
 pub mod head;

@@ -9,10 +9,11 @@ cutoff-based cleanup proposals with approval-only archival. Phase 9's manual
 multi-task evaluation command, frozen workspace/state copies, repeated arms and
 reports pass focused host/native fixtures and the release developer-image gate;
 the first real-model run is pending.
-Sysbox S1–S5 are complete and core-gated, including local sort-key modifiers.
-The utility track continues with `xargs`. Its default-command choice is pending
-(see the remaining-work checklist).
-Design revised 2026-10-06. See the
+Sysbox S1–S5 and S6 echo are complete and core-gated, including local sort-key modifiers.
+The utility track continues with `xargs`, which will use sysbox `echo` when
+the command is omitted.
+Rush's built-in echo remains in place.
+Design revised 2026-10-07. See the
 [remaining-work checklist](gears-batteries-progress.md#what-remains) for current
 status; that document also retains the implementation history. Two questions wait
 for later phases: question 7 is needed before the first real-model evaluation, and
@@ -846,8 +847,9 @@ them, and refuses any other flag with a message naming it.
 - S4. `cut`: `-b -c --complement`, followed by `-d -f -s` field selection.
 - S5. `tr`: single-set `-d -s -c`, ranges and POSIX classes; then translation
   and two-set deletion/squeezing.
-- S6. `xargs`: `-0 -d -n -I -r -t`, running the command directly, never
-  through a shell.
+- S6. Add sysbox `echo` while keeping Rush's built-in echo. Then add `xargs`:
+  `-0 -d -n -I -r -t`, running the command directly, never through a shell;
+  an omitted command invokes sysbox `echo`.
 
 **Phase 1. Turn and data integrity in Gears.** Guarantees 2 to 4, 6, 7, 9,
 11 and 12, and guarantee 8 for the children Gears starts today; later phases

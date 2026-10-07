@@ -95,6 +95,11 @@ The shell is somewhat barebones now (contributions are welcome!).
   `[:lower:]/[:upper:]` pairs convert ASCII case. Sets support byte ranges,
   backslash/octal escapes and C-locale POSIX classes, including `[:space:]`.
   Repetition/equivalence constructs are refused;
+- `echo [-neE] [ARG]...` prints arguments separated by spaces. `-n` omits
+  the trailing newline; `-e` enables byte escapes and `-E` disables them.
+  Escapes include octal/hex bytes and `\c` to stop output. `POSIXLY_CORRECT`
+  enables escapes and restricts option parsing. Rush retains its built-in echo;
+  use `sysbox echo` or `/system/bin/echo` to select this implementation;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
   numeric IPv4 and IPv6 addresses, `localhost`, and DNS names;
 - `head [-n [-]NUM | -c [-]NUM] [-q | -v] [-z] [FILE]...` prints the first 10

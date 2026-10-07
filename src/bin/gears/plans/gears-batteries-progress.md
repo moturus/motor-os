@@ -1,6 +1,6 @@
 # Gears batteries implementation record
 
-Updated 2026-10-06. The design in [gears-batteries.md](gears-batteries.md)
+Updated 2026-10-07. The design in [gears-batteries.md](gears-batteries.md)
 remains authoritative. Work proceeds in small patches with one-line commits.
 All Gears defects found during implementation are in scope.
 
@@ -18,7 +18,7 @@ that Gears works with OpenRouter on Motor OS.
 | --- | --- |
 | First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
 | Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
-| Motor OS command utilities | Separate coding work remains: `xargs`, awaiting the default-command choice: add sysbox `echo` (recommended), or require an explicit command. `mkdir -p`, `sort`, `uniq`, `cut` and `tr` are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Motor OS command utilities | Separate coding work remains: `xargs`. `mkdir -p`, `sort`, `uniq`, `cut`, `tr` and sysbox `echo` are implemented and core-gated; Rush's built-in echo remains unchanged. These additions are not prerequisites for using the implemented Gears/batteries features. |
 | Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
 | Optional orchestration (10) | Implement supervised worker agents and their budgets. |
 | Optional web tools (11) | Implement web search and page extraction using curl. |
@@ -1406,3 +1406,21 @@ currently supplies echo as a Rush builtin. To obey the direct-execution rule,
 add a small sysbox echo command (recommended), or require an explicit command.
 The choice was requested while the independent utility patches continued;
 no default policy or xargs implementation has been installed without an answer.
+
+
+### S6 echo prerequisite
+
+Sysbox `echo` provides `-n/-e/-E`, grouped and repeated initial options,
+byte escapes, `\c` termination, literal unknown options, and GNU-compatible
+POSIXLY_CORRECT behavior. Output is buffered without collecting the whole
+result. Write and flush failures produce a nonzero status. The installed
+wrapper is separate from Rush's unchanged built-in echo; native regression
+tests exercise both. The installed source passes 3,268 exact GNU comparisons,
+including binary escapes, empty input and option boundaries. A `/dev/full`
+check verifies output-failure handling.
+
+The final installed fixture and `full-test.sh` pass three times each in
+debug and release on unchanged source. Warnings-denied native Clippy passes.
+Gate logs: `/tmp/gears-sysbox-echo/final-gates/`. Authored crate changes are limited to sysbox;
+verified build-generated locks are restored and the user's existing sys lock
+is preserved.
