@@ -8,8 +8,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-mod sys_workspace;
-
 fn main() -> io::Result<()> {
     if env::current_exe()?
         .file_name()
@@ -19,24 +17,14 @@ fn main() -> io::Result<()> {
     }
     let args = env::args_os().skip(1).collect::<Vec<_>>();
     assert!(
-        matches!(args.len(), 4 | 6),
-        "usage: lorry-editor-workspace LORRY REPOSITORY WORK CONFIG_JSON [SYS_WORKSPACE HOME]"
+        args.len() == 4,
+        "usage: lorry-editor-workspace LORRY REPOSITORY WORK CONFIG_JSON"
     );
     let lorry = Path::new(&args[0]).canonicalize()?;
     let repo = Path::new(&args[1]).canonicalize()?;
     let work = Path::new(&args[2]).canonicalize()?;
     let shipped: Value = serde_json::from_slice(&fs::read(&args[3])?)?;
     let toolchain = toolchain(&repo)?;
-    if args.len() == 6 {
-        return sys_workspace::run(
-            &lorry,
-            &toolchain,
-            &work,
-            &shipped,
-            Path::new(&args[4]),
-            Path::new(&args[5]),
-        );
-    }
     for (custom, member) in [(false, false), (true, false), (true, true)] {
         run(&lorry, &toolchain, &work, &shipped, custom, member)?;
     }
