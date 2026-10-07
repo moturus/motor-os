@@ -884,7 +884,7 @@ mod tests {
         fs::write(fixture.0.join("Cargo.toml"), source).unwrap();
         fs::write(fixture.0.join("src/lib.rs"), "").unwrap();
         write(&fixture.0.join("Cargo.lock"), &rendered).unwrap();
-        let loaded = Manifest::load(&fixture.0).unwrap();
+        let loaded = Manifest::load_for_build(&fixture.0).unwrap();
         crate::offline::validate_resolution(&loaded, &resolution).unwrap();
     }
 
@@ -918,7 +918,7 @@ mod tests {
         );
         fs::write(fixture.0.join("Cargo.lock"), &expected).unwrap();
 
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let local_manifest =
             Manifest::parse(&local_root, &local_root.join("Cargo.toml"), local_source).unwrap();
         let local_key = PackageKey {

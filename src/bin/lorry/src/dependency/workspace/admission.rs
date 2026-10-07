@@ -638,7 +638,7 @@ mod tests {
         let config = Config::default();
         let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let host = toolchain.host.clone();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let scope = ReviewScope::default();
         let contexts = vec![Context {
             host: host.clone(),

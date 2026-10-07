@@ -404,7 +404,7 @@ mod tests {
         .unwrap();
         fixture.directory("target/lorry/debug/build/app");
         fixture.directory("target/lorry/debug/build/other");
-        let manifest = crate::manifest::Manifest::load_selected(&fixture.0, Some("app")).unwrap();
+        let manifest = crate::manifest::Manifest::load_for_build(&fixture.0).unwrap();
         assert_eq!(
             Config::default().target_directory(&manifest.root, &manifest.workspace_root, None),
             fixture.0.join("target")
@@ -454,7 +454,7 @@ mod tests {
             "version = 4\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        let manifest = crate::manifest::Manifest::load_selected(&fixture.0, None).unwrap();
+        let manifest = crate::manifest::Manifest::load_for_build(&fixture.0).unwrap();
         let package = crate::unit::selected_library_key(&manifest)
             .unwrap()
             .package;

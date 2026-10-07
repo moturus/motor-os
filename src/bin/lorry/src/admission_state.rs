@@ -2644,7 +2644,7 @@ dependencies = ["cc", "libc"]
             }
 
             fn review(&self) -> Result<Review> {
-                let manifest = Manifest::load(&self.0)?;
+                let manifest = Manifest::load_for_build(&self.0)?;
                 let lock = manifest.lock.clone().unwrap();
                 Review::from_graph(&manifest, &lock, empty_review().contexts)
             }
@@ -2874,7 +2874,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "1".repeat(64),
                 ),
             );
-            let mut lock = Manifest::load(&project.0).unwrap().lock.unwrap();
+            let mut lock = Manifest::load_for_build(&project.0).unwrap().lock.unwrap();
             for format in [crate::lockfile::Format::V3, crate::lockfile::Format::V4] {
                 lock.format = format;
                 assert_eq!(
@@ -2958,7 +2958,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }
 
         fn completed_review(project: &Project, libc_features: &[&str]) -> Review {
-            let manifest = Manifest::load(&project.0).unwrap();
+            let manifest = Manifest::load_for_build(&project.0).unwrap();
             let lock = manifest.lock.clone().unwrap();
             let (native, cross) = contexts();
             let mut review =
@@ -3070,7 +3070,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         #[test]
         fn rejects_missing_conflicting_and_drifted_context_evidence() {
             let project = Project::new(BASE_MANIFEST, BASE_LOCK);
-            let manifest = Manifest::load(&project.0).unwrap();
+            let manifest = Manifest::load_for_build(&project.0).unwrap();
             let lock = manifest.lock.clone().unwrap();
             let (native, cross) = contexts();
             let build = || {

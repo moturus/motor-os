@@ -856,7 +856,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let manifest = Manifest::load(&root).unwrap();
+        let manifest = Manifest::load_for_build(&root).unwrap();
         let mut config = Config::default();
         config.policy.default = PolicyDefault::Allow;
         let cfg = CfgSet::parse("unix\n").unwrap();

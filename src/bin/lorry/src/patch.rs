@@ -129,7 +129,7 @@ mod tests {
             "version = 4\n\n[[package]]\nname = \"root\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        Manifest::load(root).unwrap()
+        Manifest::load_for_build(root).unwrap()
     }
 
     #[test]

@@ -476,7 +476,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let manifest = Manifest::load(&temp.0).unwrap();
+        let manifest = Manifest::load_for_build(&temp.0).unwrap();
         let mut catalog = Catalog::default();
         catalog
             .insert(record(

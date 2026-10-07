@@ -4783,7 +4783,7 @@ dev = ["dep:leaf"]
             ),
         )
         .unwrap();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let repositories = RepositorySet::open(
             &crate::config::Repositories::default(),
             DEFAULT_TREE_LIMITS,
@@ -4854,7 +4854,7 @@ dev = ["dep:leaf"]
             ),
         )
         .unwrap();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let libc = Record::parse(
             Path::new("/fixture/libc-index-record.json"),
             b"{\"name\":\"libc\",\"vers\":\"0.2.139\",\"deps\":[],\
@@ -5026,7 +5026,7 @@ dev = ["dep:leaf"]
     #[test]
     fn matches_the_frozen_stage_two_cargo_resolution_oracle() {
         let root = Path::new("tests/oracles/stage2-resolution/root");
-        let manifest = Manifest::load(root).unwrap();
+        let manifest = Manifest::load_for_build(root).unwrap();
         let mut catalog = Catalog::default();
         for entry in fs::read_dir("tests/oracles/stage2-resolution/index-records").unwrap() {
             let path = entry.unwrap().path();
@@ -5090,7 +5090,7 @@ dev = ["dep:leaf"]
             }
         }
 
-        let manifest = Manifest::load(Path::new(".")).unwrap();
+        let manifest = Manifest::load_for_build(Path::new(".")).unwrap();
         let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
         let lock = manifest.lock.as_ref().unwrap();
         for package in &lock.packages {
@@ -5193,7 +5193,7 @@ dev = ["dep:leaf"]
         let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
             return;
         };
-        let manifest = Manifest::load(Path::new(".")).unwrap();
+        let manifest = Manifest::load_for_build(Path::new(".")).unwrap();
         let repositories = RepositorySet::open(
             &crate::config::Repositories {
                 system: Some(PathBuf::from(repository)),

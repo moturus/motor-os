@@ -4055,7 +4055,7 @@ mod tests {
     #[test]
     fn selected_workspace_binaries_publish_with_their_own_package_owners() {
         let fixture = Fixture::new();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let first = selected_library_key(&manifest).unwrap().package;
         let second = PackageKey {
             name: "second".to_owned(),
@@ -4411,7 +4411,7 @@ mod tests {
         use std::time::Instant;
 
         let fixture = Fixture::new();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config, false).unwrap();
@@ -4540,7 +4540,7 @@ mod tests {
     #[test]
     fn builds_a_root_binary_with_an_unversioned_path_dependency() {
         let fixture = Fixture::new();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config, false).unwrap();
@@ -4588,7 +4588,7 @@ mod tests {
     fn builds_all_or_one_binary_and_selects_default_run() {
         let fixture = Fixture::new();
         fixture.add_multiple_binaries();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let members = std::slice::from_ref(&manifest);
         assert_eq!(select_run_member(members, None, false).unwrap().1, "worker");
         assert_eq!(
@@ -4660,8 +4660,17 @@ mod tests {
     fn builds_a_selected_workspace_member_into_shared_artifacts() {
         let fixture = Fixture::new();
         let member = fixture.make_workspace();
-        let manifest = Manifest::load_selected(&fixture.0, Some("root-bin")).unwrap();
-        assert_eq!(manifest, Manifest::load(&member).unwrap());
+        let manifest = Manifest::load_for_build(&member).unwrap();
+        let (_, selected) = crate::manifest::SourceWorkspace::load_compilation(
+            &fixture.0,
+            None,
+            &crate::manifest::PackageSelection {
+                packages: vec!["root-bin".to_owned()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.as_slice(), std::slice::from_ref(&manifest));
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config, false).unwrap();
@@ -4708,7 +4717,7 @@ mod tests {
     fn builds_the_root_library_before_the_binary() {
         let fixture = Fixture::new();
         fixture.add_root_library();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config, false).unwrap();
@@ -4778,7 +4787,7 @@ mod tests {
             "pub fn value() -> &'static str { local_dependency::VALUE }\n",
         )
         .unwrap();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config, false).unwrap();
@@ -4864,7 +4873,7 @@ mod tests {
                 ).unwrap();"#,
         );
         fs::write(script_path, script).unwrap();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         config.policy.rules.insert(
@@ -5028,7 +5037,7 @@ mod tests {
             let source = fs::read_to_string(&path).unwrap();
             fs::write(path, source.replace("dependency-ok", "build-script-ok")).unwrap();
         }
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         config.policy.rules.insert(
@@ -5158,7 +5167,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         config.test.extraction_root = Some(fixture.0.join("target/bundle-extraction"));
@@ -5304,7 +5313,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         config.test.extraction_root = Some(fixture.0.join("target/bundle-extraction"));
@@ -5434,7 +5443,7 @@ mod tests {
     fn unknown_named_test_lists_discovered_integration_targets() {
         let fixture = Fixture::new();
         fixture.add_test_targets();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config, false).unwrap();

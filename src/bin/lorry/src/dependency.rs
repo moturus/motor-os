@@ -1547,7 +1547,7 @@ mod tests {
              [[package]]\nname = \"root\"\nversion = \"0.1.0\"\ndependencies = [\"local\"]\n",
         )
         .unwrap();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let config = Config::default();
         let repositories =
             RepositorySet::open(&Repositories::default(), DEFAULT_LIMITS, 16 * 1024 * 1024)
@@ -1913,7 +1913,7 @@ mod tests {
         assert_check_graph_matches_cargo(&fixture.0, &all_check, &["--all-targets"]);
 
         fs::remove_file(fixture.0.join("src/main.rs")).unwrap();
-        let library_only = Manifest::load(&fixture.0).unwrap();
+        let library_only = Manifest::load_for_build(&fixture.0).unwrap();
         let library_only_plan = graph
             .selected_mixed_test_plan(&options, &library_only, false, Some("integration"))
             .unwrap();
@@ -1955,7 +1955,7 @@ mod tests {
             config.policy.limits.max_package_bytes,
         )
         .unwrap();
-        let manifest = Manifest::load(Path::new(".")).unwrap();
+        let manifest = Manifest::load_for_build(Path::new(".")).unwrap();
         let linux = CfgSet::parse(
             "debug_assertions\npanic=\"unwind\"\ntarget_arch=\"x86_64\"\n\
              target_endian=\"little\"\ntarget_env=\"gnu\"\ntarget_family=\"unix\"\n\
@@ -2125,7 +2125,7 @@ mod tests {
             config.policy.limits.max_package_bytes,
         )
         .unwrap();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let linux = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
         let staging = fixture.0.join("staging");
         let graph = prepare_locked(

@@ -2964,7 +2964,7 @@ mod tests {
                 .as_str()
                 .unwrap();
             assert_eq!(cargo_alias, expected);
-            let root = Manifest::load(&fixture.0).unwrap();
+            let root = Manifest::load_for_build(&fixture.0).unwrap();
             let resolution = resolve_selected(
                 &root,
                 &Catalog::default(),
@@ -3283,7 +3283,7 @@ mod tests {
         fs::write(workspace.join("app/src/main.rs"), "fn main() {}\n").unwrap();
         fs::write(workspace.join("shared/src/lib.rs"), "pub fn value() {}\n").unwrap();
 
-        let root = Manifest::load_selected(&workspace, Some("app")).unwrap();
+        let root = Manifest::load_for_build(&workspace.join("app")).unwrap();
         let cfg = CfgSet::parse("unix\n").unwrap();
         let resolution = resolve_selected(
             &root,

@@ -15,28 +15,6 @@ pub(crate) struct PackageSelection {
 }
 
 impl PackageSelection {
-    pub(super) fn single(package: Option<&str>) -> Self {
-        Self {
-            packages: package.into_iter().map(str::to_owned).collect(),
-            ..Self::default()
-        }
-    }
-
-    pub(super) fn select_one<'a>(
-        &self,
-        members: impl Iterator<Item = (&'a str, &'a Version, &'a Path)>,
-        defaults: impl Iterator<Item = &'a Path>,
-    ) -> Result<(PathBuf, Vec<String>)> {
-        let (mut selected, warnings) = self.select(members, defaults)?;
-        match selected.len() {
-            1 => Ok((selected.pop().unwrap(), warnings)),
-            count => Err(Error::failure(format!(
-                "package selection selects {count} packages; multi-package execution is not yet supported"
-            ))
-            .with_help("select one workspace package with `-p NAME`")),
-        }
-    }
-
     pub(crate) fn select<'a>(
         &self,
         members: impl Iterator<Item = (&'a str, &'a Version, &'a Path)>,

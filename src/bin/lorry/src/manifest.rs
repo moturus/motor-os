@@ -381,48 +381,31 @@ impl Manifest {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn load(root: &Path) -> Result<Self> {
-        Self::load_selected(root, None)
-    }
-
-    #[allow(dead_code)]
-    pub fn load_for_vendor(root: &Path) -> Result<Self> {
-        Self::load_for_vendor_selected(root, None)
-    }
-
-    pub fn load_selected(root: &Path, package: Option<&str>) -> Result<Self> {
-        Self::load_project(root, &PackageSelection::single(package), true)
-    }
-
-    pub fn load_for_vendor_selected(root: &Path, package: Option<&str>) -> Result<Self> {
-        Self::load_project(root, &PackageSelection::single(package), false)
-    }
-
+    // Tests load the one package that a build in `current` selects by default.
     #[cfg(test)]
-    pub fn load_selected_or_manifest_path(
-        root: &Path,
-        manifest_path: Option<&Path>,
-        package: Option<&str>,
-        require_current_lock: bool,
-    ) -> Result<Self> {
-        Self::load_selection(
-            root,
-            manifest_path,
-            &PackageSelection::single(package),
-            require_current_lock,
-        )
+    pub(crate) fn load_for_build(current: &Path) -> Result<Self> {
+        let (_, mut selected) =
+            SourceWorkspace::load_compilation(current, None, &PackageSelection::default())?;
+        assert_eq!(selected.len(), 1, "test fixture must select one package");
+        Ok(selected.pop().unwrap())
     }
 
+    // Vendor sees source-level rules and an optional, possibly stale lock.
     #[cfg(test)]
-    pub fn load_selection(
-        root: &Path,
-        manifest_path: Option<&Path>,
-        selection: &PackageSelection,
-        require_current_lock: bool,
-    ) -> Result<Self> {
-        let path = discover_manifest(root, manifest_path)?;
-        Self::load_project(path.parent().unwrap(), selection, require_current_lock)
+    pub(crate) fn load_for_vendor(current: &Path) -> Result<Self> {
+        let mut workspace = SourceWorkspace::load(current, None)?;
+        workspace.load_context(false)?;
+        assert_eq!(
+            workspace.default_members.len(),
+            1,
+            "test fixture must select one package"
+        );
+        let root = workspace.default_members.pop().unwrap();
+        Ok(workspace
+            .packages
+            .into_iter()
+            .find(|package| package.root == root)
+            .unwrap())
     }
 
     pub(crate) fn load_compilation_member(source: &Self) -> Result<Self> {
@@ -432,7 +415,6 @@ impl Manifest {
             source.path.clone(),
             document,
             &source.workspace_root,
-            true,
         )?;
         member
             .workspace_members
@@ -474,54 +456,11 @@ impl Manifest {
         Ok(())
     }
 
-    fn load_project(
-        root: &Path,
-        selection: &PackageSelection,
-        require_current_lock: bool,
-    ) -> Result<Self> {
-        let path = discover_manifest(root, None)?;
-        let root = path.parent().unwrap().to_owned();
-        let document = Document::load(&path, "Cargo manifest")?;
-        let Some(workspace) = discover_workspace(&root)? else {
-            let mut manifest =
-                Self::finish_root(root.clone(), path, document, &root, require_current_lock)?;
-            let (_, warnings) = selection.select_one(
-                std::iter::once((
-                    manifest.name.as_str(),
-                    &manifest.version,
-                    manifest.root.as_path(),
-                )),
-                std::iter::once(manifest.root.as_path()),
-            )?;
-            manifest.warnings.extend(warnings);
-            manifest.workspace_root = root;
-            return Ok(manifest);
-        };
-        let (member, warnings) = workspace.select(selection)?;
-        let member_path = member.join(MANIFEST_NAME);
-        let member_document = if member == root {
-            document
-        } else {
-            Document::load(&member_path, "Cargo workspace member manifest")?
-        };
-        let mut manifest = Self::finish_root(
-            member,
-            member_path,
-            member_document,
-            &workspace.root,
-            require_current_lock,
-        )?;
-        workspace.apply(&mut manifest)?;
-        manifest.warnings.extend(warnings);
-        Ok(manifest)
-    }
-
     fn finish_root(
         root: PathBuf,
         path: PathBuf,
         document: Document,
         lock_root: &Path,
-        require_current_lock: bool,
     ) -> Result<Self> {
         let inherited = dependency_workspace_package(&root)?;
         let mut manifest = Self::parse_document_with_inheritance(
@@ -537,23 +476,14 @@ impl Manifest {
         resolve_target_defaults(&mut manifest, true)?;
         let lock_path = lock_root.join(LOCK_NAME);
         if !lock_path.is_file() {
-            if require_current_lock {
-                return Err(Error::failure(format!(
-                    "required lockfile `{}` is missing",
-                    lock_path.display()
-                ))
-                .with_help(
-                    "create a version-4 Cargo.lock; build commands never resolve or write it",
-                ));
-            }
-            return Ok(manifest);
+            return Err(Error::failure(format!(
+                "required lockfile `{}` is missing",
+                lock_path.display()
+            ))
+            .with_help("create a version-4 Cargo.lock; build commands never resolve or write it"));
         }
-        manifest.lock = Some(if require_current_lock {
-            let document = Document::load(&lock_path, "Cargo lockfile")?;
-            parse_lock_document(Some(&manifest), &lock_path, &document)?
-        } else {
-            Lockfile::load(&lock_path)?
-        });
+        let document = Document::load(&lock_path, "Cargo lockfile")?;
+        manifest.lock = Some(parse_lock_document(Some(&manifest), &lock_path, &document)?);
         Ok(manifest)
     }
 
@@ -844,87 +774,6 @@ fn canonical_manifest(manifest_path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-#[derive(Clone)]
-struct Workspace {
-    root: PathBuf,
-    members: BTreeMap<String, PathBuf>,
-    versions: BTreeMap<String, Version>,
-    defaults: Vec<PathBuf>,
-    dev: DevProfile,
-    release: ReleaseProfile,
-    profile_errors: BTreeMap<String, Error>,
-    resolver: Resolver,
-    patches: Vec<Patch>,
-    warnings: Vec<String>,
-}
-
-impl Workspace {
-    fn parse(current: &Path, membership: source::WorkspaceRoot) -> Result<Self> {
-        let root = &membership.root;
-        let path = root.join(MANIFEST_NAME);
-        let document = Document::load(&path, "Cargo workspace manifest")?;
-        let item = document.root().get("workspace").ok_or_else(|| {
-            Error::failure(format!(
-                "workspace manifest `{}` has no `[workspace]`",
-                path.display()
-            ))
-        })?;
-        require_table(&path, &document, item, "workspace")?;
-
-        validate_virtual_workspace(&path, &document)?;
-        let resolver = workspace_resolver(root, &path, &document)?;
-
-        let packages = membership.load_members()?;
-        let defaults = membership.defaults(current, packages.keys())?;
-        let versions = packages
-            .values()
-            .map(|package| (package.name.clone(), package.version.clone()))
-            .collect();
-        let warnings = packages
-            .values()
-            .flat_map(|package| package.warnings.clone())
-            .collect();
-        let members = packages
-            .into_iter()
-            .map(|(directory, manifest)| (manifest.name, directory))
-            .collect();
-        let (dev, release, profile_errors) = parse_profiles(&path, &document)?;
-        Ok(Self {
-            root: root.to_owned(),
-            members,
-            versions,
-            defaults,
-            dev,
-            release,
-            profile_errors,
-            resolver,
-            patches: parse_patches(&path, &document, root)?,
-            warnings,
-        })
-    }
-
-    fn select(&self, selection: &PackageSelection) -> Result<(PathBuf, Vec<String>)> {
-        selection.select_one(
-            self.members
-                .iter()
-                .map(|(name, root)| (name.as_str(), &self.versions[name], root.as_path())),
-            self.defaults.iter().map(PathBuf::as_path),
-        )
-    }
-
-    fn apply(&self, manifest: &mut Manifest) -> Result<()> {
-        manifest.workspace_root.clone_from(&self.root);
-        manifest.workspace_members.clone_from(&self.members);
-        manifest.dev.clone_from(&self.dev);
-        manifest.release.clone_from(&self.release);
-        manifest.profile_errors.clone_from(&self.profile_errors);
-        manifest.resolver = self.resolver;
-        manifest.patches.clone_from(&self.patches);
-        manifest.warnings.extend(self.warnings.iter().cloned());
-        Ok(())
-    }
-}
-
 fn validate_virtual_workspace(path: &Path, document: &Document) -> Result<()> {
     if !document.root().contains_key("package") {
         for (key, item) in document.root().iter() {
@@ -939,19 +788,6 @@ fn validate_virtual_workspace(path: &Path, document: &Document) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn discover_workspace(current: &Path) -> Result<Option<Workspace>> {
-    if let Some(membership) = source::nearest_workspace(current)? {
-        let workspace = Workspace::parse(current, membership)?;
-        if workspace.root == current {
-            return Ok(Some(workspace));
-        }
-        if workspace.members.values().any(|member| member == current) {
-            return Ok(Some(workspace));
-        }
-    }
-    Ok(None)
 }
 
 fn workspace_member_root(
@@ -3941,7 +3777,7 @@ unsafe_code = { level = "forbid", priority = 1 }
         )
         .unwrap();
 
-        let manifest = Manifest::load(&root).unwrap();
+        let manifest = Manifest::load_for_build(&root).unwrap();
         assert_eq!(manifest.default_run.as_deref(), Some("worker"));
         assert_eq!(
             manifest
@@ -3998,27 +3834,37 @@ unsafe_code = { level = "forbid", priority = 1 }
         )
         .unwrap();
 
-        let from_root = Manifest::load_selected(&root, Some("app")).unwrap();
-        let from_member = Manifest::load(&root.join("app")).unwrap();
-        let from_path = Manifest::load_selected_or_manifest_path(
-            &root,
-            Some(&root.join("app/Cargo.toml")),
-            Some("app"),
-            true,
-        )
-        .unwrap();
-        assert_eq!(from_root, from_member);
-        assert_eq!(from_root, from_path);
-        assert_eq!(
-            from_root,
-            Manifest::load_selected_or_manifest_path(
-                &root,
-                Some(Path::new("app/Cargo.toml")),
-                Some("app"),
-                true
-            )
+        let compile = |current: &Path,
+                       manifest_path: Option<&Path>,
+                       packages: &[&str],
+                       workspace,
+                       exclude: &[&str]| {
+            let selection = PackageSelection {
+                packages: packages.iter().map(|name| (*name).to_owned()).collect(),
+                workspace,
+                exclude: exclude.iter().map(|name| (*name).to_owned()).collect(),
+            };
+            SourceWorkspace::load_compilation(current, manifest_path, &selection)
+                .map(|(_, selected)| selected)
+        };
+        let names = |selected: Vec<Manifest>| {
+            selected
+                .into_iter()
+                .map(|member| member.name)
+                .collect::<Vec<_>>()
+        };
+        let [from_root] = compile(&root, None, &["app"], false, &[])
             .unwrap()
-        );
+            .try_into()
+            .unwrap();
+        let from_member = Manifest::load_for_build(&root.join("app")).unwrap();
+        assert_eq!(from_root, from_member);
+        for manifest_path in [root.join("app/Cargo.toml"), PathBuf::from("app/Cargo.toml")] {
+            assert_eq!(
+                compile(&root, Some(&manifest_path), &["app"], false, &[]).unwrap(),
+                std::slice::from_ref(&from_root)
+            );
+        }
         assert_eq!(from_root.root, root.join("app"));
         assert_eq!(from_root.workspace_root, root);
         assert_eq!(from_root.resolver, Resolver::V2);
@@ -4026,7 +3872,7 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert_eq!(from_root.release.lto, Lto::Thin);
         assert_eq!(from_root.release.codegen_units, Some(2));
         assert!(from_root.lock.is_some());
-        let shared = Manifest::load_selected(&root, Some("shared")).unwrap();
+        let shared = Manifest::load_for_build(&root.join("shared")).unwrap();
         for selection in [
             PackageSelection::default(),
             PackageSelection {
@@ -4068,34 +3914,18 @@ unsafe_code = { level = "forbid", priority = 1 }
         )
         .unwrap();
         assert_eq!(selected, [shared]);
-        assert!(Manifest::load_selected(&from_root.workspace_root, None).is_err());
-        assert!(Manifest::load_selected(&from_root.workspace_root, Some("missing")).is_err());
         let selected = |packages: &[&str], workspace, exclude: &[&str]| {
-            Manifest::load_selection(
-                &root,
-                None,
-                &PackageSelection {
-                    packages: packages.iter().map(|name| (*name).to_owned()).collect(),
-                    workspace,
-                    exclude: exclude.iter().map(|name| (*name).to_owned()).collect(),
-                },
-                true,
-            )
+            compile(&root, None, packages, workspace, exclude)
         };
+        assert!(selected(&["missing"], false, &[]).is_err());
         assert_eq!(
-            selected(&["app", "app@0.1"], false, &[]).unwrap().name,
-            "app"
+            names(selected(&["app", "app@0.1"], false, &[]).unwrap()),
+            ["app"]
         );
-        assert!(
-            selected(&["app", "shared"], false, &[])
-                .unwrap_err()
-                .to_string()
-                .contains("selects 2 packages")
-        );
-        assert_eq!(selected(&[], true, &["sha*"]).unwrap().name, "app");
+        assert_eq!(names(selected(&[], true, &["sha*"]).unwrap()), ["app"]);
         assert_eq!(
-            selected(&["missing"], true, &["shared"]).unwrap().name,
-            "app"
+            names(selected(&["missing"], true, &["shared"]).unwrap()),
+            ["app"]
         );
         assert!(
             selected(&["missing"], true, &[])
@@ -4137,7 +3967,7 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert!(warnings.is_empty());
         let unmatched = selected(&[], true, &["shared", "missing"]).unwrap();
         assert!(
-            unmatched
+            unmatched[0]
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("excluded package selector `missing`"))
@@ -4154,33 +3984,22 @@ unsafe_code = { level = "forbid", priority = 1 }
                 .to_string()
                 .contains("--exclude")
         );
-        assert_eq!(
-            Manifest::load_selected_or_manifest_path(
-                &from_root.root,
-                Some(&root.join("app/Cargo.toml")),
-                Some("shared"),
-                true,
-            )
-            .unwrap()
-            .name,
-            "shared"
-        );
-        assert!(
-            Manifest::load_selected_or_manifest_path(
-                &from_root.root,
-                Some(&root.join("Cargo.toml")),
-                None,
-                true,
-            )
-            .is_err()
-        );
+        // From a member directory, a virtual root manifest path selects every member.
+        for (manifest, packages, expected) in [
+            ("app/Cargo.toml", &["shared"][..], &["shared"][..]),
+            ("Cargo.toml", &[], &["app", "shared"]),
+        ] {
+            let manifest = root.join(manifest);
+            let selected = compile(&from_root.root, Some(&manifest), packages, false, &[]);
+            assert_eq!(names(selected.unwrap()), expected);
+        }
         fs::write(
             from_root.workspace_root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"app\", \"shared\"]\ndefault-members = [\"app\"]\n",
         )
         .unwrap();
         assert_eq!(
-            Manifest::load_selected(&from_root.workspace_root, None)
+            Manifest::load_for_build(&from_root.workspace_root)
                 .unwrap()
                 .name,
             "app"
@@ -4421,7 +4240,7 @@ members = ["ignored-member"]
     fn loads_lorrys_frozen_stage_two_manifest_and_lock() {
         let root = Path::new(".");
         assert!(root.join("Cargo.toml").is_file());
-        let manifest = Manifest::load(root).unwrap();
+        let manifest = Manifest::load_for_build(root).unwrap();
         assert_eq!(manifest.name, "lorry");
         assert_eq!(manifest.dependencies.len(), 14);
         assert!(manifest.dependencies.iter().any(|dependency| {
@@ -4469,7 +4288,7 @@ members = ["ignored-member"]
         .unwrap();
         fs::write(root.join("src/lib.rs"), "").unwrap();
 
-        assert!(Manifest::load(&root).is_err());
+        assert!(Manifest::load_for_build(&root).is_err());
         assert!(Manifest::load_for_vendor(&root).unwrap().lock.is_none());
 
         fs::write(
@@ -4478,7 +4297,7 @@ members = ["ignored-member"]
              [[package]]\nname = \"vendor-root\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        assert!(Manifest::load(&root).is_err());
+        assert!(Manifest::load_for_build(&root).is_err());
         assert_eq!(
             Manifest::load_for_vendor(&root)
                 .unwrap()
@@ -4496,7 +4315,7 @@ members = ["ignored-member"]
              [[package]]\nname = \"vendor-root\"\nversion = \"0.2.0\"\n",
         )
         .unwrap();
-        assert!(Manifest::load(&root).is_ok());
+        assert!(Manifest::load_for_build(&root).is_ok());
         assert!(Manifest::load_for_vendor(&root).is_ok());
         fs::remove_dir_all(root).unwrap();
     }
@@ -4527,7 +4346,7 @@ members = ["ignored-member"]
         fs::write(root.join("tests/readme.txt"), "").unwrap();
         fs::write(root.join("tests/nested/main.rs"), "").unwrap();
 
-        let manifest = Manifest::load(&root).unwrap();
+        let manifest = Manifest::load_for_build(&root).unwrap();
         assert_eq!(
             manifest
                 .integration_tests
@@ -4549,7 +4368,7 @@ members = ["ignored-member"]
             "[[test]]\nname = \"extra\"\npath = \"tests/z.rs\"\n",
         ] {
             fs::write(&path, format!("{source}\n{declarations}")).unwrap();
-            let manifest = Manifest::load(&root).unwrap();
+            let manifest = Manifest::load_for_build(&root).unwrap();
             let cargo = std::process::Command::new(env!("CARGO"))
                 .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
                 .env("CARGO_HOME", root.join("cargo-home"))
@@ -4584,7 +4403,7 @@ members = ["ignored-member"]
         }
 
         fs::write(root.join("tests/a_b.rs"), "").unwrap();
-        assert!(Manifest::load(&root).is_err());
+        assert!(Manifest::load_for_build(&root).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4831,7 +4650,7 @@ bench = false
         fs::write(root.join("outside.rs"), "").unwrap();
         symlink(root.join("outside.rs"), root.join("tests/linked.rs")).unwrap();
 
-        assert!(Manifest::load(&root).is_err());
+        assert!(Manifest::load_for_build(&root).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

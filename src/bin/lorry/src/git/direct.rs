@@ -924,7 +924,7 @@ mod tests {
         permissions.set_readonly(true);
         fs::set_permissions(workspace.join("Cargo.toml"), permissions).unwrap();
 
-        let manifest = Manifest::load(&workspace).unwrap();
+        let manifest = Manifest::load_for_build(&workspace).unwrap();
         let direct = load_locked_dependencies(&manifest, &limits).unwrap();
         let described = load_locked_sources(&manifest, &limits).unwrap();
         let description = &described.packages[0].0;
