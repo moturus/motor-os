@@ -537,9 +537,23 @@ mod tests {
         let rustc = fixture.0.join("rustc");
         let driver = fixture.0.join("clippy-driver");
         let version = "rustc 1.99.0-dev\ncommit-hash: selected\nhost: host\nrelease: 1.99.0-dev\n";
+        // A process that forks while this one holds the driver open for writing
+        // makes executing it fail with ETXTBSY, so a child process writes it.
+        let install = |contents: &str, mode: u32| {
+            let staged = fixture.0.join("staged-driver");
+            fs::write(&staged, contents).unwrap();
+            let _ = fs::remove_file(&driver);
+            let status = std::process::Command::new("cp")
+                .arg(&staged)
+                .arg(&driver)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            fs::set_permissions(&driver, fs::Permissions::from_mode(mode)).unwrap();
+        };
         let missing = discover_clippy_driver(&rustc, version).unwrap_err();
         assert!(missing.render().contains("beside the selected rustc"));
-        fs::write(&driver, "#!/bin/sh\nprintf 'different compiler\\n'\n").unwrap();
+        install("#!/bin/sh\nprintf 'different compiler\\n'\n", 0o644);
         assert!(discover_clippy_driver(&rustc, version).is_err());
         fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
@@ -551,11 +565,11 @@ mod tests {
         let script = format!(
             "#!/bin/sh\n[ \"$*\" = '--rustc -vV' ] || exit 2\ncat <<'VERSION'\n{version}VERSION\n"
         );
-        fs::write(&driver, &script).unwrap();
+        install(&script, 0o755);
         let first = discover_clippy_driver(&rustc, version).unwrap();
         assert_eq!(first.path, driver);
         assert_eq!(first.sha256, crate::hash::sha256_file(&driver).unwrap());
-        fs::write(&driver, format!("{script}# changed lint implementation\n")).unwrap();
+        install(&format!("{script}# changed lint implementation\n"), 0o755);
         assert_ne!(
             first.sha256,
             discover_clippy_driver(&rustc, version).unwrap().sha256
