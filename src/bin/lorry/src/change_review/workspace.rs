@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
 
-use crate::admission_state::Review;
+use crate::admission_state::{Capability, Context, Review, UnitKind, native_tool_name};
 use crate::diagnostic::{Error, Result};
 use crate::resolver::{PackageKey, Resolution};
 
@@ -92,11 +92,15 @@ fn write(
         }
     }
     writeln!(output, "  {}", next.scope.description())?;
-    writeln!(output, "  Contexts: {:?}", next.contexts)?;
+    writeln!(output, "  Contexts: {}", contexts(&next.contexts))?;
     if let Some(previous) = previous
         && previous.contexts != next.contexts
     {
-        writeln!(output, "  Previous contexts: {:?}", previous.contexts)?;
+        writeln!(
+            output,
+            "  Previous contexts: {}",
+            contexts(&previous.contexts)
+        )?;
     }
     writeln!(
         output,
@@ -137,21 +141,35 @@ fn write(
             .iter()
             .filter(|package| !next.locked_registry.contains(package))
         {
-            writeln!(output, "  - locked package: {package:?}")?;
+            writeln!(
+                output,
+                "  - locked package: {} {} (crates.io); checksum: {}; dependencies: {}",
+                package.name,
+                package.version,
+                package.checksum,
+                list(&package.dependencies)
+            )?;
         }
         for package in previous
             .locked_git
             .iter()
             .filter(|package| !next.locked_git.contains(package))
         {
-            writeln!(output, "  - locked Git package: {package:?}")?;
+            writeln!(
+                output,
+                "  - locked Git package: {} {} ({}); dependencies: {}",
+                package.name,
+                package.version,
+                package.source,
+                list(&package.dependencies)
+            )?;
         }
         for capability in previous
             .capabilities
             .iter()
             .filter(|value| !next.capabilities.contains(value))
         {
-            writeln!(output, "  - capability: {capability:?}")?;
+            writeln!(output, "  - capability: {}", grant(capability))?;
         }
     }
     for capability in next
@@ -159,7 +177,7 @@ fn write(
         .iter()
         .filter(|value| previous.is_none_or(|old| !old.capabilities.contains(value)))
     {
-        writeln!(output, "  + capability: {capability:?}")?;
+        writeln!(output, "  + capability: {}", grant(capability))?;
     }
     for package in &next.locked_registry {
         writeln!(
@@ -171,69 +189,28 @@ fn write(
         write_users(output, users, &package.name, &package.version, None)?;
         writeln!(
             output,
-            "    locked dependencies: {:?}",
-            package.dependencies
+            "    locked dependencies: {}",
+            list(&package.dependencies)
         )?;
-        if let Some(source) = next.registry_sources.iter().find(|source| {
+        let source = next.registry_sources.iter().find(|source| {
             source.name == package.name
                 && source.version == package.version
                 && source.checksum == package.checksum
-        }) {
-            writeln!(
-                output,
-                "    tree: {}; license: {:?}; build script: {}; procedural macro: {}",
-                source.source_tree_sha256, source.license, source.build_script, source.proc_macro
-            )?;
-        } else {
-            writeln!(
-                output,
-                "    Source lies outside the reviewed feature/platform closure."
-            )?;
-        }
-        let contexts = next
-            .context_registry
-            .iter()
-            .filter(|context| {
-                context.name == package.name
-                    && context.version == package.version
-                    && context.checksum == package.checksum
-            })
-            .collect::<Vec<_>>();
-        if let Some(previous) = previous {
-            let old = previous
-                .context_registry
-                .iter()
-                .filter(|context| {
-                    context.name == package.name
-                        && context.version == package.version
-                        && context.checksum == package.checksum
-                })
-                .collect::<Vec<_>>();
-            if old != contexts {
-                for context in old {
-                    writeln!(
-                        output,
-                        "    previous {} -> {}: {:?}; host {:?}; target {:?}",
-                        context.host,
-                        context.target,
-                        context.compile_kinds,
-                        context.host_features,
-                        context.target_features
-                    )?;
-                }
-            }
-        }
-        for context in contexts {
-            writeln!(
-                output,
-                "    {} -> {}: {:?}; host {:?}; target {:?}",
-                context.host,
-                context.target,
-                context.compile_kinds,
-                context.host_features,
-                context.target_features
-            )?;
-        }
+        });
+        write_source(
+            output,
+            source.map(|source| {
+                (
+                    source.source_tree_sha256.as_str(),
+                    source.license.as_str(),
+                    source.build_script,
+                    source.proc_macro,
+                )
+            }),
+        )?;
+        let rows =
+            |review| registry_rows(review, &package.name, &package.version, &package.checksum);
+        write_contexts(output, previous.map(rows), rows(next))?;
     }
     for package in &next.locked_git {
         writeln!(
@@ -250,69 +227,161 @@ fn write(
         )?;
         writeln!(
             output,
-            "    locked dependencies: {:?}",
-            package.dependencies
+            "    locked dependencies: {}",
+            list(&package.dependencies)
         )?;
-        if let Some(source) = next.git_sources.iter().find(|source| {
+        let source = next.git_sources.iter().find(|source| {
             source.name == package.name
                 && source.version == package.version
                 && source.source == package.source
-        }) {
-            writeln!(
-                output,
-                "    tree: {}; license: {:?}; build script: {}; procedural macro: {}",
-                source.source_tree_sha256, source.license, source.build_script, source.proc_macro
-            )?;
-        } else {
-            writeln!(
-                output,
-                "    Source lies outside the reviewed feature/platform closure."
-            )?;
-        }
-        let contexts = next
-            .context_git
-            .iter()
-            .filter(|context| {
-                context.name == package.name
-                    && context.version == package.version
-                    && context.source == package.source
-            })
-            .collect::<Vec<_>>();
-        if let Some(previous) = previous {
-            let old = previous
-                .context_git
-                .iter()
-                .filter(|context| {
-                    context.name == package.name
-                        && context.version == package.version
-                        && context.source == package.source
-                })
-                .collect::<Vec<_>>();
-            if old != contexts {
-                for context in old {
-                    writeln!(
-                        output,
-                        "    previous {} -> {}: {:?}; host {:?}; target {:?}",
-                        context.host,
-                        context.target,
-                        context.compile_kinds,
-                        context.host_features,
-                        context.target_features
-                    )?;
-                }
-            }
-        }
-        for context in contexts {
-            writeln!(
-                output,
-                "    {} -> {}: {:?}; host {:?}; target {:?}",
-                context.host,
-                context.target,
-                context.compile_kinds,
-                context.host_features,
-                context.target_features
-            )?;
-        }
+        });
+        write_source(
+            output,
+            source.map(|source| {
+                (
+                    source.source_tree_sha256.as_str(),
+                    source.license.as_str(),
+                    source.build_script,
+                    source.proc_macro,
+                )
+            }),
+        )?;
+        let rows = |review| git_rows(review, &package.name, &package.version, &package.source);
+        write_contexts(output, previous.map(rows), rows(next))?;
+    }
+    Ok(())
+}
+
+/// Comma-separated values, or `none`.
+fn list<T: std::fmt::Display>(values: &[T]) -> String {
+    if values.is_empty() {
+        return "none".to_owned();
+    }
+    values
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn contexts(values: &[Context]) -> String {
+    let values = values
+        .iter()
+        .map(|context| format!("{} -> {}", context.host, context.target))
+        .collect::<Vec<_>>();
+    list(&values)
+}
+
+fn grant(capability: &Capability) -> String {
+    let tools = capability
+        .native_tools
+        .iter()
+        .map(|role| native_tool_name(*role))
+        .collect::<Vec<_>>();
+    format!(
+        "{} {} ({}); build script: {}; procedural macro: {}; native tools: {}; caller environment: {}",
+        capability.package,
+        capability.version,
+        capability.checksum,
+        capability.build_script,
+        capability.proc_macro,
+        list(&tools),
+        list(&capability.caller_env)
+    )
+}
+
+fn write_source(
+    output: &mut impl Write,
+    source: Option<(&str, &str, bool, bool)>,
+) -> io::Result<()> {
+    let Some((tree, license, build_script, proc_macro)) = source else {
+        return writeln!(
+            output,
+            "    Source lies outside the reviewed feature/platform closure."
+        );
+    };
+    let license = if license.is_empty() {
+        "unspecified"
+    } else {
+        license
+    };
+    writeln!(
+        output,
+        "    tree: {tree}; license: {license}; build script: {build_script}; procedural macro: {proc_macro}"
+    )
+}
+
+/// Host, target, compile kinds, host features, and target features.
+type ContextRow<'a> = (&'a str, &'a str, &'a [UnitKind], &'a [String], &'a [String]);
+
+fn registry_rows<'a>(
+    review: &'a Review,
+    name: &str,
+    version: &str,
+    checksum: &str,
+) -> Vec<ContextRow<'a>> {
+    review
+        .context_registry
+        .iter()
+        .filter(|context| {
+            context.name == name && context.version == version && context.checksum == checksum
+        })
+        .map(|context| {
+            (
+                context.host.as_str(),
+                context.target.as_str(),
+                context.compile_kinds.as_slice(),
+                context.host_features.as_slice(),
+                context.target_features.as_slice(),
+            )
+        })
+        .collect()
+}
+
+fn git_rows<'a>(
+    review: &'a Review,
+    name: &str,
+    version: &str,
+    source: &str,
+) -> Vec<ContextRow<'a>> {
+    review
+        .context_git
+        .iter()
+        .filter(|context| {
+            context.name == name && context.version == version && context.source == source
+        })
+        .map(|context| {
+            (
+                context.host.as_str(),
+                context.target.as_str(),
+                context.compile_kinds.as_slice(),
+                context.host_features.as_slice(),
+                context.target_features.as_slice(),
+            )
+        })
+        .collect()
+}
+
+/// Lists previous feature contexts only when they changed.
+fn write_contexts(
+    output: &mut impl Write,
+    previous: Option<Vec<ContextRow<'_>>>,
+    next: Vec<ContextRow<'_>>,
+) -> io::Result<()> {
+    let previous = previous.filter(|previous| *previous != next);
+    let rows = previous
+        .iter()
+        .flatten()
+        .map(|row| ("previous ", row))
+        .chain(next.iter().map(|row| ("", row)));
+    for (label, (host, target, kinds, host_features, target_features)) in rows {
+        writeln!(
+            output,
+            "    {label}{host} -> {target} ({}); host features: {}; target features: {}",
+            list(kinds),
+            list(host_features),
+            list(target_features)
+        )?;
     }
     Ok(())
 }
@@ -348,6 +417,112 @@ fn write_users(
     writeln!(
         output,
         "    member users: {}",
-        names.into_iter().collect::<Vec<_>>().join(", ")
+        list(&names.into_iter().collect::<Vec<_>>())
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admission_state::{ContextRegistry, LockedRegistry, RegistrySource};
+    use crate::config::NativeToolRole;
+
+    #[test]
+    fn human_review_writes_plain_stable_text() {
+        let checksum = "1".repeat(64);
+        let context = |target: &str| Context {
+            host: "host".to_owned(),
+            target: target.to_owned(),
+        };
+        let locked = |name: &str, checksum: &str| LockedRegistry {
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+            checksum: checksum.to_owned(),
+            dependencies: vec![],
+        };
+        let mut previous = Review {
+            resolver_version: 2,
+            contexts: vec![context("target")],
+            locked_registry: vec![locked("helper", &checksum)],
+            context_registry: vec![ContextRegistry {
+                host: "host".to_owned(),
+                target: "target".to_owned(),
+                name: "helper".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: checksum.clone(),
+                compile_kinds: vec![UnitKind::Host],
+                host_features: vec![],
+                target_features: vec![],
+            }],
+            registry_sources: vec![RegistrySource {
+                name: "helper".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: checksum.clone(),
+                license: String::new(),
+                source_tree_sha256: "2".repeat(64),
+                build_script: true,
+                proc_macro: true,
+            }],
+            ..Review::default()
+        };
+        previous
+            .complete(vec![Capability {
+                package: "helper".to_owned(),
+                version: "1.0.0".to_owned(),
+                checksum: checksum.clone(),
+                build_script: true,
+                proc_macro: false,
+                native_tools: vec![NativeToolRole::CCompiler],
+                caller_env: vec![],
+            }])
+            .unwrap();
+        let mut next = previous.clone();
+        previous
+            .locked_registry
+            .push(locked("old", &"3".repeat(64)));
+        next.contexts.insert(0, context("other"));
+        next.context_registry[0]
+            .compile_kinds
+            .push(UnitKind::Target);
+        next.context_registry[0].host_features = vec!["default".to_owned(), "std".to_owned()];
+        next.registry_sources[0].license = "MIT".to_owned();
+        next.capabilities[0].caller_env = vec!["PUBLIC".to_owned()];
+        let report = render(
+            Some(&previous),
+            Some("abc"),
+            &next,
+            &Resolution {
+                root_edges: vec![],
+                packages: vec![],
+            },
+        )
+        .unwrap();
+        let grant = format!(
+            "helper 1.0.0 ({checksum}); build script: true; procedural macro: false; native tools: c-compiler; caller environment"
+        );
+        let expected = format!(
+            "Workspace dependency admission review:
+  Previous commitment: abc
+  Review scope: all workspace members; default features; no additional feature requests
+  Contexts: host -> other, host -> target
+  Previous contexts: host -> target
+  Resolver: 2; 1 locked registry/Git packages; 1 grants
+  Reviewed source additions: 1; removals: 1; grant additions: 1; removals: 1
+  - locked package: old 1.0.0 (crates.io); checksum: {old}; dependencies: none
+  - capability: {grant}: none
+  + capability: {grant}: PUBLIC
+
+  Package: helper 1.0.0 (crates.io)
+    checksum: {checksum}
+    member users: none
+    locked dependencies: none
+    tree: {tree}; license: MIT; build script: true; procedural macro: true
+    previous host -> target (host); host features: none; target features: none
+    host -> target (host, target); host features: default, std; target features: none
+",
+            old = "3".repeat(64),
+            tree = "2".repeat(64),
+        );
+        assert_eq!(String::from_utf8(report).unwrap(), expected);
+    }
 }

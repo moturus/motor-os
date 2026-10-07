@@ -123,7 +123,7 @@ fn required_strings(path: &Path, table: &Table, key: &str) -> Result<Vec<String>
         .collect()
 }
 
-fn native_tool_name(role: NativeToolRole) -> &'static str {
+pub(crate) fn native_tool_name(role: NativeToolRole) -> &'static str {
     match role {
         NativeToolRole::CCompiler => "c-compiler",
         NativeToolRole::CxxCompiler => "cxx-compiler",
@@ -1249,11 +1249,25 @@ mod review {
         }
     }
 
+    impl std::fmt::Display for UnitKind {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(unit_kind_name(*self))
+        }
+    }
+
     fn reference_source_name(value: ReferenceSource) -> &'static str {
         match value {
             ReferenceSource::CratesIo => "crates.io",
             ReferenceSource::Git => "git",
             ReferenceSource::Path => "path",
+        }
+    }
+
+    /// The canonical `source name version` spelling of a locked dependency.
+    impl std::fmt::Display for DependencyReference {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let source = reference_source_name(self.source);
+            write!(formatter, "{source} {} {}", self.name, self.version)
         }
     }
 
@@ -1720,12 +1734,7 @@ mod review {
             for value in values {
                 self.item()?;
                 self.raw("    ")?;
-                self.quoted(&format!(
-                    "{} {} {}",
-                    reference_source_name(value.source),
-                    value.name,
-                    value.version
-                ))?;
+                self.quoted(&value.to_string())?;
                 self.raw(",\n")?;
             }
             self.raw("]\n")
