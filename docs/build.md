@@ -14,7 +14,7 @@ src/build-motor-os.sh
 The script installs missing host packages and rustup, configures the VM host,
 checks out the exact Rust, LLVM, Cargo, and mlibc revisions declared in
 `src/toolchain-versions.sh`, builds the complete host and native toolchains,
-and creates all three release images. Package installation and VM networking
+and creates the base, standard, developer, and wasm release images. Package installation and VM networking
 setup use `sudo`, and both run at the very start, so the rest of the build can
 be left unattended; managed source and dependency acquisition uses the network.
 If the build is interrupted or fails, run the same command again.
@@ -38,10 +38,49 @@ toolchains/      immutable key-qualified host toolchain prefixes
 assemblies/      keyed C sysroots, native tools, and generated image roots
 ripgrep/ helix/ sed/ lua-<version>/
                  sources of the userspace add-ons, built last
+javy/ wasmi/ wasmtime/
+                 published Motor branches for the Javy/Wasmi add-on
 ```
 
 Re-running `src/build-motor-os.sh` validates and reuses a complete matching
 prefix or assembly. It does not broadly delete older keyed outputs.
+
+With an installed assembly, build just Javy/Wasmi and their images with:
+
+```sh
+src/build-motor-os.sh --javy-only
+make dev.img wasm.img BUILD=release -j"$(nproc)"
+```
+
+Both images install `/user/bin/javy`, `/user/bin/wasmi`, and the verified default
+plugin under `/user/share/javy`. The wasm image has a 1 GiB data partition and
+does not include the native development toolchain. Wasmtime installation follows
+in later slices; the current wasm image delivers Javy/Wasmi.
+
+On Motor, compile into a writable directory and execute with explicit masks:
+
+```sh
+MOTOR_OS_CAPS=0x200 javy build hello.js -o /user/tmp/hello.wasm
+MOTOR_OS_CAPS=0 wasmi /user/tmp/hello.wasm
+```
+
+The add-on follows published `moturus` branches and records resolved revisions,
+the selected assembly, native library content, and input digests in
+`/user/share/javy/sources.txt`. Build-time downloads are digest-checked; the
+installed-tool tests require no Internet access:
+
+```sh
+src/tests/test-javy.sh --prepare
+src/tests/test-javy.sh
+```
+
+These Rust checks run both release images at 256 and 224 MiB, including static
+and dynamic compilation, TypeScript, plugin configuration, execution, errors,
+fuel and permission refusals. They are also called by the release full-test
+entry points for their respective images; debug suites skip this memory matrix.
+Engine regressions remain in the owning forks. Upstream Brotli is used; compressed
+source bytes can differ between Linux and Motor because their math libraries
+round some logarithms differently.
 
 For the source layout, authoring mode, generated manifests, and update policy,
 see [Building the complete toolchain](build-motor-os.md). The LLVM/C++ and

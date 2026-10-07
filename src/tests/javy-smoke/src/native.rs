@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use moto_stats::Collector;
 use moto_sys::stats::MemoryStats;
 
+mod behavior;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const SHARE: &str = "/user/share/javy";
 const DEADLINE: Duration = Duration::from_secs(120);
@@ -243,6 +245,7 @@ pub fn run() -> Result<()> {
         "MOTOR_OS_CAPS=0 /user/bin/wasmi dynamic.wasm",
         1,
     )?;
+    behavior::run(&mut suite)?;
     suite.compile(
         "typescript",
         &format!("{SHARE}/typescript-workload.js"),
