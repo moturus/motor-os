@@ -76,8 +76,8 @@ src/tests/test-javy.sh
 
 These Rust checks run both release images at 256 and 224 MiB, including static
 and dynamic compilation, TypeScript, plugin configuration, execution, errors,
-fuel and permission refusals. They are also called by the release full-test
-entry points for their respective images; debug suites skip this memory matrix.
+fuel and permission refusals. `src/tests/full-test-dev.sh --release` prepares
+and runs this entire matrix; debug suites skip it.
 Engine regressions remain in the owning forks. Upstream Brotli is used; compressed
 source bytes can differ between Linux and Motor because their math libraries
 round some logarithms differently.

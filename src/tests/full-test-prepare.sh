@@ -49,12 +49,6 @@ fi
 make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" boot core sys-base user-base systest mio-test tokio-tests \
   crossterm-smoke BUILD="$BUILD" -j"$(nproc)"
 
-if [ "$BUILD" = release ]; then
-  javy_image=wasm
-  [ "$TEST_VM_PHASE" != developer ] || javy_image=dev
-  "$WD/test-javy.sh" --prepare --image "$javy_image"
-fi
-
 # The host-side test binaries the suite runs. --no-run builds exactly what a
 # later `cargo test` with the same flags then runs; --quiet only keeps the
 # output of this script to the compilation that is actually new.

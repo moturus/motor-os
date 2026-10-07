@@ -5,6 +5,7 @@
 # The dev-image full test includes the repository suite, httpd-axum regressions,
 # native source builds, and Lorry's bounded product suite. Lorry validation is
 # profile-independent and does not multiply coverage by the OS image profile.
+# Release runs also check Javy/Wasmi on both wasm and developer images.
 #
 # Work that is not explicitly scoped to Lorry runs this suite only with
 # --release. If such work necessarily changes src/bin/lorry, ask before adding
@@ -15,7 +16,7 @@ set -euo pipefail
 WD="$(dirname "$0")"
 ROOT_DIR="$WD/../.."
 
-# Size options become environment settings shared by every phase. Forward only
+# Size options become environment settings shared by the main phases. Forward only
 # the profile and VMM options supported by the component/source-build runners.
 FORWARDED_ARGS=()
 VMM=qemu
@@ -100,5 +101,11 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
   "$WD/test-dev-sources.sh" "${FORWARDED_ARGS[@]}"
 
 "$ROOT_DIR/src/bin/lorry/tests/test-all.sh"
+
+# The wasm tools have their own 256/224 MiB release-image matrix.
+if [ "$SEEN_RELEASE" = 1 ]; then
+  "$WD/test-javy.sh" --prepare --image both
+  "$WD/test-javy.sh" --image both
+fi
 
 echo "full-test-dev.sh ALL PASS"
