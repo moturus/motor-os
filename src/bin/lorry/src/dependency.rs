@@ -5,7 +5,7 @@ use std::thread;
 use crate::admission_state::{Capability, CompactState, Context, Review};
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::cargo_registry::CargoRegistry;
-use crate::config::Config;
+use crate::config::{Config, PolicyLimits};
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
 use crate::manifest::Manifest;
@@ -19,6 +19,7 @@ use crate::resolver::{
 };
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::Toolchain;
+use crate::validation::ValidationMode;
 pub(crate) mod workspace;
 
 use crate::unit::{
@@ -370,6 +371,65 @@ pub enum RegistrySource<'a> {
     Cargo(&'a CargoRegistry),
 }
 
+/// How a command opens its one verified registry source.
+pub(crate) struct RegistryAccess<'a> {
+    pub use_cargo_registry: bool,
+    pub validation: ValidationMode,
+    pub staging_parent: &'a Path,
+    pub evidence_root: &'a Path,
+}
+
+/// Locked inputs that workspace commands read before resolution: the registry
+/// source, the locked Git sources, and resolver options.
+pub(crate) struct LockedContext {
+    registry: OpenRegistry,
+    pub direct: crate::git::DirectCatalog,
+    pub options: Options,
+}
+
+enum OpenRegistry {
+    Lorry(RepositorySet),
+    Cargo(CargoRegistry),
+}
+
+impl LockedContext {
+    pub(crate) fn open(
+        manifest: &Manifest,
+        config: &Config,
+        toolchain: &Toolchain,
+        access: RegistryAccess<'_>,
+        git: fn(&Manifest, &PolicyLimits) -> Result<crate::git::DirectCatalog>,
+    ) -> Result<Self> {
+        let registry = if access.use_cargo_registry {
+            OpenRegistry::Cargo(CargoRegistry::discover_with_validation(
+                access.staging_parent,
+                &config.policy.limits,
+                access.validation,
+                Some(access.evidence_root),
+            )?)
+        } else {
+            OpenRegistry::Lorry(RepositorySet::open_with_validation(
+                &config.repositories,
+                crate::engine::repository_tree_limits(&config.policy.limits)?,
+                config.policy.limits.max_package_bytes,
+                access.validation,
+            )?)
+        };
+        Ok(Self {
+            registry,
+            direct: git(manifest, &config.policy.limits)?,
+            options: resolver_options(manifest, config, toolchain)?,
+        })
+    }
+
+    pub(crate) fn source(&self) -> RegistrySource<'_> {
+        match &self.registry {
+            OpenRegistry::Lorry(repositories) => RegistrySource::Lorry(repositories),
+            OpenRegistry::Cargo(registry) => RegistrySource::Cargo(registry),
+        }
+    }
+}
+
 /// Resolver options shared by build, vendor, and admission reconstruction.
 pub fn resolver_options(
     manifest: &Manifest,
@@ -495,24 +555,42 @@ fn registry_package_evidence_set(
     Ok(prepared)
 }
 
+/// Inspection reads every locked registry object locally, so it verifies them
+/// in parallel before resolution.
 fn locked_catalog(
     manifest: &Manifest,
     source: RegistrySource<'_>,
     direct: &crate::git::DirectCatalog,
     describe: bool,
 ) -> Result<Catalog> {
+    if let RegistrySource::Lorry(repositories) = source {
+        let checksums = manifest
+            .lock
+            .iter()
+            .flat_map(|lock| &lock.packages)
+            .filter_map(|package| package.checksum.clone())
+            .collect::<Vec<_>>();
+        repositories.prefetch_registries(&checksums)?;
+    }
+    source_catalog(manifest, Some(source), direct, describe)
+}
+
+/// Starts a resolver catalog from the locked crates.io candidates in `source`
+/// (none for an unlocked resolution), then adds patches and direct Git sources.
+pub(crate) fn source_catalog(
+    manifest: &Manifest,
+    source: Option<RegistrySource<'_>>,
+    direct: &crate::git::DirectCatalog,
+    describe: bool,
+) -> Result<Catalog> {
     let mut catalog = match source {
-        RegistrySource::Lorry(repositories) => {
-            let checksums = manifest
-                .lock
-                .iter()
-                .flat_map(|lock| &lock.packages)
-                .filter_map(|package| package.checksum.clone())
-                .collect::<Vec<_>>();
-            repositories.prefetch_registries(&checksums)?;
+        Some(RegistrySource::Lorry(repositories)) => {
             Catalog::from_locked_repository(manifest, repositories)?
         }
-        RegistrySource::Cargo(registry) => Catalog::from_locked_cargo_registry(manifest, registry)?,
+        Some(RegistrySource::Cargo(registry)) => {
+            Catalog::from_locked_cargo_registry(manifest, registry)?
+        }
+        None => Catalog::default(),
     };
     if describe {
         patch::configure_sources(manifest, &mut catalog)?;
@@ -1199,9 +1277,15 @@ mod tests {
         // Integration harness environments come from the shared test plan.
         let mut workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
         workspace.load_locked_context().unwrap();
-        let (complete, catalog) =
-            workspace::resolve_locked(&workspace, &config, source, &direct, &resolver_options)
-                .unwrap();
+        let (complete, catalog) = workspace::resolve_locked(
+            &workspace,
+            &config,
+            source,
+            &direct,
+            &resolver_options,
+            None,
+        )
+        .unwrap();
         let requests = crate::resolver::workspace::features::member_requests(
             &workspace,
             &[fixture.0.clone()].into(),

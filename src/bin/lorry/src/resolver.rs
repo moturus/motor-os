@@ -54,10 +54,6 @@ impl Catalog {
         })
     }
 
-    pub fn allow_unlocked_registry_candidates(&mut self) {
-        self.locked_repository = None;
-    }
-
     pub fn from_locked_cargo_registry(
         manifest: &Manifest,
         registry: &CargoRegistry,

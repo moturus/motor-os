@@ -35,15 +35,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     })?;
     workspace.load_locked_context()?;
     let manifest = &workspace.packages[0];
-    let mut config = Config::load_workspace(
-        &current,
-        &workspace.root,
-        workspace
-            .packages
-            .iter()
-            .map(|member| member.root.as_path()),
-    )?;
-    config.apply_max_packages(cli.max_packages)?;
+    let config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let options = dependency::resolver_options(manifest, &config, &toolchain)?;
     let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-review")?;

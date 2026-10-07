@@ -791,6 +791,7 @@ mod tests {
             registry_source,
             &direct,
             &options,
+            None,
         )
         .unwrap();
         let prepared = crate::dependency::workspace::prepare_sources(

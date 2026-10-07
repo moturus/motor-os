@@ -3,8 +3,7 @@ use crate::admission_state::ReviewScope;
 use crate::cli::{FeatureSelection, FetchOptions};
 use crate::manifest::SourceWorkspace;
 use crate::resolver::workspace::{
-    features::member_requests, resolve_complete_workspace, resolve_locked_workspace,
-    resolve_selected_workspace,
+    features::member_requests, resolve_complete_workspace, resolve_selected_workspace,
 };
 
 pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
@@ -19,15 +18,7 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
     let mut workspace =
         SourceWorkspace::load(&current, cli.manifest_path.as_deref().map(Path::new))?;
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
-    let mut config = Config::load_workspace(
-        &current,
-        &workspace.root,
-        workspace
-            .packages
-            .iter()
-            .map(|package| package.root.as_path()),
-    )?;
-    config.apply_max_packages(cli.max_packages)?;
+    let config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
     workspace.load_locked_context().map_err(|error| {
         error.with_help("provide a usable Cargo.lock with `lorry vendor`, then run `lorry fetch`")
     })?;
@@ -147,15 +138,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     let mut workspace =
         SourceWorkspace::load(&current, cli.manifest_path.as_deref().map(Path::new))?;
     workspace.load_context(options.locked)?;
-    let mut config = Config::load_workspace(
-        &current,
-        &workspace.root,
-        workspace
-            .packages
-            .iter()
-            .map(|package| package.root.as_path()),
-    )?;
-    config.apply_max_packages(cli.max_packages)?;
+    let config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
     if workspace.packages.is_empty() {
         return Ok(0);
     }
@@ -232,14 +215,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         )?;
         (complete, catalog, None)
     } else {
-        let mut catalog = prepare_catalog(
-            &manifest,
-            &config,
-            acquisition.repositories(),
-            true,
-            Some(&direct),
-            true,
-        )?;
+        let mut catalog = dependency::source_catalog(&manifest, None, &direct, true)?;
         let mut locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
         if let Some(forced) = &forced {
             let (name, old, version) = forced.as_resolver_input();
@@ -317,13 +293,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         progress.report("Verifying selected dependency sources")?;
         let evidence = acquisition.evidence(&selected, Some(&direct))?;
         policy::inspect_sources(&config.policy, &selected, &evidence)?;
-        let mut refined = false;
-        for (key, evidence) in &evidence {
-            if key.source == PackageSourceKey::CratesIo {
-                refined |= catalog.annotate_proc_macro(key, evidence.proc_macro)?;
-            }
-        }
-        if !refined {
+        if !dependency::workspace::annotate_proc_macros(&mut catalog, &evidence)? {
             break (resolutions, selected, evidence);
         }
     };
@@ -494,6 +464,8 @@ fn review_scope(
     })
 }
 
+/// Fetch and locked vendor resolve the lock with acquisition of the index
+/// records that verified local state lacks.
 fn resolve_locked(
     workspace: &SourceWorkspace,
     config: &Config,
@@ -503,29 +475,17 @@ fn resolve_locked(
     offline: bool,
 ) -> Result<(Resolution, Catalog)> {
     let manifest = &workspace.packages[0];
-    let lock = manifest.lock.as_ref().ok_or_else(|| {
-        Error::failure("workspace source acquisition requires Cargo.lock")
-            .with_help("run `lorry vendor` to create the workspace lock")
-    })?;
-    let mut catalog = prepare_catalog(
-        manifest,
-        config,
-        acquisition.repositories(),
-        false,
-        Some(direct),
-        true,
-    )?;
-    catalog.use_fetch_hint();
-    let complete = resolve_locked_workspace(
+    let repositories = acquisition.repositories().clone();
+    dependency::workspace::resolve_locked(
         workspace,
-        &mut catalog,
+        config,
+        dependency::RegistrySource::Lorry(&repositories),
+        direct,
         options,
-        lock,
-        &mut |name, _, catalog| acquisition.load_locked_sparse(manifest, name, catalog, offline),
-    )?;
-    crate::offline::validate_workspace_resolution(lock, &complete)?;
-    policy::preflight_sources(&config.policy, &complete)?;
-    Ok((complete, catalog))
+        Some(&mut |name, _, catalog| {
+            acquisition.load_locked_sparse(manifest, name, catalog, offline)
+        }),
+    )
 }
 
 fn discover_proc_macros(

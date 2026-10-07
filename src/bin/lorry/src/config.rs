@@ -269,6 +269,24 @@ impl Config {
         )
     }
 
+    /// Loads a source workspace's configuration with this run's package bound.
+    pub(crate) fn load_source_workspace(
+        current: &Path,
+        workspace: &crate::manifest::SourceWorkspace,
+        max_packages: Option<u64>,
+    ) -> Result<Self> {
+        let mut config = Self::load_workspace(
+            current,
+            &workspace.root,
+            workspace
+                .packages
+                .iter()
+                .map(|member| member.root.as_path()),
+        )?;
+        config.apply_max_packages(max_packages)?;
+        Ok(config)
+    }
+
     pub(crate) fn load_workspace<'a>(
         current: &Path,
         workspace_root: &Path,

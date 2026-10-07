@@ -9,14 +9,12 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::atomic::AtomicDirectory;
-use crate::cargo_registry::CargoRegistry;
 use crate::cli::{Cli, MetadataOptions, Verbosity};
 use crate::config::Config;
 use crate::dependency::{self, PreparedGraph, PreparedPackage};
 use crate::diagnostic::{Error, Result};
 use crate::manifest::{Manifest, SourceWorkspace};
 use crate::progress::Progress;
-use crate::repository::RepositorySet;
 use crate::resolver::{PackageKey, Resolution, ResolvedSource};
 use crate::source_tree::Exclusions;
 use crate::toolchain::Toolchain;
@@ -31,15 +29,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     )?;
     warn_default_format(cli, options);
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
-    let mut config = Config::load_workspace(
-        &current,
-        &workspace.root,
-        workspace
-            .packages
-            .iter()
-            .map(|member| member.root.as_path()),
-    )?;
-    config.apply_max_packages(cli.max_packages)?;
+    let config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
     let target_directory = package::path_utf8(
         &config.target_directory(&current, &workspace.root, None),
         "metadata target directory",
@@ -76,39 +66,25 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-metadata")?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     progress.report("Verifying dependency state")?;
-    let repositories = if cli.use_cargo_registry {
-        None
-    } else {
-        Some(RepositorySet::open_with_validation(
-            &config.repositories,
-            crate::engine::repository_tree_limits(&config.policy.limits)?,
-            config.policy.limits.max_package_bytes,
-            ValidationMode::Trusted,
-        )?)
-    };
-    let cargo_registry = if cli.use_cargo_registry {
-        Some(CargoRegistry::discover_with_validation(
-            staging.path(),
-            &config.policy.limits,
-            ValidationMode::Trusted,
-            Some(&crate::engine::artifact_root(manifest).join(".cargo-evidence")),
-        )?)
-    } else {
-        None
-    };
-    let source = match (&repositories, &cargo_registry) {
-        (Some(repositories), None) => dependency::RegistrySource::Lorry(repositories),
-        (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
-        _ => unreachable!("exactly one registry source is constructed"),
-    };
-    let direct = crate::git::load_locked_sources(manifest, &config.policy.limits)?;
-    let resolver_options = dependency::resolver_options(manifest, &config, &toolchain)?;
+    let locked = dependency::LockedContext::open(
+        manifest,
+        &config,
+        &toolchain,
+        dependency::RegistryAccess {
+            use_cargo_registry: cli.use_cargo_registry,
+            validation: ValidationMode::Trusted,
+            staging_parent: staging.path(),
+            evidence_root: &crate::engine::artifact_root(manifest).join(".cargo-evidence"),
+        },
+        crate::git::load_locked_sources,
+    )?;
     let (complete, catalog) = dependency::workspace::resolve_locked(
         &workspace,
         &config,
-        source,
-        &direct,
-        &resolver_options,
+        locked.source(),
+        &locked.direct,
+        &locked.options,
+        None,
     )?;
     let members = crate::resolver::workspace::features::member_requests(
         &workspace,
@@ -123,15 +99,15 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     let resolution = crate::resolver::workspace::resolve_metadata_workspace(
         &complete,
         &catalog,
-        &resolver_options,
+        &locked.options,
         &members,
     )?;
     let prepared = dependency::workspace::prepare_sources(
         resolution,
         &config,
-        source,
+        locked.source(),
         staging.path(),
-        &direct,
+        &locked.direct,
     )?;
     let cache_root = config.cache_directory()?;
     let roots = publish_source_parts(

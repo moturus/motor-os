@@ -2,7 +2,6 @@ use crate::admission_state::CompactState;
 use crate::atomic::{AtomicDirectory, AtomicFile};
 use crate::bundle;
 use crate::cache;
-use crate::cargo_registry::CargoRegistry;
 use crate::cli::{CheckOptions, Cli, Color, Command, MessageFormat, Verbosity};
 use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, effective_rustflags};
 use crate::dependency;
@@ -12,7 +11,6 @@ use crate::hash::{FieldDigest, Sha256, decode_hex, hex, modified_time, sha256_fi
 use crate::manifest::{Manifest, TargetKind};
 use crate::process;
 use crate::progress::Progress;
-use crate::repository::RepositorySet;
 use crate::resolver::{CompileKind, PackageKey, Resolution, TargetSelection};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
@@ -332,36 +330,23 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     // repository objects verified during admission are not re-hashed when the
     // build prepares its dependency graph.
     let admission_staging = AtomicDirectory::new(&env::temp_dir(), "lorry-admission")?;
-    let repositories = if cli.use_cargo_registry {
-        None
-    } else {
-        Some(RepositorySet::open_with_validation(
-            &config.repositories,
-            repository_tree_limits(&config.policy.limits)?,
-            config.policy.limits.max_package_bytes,
+    let locked = dependency::LockedContext::open(
+        &manifest,
+        &config,
+        &toolchain,
+        dependency::RegistryAccess {
+            use_cargo_registry: cli.use_cargo_registry,
             validation,
-        )?)
-    };
-    let cargo_registry = if cli.use_cargo_registry {
-        Some(CargoRegistry::discover_with_validation(
-            admission_staging.path(),
-            &config.policy.limits,
-            validation,
-            Some(&target_root.join(".cargo-evidence")),
-        )?)
-    } else {
-        None
-    };
-    let source = match (&repositories, &cargo_registry) {
-        (Some(repositories), None) => dependency::RegistrySource::Lorry(repositories),
-        (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
-        _ => unreachable!("exactly one registry source is constructed"),
-    };
-    let direct = if shared {
-        crate::git::load_locked_sources(&manifest, &config.policy.limits)?
-    } else {
-        crate::git::load_locked_dependencies(&manifest, &config.policy.limits)?
-    };
+            staging_parent: admission_staging.path(),
+            evidence_root: &target_root.join(".cargo-evidence"),
+        },
+        if shared {
+            crate::git::load_locked_sources
+        } else {
+            crate::git::load_locked_dependencies
+        },
+    )?;
+    let (source, direct) = (locked.source(), &locked.direct);
     let members = shared
         .then(|| {
             crate::resolver::workspace::features::member_requests(
@@ -373,15 +358,14 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         })
         .transpose()?;
     crate::trace::event("opened dependency source");
-    let options = dependency::resolver_options(&manifest, &config, &toolchain)?;
     let inputs = dependency::ReviewInputs {
         manifest: &manifest,
         config: &config,
         source,
         toolchain: &toolchain,
-        options: &options,
+        options: &locked.options,
         staging_parent: admission_staging.path(),
-        direct: Some(&direct),
+        direct: Some(direct),
         prepare_context: Some(crate::admission_state::Context {
             host: host_info.triple.clone(),
             target: target_info.triple.clone(),
@@ -492,7 +476,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     jobs,
                     keep_going: options.keep_going,
                     use_cargo_registry: cli.use_cargo_registry,
-                    source: (source, &direct, verified_resolution),
+                    source: (source, direct, verified_resolution),
                     bundle: false,
                     validation,
                     ordinary_freshness_base,
@@ -528,7 +512,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 jobs,
                 keep_going: false,
                 use_cargo_registry: cli.use_cargo_registry,
-                source: (source, &direct, verified_resolution),
+                source: (source, direct, verified_resolution),
                 bundle: false,
                 validation,
                 ordinary_freshness_base: None,
@@ -562,7 +546,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     jobs,
                     keep_going: false,
                     use_cargo_registry: cli.use_cargo_registry,
-                    source: (source, &direct, verified_resolution),
+                    source: (source, direct, verified_resolution),
                     bundle: false,
                     validation,
                     ordinary_freshness_base,
@@ -618,7 +602,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     jobs,
                     keep_going: false,
                     use_cargo_registry: cli.use_cargo_registry,
-                    source: (source, &direct, verified_resolution),
+                    source: (source, direct, verified_resolution),
                     bundle: options.bundle,
                     validation,
                     ordinary_freshness_base,
@@ -3176,6 +3160,7 @@ fn use_color(color: Color) -> bool {
 mod tests {
     use super::*;
     use crate::config::{CargoCompat, PolicyAction, PolicyRule};
+    use crate::repository::RepositorySet;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3496,9 +3481,10 @@ mod tests {
         .unwrap();
         let source = dependency::RegistrySource::Lorry(&repositories);
         let direct = crate::git::DirectCatalog::default();
-        let (complete, catalog) =
-            dependency::workspace::resolve_locked(&workspace, &config, source, &direct, &options)
-                .unwrap();
+        let (complete, catalog) = dependency::workspace::resolve_locked(
+            &workspace, &config, source, &direct, &options, None,
+        )
+        .unwrap();
         let requests = crate::resolver::workspace::features::member_requests(
             &workspace,
             &members.iter().map(|member| member.root.clone()).collect(),

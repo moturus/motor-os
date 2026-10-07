@@ -18,7 +18,6 @@ use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
 use crate::lockfile;
 use crate::manifest::Manifest;
-use crate::patch;
 use crate::policy::{self, PackageEvidence};
 use crate::progress::Progress;
 use crate::redirect::TrustPolicy;
@@ -160,35 +159,6 @@ struct VendorContext {
     host: TargetInfo,
     target: TargetInfo,
     recorded: bool,
-}
-
-fn prepare_catalog(
-    manifest: &Manifest,
-    config: &Config,
-    repositories: &RepositorySet,
-    allow_unlocked: bool,
-    direct: Option<&crate::git::DirectCatalog>,
-    describe: bool,
-) -> Result<Catalog> {
-    let mut catalog = if manifest.lock.is_some() {
-        Catalog::from_locked_repository(manifest, repositories)?
-    } else {
-        Catalog::default()
-    };
-    if allow_unlocked {
-        catalog.allow_unlocked_registry_candidates();
-    }
-    if describe {
-        patch::configure_sources(manifest, &mut catalog)?;
-    } else {
-        patch::configure(manifest, &mut catalog)?;
-    }
-    if let Some(direct) = direct {
-        direct.configure(&mut catalog)?;
-    } else {
-        crate::git::configure_direct(manifest, &config.policy.limits, &mut catalog)?;
-    }
-    Ok(catalog)
 }
 
 struct Acquisition<'a> {

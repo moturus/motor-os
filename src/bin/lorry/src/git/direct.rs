@@ -141,14 +141,6 @@ fn materialize_locked_catalog(
     direct_catalog(manifest, policy, &objects, materialized, describe)
 }
 
-pub(crate) fn configure_direct(
-    manifest: &Manifest,
-    policy: &PolicyLimits,
-    catalog: &mut Catalog,
-) -> Result<()> {
-    load_locked_dependencies(manifest, policy)?.configure(catalog)
-}
-
 pub(crate) fn load_locked_dependencies(
     manifest: &Manifest,
     policy: &PolicyLimits,

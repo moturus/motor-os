@@ -29,6 +29,7 @@ pub(crate) fn reconstruct(
         inputs.source,
         &direct,
         inputs.options,
+        None,
     )?;
     let members = requests(&workspace, scope)?;
     let mut resolutions = Vec::new();
@@ -42,39 +43,26 @@ pub(crate) fn reconstruct(
             target_triple: &target.triple,
             target_cfg: &target.cfg,
         };
-        let resolution = loop {
-            let resolution = resolve_selected_workspace(
-                &complete,
-                &catalog,
-                inputs.options,
-                &members,
-                selection,
-            )?;
-            let inspected = prepare_sources(
-                resolution.clone(),
-                inputs.config,
-                inputs.source,
-                inputs.staging_parent,
-                &direct,
-            )?;
-            let mut refined = false;
-            for (key, package) in inspected.packages {
-                if key.source == PackageSourceKey::CratesIo {
-                    refined |= catalog.annotate_proc_macro(&key, package.evidence.proc_macro)?;
-                }
-                if let Some(previous) = evidence.insert(key, package.evidence.clone())
-                    && previous != package.evidence
-                {
-                    return Err(Error::failure(
-                        "workspace review contexts disagree about source evidence",
-                    ));
-                }
+        let inspected = inspect_selected(
+            &mut catalog,
+            inputs.config,
+            inputs.source,
+            inputs.staging_parent,
+            &direct,
+            |catalog| {
+                resolve_selected_workspace(&complete, catalog, inputs.options, &members, selection)
+            },
+        )?;
+        for (key, package) in inspected.packages {
+            if let Some(previous) = evidence.insert(key, package.evidence.clone())
+                && previous != package.evidence
+            {
+                return Err(Error::failure(
+                    "workspace review contexts disagree about source evidence",
+                ));
             }
-            if !refined {
-                break resolution;
-            }
-        };
-        resolutions.push(resolution);
+        }
+        resolutions.push(inspected.resolution);
     }
     let selected = crate::resolver::merge_resolutions(resolutions.clone())?;
     evidence.retain(|key, _| selected.packages.iter().any(|package| package.key == *key));
@@ -431,7 +419,7 @@ mod tests {
         let source = RegistrySource::Lorry(&repositories);
         let direct = crate::git::DirectCatalog::default();
         let (complete, catalog) =
-            resolve_locked(&workspace, &config, source, &direct, &options).unwrap();
+            resolve_locked(&workspace, &config, source, &direct, &options, None).unwrap();
         let scope = ReviewScope {
             packages: vec!["a".into(), "b".into()],
             ..ReviewScope::default()

@@ -3,14 +3,12 @@ use std::env;
 use std::io::{self, Write};
 
 use crate::atomic::AtomicDirectory;
-use crate::cargo_registry::CargoRegistry;
 use crate::cli::{Cli, TreeOptions, Verbosity};
 use crate::config::Config;
-use crate::dependency::{self, workspace::PreparedSources};
+use crate::dependency::{self, LockedContext, RegistryAccess, workspace::PreparedSources};
 use crate::diagnostic::{Error, Result};
 use crate::manifest::{Manifest, SourceWorkspace};
 use crate::progress::Progress;
-use crate::repository::RepositorySet;
 use crate::resolver::workspace::{features::member_requests, resolve_selected_workspace};
 use crate::resolver::{
     CompileKind, FeatureContext, PackageKey, ResolvedEdge, ResolvedSource, TargetSelection,
@@ -40,15 +38,7 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
     }
     workspace.load_locked_context()?;
     let manifest = &workspace.packages[0];
-    let mut config = Config::load_workspace(
-        &current,
-        &workspace.root,
-        workspace
-            .packages
-            .iter()
-            .map(|member| member.root.as_path()),
-    )?;
-    config.apply_max_packages(cli.max_packages)?;
+    let config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let physical_target = config.selected_target(options.target.as_deref())?;
@@ -70,33 +60,18 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
     let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-tree")?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     progress.report("Verifying dependency state")?;
-    let repositories = if cli.use_cargo_registry {
-        None
-    } else {
-        Some(RepositorySet::open_with_validation(
-            &config.repositories,
-            crate::engine::repository_tree_limits(&config.policy.limits)?,
-            config.policy.limits.max_package_bytes,
-            ValidationMode::Trusted,
-        )?)
-    };
-    let cargo_registry = if cli.use_cargo_registry {
-        Some(CargoRegistry::discover_with_validation(
-            staging.path(),
-            &config.policy.limits,
-            ValidationMode::Trusted,
-            Some(&crate::engine::artifact_root(manifest).join(".cargo-evidence")),
-        )?)
-    } else {
-        None
-    };
-    let source = match (&repositories, &cargo_registry) {
-        (Some(repositories), None) => dependency::RegistrySource::Lorry(repositories),
-        (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
-        _ => unreachable!("exactly one registry source is constructed"),
-    };
-    let direct = crate::git::load_locked_sources(manifest, &config.policy.limits)?;
-    let resolver_options = dependency::resolver_options(manifest, &config, &toolchain)?;
+    let locked = LockedContext::open(
+        manifest,
+        &config,
+        &toolchain,
+        RegistryAccess {
+            use_cargo_registry: cli.use_cargo_registry,
+            validation: ValidationMode::Trusted,
+            staging_parent: staging.path(),
+            evidence_root: &crate::engine::artifact_root(manifest).join(".cargo-evidence"),
+        },
+        crate::git::load_locked_sources,
+    )?;
     let selection = TargetSelection {
         target_triple: &target.triple,
         target_cfg: &target.cfg,
@@ -106,9 +81,10 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
     let (complete, mut catalog) = dependency::workspace::resolve_locked(
         &workspace,
         &config,
-        source,
-        &direct,
-        &resolver_options,
+        locked.source(),
+        &locked.direct,
+        &locked.options,
+        None,
     )?;
     let requests = member_requests(
         &workspace,
@@ -117,31 +93,16 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
         false,
     )?;
     progress.report("Preparing dependency graph")?;
-    let prepared = loop {
-        let resolution = resolve_selected_workspace(
-            &complete,
-            &catalog,
-            &resolver_options,
-            &requests,
-            selection,
-        )?;
-        let prepared = dependency::workspace::prepare_sources(
-            resolution,
-            &config,
-            source,
-            staging.path(),
-            &direct,
-        )?;
-        let mut refined = false;
-        for (key, package) in &prepared.packages {
-            if key.source == crate::resolver::PackageSourceKey::CratesIo {
-                refined |= catalog.annotate_proc_macro(key, package.evidence.proc_macro)?;
-            }
-        }
-        if !refined {
-            break prepared;
-        }
-    };
+    let prepared = dependency::workspace::inspect_selected(
+        &mut catalog,
+        &config,
+        locked.source(),
+        staging.path(),
+        &locked.direct,
+        |catalog| {
+            resolve_selected_workspace(&complete, catalog, &locked.options, &requests, selection)
+        },
+    )?;
     let rendered = prepared
         .resolution
         .root_edges

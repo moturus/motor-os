@@ -242,7 +242,8 @@ mod tests {
             max_depth: config.policy.limits.max_depth,
         };
         let (complete, catalog) =
-            sources::resolve_locked(&workspace, &config, registry, &direct, &options).unwrap();
+            sources::resolve_locked(&workspace, &config, registry, &direct, &options, None)
+                .unwrap();
         let members = solver::features::member_requests(
             &workspace,
             &workspace

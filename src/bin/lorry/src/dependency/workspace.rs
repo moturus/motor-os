@@ -12,12 +12,20 @@ pub(crate) struct PreparedSources {
     pub packages: BTreeMap<PackageKey, PreparedPackage>,
 }
 
+/// Acquires the crates.io index records of one package name into a catalog.
+pub(crate) type IndexLoader<'a> =
+    &'a mut dyn FnMut(&str, &semver::VersionReq, &mut Catalog) -> Result<()>;
+
+/// Resolves the complete workspace graph from Cargo.lock. Without `acquire`,
+/// registry records come only from verified local state; fetch and vendor pass
+/// a loader that may acquire missing index records.
 pub(crate) fn resolve_locked(
     workspace: &SourceWorkspace,
     config: &Config,
     source: RegistrySource<'_>,
     direct: &crate::git::DirectCatalog,
     options: &Options,
+    acquire: Option<IndexLoader<'_>>,
 ) -> Result<(Resolution, Catalog)> {
     let context = workspace
         .packages
@@ -27,14 +35,17 @@ pub(crate) fn resolve_locked(
         .lock
         .as_ref()
         .ok_or_else(|| Error::failure("workspace dependency preparation requires Cargo.lock"))?;
-    let mut catalog = locked_catalog(context, source, direct, true)?;
+    let mut catalog = match acquire {
+        None => locked_catalog(context, source, direct, true)?,
+        Some(_) => source_catalog(context, Some(source), direct, true)?,
+    };
     catalog.use_fetch_hint();
     let complete = resolve_locked_workspace(
         workspace,
         &mut catalog,
         options,
         lock,
-        &mut |_, _, _| Ok(()),
+        acquire.unwrap_or(&mut |_, _, _| Ok(())),
     )?;
     offline::validate_workspace_resolution(lock, &complete)?;
     policy::preflight_sources(&config.policy, &complete)?;
@@ -59,44 +70,75 @@ pub(crate) fn resolve_compilation(
         inputs.source,
         direct,
         inputs.options,
+        None,
     )?;
-    loop {
-        let resolution = crate::resolver::workspace::resolve_selected_workspace(
-            &complete,
-            &catalog,
-            inputs.options,
-            members,
-            selection,
-        )?;
-        if matches!(inputs.source, RegistrySource::Lorry(_))
-            && resolution.packages.iter().any(|package| {
-                matches!(
-                    package.source,
-                    ResolvedSource::CratesIo { .. } | ResolvedSource::Git { .. }
-                )
-            })
-        {
-            return Err(Error::failure(
-                "compilation using crates.io or Git packages requires workspace admission",
-            ).with_help("run workspace-root `lorry vendor --locked [--offline]` to review and approve these sources"));
-        }
-        let inspected = prepare_sources(
-            resolution.clone(),
-            inputs.config,
-            inputs.source,
-            inputs.staging_parent,
-            direct,
-        )?;
-        let mut refined = false;
-        for (key, package) in inspected.packages {
-            if key.source == PackageSourceKey::CratesIo {
-                refined |= catalog.annotate_proc_macro(&key, package.evidence.proc_macro)?;
+    let prepared = inspect_selected(
+        &mut catalog,
+        inputs.config,
+        inputs.source,
+        inputs.staging_parent,
+        direct,
+        |catalog| {
+            let resolution = crate::resolver::workspace::resolve_selected_workspace(
+                &complete,
+                catalog,
+                inputs.options,
+                members,
+                selection,
+            )?;
+            if matches!(inputs.source, RegistrySource::Lorry(_))
+                && resolution.packages.iter().any(|package| {
+                    matches!(
+                        package.source,
+                        ResolvedSource::CratesIo { .. } | ResolvedSource::Git { .. }
+                    )
+                })
+            {
+                return Err(Error::failure(
+                    "compilation using crates.io or Git packages requires workspace admission",
+                ).with_help("run workspace-root `lorry vendor --locked [--offline]` to review and approve these sources"));
             }
-        }
-        if !refined {
-            return Ok(resolution);
+            Ok(resolution)
+        },
+    )?;
+    Ok(prepared.resolution)
+}
+
+/// Resolves and inspects the selected graph until inspection reveals no new
+/// crates.io procedural macro; a macro moves its dependencies to the host.
+pub(crate) fn inspect_selected(
+    catalog: &mut Catalog,
+    config: &Config,
+    source: RegistrySource<'_>,
+    staging_parent: &Path,
+    direct: &crate::git::DirectCatalog,
+    mut resolve: impl FnMut(&Catalog) -> Result<Resolution>,
+) -> Result<PreparedSources> {
+    loop {
+        let prepared = prepare_sources(resolve(catalog)?, config, source, staging_parent, direct)?;
+        let evidence = prepared
+            .packages
+            .iter()
+            .map(|(key, package)| (key, &package.evidence));
+        if !annotate_proc_macros(catalog, evidence)? {
+            return Ok(prepared);
         }
     }
+}
+
+/// Records the inspected macro status of crates.io packages and reports
+/// whether any of them changed the catalog.
+pub(crate) fn annotate_proc_macros<'a>(
+    catalog: &mut Catalog,
+    evidence: impl IntoIterator<Item = (&'a PackageKey, &'a PackageEvidence)>,
+) -> Result<bool> {
+    let mut refined = false;
+    for (key, evidence) in evidence {
+        if key.source == PackageSourceKey::CratesIo {
+            refined |= catalog.annotate_proc_macro(key, evidence.proc_macro)?;
+        }
+    }
+    Ok(refined)
 }
 
 pub(crate) fn prepare_sources(
@@ -215,7 +257,7 @@ mod tests {
             let direct = crate::git::DirectCatalog::default();
             let options = super::super::tests::options(&workspace.packages[0]);
             let (complete, catalog) =
-                resolve_locked(&workspace, &config, source, &direct, &options).unwrap();
+                resolve_locked(&workspace, &config, source, &direct, &options, None).unwrap();
             let members = crate::resolver::workspace::features::member_requests(
                 &workspace,
                 &[fixture.0.clone()].into(),
@@ -304,7 +346,7 @@ mod tests {
         let direct = crate::git::DirectCatalog::default();
         let options = super::super::tests::options(&workspace.packages[0]);
         let (complete, catalog) =
-            resolve_locked(&workspace, &config, source, &direct, &options).unwrap();
+            resolve_locked(&workspace, &config, source, &direct, &options, None).unwrap();
         let cfg = crate::toolchain::CfgSet::parse("unix\n").unwrap();
         let members = crate::resolver::workspace::features::member_requests(
             &workspace,
@@ -482,6 +524,7 @@ mod tests {
             source,
             &direct,
             &super::super::tests::options(&workspace.packages[0]),
+            None,
         )
         .unwrap();
         let staging = fixture.0.join("unused-staging");
