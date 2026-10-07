@@ -53,15 +53,8 @@ make dev.img wasm.img BUILD=release -j"$(nproc)"
 ```
 
 Both images install `/devtools/bin/javy` and `/devtools/bin/wasmi`, with support
-files under `/devtools/cfg/javy`:
-
-| File | Purpose |
-| --- | --- |
-| `plugin.wasm` | Default QuickJS plugin for explicit plugin selection and dynamic modules; Javy also embeds it. |
-| `typescript-workload.js` | TypeScript 5.9.3 plus a transpilation workload for the installed-tool tests. |
-| `typescript-LICENSE.txt`, `typescript-NOTICES.txt` | License and third-party notices for the bundled TypeScript code. |
-| `sources.txt` | Resolved source revisions, build settings, and input digests. |
-| `SHA256SUMS` | Checksums of the staged binaries and support files. |
+files under `/devtools/cfg/javy`. See [WebAssembly on Motor OS](wasm.md) for the
+installed files and the developer image's example under `/devtools/src/wasm`.
 
 The wasm image has a 1 GiB data partition and
 does not include the native development toolchain. Wasmtime installation follows

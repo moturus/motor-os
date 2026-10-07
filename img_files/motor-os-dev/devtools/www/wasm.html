@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="The Motor OS DNS resolver service: request path, configuration, transport, validation, and the result contract.">
+<meta name="description" content="Javy and Wasmi on the Motor OS developer image: installed files and a JavaScript-to-WebAssembly example.">
 <meta name="theme-color" content="#0a0a0a">
-<title>DNS resolver | Motor OS</title>
+<title>WebAssembly on Motor OS | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -413,7 +413,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
-    <li><a href="dns.html" class="current">DNS resolver</a></li>
+    <li><a href="dns.html">DNS resolver</a></li>
     <li><a href="terminals.html">Terminals</a></li>
     <li><a href="diagnostics.html">Logs and diagnostics</a></li>
   </ul>
@@ -434,7 +434,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="toolchain.html">Toolchains</a></li>
     <li><a href="rust.html">Rust on Motor OS</a></li>
     <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
-    <li><a href="wasm.html">WebAssembly</a></li>
+    <li><a href="wasm.html" class="current">WebAssembly</a></li>
     <li><a href="lorry.html">Lorry: the package manager</a></li>
     <li><a href="gix.html">gix: the Git client</a></li>
     <li><a href="hello.html">Hello, world</a></li>
@@ -444,85 +444,51 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">System</div>
-<h1>DNS resolver</h1>
-<p class="lead">Name resolution is a standalone service, <code>dns-resolver</code>, reached
-over bounded synchronous IPC. Its backend is native Rust and depends only on Motor OS
-networking and filesystem APIs. It runs with the None role, holding only
-<code>CAP_LOG</code> and <code>CAP_NET</code>.</p>
+<div class="eyebrow">Developing</div>
+<h1>WebAssembly on Motor OS</h1>
+<p class="lead">The developer image includes Javy 9.1.0 and Wasmi 1.1.0. Compile
+JavaScript into WebAssembly and run it inside the VM, with no downloads.</p>
+<p>Javy produces a WebAssembly module containing the QuickJS runtime. Wasmi
+interprets that module using the Motor port's WASI Preview 1 support.</p>
 
-<h2>Request path</h2>
-<pre><code>Rust application (std::net::ToSocketAddrs, TcpStream::connect("host:port"), ...)
-  -&gt; rt.vdso lookup_host
-  -&gt; moto-dns: bounded synchronous IPC
-  -&gt; dns-resolver service
-  -&gt; connected UDP, with TCP fallback
-  -&gt; sys-io</code></pre>
-<p>Numeric addresses and <code>localhost</code> are answered in the runtime without
-contacting the service. Other names use a fresh client connection per lookup, so a dead
-resolver connection is never cached and a restarted service is found by the next call.
-The service keeps four fixed workers and a versioned, pointer-free request and response
-format defined in the <code>moto-dns</code> crate (names up to 253 bytes, up to 16
-addresses per answer). Because each lookup takes one IPC connection into four workers,
-more than 32 concurrent lookups are refused with <code>NotConnected</code>; raising this
-is on the follow-up list.</p>
-<p>The service answers only callers that hold <code>CAP_NET</code>, checked against the
-capabilities the kernel reports for the connection; other callers get
-<code>PermissionDenied</code>. So a process without network access cannot borrow the
-resolver's. Numeric addresses and <code>localhost</code> need no capability. See
-<a href="capabilities.html#network">Capabilities</a>.</p>
+<h2>Installed files</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Path</th><th>Contents</th></tr>
+  <tr><td><code>/devtools/bin/javy</code></td><td>JavaScript-to-WebAssembly compiler.</td></tr>
+  <tr><td><code>/devtools/bin/wasmi</code></td><td>WebAssembly interpreter and command runner.</td></tr>
+  <tr><td><code>/devtools/cfg/javy/plugin.wasm</code></td><td>Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy.</td></tr>
+  <tr><td><code>/devtools/cfg/javy/typescript-workload.js</code></td><td>TypeScript 5.9.3 plus a transpilation test workload.</td></tr>
+  <tr><td><code>/devtools/cfg/javy/typescript-LICENSE.txt</code>, <code>typescript-NOTICES.txt</code></td><td>License and third-party notices for the bundled TypeScript code.</td></tr>
+  <tr><td><code>/devtools/cfg/javy/sources.txt</code>, <code>SHA256SUMS</code></td><td>Build provenance, source revisions, and staged-file checksums.</td></tr>
+  <tr><td><code>/devtools/src/wasm/</code></td><td><code>hello.js</code> and a README with compile/run instructions.</td></tr>
+  <tr><td><code>/devtools/www/wasm.html</code></td><td>This guide.</td></tr>
+</table>
+</div>
+<p><code>make dev.img BUILD=release</code> produces <code>motor-os-dev.qcow2</code>.
+The smaller <code>wasm.img</code> also includes the tools and their configuration
+directory. The example and HTML documentation are part of <code>dev.img</code>.</p>
 
-<h2>Configuration</h2>
-<p>The service reads <code>/system/cfg/libc/hosts</code> first and
-<code>/system/cfg/libc/resolv.conf</code> second. sys-io owns <code>resolv.conf</code>:
-before starting services it publishes the DNS servers from the active static device
-configuration atomically, and it republishes the aggregate whenever a DHCP lease changes.
-Static servers are declared with <code>dns_servers</code> in <code>sys-net.toml</code>;
-DHCP-configured devices use the servers from their leases. At most the first two unique
-nameservers are queried, which keeps one-family lookup latency inside the IPC deadline
-when both are unavailable.</p>
-
-<h2>Transport and validation</h2>
-<p>Each UDP attempt:</p>
-<ul>
-  <li>creates a fresh socket, and with it a freshly randomized ephemeral source port;</li>
-  <li>connects it to the selected nameserver, so packets from other sources are discarded
-  by the socket;</li>
-  <li>generates a fresh random 16-bit transaction ID;</li>
-  <li>sends one recursive A or AAAA question;</li>
-  <li>applies a one-second receive deadline;</li>
-  <li>validates the transaction ID, the response bit, the opcode, the single echoed
-  question, the canonical question name, type, and class, the response code, record
-  bounds, and compression pointers;</li>
-  <li>accepts address records only for the question name or a previously validated CNAME
-  target;</li>
-  <li>removes duplicate addresses.</li>
-</ul>
-<p>UDP delivery is unreliable, so the backend performs one bounded retransmission, on a
-new socket with a new transaction ID. NXDOMAIN is final and is not retried. A response
-with the truncated bit set is repeated over a connected DNS-over-TCP stream using the
-same query and the same strict parser.</p>
-<p>There is no cache. Correct caching requires honoring each record's TTL and a
-negative-cache policy; an arbitrary service-wide TTL would trade a small speedup for
-stale answers.</p>
-
-<h2>Result contract</h2>
-<p>The resolver reports one of: success, not found, temporary failure, timeout, out of
-memory, unsupported family, system failure, resolver failure, invalid request, or busy.
-The runtime maps these to stable Motor error codes, which surface through
-<code>std::io::Error</code>. Combined lookups collect IPv4 before IPv6 and then apply the
-destination-ordering policy: usable addresses first, with an unusable global IPv6 range
-ranked last so that a VM without IPv6 connectivity does not wait on it.</p>
-
-<h2>Testing</h2>
-<p><code>dns-resolver --self-test</code> covers numeric and hosts-file lookups, malformed
-requests, result ordering, restart behavior, live external resolution, and a deterministic
-loopback DNS fixture that drops the first UDP query, answers the retransmission with a
-truncated response, and completes the lookup over TCP. The regular test suites never go
-out to the Internet; only this explicitly separate live check does.</p>
+<h2>Run the example</h2>
+<p>In the developer VM's shell:</p>
+<pre><code>cd /devtools/src/wasm
+MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /user/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /devtools/bin/wasmi /user/tmp/hello.wasm</code></pre>
+<p>Expected output:</p>
+<pre><code>Hello from WebAssembly on Motor OS!
+{"squares":[1,4,9,16],"total":30}</code></pre>
+<p>The masks launch the tools with role None: <code>0x200</code> grants Javy
+filesystem write access for its output, while Wasmi needs no capabilities for this
+example. <code>/user/tmp</code> is writable by role None. The default plugin is
+embedded, and the example runs offline. Edit <code>hello.js</code> and repeat the
+commands to try changes.</p>
+<p>See <a href="build.html">Building Motor OS</a> for image construction and
+<a href="capabilities.html">Capabilities</a> for the masks. The host-side
+<code>src/tests/test-javy.sh</code> checks the installed tools;
+<code>src/tests/full-test-dev.sh --release</code> includes those checks.</p>
 <nav class="pager">
-<a class="pager-prev" href="networking.html"><span>Previous</span>Networking</a>
-<a class="pager-next" href="terminals.html"><span>Next</span>Terminals</a>
+<a class="pager-prev" href="c-cpp.html"><span>Previous</span>C/C++ on Motor OS</a>
+<a class="pager-next" href="lorry.html"><span>Next</span>Lorry: the package manager</a>
 </nav>
 </article>
 </main>
