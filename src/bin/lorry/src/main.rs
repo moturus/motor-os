@@ -62,6 +62,7 @@ use diagnostic::Result;
 const VERSION: &str = "0.1.0";
 
 fn main() {
+    report_output_failures();
     #[cfg(target_os = "motor")]
     let code = match std::thread::Builder::new()
         .name("lorry".to_owned())
@@ -79,6 +80,29 @@ fn main() {
     if code != 0 {
         std::process::exit(code);
     }
+}
+
+// The std print macros panic when stdout or stderr fails, for example on a
+// full disk or a closed pipe. With panic = "abort" that would dump core.
+fn report_output_failures() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let Some(message) = info
+            .payload_as_str()
+            .filter(|message| message.starts_with("failed printing to std"))
+        else {
+            return default(info);
+        };
+        let error =
+            diagnostic::Error::failure(message.replace("failed printing", "failed to write"));
+        let code = if message.starts_with("failed printing to stderr") {
+            error.exit_code()
+        } else {
+            let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+            report_error(error, Cli::lorry_messages_requested(&arguments))
+        };
+        std::process::exit(code);
+    }));
 }
 
 fn command_main() -> i32 {

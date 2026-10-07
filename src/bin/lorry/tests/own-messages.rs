@@ -187,3 +187,31 @@ fn an_interrupted_compiler_query_finishes_the_cargo_stream_unsuccessfully() {
     let finished: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(finished["success"], false);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_output_device_is_an_error_not_an_abort() {
+    let full = || {
+        fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap()
+    };
+    let stdout = Command::new(env!("CARGO_BIN_EXE_lorry"))
+        .arg("--version")
+        .stdout(full())
+        .output()
+        .unwrap();
+    assert_eq!(stdout.status.code(), Some(101));
+    let stderr = String::from_utf8(stdout.stderr).unwrap();
+    assert!(
+        stderr.starts_with("error: failed to write to stdout:"),
+        "{stderr}"
+    );
+    let stderr = Command::new(env!("CARGO_BIN_EXE_lorry"))
+        .arg("unknown-command")
+        .stderr(full())
+        .status()
+        .unwrap();
+    assert_eq!(stderr.code(), Some(101));
+}
