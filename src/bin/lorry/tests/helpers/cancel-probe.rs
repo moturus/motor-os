@@ -128,11 +128,10 @@ fn run() -> Result<(), String> {
     if abandoned_staging_count(&root)? != 0 {
         return Err("recovery left the killed compiler's staging behind".to_owned());
     }
-    verify_held_owner(&root, &build, &source, Some(boot_id))?;
-    verify_held_owner(&root, &build, &source, None)?;
+    verify_held_owner(&root, &build, &source, boot_id)?;
     verify_old_boot_and_malformed_owners(&root, &build, boot_id)?;
     println!(
-        "PASS: Motor recovery protects same-boot and legacy children, ignores old boots, and rejects malformed owners"
+        "PASS: Motor recovery protects same-boot children, ignores old boots, and rejects malformed and PID-only owners"
     );
     Ok(())
 }
@@ -180,7 +179,7 @@ fn verify_held_owner(
     root: &Path,
     build: &impl Fn() -> Command,
     source: &Path,
-    boot_id: Option<u64>,
+    boot_id: u64,
 ) -> Result<(), String> {
     for name in ["hold-ready", "hold-release"] {
         let path = root.join(name);
@@ -206,10 +205,7 @@ fn verify_held_owner(
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let owner = match boot_id {
-        Some(boot) => format!("2 {boot:016x} {}\n", holder.id()),
-        None => format!("{}\n", holder.id()),
-    };
+    let owner = format!("2 {boot_id:016x} {}\n", holder.id());
     let marker = root.join("target/.lorry-artifacts.owner");
     fs::write(&marker, &owner).map_err(|error| error.to_string())?;
     fs::write(
@@ -288,6 +284,8 @@ fn verify_old_boot_and_malformed_owners(
     for invalid in [
         "2 0000000000000000 240\n",
         "3 0123456789abcdef 240\n",
+        // Lorry no longer accepts the older PID-only record.
+        "240\n",
         "garbage\n",
     ] {
         fs::write(&marker, invalid).map_err(|error| error.to_string())?;
