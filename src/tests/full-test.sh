@@ -636,11 +636,11 @@ echo "$out"
 
 "$WD/test-unwind.sh"
 
-printf '%s\n' "put $ROOT_DIR/build/bin/$BUILD/sysbox-utility-tests $TEST_BIN/sysbox-utility-tests" |
+printf '%s\n' "put $ROOT_DIR/build/bin/$BUILD/sysbox-utility-tests $TEST_TMP/sysbox-utility-tests" |
   sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
     -i "$WD/test.key" motor@192.168.4.2
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_BIN/sysbox-utility-tests /system/bin/sysbox")" ||
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_TMP/sysbox-utility-tests /system/bin/sysbox")" ||
   fail "sysbox utility tests failed: $out"
 [ "${out##*$'\n'}" = "sysbox utility-tests: ALL PASS" ] || fail "sysbox utility tests did not finish: $out"
 printf '%s\n' "$out"
