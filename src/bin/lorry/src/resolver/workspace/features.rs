@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use super::MemberRequest;
 use crate::cli::FeatureSelection;
 use crate::diagnostic::{Error, Result};
-use crate::manifest::{Manifest, Resolver, SourceWorkspace};
+use crate::manifest::{Manifest, Resolver, SourceWorkspace, TargetKind};
 
 /// Route CLI features before solving; the solver validates dependency features.
 pub(crate) fn member_requests(
@@ -34,10 +34,10 @@ pub(crate) fn member_requests(
                 dev: dev && selected.contains(&member.root),
                 selected: selected.contains(&member.root),
                 target_units: selected.contains(&member.root)
-                    && (!member.binaries.is_empty()
-                        || dev
-                            && (!member.integration_tests.is_empty()
-                                || !member.described_targets.is_empty())),
+                    && member
+                        .targets
+                        .iter()
+                        .any(|target| dev || target.kind == TargetKind::Bin),
             },
         );
     }

@@ -928,8 +928,17 @@ mod tests {
         let direct = load_locked_dependencies(&manifest, &limits).unwrap();
         let described = load_locked_sources(&manifest, &limits).unwrap();
         let description = &described.packages[0].0;
-        assert_eq!(description.binaries.len(), 1);
-        assert_eq!(description.described_targets.len(), 1);
+        assert_eq!(
+            description
+                .targets
+                .iter()
+                .map(|target| target.kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::manifest::TargetKind::Bin,
+                crate::manifest::TargetKind::Example
+            ]
+        );
         assert_eq!(
             description.dependencies[0].kind,
             crate::sparse::DependencyKind::Dev
@@ -939,7 +948,13 @@ mod tests {
             if locked.matches(git))
         );
         assert_eq!(described.evidence, direct.evidence);
-        assert!(direct.packages[0].0.binaries.is_empty());
+        assert!(
+            direct.packages[0]
+                .0
+                .targets_of(crate::manifest::TargetKind::Bin)
+                .next()
+                .is_none()
+        );
         let mut catalog = Catalog::default();
         direct.configure(&mut catalog).unwrap();
         let options = crate::resolver::Options {

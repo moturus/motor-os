@@ -11,7 +11,9 @@ use crate::identity::{
     CargoProfileLto, CargoSource, CargoStrip, CargoTargetKind, CargoUnitIdentityInput,
     CargoUnitLto, Identity, RootTargetKind, cargo_unit_identity, root_lto,
 };
-use crate::manifest::{DevProfile, Lto as ManifestLto, Manifest, ReleaseProfile};
+use crate::manifest::{
+    DevProfile, Lto as ManifestLto, Manifest, ReleaseProfile, Target, TargetKind,
+};
 use crate::resolver::{
     CompileKind, FeatureContext, PackageKey, PackageSourceKey, Resolution, ResolvedEdge,
     ResolvedPackage, selected_root_features,
@@ -61,18 +63,15 @@ pub struct UnitKey {
 }
 
 impl UnitKey {
-    pub(crate) fn auxiliary_target<'a>(
-        &self,
-        manifest: &'a Manifest,
-    ) -> Option<&'a crate::manifest::DescribedTarget> {
+    pub(crate) fn manifest_target<'a>(&self, manifest: &'a Manifest) -> Option<&'a Target> {
         let kind = match self.kind {
-            UnitKind::Example => "example",
-            UnitKind::Bench => "bench",
+            UnitKind::Binary | UnitKind::BinaryHarness => TargetKind::Bin,
+            UnitKind::IntegrationHarness => TargetKind::Test,
+            UnitKind::Example => TargetKind::Example,
+            UnitKind::Bench => TargetKind::Bench,
             _ => return None,
         };
-        manifest.described_targets.iter().find(|target| {
-            target.kind == kind && Some(target.name.as_str()) == self.target.as_deref()
-        })
+        manifest.target(kind, self.target.as_deref()?)
     }
 
     pub(crate) fn is_harness(&self) -> bool {
@@ -86,7 +85,7 @@ impl UnitKey {
         if self.kind == UnitKind::Library {
             Some(&manifest.library.as_ref().unwrap().crate_types)
         } else {
-            self.auxiliary_target(manifest)
+            self.manifest_target(manifest)
                 .filter(|target| target.crate_types != ["bin"])
                 .map(|target| target.crate_types.as_slice())
         }
@@ -467,9 +466,9 @@ pub(crate) fn workspace_auxiliary_units(
     if let Some(name) = selection.name
         && !selected.iter().any(|package| {
             manifests[package]
-                .described_targets
+                .targets
                 .iter()
-                .any(|target| target.kind == selection.kind && target.name == name)
+                .any(|target| target.kind.as_str() == selection.kind && target.name == name)
         })
     {
         return Err(Error::failure(format!(
@@ -477,8 +476,8 @@ pub(crate) fn workspace_auxiliary_units(
             selection.kind
         )));
     }
-    let matches = |target: &crate::manifest::DescribedTarget| {
-        target.kind == selection.kind
+    let matches = |target: &Target| {
+        target.kind.as_str() == selection.kind
             && selection.name.is_none_or(|name| name == target.name)
             && selection.tested.is_none_or(|tested| tested == target.test)
             && selection
@@ -487,7 +486,7 @@ pub(crate) fn workspace_auxiliary_units(
     };
     if !selected
         .iter()
-        .any(|key| manifests[key].described_targets.iter().any(&matches))
+        .any(|key| manifests[key].targets.iter().any(&matches))
     {
         return Ok(UnitGraph {
             units: BTreeMap::new(),
@@ -506,11 +505,7 @@ pub(crate) fn workspace_auxiliary_units(
     {
         let manifest = &manifests[&package.key];
         let features = features_for(package, CompileKind::Target);
-        for target in manifest
-            .described_targets
-            .iter()
-            .filter(|target| matches(target))
-        {
+        for target in manifest.targets.iter().filter(|target| matches(target)) {
             if !target_enabled(
                 resolution,
                 manifest,
@@ -800,7 +795,7 @@ fn workspace_target_units(
                 .filter(|package| selected.contains(&package.key))
             {
                 let manifest = &manifests[&package.key];
-                if let Some(binary) = manifest.binaries.iter().find(|binary| binary.name == name) {
+                if let Some(binary) = manifest.target(TargetKind::Bin, name) {
                     target_enabled(
                         resolution,
                         manifest,
@@ -1222,8 +1217,7 @@ pub(crate) fn workspace_units(
             continue;
         }
         for target in manifest
-            .binaries
-            .iter()
+            .targets_of(TargetKind::Bin)
             .filter(|target| binary_name.is_none_or(|name| name == target.name))
         {
             if !target_enabled(
@@ -1390,9 +1384,9 @@ pub(crate) fn workspace_test_units(
         ] {
             if !selected.iter().any(|key| {
                 manifests[key]
-                    .described_targets
+                    .targets
                     .iter()
-                    .any(|target| target.kind == kind && target.test == tested)
+                    .any(|target| target.kind.as_str() == kind && target.test == tested)
             }) {
                 continue;
             }
@@ -1425,12 +1419,9 @@ fn workspace_harness_units(
 ) -> Result<UnitGraph> {
     let panic_abort = options.panic_abort;
     if let Some(name) = integration_name
-        && !selected.iter().any(|package| {
-            manifests[package]
-                .integration_tests
-                .iter()
-                .any(|target| target.name == name)
-        })
+        && !selected
+            .iter()
+            .any(|package| manifests[package].target(TargetKind::Test, name).is_some())
     {
         return Err(Error::failure(format!(
             "no integration-test target named `{name}`"
@@ -1456,36 +1447,32 @@ fn workspace_harness_units(
                 integration_name.is_none() && filter.matches(target.test, target.bench)
             })
             .map(|target| (UnitKind::LibraryHarness, &target.name, None));
-        let binaries = manifest
-            .binaries
+        let targets = manifest
+            .targets
             .iter()
-            .filter(|target| {
-                integration_name.is_none() && filter.matches(target.test, target.bench)
+            .filter(|target| match target.kind {
+                TargetKind::Bin => {
+                    integration_name.is_none() && filter.matches(target.test, target.bench)
+                }
+                TargetKind::Test => integration_name
+                    .map_or(filter.matches(target.test, target.bench), |name| {
+                        name == target.name
+                    }),
+                TargetKind::Example | TargetKind::Bench => false,
             })
             .map(|target| {
                 (
-                    UnitKind::BinaryHarness,
-                    &target.name,
-                    target.required_features.as_deref(),
-                )
-            });
-        let integrations = manifest
-            .integration_tests
-            .iter()
-            .filter(|target| {
-                integration_name.map_or(filter.matches(target.test, target.bench), |name| {
-                    name == target.name
-                })
-            })
-            .map(|target| {
-                (
-                    UnitKind::IntegrationHarness,
+                    if target.kind == TargetKind::Bin {
+                        UnitKind::BinaryHarness
+                    } else {
+                        UnitKind::IntegrationHarness
+                    },
                     &target.name,
                     target.required_features.as_deref(),
                 )
             });
         let mut integration = false;
-        for (kind, name, required) in library.chain(binaries).chain(integrations) {
+        for (kind, name, required) in library.chain(targets) {
             if !target_enabled(
                 resolution,
                 manifest,
@@ -1527,7 +1514,7 @@ fn workspace_harness_units(
             roots.push(key.with_profile(ProfileContext::Test, panic_abort));
         }
         if integration {
-            for target in &manifest.binaries {
+            for target in manifest.targets_of(TargetKind::Bin) {
                 if !target_enabled(
                     resolution,
                     manifest,
@@ -1758,8 +1745,7 @@ pub fn add_selected_binaries(
         .transpose()?;
     let mut binaries = Vec::new();
     for target in manifest
-        .binaries
-        .iter()
+        .targets_of(TargetKind::Bin)
         .filter(|target| selected_name.is_none_or(|name| name == target.name))
     {
         let mut key = selected_library_key(manifest)?;
@@ -2027,12 +2013,12 @@ pub fn plan_dependency_units_with_remaps(
                 CargoTargetKind::Test,
             ),
             UnitKind::Example | UnitKind::Bench => (
-                key.auxiliary_target(manifest)
+                key.manifest_target(manifest)
                     .ok_or_else(|| Error::failure("auxiliary unit has no target"))?
                     .name
                     .as_str(),
                 if key.kind == UnitKind::Example {
-                    let types = &key.auxiliary_target(manifest).unwrap().crate_types;
+                    let types = &key.manifest_target(manifest).unwrap().crate_types;
                     if types == &["bin"] {
                         CargoTargetKind::ExampleBin
                     } else {
@@ -3255,7 +3241,7 @@ mod tests {
                 .position(|candidate| *candidate == node)
                 .unwrap()];
             let profile = &unit["profile"];
-            if let Some(target) = key.auxiliary_target(&manifests[&key.package]) {
+            if let Some(target) = key.manifest_target(&manifests[&key.package]) {
                 assert_eq!(
                     unit["target"]["crate_types"],
                     serde_json::json!(target.crate_types)

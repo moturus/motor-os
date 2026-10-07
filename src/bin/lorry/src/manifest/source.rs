@@ -133,10 +133,12 @@ impl SourceWorkspace {
 
     fn standalone(manifest_path: &Path) -> Result<Self> {
         let directory = manifest_path.parent().unwrap();
+        let package = load_package(directory, directory)?;
+        package.require_member_targets()?;
         Ok(Self {
             manifest_path: manifest_path.to_owned(),
             root: directory.to_owned(),
-            packages: vec![load_package(directory, directory)?],
+            packages: vec![package],
             default_members: vec![directory.to_owned()],
             metadata: serde_json::Value::Null,
             virtual_root: false,
@@ -208,6 +210,7 @@ impl WorkspaceRoot {
                 )));
             }
             let package = load_package(&directory, &self.root)?;
+            package.require_member_targets()?;
             if !names.insert(package.name.clone()) {
                 return Err(Error::failure(format!(
                     "workspace contains duplicate package name `{}`",

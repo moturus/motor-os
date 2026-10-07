@@ -242,8 +242,12 @@ mod tests {
             assert_eq!(root.name, "root");
             assert_eq!(root.root, fixture.0);
             assert_eq!(root.library.is_some(), library);
-            assert_eq!(root.binaries.len(), 1);
-            assert_eq!(root.binaries[0].name, "root");
+            assert_eq!(
+                root.targets_of(crate::manifest::TargetKind::Bin)
+                    .map(|target| target.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["root"]
+            );
         }
     }
 
@@ -369,7 +373,13 @@ mod tests {
             .unwrap()
             .clone();
         assert!(prepared.packages[&app].manifest.library.is_none());
-        assert_eq!(prepared.packages[&app].manifest.binaries.len(), 1);
+        assert_eq!(
+            prepared.packages[&app]
+                .manifest
+                .targets_of(crate::manifest::TargetKind::Bin)
+                .count(),
+            1
+        );
         let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let plan = prepared
             .workspace_plan(

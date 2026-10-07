@@ -9,7 +9,7 @@ use crate::dependency;
 use crate::diagnostic::{Error, Result};
 use crate::executor;
 use crate::hash::{FieldDigest, Sha256, decode_hex, hex, modified_time, sha256_file};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, TargetKind};
 use crate::process;
 use crate::progress::Progress;
 use crate::repository::RepositorySet;
@@ -116,8 +116,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 || selected.iter().any(|member| {
                     member.build_script.is_some()
                         || member
-                            .binaries
-                            .iter()
+                            .targets_of(TargetKind::Bin)
                             .any(|binary| binary.required_features.is_some())
                         || member
                             .library
@@ -168,12 +167,10 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         }
         if !targets.tests {
             for name in &targets.test {
-                if !selected.iter().any(|member| {
-                    member
-                        .integration_tests
-                        .iter()
-                        .any(|target| target.name == *name)
-                }) {
+                if !selected
+                    .iter()
+                    .any(|member| member.target(TargetKind::Test, name).is_some())
+                {
                     return Err(unknown_integration_test(&manifest, name));
                 }
             }
@@ -256,7 +253,9 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let run_binary = run_selection.map(|(_, name)| name);
     let binary_selection = match &cli.command {
         Command::Build(options) => options.targets.single_binary(),
-        Command::Run(_) if !run_example && manifest.binaries.len() > 1 => run_binary,
+        Command::Run(_) if !run_example && manifest.targets_of(TargetKind::Bin).count() > 1 => {
+            run_binary
+        }
         _ => None,
     };
     let run_targets = crate::cli::TargetSelection {
@@ -939,7 +938,7 @@ fn validate_member_binary_selection<'a>(
     if let Some(name) = requested
         && !members
             .iter()
-            .any(|member| member.binaries.iter().any(|target| target.name == name))
+            .any(|member| member.target(TargetKind::Bin, name).is_some())
     {
         return Err(Error::failure(format!(
             "no binary target named `{name}` in selected packages"
@@ -955,7 +954,7 @@ fn validate_binary_selection<'a>(
     let Some(name) = requested else {
         return Ok(None);
     };
-    if manifest.binaries.iter().any(|target| target.name == name) {
+    if manifest.target(TargetKind::Bin, name).is_some() {
         Ok(Some(name))
     } else {
         Err(unknown_binary(manifest, name))
@@ -976,32 +975,24 @@ fn select_run_member<'a>(
         [name] => Some(*name),
         _ => None,
     });
+    let kind = if example {
+        TargetKind::Example
+    } else {
+        TargetKind::Bin
+    };
     let binaries = members
         .iter()
         .flat_map(|member| {
             member
-                .binaries
-                .iter()
-                .filter(|_| !example)
-                .filter(move |target| requested.is_none_or(|name| name == target.name))
-                .map(move |target| (member, target.name.as_str(), false))
-                .chain(
-                    member
-                        .described_targets
-                        .iter()
-                        .filter(move |target| {
-                            example
-                                && target.kind == "example"
-                                && requested == Some(target.name.as_str())
-                        })
-                        .map(move |target| {
-                            (
-                                member,
-                                target.name.as_str(),
-                                !target.crate_types.iter().any(|kind| kind == "bin"),
-                            )
-                        }),
-                )
+                .targets_of(kind)
+                .filter(move |target| requested.map_or(!example, |name| name == target.name))
+                .map(move |target| {
+                    (
+                        member,
+                        target.name.as_str(),
+                        !target.crate_types.iter().any(|kind| kind == "bin"),
+                    )
+                })
         })
         .collect::<Vec<_>>();
     match binaries.as_slice() {
@@ -1059,8 +1050,7 @@ fn selected_run_artifact<'a>(
 
 fn unknown_binary(manifest: &Manifest, name: &str) -> Error {
     let available = manifest
-        .binaries
-        .iter()
+        .targets_of(TargetKind::Bin)
         .map(|target| target.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
@@ -1113,12 +1103,7 @@ fn build_inner(
             .members
             .unwrap_or_else(|| std::slice::from_ref(build.manifest))
             .iter()
-            .any(|member| {
-                member
-                    .integration_tests
-                    .iter()
-                    .any(|target| target.name == name)
-            })
+            .any(|member| member.target(TargetKind::Test, name).is_some())
     {
         return Err(unknown_integration_test(build.manifest, name));
     }
@@ -1470,15 +1455,14 @@ fn build_inner(
                 .unwrap_or_else(|| std::slice::from_ref(build.manifest))
                 .iter()
                 .any(|member| {
-                    !member.integration_tests.is_empty()
-                        || member.described_targets.iter().any(|target| {
-                            target.kind == "bench"
-                                && (target.test
-                                    || build.target_selection.is_some_and(|targets| {
-                                        targets.benches
-                                            || !targets.bench.is_empty()
-                                            || targets.all_targets
-                                    }))
+                    member.targets_of(TargetKind::Test).next().is_some()
+                        || member.targets_of(TargetKind::Bench).any(|target| {
+                            target.test
+                                || build.target_selection.is_some_and(|targets| {
+                                    targets.benches
+                                        || !targets.bench.is_empty()
+                                        || targets.all_targets
+                                })
                         })
                 }));
     let check_integration = check.is_some_and(|options| {
@@ -1490,11 +1474,10 @@ fn build_inner(
                 .unwrap_or_else(|| std::slice::from_ref(build.manifest))
                 .iter()
                 .any(|member| {
-                    !member.integration_tests.is_empty()
-                        || member
-                            .described_targets
-                            .iter()
-                            .any(|target| target.kind == "bench")
+                    member
+                        .targets
+                        .iter()
+                        .any(|target| matches!(target.kind, TargetKind::Test | TargetKind::Bench))
                 })
     });
     let integration_binaries = (selected_integration || check_integration)
@@ -1506,8 +1489,7 @@ fn build_inner(
                 .map(|member| {
                     let package = selected_library_key(member)?.package;
                     let binaries = member
-                        .binaries
-                        .iter()
+                        .targets_of(TargetKind::Bin)
                         .map(|binary| {
                             (
                                 binary.name.clone(),
@@ -2999,7 +2981,7 @@ fn collect_test_targets(
                 UnitKind::Bench => 3,
                 UnitKind::Example
                     if key
-                        .auxiliary_target(manifest)
+                        .manifest_target(manifest)
                         .is_some_and(|target| target.crate_types != ["bin"]) =>
                 {
                     4
@@ -3052,8 +3034,7 @@ fn collect_test_targets(
 
 fn unknown_integration_test(manifest: &Manifest, name: &str) -> Error {
     let available = manifest
-        .integration_tests
-        .iter()
+        .targets_of(TargetKind::Test)
         .map(|target| target.name.as_str())
         .collect::<Vec<_>>();
     let help = if available.is_empty() {

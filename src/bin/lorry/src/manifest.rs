@@ -17,13 +17,11 @@ mod source;
 mod targets;
 pub(crate) use selection::PackageSelection;
 pub(crate) use source::SourceWorkspace;
-pub(crate) use targets::DescribedTarget;
+pub(crate) use targets::{Target, TargetKind};
 
 const MANIFEST_NAME: &str = "Cargo.toml";
 const LOCK_NAME: &str = "Cargo.lock";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
-const MAX_BINARY_TARGETS: usize = 64;
-const MAX_DESCRIBED_TARGETS: usize = 1_024;
 const MAX_WORKSPACE_MEMBERS: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,6 +46,8 @@ pub struct Manifest {
     pub profile_directory: Option<String>,
     pub profile_name: Option<String>,
     profile_errors: BTreeMap<String, Error>,
+    /// Dependencies drop unresolved explicit targets; members reject them.
+    unresolved_target: Option<Error>,
     #[allow(dead_code)]
     pub resolver: Resolver,
     pub links: Option<String>,
@@ -55,10 +55,8 @@ pub struct Manifest {
     pub build_script: Option<PathBuf>,
     #[allow(dead_code)]
     pub library: Option<LibraryTarget>,
-    #[allow(dead_code)]
-    pub binaries: Vec<BinaryTarget>,
-    pub integration_tests: Vec<IntegrationTestTarget>,
-    pub described_targets: Vec<DescribedTarget>,
+    /// Non-library targets, ordered by kind and then by name.
+    pub targets: Vec<Target>,
     #[allow(dead_code)]
     pub dependencies: Vec<Dependency>,
     #[allow(dead_code)]
@@ -226,29 +224,6 @@ impl LibraryTarget {
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BinaryTarget {
-    pub name: String,
-    pub path: PathBuf,
-    pub test: bool,
-    pub bench: bool,
-    pub doc: bool,
-    pub harness: bool,
-    pub required_features: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IntegrationTestTarget {
-    pub name: String,
-    pub path: PathBuf,
-    pub required_features: Option<Vec<String>>,
-    pub test: bool,
-    pub bench: bool,
-    pub doc: bool,
-    pub harness: bool,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dependency {
     pub alias: String,
     pub package: String,
@@ -350,6 +325,20 @@ impl Manifest {
         }
     }
 
+    pub(crate) fn targets_of(&self, kind: TargetKind) -> impl Iterator<Item = &Target> + Clone {
+        self.targets
+            .iter()
+            .filter(move |target| target.kind == kind)
+    }
+
+    pub(crate) fn target(&self, kind: TargetKind, name: &str) -> Option<&Target> {
+        self.targets_of(kind).find(|target| target.name == name)
+    }
+
+    fn require_member_targets(&self) -> Result<()> {
+        self.unresolved_target.clone().map_or(Ok(()), Err)
+    }
+
     pub fn panic_abort(&self, release: bool) -> bool {
         if release {
             self.release.panic_abort
@@ -444,6 +433,7 @@ impl Manifest {
         manifest.root = root;
         manifest.workspace_root = lock_root.to_owned();
         manifest.path = manifest.root.join(MANIFEST_NAME);
+        manifest.require_member_targets()?;
         resolve_target_defaults(&mut manifest, true)?;
         let lock_path = lock_root.join(LOCK_NAME);
         if !lock_path.is_file() {
@@ -569,42 +559,28 @@ impl Manifest {
         let build_script = parse_build_script(path, document, package, root)?;
         let library = parse_library(path, document, root, &name)?;
         let mut warnings = Vec::new();
-        let binaries = if matches!(mode, ManifestMode::Root | ManifestMode::Source) {
-            parse_binaries(
-                path,
-                document,
-                root,
-                package,
-                BinaryPackage {
-                    name: &name,
-                    edition,
-                    has_library: library.is_some(),
-                },
-                &mut warnings,
-            )?
-        } else {
-            Vec::new()
+        let package_targets = targets::Package {
+            root,
+            path,
+            document,
+            table: package,
+            name: &name,
+            edition,
+            has_library: library.is_some(),
         };
-        let integration_tests =
-            parse_integration_tests(path, document, root, package, edition, mode)?;
-        let mut described_targets = targets::parse(
-            root,
-            path,
-            document,
-            package,
-            edition,
-            "example",
-            &mut warnings,
-        )?;
-        described_targets.extend(targets::parse(
-            root,
-            path,
-            document,
-            package,
-            edition,
-            "bench",
-            &mut warnings,
-        )?);
+        let mut targets = Vec::new();
+        let mut unresolved_target = None;
+        for kind in TargetKind::ALL {
+            // Dependency binaries are neither built nor described.
+            if kind != TargetKind::Bin || mode != ManifestMode::Dependency {
+                targets.extend(targets::parse(
+                    &package_targets,
+                    kind,
+                    &mut warnings,
+                    &mut unresolved_target,
+                )?);
+            }
+        }
         let mut dependencies = Vec::new();
         let mut fields = DependencyFields {
             path,
@@ -687,15 +663,14 @@ impl Manifest {
             dev,
             release,
             profile_errors,
+            unresolved_target,
             profile_directory: None,
             profile_name: None,
             resolver,
             links,
             build_script,
             library,
-            binaries,
-            integration_tests,
-            described_targets,
+            targets,
             dependencies,
             features,
             patches,
@@ -1295,246 +1270,6 @@ fn parse_library(
     }))
 }
 
-struct BinaryPackage<'a> {
-    name: &'a str,
-    edition: Edition,
-    has_library: bool,
-}
-
-fn parse_binaries(
-    path: &Path,
-    document: &Document,
-    root: &Path,
-    package: &Table,
-    defaults: BinaryPackage<'_>,
-    warnings: &mut Vec<String>,
-) -> Result<Vec<BinaryTarget>> {
-    let discovered = discover_binaries(root, defaults.name)?;
-    let mut binaries = if package.get("autobins").and_then(Item::as_bool) == Some(false) {
-        BTreeMap::new()
-    } else {
-        discovered.clone()
-    };
-    if let Some(item) = document.root().get("bin") {
-        let mut explicit_names = BTreeSet::new();
-        let mut explicit_paths = BTreeSet::new();
-        let mut explicit_targets = Vec::new();
-        let tables = item.as_array_of_tables().ok_or_else(|| {
-            type_error(
-                path,
-                document.line_of_item(item),
-                "bin",
-                "an array of tables",
-            )
-        })?;
-        if tables.len() > MAX_BINARY_TARGETS {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("package declares more than {MAX_BINARY_TARGETS} binary targets"),
-                "reduce the number of program targets",
-            ));
-        }
-        for table in tables.iter() {
-            for (key, item) in table.iter() {
-                if !matches!(
-                    key,
-                    "name" | "path" | "test" | "bench" | "doc" | "harness" | "required-features"
-                ) {
-                    return Err(unsupported_key(path, document, item, &format!("bin.{key}")));
-                }
-            }
-            let name = optional_string(path, document, table, "bin", "name")?
-                .unwrap_or_else(|| defaults.name.to_owned());
-            validate_package_name(path, document.line_of_table(table), &name)?;
-            let source = match optional_string(path, document, table, "bin", "path")? {
-                Some(relative) => {
-                    validate_relative_path(
-                        path,
-                        document.line_of_table(table),
-                        "bin.path",
-                        &relative,
-                    )?;
-                    let source = root.join(relative);
-                    explicit_paths.insert(source.clone());
-                    source
-                }
-                None => match discovered.get(&name) {
-                    Some(target) => target.path.clone(),
-                    None => {
-                        let legacy = (defaults.edition == Edition::E2015)
-                            .then(|| legacy_binary_path(root, &name, defaults.has_library))
-                            .flatten()
-                            .ok_or_else(|| {
-                                Error::failure(format!(
-                                    "cannot infer source path for binary `{name}`; specify `bin.path`"
-                                ))
-                            })?;
-                        warnings.push(format!(
-                            "path `{}` was erroneously implicitly accepted for binary `{name}`,\nplease set bin.path in Cargo.toml",
-                            legacy.strip_prefix(root).unwrap().display()
-                        ));
-                        legacy
-                    }
-                },
-            };
-            let target = BinaryTarget {
-                name,
-                path: source,
-                test: optional_bool(path, document, table, "bin", "test")?.unwrap_or(true),
-                bench: optional_bool(path, document, table, "bin", "bench")?.unwrap_or(true),
-                doc: optional_bool(path, document, table, "bin", "doc")?.unwrap_or(true),
-                harness: optional_bool(path, document, table, "bin", "harness")?.unwrap_or(true),
-                required_features: optional_string_array(
-                    path,
-                    document,
-                    table,
-                    "bin",
-                    "required-features",
-                )?,
-            };
-            if !explicit_names.insert(target.name.clone()) {
-                return Err(Error::at(
-                    path,
-                    document.line_of_table(table),
-                    "duplicate binary target name",
-                    "give every `[[bin]]` target a distinct name",
-                ));
-            }
-            explicit_targets.push(target);
-        }
-        // Cargo suppresses inferred targets by either explicit name or path.
-        // Keep explicit targets distinct even when they share a source file.
-        binaries.retain(|name, target| {
-            !explicit_names.contains(name) && !explicit_paths.contains(&target.path)
-        });
-        if defaults.edition == Edition::E2015 && package.get("autobins").is_none() {
-            if !binaries.is_empty() {
-                warnings.push(
-                    "An explicit [[bin]] section is specified in Cargo.toml which currently disables automatically inferring other binary targets in edition 2015; set `autobins` explicitly".to_owned(),
-                );
-            }
-            binaries.clear();
-        }
-        binaries.extend(
-            explicit_targets
-                .into_iter()
-                .map(|target| (target.name.clone(), target)),
-        );
-    }
-    if binaries.len() > MAX_BINARY_TARGETS {
-        return Err(Error::failure(format!(
-            "package discovers more than {MAX_BINARY_TARGETS} binary targets"
-        )));
-    }
-    Ok(binaries.into_values().collect())
-}
-
-fn legacy_binary_path(root: &Path, name: &str, has_library: bool) -> Option<PathBuf> {
-    let named = root.join("src").join(format!("{name}.rs"));
-    if !has_library && named.is_file() {
-        return Some(named);
-    }
-    [root.join("src/main.rs"), root.join("src/bin/main.rs")]
-        .into_iter()
-        .find(|path| path.is_file())
-}
-
-fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String, BinaryTarget>> {
-    let mut binaries = BTreeMap::new();
-    let main = root.join("src/main.rs");
-    if main.is_file() {
-        binaries.insert(
-            package_name.to_owned(),
-            BinaryTarget {
-                name: package_name.to_owned(),
-                path: main,
-                test: true,
-                bench: true,
-                doc: true,
-                harness: true,
-                required_features: None,
-            },
-        );
-    }
-    let directory = root.join("src/bin");
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(binaries),
-        Err(error) => {
-            return Err(Error::failure(format!(
-                "failed to discover binary targets in `{}`: {error}",
-                directory.display()
-            )));
-        }
-    };
-    let mut entries = entries
-        .collect::<std::io::Result<Vec<_>>>()
-        .map_err(|error| {
-            Error::failure(format!(
-                "failed to read a binary target in `{}`: {error}",
-                directory.display()
-            ))
-        })?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with('.'))
-        {
-            continue;
-        }
-        let metadata = entry.file_type().map_err(|error| {
-            Error::failure(format!(
-                "failed to inspect binary target `{}`: {error}",
-                entry.path().display()
-            ))
-        })?;
-        let (name, source) = if !metadata.is_dir()
-            && entry.path().extension().and_then(|value| value.to_str()) == Some("rs")
-        {
-            (
-                entry.path().file_stem().map(|value| value.to_owned()),
-                entry.path(),
-            )
-        } else if metadata.is_dir() && entry.path().join("main.rs").is_file() {
-            (Some(entry.file_name()), entry.path().join("main.rs"))
-        } else {
-            continue;
-        };
-        let name = name
-            .and_then(|value| value.into_string().ok())
-            .ok_or_else(|| {
-                Error::failure(format!(
-                    "binary target name in `{}` is not valid UTF-8",
-                    directory.display()
-                ))
-            })?;
-        validate_package_name(&root.join(MANIFEST_NAME), 1, &name)?;
-        if binaries
-            .insert(
-                name.clone(),
-                BinaryTarget {
-                    name: name.clone(),
-                    path: source,
-                    test: true,
-                    bench: true,
-                    doc: true,
-                    harness: true,
-                    required_features: None,
-                },
-            )
-            .is_some()
-        {
-            return Err(Error::failure(format!(
-                "binary target name `{name}` is discovered more than once"
-            )));
-        }
-    }
-    Ok(binaries)
-}
-
 fn resolve_target_defaults(manifest: &mut Manifest, check_sources: bool) -> Result<()> {
     if check_sources
         && let Some(library) = &manifest.library
@@ -1545,25 +1280,25 @@ fn resolve_target_defaults(manifest: &mut Manifest, check_sources: bool) -> Resu
             library.path.display()
         )));
     }
-    for binary in &manifest.binaries {
-        if check_sources && !binary.path.is_file() {
+    for target in &manifest.targets {
+        // Missing example and bench sources fail only when compiled.
+        if check_sources
+            && manifest.editable
+            && matches!(target.kind, TargetKind::Bin | TargetKind::Test)
+            && !target.path.is_file()
+        {
             return Err(Error::failure(format!(
-                "binary target `{}` does not exist",
-                binary.path.display()
-            )));
-        }
-    }
-    for test in &manifest.integration_tests {
-        if check_sources && manifest.editable && !test.path.is_file() {
-            return Err(Error::failure(format!(
-                "integration-test target `{}` does not exist",
-                test.path.display()
+                "{} target `{}` does not exist",
+                target.kind.description(),
+                target.path.display()
             )));
         }
     }
     if manifest.library.is_none()
-        && manifest.binaries.is_empty()
-        && manifest.described_targets.is_empty()
+        && manifest
+            .targets
+            .iter()
+            .all(|target| target.kind == TargetKind::Test)
     {
         return Err(Error::failure(format!(
             "package `{}` has no supported library or binary target",
@@ -1572,10 +1307,7 @@ fn resolve_target_defaults(manifest: &mut Manifest, check_sources: bool) -> Resu
         .with_help("add `src/lib.rs`, `src/main.rs`, or one supported `[[bin]]`"));
     }
     if let Some(default) = &manifest.default_run
-        && !manifest
-            .binaries
-            .iter()
-            .any(|binary| &binary.name == default)
+        && manifest.target(TargetKind::Bin, default).is_none()
     {
         return Err(Error::failure(format!(
             "package.default-run names unknown binary target `{default}`"
@@ -1583,238 +1315,6 @@ fn resolve_target_defaults(manifest: &mut Manifest, check_sources: bool) -> Resu
         .with_help("choose one of the package's binary target names"));
     }
     Ok(())
-}
-
-fn parse_integration_tests(
-    path: &Path,
-    document: &Document,
-    root: &Path,
-    package: &Table,
-    edition: Edition,
-    mode: ManifestMode,
-) -> Result<Vec<IntegrationTestTarget>> {
-    let discovered = discover_integration_tests(root)?
-        .into_iter()
-        .map(|target| (target.name.clone(), target))
-        .collect::<BTreeMap<_, _>>();
-    let automatic = package
-        .get("autotests")
-        .and_then(Item::as_bool)
-        .unwrap_or(edition != Edition::E2015 || !document.root().contains_key("test"));
-    let mut targets = if automatic {
-        discovered.clone()
-    } else {
-        BTreeMap::new()
-    };
-    if let Some(item) = document.root().get("test") {
-        let mut explicit_names = BTreeSet::new();
-        let tables = item.as_array_of_tables().ok_or_else(|| {
-            type_error(
-                path,
-                document.line_of_item(item),
-                "test",
-                "an array of tables",
-            )
-        })?;
-        for table in tables {
-            for (key, item) in table.iter() {
-                if mode == ManifestMode::Root
-                    && !matches!(
-                        key,
-                        "name"
-                            | "path"
-                            | "test"
-                            | "bench"
-                            | "doc"
-                            | "harness"
-                            | "required-features"
-                    )
-                {
-                    return Err(unsupported_key(
-                        path,
-                        document,
-                        item,
-                        &format!("test.{key}"),
-                    ));
-                }
-            }
-            let name = required_string(path, document, table, "test", "name")?;
-            validate_package_name(path, document.line_of_table(table), &name)?;
-            let relative =
-                optional_string(path, document, table, "test", "path")?.unwrap_or_else(|| {
-                    discovered.get(&name).map_or_else(
-                        || format!("tests/{name}.rs"),
-                        |target| {
-                            target
-                                .path
-                                .strip_prefix(root)
-                                .unwrap()
-                                .to_string_lossy()
-                                .into_owned()
-                        },
-                    )
-                });
-            validate_relative_path(path, document.line_of_table(table), "test.path", &relative)?;
-            let crate_name = name.replace('-', "_");
-            if explicit_names.contains(&crate_name) {
-                return Err(Error::at(
-                    path,
-                    document.line_of_table(table),
-                    format!("duplicate integration-test crate name `{crate_name}`"),
-                    "give every `[[test]]` target a distinct name",
-                ));
-            }
-            let target_path = root.join(relative);
-            targets.retain(|_, target| {
-                let name = target.name.replace('-', "_");
-                explicit_names.contains(&name) || (target.path != target_path && name != crate_name)
-            });
-            explicit_names.insert(crate_name);
-            targets.insert(
-                name.clone(),
-                IntegrationTestTarget {
-                    name,
-                    path: target_path,
-                    required_features: optional_string_array(
-                        path,
-                        document,
-                        table,
-                        "test",
-                        "required-features",
-                    )?,
-                    test: optional_bool(path, document, table, "test", "test")?.unwrap_or(true),
-                    bench: optional_bool(path, document, table, "test", "bench")?.unwrap_or(false),
-                    doc: optional_bool(path, document, table, "test", "doc")?.unwrap_or(false),
-                    harness: optional_bool(path, document, table, "test", "harness")?
-                        .unwrap_or(true),
-                },
-            );
-        }
-    }
-    if targets.len() > MAX_DESCRIBED_TARGETS {
-        return Err(Error::failure(format!(
-            "package describes more than {MAX_DESCRIBED_TARGETS} integration-test targets"
-        )));
-    }
-    let mut crate_names = BTreeSet::new();
-    for target in targets.values() {
-        let crate_name = target.name.replace('-', "_");
-        if !crate_names.insert(crate_name.clone()) {
-            return Err(Error::failure(format!(
-                "integration-test target `{}` has duplicate crate name `{crate_name}`",
-                target.name
-            )));
-        }
-    }
-    Ok(targets.into_values().collect())
-}
-
-fn discover_integration_tests(root: &Path) -> Result<Vec<IntegrationTestTarget>> {
-    let directory = root.join("tests");
-    let metadata = match fs::symlink_metadata(&directory) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(Error::failure(format!(
-                "failed to inspect integration-test directory `{}`: {error}",
-                directory.display()
-            )));
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::failure(format!(
-            "integration-test path `{}` is not a real directory",
-            directory.display()
-        )));
-    }
-
-    let mut targets = Vec::new();
-    let mut crate_names = BTreeSet::new();
-    for entry in fs::read_dir(&directory).map_err(|error| {
-        Error::failure(format!(
-            "failed to read integration-test directory `{}`: {error}",
-            directory.display()
-        ))
-    })? {
-        let entry = entry.map_err(|error| {
-            Error::failure(format!(
-                "failed to read an integration-test entry in `{}`: {error}",
-                directory.display()
-            ))
-        })?;
-        let mut path = entry.path();
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            Error::failure(format!(
-                "failed to inspect integration-test entry `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(Error::failure(format!(
-                "integration-test entry `{}` is a symbolic link",
-                path.display()
-            )));
-        }
-        let name_path = path.clone();
-        if metadata.is_dir() {
-            path = path.join("main.rs");
-            if !path.is_file() {
-                continue;
-            }
-            if fs::symlink_metadata(&path)
-                .map_err(|error| {
-                    Error::failure(format!(
-                        "failed to inspect integration-test source: {error}"
-                    ))
-                })?
-                .file_type()
-                .is_symlink()
-            {
-                return Err(Error::failure(format!(
-                    "integration-test entry `{}` is a symbolic link",
-                    path.display()
-                )));
-            }
-        } else if path.extension().is_none_or(|extension| extension != "rs") {
-            continue;
-        } else if !metadata.is_file() {
-            return Err(Error::failure(format!(
-                "integration-test entry `{}` is not a regular file",
-                path.display()
-            )));
-        }
-        let name = if metadata.is_dir() {
-            name_path.file_name()
-        } else {
-            name_path.file_stem()
-        }
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            Error::failure(format!(
-                "integration-test filename `{}` is not valid UTF-8",
-                path.display()
-            ))
-        })?
-        .to_owned();
-        validate_package_name(&root.join(MANIFEST_NAME), 1, &name)?;
-        let crate_name = name.replace('-', "_");
-        if !crate_names.insert(crate_name.clone()) {
-            return Err(Error::failure(format!(
-                "integration-test target `{name}` has duplicate crate name `{crate_name}`"
-            )));
-        }
-        targets.push(IntegrationTestTarget {
-            name,
-            path,
-            required_features: None,
-            test: true,
-            bench: false,
-            doc: false,
-            harness: true,
-        });
-    }
-    targets.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(targets)
 }
 
 struct DependencyFields<'a> {
@@ -3430,6 +2930,13 @@ strip = true
 codegen-units = 1
 "#;
 
+    fn target_names(manifest: &Manifest, kind: TargetKind) -> Vec<&str> {
+        manifest
+            .targets_of(kind)
+            .map(|target| target.name.as_str())
+            .collect()
+    }
+
     fn parsed(source: &str) -> Result<Manifest> {
         Manifest::parse(
             Path::new("/tmp/pkg"),
@@ -3546,7 +3053,7 @@ codegen-units = 1
             ))
             .unwrap();
             let library = manifest.library.unwrap();
-            let binary = &manifest.binaries[0];
+            let binary = &manifest.targets[0];
             assert_eq!(library.bench, !flags.contains("bench = false"));
             assert_eq!(binary.bench, library.bench);
             assert_eq!(library.test, !flags.contains("test = false"));
@@ -3750,17 +3257,13 @@ unsafe_code = { level = "forbid", priority = 1 }
         let manifest = Manifest::load_for_build(&root).unwrap();
         assert_eq!(manifest.default_run.as_deref(), Some("worker"));
         assert_eq!(
-            manifest
-                .binaries
-                .iter()
-                .map(|target| target.name.as_str())
-                .collect::<Vec<_>>(),
+            target_names(&manifest, TargetKind::Bin),
             ["demo", "tool", "worker"]
         );
-        assert_eq!(manifest.binaries[1].path, root.join("src/custom.rs"));
-        assert!(manifest.binaries[0].doc);
-        assert!(!manifest.binaries[1].doc);
-        assert!(manifest.binaries[2].doc);
+        assert_eq!(manifest.targets[1].path, root.join("src/custom.rs"));
+        assert!(manifest.targets[0].doc);
+        assert!(!manifest.targets[1].doc);
+        assert!(manifest.targets[2].doc);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4121,10 +3624,10 @@ members = ["ignored-member"]
         .unwrap();
         assert_eq!(manifest.links.as_deref(), Some("native"));
         assert!(manifest.build_script.is_some());
-        assert_eq!(manifest.integration_tests.len(), 1);
-        assert_eq!(manifest.integration_tests[0].name, "ignored-test");
+        assert_eq!(manifest.targets.len(), 1);
+        assert_eq!(manifest.targets[0].name, "ignored-test");
         assert_eq!(
-            manifest.integration_tests[0].path,
+            manifest.targets[0].path,
             Path::new("/dependency/tests/ignored.rs")
         );
         let library = manifest.library.as_ref().unwrap();
@@ -4318,17 +3821,10 @@ members = ["ignored-member"]
 
         let manifest = Manifest::load_for_build(&root).unwrap();
         assert_eq!(
-            manifest
-                .integration_tests
-                .iter()
-                .map(|target| target.name.as_str())
-                .collect::<Vec<_>>(),
+            target_names(&manifest, TargetKind::Test),
             ["a-b", "nested", "z"]
         );
-        assert_eq!(
-            manifest.integration_tests[0].path,
-            root.join("tests/a-b.rs")
-        );
+        assert_eq!(manifest.targets[0].path, root.join("tests/a-b.rs"));
 
         let path = root.join("Cargo.toml");
         let source = fs::read_to_string(&path).unwrap();
@@ -4365,8 +3861,7 @@ members = ["ignored-member"]
                 })
                 .collect::<Vec<_>>();
             let tests = manifest
-                .integration_tests
-                .iter()
+                .targets_of(TargetKind::Test)
                 .map(|target| (target.name.as_str(), target.path.clone()))
                 .collect::<Vec<_>>();
             assert_eq!(tests, cargo_tests, "{declarations}");
@@ -4420,17 +3915,10 @@ bench = false
         ];
         expected.extend(
             manifest
-                .integration_tests
+                .targets
                 .iter()
-                .filter(|target| target.bench)
-                .map(|target| ("test".to_owned(), target.name.clone())),
-        );
-        expected.extend(
-            manifest
-                .described_targets
-                .iter()
-                .filter(|target| target.bench)
-                .map(|target| (target.kind.to_owned(), target.name.clone())),
+                .filter(|target| target.kind != TargetKind::Bin && target.bench)
+                .map(|target| (target.kind.as_str().to_owned(), target.name.clone())),
         );
         expected.sort();
         let output = std::process::Command::new(env!("CARGO"))
@@ -4513,7 +4001,7 @@ bench = false
         let manifest = Manifest::load_source_dependency(&root).unwrap();
         let targets = cargo["packages"][0]["targets"].as_array().unwrap();
         assert_eq!(targets.len(), 5);
-        let test = &manifest.integration_tests[0];
+        let test = manifest.targets_of(TargetKind::Test).next().unwrap();
         assert_eq!(test.required_features.as_ref().unwrap(), &["extra"]);
         assert!(!test.test && test.doc && !test.harness);
         let cargo_test = targets
@@ -4527,19 +4015,7 @@ bench = false
         assert_eq!(cargo_test["test"], test.test);
         assert_eq!(cargo_test["doc"], test.doc);
         let mut paths = vec![manifest.library.as_ref().unwrap().path.clone()];
-        paths.extend(manifest.binaries.iter().map(|target| target.path.clone()));
-        paths.extend(
-            manifest
-                .integration_tests
-                .iter()
-                .map(|target| target.path.clone()),
-        );
-        paths.extend(
-            manifest
-                .described_targets
-                .iter()
-                .map(|target| target.path.clone()),
-        );
+        paths.extend(manifest.targets.iter().map(|target| target.path.clone()));
         for path in paths {
             assert!(
                 targets
@@ -4560,8 +4036,14 @@ bench = false
             .replace("missing/lib.rs", "lib.rs");
         fs::write(root.join("Cargo.toml"), text).unwrap();
         let dependency = Manifest::load_path_dependency(&root).unwrap();
-        assert_eq!(dependency.integration_tests.len(), 1);
-        assert_eq!(dependency.described_targets.len(), 2);
+        assert_eq!(
+            dependency
+                .targets
+                .iter()
+                .map(|target| target.kind)
+                .collect::<Vec<_>>(),
+            [TargetKind::Example, TargetKind::Test, TargetKind::Bench]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4587,40 +4069,268 @@ bench = false
         fs::write(root.join("tests/directory-test/main.rs"), "").unwrap();
 
         let manifest = Manifest::load_path_dependency(&root).unwrap();
-        assert_eq!(manifest.integration_tests.len(), 2);
-        assert_eq!(manifest.integration_tests[0].name, "auto-test");
-        assert_eq!(manifest.integration_tests[1].name, "directory-test");
+        assert_eq!(
+            target_names(&manifest, TargetKind::Test),
+            ["auto-test", "directory-test"]
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn target_fixture(name: &str) -> PathBuf {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("lorry-{name}-{}-{id}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        root
+    }
+
+    fn cargo_metadata_targets(root: &Path) -> std::process::Output {
+        std::process::Command::new(env!("CARGO"))
+            .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
+            .env("CARGO_HOME", root.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(root)
+            .output()
+            .unwrap()
     }
 
     #[cfg(unix)]
     #[test]
-    fn rejects_linked_integration_test_entries() {
+    fn infers_and_merges_targets_like_cargo() {
         use std::os::unix::fs::symlink;
 
-        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "lorry-linked-integration-targets-{}-{id}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::create_dir_all(root.join("tests")).unwrap();
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"integration-root\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("Cargo.lock"),
-            "version = 4\n\n[[package]]\nname = \"integration-root\"\nversion = \"0.1.0\"\n",
-        )
-        .unwrap();
-        fs::write(root.join("src/lib.rs"), "").unwrap();
-        fs::write(root.join("outside.rs"), "").unwrap();
-        symlink(root.join("outside.rs"), root.join("tests/linked.rs")).unwrap();
+        let root = target_fixture("target-inference");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(root.join("outside/linked-dir")).unwrap();
+        fs::create_dir_all(root.join("bench-sources")).unwrap();
+        fs::write(root.join("outside/linked.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("outside/linked-dir/main.rs"), "fn main() {}\n").unwrap();
+        symlink(root.join("bench-sources"), root.join("benches")).unwrap();
+        let mut explicit = String::new();
+        for (kind, directory) in [
+            ("bin", "src/bin"),
+            ("example", "examples"),
+            ("test", "tests"),
+            ("bench", "benches"),
+        ] {
+            // An explicit name selects `sub/main.rs`; an explicit path hides `plain`.
+            explicit.push_str(&format!(
+                "[[{kind}]]\nname = \"sub\"\n[[{kind}]]\nname = \"renamed\"\npath = \"{directory}/plain.rs\"\n"
+            ));
+            let directory = root.join(directory);
+            for entry in ["sub", ".hidden-dir", "no-main"] {
+                fs::create_dir_all(directory.join(entry)).unwrap();
+            }
+            for file in [
+                "plain.rs",
+                ".hidden.rs",
+                "sub/main.rs",
+                ".hidden-dir/main.rs",
+                "no-main/lib.rs",
+                "notes.txt",
+                "no-extension",
+            ] {
+                fs::write(directory.join(file), "fn main() {}\n").unwrap();
+            }
+            symlink(root.join("outside/linked.rs"), directory.join("linked.rs")).unwrap();
+            symlink(
+                root.join("outside/linked-dir"),
+                directory.join("linked-dir"),
+            )
+            .unwrap();
+        }
+        let disabled =
+            "autobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n";
+        for (edition, auto, tables) in [
+            ("2021", "", ""),
+            ("2021", "", explicit.as_str()),
+            ("2021", disabled, explicit.as_str()),
+            ("2021", disabled, ""),
+            ("2015", "", explicit.as_str()),
+        ] {
+            fs::write(
+                root.join("Cargo.toml"),
+                format!("[package]\nname = \"infer\"\nversion = \"1.0.0\"\nedition = \"{edition}\"\n{auto}[workspace]\n{tables}"),
+            )
+            .unwrap();
+            let manifest = Manifest::load_source_dependency(&root).unwrap();
+            let lorry = manifest
+                .targets
+                .iter()
+                .map(|target| {
+                    (
+                        target.kind.as_str(),
+                        target.name.as_str(),
+                        target.path.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let cargo = cargo_metadata_targets(&root);
+            assert!(
+                cargo.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+            let cargo: serde_json::Value = serde_json::from_slice(&cargo.stdout).unwrap();
+            let cargo = cargo["packages"][0]["targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|target| target["kind"][0] != "lib")
+                .map(|target| {
+                    (
+                        target["kind"][0].as_str().unwrap(),
+                        target["name"].as_str().unwrap(),
+                        PathBuf::from(target["src_path"].as_str().unwrap()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(lorry, cargo, "edition {edition}, {auto}{tables}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
-        assert!(Manifest::load_for_build(&root).is_err());
+    #[test]
+    fn explicit_targets_follow_cargo_requirements() {
+        let root = target_fixture("explicit-targets");
+        let header = "[package]\nname = \"explicit\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[workspace]\n";
+        let load = |tables: &str| {
+            fs::write(root.join("Cargo.toml"), format!("{header}{tables}")).unwrap();
+            Manifest::load_source_dependency(&root)
+        };
+        // A file in place of a target directory holds no targets in Cargo.
+        fs::write(root.join("tests"), "").unwrap();
+        assert!(load("").unwrap().targets.is_empty());
+        assert!(cargo_metadata_targets(&root).status.success());
+        fs::remove_file(root.join("tests")).unwrap();
+        for (kind, directory) in [
+            ("bin", "src/bin"),
+            ("example", "examples"),
+            ("test", "tests"),
+            ("bench", "benches"),
+        ] {
+            // Only an unresolved binary fails in a dependency, as in Cargo.
+            let missing = load(&format!("[[{kind}]]\nname = \"missing\"\n"));
+            assert_eq!(missing.is_err(), kind == "bin", "{kind}");
+            assert!(load(&format!("[[{kind}]]\npath = \"src/lib.rs\"\n")).is_err());
+
+            // A file and a directory with the same name collide in Cargo too.
+            fs::create_dir_all(root.join(directory).join("twin")).unwrap();
+            fs::write(root.join(directory).join("twin.rs"), "").unwrap();
+            fs::write(root.join(directory).join("twin/main.rs"), "").unwrap();
+            assert!(
+                load("").unwrap_err().render().contains("duplicate"),
+                "{kind}"
+            );
+            assert!(!cargo_metadata_targets(&root).status.success());
+            fs::remove_dir_all(root.join(directory)).unwrap();
+        }
+
+        let manifest = load(
+            "[[bin]]\nname = \"tool\"\npath = \"src/lib.rs\"\nedition = \"2018\"\ndoctest = false\n\
+             [[test]]\nname = \"check\"\npath = \"src/lib.rs\"\ncrate-type = [\"lib\"]\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.targets[0].edition, Edition::E2018);
+        assert_eq!(manifest.targets[1].crate_types, ["bin"]);
+        assert!(manifest.warnings[0].contains("`edition` is set on bin `tool`"));
+        let error =
+            load("[[bin]]\nname = \"tool\"\npath = \"src/lib.rs\"\ncrate-type = [\"lib\"]\n")
+                .unwrap_err();
+        assert!(error.render().contains("unsupported bin crate-type"));
+
+        fs::create_dir_all(root.join("src/bin")).unwrap();
+        for index in 0..1_025 {
+            fs::write(root.join(format!("src/bin/b{index}.rs")), "").unwrap();
+        }
+        let error = load("").unwrap_err();
+        assert!(error.render().contains("more than 1024 binary targets"));
+        fs::remove_file(root.join("src/bin/b0.rs")).unwrap();
+        assert_eq!(load("").unwrap().targets.len(), 1_024);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dependencies_drop_unresolved_explicit_targets_like_cargo() {
+        let root = target_fixture("unresolved-targets");
+        // Published crates may declare targets whose files the archive excludes.
+        let dependency = root.join("vendor/dep");
+        fs::create_dir_all(dependency.join("src")).unwrap();
+        fs::write(dependency.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            dependency.join(".cargo-checksum.json"),
+            format!("{{\"files\":{{}},\"package\":\"{}\"}}", "0".repeat(64)),
+        )
+        .unwrap();
+        fs::write(
+            dependency.join("Cargo.toml"),
+            "[package]\nname = \"dep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             [[test]]\nname = \"excluded-test\"\n[[example]]\nname = \"excluded-example\"\n\
+             [[bench]]\nname = \"excluded-bench\"\nharness = false\n",
+        )
+        .unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(app.join("src")).unwrap();
+        fs::create_dir_all(app.join(".cargo")).unwrap();
+        fs::write(
+            app.join(".cargo/config.toml"),
+            format!(
+                "[source.crates-io]\nreplace-with = \"vendored\"\n\
+                 [source.vendored]\ndirectory = \"{}\"\n",
+                root.join("vendor").display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            app.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             [workspace]\n[dependencies]\ndep = \"1.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let cargo = |directory: &Path, command: &[&str]| {
+            std::process::Command::new(env!("CARGO"))
+                .args(command)
+                .arg("--offline")
+                .env("CARGO_HOME", root.join("cargo-home"))
+                .env("CARGO_TARGET_DIR", root.join("target"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(directory)
+                .output()
+                .unwrap()
+        };
+        // Cargo builds the registry dependency and omits the targets.
+        let build = cargo(&app, &["check"]);
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let metadata = cargo(&app, &["metadata", "--format-version=1"]);
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        let dependency_targets = metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "dep")
+            .unwrap()["targets"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(dependency_targets, 1);
+        for manifest in [
+            Manifest::load_path_dependency(&dependency).unwrap(),
+            Manifest::load_source_dependency(&dependency).unwrap(),
+        ] {
+            assert!(manifest.library.is_some() && manifest.targets.is_empty());
+        }
+        // As a member, Cargo and Lorry both reject the package.
+        assert!(!cargo(&dependency, &["check"]).status.success());
+        let Err(error) = SourceWorkspace::load(&dependency, None) else {
+            panic!("a member must reject an unresolved explicit target");
+        };
+        assert!(error.render().contains("cannot infer source path"));
         fs::remove_dir_all(root).unwrap();
     }
 

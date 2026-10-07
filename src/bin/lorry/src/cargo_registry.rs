@@ -737,8 +737,18 @@ mod tests {
             .load_description("demo", &version, &checksum)
             .unwrap();
         assert!(!described.manifest.editable);
-        assert_eq!(described.manifest.binaries.len(), 1);
-        assert_eq!(described.manifest.described_targets.len(), 1);
+        assert_eq!(
+            described
+                .manifest
+                .targets
+                .iter()
+                .map(|target| target.kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::manifest::TargetKind::Bin,
+                crate::manifest::TargetKind::Example
+            ]
+        );
         assert_eq!(
             described.manifest.dependencies[0].kind,
             crate::sparse::DependencyKind::Dev
@@ -806,8 +816,18 @@ mod tests {
             .values()
             .find(|package| package.manifest.name == "demo")
             .unwrap();
-        assert_eq!(dependency.manifest.binaries.len(), 1);
-        assert_eq!(dependency.manifest.described_targets.len(), 1);
+        assert_eq!(
+            dependency
+                .manifest
+                .targets
+                .iter()
+                .map(|target| target.kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::manifest::TargetKind::Bin,
+                crate::manifest::TargetKind::Example
+            ]
+        );
         assert!(!root.join(".lorry").exists());
         assert!(!root.join("target").exists());
         fs::write(source.join("examples/demo.rs"), "fn changed() {}\n").unwrap();

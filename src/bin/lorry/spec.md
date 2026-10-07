@@ -488,25 +488,32 @@ workspace root. Vendoring resolves every member together, including optional,
 development, and all-platform edges; selectors change review/acquisition scope
 without narrowing complete resolution or its outside-package cap.
 
-A root package may contain at most one library and 64 binary targets. Lorry
-discovers `src/main.rs`, `src/bin/*.rs`, and `src/bin/*/main.rs`, merges exact
-explicit `[[bin]]` targets, and honors `package.autobins = false`.
-Explicit binary names and source paths suppress matching inferred binaries;
-several explicit binaries may still share a source file. `[lib]` and
-`[[bin]]` accept the Cargo-defaulted `name`, `path`, and `test` fields needed
-by the supported packages. An explicit binary without a path uses the
-matching inferred file or directory target, even with `autobins = false`.
-Edition 2015 retains Cargo's explicit-table discovery default and warned
-legacy paths. Hidden binary files are not inferred. Source target paths are
-normalized without resolving symbolic links, as Cargo presents them.
-Lorry discovers top-level `tests/*.rs` integration
-crates automatically.
-`doc-scrape-examples` accepts a boolean on libraries, examples, and benches
+A package may contain one library and at most 1,024 targets of each other
+kind: binary, example, test, and bench. One routine infers all four kinds as
+Cargo does: `src/main.rs` for binaries, then `NAME.rs` files and `NAME/main.rs`
+directories in `src/bin`, `examples`, `tests`, and `benches`. Hidden and
+non-UTF-8 entries are skipped. A symbolic link to a file is followed, and a
+symbolic link to a directory is not treated as a target directory. A missing
+target directory, or a file in its place, has no targets.
+Explicit `[[bin]]`, `[[example]]`, `[[test]]`, and `[[bench]]` tables share
+one parser and require `name`. Explicit names and source paths suppress
+matching inferred targets; several explicit targets may still share a source
+file. An explicit target without a path uses the matching inferred file or
+directory, even with its `auto*` flag set to false. When none or two match,
+a binary is an error. A test, example, or bench is dropped from a dependency,
+as Cargo drops targets whose files a published crate excludes; a workspace
+member rejects it. `edition` is accepted on
+every kind with a deprecation warning. `crate-type` is rejected on binaries
+and ignored on tests and benches. Integration-test names must also differ
+after `-` becomes `_`. Edition 2015 retains Cargo's explicit-table discovery
+default and warned legacy binary paths. Source target paths are normalized
+without resolving symbolic links, as Cargo presents them.
+`doc-scrape-examples` accepts a boolean on every target kind
 as inert documentation metadata;
 it does not change build, check, or test units.
 The inert `[badges]` table is accepted in selected packages too.
-Dependency manifests may describe up to 1,024 integration-test targets;
-these targets are not built when that package is only a dependency.
+Integration tests, examples, and benches of a package used only as a
+dependency are described but not built.
 
 `build` defaults to libraries and binaries. It shares check's target selectors:
 `--lib`, `--bins`, `--tests`, `--examples`, `--benches`, `--all-targets`, and repeated

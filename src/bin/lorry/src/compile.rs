@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::build_script::{Directive, Output as BuildScriptOutput};
 use crate::diagnostic::{Error, Result};
 use crate::identity::{CargoDebugInfo, CargoPanicStrategy, CargoStrip, CargoUnitLto, Identity};
-use crate::manifest::{Edition, Manifest};
+use crate::manifest::{Edition, Manifest, TargetKind};
 use crate::resolver::{CompileKind, PackageKey, PackageSourceKey};
 use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind, UnitMode};
 
@@ -225,24 +225,6 @@ pub fn dependency_rustc_invocation_with_build_output(
                 output_dir,
             )
         }
-        UnitKind::Binary => {
-            let name = key
-                .target
-                .as_deref()
-                .ok_or_else(|| Error::failure("selected binary unit has no target name"))?;
-            let binary = manifest
-                .binaries
-                .iter()
-                .find(|binary| binary.name == name)
-                .ok_or_else(|| Error::failure(format!("selected binary `{name}` is absent")))?;
-            (
-                binary_crate_name.as_deref().unwrap(),
-                binary.path.as_path(),
-                "bin",
-                "dep-info,link",
-                output_dir,
-            )
-        }
         UnitKind::LibraryHarness => {
             let library = manifest
                 .library
@@ -256,46 +238,17 @@ pub fn dependency_rustc_invocation_with_build_output(
                 output_dir,
             )
         }
-        UnitKind::BinaryHarness => {
-            let name = key
-                .target
-                .as_deref()
-                .ok_or_else(|| Error::failure("selected binary harness has no target name"))?;
-            let binary = manifest
-                .binaries
-                .iter()
-                .find(|binary| binary.name == name)
-                .ok_or_else(|| Error::failure(format!("binary harness `{name}` is absent")))?;
-            (
-                binary_crate_name.as_deref().unwrap(),
-                binary.path.as_path(),
-                "bin",
-                "dep-info,link",
-                output_dir,
-            )
-        }
-        UnitKind::IntegrationHarness => {
-            let name = key
-                .target
-                .as_deref()
-                .ok_or_else(|| Error::failure("selected integration harness has no target name"))?;
-            let target = manifest
-                .integration_tests
-                .iter()
-                .find(|target| target.name == name)
-                .ok_or_else(|| Error::failure(format!("integration harness `{name}` is absent")))?;
-            (
-                binary_crate_name.as_deref().unwrap(),
-                target.path.as_path(),
-                "bin",
-                "dep-info,link",
-                output_dir,
-            )
-        }
-        UnitKind::Example | UnitKind::Bench => {
-            let target = key
-                .auxiliary_target(manifest)
-                .ok_or_else(|| Error::failure("auxiliary compiler unit has no target"))?;
+        UnitKind::Binary
+        | UnitKind::BinaryHarness
+        | UnitKind::IntegrationHarness
+        | UnitKind::Example
+        | UnitKind::Bench => {
+            let target = key.manifest_target(manifest).ok_or_else(|| {
+                Error::failure(format!(
+                    "selected target `{}` is absent",
+                    key.target.as_deref().unwrap_or_default()
+                ))
+            })?;
             (
                 binary_crate_name.as_deref().unwrap(),
                 target.path.as_path(),
@@ -371,7 +324,7 @@ pub fn dependency_rustc_invocation_with_build_output(
         &format!(
             "--edition={}",
             edition_name(
-                key.auxiliary_target(manifest)
+                key.manifest_target(manifest)
                     .map_or(manifest.edition, |target| target.edition)
             )
         ),
@@ -394,24 +347,7 @@ pub fn dependency_rustc_invocation_with_build_output(
     if key.is_harness() {
         let harness = match key.kind {
             UnitKind::LibraryHarness => manifest.library.as_ref().unwrap().harness,
-            UnitKind::BinaryHarness => {
-                manifest
-                    .binaries
-                    .iter()
-                    .find(|target| Some(target.name.as_str()) == key.target.as_deref())
-                    .unwrap()
-                    .harness
-            }
-            UnitKind::IntegrationHarness => {
-                manifest
-                    .integration_tests
-                    .iter()
-                    .find(|target| Some(target.name.as_str()) == key.target.as_deref())
-                    .unwrap()
-                    .harness
-            }
-            UnitKind::Example | UnitKind::Bench => key.auxiliary_target(manifest).unwrap().harness,
-            _ => unreachable!(),
+            _ => key.manifest_target(manifest).unwrap().harness,
         };
         if harness {
             push(&mut arguments, "--test");
@@ -500,7 +436,7 @@ pub fn dependency_rustc_invocation_with_build_output(
         rustc_environment(options.cargo, manifest, crate_name, &dependency_directories)?;
     if matches!(key.kind, UnitKind::Binary | UnitKind::BinaryHarness)
         || key.kind == UnitKind::Example
-            && key.auxiliary_target(manifest).unwrap().crate_types == ["bin"]
+            && key.manifest_target(manifest).unwrap().crate_types == ["bin"]
     {
         value(
             &mut environment,
@@ -513,7 +449,7 @@ pub fn dependency_rustc_invocation_with_build_output(
             .integration_binaries
             .and_then(|packages| packages.get(&key.package))
             .ok_or_else(|| Error::failure("integration harness has no program environment"))?;
-        for binary in &manifest.binaries {
+        for binary in manifest.targets_of(TargetKind::Bin) {
             let path = binaries.get(&binary.name).ok_or_else(|| {
                 Error::failure(format!(
                     "integration harness has no path for program `{}`",

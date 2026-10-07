@@ -187,24 +187,9 @@ impl TargetSelection {
             }
             let available = members
                 .iter()
-                .flat_map(|member| match kind {
-                    "bin" => member
-                        .binaries
-                        .iter()
-                        .map(|target| target.name.as_str())
-                        .collect::<Vec<_>>(),
-                    "test" => member
-                        .integration_tests
-                        .iter()
-                        .map(|target| target.name.as_str())
-                        .collect(),
-                    _ => member
-                        .described_targets
-                        .iter()
-                        .filter(|target| target.kind == kind)
-                        .map(|target| target.name.as_str())
-                        .collect(),
-                })
+                .flat_map(|member| &member.targets)
+                .filter(|target| target.kind.as_str() == kind)
+                .map(|target| target.name.as_str())
                 .collect::<std::collections::BTreeSet<_>>();
             let mut expanded = std::collections::BTreeSet::new();
             for name in std::mem::take(names) {

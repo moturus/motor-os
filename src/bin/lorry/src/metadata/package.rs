@@ -165,30 +165,18 @@ pub(crate) fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::
             doc: library.doc,
         });
     }
-    for binary in &manifest.binaries {
+    // Manifest targets already follow Cargo's kind and name order.
+    for target in &manifest.targets {
         targets.push(wire::Target {
-            name: binary.name.clone(),
-            kind: vec!["bin".to_owned()],
-            crate_types: vec!["bin".to_owned()],
-            required_features: binary.required_features.clone(),
-            src_path: rebase_path(manifest, root, &binary.path, "binary source")?,
-            edition: edition(manifest.edition).to_owned(),
+            name: target.name.clone(),
+            kind: vec![target.kind.as_str().to_owned()],
+            crate_types: target.crate_types.clone(),
+            required_features: target.required_features.clone(),
+            src_path: rebase_path(manifest, root, &target.path, "target source")?,
+            edition: edition(target.edition).to_owned(),
             doctest: false,
-            test: binary.test,
-            doc: binary.doc,
-        });
-    }
-    for test in &manifest.integration_tests {
-        targets.push(wire::Target {
-            name: test.name.clone(),
-            kind: vec!["test".to_owned()],
-            crate_types: vec!["bin".to_owned()],
-            required_features: test.required_features.clone(),
-            src_path: rebase_path(manifest, root, &test.path, "integration-test source")?,
-            edition: edition(manifest.edition).to_owned(),
-            doctest: false,
-            test: test.test,
-            doc: test.doc,
+            test: target.test,
+            doc: target.doc,
         });
     }
     if let Some(build_script) = &manifest.build_script {
@@ -204,29 +192,6 @@ pub(crate) fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::
             doc: false,
         });
     }
-    for target in &manifest.described_targets {
-        targets.push(wire::Target {
-            name: target.name.clone(),
-            kind: vec![target.kind.to_owned()],
-            crate_types: target.crate_types.clone(),
-            required_features: target.required_features.clone(),
-            src_path: rebase_path(manifest, root, &target.path, "target source")?,
-            edition: edition(target.edition).to_owned(),
-            doctest: false,
-            test: target.test,
-            doc: target.doc,
-        });
-    }
-    // Cargo constructs targets in this category order, sorting names within
-    // each category during discovery.
-    targets.sort_by_key(|target| match target.kind[0].as_str() {
-        "bin" => 1,
-        "example" => 2,
-        "test" => 3,
-        "bench" => 4,
-        "custom-build" => 5,
-        _ => 0,
-    });
     Ok(targets)
 }
 

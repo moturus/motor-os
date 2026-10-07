@@ -52,7 +52,7 @@ of the member selected by `-p`.
 A supported package has:
 
 - one or more selected members for build, check, Clippy, and test;
-- at most one library and 64 binary targets;
+- at most one library and 1,024 targets of each other kind;
 - optional `tests/*.rs` and `tests/*/main.rs` integration tests;
 - a current Cargo.lock in Cargo format 1 through 4, including for
   dependency-free packages; locked commands preserve its exact bytes; and
