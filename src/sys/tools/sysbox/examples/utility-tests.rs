@@ -3,6 +3,8 @@
 mod cut;
 #[path = "utility-tests/sort-keys.rs"]
 mod sort_key_flags;
+#[path = "utility-tests/tr.rs"]
+mod tr;
 #[path = "utility-tests/uniq.rs"]
 mod uniq;
 use std::io::Write;
@@ -144,6 +146,7 @@ fn main() {
     uniq::run_test(&root);
     cut::bytes(&root);
     cut::fields(&root);
+    tr::one_set(&root);
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox utility-tests: ALL PASS");
 }

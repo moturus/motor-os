@@ -89,6 +89,10 @@ The shell is somewhat barebones now (contributions are welcome!).
   `-f LIST` selects fields, with TAB by default or a single-byte `-d` delimiter
   (empty `-d` means NUL). `-s` suppresses undelimited lines; otherwise they pass
   through. Selected fields retain their input order and delimiter;
+- `tr (-d | -s) [-c] [--] SET` streams bytes, deleting (`-d`) or squeezing
+  (`-s`) the selected set; `-c` complements it. Sets support byte ranges,
+  backslash/octal escapes and C-locale POSIX classes, including `[:space:]`.
+  Repetition/equivalence constructs are refused;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
   numeric IPv4 and IPv6 addresses, `localhost`, and DNS names;
 - `head [-n [-]NUM | -c [-]NUM] [-q | -v] [-z] [FILE]...` prints the first 10

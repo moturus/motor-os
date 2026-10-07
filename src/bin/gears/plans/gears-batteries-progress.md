@@ -18,7 +18,7 @@ that Gears works with OpenRouter on Motor OS.
 | --- | --- |
 | First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
 | Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
-| Motor OS command utilities | Separate coding work remains: `tr` and `xargs`. `mkdir -p`, `sort`, `uniq` and `cut` are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Motor OS command utilities | Separate coding work remains: `tr` translation and `xargs`. `mkdir -p`, `sort`, `uniq`, `cut` and single-set `tr` filtering are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
 | Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
 | Optional orchestration (10) | Implement supervised worker agents and their budgets. |
 | Optional web tools (11) | Implement web search and page extraction using curl. |
@@ -1345,5 +1345,32 @@ logs remain in `/tmp/gears-sysbox-cut/original-short-equals.log` and
 The final installed fixture and `full-test.sh` pass three times each in
 debug and release on unchanged source. Warnings-denied native Clippy passes.
 Gate logs: `/tmp/gears-sysbox-cut/short-equals-fixed-gates/`. Authored crate changes are limited to sysbox;
+verified build-generated locks are restored and the user's existing sys lock
+is preserved.
+
+
+### S5 tr single-set filtering
+
+`tr -d/-s` deletes or squeezes selected bytes, with `-c/-C` complement,
+byte ranges, C escapes and C-locale POSIX classes. It uses bounded streaming
+buffers and preserves squeezing state across chunks. All six C whitespace
+bytes are included in `[:space:]`. Equivalence/repetition constructs are
+explicitly unsupported. Binary, complement, class and chunk-boundary fixtures
+pass, as do 400 installed-source GNU output/status comparisons and 80
+literal-marker output/status/diagnostic comparisons. Seven explicitly
+unsupported construct cases are rejected. A review reproduced a panic
+for the short literal set `[:]` in the uninstalled prototype. Class terminators
+are now searched after the opening `[:`, so that short set stays literal;
+empty and invalid class names produce errors. Native regression cases cover
+all three outcomes, and original panic logs remain in the prototype directories.
+The review also found overly broad construct detection that rejected ordinary
+literal sets such as `[*]` and `[=` and missed an escaped repetition operand.
+Detection now checks complete markers and the decoded repeated byte; literal
+and explicitly unsupported constructs have separate regression cases. Original
+comparison logs remain alongside the panic logs.
+
+The final installed fixture and `full-test.sh` pass three times each in
+debug and release on unchanged source. Warnings-denied native Clippy passes.
+Gate logs: `/tmp/gears-sysbox-tr-one-set/final-gates/`. Authored crate changes are limited to sysbox;
 verified build-generated locks are restored and the user's existing sys lock
 is preserved.

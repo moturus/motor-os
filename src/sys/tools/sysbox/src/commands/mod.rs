@@ -26,6 +26,7 @@ pub mod stats;
 pub mod tail;
 pub mod time;
 pub mod top;
+pub mod tr;
 pub mod uniq;
 pub mod uptime;
 pub mod wc;
