@@ -18,7 +18,7 @@ that Gears works with OpenRouter on Motor OS.
 | --- | --- |
 | First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
 | Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
-| Motor OS command utilities | Separate coding work remains: `xargs -I/-t`. Sysbox `echo` and `xargs -0/-d/-n/-r` are implemented and core-gated; Rush's built-in echo remains unchanged. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Motor OS command utilities | S1–S6 are implemented and core-gated: `mkdir -p`, `sort`, `uniq`, `cut`, `tr`, sysbox `echo` and `xargs -0/-d/-n/-I/-r/-t`. Rush's built-in echo remains unchanged. These additions are not prerequisites for using the implemented Gears/batteries features. |
 | Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
 | Optional orchestration (10) | Implement supervised worker agents and their budgets. |
 | Optional web tools (11) | Implement web search and page extraction using curl. |
@@ -1477,5 +1477,35 @@ is also carried into the following replacement patch.
 The final installed fixture and `full-test.sh` pass three times each in
 debug and release on unchanged source. Warnings-denied native Clippy passes.
 Gate logs: `/tmp/gears-sysbox-xargs-batches/final-gates/`. Authored crate changes are limited to sysbox;
+verified build-generated locks are restored and the user's existing sys lock
+is preserved.
+
+
+### S6 xargs replacement and command tracing
+
+`xargs -I` replaces every marker occurrence in initial arguments,
+using one input record per invocation. Default replacement input uses quoted
+newline records and skips leading blanks; `-0/-d` keep records literal. The
+executable and the internal default echo selector remain literal. Replacement
+size is checked before allocation. `-t` prints a quoted representation of the
+direct invocation, without using a shell. Native regressions cover repeated
+markers, literal shell syntax, quote-safe traces, conflicting options and
+oversized expansion. Installed-source host fixtures, 182 explicit-command GNU
+output/status comparisons and 60 default-command output/status/diagnostic
+comparisons pass. Two additional GNU comparisons and a native assertion
+verify that `-I=` and `--replace==` use a literal equals replacement marker.
+
+Default-command integration initially replaced the internal `echo` selector
+when the user chose `-I echo`, causing an unknown-command failure. The
+integration now protects that selector together with the executable path.
+Native regressions cover omitted commands with markers `{}`, `echo` and
+`sysbox`; each input record invokes echo with no arguments, like GNU xargs.
+The original reproduction is preserved in
+`/tmp/gears-sysbox-xargs/original-default-marker.log`. All final gates use
+the corrected source.
+
+The final installed fixture and `full-test.sh` pass three times each in
+debug and release on unchanged source. Warnings-denied native Clippy passes.
+Gate logs: `/tmp/gears-sysbox-xargs-replacement/final-gates/`. Authored crate changes are limited to sysbox;
 verified build-generated locks are restored and the user's existing sys lock
 is preserved.

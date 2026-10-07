@@ -189,3 +189,86 @@ pub fn batches(root: &Path) {
     );
     println!("sysbox utility-tests: xargs batches PASS");
 }
+
+pub fn replacement(root: &Path) {
+    let executable = std::env::current_exe().unwrap();
+    let executable = executable.to_str().unwrap();
+    expect(
+        run(
+            root,
+            &["xargs", "-I%", executable, "--probe", "args", "pre%/%post"],
+            b"a b\nc",
+        ),
+        0,
+        b"[\"prea b/a bpost\"]\n[\"prec/cpost\"]\n",
+        b"",
+    );
+    expect(
+        run(
+            root,
+            &["xargs", "-0", "-I{}", executable, "--probe", "args", "{}"],
+            b"a b\0; touch replaced\0",
+        ),
+        0,
+        b"[\"a b\"]\n[\"; touch replaced\"]\n",
+        b"",
+    );
+    assert!(!root.join("replaced").exists());
+    expect(
+        run(
+            root,
+            &["xargs", "-I=", executable, "--probe", "args", "pre=post"],
+            b"x\ny\n",
+        ),
+        0,
+        b"[\"prexpost\"]\n[\"preypost\"]\n",
+        b"",
+    );
+
+    expect(
+        run(
+            root,
+            &["xargs", "-I%", executable, "--probe", "args", "%"],
+            b"",
+        ),
+        0,
+        b"",
+        b"",
+    );
+    expect(
+        run(
+            root,
+            &["xargs", "-0t", executable, "--probe", "args"],
+            b"a b\0$(echo bad)\0a'b\0",
+        ),
+        0,
+        b"[\"a b\", \"$(echo bad)\", \"a'b\"]\n",
+        format!("{executable} --probe args 'a b' '$(echo bad)' 'a'\\''b'\n").as_bytes(),
+    );
+    let repeated = "%".repeat(20_000);
+    let input = vec![b'x'; 20_000];
+    expect(
+        run(
+            root,
+            &["xargs", "-I%", executable, "--probe", "args", &repeated],
+            &input,
+        ),
+        1,
+        b"",
+        b"xargs: argument list too long\n",
+    );
+    expect(
+        run(root, &["xargs", "-n2", "-I%", executable, "--probe", "args", "%"], b"a b\nc"),
+        0, b"[\"a b\"]\n[\"c\"]\n",
+        b"xargs: warning: options --max-args and --replace/-I/-i are mutually exclusive, ignoring previous --max-args value\n",
+    );
+    for marker in ["{}", "echo", "sysbox"] {
+        expect(
+            run(root, &["xargs", "-I", marker], b"word\nnext\n"),
+            0,
+            b"\n\n",
+            b"",
+        );
+    }
+    println!("sysbox utility-tests: xargs replacement PASS");
+}

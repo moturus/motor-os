@@ -100,11 +100,17 @@ The shell is somewhat barebones now (contributions are welcome!).
   Escapes include octal/hex bytes and `\c` to stop output. `POSIXLY_CORRECT`
   enables escapes and restricts option parsing. Rush retains its built-in echo;
   use `sysbox echo` or `/system/bin/echo` to select this implementation;
-- `xargs [-0r] [-d BYTE] [-n COUNT] [--] [COMMAND [ARG]...]` reads UTF-8 arguments and runs the
+- `xargs [-0r] [-d BYTE] [-n COUNT] [-I MARKER] [-t] [--] [COMMAND [ARG]...]` reads UTF-8 arguments and runs the
   command directly. Default input recognizes quotes and backslashes; `-0`
   reads literal NUL-separated arguments. `-d` uses a single-byte or escaped
   delimiter without quoting; `-n` limits arguments per invocation. `-r` skips empty input. Batches are
   bounded to 128 KiB and children receive EOF on stdin. With no command it runs sysbox `echo`.
+  `-I` replaces all marker occurrences in each initial argument using one
+  input record per invocation (newline records by default, literal with
+  `-0/-d`); leading blanks are skipped only in newline-record mode. `-t`
+  traces a quoted display of the direct invocation. Replacement size is
+  checked before allocation. `-n` and `-I` are mutually exclusive; last wins
+  with a diagnostic, apart from `-n1` after `-I`.
   Child failure statuses are 123 (ordinary failure), 124 (exit 255),
   125 (signal where reported), 126 (cannot execute) and 127 (not found);
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports

@@ -11,7 +11,9 @@ fn fail(message: &str) -> ! {
 struct Options {
     delimiter: Option<u8>,
     maximum: Option<usize>,
+    replacement: Option<String>,
     empty: bool,
+    verbose: bool,
 }
 fn delimiter(text: &str) -> u8 {
     let bytes = text.as_bytes();
@@ -79,7 +81,7 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
             );
         }
         if argument == "--help" {
-            println!("usage: xargs [-0r] [-d BYTE] [-n COUNT] [COMMAND [ARG]...]\nRead UTF-8 arguments from stdin and run COMMAND directly, without a shell.\nDefault input recognizes quotes and backslashes; -0/-d are literal.\n-n limits each batch; -r skips empty input. With no command, run sysbox echo.\nCommand lines are bounded to 128 KiB.");
+            println!("usage: xargs [-0rt] [-d BYTE] [-n COUNT] [-I REPLACE] [COMMAND [ARG]...]\nRead UTF-8 arguments from stdin and run COMMAND directly, without a shell.\nDefault input recognizes quotes and backslashes; -0/-d are literal.\n-I replaces the marker in initial arguments, once per input record.\n-n limits each batch; -r skips empty input; -t prints commands.\nWith no command, run sysbox echo.\nCommand lines are bounded to 128 KiB.");
             std::process::exit(0);
         }
         let (name, value) = if argument.starts_with("--") {
@@ -92,8 +94,10 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
         let flags = match name {
             "--null" if value.is_none() => "0",
             "--no-run-if-empty" if value.is_none() => "r",
+            "--verbose" if value.is_none() => "t",
             "--delimiter" => "d",
             "--max-args" => "n",
+            "--replace" => "I",
             name if !name.starts_with("--") => &argument[1..],
             _ => fail(&format!("unsupported option '{argument}'")),
         };
@@ -101,21 +105,36 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
             match flag {
                 '0' => options.delimiter = Some(0),
                 'r' => options.empty = true,
-                'd' | 'n' => {
+                't' => options.verbose = true,
+                'd' | 'n' | 'I' => {
                     let rest = &flags[position + 1..];
                     let value = value.unwrap_or_else(|| {
                         if !rest.is_empty() {
                             rest
+                        } else if argument == "--replace" {
+                            "{}"
                         } else {
                             arguments.next().unwrap_or_else(|| {
                                 fail(&format!("option requires an argument -- '{flag}'"))
                             })
                         }
                     });
-                    if flag == 'd' {
-                        options.delimiter = Some(delimiter(value));
-                    } else {
-                        options.maximum = Some(maximum(value));
+                    match flag {
+                        'd' => options.delimiter = Some(delimiter(value)),
+                        'n' => {
+                            let number = maximum(value);
+                            if options.replacement.is_some() && number != 1 {
+                                eprintln!("xargs: warning: options --replace and --max-args/-n are mutually exclusive, ignoring previous --replace value");
+                                options.replacement = None;
+                            }
+                            options.maximum = Some(number);
+                        }
+                        _ => {
+                            if options.maximum.take().is_some() {
+                                eprintln!("xargs: warning: options --max-args and --replace/-I/-i are mutually exclusive, ignoring previous --max-args value");
+                            }
+                            options.replacement = Some(value.to_owned());
+                        }
                     }
                     break;
                 }
@@ -125,7 +144,28 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
     }
     (options, arguments.cloned().collect())
 }
-fn execute(command: &[String]) -> i32 {
+fn trace(argument: &str) -> String {
+    if !argument.is_empty()
+        && argument
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte))
+    {
+        argument.to_owned()
+    } else {
+        format!("'{}'", argument.replace('\'', "'\\''"))
+    }
+}
+fn execute(command: &[String], options: &Options) -> i32 {
+    if options.verbose {
+        eprintln!(
+            "{}",
+            command
+                .iter()
+                .map(|argument| trace(argument))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
     let status = Command::new(&command[0])
         .args(&command[1..])
         .stdin(Stdio::null())
@@ -161,7 +201,8 @@ fn execute(command: &[String]) -> i32 {
 pub fn do_command(args: &[String]) {
     assert_eq!(args[0], "xargs");
     let (options, mut initial) = parse(&args[1..]);
-    if initial.is_empty() {
+    let default = initial.is_empty();
+    if default {
         let program = std::env::current_exe()
             .unwrap_or_else(|error| fail(&format!("cannot locate sysbox: {error}")))
             .into_os_string()
@@ -179,28 +220,67 @@ pub fn do_command(args: &[String]) {
     let mut bytes = base;
     let mut ran = false;
     let mut result = 0;
-    tokens::arguments(std::io::stdin().lock(), options.delimiter, |argument| {
-        let size = argument.len() + 1;
-        if base + size >= LIMIT {
-            fail("argument line too long");
-        }
-        if bytes + size >= LIMIT {
-            result = result.max(execute(&batch));
-            ran = true;
-            batch.truncate(initial.len());
-            bytes = base;
-        }
-        bytes += size;
-        batch.push(argument);
-        if batch.len() - initial.len() == options.maximum.unwrap_or(usize::MAX) {
-            result = result.max(execute(&batch));
-            ran = true;
-            batch.truncate(initial.len());
-            bytes = base;
-        }
-    });
-    if batch.len() > initial.len() || (!ran && !options.empty) {
-        result = result.max(execute(&batch));
+    tokens::arguments(
+        std::io::stdin().lock(),
+        options.delimiter,
+        options.replacement.is_some(),
+        |argument| {
+            if let Some(marker) = &options.replacement {
+                if marker.is_empty() {
+                    fail("command too long");
+                }
+                let mut command = Vec::with_capacity(initial.len());
+                let mut size = 0usize;
+                for (index, arg) in initial.iter().enumerate() {
+                    let literal = index == 0 || (default && index == 1);
+                    let matches = if literal {
+                        0
+                    } else {
+                        arg.matches(marker).count()
+                    };
+                    let length = argument
+                        .len()
+                        .checked_mul(matches)
+                        .and_then(|replacements| {
+                            replacements.checked_add(arg.len() - matches * marker.len())
+                        })
+                        .unwrap_or_else(|| fail("argument list too long"));
+                    size = size
+                        .checked_add(length + 1)
+                        .filter(|size| *size < LIMIT)
+                        .unwrap_or_else(|| fail("argument list too long"));
+                    command.push(if literal {
+                        arg.clone()
+                    } else {
+                        arg.replace(marker, &argument)
+                    });
+                }
+                result = result.max(execute(&command, &options));
+                ran = true;
+            } else {
+                let size = argument.len() + 1;
+                if base + size >= LIMIT {
+                    fail("argument line too long");
+                }
+                if bytes + size >= LIMIT {
+                    result = result.max(execute(&batch, &options));
+                    ran = true;
+                    batch.truncate(initial.len());
+                    bytes = base;
+                }
+                bytes += size;
+                batch.push(argument);
+                if batch.len() - initial.len() == options.maximum.unwrap_or(usize::MAX) {
+                    result = result.max(execute(&batch, &options));
+                    ran = true;
+                    batch.truncate(initial.len());
+                    bytes = base;
+                }
+            }
+        },
+    );
+    if batch.len() > initial.len() || (!ran && !options.empty && options.replacement.is_none()) {
+        result = result.max(execute(&batch, &options));
     }
     if result != 0 {
         std::process::exit(result);

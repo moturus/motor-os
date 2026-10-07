@@ -6,7 +6,12 @@ fn emit(value: &mut Vec<u8>, accept: &mut impl FnMut(String)) {
             .unwrap_or_else(|_| super::fail("argument is not valid UTF-8")),
     );
 }
-pub fn arguments(input: impl Read, delimiter: Option<u8>, mut accept: impl FnMut(String)) {
+pub fn arguments(
+    input: impl Read,
+    delimiter: Option<u8>,
+    lines: bool,
+    mut accept: impl FnMut(String),
+) {
     let mut value = Vec::new();
     let (mut quote, mut escaped, mut active) = (None, false, false);
     let (mut warned, mut truncated) = (false, false);
@@ -58,13 +63,13 @@ pub fn arguments(input: impl Read, delimiter: Option<u8>, mut accept: impl FnMut
             } else if matches!(byte, b'\'' | b'"') {
                 quote = Some(byte);
                 active = true;
-            } else if matches!(byte, b'\n' | b' ' | b'\t') {
+            } else if byte == b'\n' || (!lines && matches!(byte, b' ' | b'\t')) {
                 if active {
                     emit(&mut value, &mut accept);
                 }
                 active = false;
                 truncated = false;
-            } else {
+            } else if !lines || active || !matches!(byte, b' ' | b'\t') {
                 if !truncated {
                     value.push(byte);
                 }
