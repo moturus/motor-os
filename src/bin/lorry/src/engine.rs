@@ -256,8 +256,14 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
 
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
-    let ordinary_freshness_base = (!shared
-        && !validation.is_strict()
+    let fresh_targets = match &cli.command {
+        Command::Build(options) => Some(&options.targets),
+        Command::Run(_) => Some(&run_targets),
+        _ => None,
+    };
+    let shared_members = shared.then_some(selected.as_slice());
+    let fresh_owner = fresh_owner(&manifest, shared_members, fresh_targets, binary_selection);
+    let ordinary_freshness_base = (!validation.is_strict()
         && !(compact_state.is_none()
             && manifest
                 .lock
@@ -283,6 +289,11 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             binary_selection,
             jobs,
             cargo: &cargo,
+            shared: shared_members.map(|members| SharedSelection {
+                members,
+                features: &cli.features,
+                targets: fresh_targets,
+            }),
         })
     })
     .transpose()?;
@@ -368,7 +379,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 manifest.profile_directory.as_deref(),
             ),
             &manifest.workspace_root,
-            &manifest.root,
+            &fresh_owner,
             base,
             validation,
         )
@@ -841,14 +852,41 @@ fn create_published_profile(path: &Path) -> Result<()> {
 }
 
 pub(crate) fn fresh_record_path(profile: &Path, package_root: &Path) -> PathBuf {
+    fresh_record_path_for(profile, package_root.as_os_str().as_encoded_bytes())
+}
+
+fn fresh_record_path_for(profile: &Path, owner: &[u8]) -> PathBuf {
     let mut hash = Sha256::new();
     hash.update(b"lorry-fresh-owner-v1");
-    hash.update(package_root.as_os_str().as_encoded_bytes());
+    hash.update(owner);
     profile.join(format!("{FRESH_PROFILE_FILE}-{}", hex(&hash.finish())))
 }
 
-fn invalidate_fresh_profile(profile: &Path, package_root: &Path) -> Result<()> {
-    let path = fresh_record_path(profile, package_root);
+/// Names the completed-profile record. A single-package build keeps its
+/// package root; a shared selection is named by its members and targets, so
+/// alternating selections do not overwrite one another's record.
+fn fresh_owner(
+    manifest: &Manifest,
+    members: Option<&[Manifest]>,
+    targets: Option<&crate::cli::TargetSelection>,
+    binary: Option<&str>,
+) -> Vec<u8> {
+    let Some(members) = members else {
+        return manifest.root.as_os_str().as_encoded_bytes().to_vec();
+    };
+    let mut digest = FreshDigest::new();
+    digest.bytes("schema", b"lorry-shared-selection-v1");
+    digest.os("primary", manifest.root.as_os_str());
+    for member in members {
+        digest.os("member", member.root.as_os_str());
+    }
+    digest.debug("targets", &targets);
+    digest.debug("binary", &binary);
+    format!("shared:{}", hex(&digest.finish())).into_bytes()
+}
+
+fn invalidate_fresh_profile(profile: &Path, owner: &[u8]) -> Result<()> {
+    let path = fresh_record_path_for(profile, owner);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(Error::failure(format!(
@@ -1141,7 +1179,13 @@ fn build_inner(
     manifests.insert(selected_root.package.clone(), build.manifest.clone());
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
-    let completed_freshness_base = (check.is_none() && build.members.is_none())
+    let fresh_owner = fresh_owner(
+        build.manifest,
+        build.members,
+        build.target_selection,
+        build.binary_selection,
+    );
+    let completed_freshness_base = (check.is_none() && !build.test)
         .then(|| freshness_base(&build, &prepared, &cargo))
         .transpose()?;
     if let Some(base) = completed_freshness_base {
@@ -1149,7 +1193,7 @@ fn build_inner(
         if let Some(artifacts) = restore_fresh_profile(
             &destination,
             &build.manifest.workspace_root,
-            &build.manifest.root,
+            &fresh_owner,
             base,
             build.validation,
         ) {
@@ -1660,7 +1704,7 @@ fn build_inner(
         return Ok(BuildOutcome::Tests(tests));
     }
     // Test builds always select workspace members and return above.
-    invalidate_fresh_profile(&destination, &build.manifest.root)?;
+    invalidate_fresh_profile(&destination, &fresh_owner)?;
     let plan = normal_plan()?;
     if build.verbosity != Verbosity::Quiet {
         for warning in binary_collision_warnings(&plan, &selected_packages, &destination) {
@@ -1745,7 +1789,7 @@ fn build_inner(
         write_fresh_profile(
             &destination,
             &build.manifest.workspace_root,
-            &build.manifest.root,
+            &fresh_owner,
             base,
             &compiled,
             &local_source_roots(&prepared.resolution),
@@ -1931,6 +1975,14 @@ struct TrustedFreshness<'a> {
     binary_selection: Option<&'a str>,
     jobs: usize,
     cargo: &'a Path,
+    shared: Option<SharedSelection<'a>>,
+}
+
+/// What a shared workspace selection adds to the single-package inputs.
+struct SharedSelection<'a> {
+    members: &'a [Manifest],
+    features: &'a crate::cli::FeatureSelection,
+    targets: Option<&'a crate::cli::TargetSelection>,
 }
 
 fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
@@ -1951,6 +2003,11 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
     digest.debug("cargo-registry", &inputs.use_cargo_registry);
     digest.debug("binary-selection", &inputs.binary_selection);
     digest.debug("jobs", &inputs.jobs);
+    if let Some(shared) = &inputs.shared {
+        digest.debug("shared-members", &shared.members);
+        digest.debug("shared-features", shared.features);
+        digest.debug("shared-targets", &shared.targets);
+    }
     digest.metadata("lorry", inputs.cargo)?;
     digest.metadata("rustc", &inputs.toolchain.rustc)?;
     digest.metadata(
@@ -2005,6 +2062,9 @@ fn freshness_base(
     digest.debug("binary-selection", &build.binary_selection);
     digest.debug("target-selection", &build.target_selection);
     digest.debug("jobs", &build.jobs);
+    if let Some(members) = build.members {
+        digest.debug("shared-members", &members);
+    }
     if build.validation.is_strict() {
         digest.file("lorry", cargo)?;
         digest.file("rustc", &build.toolchain.rustc)?;
@@ -2093,11 +2153,11 @@ fn compiler_environment_digest(digest: &mut FreshDigest) {
 fn restore_fresh_profile(
     profile: &Path,
     package_root: &Path,
-    owner_root: &Path,
+    owner: &[u8],
     base: [u8; 32],
     validation: ValidationMode,
 ) -> Option<BuildArtifacts> {
-    let record = read_fresh_profile(profile, owner_root)?;
+    let record = read_fresh_profile(profile, owner)?;
     if record.base != base || !tracked_env::matches_current(&record.environment) {
         return None;
     }
@@ -2147,10 +2207,16 @@ fn restore_fresh_profile(
     if !valid {
         return None;
     }
+    let mut messages = record.messages;
+    for message in &mut messages {
+        if message["reason"] == "compiler-artifact" {
+            message["fresh"] = serde_json::Value::Bool(true);
+        }
+    }
     Some(BuildArtifacts {
         primary,
         binaries,
-        messages: record.messages,
+        messages,
         library_paths: record.library_paths,
     })
 }
@@ -2158,13 +2224,17 @@ fn restore_fresh_profile(
 fn write_fresh_profile(
     profile: &Path,
     package_root: &Path,
-    owner_root: &Path,
+    owner: &[u8],
     base: [u8; 32],
     artifacts: &StagedArtifacts,
     local_roots: &[LocalSource],
     validation: ValidationMode,
 ) -> Result<()> {
-    let primary = relative_profile_path(profile, &artifacts.primary)?;
+    // A root outside this profile, such as a host proc macro in a cross
+    // build, has no profile-relative record.
+    let Ok(primary) = relative_profile_path(profile, &artifacts.primary) else {
+        return Ok(());
+    };
     let mut dep_info = artifacts
         .dep_info
         .iter()
@@ -2238,13 +2308,13 @@ fn write_fresh_profile(
             document.push_str(&format!("dep-info={}\n", path.display()));
         }
     }
-    let mut record = AtomicFile::new(&fresh_record_path(profile, owner_root))?;
+    let mut record = AtomicFile::new(&fresh_record_path_for(profile, owner))?;
     record.write_all(document.as_bytes())?;
     record.commit()
 }
 
-fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfile> {
-    let path = fresh_record_path(profile, package_root);
+fn read_fresh_profile(profile: &Path, owner: &[u8]) -> Option<FreshProfile> {
+    let path = fresh_record_path_for(profile, owner);
     let metadata = fs::symlink_metadata(&path).ok()?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_FRESH_PROFILE_BYTES {
         return None;
@@ -2497,7 +2567,8 @@ fn trusted_input_digest(
     }
     for source in local_roots {
         if source.editable {
-            let mut manifest = Manifest::load_path_dependency(&source.root)?;
+            // Members may be binary-only, which a dependency load rejects.
+            let mut manifest = Manifest::load_source_dependency(&source.root)?;
             manifest.workspace_root.clone_from(&root);
             digest.bytes(
                 "editable-source",
@@ -3167,6 +3238,10 @@ fn use_color(color: Color) -> bool {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    fn owner(path: &Path) -> &[u8] {
+        path.as_os_str().as_encoded_bytes()
+    }
     use crate::config::{CargoCompat, PolicyAction, PolicyRule};
     use crate::repository::RepositorySet;
     use std::collections::BTreeSet;
@@ -3707,7 +3782,7 @@ mod tests {
         assert_ne!(first, second);
         fs::write(&first, b"first").unwrap();
         fs::write(&second, b"second").unwrap();
-        invalidate_fresh_profile(&profile, &fixture.0.join("first")).unwrap();
+        invalidate_fresh_profile(&profile, owner(&fixture.0.join("first"))).unwrap();
         assert!(!first.exists());
         assert_eq!(fs::read(second).unwrap(), b"second");
     }
@@ -3752,7 +3827,7 @@ mod tests {
             write_fresh_profile(
                 &profile,
                 &fixture.0,
-                &fixture.0,
+                owner(&fixture.0),
                 base,
                 &staged,
                 &[],
@@ -3760,13 +3835,14 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                read_fresh_profile(&profile, &fixture.0)
+                read_fresh_profile(&profile, owner(&fixture.0))
                     .unwrap()
                     .script_inputs,
                 staged.script_inputs
             );
             let fresh = || {
-                restore_fresh_profile(&profile, &fixture.0, &fixture.0, base, validation).is_some()
+                restore_fresh_profile(&profile, &fixture.0, owner(&fixture.0), base, validation)
+                    .is_some()
             };
             assert!(fresh());
             fs::write(&first, b"different").unwrap();
@@ -3815,7 +3891,7 @@ mod tests {
         write_fresh_profile(
             &profile,
             &fixture.0,
-            &fixture.0,
+            owner(&fixture.0),
             base,
             &staged,
             &[],
@@ -3834,7 +3910,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                &fixture.0,
+                owner(&fixture.0),
                 base,
                 ValidationMode::Trusted
             )
@@ -3844,7 +3920,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                &fixture.0,
+                owner(&fixture.0),
                 base,
                 ValidationMode::Strict
             )
@@ -3861,7 +3937,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                &fixture.0,
+                owner(&fixture.0),
                 base,
                 ValidationMode::Trusted
             )
@@ -3871,7 +3947,7 @@ mod tests {
         write_fresh_profile(
             &profile,
             &fixture.0,
-            &fixture.0,
+            owner(&fixture.0),
             base,
             &staged,
             &[],
@@ -3882,7 +3958,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                &fixture.0,
+                owner(&fixture.0),
                 base,
                 ValidationMode::Strict
             )
@@ -3893,7 +3969,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                &fixture.0,
+                owner(&fixture.0),
                 base,
                 ValidationMode::Strict
             )
@@ -3941,7 +4017,7 @@ mod tests {
         write_fresh_profile(
             &profile,
             &fixture.0,
-            &fixture.0,
+            owner(&fixture.0),
             base,
             &staged,
             &[],
@@ -3953,7 +4029,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                &fixture.0,
+                owner(&fixture.0),
                 base,
                 ValidationMode::Trusted
             )
@@ -3963,7 +4039,7 @@ mod tests {
         write_fresh_profile(
             &profile,
             &fixture.0,
-            &fixture.0,
+            owner(&fixture.0),
             base,
             &staged,
             &[],
@@ -3975,7 +4051,7 @@ mod tests {
             restore_fresh_profile(
                 &profile,
                 &fixture.0,
-                &fixture.0,
+                owner(&fixture.0),
                 base,
                 ValidationMode::Strict
             )

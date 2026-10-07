@@ -1693,8 +1693,12 @@ Lorry removes the Cargo-client variables `CARGO_LOG`, `RUSTUP_TOOLCHAIN`,
 and `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS` before starting rustc, so
 a unit always sees them unset.
 
-After a successful eligible single-member build or run, the completed root
-profile contains a freshness record scoped to the selected package path. An
+After a successful build or run, the completed root profile contains a
+freshness record. A single-member build scopes it to the selected package
+path. A shared workspace build scopes it to the selected members, target
+selection, and binary selection, and also digests every selected member's
+manifest and the feature requests. So alternating selections keep separate
+records. An
 ordinary unchanged `build` or `run` validates parsed manifest, lock, compact
 admission, configuration, compiler, target, flags, tracked variables, and
 tool metadata plus rustc dep-info and mutable path-source path/size/mtime
