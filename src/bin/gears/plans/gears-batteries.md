@@ -9,10 +9,9 @@ cutoff-based cleanup proposals with approval-only archival. Phase 9's manual
 multi-task evaluation command, frozen workspace/state copies, repeated arms and
 reports pass focused host/native fixtures and the release developer-image gate;
 the first real-model run is pending.
-Sysbox S1–S5 and S6 echo are complete and core-gated, including local sort-key modifiers.
-The utility track continues with `xargs`, which will use sysbox `echo` when
-the command is omitted.
-Rush's built-in echo remains in place.
+Sysbox S1–S5, S6 echo and basic xargs are complete and core-gated.
+The utility track continues with `xargs -d/-n/-I/-t`. Omitted commands run
+sysbox `echo`; Rush's built-in echo remains in place.
 Design revised 2026-10-07. See the
 [remaining-work checklist](gears-batteries-progress.md#what-remains) for current
 status; that document also retains the implementation history. Two questions wait

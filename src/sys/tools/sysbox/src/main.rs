@@ -37,6 +37,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox tr");
     println!("\tsysbox uniq");
     println!("\tsysbox uptime");
+    println!("\tsysbox xargs");
     println!("\tsysbox wc");
     println!("\tsysbox which");
     std::process::exit(exit_code);
@@ -105,6 +106,7 @@ fn main() {
         "top" => commands::top::do_command(&args[1..]),
         "tr" => commands::tr::do_command(&args[1..]),
         "uniq" => commands::uniq::do_command(&args[1..]),
+        "xargs" => commands::xargs::do_command(&args[1..]),
         "uptime" => commands::uptime::do_command(&args[1..]),
         "wc" => commands::wc::do_command(&args[1..]),
         "which" => commands::which::do_command(&args[1..]),

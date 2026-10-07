@@ -1,0 +1,2 @@
+#!/system/bin/rush
+/system/bin/sysbox xargs "$@"

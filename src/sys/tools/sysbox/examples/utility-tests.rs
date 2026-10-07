@@ -9,6 +9,10 @@ mod sort_key_flags;
 mod tr;
 #[path = "utility-tests/uniq.rs"]
 mod uniq;
+#[path = "utility-tests/xargs.rs"]
+mod xargs;
+#[path = "utility-tests/xargs-probe.rs"]
+mod xargs_probe;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -140,6 +144,10 @@ fn sort_fields(root: &Path) {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--probe") {
+        xargs_probe::probe();
+        return;
+    }
     let root = std::env::temp_dir().join(format!("sysbox-utility-tests-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
     eprintln!("sysbox utility test artifacts: {}", root.display());
@@ -150,6 +158,7 @@ fn main() {
     cut::fields(&root);
     tr::one_set(&root);
     tr::translation(&root);
+    xargs::basic(&root);
     echo::run_test(&root);
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox utility-tests: ALL PASS");

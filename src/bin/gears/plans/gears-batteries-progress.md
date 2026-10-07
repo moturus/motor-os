@@ -18,7 +18,7 @@ that Gears works with OpenRouter on Motor OS.
 | --- | --- |
 | First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
 | Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
-| Motor OS command utilities | Separate coding work remains: `xargs`. `mkdir -p`, `sort`, `uniq`, `cut`, `tr` and sysbox `echo` are implemented and core-gated; Rush's built-in echo remains unchanged. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Motor OS command utilities | Separate coding work remains: `xargs -d/-n/-I/-t`. Basic `xargs` and sysbox `echo` are implemented and core-gated; Rush's built-in echo remains unchanged. These additions are not prerequisites for using the implemented Gears/batteries features. |
 | Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
 | Optional orchestration (10) | Implement supervised worker agents and their budgets. |
 | Optional web tools (11) | Implement web search and page extraction using curl. |
@@ -1422,5 +1422,35 @@ check verifies output-failure handling.
 The final installed fixture and `full-test.sh` pass three times each in
 debug and release on unchanged source. Warnings-denied native Clippy passes.
 Gate logs: `/tmp/gears-sysbox-echo/final-gates/`. Authored crate changes are limited to sysbox;
+verified build-generated locks are restored and the user's existing sys lock
+is preserved.
+
+
+### S6 xargs direct execution and bounded input
+
+Sysbox `xargs` parses quoted and backslash-escaped default input and
+literal NUL-separated `-0` input, supports `-r`, and executes commands directly
+without a shell. Omitted commands run sysbox `echo`, including the empty-input
+case. Children receive EOF on stdin. Argument batches are bounded to 128 KiB;
+invalid UTF-8 and oversized arguments fail explicitly. Child errors map to
+the documented xargs statuses, with exit 255 stopping further invocations.
+Native fixtures cover quoting, injection-shaped literal arguments, empty
+input, child stdin, status propagation and a 50,000-argument two-batch stream.
+Installed-source host fixtures, 42 explicit-command GNU output/status
+comparisons and 18 default-command output/status/diagnostic comparisons pass.
+
+The first native run exposed a new xargs status-classification defect:
+Motor's PATH resolver returns InvalidFilename when no command is found,
+which xargs initially classified as 126. Sysbox now normalizes that specific
+Motor spawn result to NotFound before choosing the diagnostic and status 127.
+Other errors retain their classification. Native assertions cover both bare
+and relative missing commands (127), plus a file denied execution (126).
+The original failure is preserved in
+`/tmp/gears-sysbox-xargs-basic/final-gates/`; it does not count toward the
+six final gates, which all use the corrected source.
+
+The final installed fixture and `full-test.sh` pass three times each in
+debug and release on unchanged source. Warnings-denied native Clippy passes.
+Gate logs: `/tmp/gears-sysbox-xargs-basic/final-gates-corrected/`. Authored crate changes are limited to sysbox;
 verified build-generated locks are restored and the user's existing sys lock
 is preserved.
