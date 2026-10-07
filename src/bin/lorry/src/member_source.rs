@@ -8,6 +8,7 @@ use gix::ignore::Search;
 use crate::diagnostic::{Error, Result};
 use crate::hash::{Sha256, sha256_file};
 use crate::manifest::Manifest;
+use crate::source_tree::{DEFAULT_LIMITS, Limits};
 
 pub(crate) struct Snapshot {
     pub sha256: [u8; 32],
@@ -16,11 +17,17 @@ pub(crate) struct Snapshot {
 }
 
 pub(crate) fn snapshot(manifest: &Manifest, strict: bool) -> Result<Snapshot> {
+    snapshot_within(manifest, strict, DEFAULT_LIMITS)
+}
+
+// Members are trusted, but a link out of the package must not make Lorry
+// walk or hash a whole filesystem. Path packages use the same limits.
+fn snapshot_within(manifest: &Manifest, strict: bool, limits: Limits) -> Result<Snapshot> {
     let mut hash = Sha256::new();
     hash.update(b"lorry-editable-source-v1\0");
     let mut bytes = 0_u64;
     let mut count = 0;
-    for path in files(manifest)? {
+    for path in collect(manifest, limits.max_entries)? {
         let relative = path.strip_prefix(&manifest.root).unwrap();
         field(&mut hash, relative.as_os_str().as_encoded_bytes());
         let metadata = match fs::metadata(&path) {
@@ -36,6 +43,10 @@ pub(crate) fn snapshot(manifest: &Manifest, strict: bool) -> Result<Snapshot> {
         let identity = resolved
             .strip_prefix(&manifest.workspace_root)
             .unwrap_or(&resolved);
+        bytes = bytes
+            .checked_add(metadata.len())
+            .filter(|bytes| *bytes <= limits.max_tree_bytes)
+            .ok_or_else(|| limit_error(manifest, format!("{} bytes", limits.max_tree_bytes)))?;
         field(&mut hash, identity.as_os_str().as_encoded_bytes());
         field(&mut hash, &metadata.len().to_le_bytes());
         if strict {
@@ -49,9 +60,6 @@ pub(crate) fn snapshot(manifest: &Manifest, strict: bool) -> Result<Snapshot> {
             field(&mut hash, &modified.as_secs().to_le_bytes());
             field(&mut hash, &modified.subsec_nanos().to_le_bytes());
         }
-        bytes = bytes
-            .checked_add(metadata.len())
-            .ok_or_else(|| Error::failure("editable source byte count overflowed"))?;
         count += 1;
     }
     Ok(Snapshot {
@@ -66,7 +74,20 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
     hash.update(bytes);
 }
 
-pub(crate) fn files(manifest: &Manifest) -> Result<Vec<PathBuf>> {
+fn limit_error(manifest: &Manifest, limit: String) -> Error {
+    Error::failure(format!(
+        "editable package `{}` exceeds the source limit of {limit}",
+        manifest.name
+    ))
+    .with_help("exclude large files with `package.exclude`, or remove links that leave the package")
+}
+
+#[cfg(test)]
+fn files(manifest: &Manifest) -> Result<Vec<PathBuf>> {
+    collect(manifest, DEFAULT_LIMITS.max_entries)
+}
+
+fn collect(manifest: &Manifest, max_files: usize) -> Result<Vec<PathBuf>> {
     // Cargo uses Git ignores only when the manifest is tracked and no include
     // list replaces that discovery. A plain directory excludes dotfiles.
     let include = manifest.metadata.include.as_deref().unwrap_or_default();
@@ -81,6 +102,8 @@ pub(crate) fn files(manifest: &Manifest) -> Result<Vec<PathBuf>> {
     }
     excludes.extend(manifest.metadata.exclude.clone().unwrap_or_default());
     let filter = FileFilter {
+        manifest,
+        max_files,
         root: &manifest.root,
         include: (!include.is_empty()).then(|| Search::from_overrides(include, Default::default())),
         exclude: Search::from_overrides(excludes, Default::default()),
@@ -117,12 +140,25 @@ fn tracked_repository(root: &Path) -> Result<Option<gix::Repository>> {
 }
 
 struct FileFilter<'a> {
+    manifest: &'a Manifest,
+    max_files: usize,
     root: &'a Path,
     include: Option<Search>,
     exclude: Search,
 }
 
 impl FileFilter<'_> {
+    fn push(&self, files: &mut Vec<PathBuf>, path: PathBuf) -> Result<()> {
+        if files.len() >= self.max_files {
+            return Err(limit_error(
+                self.manifest,
+                format!("{} files", self.max_files),
+            ));
+        }
+        files.push(path);
+        Ok(())
+    }
+
     fn accepts(&self, path: &Path, directory: bool) -> bool {
         let Ok(relative) = path.strip_prefix(self.root) else {
             return false;
@@ -166,8 +202,7 @@ fn walk(
         return Ok(());
     }
     if !directory {
-        files.push(path.to_owned());
-        return Ok(());
+        return filter.push(files, path.to_owned());
     }
     if path != filter.root
         && (path.join("Cargo.toml").exists() || path == filter.root.join("target"))
@@ -308,7 +343,7 @@ fn git_files(
                 walk(&path, filter, ancestors, files)?;
             }
         } else if filter.accepts(&path, false) {
-            files.push(path);
+            filter.push(files, path)?;
         }
     }
     ancestors.pop();
@@ -325,6 +360,46 @@ fn io_error(path: &Path, error: std::io::Error) -> Error {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editable_sources_stop_at_the_path_package_limits() {
+        let base = std::env::temp_dir().join(format!("lorry-member-limit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("member");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(base.join("outside")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        for index in 0..4 {
+            fs::write(base.join(format!("outside/{index}")), "0123456789").unwrap();
+        }
+        std::os::unix::fs::symlink(base.join("outside"), root.join("linked")).unwrap();
+        let manifest = Manifest::load_for_vendor(&root).unwrap();
+        let limits = |max_entries, max_tree_bytes| Limits {
+            max_entries,
+            max_tree_bytes,
+            ..DEFAULT_LIMITS
+        };
+        let full = snapshot_within(&manifest, true, DEFAULT_LIMITS)
+            .ok()
+            .unwrap();
+        assert_eq!(full.files, 6);
+        assert!(snapshot_within(&manifest, true, limits(6, full.bytes)).is_ok());
+        let files = snapshot_within(&manifest, true, limits(5, full.bytes))
+            .err()
+            .unwrap();
+        assert!(files.render().contains("source limit of 5 files"));
+        let bytes = snapshot_within(&manifest, false, limits(6, full.bytes - 1))
+            .err()
+            .unwrap();
+        let expected = format!("source limit of {} bytes", full.bytes - 1);
+        assert!(bytes.render().contains(&expected));
+        fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn editable_files_follow_links_and_stop_at_other_packages() {
