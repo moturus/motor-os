@@ -16,15 +16,6 @@ impl Selection {
     }
 }
 
-#[cfg(test)]
-pub fn transitive_selection(
-    manifest: &Manifest,
-    selector: &str,
-    version: &str,
-) -> Result<Selection> {
-    workspace_selection(std::slice::from_ref(manifest), selector, version)
-}
-
 pub fn workspace_selection(
     members: &[Manifest],
     selector: &str,
@@ -186,12 +177,12 @@ mod tests {
         );
         let manifest = Manifest::load_for_vendor(&fixture.0).unwrap();
         assert!(
-            transitive_selection(&manifest, "libc", "0.2.2")
+            workspace_selection(std::slice::from_ref(&manifest), "libc", "0.2.2")
                 .unwrap_err()
                 .render()
                 .contains("ambiguous")
         );
-        let error = transitive_selection(&manifest, "a", "0.2.2").unwrap_err();
+        let error = workspace_selection(std::slice::from_ref(&manifest), "a", "0.2.2").unwrap_err();
         assert!(error.render().contains("edit its version requirement"));
     }
 
@@ -216,12 +207,13 @@ mod tests {
         .unwrap();
         let manifest = Manifest::load_for_vendor(&fixture.0).unwrap();
         assert!(
-            transitive_selection(&manifest, "demo", "1.2.4")
+            workspace_selection(std::slice::from_ref(&manifest), "demo", "1.2.4")
                 .unwrap_err()
                 .render()
                 .contains("ambiguous")
         );
-        let selection = transitive_selection(&manifest, "demo@1.2.3", "1.2.4").unwrap();
+        let selection =
+            workspace_selection(std::slice::from_ref(&manifest), "demo@1.2.3", "1.2.4").unwrap();
         let (name, old, requested) = selection.as_resolver_input();
         assert_eq!(name, "demo");
         assert_eq!(old.unwrap(), &Version::parse("1.2.3").unwrap());

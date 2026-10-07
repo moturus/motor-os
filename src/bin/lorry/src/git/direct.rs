@@ -102,11 +102,6 @@ impl DirectCatalog {
     pub(crate) fn sources(&self) -> impl Iterator<Item = &GitSourceEvidence> {
         self.sources.values()
     }
-
-    #[cfg(test)]
-    pub(crate) fn has_sources(&self) -> bool {
-        !self.sources.is_empty()
-    }
 }
 
 pub(crate) fn materialize_locked_sources(
