@@ -971,7 +971,6 @@ fn validate_dep_info(
     source_remap: Option<&crate::unit::SourceRemap>,
     allowed_inputs: &[PathBuf],
 ) -> Result<()> {
-    const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
     let dep_info = match output {
         RustcOutput::Library { dep_info, .. }
         | RustcOutput::StaticLibrary { dep_info, .. }
@@ -1064,6 +1063,53 @@ fn validate_dep_info(
         }
     }
     Ok(())
+}
+
+const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
+
+pub(crate) struct DepInfo {
+    pub bytes: Vec<u8>,
+    /// Each input as placed by the caller, with its canonical path.
+    pub inputs: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Reads a bounded rustc dep-info file. Each listed input is placed by
+/// `resolve` and then canonicalized; `kind` names the inputs in errors.
+pub(crate) fn read_dep_info(
+    path: &Path,
+    kind: &str,
+    resolve: impl Fn(PathBuf) -> PathBuf,
+) -> Result<DepInfo> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::failure(format!(
+            "failed to inspect rustc dep-info `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_DEP_INFO_BYTES {
+        return Err(Error::failure(format!(
+            "invalid rustc dep-info `{}`",
+            path.display()
+        )));
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        Error::failure(format!(
+            "failed to read rustc dep-info `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    let mut inputs = Vec::new();
+    for input in parse_dep_info_paths(&bytes)? {
+        let input = resolve(input);
+        let canonical = fs::canonicalize(&input).map_err(|error| {
+            Error::failure(format!(
+                "failed to resolve {kind} `{}`: {error}",
+                input.display()
+            ))
+        })?;
+        inputs.push((input, canonical));
+    }
+    Ok(DepInfo { bytes, inputs })
 }
 
 pub(crate) fn parse_dep_info_paths(bytes: &[u8]) -> Result<Vec<PathBuf>> {

@@ -12,7 +12,7 @@ use crate::build_script::{Directive, Output as BuildScriptOutput};
 use crate::compile::{RustcInvocation, RustcOutput};
 use crate::config::CargoCompat;
 use crate::diagnostic::{Error, Result};
-use crate::hash::{Sha256, hex, sha256_file};
+use crate::hash::{FieldDigest, Sha256, hex, modified_time, sha256_file};
 use crate::json::Value;
 use crate::manifest::Manifest;
 use crate::process;
@@ -428,7 +428,7 @@ impl BuildCache {
             copy_new_file(&entry.payload.join("library.a"), archive)?;
         }
         if selected.is_some() {
-            copy_new_file(&entry.payload.join("library.d"), dep_info_path(output)?)?;
+            copy_new_file(&entry.payload.join("library.d"), output.dep_info())?;
         }
         let stdout = fs::read(entry.payload.join(PUBLISHED_STDOUT))?;
         let stderr = fs::read(entry.payload.join(PUBLISHED_STDERR))?;
@@ -495,7 +495,7 @@ impl BuildCache {
         diagnostics: (&[u8], &[u8]),
     ) -> Result<()> {
         let (rlib, rmeta) = library_paths(output)?;
-        let dep_info = selected.map(|_| dep_info_path(output)).transpose()?;
+        let dep_info = selected.map(|_| output.dep_info());
         let destination = self.entry_path(key);
         let external_inputs = selected
             .map(|inputs| external_inputs_digest(dep_info.unwrap(), inputs))
@@ -1008,18 +1008,7 @@ fn metadata_tree_digest(
                         root.display()
                     )));
                 }
-                let modified = metadata.modified().map_err(|error| {
-                    Error::failure(format!(
-                        "failed to read modification time for `{}`: {error}",
-                        path.display()
-                    ))
-                })?;
-                let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
-                    Error::failure(format!(
-                        "modification time for `{}` predates the Unix epoch",
-                        path.display()
-                    ))
-                })?;
+                let modified = modified_time(&path, &metadata)?;
                 entries.push((relative.to_owned(), Some((metadata.len(), modified))));
             } else {
                 return Err(Error::failure(format!(
@@ -1126,17 +1115,6 @@ fn library_paths(output: &RustcOutput) -> Result<(&Path, &Path)> {
     }
 }
 
-fn dep_info_path(output: &RustcOutput) -> Result<&Path> {
-    match output {
-        RustcOutput::Library { dep_info, .. }
-        | RustcOutput::StaticLibrary { dep_info, .. }
-        | RustcOutput::Binary { dep_info, .. }
-        | RustcOutput::Metadata { dep_info, .. }
-        | RustcOutput::ProcMacro { dep_info, .. }
-        | RustcOutput::BuildScript { dep_info, .. } => Ok(dep_info),
-    }
-}
-
 fn published_unit_directory(output: &RustcOutput) -> Result<&Path> {
     let primary = match output {
         RustcOutput::Library { rlib, .. } => rlib,
@@ -1229,18 +1207,7 @@ fn published_fingerprint(
         if validation.is_strict() {
             digest.file_contents("artifact-contents", path)?;
         } else {
-            let modified = metadata
-                .modified()
-                .and_then(|time| {
-                    time.duration_since(UNIX_EPOCH)
-                        .map_err(std::io::Error::other)
-                })
-                .map_err(|error| {
-                    Error::failure(format!(
-                        "failed to inspect unit output time `{}`: {error}",
-                        path.display()
-                    ))
-                })?;
+            let modified = modified_time(path, &metadata)?;
             digest.bytes("artifact-length", &metadata.len().to_le_bytes());
             digest.bytes("artifact-mtime-secs", &modified.as_secs().to_le_bytes());
             digest.bytes(
@@ -1263,7 +1230,7 @@ fn published_fingerprint(
     if let Some(inputs) = selected {
         digest.bytes(
             "external-inputs",
-            &external_inputs_digest(dep_info_path(output)?, inputs)?,
+            &external_inputs_digest(output.dep_info(), inputs)?,
         );
     }
     Ok(digest.finish())
@@ -1563,49 +1530,20 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn external_inputs_digest(dep_info: &Path, inputs: SelectedInputs<'_>) -> Result<[u8; 32]> {
-    const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
-    let metadata = fs::symlink_metadata(dep_info).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect rustc dep-info `{}`: {error}",
-            dep_info.display()
-        ))
-    })?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_DEP_INFO_BYTES {
-        return Err(Error::failure(format!(
-            "invalid rustc dep-info `{}`",
-            dep_info.display()
-        )));
-    }
-    let bytes = fs::read(dep_info).map_err(|error| {
-        Error::failure(format!(
-            "failed to read rustc dep-info `{}`: {error}",
-            dep_info.display()
-        ))
-    })?;
     let root = fs::canonicalize(inputs.package_root).map_err(|error| {
         Error::failure(format!(
             "failed to resolve package root `{}`: {error}",
             inputs.package_root.display()
         ))
     })?;
-    let mut external = BTreeMap::new();
-    for source in crate::executor::parse_dep_info_paths(&bytes)? {
-        let path = inputs
+    let parsed = crate::executor::read_dep_info(dep_info, "rustc dep-info input", |source| {
+        inputs
             .source_remap
             .and_then(|remap| remap.restore_physical_path(&source))
-            .unwrap_or_else(|| {
-                if source.is_absolute() {
-                    source
-                } else {
-                    inputs.working_dir.join(source)
-                }
-            });
-        let resolved = fs::canonicalize(&path).map_err(|error| {
-            Error::failure(format!(
-                "failed to resolve rustc dep-info input `{}`: {error}",
-                path.display()
-            ))
-        })?;
+            .unwrap_or_else(|| inputs.working_dir.join(source))
+    })?;
+    let mut external = BTreeMap::new();
+    for (path, resolved) in parsed.inputs {
         if !resolved.starts_with(&root) {
             external.insert(path, resolved);
         }
@@ -1620,16 +1558,15 @@ fn external_inputs_digest(dep_info: &Path, inputs: SelectedInputs<'_>) -> Result
     Ok(digest.finish())
 }
 
-struct KeyDigest(Sha256);
+struct KeyDigest(FieldDigest);
 
 impl KeyDigest {
     fn new() -> Self {
-        Self(Sha256::new())
+        Self(FieldDigest::new())
     }
 
     fn bytes(&mut self, name: &str, value: &[u8]) {
-        self.field(name.as_bytes());
-        self.field(value);
+        self.0.bytes(name, value);
     }
 
     fn string(&mut self, name: &str, value: &str) {
@@ -1652,37 +1589,7 @@ impl KeyDigest {
     }
 
     fn metadata(&mut self, name: &str, path: &Path) -> Result<()> {
-        let metadata = fs::metadata(path).map_err(|error| {
-            Error::failure(format!("failed to inspect `{}`: {error}", path.display()))
-        })?;
-        let modified = metadata.modified().map_err(|error| {
-            Error::failure(format!(
-                "failed to read modification time for `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
-            Error::failure(format!(
-                "modification time for `{}` predates the Unix epoch",
-                path.display()
-            ))
-        })?;
-        self.os(&format!("{name}-path"), path.as_os_str(), &[]);
-        self.bytes(&format!("{name}-length"), &metadata.len().to_le_bytes());
-        self.bytes(
-            &format!("{name}-mtime-secs"),
-            &modified.as_secs().to_le_bytes(),
-        );
-        self.bytes(
-            &format!("{name}-mtime-nanos"),
-            &modified.subsec_nanos().to_le_bytes(),
-        );
-        Ok(())
-    }
-
-    fn field(&mut self, value: &[u8]) {
-        self.0.update(&(value.len() as u64).to_le_bytes());
-        self.0.update(value);
+        self.0.metadata(name, path)
     }
 
     fn finish(self) -> [u8; 32] {
@@ -1906,7 +1813,7 @@ mod tests {
             working_dir: &source,
             source_remap: None,
         };
-        let dep_info = dep_info_path(&built).unwrap();
+        let dep_info = built.dep_info();
         fs::write(dep_info, b"library.rlib: src/lib.rs\n").unwrap();
         cache
             .store(key, &built, None, Some(inputs), (b"", b""))
@@ -1951,7 +1858,7 @@ mod tests {
         };
         let built = output(&fixture.0.join("built"), b"old library");
         fs::write(
-            dep_info_path(&built).unwrap(),
+            built.dep_info(),
             format!("library.rlib: {}\n", external.display()),
         )
         .unwrap();
@@ -2019,7 +1926,7 @@ mod tests {
         fs::write(&external, b"first").unwrap();
         let output = output(&fixture.0.join("unit/deps"), b"library");
         fs::write(
-            dep_info_path(&output).unwrap(),
+            output.dep_info(),
             format!("library.rlib: {}\n", external.display()),
         )
         .unwrap();

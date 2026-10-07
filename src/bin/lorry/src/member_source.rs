@@ -1,12 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use gix::glob::pattern::Case;
 use gix::ignore::Search;
 
 use crate::diagnostic::{Error, Result};
-use crate::hash::{Sha256, sha256_file};
+use crate::hash::{FieldDigest, modified_time, sha256_file};
 use crate::manifest::Manifest;
 use crate::source_tree::{DEFAULT_LIMITS, Limits};
 
@@ -23,18 +22,17 @@ pub(crate) fn snapshot(manifest: &Manifest, strict: bool) -> Result<Snapshot> {
 // Members are trusted, but a link out of the package must not make Lorry
 // walk or hash a whole filesystem. Path packages use the same limits.
 fn snapshot_within(manifest: &Manifest, strict: bool, limits: Limits) -> Result<Snapshot> {
-    let mut hash = Sha256::new();
-    hash.update(b"lorry-editable-source-v1\0");
+    let mut hash = FieldDigest::tagged(b"lorry-editable-source-v1\0");
     let mut bytes = 0_u64;
     let mut count = 0;
     for path in collect(manifest, limits.max_entries)? {
         let relative = path.strip_prefix(&manifest.root).unwrap();
-        field(&mut hash, relative.as_os_str().as_encoded_bytes());
+        hash.field(relative.as_os_str().as_encoded_bytes());
         let metadata = match fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => continue,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                field(&mut hash, b"absent");
+                hash.field(b"absent");
                 continue;
             }
             Err(error) => return Err(io_error(&path, error)),
@@ -47,18 +45,14 @@ fn snapshot_within(manifest: &Manifest, strict: bool, limits: Limits) -> Result<
             .checked_add(metadata.len())
             .filter(|bytes| *bytes <= limits.max_tree_bytes)
             .ok_or_else(|| limit_error(manifest, format!("{} bytes", limits.max_tree_bytes)))?;
-        field(&mut hash, identity.as_os_str().as_encoded_bytes());
-        field(&mut hash, &metadata.len().to_le_bytes());
+        hash.field(identity.as_os_str().as_encoded_bytes());
+        hash.field(&metadata.len().to_le_bytes());
         if strict {
-            field(&mut hash, &sha256_file(&path)?);
+            hash.field(&sha256_file(&path)?);
         } else {
-            let modified = metadata
-                .modified()
-                .map_err(|error| io_error(&path, error))?
-                .duration_since(UNIX_EPOCH)
-                .map_err(|error| Error::failure(error.to_string()))?;
-            field(&mut hash, &modified.as_secs().to_le_bytes());
-            field(&mut hash, &modified.subsec_nanos().to_le_bytes());
+            let modified = modified_time(&path, &metadata)?;
+            hash.field(&modified.as_secs().to_le_bytes());
+            hash.field(&modified.subsec_nanos().to_le_bytes());
         }
         count += 1;
     }
@@ -67,11 +61,6 @@ fn snapshot_within(manifest: &Manifest, strict: bool, limits: Limits) -> Result<
         bytes,
         files: count,
     })
-}
-
-fn field(hash: &mut Sha256, bytes: &[u8]) {
-    hash.update(&(bytes.len() as u64).to_le_bytes());
-    hash.update(bytes);
 }
 
 fn limit_error(manifest: &Manifest, limit: String) -> Error {

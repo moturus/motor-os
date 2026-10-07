@@ -1,9 +1,10 @@
 use crate::diagnostic::{Error, Result};
 use sha2::{Digest, Sha256 as Sha256Backend};
-use std::fs::File;
+use std::fs::{self, File, Metadata};
 use std::hash::Hasher;
 use std::io::Read;
 use std::path::Path;
+use std::time::{Duration, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub struct Sha256(Sha256Backend);
@@ -26,6 +27,74 @@ impl Default for Sha256 {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// SHA-256 over fields that each carry a little-endian `u64` length prefix.
+/// Cache keys and on-disk records depend on this exact encoding.
+#[derive(Default)]
+pub struct FieldDigest(Sha256);
+
+impl FieldDigest {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Starts the digest with a tag that has no length prefix.
+    pub fn tagged(tag: &[u8]) -> Self {
+        let mut digest = Self::new();
+        digest.0.update(tag);
+        digest
+    }
+
+    pub fn field(&mut self, value: &[u8]) {
+        self.0.update(&(value.len() as u64).to_le_bytes());
+        self.0.update(value);
+    }
+
+    /// A named value: the name field, then the value field.
+    pub fn bytes(&mut self, name: &str, value: &[u8]) {
+        self.field(name.as_bytes());
+        self.field(value);
+    }
+
+    /// The path, length and modification time of the file at `path`.
+    pub fn metadata(&mut self, name: &str, path: &Path) -> Result<()> {
+        let metadata = fs::metadata(path).map_err(|error| {
+            Error::failure(format!("failed to inspect `{}`: {error}", path.display()))
+        })?;
+        let modified = modified_time(path, &metadata)?;
+        self.bytes(&format!("{name}-path"), path.as_os_str().as_encoded_bytes());
+        self.bytes(&format!("{name}-length"), &metadata.len().to_le_bytes());
+        self.bytes(
+            &format!("{name}-mtime-secs"),
+            &modified.as_secs().to_le_bytes(),
+        );
+        self.bytes(
+            &format!("{name}-mtime-nanos"),
+            &modified.subsec_nanos().to_le_bytes(),
+        );
+        Ok(())
+    }
+
+    pub fn finish(self) -> [u8; 32] {
+        self.0.finish()
+    }
+}
+
+/// A file's modification time as a duration since the Unix epoch.
+pub fn modified_time(path: &Path, metadata: &Metadata) -> Result<Duration> {
+    let modified = metadata.modified().map_err(|error| {
+        Error::failure(format!(
+            "failed to read modification time for `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    modified.duration_since(UNIX_EPOCH).map_err(|_| {
+        Error::failure(format!(
+            "modification time for `{}` predates the Unix epoch",
+            path.display()
+        ))
+    })
 }
 
 pub fn sha256_file(path: &Path) -> Result<[u8; 32]> {
@@ -272,6 +341,25 @@ mod tests {
             }
             assert_eq!(partitioned.finish(), expected, "chunk size {chunk_size}");
         }
+    }
+
+    #[test]
+    fn field_digest_encoding_is_pinned() {
+        // Persisted cache keys and records rely on these exact bytes.
+        let mut tagged = FieldDigest::tagged(b"lorry-field-digest-test\0");
+        tagged.field(b"");
+        tagged.field(b"abc");
+        tagged.bytes("name", &[0xff; 3]);
+        assert_eq!(
+            hex(&tagged.finish()),
+            "efc084b25c29839b68b2dd81781db8c27593293df3e76e7b21290ae0bf699054"
+        );
+        let mut named = FieldDigest::new();
+        named.bytes("schema", b"v1");
+        assert_eq!(
+            hex(&named.finish()),
+            "719c834c8fa78d987ad69df98aac123b39a8ad774fb31bd7ff206bf9fd228165"
+        );
     }
 
     #[test]

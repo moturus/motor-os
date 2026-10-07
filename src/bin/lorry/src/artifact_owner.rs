@@ -4,31 +4,26 @@ use std::path::{Path, PathBuf};
 
 use crate::atomic::AtomicFile;
 use crate::diagnostic::{Error, Result};
-use crate::hash::Sha256;
+use crate::hash::FieldDigest;
 use crate::resolver::{PackageKey, PackageSourceKey};
 
 const FILE_NAME: &str = ".lorry-owner-v1";
 pub(crate) const PRIMARY_SUFFIX: &str = ".lorry-owner-v1";
 
-fn field(hash: &mut Sha256, bytes: &[u8]) {
-    hash.update(&(bytes.len() as u64).to_le_bytes());
-    hash.update(bytes);
-}
-
 pub fn identity(package: &PackageKey) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    field(&mut hash, b"lorry-artifact-owner-v1");
-    field(&mut hash, package.name.as_bytes());
-    field(&mut hash, package.version.to_string().as_bytes());
+    let mut hash = FieldDigest::new();
+    hash.field(b"lorry-artifact-owner-v1");
+    hash.field(package.name.as_bytes());
+    hash.field(package.version.to_string().as_bytes());
     match &package.source {
-        PackageSourceKey::CratesIo => field(&mut hash, b"crates.io"),
+        PackageSourceKey::CratesIo => hash.field(b"crates.io"),
         PackageSourceKey::Git(source) => {
-            field(&mut hash, b"git");
-            field(&mut hash, source.as_bytes());
+            hash.field(b"git");
+            hash.field(source.as_bytes());
         }
         PackageSourceKey::Path(path) => {
-            field(&mut hash, b"path");
-            field(&mut hash, path.as_os_str().as_encoded_bytes());
+            hash.field(b"path");
+            hash.field(path.as_os_str().as_encoded_bytes());
         }
     }
     hash.finish()

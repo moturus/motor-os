@@ -8,7 +8,7 @@ use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, effecti
 use crate::dependency;
 use crate::diagnostic::{Error, Result};
 use crate::executor;
-use crate::hash::{Sha256, decode_hex, hex, sha256_file};
+use crate::hash::{FieldDigest, Sha256, decode_hex, hex, modified_time, sha256_file};
 use crate::manifest::Manifest;
 use crate::process;
 use crate::progress::Progress;
@@ -26,7 +26,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 
@@ -1983,7 +1983,6 @@ fn report_finished(
 
 const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v6";
 const MAX_FRESH_PROFILE_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
 
 // The unit cache handles dependency compilation. This record additionally
 // proves that the installed root artifact can be reused as one complete unit.
@@ -2468,40 +2467,14 @@ fn fresh_input_digest(
     })?;
     let mut sources = BTreeMap::new();
     for relative in dep_info {
-        let path = profile.join(relative);
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            Error::failure(format!(
-                "failed to inspect rustc dep-info `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        if !metadata.file_type().is_file() || metadata.len() > MAX_DEP_INFO_BYTES {
-            return Err(Error::failure(format!(
-                "invalid rustc dep-info `{}`",
-                path.display()
-            )));
-        }
-        let bytes = fs::read(&path).map_err(|error| {
-            Error::failure(format!(
-                "failed to read rustc dep-info `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        digest.bytes("dep-info", &bytes);
         // rustc's dep-info is the authoritative list for include!, modules,
         // and other root source inputs that are not named in Cargo.toml.
-        for source in executor::parse_dep_info_paths(&bytes)? {
-            let source = if source.is_absolute() {
-                source
-            } else {
+        let parsed =
+            executor::read_dep_info(&profile.join(relative), "root source input", |source| {
                 root.join(source)
-            };
-            let source = fs::canonicalize(&source).map_err(|error| {
-                Error::failure(format!(
-                    "failed to resolve root source input `{}`: {error}",
-                    source.display()
-                ))
             })?;
+        digest.bytes("dep-info", &parsed.bytes);
+        for (_, source) in parsed.inputs {
             sources.insert(source.clone(), sha256_regular(&source)?);
         }
     }
@@ -2572,37 +2545,11 @@ fn trusted_input_digest(
     })?;
     let mut sources = BTreeMap::new();
     for relative in dep_info {
-        let path = profile.join(relative);
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            Error::failure(format!(
-                "failed to inspect rustc dep-info `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        if !metadata.file_type().is_file() || metadata.len() > MAX_DEP_INFO_BYTES {
-            return Err(Error::failure(format!(
-                "invalid rustc dep-info `{}`",
-                path.display()
-            )));
-        }
-        let bytes = fs::read(&path).map_err(|error| {
-            Error::failure(format!(
-                "failed to read rustc dep-info `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        for source in executor::parse_dep_info_paths(&bytes)? {
-            let source = if source.is_absolute() {
-                source
-            } else {
+        let parsed =
+            executor::read_dep_info(&profile.join(relative), "root source input", |source| {
                 root.join(source)
-            };
-            let source = fs::canonicalize(&source).map_err(|error| {
-                Error::failure(format!(
-                    "failed to resolve root source input `{}`: {error}",
-                    source.display()
-                ))
             })?;
+        for (_, source) in parsed.inputs {
             let metadata = fs::symlink_metadata(&source).map_err(|error| {
                 Error::failure(format!(
                     "failed to inspect root source input `{}`: {error}",
@@ -2615,18 +2562,7 @@ fn trusted_input_digest(
                     source.display()
                 )));
             }
-            let modified = metadata.modified().map_err(|error| {
-                Error::failure(format!(
-                    "failed to read modification time for `{}`: {error}",
-                    source.display()
-                ))
-            })?;
-            let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
-                Error::failure(format!(
-                    "modification time for `{}` predates the Unix epoch",
-                    source.display()
-                ))
-            })?;
+            let modified = modified_time(&source, &metadata)?;
             sources.insert(source, (metadata.len(), modified));
         }
     }
@@ -2761,18 +2697,7 @@ fn metadata_tree_digest(root: &Path, digest: &mut FreshDigest) -> Result<()> {
 }
 
 fn metadata_time(path: &Path, metadata: &fs::Metadata, digest: &mut FreshDigest) -> Result<()> {
-    let modified = metadata.modified().map_err(|error| {
-        Error::failure(format!(
-            "failed to read modification time for `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
-        Error::failure(format!(
-            "modification time for `{}` predates the Unix epoch",
-            path.display()
-        ))
-    })?;
+    let modified = modified_time(path, metadata)?;
     digest.bytes("mtime-secs", &modified.as_secs().to_le_bytes());
     digest.bytes("mtime-nanos", &modified.subsec_nanos().to_le_bytes());
     Ok(())
@@ -2791,18 +2716,15 @@ fn sha256_regular(path: &Path) -> Result<[u8; 32]> {
     sha256_file(path)
 }
 
-struct FreshDigest(Sha256);
+struct FreshDigest(FieldDigest);
 
 impl FreshDigest {
     fn new() -> Self {
-        Self(Sha256::new())
+        Self(FieldDigest::new())
     }
 
     fn bytes(&mut self, name: &str, value: &[u8]) {
-        for field in [name.as_bytes(), value] {
-            self.0.update(&(field.len() as u64).to_le_bytes());
-            self.0.update(field);
-        }
+        self.0.bytes(name, value);
     }
 
     fn os(&mut self, name: &str, value: &OsStr) {
@@ -2820,32 +2742,7 @@ impl FreshDigest {
     }
 
     fn metadata(&mut self, name: &str, path: &Path) -> Result<()> {
-        let metadata = fs::metadata(path).map_err(|error| {
-            Error::failure(format!("failed to inspect `{}`: {error}", path.display()))
-        })?;
-        let modified = metadata.modified().map_err(|error| {
-            Error::failure(format!(
-                "failed to read modification time for `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
-            Error::failure(format!(
-                "modification time for `{}` predates the Unix epoch",
-                path.display()
-            ))
-        })?;
-        self.os(&format!("{name}-path"), path.as_os_str());
-        self.bytes(&format!("{name}-length"), &metadata.len().to_le_bytes());
-        self.bytes(
-            &format!("{name}-mtime-secs"),
-            &modified.as_secs().to_le_bytes(),
-        );
-        self.bytes(
-            &format!("{name}-mtime-nanos"),
-            &modified.subsec_nanos().to_le_bytes(),
-        );
-        Ok(())
+        self.0.metadata(name, path)
     }
 
     fn finish(self) -> [u8; 32] {

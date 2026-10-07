@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::{Error, Result};
-use crate::hash::{Sha256, hex, sha256_file};
+use crate::hash::{FieldDigest, hex, sha256_file};
 use crate::process::RustcCommand;
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::{TargetInfo, Toolchain};
@@ -84,21 +84,21 @@ impl Layout {
             options.source_limits,
             Exclusions::GitAndTarget,
         )?;
-        let mut digest = Digest::new();
+        let mut digest = FieldDigest::new();
         digest.field(FORMAT_TAG);
-        digest.string(options.package_name);
+        digest.field(options.package_name.as_bytes());
         digest.field(&source.manifest_bytes());
         digest.field(options.build_inputs);
         digest.field(&options.compiler_identity.lorry);
         digest.field(&options.compiler_identity.rustc);
-        digest.string(&options.toolchain.verbose_version);
-        digest.string(&options.target.triple);
+        digest.field(options.toolchain.verbose_version.as_bytes());
+        digest.field(options.target.triple.as_bytes());
         for (name, value) in options.target.cfg.cargo_environment() {
-            digest.string(&name);
-            digest.string(&value);
+            digest.field(name.as_bytes());
+            digest.field(value.as_bytes());
         }
-        digest.string(if options.release { "release" } else { "debug" });
-        digest.string(options.test_name.unwrap_or("<all>"));
+        digest.field(if options.release { "release" } else { "debug" }.as_bytes());
+        digest.field(options.test_name.unwrap_or("<all>").as_bytes());
         digest.field(options.extraction_root.as_os_str().as_encoded_bytes());
         let id = hex(&digest.finish());
         let directory = options
@@ -292,27 +292,6 @@ fn launcher_source(layout: &Layout, payloads: &[Payload<'_>], manifest: &str) ->
          const MANIFEST: &[u8] = {manifest:?}.as_bytes();\n\
          static PAYLOADS: &[Payload] = &[\n{table}];\n\n{LAUNCHER_RUNTIME}"
     ))
-}
-
-struct Digest(Sha256);
-
-impl Digest {
-    fn new() -> Self {
-        Self(Sha256::new())
-    }
-
-    fn string(&mut self, value: &str) {
-        self.field(value.as_bytes());
-    }
-
-    fn field(&mut self, value: &[u8]) {
-        self.0.update(&(value.len() as u64).to_le_bytes());
-        self.0.update(value);
-    }
-
-    fn finish(self) -> [u8; 32] {
-        self.0.finish()
-    }
 }
 
 const LAUNCHER_RUNTIME: &str = r#"
