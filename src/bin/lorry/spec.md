@@ -1742,9 +1742,8 @@ writer and is replaced under the lock without interpreting its PID. For the same
 boot, the next command waits for that owner's child process records to disappear
 before changing artifacts. Legacy PID-only records retain that conservative wait.
 A missing kernel boot identity, malformed record, process-list error, or child
-still present after 30 seconds fails without changing artifacts. Lorry's pinned
-published moto-sys predates the appended field; a layout-checked ABI reader reads
-it from the kernel's full mapped page, rejecting older kernels' zero value.
+still present after 30 seconds fails without changing artifacts. Older kernels
+leave `boot_random_id` zero; Lorry rejects that value.
 If a compiler-unit replacement is interrupted between preserving the old
 directory and installing the new one, the next build restores the previous
 completed directory under the artifact lock. It leaves abandoned staging

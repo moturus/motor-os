@@ -122,17 +122,8 @@ impl Drop for ArtifactLock {
 
 #[cfg(target_os = "motor")]
 fn motor_boot_id() -> Result<u64> {
-    // Published moto-sys 0.3.0 has the ABI prefix, but not its new tail field.
-    #[repr(C)]
-    struct PageWithBootId {
-        prefix: moto_sys::KernelStaticPage,
-        boot_random_id: u64,
-    }
-    const _: () = assert!(core::mem::offset_of!(PageWithBootId, boot_random_id) == 64);
-    let page = moto_sys::KernelStaticPage::VADDR as usize as *const PageWithBootId;
-    // SAFETY: the kernel maps the full read-only page at this address. The field
-    // is initialized before userspace and immutable; older kernels leave zero.
-    let boot_id = unsafe { (*page).boot_random_id };
+    // Older kernels leave the field zero.
+    let boot_id = moto_sys::KernelStaticPage::get().boot_random_id;
     if boot_id == 0 {
         return Err(Error::failure(
             "Motor kernel provides no nonzero boot identity",
