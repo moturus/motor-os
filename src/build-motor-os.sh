@@ -1016,8 +1016,8 @@ main() {
 		"$MOTOR/vm_images/release/motor-os.qcow2"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
 		"$MOTOR/vm_images/release/motor-os-wasm.qcow2"
-		"$JAVY_IMG/user/bin/javy"
-		"$JAVY_IMG/user/bin/wasmi"
+		"$JAVY_IMG/devtools/bin/javy"
+		"$JAVY_IMG/devtools/bin/wasmi"
 	)
 	local output
 	for output in "${required_outputs[@]}"; do

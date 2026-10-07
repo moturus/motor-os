@@ -53,11 +53,11 @@ for variant in "${images[@]}"; do
       -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" -i "$WD/test.key" -P 2222)
     {
       printf 'put "%s" /user/tmp/javy-smoke\n' "$binary"
-      printf 'get /user/bin/javy "%s"\n' "$evidence/installed-javy"
-      printf 'get /user/bin/wasmi "%s"\n' "$evidence/installed-wasmi"
+      printf 'get /devtools/bin/javy "%s"\n' "$evidence/installed-javy"
+      printf 'get /devtools/bin/wasmi "%s"\n' "$evidence/installed-wasmi"
     } | sftp "${sftp_options[@]}" -b - motor@192.168.4.2
-    cmp "$assembly/javy/user/bin/javy" "$evidence/installed-javy"
-    cmp "$assembly/javy/user/bin/wasmi" "$evidence/installed-wasmi"
+    cmp "$assembly/javy/devtools/bin/javy" "$evidence/installed-javy"
+    cmp "$assembly/javy/devtools/bin/wasmi" "$evidence/installed-wasmi"
     vm_ssh /user/tmp/javy-smoke 2>&1 | tee "$evidence/$label.log"
     vm_ssh shutdown
     status=0

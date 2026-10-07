@@ -1,4 +1,4 @@
-use super::{Result, SHARE, Suite, fs};
+use super::{Result, SUPPORT_DIR, Suite, fs};
 
 pub(super) fn run(suite: &mut Suite) -> Result<()> {
     fs::write(
@@ -44,17 +44,17 @@ console.log(JSON.stringify({answer: values.get('answer'), text: new TextDecoder(
     suite.compile("runtime-error-compile", "throw.js", "throw.wasm", "")?;
     suite.refusal(
         "runtime-error",
-        "MOTOR_OS_CAPS=0 /user/bin/wasmi throw.wasm",
+        "MOTOR_OS_CAPS=0 /devtools/bin/wasmi throw.wasm",
         "expected runtime exception",
     )?;
-    suite.command("invalid-config", "MOTOR_OS_CAPS=0x200 /user/bin/javy build hello.js -J unknown-option=y -o invalid-config.wasm", 2)?;
+    suite.command("invalid-config", "MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -J unknown-option=y -o invalid-config.wasm", 2)?;
     assert!(!suite.root.join("invalid-config.wasm").exists());
     suite.command(
         "plugin-schema",
-        "MOTOR_OS_CAPS=0 /user/bin/javy build hello.js -J help",
+        "MOTOR_OS_CAPS=0 /devtools/bin/javy build hello.js -J help",
         0,
     )?;
-    suite.command("plugin-initialize", &format!("MOTOR_OS_CAPS=0x200 /user/bin/javy init-plugin {SHARE}/plugin.wasm --deterministic -o initialized.wasm"), 0)?;
+    suite.command("plugin-initialize", &format!("MOTOR_OS_CAPS=0x200 /devtools/bin/javy init-plugin {SUPPORT_DIR}/plugin.wasm --deterministic -o initialized.wasm"), 0)?;
     suite.compile(
         "initialized-plugin",
         "hello.js",

@@ -52,21 +52,31 @@ src/build-motor-os.sh --javy-only
 make dev.img wasm.img BUILD=release -j"$(nproc)"
 ```
 
-Both images install `/user/bin/javy`, `/user/bin/wasmi`, and the verified default
-plugin under `/user/share/javy`. The wasm image has a 1 GiB data partition and
+Both images install `/devtools/bin/javy` and `/devtools/bin/wasmi`, with support
+files under `/devtools/cfg/javy`:
+
+| File | Purpose |
+| --- | --- |
+| `plugin.wasm` | Default QuickJS plugin for explicit plugin selection and dynamic modules; Javy also embeds it. |
+| `typescript-workload.js` | TypeScript 5.9.3 plus a transpilation workload for the installed-tool tests. |
+| `typescript-LICENSE.txt`, `typescript-NOTICES.txt` | License and third-party notices for the bundled TypeScript code. |
+| `sources.txt` | Resolved source revisions, build settings, and input digests. |
+| `SHA256SUMS` | Checksums of the staged binaries and support files. |
+
+The wasm image has a 1 GiB data partition and
 does not include the native development toolchain. Wasmtime installation follows
 in later slices; the current wasm image delivers Javy/Wasmi.
 
 On Motor, compile into a writable directory and execute with explicit masks:
 
 ```sh
-MOTOR_OS_CAPS=0x200 javy build hello.js -o /user/tmp/hello.wasm
-MOTOR_OS_CAPS=0 wasmi /user/tmp/hello.wasm
+MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /user/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /devtools/bin/wasmi /user/tmp/hello.wasm
 ```
 
 The add-on follows published `moturus` branches and records resolved revisions,
 the selected assembly, native library content, and input digests in
-`/user/share/javy/sources.txt`. Build-time downloads are digest-checked; the
+`/devtools/cfg/javy/sources.txt`. Build-time downloads are digest-checked; the
 installed-tool tests require no Internet access:
 
 ```sh

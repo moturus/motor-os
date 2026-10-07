@@ -30,7 +30,7 @@ javy_source_manifest() (
 )
 
 build_javy() {
-	local inputs="$ASSEMBLY_BUILD_ROOT/javy-inputs" share="$JAVY_IMG/user/share/javy"
+	local inputs="$ASSEMBLY_BUILD_ROOT/javy-inputs" cfg="$JAVY_IMG/devtools/cfg/javy"
 	mkdir -p "$inputs"
 	javy_download https://github.com/bytecodealliance/javy/releases/download/v9.1.0/plugin.wasm.gz \
 		dc237a6fb9c7e58423456a12fc3c4e7a97d9d1eeb91b89ca73db76b78ae95e83 "$inputs/plugin.wasm.gz"
@@ -44,20 +44,20 @@ build_javy() {
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" \
 			JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" ./motor-build.sh
 	)
-	mkdir -p "$JAVY_IMG/user/bin" "$share"
+	mkdir -p "$JAVY_IMG/devtools/bin" "$cfg"
 	local tool
 	for tool in javy wasmi; do
 		install -m 755 "$ASSEMBLY_BUILD_ROOT/javy/x86_64-unknown-motor/release/$tool" \
-			"$JAVY_IMG/user/bin/$tool"
+			"$JAVY_IMG/devtools/bin/$tool"
 	done
-	install -m 644 "$inputs/plugin.wasm" "$share/plugin.wasm"
-	tar -xOf "$inputs/typescript.tgz" package/lib/typescript.js > "$share/typescript-workload.js"
-	cat "$MOTOR/src/tests/javy-smoke/fixtures/typescript-workload.js" >> "$share/typescript-workload.js"
-	printf '%s  %s\n' "$JAVY_TYPESCRIPT_SHA" "$share/typescript-workload.js" | sha256sum -c -
-	tar -xOf "$inputs/typescript.tgz" package/LICENSE.txt > "$share/typescript-LICENSE.txt"
-	tar -xOf "$inputs/typescript.tgz" package/ThirdPartyNoticeText.txt > "$share/typescript-NOTICES.txt"
-	printf '%s\n' "$JAVY_SOURCE_MANIFEST" > "$share/sources.txt"
-	(cd "$JAVY_IMG" && sha256sum user/bin/{javy,wasmi} user/share/javy/* > "$share/SHA256SUMS")
+	install -m 644 "$inputs/plugin.wasm" "$cfg/plugin.wasm"
+	tar -xOf "$inputs/typescript.tgz" package/lib/typescript.js > "$cfg/typescript-workload.js"
+	cat "$MOTOR/src/tests/javy-smoke/fixtures/typescript-workload.js" >> "$cfg/typescript-workload.js"
+	printf '%s  %s\n' "$JAVY_TYPESCRIPT_SHA" "$cfg/typescript-workload.js" | sha256sum -c -
+	tar -xOf "$inputs/typescript.tgz" package/LICENSE.txt > "$cfg/typescript-LICENSE.txt"
+	tar -xOf "$inputs/typescript.tgz" package/ThirdPartyNoticeText.txt > "$cfg/typescript-NOTICES.txt"
+	printf '%s\n' "$JAVY_SOURCE_MANIFEST" > "$cfg/sources.txt"
+	(cd "$JAVY_IMG" && sha256sum devtools/bin/{javy,wasmi} devtools/cfg/javy/* > "$cfg/SHA256SUMS")
 }
 
 build_javy_addon() {
@@ -75,8 +75,8 @@ build_javy_addon() {
 	JAVY_SOURCE_MANIFEST="$(javy_source_manifest)"
 	source="$(printf '%s\n' "$JAVY_SOURCE_MANIFEST" | sha256sum | cut -d' ' -f1)"
 	# All outputs must still match, not just the executable used by ensure_addon.
-	if ! (cd "$JAVY_IMG" && sha256sum --status -c user/share/javy/SHA256SUMS) 2>/dev/null; then
+	if ! (cd "$JAVY_IMG" && sha256sum --status -c devtools/cfg/javy/SHA256SUMS) 2>/dev/null; then
 		rm -f "$ASSEMBLY_ROOT/ADDON-javy"
 	fi
-	ensure_addon javy "$source" "$JAVY_IMG" user/bin/javy build_javy
+	ensure_addon javy "$source" "$JAVY_IMG" devtools/bin/javy build_javy
 }

@@ -43,6 +43,7 @@ directories:
   - "/devtools"
   - "/devtools/bin"
   - "/devtools/cfg"
+  - "/devtools/cfg/javy"
   - "/devtools/cfg/llvm"
   - "/devtools/llvm"
   - "/devtools/llvm/bin"
@@ -89,8 +90,8 @@ assembly_required_executables:
   - "helix/devtools/helix/hx"
   - "sed/devtools/bin/sed"
   - "rust-analyzer/devtools/rust/bin/rust-analyzer"
-  - "javy/user/bin/javy"
-  - "javy/user/bin/wasmi"
+  - "javy/devtools/bin/javy"
+  - "javy/devtools/bin/wasmi"
 source_dirs:
   - source: "src/bin/red"
     destination: "/devtools/src/motor-os/bin/red"
