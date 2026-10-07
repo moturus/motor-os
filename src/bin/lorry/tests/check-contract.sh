@@ -81,11 +81,13 @@ printf '%s\n' \
 printf '%s\n' \
     '#[cfg(generated_fixture)]' \
     'include!(concat!(env!("OUT_DIR"), "/generated.rs"));' \
+    'pub const TRACKED: Option<&str> = option_env!("LORRY_CHECK_TRACKED");' \
     >"$DEPENDENCY/src/lib.rs"
 printf '%s\n' \
     '#[deprecated]' \
     'pub fn old_value() -> u8 { fixture_dependency::VALUE }' \
     'pub fn value() -> u8 { fixture_dependency::VALUE }' \
+    'pub const MEMBER_TRACKED: Option<&str> = option_env!("LORRY_CHECK_MEMBER_TRACKED");' \
     >"$PROJECT/src/lib.rs"
 printf 'fn main() { assert_eq!(check_fixture::old_value(), 42); }\n' \
     >"$PROJECT/src/bin/first.rs"
@@ -192,6 +194,39 @@ if grep -F '<--crate-name>' "$LOG" >/dev/null; then
     echo "check-contract: CARGO_LOG invalidated unchanged build freshness" >&2
     exit 1
 fi
+
+# As in Cargo, unit keys cover only the variables Lorry sets for rustc. A
+# variable that a unit reads with option_env! is rechecked; a new value
+# rebuilds that unit and its dependents. Other variables, including `_` set
+# by whatever program launches Lorry, invalidate nothing.
+compiled() { grep -F -- "$1" "$LOG" >/dev/null; }
+tracked_failure() {
+    echo "check-contract: $1" >&2
+    exit 1
+}
+(
+    cd "$PROJECT"
+    : >"$LOG"
+    LORRY_CHECK_UNRELATED=1 env "$LORRY" --quiet build
+    ! compiled '<--crate-name>' || tracked_failure "an unrelated variable rebuilt units"
+    : >"$LOG"
+    LORRY_CHECK_TRACKED=one "$LORRY" --quiet build
+    compiled "<$DEPENDENCY/src/lib.rs>" ||
+        tracked_failure "a variable read by a dependency did not rebuild it"
+    compiled '<src/lib.rs>' || tracked_failure "a rebuilt dependency left its dependent fresh"
+    : >"$LOG"
+    LORRY_CHECK_TRACKED=one LORRY_CHECK_UNRELATED=2 "$LORRY" --quiet build
+    ! compiled '<--crate-name>' || tracked_failure "an unchanged tracked variable rebuilt units"
+    : >"$LOG"
+    LORRY_CHECK_TRACKED=one LORRY_CHECK_MEMBER_TRACKED=yes "$LORRY" --quiet build
+    compiled '<src/lib.rs>' || tracked_failure "a variable read by the member did not rebuild it"
+    ! compiled "<$DEPENDENCY/src/lib.rs>" ||
+        tracked_failure "a variable read only by the member rebuilt its dependency"
+    : >"$LOG"
+    "$LORRY" --quiet build
+    compiled "<$DEPENDENCY/src/lib.rs>" ||
+        tracked_failure "unsetting a tracked variable did not rebuild its reader"
+)
 
 LIB_TARGET="$WORK/lib-target"
 : >"$LOG"

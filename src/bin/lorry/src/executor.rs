@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -89,6 +89,8 @@ pub struct ExecutedBuildScript {
     pub executable_sha256: [u8; 32],
     pub out_dir: PathBuf,
     pub temp_dir: PathBuf,
+    /// Caller variables that policy passes into the script's environment.
+    pub caller_variables: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -96,6 +98,8 @@ pub struct Outputs {
     pub artifacts: BTreeMap<UnitKey, RustcOutput>,
     pub build_scripts: BTreeMap<UnitKey, ExecutedBuildScript>,
     pub cache_keys: BTreeMap<UnitKey, CacheKey>,
+    /// Process variables that some unit's output depends on.
+    pub tracked_variables: BTreeSet<String>,
 }
 
 /// One executed unit's result, recorded into `Outputs` by the scheduler.
@@ -104,6 +108,7 @@ enum Executed {
     Artifact {
         output: RustcOutput,
         cache_key: CacheKey,
+        tracked: Tracked,
     },
 }
 
@@ -118,6 +123,7 @@ impl Executed {
         Ok(Self::Artifact {
             cache_key: cache.dependency_key(cache_key, &output, selected, &tracked)?,
             output,
+            tracked,
         })
     }
 }
@@ -143,9 +149,17 @@ impl Scheduler {
     ) -> Result<()> {
         match executed {
             Executed::BuildScript(output) => {
+                self.outputs
+                    .tracked_variables
+                    .extend(output.caller_variables.iter().cloned());
                 self.outputs.build_scripts.insert(key.clone(), output);
             }
-            Executed::Artifact { output, cache_key } => {
+            Executed::Artifact {
+                output,
+                cache_key,
+                tracked,
+            } => {
+                self.outputs.tracked_variables.extend(tracked.into_keys());
                 self.outputs.artifacts.insert(key.clone(), output);
                 self.outputs.cache_keys.insert(key.clone(), cache_key);
             }
@@ -544,6 +558,7 @@ fn execute_unit(
                     executable_sha256: sha256_file(executable)?,
                     out_dir,
                     temp_dir,
+                    caller_variables: admission.caller_env.clone(),
                 };
                 options.reporter.build_script_executed(key, &executed)?;
                 Ok(Executed::BuildScript(executed))

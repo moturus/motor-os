@@ -321,17 +321,23 @@ impl BuildCache {
             &replacements,
         );
         rustc_arguments_digest(&mut digest, &input.invocation.arguments, &replacements)?;
-        let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
-        environment.remove(OsStr::new("CARGO_PRIMARY_PACKAGE"));
-        for (name, value) in &input.invocation.environment {
-            environment.insert(name.into(), value.clone());
+        // Other process variables are rechecked after compilation when rustc
+        // reports reading them, as Cargo does.
+        let mut environment = input
+            .invocation
+            .environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), Some(value.clone())))
+            .collect::<BTreeMap<_, _>>();
+        for name in tracked_env::COMPILER_VARIABLES {
+            environment
+                .entry(name)
+                .or_insert_with(|| tracked_env::current(name));
         }
-        for (name, value) in &environment {
-            if crate::process::is_removed_cargo_client_environment(name) {
-                continue;
-            }
-            digest.os("rustc-environment-name", name, &replacements);
-            digest.os("rustc-environment-value", value, &replacements);
+        for (name, value) in environment {
+            let Some(value) = value else { continue };
+            digest.os("rustc-environment-name", OsStr::new(name), &replacements);
+            digest.os("rustc-environment-value", &value, &replacements);
         }
 
         if input.manifest.editable {

@@ -9,6 +9,14 @@ use std::path::Path;
 use crate::diagnostic::{Error, Result};
 use crate::json::Value;
 
+/// Process variables that rustc reads itself. They can change its output but
+/// never appear in dep-info, so unit and profile keys hash them directly.
+pub const COMPILER_VARIABLES: [&str; 3] = [
+    "RUSTC_BOOTSTRAP",
+    "RUSTC_FORCE_RUSTC_VERSION",
+    "RUST_TARGET_PATH",
+];
+
 /// Variable name to the value rustc saw, or `None` when it was unset.
 pub type Tracked = BTreeMap<String, Option<String>>;
 
@@ -73,6 +81,17 @@ pub fn matches_current(tracked: &Tracked) -> bool {
             _ => false,
         }
     })
+}
+
+/// Records the current value of each named variable.
+pub fn snapshot<'a>(names: impl IntoIterator<Item = &'a String>) -> Tracked {
+    names
+        .into_iter()
+        .map(|name| {
+            let value = current(name).map(|value| value.to_string_lossy().into_owned());
+            (name.clone(), value)
+        })
+        .collect()
 }
 
 pub fn encode(tracked: &Tracked) -> Vec<u8> {

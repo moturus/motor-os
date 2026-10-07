@@ -14,6 +14,7 @@ use crate::progress::Progress;
 use crate::resolver::{CompileKind, PackageKey, Resolution, TargetSelection};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
+use crate::tracked_env::{self, Tracked};
 use crate::unit::{CompilationPlan, PlanOptions, UnitKey, UnitKind, selected_library_key};
 use crate::validation::ValidationMode;
 use std::collections::BTreeMap;
@@ -1297,7 +1298,7 @@ fn build_inner(
         None
     };
     let bundle_inputs = (build.test && build.bundle)
-        .then(|| freshness_base(&build, &prepared, &cargo))
+        .then(|| bundle_build_inputs(&build, &prepared, &cargo))
         .transpose()?;
     let bundle_compiler = bundle_inputs
         .as_ref()
@@ -1738,6 +1739,7 @@ fn build_inner(
         .collect();
     compiled.script_inputs.sort();
     compiled.script_inputs.dedup();
+    compiled.environment = tracked_env::snapshot(&outputs.tracked_variables);
 
     if let Some(base) = completed_freshness_base {
         write_fresh_profile(
@@ -1902,6 +1904,7 @@ struct FreshProfile {
     script_inputs: Vec<PathBuf>,
     script_inputs_sha256: [u8; 32],
     messages: Vec<serde_json::Value>,
+    environment: Tracked,
     library_paths: Vec<PathBuf>,
 }
 
@@ -1954,13 +1957,7 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
         "workspace-manifest",
         &inputs.manifest.workspace_root.join("Cargo.toml"),
     )?;
-    for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
-        if process::is_removed_cargo_client_environment(&name) {
-            continue;
-        }
-        digest.os("environment-name", &name);
-        digest.os("environment-value", &value);
-    }
+    compiler_environment_digest(&mut digest);
     for path in [
         inputs.host_options.linker.as_deref(),
         inputs.target_options.linker.as_deref(),
@@ -2034,13 +2031,7 @@ fn freshness_base(
         );
         digest.debug("dependency-file-count", &package.evidence.file_count);
     }
-    for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
-        if process::is_removed_cargo_client_environment(&name) {
-            continue;
-        }
-        digest.os("environment-name", &name);
-        digest.os("environment-value", &value);
-    }
+    compiler_environment_digest(&mut digest);
     for path in [
         build.host_options.linker.as_deref(),
         build.target_options.linker.as_deref(),
@@ -2066,6 +2057,39 @@ fn freshness_base(
     Ok(digest.finish())
 }
 
+// A bundle layout is fixed before its harnesses compile, so it cannot use the
+// variables that units report reading. It covers the whole environment
+// instead, so a changed variable gets a new extraction directory.
+fn bundle_build_inputs(
+    build: &Build<'_>,
+    prepared: &dependency::PreparedGraph,
+    cargo: &Path,
+) -> Result<[u8; 32]> {
+    let mut digest = FreshDigest::new();
+    digest.bytes("schema", b"lorry-bundle-inputs-v1");
+    digest.bytes("build-inputs", &freshness_base(build, prepared, cargo)?);
+    for (name, value) in env::vars_os().collect::<BTreeMap<_, _>>() {
+        if process::is_removed_cargo_client_environment(&name) {
+            continue;
+        }
+        digest.os("environment-name", &name);
+        digest.os("environment-value", &value);
+    }
+    Ok(digest.finish())
+}
+
+// Hashes the variables rustc reads itself. Variables that units read are
+// recorded in the profile and rechecked instead.
+fn compiler_environment_digest(digest: &mut FreshDigest) {
+    for name in tracked_env::COMPILER_VARIABLES {
+        digest.os("environment-name", OsStr::new(name));
+        match tracked_env::current(name) {
+            Some(value) => digest.os("environment-value", &value),
+            None => digest.bytes("environment-unset", b""),
+        }
+    }
+}
+
 fn restore_fresh_profile(
     profile: &Path,
     package_root: &Path,
@@ -2074,7 +2098,7 @@ fn restore_fresh_profile(
     validation: ValidationMode,
 ) -> Option<BuildArtifacts> {
     let record = read_fresh_profile(profile, owner_root)?;
-    if record.base != base {
+    if record.base != base || !tracked_env::matches_current(&record.environment) {
         return None;
     }
     if script_input_digest(&record.script_inputs).ok() != Some(record.script_inputs_sha256) {
@@ -2169,8 +2193,9 @@ fn write_fresh_profile(
         }
     };
     let primary_sha256 = artifact_sha256(&artifacts.primary)?;
+    let environment = tracked_env::encode(&artifacts.environment);
     let mut document = format!(
-        "lorry-fresh-v6\nbase={}\ninputs={}\nscript-inputs={}\nprimary={}\t{}\nmessages={}\n",
+        "lorry-fresh-v7\nbase={}\ninputs={}\nscript-inputs={}\nprimary={}\t{}\nmessages={}\nenvironment={}",
         hex(&base),
         hex(&inputs),
         hex(&script_input_digest(&artifacts.script_inputs)?),
@@ -2179,6 +2204,7 @@ fn write_fresh_profile(
         serde_json::to_string(&artifacts.messages).map_err(|error| {
             Error::failure(format!("failed to serialize profile messages: {error}"))
         })?,
+        String::from_utf8_lossy(&environment),
     );
     for (name, path) in &artifacts.binaries {
         let relative = relative_profile_path(profile, path)?;
@@ -2234,13 +2260,16 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
     }
     let document = String::from_utf8(fs::read(path).ok()?).ok()?;
     let mut lines = document.lines();
-    (lines.next()? == "lorry-fresh-v6").then_some(())?;
+    (lines.next()? == "lorry-fresh-v7").then_some(())?;
     let base = decode_hex(lines.next()?.strip_prefix("base=")?).ok()?;
     let inputs = decode_hex(lines.next()?.strip_prefix("inputs=")?).ok()?;
     let script_inputs_sha256 = decode_hex(lines.next()?.strip_prefix("script-inputs=")?).ok()?;
     let primary = parse_fresh_artifact(lines.next()?.strip_prefix("primary=")?)?;
     let messages: Vec<serde_json::Value> =
         serde_json::from_str(lines.next()?.strip_prefix("messages=")?).ok()?;
+    let environment = tracked_env::decode(
+        format!("{}\n", lines.next()?.strip_prefix("environment=")?).as_bytes(),
+    )?;
     messages
         .iter()
         .all(|message| {
@@ -2303,6 +2332,7 @@ fn read_fresh_profile(profile: &Path, package_root: &Path) -> Option<FreshProfil
         script_inputs,
         script_inputs_sha256,
         messages,
+        environment,
         library_paths,
     })
 }
@@ -2700,6 +2730,8 @@ struct StagedArtifacts {
     dep_info: Vec<PathBuf>,
     script_inputs: Vec<PathBuf>,
     messages: Vec<serde_json::Value>,
+    /// Process variables the build read, with the values it saw.
+    environment: Tracked,
     library_paths: Vec<PathBuf>,
 }
 
@@ -2824,6 +2856,7 @@ fn compile_root_targets(
             dep_info,
             script_inputs: Vec::new(),
             messages: Vec::new(),
+            environment: Tracked::new(),
             library_paths: Vec::new(),
         });
     }
@@ -2863,6 +2896,7 @@ fn compile_root_targets(
         dep_info: vec![dep_info],
         script_inputs: Vec::new(),
         messages: Vec::new(),
+        environment: Tracked::new(),
         library_paths: Vec::new(),
     })
 }
@@ -3698,6 +3732,7 @@ mod tests {
             dep_info: vec![dep_info],
             script_inputs: vec![link.clone(), directory.clone()],
             messages: Vec::new(),
+            environment: Tracked::new(),
             library_paths: Vec::new(),
         };
         for validation in [ValidationMode::Trusted, ValidationMode::Strict] {
@@ -3760,6 +3795,7 @@ mod tests {
             dep_info: vec![dep_info],
             script_inputs: Vec::new(),
             messages: Vec::new(),
+            environment: Tracked::new(),
             library_paths: Vec::new(),
         };
         let base = [7; 32];
@@ -3849,6 +3885,7 @@ mod tests {
             dep_info: vec![dep_info],
             script_inputs: Vec::new(),
             messages: Vec::new(),
+            environment: Tracked::new(),
             library_paths: Vec::new(),
         };
         let base = [5; 32];

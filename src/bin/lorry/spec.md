@@ -1647,9 +1647,17 @@ libraries, are stored in the project below `target/lorry/.cache/v1/units/sha256/
 Selected binaries, tests, and incremental state are not unit-cache entries.
 
 Cache keys cover Lorry/cache schema, compiler identity, normalized rustc
-arguments and child environment, package source identity, dependency unit
-identities, build-script executable/environment/directives/output, and
-approved native tools. The project root and diagnostic-only rustc verbosity
+arguments, the variables Lorry sets for rustc, package source identity,
+dependency unit identities, build-script executable/environment/directives/output,
+and approved native tools.
+Like Cargo, a key does not cover the rest of the process environment.
+rustc reports each variable that a unit reads with `env!` or `option_env!`
+(`# env-dep:` lines in dep-info). Lorry records those values with the
+published unit and its cache entry. A unit is reused only while every recorded
+variable keeps its value.
+Every key also covers `RUSTC_BOOTSTRAP`, `RUSTC_FORCE_RUSTC_VERSION`, and
+`RUST_TARGET_PATH`, which rustc reads itself. As in Cargo, a variable read by
+a proc macro without tracking, or by the linker, is not covered. The project root and diagnostic-only rustc verbosity
 are normalized so an immutable unit can be reused by compatible projects and
 between ordinary and verbose builds. Ordinary keys trust immutable crates.io
 identity, use bounded path/size/mtime fingerprints for mutable path packages,
@@ -1660,6 +1668,9 @@ Selected-library cache entries retain rustc dep-info and a digest of inputs
 outside the package tree, including each resolved path and file contents.
 An edit, removal, or symlink retarget makes the entry stale; after a
 successful rebuild, the project-local entry is atomically replaced.
+A dependent's key covers each dependency's key, recorded variable values, and,
+for a selected unit, its external-input digest. A change to any of them
+rebuilds the dependents too.
 Each published compiler unit carries a local success fingerprint. It binds
 its compiler-input identity to installed artifacts; selected units also bind
 dep-info and external inputs. A matching unit is reused at its published path
@@ -1678,17 +1689,17 @@ clean can remove its project-local entries without removing another package's.
 Top-level selected executables have sidecar owner records. Installing a new
 executable invalidates its old owner record before atomically replacing the
 file, then records the new owner.
-The three Cargo-client variables that Lorry removes before starting rustc
-(`CARGO_LOG`, `RUSTUP_TOOLCHAIN`, and
-`__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`) are omitted from rustc
-unit keys and completed-profile freshness records.
+Lorry removes the Cargo-client variables `CARGO_LOG`, `RUSTUP_TOOLCHAIN`,
+and `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS` before starting rustc, so
+a unit always sees them unset.
 
 After a successful eligible single-member build or run, the completed root
 profile contains a freshness record scoped to the selected package path. An
 ordinary unchanged `build` or `run` validates parsed manifest, lock, compact
-admission, configuration, compiler, target, flags, environment, and tool
-metadata plus rustc dep-info and mutable path-source path/size/mtime
-fingerprints. It requires the installed artifact to exist but does not read
+admission, configuration, compiler, target, flags, tracked variables, and
+tool metadata plus rustc dep-info and mutable path-source path/size/mtime
+fingerprints. Tracked variables are those that any unit read and the caller
+variables granted to build scripts. It requires the installed artifact to exist but does not read
 artifact or dependency source contents. A matching record is checked after
 admission verification. The profile is then reused without invoking build
 scripts, rustc, native tools, or the linker. Strict mode also rehashes all of
@@ -1754,7 +1765,7 @@ select `--lib` or `--test NAME` separately, or use ordinary tests. Harnesses for
 the same platform may share a bundle.
 Integration compile-time program/temporary paths refer to that member's
 extraction directory. Layout identity also includes prepared build inputs,
-so feature, dependency, configuration, and tracked environment changes do not
+so feature, dependency, configuration, and environment changes do not
 reuse another build's extraction. Compiler executable hashes are shared across
 member layouts within an invocation. Bundles compile privately, then publish
 through the atomic executable installer with package ownership. It must verify its
