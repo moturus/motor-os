@@ -975,7 +975,7 @@ mod tests {
                 "rust-analyzer"
             ]
         );
-        assert_eq!(config.assembly_required_executables.len(), 11);
+        assert_eq!(config.assembly_required_executables.len(), 13);
         assert!(config
             .assembly_required_executables
             .iter()
@@ -991,6 +991,8 @@ mod tests {
         for path in [
             "rustc/devtools/bin/rustfmt",
             "rustc/devtools/rust/bin/rustfmt",
+            "rustc/devtools/bin/clippy-driver",
+            "rustc/devtools/rust/bin/clippy-driver",
         ] {
             assert!(config
                 .assembly_required_executables
