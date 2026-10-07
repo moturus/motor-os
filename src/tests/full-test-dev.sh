@@ -3,11 +3,11 @@
 # full-test-dev.sh — the full test suite against the dev image.
 #
 # The dev-image full test includes the repository suite, httpd-axum regressions,
-# native source builds, and Lorry's bounded product suite. Lorry validation is
-# profile-independent and does not multiply coverage by the OS image profile.
-# Release runs also check the wasm tools on the small wasm image at 224 MiB and
-# the developer image at 256 MiB, and once that Javy's output equals upstream
-# Linux Javy's byte for byte.
+# Gears host/native tests, native source builds, and Lorry's bounded product
+# suite. Lorry validation is profile-independent and does not multiply coverage
+# by the OS image profile. Release runs also check the wasm tools on the small
+# wasm image at 224 MiB and the developer image at 256 MiB, and once that Javy's
+# output equals upstream Linux Javy's byte for byte.
 #
 # Work that is not explicitly scoped to Lorry runs this suite only with
 # --release. If such work necessarily changes src/bin/lorry, ask before adding
@@ -91,6 +91,13 @@ DEV_MEMORY_MIB="${MOTO_MEMORY_MIB:-4096}"
 # Keep a local runtime version bump from breaking only the dev-image suite.
 python3 "$WD/test-dev-path-locks.py"
 
+# Gears and its optional batteries belong only to the developer-image suite.
+# These scripts accept the profile, without VMM or size options.
+PROFILE_ARGS=()
+[ "$SEEN_RELEASE" = 0 ] || PROFILE_ARGS=(--release)
+bash "$WD/test-gears-http.sh" "${PROFILE_ARGS[@]}"
+bash "$WD/test-gears-batteries.sh" "${PROFILE_ARGS[@]}"
+
 MOTO_MEMORY_MIB="$REPOSITORY_MEMORY_MIB" \
   FULL_TEST_IMG_TARGET=dev.img FULL_TEST_IMAGE=motor-os-dev.qcow2 \
   FULL_TEST_VERIFY_DEV_SOURCES=1 \
@@ -100,6 +107,7 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" MOTO_IMAGE=motor-os-dev.qcow2 \
   "$ROOT_DIR/src/bin/httpd-axum/tests/run.sh" --motor "${FORWARDED_ARGS[@]}"
 
 MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
+  TEST_DEV_SOURCES_GEARS_TESTS=1 \
   "$WD/test-dev-sources.sh" "${FORWARDED_ARGS[@]}"
 
 "$ROOT_DIR/src/bin/lorry/tests/test-all.sh"

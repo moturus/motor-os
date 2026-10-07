@@ -12,6 +12,12 @@ measurement. The SDK rollout is complete. Automated host/native component
 checks and `src/tests/full-test-dev.sh --release` pass. The user has confirmed
 that Gears works with OpenRouter on Motor OS.
 
+Gears/batteries host and native test coverage now belongs only to
+`full-test-dev.sh`. The main `full-test.sh` and its preparation script have no
+Gears-specific build or test steps. The developer wrapper runs the host gates,
+then opts into native gates in the VM owned by its developer-source phase.
+Earlier test-wiring references below describe the implementation history.
+
 ## What remains
 
 | Work | Status and next step |
@@ -1509,3 +1515,18 @@ debug and release on unchanged source. Warnings-denied native Clippy passes.
 Gate logs: `/tmp/gears-sysbox-xargs-replacement/final-gates/`. Authored crate changes are limited to sysbox;
 verified build-generated locks are restored and the user's existing sys lock
 is preserved.
+
+## Gears tests belong to the developer suite
+
+`full-test.sh` and `full-test-prepare.sh` no longer invoke or prepare Gears
+tests. `full-test-dev.sh` runs both host gates and enables both native gates
+in the existing VM owned by its developer-source phase. The memory and size
+fixtures verify that host gates receive only the profile and that the native
+phase is enabled by the developer wrapper.
+
+The first release developer run found a test-harness bug: the Sysbox utility
+fixture was uploaded to read-only `/devtools/tests`. Upload and execution now
+use writable test scratch instead. The corrected `full-test-dev.sh --release`
+passes, including all four Gears gates and the native Sysbox utility fixture.
+Shell syntax and both wrapper fixtures pass. Original and corrected logs are
+preserved in `/tmp/gears-dev-only-gate/`; no OS crate source changed.

@@ -272,6 +272,15 @@ vm_ssh "/devtools/bin/rustc $DEV_TMP/temp-contract.rs -o $DEV_TMP/temp-contract"
 [ "$(vm_ssh "TMPDIR=/none/tmp $DEV_TMP/temp-contract")" = /none/tmp ] ||
   fail "Rust std ignored explicit TMPDIR"
 
+# full-test-dev.sh supplies the host mock and opts into native Gears tests.
+# Reuse this phase's owned VM; standalone source builds keep their own scope.
+if [ "${TEST_DEV_SOURCES_GEARS_TESTS:-0}" = 1 ]; then
+  profile_args=()
+  [ "$BUILD" = debug ] || profile_args=(--release)
+  bash "$WD/test-gears-http-vm.sh" "${profile_args[@]}"
+  bash "$WD/test-gears-batteries-vm.sh" "${profile_args[@]}"
+fi
+
 # Build trees are scratch. Remove each one after its boundary check so later
 # independent builds retain enough room for their own outputs.
 for package in red gears gears-batteries; do

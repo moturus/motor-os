@@ -797,11 +797,13 @@ Services are optional, run in the foreground, and add no boot work.
   through direct sysbox invocation. Local HTTP tests cover a plain HTTP
   fetch and a redirect returned without following it; phase 11 tests the
   batteries' bounded redirect handling separately.
-- Gears changes run Gears' own tests and `test-gears-http.sh`. The batteries
-  add `src/tests/test-gears-batteries.sh` to `full-test.sh` and a VM test,
-  `test-gears-batteries-vm.sh`, run like `test-gears-http-vm.sh` when
-  `FULL_TEST_VERIFY_DEV_SOURCES=1`. Gears and the batteries are non-core
-  components: their gate is these tests plus `full-test-dev.sh --release`.
+- Gears changes run Gears' own tests and `test-gears-http.sh`. Only
+  `full-test-dev.sh` includes the Gears/batteries host and native test gates.
+  Its developer-source phase runs `test-gears-http-vm.sh` and
+  `test-gears-batteries-vm.sh` in its owned VM. `full-test.sh` and its shared
+  preparation script have no Gears-specific build or test steps. Gears and the
+  batteries are non-core components: their gate is these tests plus
+  `full-test-dev.sh --release`.
 - The sysbox utilities are core OS patches: each passes `full-test.sh` three
   times in debug and three times in release before it is committed.
 - Real-model sessions and the eval are user-run, outside `full-test`.
@@ -957,7 +959,7 @@ meet guarantee 8 for the children they add.
 
 **Phase 5. The batteries crate and everyday coding.**
 - 5.1 The crate, its build (repeating Gears' `[patch.crates-io]` entries)
-  and packaging: the Makefile, `full-test-prepare.sh`, the developer image's
+  and packaging: the Makefile, `full-test-dev.sh`, the developer image's
   program and source lists, and the Lorry build in `test-dev-sources.sh`.
 - 5.2 The hook skeleton with failure isolation, workspace-root project
   instructions and the prompt snapshot; no parent or subdirectory discovery.

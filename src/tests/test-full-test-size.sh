@@ -65,6 +65,9 @@ printf '%s:%s:%s\n' "$MOTO_SMP" "$MOTO_MEMORY_MIB" "$*" >> "$MOTO_SIZE_TEST_LOG"
 SH
   chmod +x "$scratch/$runner"
 done
+for runner in test-gears-http.sh test-gears-batteries.sh; do
+  printf '#!/bin/bash\n[ "$#" = 1 ] && [ "$1" = --release ]\n' > "$scratch/src/tests/$runner"
+done
 printf '#!/bin/sh\nexit 0\n' > "$scratch/src/bin/lorry/tests/test-all.sh"
 chmod +x "$scratch/src/bin/lorry/tests/test-all.sh"
 # The wasm tools select their own fixed VM sizes; the profile and VMM are forwarded.

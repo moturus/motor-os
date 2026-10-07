@@ -64,14 +64,6 @@ done
 # Fetches what test-crossterm-host.sh then runs offline.
 bash "$WD/test-crossterm-host.sh" --prepare "${profile_args[@]}"
 host_build --locked --offline --manifest-path "$ROOT_DIR/src/bin/httpd-axum/Cargo.toml" --tests
-# Build the batteries' Linux rg before the timed suite starts.
-bash "$WD/test-gears-batteries.sh" --prepare "${profile_args[@]}"
-# test-gears-http.sh: curl's host binary, then Gears against it.
-for crate in curl gears gears-batteries gears-mock-provider; do
-  host_build --locked --manifest-path "$ROOT_DIR/src/bin/$crate/Cargo.toml"
-done
-cargo build --quiet --locked "${profile_args[@]}" \
-  --manifest-path "$ROOT_DIR/src/bin/gears-mock-provider/Cargo.toml"
 host_build --manifest-path "$ROOT_DIR/src/sys/sys-init/Cargo.toml"
 host_build --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
 host_build --locked --offline \
