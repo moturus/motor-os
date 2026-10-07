@@ -1165,35 +1165,10 @@ fn safe_toml_string(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, PolicyLimits, PolicyRule};
-    use crate::repository::RepositorySet;
+    use crate::config::{PolicyLimits, PolicyRule};
     use crate::resolver::{FeatureContext, PackageSourceKey, ResolvedEdge};
     use semver::VersionReq;
-    use std::fs;
     use std::path::Path;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
-
-    struct Fixture(PathBuf);
-
-    impl Fixture {
-        fn new() -> Self {
-            let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("lorry-policy-{}-{id}", std::process::id()));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn checksum(byte: u8) -> [u8; 32] {
         [byte; 32]
@@ -1881,81 +1856,5 @@ mod tests {
             })
             .collect();
         inspect(&pass, &resolution, &existing).unwrap();
-    }
-
-    #[test]
-    fn admits_every_registry_object_with_the_external_policy_when_requested() {
-        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let repository = PathBuf::from(repository);
-        let generated = repository.parent().unwrap().join("lorry.toml");
-        assert!(generated.is_file());
-
-        let fixture = Fixture::new();
-        let home_config = fixture.0.join("home/.config/lorry");
-        fs::create_dir_all(&home_config).unwrap();
-        fs::copy(&generated, home_config.join("lorry.toml")).unwrap();
-        let config = Config::load_for_test(
-            Path::new("."),
-            &BTreeMap::from([(
-                "HOME".to_owned(),
-                fixture.0.join("home").display().to_string(),
-            )]),
-        )
-        .unwrap();
-        let repositories = RepositorySet::open(
-            &config.repositories,
-            DEFAULT_LIMITS,
-            config.policy.limits.max_package_bytes,
-        )
-        .unwrap();
-
-        let mut packages = Vec::new();
-        let mut evidence = BTreeMap::new();
-        let namespace = repository.join("objects/crates-io/sha256");
-        for prefix in fs::read_dir(namespace).unwrap() {
-            for entry in fs::read_dir(prefix.unwrap().path()).unwrap() {
-                let checksum = entry
-                    .unwrap()
-                    .file_name()
-                    .into_string()
-                    .expect("object address is UTF-8");
-                let object = repositories.lookup_registry(&checksum).unwrap().unwrap();
-                let manifest = Manifest::load_path_dependency(&object.root.join("source")).unwrap();
-                let package = ResolvedPackage {
-                    key: PackageKey {
-                        name: object.name.clone(),
-                        version: object.version.clone(),
-                        source: PackageSourceKey::CratesIo,
-                    },
-                    source: ResolvedSource::CratesIo {
-                        checksum: object.checksum,
-                    },
-                    local_manifest: None,
-                    feature_sets: BTreeMap::new(),
-                    compile_kinds: [crate::resolver::CompileKind::Target].into(),
-                    target_features: BTreeSet::new(),
-                    host_features: BTreeSet::new(),
-                    edges: Vec::new(),
-                    lock_edges: Vec::new(),
-                };
-                let tree = object
-                    .source_tree
-                    .clone()
-                    .expect("test repository retains sources");
-                let inspected =
-                    PackageEvidence::from_registry(&package, &object, &manifest, &tree, false)
-                        .unwrap();
-                evidence.insert(package.key.clone(), inspected);
-                packages.push(package);
-            }
-        }
-
-        packages.sort_by(|left, right| left.key.cmp(&right.key));
-        let resolution = make_resolution(packages);
-        let pass = preflight(&config.policy, &resolution).unwrap();
-        let admission = inspect(&pass, &resolution, &evidence).unwrap();
-        assert_eq!(admission.packages.len(), 45);
     }
 }

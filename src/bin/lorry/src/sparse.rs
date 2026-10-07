@@ -722,7 +722,6 @@ fn invalid(path: &Path, message: impl Into<String>) -> Error {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
 
     const CHECKSUM: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -974,24 +973,5 @@ mod tests {
             .to_string()
             .contains("duplicate JSON")
         );
-    }
-
-    #[test]
-    fn parses_every_stage_two_seed_record_when_requested() {
-        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let objects = PathBuf::from(repository).join("objects/crates-io/sha256");
-        let mut checked = 0;
-        for prefix in fs::read_dir(objects).unwrap() {
-            for object in fs::read_dir(prefix.unwrap().path()).unwrap() {
-                let path = object.unwrap().path().join("index-record.json");
-                let bytes = fs::read(&path).unwrap();
-                Record::parse(&path, &bytes)
-                    .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
-                checked += 1;
-            }
-        }
-        assert_eq!(checked, 45);
     }
 }

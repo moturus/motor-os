@@ -11,15 +11,7 @@ use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedSource};
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-pub fn validate_resolution(manifest: &Manifest, resolution: &Resolution) -> Result<()> {
-    validate(manifest, resolution, EdgeMode::Exact)
-}
-
 pub fn validate_selected_resolution(manifest: &Manifest, resolution: &Resolution) -> Result<()> {
-    validate(manifest, resolution, EdgeMode::SelectedSubset)
-}
-
-fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -> Result<()> {
     let lock = manifest
         .lock
         .as_ref()
@@ -45,11 +37,11 @@ fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -
         &root.dependencies,
         &lock.packages,
         &source_kinds,
-        edge_mode,
+        EdgeMode::SelectedSubset,
         lock.format,
     )?;
 
-    validate_packages(lock, resolution, &source_kinds, edge_mode)
+    validate_packages(lock, resolution, &source_kinds, EdgeMode::SelectedSubset)
 }
 
 /// Workspace roots are ordinary packages; no synthetic root edges are locked.
@@ -402,7 +394,8 @@ mod tests {
 
     use crate::config::IncompatibleRustVersions;
     use crate::manifest::Resolver;
-    use crate::resolver::{Catalog, Options, resolve};
+    use crate::resolver::workspace::resolve_locked_workspace;
+    use crate::resolver::{Catalog, Options, TargetSelection, resolve_selected};
     use crate::sparse::Record;
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -451,7 +444,8 @@ mod tests {
         )
     }
 
-    fn fixture() -> (TempDir, Manifest, Resolution) {
+    /// Returns the selected Linux graph and the complete locked graph.
+    fn fixture() -> (TempDir, Manifest, Resolution, Resolution) {
         let temp = TempDir::new();
         fs::write(
             temp.0.join("Cargo.toml"),
@@ -489,31 +483,49 @@ mod tests {
         catalog.insert(record("b", "2.0.0", "[]", 0x22)).unwrap();
         let locked =
             crate::resolver::LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
-        let resolution = resolve(
+        let options = Options {
+            resolver: Resolver::V2,
+            incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
+            rust_versions: vec![Version::parse("1.98.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: Some(8),
+        };
+        let cfg = crate::toolchain::CfgSet::parse("unix\n").unwrap();
+        let selected = resolve_selected(
             &manifest,
             &catalog,
-            &Options {
-                resolver: Resolver::V2,
-                incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
-                rust_versions: vec![Version::parse("1.98.0").unwrap()],
-                package_limit: crate::policy::PackageLimit::with_max(16),
-                max_depth: Some(8),
-            },
+            &options,
             &locked,
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+            },
         )
         .unwrap();
-        (temp, manifest, resolution)
+        let workspace = crate::manifest::SourceWorkspace::load(&temp.0, None).unwrap();
+        let complete = resolve_locked_workspace(
+            &workspace,
+            &mut catalog,
+            &options,
+            manifest.lock.as_ref().unwrap(),
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        (temp, manifest, selected, complete)
     }
 
     #[test]
     fn accepts_the_selected_subgraph_and_unused_lock_nodes() {
-        let (_temp, manifest, resolution) = fixture();
-        validate_resolution(&manifest, &resolution).unwrap();
+        let (_temp, manifest, selected, complete) = fixture();
+        validate_selected_resolution(&manifest, &selected).unwrap();
+        validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete).unwrap();
     }
 
     #[test]
     fn selected_validation_allows_inactive_locked_edges_but_exact_validation_does_not() {
-        let (_temp, mut manifest, resolution) = fixture();
+        let (_temp, mut manifest, selected, complete) = fixture();
         let root = manifest
             .lock
             .as_mut()
@@ -524,9 +536,9 @@ mod tests {
             .unwrap();
         root.dependencies.push("unused".to_owned());
 
-        validate_selected_resolution(&manifest, &resolution).unwrap();
+        validate_selected_resolution(&manifest, &selected).unwrap();
         assert!(
-            validate_resolution(&manifest, &resolution)
+            validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete)
                 .unwrap_err()
                 .to_string()
                 .contains("dependency edges")
@@ -535,7 +547,7 @@ mod tests {
 
     #[test]
     fn rejects_checksum_node_and_edge_drift() {
-        let (_temp, mut manifest, resolution) = fixture();
+        let (_temp, mut manifest, _, complete) = fixture();
         let lock = manifest.lock.as_mut().unwrap();
         lock.packages
             .iter_mut()
@@ -543,13 +555,13 @@ mod tests {
             .unwrap()
             .checksum = Some(checksum(0xff));
         assert!(
-            validate_resolution(&manifest, &resolution)
+            validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete)
                 .unwrap_err()
                 .to_string()
                 .contains("checksum")
         );
 
-        let (_temp, mut manifest, resolution) = fixture();
+        let (_temp, mut manifest, _, complete) = fixture();
         let lock = manifest.lock.as_mut().unwrap();
         lock.packages
             .iter_mut()
@@ -558,13 +570,13 @@ mod tests {
             .dependencies
             .clear();
         assert!(
-            validate_resolution(&manifest, &resolution)
+            validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete)
                 .unwrap_err()
                 .to_string()
                 .contains("dependency edges")
         );
 
-        let (_temp, mut manifest, resolution) = fixture();
+        let (_temp, mut manifest, _, complete) = fixture();
         manifest
             .lock
             .as_mut()
@@ -572,7 +584,7 @@ mod tests {
             .packages
             .retain(|package| package.name != "b");
         assert!(
-            validate_resolution(&manifest, &resolution)
+            validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete)
                 .unwrap_err()
                 .to_string()
                 .contains("selects no package")

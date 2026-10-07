@@ -266,12 +266,6 @@ pub struct Dependency {
     pub kind: DependencyKind,
 }
 
-impl Dependency {
-    pub(crate) fn matches_version(&self, version: &semver::Version) -> bool {
-        !self.version_specified || self.requirement.matches(version)
-    }
-}
-
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DependencySource {

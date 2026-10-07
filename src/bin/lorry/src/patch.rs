@@ -74,7 +74,7 @@ fn load_local_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver::{Options, ResolvedSource, resolve};
+    use crate::resolver::{Options, ResolvedSource, resolve_member};
     use crate::sparse::Record;
     use semver::Version;
     use std::path::{Path, PathBuf};
@@ -158,7 +158,15 @@ mod tests {
             package_limit: crate::policy::PackageLimit::with_max(16),
             max_depth: Some(8),
         };
-        let resolution = resolve(&manifest, &catalog, &options, &[]).unwrap();
+        let resolution =
+            resolve_member(
+                &manifest,
+                &mut catalog,
+                &options,
+                &[],
+                &mut |_, _, _| Ok(()),
+            )
+            .unwrap();
         assert!(matches!(
             resolution.packages[0].source,
             ResolvedSource::Path {

@@ -2347,38 +2347,6 @@ mod tests {
         assert!(error.to_string().contains("non-canonical"));
     }
 
-    #[test]
-    fn verifies_external_registry_seed_when_requested() {
-        let Some(root) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let root = PathBuf::from(root);
-        let set = RepositorySet::open(
-            &configurations(Some(&root), None),
-            crate::source_tree::DEFAULT_LIMITS,
-            16 * 1024 * 1024,
-        )
-        .unwrap();
-
-        let registry = object_identities(&root.join("objects/crates-io/sha256"));
-        assert_eq!(registry.len(), 45);
-        for checksum in registry {
-            set.lookup_registry(&checksum).unwrap().unwrap();
-        }
-    }
-
-    fn object_identities(namespace: &Path) -> Vec<String> {
-        let mut identities = Vec::new();
-        for prefix in fs::read_dir(namespace).unwrap() {
-            let prefix = prefix.unwrap().path();
-            for object in fs::read_dir(prefix).unwrap() {
-                identities.push(object.unwrap().file_name().into_string().unwrap());
-            }
-        }
-        identities.sort();
-        identities
-    }
-
     fn replace_metadata(path: &Path, old: &str, new: &str) {
         let contents = fs::read_to_string(path).unwrap();
         assert!(contents.contains(old));

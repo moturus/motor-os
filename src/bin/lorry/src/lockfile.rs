@@ -2,14 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::Path;
 
 use semver::Version;
 
-use crate::atomic::AtomicFile;
 use crate::diagnostic::{Error, Result};
-use crate::hash::{decode_hex, hex};
-use crate::manifest::{GitSelector, LockedPackage, Manifest, SourceWorkspace};
+use crate::hash::hex;
+use crate::manifest::{GitSelector, SourceWorkspace};
 use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedEdge, ResolvedSource};
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
@@ -61,41 +59,12 @@ impl Format {
     }
 }
 
-pub fn render(manifest: &Manifest, resolution: &Resolution) -> Result<Vec<u8>> {
-    let root_version = Version::parse(&manifest.version.original).map_err(|error| {
-        Error::failure(format!(
-            "root package has invalid version `{} {}`: {error}",
-            manifest.name, manifest.version.original
-        ))
-    })?;
-    let root = Identity {
-        name: manifest.name.clone(),
-        version: root_version,
-        source: None,
-    };
-    let (identities, mut nodes) = resolved_nodes(resolution)?;
-    insert_node(
-        &mut nodes,
-        Node {
-            identity: root,
-            checksum: None,
-            dependencies: edge_identities(&resolution.root_edges, &identities)?,
-        },
-    )?;
-    preserve_inactive_dependencies(manifest, resolution, &mut nodes)?;
-    preserve_unselected_workspace(manifest, &mut nodes)?;
-    render_nodes(&nodes, Format::V4)
-}
-
 /// Every member is already an ordinary node in a complete workspace graph.
 pub(crate) fn render_workspace(resolution: &Resolution, format: Format) -> Result<Vec<u8>> {
-    let (_, nodes) = resolved_nodes(resolution)?;
-    render_nodes(&nodes, format)
+    render_nodes(&resolved_nodes(resolution)?, format)
 }
 
-type Identities = BTreeMap<PackageKey, Identity>;
-
-fn resolved_nodes(resolution: &Resolution) -> Result<(Identities, BTreeMap<Identity, Node>)> {
+fn resolved_nodes(resolution: &Resolution) -> Result<BTreeMap<Identity, Node>> {
     let mut identities = BTreeMap::new();
     for package in &resolution.packages {
         let identity = identity(package.key.clone());
@@ -141,7 +110,7 @@ fn resolved_nodes(resolution: &Resolution) -> Result<(Identities, BTreeMap<Ident
             },
         )?;
     }
-    Ok((identities, nodes))
+    Ok(nodes)
 }
 
 fn render_nodes(nodes: &BTreeMap<Identity, Node>, format: Format) -> Result<Vec<u8>> {
@@ -213,171 +182,6 @@ fn render_nodes(nodes: &BTreeMap<Identity, Node>, format: Format) -> Result<Vec<
         }
     }
     Ok(output.into_bytes())
-}
-
-fn preserve_inactive_dependencies(
-    manifest: &Manifest,
-    resolution: &Resolution,
-    nodes: &mut BTreeMap<Identity, Node>,
-) -> Result<()> {
-    let Some(lock) = manifest.lock.as_ref() else {
-        return Ok(());
-    };
-    let root_version = Version::parse(&manifest.version.original).map_err(|error| {
-        Error::failure(format!(
-            "root package has invalid version `{} {}`: {error}",
-            manifest.name, manifest.version.original
-        ))
-    })?;
-    let root = Identity {
-        name: manifest.name.clone(),
-        version: root_version,
-        source: None,
-    };
-    let mut selected = vec![(root, Some(manifest))];
-    selected.extend(resolution.packages.iter().map(|package| {
-        (
-            identity(package.key.clone()),
-            package.local_manifest.as_ref(),
-        )
-    }));
-
-    let mut pending = Vec::new();
-    for (identity, local_manifest) in selected {
-        let Some(locked) = lock
-            .packages
-            .iter()
-            .find(|package| locked_identity(package).is_ok_and(|locked| locked == identity))
-        else {
-            continue;
-        };
-        let node = nodes
-            .get_mut(&identity)
-            .ok_or_else(|| Error::failure("resolved Cargo.lock node disappeared"))?;
-        for reference in &locked.dependencies {
-            let dependency =
-                crate::offline::resolve_lock_reference(reference, &lock.packages, lock.format)?;
-            let dependency_identity = locked_identity(dependency)?;
-            if node.dependencies.contains(&dependency_identity)
-                || local_manifest.is_some_and(|manifest| {
-                    !manifest
-                        .dependencies
-                        .iter()
-                        .any(|declared| dependency_matches(declared, dependency))
-                })
-            {
-                continue;
-            }
-            node.dependencies.insert(dependency_identity);
-            pending.push(dependency);
-        }
-    }
-    preserve_locked_packages(lock, pending, nodes)
-}
-
-fn dependency_matches(dependency: &crate::manifest::Dependency, locked: &LockedPackage) -> bool {
-    if dependency.package != locked.name
-        || !Version::parse(&locked.version.original)
-            .is_ok_and(|version| dependency.matches_version(&version))
-    {
-        return false;
-    }
-    match (&dependency.source, locked.source.as_deref()) {
-        (crate::manifest::DependencySource::CratesIo, Some(CRATES_IO_SOURCE)) => true,
-        (crate::manifest::DependencySource::Path(_), None) => true,
-        (crate::manifest::DependencySource::Git(expected), Some(source)) => {
-            crate::git::parse_locked_source(source).is_ok_and(|source| source.matches(expected))
-        }
-        _ => false,
-    }
-}
-
-fn preserve_unselected_workspace(
-    manifest: &Manifest,
-    nodes: &mut BTreeMap<Identity, Node>,
-) -> Result<()> {
-    if manifest.workspace_root == manifest.root {
-        return Ok(());
-    }
-    let lock = manifest
-        .lock
-        .as_ref()
-        .ok_or_else(|| Error::failure("workspace vendoring requires the shared Cargo.lock"))?;
-    let pending = lock
-        .packages
-        .iter()
-        .filter(|package| {
-            package.source.is_none()
-                && package.name != manifest.name
-                && manifest.workspace_members.contains_key(&package.name)
-        })
-        .collect::<Vec<_>>();
-    preserve_locked_packages(lock, pending, nodes)
-}
-
-fn preserve_locked_packages<'a>(
-    lock: &'a crate::manifest::Lockfile,
-    mut pending: Vec<&'a LockedPackage>,
-    nodes: &mut BTreeMap<Identity, Node>,
-) -> Result<()> {
-    let mut preserved = BTreeSet::new();
-    while let Some(package) = pending.pop() {
-        let identity = locked_identity(package)?;
-        if nodes.contains_key(&identity) || !preserved.insert(identity.clone()) {
-            continue;
-        }
-        let mut dependencies = BTreeSet::new();
-        for reference in &package.dependencies {
-            let dependency =
-                crate::offline::resolve_lock_reference(reference, &lock.packages, lock.format)?;
-            dependencies.insert(locked_identity(dependency)?);
-            pending.push(dependency);
-        }
-        let checksum = package
-            .checksum
-            .as_deref()
-            .map(decode_hex)
-            .transpose()
-            .map_err(|error| {
-                Error::failure(format!(
-                    "invalid Cargo.lock checksum for `{} {}`: {error}",
-                    package.name, package.version.original
-                ))
-            })?;
-        insert_node(
-            nodes,
-            Node {
-                identity,
-                checksum,
-                dependencies,
-            },
-        )?;
-    }
-    Ok(())
-}
-
-fn locked_identity(package: &LockedPackage) -> Result<Identity> {
-    if let Some(source) = package.source.as_deref()
-        && source != CRATES_IO_SOURCE
-    {
-        crate::git::parse_locked_source(source)?;
-    }
-    Ok(Identity {
-        name: package.name.clone(),
-        version: Version::parse(&package.version.original).map_err(|error| {
-            Error::failure(format!(
-                "invalid locked version `{} {}`: {error}",
-                package.name, package.version.original
-            ))
-        })?,
-        source: package.source.clone(),
-    })
-}
-
-pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = AtomicFile::new(path)?;
-    file.write_all(bytes)?;
-    file.commit()
 }
 
 fn identity(key: PackageKey) -> Identity {
@@ -523,7 +327,7 @@ mod tests {
     use super::*;
     use crate::resolver::{FeatureContext, ResolvedPackage};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -745,49 +549,72 @@ mod tests {
         );
     }
 
+    fn path_package(name: &str, version: &str, root: &Path) -> ResolvedPackage {
+        let key = PackageKey {
+            name: name.to_owned(),
+            version: Version::parse(version).unwrap(),
+            source: PackageSourceKey::Path(root.to_owned()),
+        };
+        package(
+            key,
+            ResolvedSource::Path {
+                logical_root: root.to_owned(),
+                physical_root: root.to_owned(),
+                source_tree_sha256: [7; 32],
+                patched_crates_io: false,
+            },
+        )
+    }
+
+    fn lock_edge(package: PackageKey) -> ResolvedEdge {
+        ResolvedEdge {
+            dependency_index: 0,
+            alias: package.name.clone(),
+            target: None,
+            kind: crate::sparse::DependencyKind::Normal,
+            parent_compile_kind: Some(crate::resolver::CompileKind::Target),
+            compile_kind: crate::resolver::CompileKind::Target,
+            context: FeatureContext::Target(String::new()),
+            package,
+        }
+    }
+
     #[test]
     fn renders_a_crates_io_patch_with_its_git_identity() {
         let fixture = Fixture::new();
-        let source = "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-                      [dependencies]\ndemo = \"=1.2.3\"\n\
-                      [patch.crates-io]\ndemo = { git = \"https://example.com/demo.git\", branch = \"motor\" }\n";
-        let manifest = Manifest::parse(&fixture.0, &fixture.0.join("Cargo.toml"), source).unwrap();
         let cargo_source = "git+https://example.com/demo.git?branch=motor#0123456789abcdef0123456789abcdef01234567";
         let key = PackageKey {
             name: "demo".to_owned(),
             version: Version::parse("1.2.3").unwrap(),
             source: PackageSourceKey::Git(cargo_source.to_owned()),
         };
+        let mut root = path_package("root", "0.1.0", &fixture.0);
+        root.lock_edges.push(lock_edge(key.clone()));
         let resolution = Resolution {
-            root_edges: vec![ResolvedEdge {
-                dependency_index: 0,
-                alias: "demo".to_owned(),
-                target: None,
-                kind: crate::sparse::DependencyKind::Normal,
-                parent_compile_kind: None,
-                compile_kind: crate::resolver::CompileKind::Target,
-                context: FeatureContext::Target(String::new()),
-                package: key.clone(),
-            }],
-            packages: vec![package(
-                key,
-                ResolvedSource::Git {
-                    cargo_source: cargo_source.to_owned(),
-                    git_url: "https://example.com/demo.git".to_owned(),
-                    requested_revision: "motor".to_owned(),
-                    resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-                    git_tree: "1".repeat(40),
-                    repository_tree_sha256: [2; 32],
-                    package_path: String::new(),
-                    logical_root: fixture.0.join(".lorry/git/demo/source"),
-                    physical_root: fixture.0.join("object/source"),
-                    source_tree_sha256: [3; 32],
-                    patched_crates_io: true,
-                },
-            )],
+            root_edges: Vec::new(),
+            packages: vec![
+                root,
+                package(
+                    key,
+                    ResolvedSource::Git {
+                        cargo_source: cargo_source.to_owned(),
+                        git_url: "https://example.com/demo.git".to_owned(),
+                        requested_revision: "motor".to_owned(),
+                        resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                        git_tree: "1".repeat(40),
+                        repository_tree_sha256: [2; 32],
+                        package_path: String::new(),
+                        logical_root: fixture.0.join(".lorry/git/demo/source"),
+                        physical_root: fixture.0.join("object/source"),
+                        source_tree_sha256: [3; 32],
+                        patched_crates_io: true,
+                    },
+                ),
+            ],
         };
 
-        let rendered = String::from_utf8(render(&manifest, &resolution).unwrap()).unwrap();
+        let rendered =
+            String::from_utf8(render_workspace(&resolution, Format::V4).unwrap()).unwrap();
         assert!(rendered.contains(&format!("source = \"{cargo_source}\"")));
         assert!(!rendered.contains("checksum ="));
         assert!(rendered.contains("dependencies = [\n \"demo\",\n]"));
@@ -796,64 +623,26 @@ mod tests {
     #[test]
     fn renders_cargo_v4_path_and_registry_disambiguation_and_round_trips() {
         let fixture = Fixture::new();
-        let local_root = fixture.0.join("local");
-        let source = "[package]\nname = \"lock-oracle\"\nversion = \"0.1.0\"\n\
-                      edition = \"2021\"\n\
-                      [dependencies]\n\
-                      registry-cfg = { package = \"cfg-if\", version = \"=1.0.4\" }\n\
-                      local-cfg = { package = \"cfg-if\", path = \"local\" }\n";
-        let manifest = Manifest::parse(&fixture.0, &fixture.0.join("Cargo.toml"), source).unwrap();
         let registry_key = PackageKey {
             name: "cfg-if".to_owned(),
             version: Version::parse("1.0.4").unwrap(),
             source: PackageSourceKey::CratesIo,
         };
-        let path_key = PackageKey {
-            name: "cfg-if".to_owned(),
-            version: Version::parse("1.0.4").unwrap(),
-            source: PackageSourceKey::Path(local_root.clone()),
-        };
-        let packages = vec![
-            package(
-                path_key.clone(),
-                ResolvedSource::Path {
-                    logical_root: local_root.clone(),
-                    physical_root: local_root,
-                    source_tree_sha256: [7; 32],
-                    patched_crates_io: false,
-                },
-            ),
-            package(
-                registry_key.clone(),
-                ResolvedSource::CratesIo { checksum: [9; 32] },
-            ),
+        let local = path_package("cfg-if", "1.0.4", &fixture.0.join("local"));
+        let mut root = path_package("lock-oracle", "0.1.0", &fixture.0);
+        root.lock_edges = vec![
+            lock_edge(registry_key.clone()),
+            lock_edge(local.key.clone()),
         ];
         let resolution = Resolution {
-            root_edges: vec![
-                ResolvedEdge {
-                    dependency_index: 0,
-                    alias: "registry-demo".to_owned(),
-                    target: None,
-                    kind: crate::sparse::DependencyKind::Normal,
-                    parent_compile_kind: None,
-                    compile_kind: crate::resolver::CompileKind::Target,
-                    context: FeatureContext::Target(String::new()),
-                    package: registry_key,
-                },
-                ResolvedEdge {
-                    dependency_index: 1,
-                    alias: "path-demo".to_owned(),
-                    target: None,
-                    kind: crate::sparse::DependencyKind::Normal,
-                    parent_compile_kind: None,
-                    compile_kind: crate::resolver::CompileKind::Target,
-                    context: FeatureContext::Target(String::new()),
-                    package: path_key,
-                },
+            root_edges: Vec::new(),
+            packages: vec![
+                local,
+                package(registry_key, ResolvedSource::CratesIo { checksum: [9; 32] }),
+                root,
             ],
-            packages,
         };
-        let rendered = render(&manifest, &resolution).unwrap();
+        let rendered = render_workspace(&resolution, Format::V4).unwrap();
         let expected = format!(
             concat!(
                 "# This file is automatically @generated by Cargo.\n",
@@ -881,75 +670,8 @@ mod tests {
         );
         assert_eq!(rendered, expected.as_bytes());
 
-        fs::write(fixture.0.join("Cargo.toml"), source).unwrap();
-        fs::write(fixture.0.join("src/lib.rs"), "").unwrap();
-        write(&fixture.0.join("Cargo.lock"), &rendered).unwrap();
-        let loaded = Manifest::load_for_build(&fixture.0).unwrap();
-        crate::offline::validate_resolution(&loaded, &resolution).unwrap();
-    }
-
-    #[test]
-    fn preserves_locked_inactive_dependencies_declared_by_path_packages() {
-        let fixture = Fixture::new();
-        let local_root = fixture.0.join("local");
-        fs::create_dir_all(local_root.join("src")).unwrap();
-        let root_source = "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-                           [dependencies]\nlocal = { path = \"local\" }\n";
-        let local_source = "[package]\nname = \"local\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
-                            [dependencies]\ncfg-if = { version = \"=1.0.4\", optional = true }\n";
-        fs::write(fixture.0.join("Cargo.toml"), root_source).unwrap();
-        fs::write(fixture.0.join("src/lib.rs"), "").unwrap();
-        fs::write(local_root.join("Cargo.toml"), local_source).unwrap();
-        fs::write(local_root.join("src/lib.rs"), "").unwrap();
-        let expected = format!(
-            concat!(
-                "# This file is automatically @generated by Cargo.\n",
-                "# It is not intended for manual editing.\n",
-                "version = 4\n\n",
-                "[[package]]\nname = \"cfg-if\"\nversion = \"1.0.4\"\n",
-                "source = \"{}\"\nchecksum = \"{}\"\n\n",
-                "[[package]]\nname = \"local\"\nversion = \"1.0.0\"\n",
-                "dependencies = [\n \"cfg-if\",\n]\n\n",
-                "[[package]]\nname = \"root\"\nversion = \"0.1.0\"\n",
-                "dependencies = [\n \"local\",\n]\n",
-            ),
-            CRATES_IO_SOURCE,
-            hex(&[9; 32]),
-        );
-        fs::write(fixture.0.join("Cargo.lock"), &expected).unwrap();
-
-        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
-        let local_manifest =
-            Manifest::parse(&local_root, &local_root.join("Cargo.toml"), local_source).unwrap();
-        let local_key = PackageKey {
-            name: "local".to_owned(),
-            version: Version::parse("1.0.0").unwrap(),
-            source: PackageSourceKey::Path(local_root.clone()),
-        };
-        let mut local = package(
-            local_key.clone(),
-            ResolvedSource::Path {
-                logical_root: local_root.clone(),
-                physical_root: local_root,
-                source_tree_sha256: [7; 32],
-                patched_crates_io: false,
-            },
-        );
-        local.local_manifest = Some(local_manifest);
-        let resolution = Resolution {
-            root_edges: vec![ResolvedEdge {
-                dependency_index: 0,
-                alias: "local".to_owned(),
-                target: None,
-                kind: crate::sparse::DependencyKind::Normal,
-                parent_compile_kind: None,
-                compile_kind: crate::resolver::CompileKind::Target,
-                context: FeatureContext::Target(String::new()),
-                package: local_key,
-            }],
-            packages: vec![local],
-        };
-
-        assert_eq!(render(&manifest, &resolution).unwrap(), expected.as_bytes());
+        fs::write(fixture.0.join("Cargo.lock"), &rendered).unwrap();
+        let loaded = crate::manifest::Lockfile::load(&fixture.0.join("Cargo.lock")).unwrap();
+        crate::offline::validate_workspace_resolution(&loaded, &resolution).unwrap();
     }
 }

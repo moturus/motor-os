@@ -864,23 +864,6 @@ pub fn merge_resolutions(resolutions: impl IntoIterator<Item = Resolution>) -> R
     })
 }
 
-pub fn resolve(
-    manifest: &Manifest,
-    catalog: &Catalog,
-    options: &Options,
-    locked: &[LockedPreference],
-) -> Result<Resolution> {
-    let mut catalog = catalog.clone();
-    resolve_with_scope(
-        manifest,
-        &mut catalog,
-        options,
-        locked,
-        Scope::Complete,
-        &mut |_, _, _| Ok(()),
-    )
-}
-
 pub fn resolve_selected(
     manifest: &Manifest,
     catalog: &Catalog,
@@ -889,60 +872,14 @@ pub fn resolve_selected(
     selection: TargetSelection<'_>,
 ) -> Result<Resolution> {
     let mut catalog = catalog.clone();
-    resolve_with_scope(
-        manifest,
-        &mut catalog,
-        options,
-        locked,
-        Scope::Selected(selection),
-        &mut |_, _, _| Ok(()),
-    )
-}
-
-pub fn resolve_dynamic(
-    manifest: &Manifest,
-    catalog: &mut Catalog,
-    options: &Options,
-    locked: &[LockedPreference],
-    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
-) -> Result<Resolution> {
-    resolve_with_scope(manifest, catalog, options, locked, Scope::Complete, loader)
-}
-
-pub fn resolve_selected_dynamic(
-    manifest: &Manifest,
-    catalog: &mut Catalog,
-    options: &Options,
-    locked: &[LockedPreference],
-    selection: TargetSelection<'_>,
-    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
-) -> Result<Resolution> {
-    resolve_with_scope(
-        manifest,
-        catalog,
-        options,
-        locked,
-        Scope::Selected(selection),
-        loader,
-    )
-}
-
-fn resolve_with_scope(
-    manifest: &Manifest,
-    catalog: &mut Catalog,
-    options: &Options,
-    locked: &[LockedPreference],
-    scope: Scope<'_>,
-    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
-) -> Result<Resolution> {
     catalog
         .workspace_members
         .clone_from(&manifest.workspace_members);
     catalog.workspace_root.clone_from(&manifest.workspace_root);
-    validate_locked_checksums(catalog, locked)?;
-    let requirements = root_requirements(manifest, matches!(scope, Scope::Complete))?;
+    validate_locked_checksums(&catalog, locked)?;
+    let scope = Scope::Selected(selection);
     let mut queue = VecDeque::new();
-    for requirement in requirements {
+    for requirement in root_requirements(manifest)? {
         if !scope.matches(
             CompileKind::Target,
             requirement.dependency.target.as_deref(),
@@ -953,14 +890,50 @@ fn resolve_with_scope(
             parent: None,
             parent_compile_kind: None,
             dependency_index: requirement.index,
-            context: root_context(options.resolver, scope, &requirement.dependency),
+            context: root_context(options.resolver, scope),
             compile_kind: CompileKind::Target,
             dependency: requirement.dependency,
             depth: 1,
             ancestors: BTreeSet::new(),
         });
     }
-    solve_request(queue, catalog, options, locked, scope, loader)
+    solve_request(
+        queue,
+        &mut catalog,
+        options,
+        locked,
+        scope,
+        &mut |_, _, _| Ok(()),
+    )
+}
+
+/// Resolves `manifest` as the only member of a complete workspace. The
+/// member's own edges become the root edges and its package is dropped.
+#[cfg(test)]
+pub(crate) fn resolve_member(
+    manifest: &Manifest,
+    catalog: &mut Catalog,
+    options: &Options,
+    locked: &[LockedPreference],
+    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
+) -> Result<Resolution> {
+    let workspace = crate::manifest::SourceWorkspace {
+        manifest_path: manifest.path.clone(),
+        root: manifest.workspace_root.clone(),
+        packages: vec![manifest.clone()],
+        default_members: vec![manifest.root.clone()],
+        metadata: serde_json::Value::Null,
+        virtual_root: false,
+    };
+    let mut resolution = resolve_complete_workspace(&workspace, catalog, options, locked, loader)?;
+    let member = PackageSourceKey::Path(manifest.root.clone());
+    let index = resolution
+        .packages
+        .iter()
+        .position(|package| package.key.source == member)
+        .unwrap();
+    resolution.root_edges = resolution.packages.remove(index).edges;
+    Ok(resolution)
 }
 
 fn solve_request(
@@ -994,7 +967,6 @@ fn solve_request(
 
 #[derive(Clone, Copy)]
 enum Scope<'a> {
-    Complete,
     WorkspaceComplete {
         locked: Option<&'a locked::Edges>,
         exact: bool,
@@ -1106,17 +1078,16 @@ struct RootRequirement {
     dependency: CandidateDependency,
 }
 
-fn root_requirements(manifest: &Manifest, all_features: bool) -> Result<Vec<RootRequirement>> {
-    root_requirements_and_features(manifest, all_features).map(|(requirements, _)| requirements)
+fn root_requirements(manifest: &Manifest) -> Result<Vec<RootRequirement>> {
+    root_requirements_and_features(manifest).map(|(requirements, _)| requirements)
 }
 
 pub fn selected_root_features(manifest: &Manifest) -> Result<BTreeSet<String>> {
-    root_requirements_and_features(manifest, false).map(|(_, features)| features)
+    root_requirements_and_features(manifest).map(|(_, features)| features)
 }
 
 fn root_requirements_and_features(
     manifest: &Manifest,
-    all_features: bool,
 ) -> Result<(Vec<RootRequirement>, BTreeSet<String>)> {
     let mut enabled = BTreeSet::new();
     for (index, dependency) in manifest.dependencies.iter().enumerate() {
@@ -1125,21 +1096,8 @@ fn root_requirements_and_features(
         }
     }
 
-    let namespaced = manifest
-        .features
-        .values()
-        .flatten()
-        .filter_map(|reference| reference.strip_prefix("dep:"))
-        .collect::<BTreeSet<_>>();
     let mut active = BTreeSet::new();
-    if all_features {
-        active.extend(manifest.features.keys().cloned());
-        for dependency in &manifest.dependencies {
-            if dependency.optional && !namespaced.contains(dependency.alias.as_str()) {
-                active.insert(dependency.alias.clone());
-            }
-        }
-    } else if manifest.features.contains_key("default") {
+    if manifest.features.contains_key("default") {
         active.insert("default".to_owned());
     }
 
@@ -2030,21 +1988,8 @@ fn target_dependency_context(parent: FeatureContext, selector: Option<&str>) -> 
     }
 }
 
-fn root_context(
-    resolver: ResolverVersion,
-    scope: Scope<'_>,
-    dependency: &CandidateDependency,
-) -> FeatureContext {
-    let context = match scope {
-        Scope::WorkspaceMetadata { .. } => FeatureContext::Unified,
-        Scope::Complete | Scope::WorkspaceComplete { .. } => {
-            FeatureContext::Target(dependency.target.clone().unwrap_or_default())
-        }
-        Scope::Selected(_) | Scope::WorkspaceSelected { .. } => {
-            FeatureContext::Target(String::new())
-        }
-    };
-    normalize_scope_context(resolver, scope, context)
+fn root_context(resolver: ResolverVersion, scope: Scope<'_>) -> FeatureContext {
+    normalize_scope_context(resolver, scope, FeatureContext::Target(String::new()))
 }
 
 fn child_target_context(
@@ -2053,9 +1998,7 @@ fn child_target_context(
     selector: Option<&str>,
 ) -> FeatureContext {
     match scope {
-        Scope::Complete | Scope::WorkspaceComplete { .. } => {
-            target_dependency_context(parent, selector)
-        }
+        Scope::WorkspaceComplete { .. } => target_dependency_context(parent, selector),
         Scope::Selected(_) | Scope::WorkspaceSelected { .. } | Scope::WorkspaceMetadata { .. } => {
             parent
         }
@@ -2137,7 +2080,7 @@ mod tests {
 
     #[test]
     fn snapshots_share_candidates_but_keep_selection_state_independent() {
-        let manifest = manifest("child = \"1\"", "extra = []", "2");
+        let (_dir, manifest) = manifest("child = \"1\"", "extra = []", "2");
         let candidate = local_candidate(
             manifest.clone(),
             PathBuf::from("/fixture"),
@@ -2237,7 +2180,7 @@ mod tests {
         let declarations = (0..320)
             .map(|index| format!("parent{index} = \"1\"\n"))
             .collect::<String>();
-        let manifest = manifest(&declarations, "", "2");
+        let (_dir, manifest) = manifest(&declarations, "", "2");
         let mut catalog = Catalog::default();
         for index in 0..320 {
             catalog
@@ -2257,7 +2200,7 @@ mod tests {
         limits.package_limit = PackageLimit::with_max(384);
         limits.max_depth = Some(2);
         let graph =
-            resolve_dynamic(&manifest, &mut catalog, &limits, &[], &mut |_, _, _| Ok(())).unwrap();
+            resolve_member(&manifest, &mut catalog, &limits, &[], &mut |_, _, _| Ok(())).unwrap();
         assert_eq!(graph.packages.len(), 321);
         assert_eq!(graph.root_edges.len(), 320);
         assert_eq!(
@@ -2272,7 +2215,7 @@ mod tests {
 
     #[test]
     fn failed_reuse_considers_candidates_loaded_by_its_children() {
-        let manifest = manifest("a = \"*\"\nb = \"1\"", "", "2");
+        let (_dir, manifest) = manifest("a = \"*\"\nb = \"1\"", "", "2");
         let mut catalog = Catalog::default();
         catalog
             .insert(record(
@@ -2308,7 +2251,7 @@ mod tests {
                 "",
             ))
             .unwrap();
-        let graph = resolve_dynamic(
+        let graph = resolve_member(
             &manifest,
             &mut catalog,
             &options(ResolverVersion::V2),
@@ -3491,10 +3434,12 @@ dev = ["dep:leaf"]
         )
     }
 
-    fn manifest(dependencies: &str, features: &str, resolver: &str) -> Manifest {
-        Manifest::parse(
-            Path::new("/fixture"),
-            Path::new("/fixture/Cargo.toml"),
+    // Workspace resolution reads the member directory, so each manifest owns one.
+    fn manifest(dependencies: &str, features: &str, resolver: &str) -> (LocalFixture, Manifest) {
+        let fixture = LocalFixture::new();
+        let manifest = Manifest::parse(
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
             &format!(
                 "[package]\nname = \"root\"\nversion = \"0.1.0\"\n\
                  edition = \"2021\"\nresolver = \"{resolver}\"\n\
@@ -3502,13 +3447,15 @@ dev = ["dep:leaf"]
                  [features]\n{features}\n"
             ),
         )
-        .unwrap()
+        .unwrap();
+        (fixture, manifest)
     }
 
-    fn target_manifest(resolver: &str) -> Manifest {
-        Manifest::parse(
-            Path::new("/fixture"),
-            Path::new("/fixture/Cargo.toml"),
+    fn target_manifest(resolver: &str) -> (LocalFixture, Manifest) {
+        let fixture = LocalFixture::new();
+        let manifest = Manifest::parse(
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
             &format!(
                 "[package]\nname = \"root\"\nversion = \"0.1.0\"\n\
                  edition = \"2021\"\nresolver = \"{resolver}\"\n\
@@ -3518,7 +3465,8 @@ dev = ["dep:leaf"]
                  windows-shared = {{ package = \"shared\", version = \"1\", features = [\"windows\"] }}\n"
             ),
         )
-        .unwrap()
+        .unwrap();
+        (fixture, manifest)
     }
 
     fn options(resolver: ResolverVersion) -> Options {
@@ -3576,8 +3524,15 @@ dev = ["dep:leaf"]
         catalog
             .insert(record("shared", "1.0.0", "[]", "{}", ""))
             .unwrap();
-        let root = manifest("a = \"1\"\nb = \"1\"", "", "2");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let (_dir, root) = manifest("a = \"1\"\nb = \"1\"", "", "2");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&resolution, "a"),
             [&Version::parse("1.0.0").unwrap()]
@@ -3590,7 +3545,7 @@ dev = ["dep:leaf"]
 
     #[test]
     fn dynamically_loads_only_names_reached_by_resolution() {
-        let root = manifest("a = \"1\"", "", "2");
+        let (_dir, root) = manifest("a = \"1\"", "", "2");
         let mut catalog = Catalog::default();
         let mut loaded = Vec::new();
         let mut loader = |name: &str, _requirement: &VersionReq, catalog: &mut Catalog| {
@@ -3608,7 +3563,7 @@ dev = ["dep:leaf"]
             }
         };
 
-        let resolution = resolve_dynamic(
+        let resolution = resolve_member(
             &root,
             &mut catalog,
             &options(ResolverVersion::V2),
@@ -3625,7 +3580,7 @@ dev = ["dep:leaf"]
 
     #[test]
     fn git_patch_satisfies_crates_io_without_losing_git_identity() {
-        let root = manifest("demo = \"=1.2.3\"", "", "2");
+        let (_dir, root) = manifest("demo = \"=1.2.3\"", "", "2");
         let patched = Manifest::parse(
             Path::new("/git/demo"),
             Path::new("/git/demo/Cargo.toml"),
@@ -3667,7 +3622,14 @@ dev = ["dep:leaf"]
             packages: BTreeMap::new(),
         });
 
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         let [package] = resolution.packages.as_slice() else {
             panic!("expected one patched package");
         };
@@ -3686,7 +3648,7 @@ dev = ["dep:leaf"]
 
     #[test]
     fn loader_failures_are_not_retried_during_backtracking() {
-        let root = manifest("a = \"1\"", "", "2");
+        let (_dir, root) = manifest("a = \"1\"", "", "2");
         let mut catalog = Catalog::default();
         let mut loaded = Vec::new();
         let mut loader = |name: &str, _requirement: &VersionReq, catalog: &mut Catalog| {
@@ -3702,7 +3664,7 @@ dev = ["dep:leaf"]
             }
         };
 
-        let error = resolve_dynamic(
+        let error = resolve_member(
             &root,
             &mut catalog,
             &options(ResolverVersion::V2),
@@ -3727,7 +3689,7 @@ dev = ["dep:leaf"]
                 "",
             ))
             .unwrap();
-        let root = target_manifest("2");
+        let (_dir, root) = target_manifest("2");
         let host_cfg = CfgSet::parse("unix\n").unwrap();
         let unix = CfgSet::parse("unix\n").unwrap();
         let windows = CfgSet::parse("windows\n").unwrap();
@@ -3780,13 +3742,20 @@ dev = ["dep:leaf"]
         catalog
             .insert(record("demo", "0.1.9", "[]", "{}", ""))
             .unwrap();
-        let root = manifest(
+        let (_dir, root) = manifest(
             "old = { package = \"demo\", version = \"0.1\" }\n\
              new = { package = \"demo\", version = \"0.2\" }",
             "",
             "2",
         );
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(selected(&resolution, "demo").len(), 2);
     }
 
@@ -3800,9 +3769,16 @@ dev = ["dep:leaf"]
         catalog
             .insert(record("demo", "1.1.0", "[]", "{}", ""))
             .unwrap();
-        let root = manifest("demo = \"1\"", "", "2");
+        let (_dir, root) = manifest("demo = \"1\"", "", "2");
 
-        let unlocked = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let unlocked = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&unlocked, "demo"),
             [&Version::parse("1.1.0").unwrap()]
@@ -3812,7 +3788,14 @@ dev = ["dep:leaf"]
             version: Version::parse("1.2.0").unwrap(),
             checksum: Some(yanked_checksum),
         }];
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &locked).unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &locked,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&resolution, "demo"),
             [&Version::parse("1.2.0").unwrap()]
@@ -3823,10 +3806,16 @@ dev = ["dep:leaf"]
             ..locked[0].clone()
         }];
         assert!(
-            resolve(&root, &catalog, &options(ResolverVersion::V2), &corrupt)
-                .unwrap_err()
-                .to_string()
-                .contains("checksum")
+            resolve_member(
+                &root,
+                &mut catalog,
+                &options(ResolverVersion::V2),
+                &corrupt,
+                &mut |_, _, _| Ok(())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("checksum")
         );
     }
 
@@ -3845,7 +3834,7 @@ dev = ["dep:leaf"]
         ] {
             catalog.insert(candidate).unwrap();
         }
-        let root = manifest("demo = \"1\"\nother = \"1\"", "", "2");
+        let (_dir, root) = manifest("demo = \"1\"\nother = \"1\"", "", "2");
         let demo_version = Version::parse("1.1.0").unwrap();
         let mut preferences = vec![
             LockedPreference {
@@ -3865,8 +3854,14 @@ dev = ["dep:leaf"]
             Some(&demo_version),
             Version::parse("1.2.0").unwrap(),
         );
-        let resolution =
-            resolve(&root, &catalog, &options(ResolverVersion::V2), &preferences).unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &preferences,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(selected(&resolution, "demo")[0].to_string(), "1.2.0");
         assert_eq!(selected(&resolution, "other")[0].to_string(), "1.1.0");
     }
@@ -3892,8 +3887,15 @@ dev = ["dep:leaf"]
                 ",\"rust_version\":\"1.60\"",
             ))
             .unwrap();
-        let root = manifest("demo = \"1\"", "", "3");
-        let fallback = resolve(&root, &catalog, &options(ResolverVersion::V3), &[]).unwrap();
+        let (_dir, root) = manifest("demo = \"1\"", "", "3");
+        let fallback = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V3),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&fallback, "demo"),
             [&Version::parse("1.1.0").unwrap()]
@@ -3901,7 +3903,8 @@ dev = ["dep:leaf"]
 
         let mut allow = options(ResolverVersion::V3);
         allow.incompatible_rust_versions = Some(IncompatibleRustVersions::Allow);
-        let allow = resolve(&root, &catalog, &allow, &[]).unwrap();
+        let allow =
+            resolve_member(&root, &mut catalog, &allow, &[], &mut |_, _, _| Ok(())).unwrap();
         assert_eq!(
             selected(&allow, "demo"),
             [&Version::parse("1.2.0").unwrap()]
@@ -3997,7 +4000,7 @@ dev = ["dep:leaf"]
 
     #[test]
     fn equal_lock_preferences_still_rank_msrv_compatibility() {
-        let root = manifest("demo = \"1\"\n", "", "3");
+        let (_dir, root) = manifest("demo = \"1\"\n", "", "3");
         let mut catalog = Catalog::default();
         let mut locked = Vec::new();
         for (version, rust_version) in [("1.1.0", "1.60"), ("1.2.0", "1.85")] {
@@ -4015,7 +4018,14 @@ dev = ["dep:leaf"]
             });
             catalog.insert(candidate).unwrap();
         }
-        let resolved = resolve(&root, &catalog, &options(ResolverVersion::V3), &locked).unwrap();
+        let resolved = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V3),
+            &locked,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&resolved, "demo"),
             [&Version::parse("1.1.0").unwrap()]
@@ -4024,13 +4034,12 @@ dev = ["dep:leaf"]
 
     #[test]
     fn acquisition_errors_retain_help_locations_and_exit_codes() {
-        let root = manifest("demo = \"1\"\n", "", "3");
-        let error = resolve_with_scope(
+        let (_dir, root) = manifest("demo = \"1\"\n", "", "3");
+        let error = resolve_member(
             &root,
             &mut Catalog::default(),
             &options(ResolverVersion::V2),
             &[],
-            Scope::Complete,
             &mut |_, _, _| {
                 Err(Error::at(
                     std::path::Path::new("Cargo.lock"),
@@ -4057,12 +4066,19 @@ dev = ["dep:leaf"]
         catalog
             .insert(record("demo", "1.1.0", "[]", "{\"needed\":[]}", ""))
             .unwrap();
-        let root = manifest(
+        let (_dir, root) = manifest(
             "demo = { version = \"1\", features = [\"needed\"] }",
             "",
             "2",
         );
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&resolution, "demo"),
             [&Version::parse("1.1.0").unwrap()]
@@ -4104,11 +4120,19 @@ dev = ["dep:leaf"]
                 .insert(record(name, "1.0.0", "[]", "{\"feature\":[]}", ""))
                 .unwrap();
         }
-        let root = manifest("a = { version = \"1\", features = [\"full\"] }", "", "2");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let (_dir, root) = manifest("a = { version = \"1\", features = [\"full\"] }", "", "2");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(selected(&resolution, "optional").len(), 1);
         assert_eq!(selected(&resolution, "defaultdep").len(), 1);
-        assert!(selected(&resolution, "weak").is_empty());
+        // Cargo locks the optional target of an active `weak?/feature`.
+        assert_eq!(selected(&resolution, "weak").len(), 1);
         let shared = resolution
             .packages
             .iter()
@@ -4117,8 +4141,15 @@ dev = ["dep:leaf"]
         assert_eq!(shared.target_features, ["target".to_owned()].into());
         assert_eq!(shared.host_features, ["host".to_owned()].into());
 
-        let root = manifest("a = { version = \"1\", features = [\"full\"] }", "", "1");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V1), &[]).unwrap();
+        let (_dir, root) = manifest("a = { version = \"1\", features = [\"full\"] }", "", "1");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V1),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         let shared = resolution
             .packages
             .iter()
@@ -4169,8 +4200,15 @@ dev = ["dep:leaf"]
                 .unwrap();
         }
 
-        let root = manifest("a = \"1\"", "", "2");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let (_dir, root) = manifest("a = \"1\"", "", "2");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(selected(&resolution, "implicit").len(), 1);
         assert_eq!(selected(&resolution, "namespaced").len(), 1);
         let a = resolution
@@ -4197,8 +4235,15 @@ dev = ["dep:leaf"]
             ))
             .unwrap();
 
-        let root = target_manifest("2");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let (_dir, root) = target_manifest("2");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         let shared = resolution
             .packages
             .iter()
@@ -4217,8 +4262,15 @@ dev = ["dep:leaf"]
             Some(&["windows".to_owned()].into())
         );
 
-        let root = target_manifest("1");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V1), &[]).unwrap();
+        let (_dir, root) = target_manifest("1");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V1),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         let shared = resolution
             .packages
             .iter()
@@ -4332,7 +4384,7 @@ dev = ["dep:leaf"]
                 .insert(record(name, "1.0.0", "[]", "{}", ""))
                 .unwrap();
         }
-        let root = manifest("target-package = \"1\"", "", "2");
+        let (_dir, root) = manifest("target-package = \"1\"", "", "2");
         let target_cfg = CfgSet::parse("unix\n").unwrap();
         let host_cfg = CfgSet::parse("windows\n").unwrap();
         let resolution = resolve_selected(
@@ -4405,7 +4457,7 @@ dev = ["dep:leaf"]
         };
         assert!(catalog.annotate_proc_macro(&key, true).unwrap());
         assert!(!catalog.annotate_proc_macro(&key, true).unwrap());
-        let root = manifest(
+        let (_dir, root) = manifest(
             "derive-example = \"1\"\nhelper = { version = \"1\", features = [\"target-context\"] }",
             "",
             "2",
@@ -4642,12 +4694,39 @@ dev = ["dep:leaf"]
         catalog
             .insert(record("weak", "1.0.0", "[]", "{\"feature\":[]}", ""))
             .unwrap();
-        let root = manifest(
-            "a = { version = \"1\", features = [\"full\"] }\nother = \"1\"",
+        // Complete resolution activates the weak target; selected units do not.
+        let fixture = LocalFixture::new();
+        fixture.package(
             "",
-            "2",
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\na = { version = \"1\", features = [\"full\"] }\nother = \"1\"\n",
         );
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let source = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let options = options(ResolverVersion::V2);
+        let complete =
+            resolve_complete_workspace(&source, &mut catalog, &options, &[], &mut |_, _, _| Ok(()))
+                .unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let resolution = workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &options,
+            &[workspace::MemberRequest {
+                root: source.packages[0].root.clone(),
+                features: BTreeSet::new(),
+                default_features: true,
+                dev: false,
+                selected: true,
+                target_units: false,
+            }],
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+            },
+        )
+        .unwrap();
         let a = resolution
             .packages
             .iter()
@@ -4678,11 +4757,12 @@ dev = ["dep:leaf"]
              [dependencies]\na = { path = \"a\" }\n",
         )
         .unwrap();
-        let resolution = resolve(
+        let resolution = resolve_member(
             &root,
-            &Catalog::default(),
+            &mut Catalog::default(),
             &options(ResolverVersion::V2),
             &[],
+            &mut |_, _, _| Ok(()),
         )
         .unwrap();
         assert_eq!(selected(&resolution, "a").len(), 1);
@@ -4715,11 +4795,12 @@ dev = ["dep:leaf"]
         )
         .unwrap();
         assert!(
-            resolve(
+            resolve_member(
                 &constrained,
-                &Catalog::default(),
+                &mut Catalog::default(),
                 &options(ResolverVersion::V2),
                 &[],
+                &mut |_, _, _| Ok(()),
             )
             .unwrap_err()
             .to_string()
@@ -4738,7 +4819,14 @@ dev = ["dep:leaf"]
         catalog
             .insert(record("a", "1.2.3", "[]", "{}", ""))
             .unwrap();
-        let resolution = resolve(&mixed, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let resolution = resolve_member(
+            &mixed,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(selected(&resolution, "a").len(), 2);
         assert!(
             resolution
@@ -4790,7 +4878,7 @@ dev = ["dep:leaf"]
             16 * 1024 * 1024,
         )
         .unwrap();
-        let catalog = Catalog::from_locked_repository(&manifest, &repositories).unwrap();
+        let mut catalog = Catalog::from_locked_repository(&manifest, &repositories).unwrap();
         let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
         let unix = CfgSet::parse("unix\n").unwrap();
         let selected = resolve_selected(
@@ -4810,8 +4898,14 @@ dev = ["dep:leaf"]
         assert_eq!(selected.packages.len(), 1);
         assert_eq!(selected.packages[0].key.name, "local");
 
-        let error =
-            resolve(&manifest, &catalog, &options(ResolverVersion::V2), &locked).unwrap_err();
+        let error = resolve_member(
+            &manifest,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &locked,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("missing 2.0.0"));
         assert!(error.render().contains("lorry vendor"));
     }
@@ -4864,10 +4958,12 @@ dev = ["dep:leaf"]
         .unwrap();
         let mut catalog = Catalog::default();
         catalog.insert(libc).unwrap();
-        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
-        let resolution = resolve(
-            &manifest,
-            &catalog,
+        let mut workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        let lock = manifest.lock.as_ref().unwrap();
+        let resolution = resolve_complete_workspace(
+            &workspace,
+            &mut catalog,
             &Options {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: None,
@@ -4875,10 +4971,11 @@ dev = ["dep:leaf"]
                 package_limit: PackageLimit::with_max(16),
                 max_depth: Some(8),
             },
-            &locked,
+            &LockedPreference::from_lockfile(Some(lock)).unwrap(),
+            &mut |_, _, _| Ok(()),
         )
         .unwrap();
-        crate::offline::validate_resolution(&manifest, &resolution).unwrap();
+        crate::offline::validate_workspace_resolution(lock, &resolution).unwrap();
         assert_eq!(selected(&resolution, "libc").len(), 1);
         assert_eq!(selected(&resolution, "moto-sys").len(), 1);
         assert_eq!(selected(&resolution, "moto-rt").len(), 1);
@@ -4913,18 +5010,19 @@ dev = ["dep:leaf"]
         catalog
             .insert(record("y", "1.0.0", "[]", "{}", ""))
             .unwrap();
-        let root = manifest("a = \"1\"", "", "2");
+        let (_dir, root) = manifest("a = \"1\"", "", "2");
         // `a 1.0.0` would fit in two packages, but Cargo selects `a 1.1.0`.
         let mut limited = options(ResolverVersion::V2);
         limited.package_limit = PackageLimit::with_max(2);
-        let error = resolve(&root, &catalog, &limited, &[])
+        let error = resolve_member(&root, &mut catalog, &limited, &[], &mut |_, _, _| Ok(()))
             .unwrap_err()
             .render();
         assert!(error.contains("limit of 2"), "{error}");
         assert!(error.contains("`max-packages`"), "{error}");
 
         limited.package_limit = PackageLimit::with_max(3);
-        let resolution = resolve(&root, &catalog, &limited, &[]).unwrap();
+        let resolution =
+            resolve_member(&root, &mut catalog, &limited, &[], &mut |_, _, _| Ok(())).unwrap();
         assert!(
             resolution
                 .packages
@@ -4943,18 +5041,24 @@ dev = ["dep:leaf"]
         catalog
             .insert(record("b", "1.0.0", "[]", "{}", ",\"links\":\"native\""))
             .unwrap();
-        let root = manifest("a = \"1\"\nb = \"1\"", "", "2");
+        let (_dir, root) = manifest("a = \"1\"\nb = \"1\"", "", "2");
         assert!(
-            resolve(&root, &catalog, &options(ResolverVersion::V2), &[])
-                .unwrap_err()
-                .to_string()
-                .contains("link")
+            resolve_member(
+                &root,
+                &mut catalog,
+                &options(ResolverVersion::V2),
+                &[],
+                &mut |_, _, _| Ok(())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("link")
         );
 
         let mut limits = options(ResolverVersion::V2);
         limits.package_limit = PackageLimit::with_max(1);
         assert!(
-            resolve(&root, &catalog, &limits, &[])
+            resolve_member(&root, &mut catalog, &limits, &[], &mut |_, _, _| Ok(()))
                 .unwrap_err()
                 .to_string()
                 .contains("limit of 1")
@@ -4982,12 +5086,18 @@ dev = ["dep:leaf"]
                 "",
             ))
             .unwrap();
-        let root = manifest("a = \"1\"", "", "2");
+        let (_dir, root) = manifest("a = \"1\"", "", "2");
         assert!(
-            resolve(&root, &catalog, &options(ResolverVersion::V2), &[])
-                .unwrap_err()
-                .to_string()
-                .contains("cycle")
+            resolve_member(
+                &root,
+                &mut catalog,
+                &options(ResolverVersion::V2),
+                &[],
+                &mut |_, _, _| Ok(())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("cycle")
         );
 
         let mut catalog = Catalog::default();
@@ -5012,11 +5122,11 @@ dev = ["dep:leaf"]
         catalog
             .insert(record("shared", "1.0.0", "[]", "{}", ""))
             .unwrap();
-        let root = manifest("shared = \"1\"\na = \"1\"", "", "2");
+        let (_dir, root) = manifest("shared = \"1\"\na = \"1\"", "", "2");
         let mut limits = options(ResolverVersion::V2);
         limits.max_depth = Some(2);
         assert!(
-            resolve(&root, &catalog, &limits, &[])
+            resolve_member(&root, &mut catalog, &limits, &[], &mut |_, _, _| Ok(()))
                 .unwrap_err()
                 .to_string()
                 .contains("dependency depth")
@@ -5027,6 +5137,8 @@ dev = ["dep:leaf"]
     fn matches_the_frozen_stage_two_cargo_resolution_oracle() {
         let root = Path::new("tests/oracles/stage2-resolution/root");
         let manifest = Manifest::load_for_build(root).unwrap();
+        let mut workspace = crate::manifest::SourceWorkspace::load(root, None).unwrap();
+        workspace.load_locked_context().unwrap();
         let mut catalog = Catalog::default();
         for entry in fs::read_dir("tests/oracles/stage2-resolution/index-records").unwrap() {
             let path = entry.unwrap().path();
@@ -5034,7 +5146,8 @@ dev = ["dep:leaf"]
                 .insert(Record::parse(&path, &fs::read(&path).unwrap()).unwrap())
                 .unwrap();
         }
-        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
+        let lock = manifest.lock.as_ref().unwrap();
+        let locked = LockedPreference::from_lockfile(Some(lock)).unwrap();
         let options = Options {
             resolver: manifest.resolver,
             incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
@@ -5042,10 +5155,17 @@ dev = ["dep:leaf"]
             package_limit: PackageLimit::with_max(64),
             max_depth: Some(16),
         };
-        let complete = resolve(&manifest, &catalog, &options, &locked).unwrap();
-        crate::offline::validate_resolution(&manifest, &complete).unwrap();
+        let complete = resolve_complete_workspace(
+            &workspace,
+            &mut catalog.clone(),
+            &options,
+            &locked,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        crate::offline::validate_workspace_resolution(lock, &complete).unwrap();
         assert_eq!(
-            crate::lockfile::render(&manifest, &complete).unwrap(),
+            crate::lockfile::render_workspace(&complete, crate::lockfile::Format::V4).unwrap(),
             fs::read(root.join("Cargo.lock")).unwrap()
         );
 
@@ -5071,171 +5191,6 @@ dev = ["dep:leaf"]
                 .map(|package| package.key.name.as_str())
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["a", "defaultdep", "optional", "platform", "shared"])
-        );
-    }
-
-    #[test]
-    fn resolves_the_seeded_lorry_lock_graph_when_requested() {
-        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let mut catalog = Catalog::default();
-        let objects = PathBuf::from(repository).join("objects/crates-io/sha256");
-        for prefix in fs::read_dir(objects).unwrap() {
-            for object in fs::read_dir(prefix.unwrap().path()).unwrap() {
-                let path = object.unwrap().path().join("index-record.json");
-                catalog
-                    .insert(Record::parse(&path, &fs::read(&path).unwrap()).unwrap())
-                    .unwrap();
-            }
-        }
-
-        let manifest = Manifest::load_for_build(Path::new(".")).unwrap();
-        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
-        let lock = manifest.lock.as_ref().unwrap();
-        for package in &lock.packages {
-            if package.source.as_deref() != Some(SOURCE)
-                || catalog.contains_registry(
-                    &package.name,
-                    &Version::parse(&package.version.original).unwrap(),
-                )
-            {
-                continue;
-            }
-            let dependencies = package
-                .dependencies
-                .iter()
-                .map(|dependency| {
-                    let name = dependency.split_whitespace().next().unwrap();
-                    let matches = lock
-                        .packages
-                        .iter()
-                        .filter(|package| package.name == name)
-                        .collect::<Vec<_>>();
-                    assert_eq!(
-                        matches.len(),
-                        1,
-                        "test supplement needs an unambiguous lock dependency"
-                    );
-                    Dependency {
-                        alias: name.to_owned(),
-                        package: name.to_owned(),
-                        requirement: VersionReq::parse(&format!(
-                            "={}",
-                            matches[0].version.original
-                        ))
-                        .unwrap(),
-                        features: Vec::new(),
-                        optional: false,
-                        default_features: true,
-                        target: None,
-                        kind: DependencyKind::Normal,
-                    }
-                })
-                .collect();
-            catalog
-                .insert(Record {
-                    name: package.name.clone(),
-                    version: Version::parse(&package.version.original).unwrap(),
-                    dependencies,
-                    checksum: decode_hex(package.checksum.as_deref().unwrap()).unwrap(),
-                    features: BTreeMap::new(),
-                    features2: BTreeMap::new(),
-                    yanked: false,
-                    links: None,
-                    schema: 1,
-                    rust_version: None,
-                    published: None,
-                    exact_bytes: Vec::new(),
-                })
-                .unwrap();
-        }
-        let resolution = resolve(
-            &manifest,
-            &catalog,
-            &Options {
-                resolver: manifest.resolver,
-                incompatible_rust_versions: None,
-                rust_versions: vec![Version::parse("1.98.0").unwrap()],
-                package_limit: PackageLimit::with_max(64),
-                max_depth: Some(16),
-            },
-            &locked,
-        )
-        .unwrap();
-        crate::offline::validate_resolution(&manifest, &resolution).unwrap();
-        assert_eq!(
-            crate::lockfile::render(&manifest, &resolution).unwrap(),
-            fs::read("Cargo.lock").unwrap()
-        );
-        let expected = lock
-            .packages
-            .iter()
-            .filter(|package| package.source.as_deref() == Some(SOURCE))
-            .map(|package| {
-                (
-                    package.name.clone(),
-                    Version::parse(&package.version.original).unwrap(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        let actual = resolution
-            .packages
-            .iter()
-            .filter(|package| matches!(&package.source, ResolvedSource::CratesIo { .. }))
-            .map(|package| (package.key.name.clone(), package.key.version.clone()))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn selected_lorry_graph_loads_objects_directly_from_the_seeded_repository() {
-        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let manifest = Manifest::load_for_build(Path::new(".")).unwrap();
-        let repositories = RepositorySet::open(
-            &crate::config::Repositories {
-                system: Some(PathBuf::from(repository)),
-                ..crate::config::Repositories::default()
-            },
-            DEFAULT_TREE_LIMITS,
-            16 * 1024 * 1024,
-        )
-        .unwrap();
-        let catalog = Catalog::from_locked_repository(&manifest, &repositories).unwrap();
-        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
-        let linux = CfgSet::parse(
-            "debug_assertions\npanic=\"unwind\"\ntarget_arch=\"x86_64\"\n\
-             target_endian=\"little\"\ntarget_env=\"gnu\"\ntarget_family=\"unix\"\n\
-             target_os=\"linux\"\ntarget_pointer_width=\"64\"\ntarget_vendor=\"unknown\"\nunix\n",
-        )
-        .unwrap();
-        let resolution = resolve_selected(
-            &manifest,
-            &catalog,
-            &Options {
-                resolver: manifest.resolver,
-                incompatible_rust_versions: None,
-                rust_versions: vec![Version::parse("1.98.0").unwrap()],
-                package_limit: PackageLimit::with_max(64),
-                max_depth: Some(16),
-            },
-            &locked,
-            TargetSelection {
-                target_triple: "x86_64-unknown-linux-gnu",
-                target_cfg: &linux,
-                host_triple: "x86_64-unknown-linux-gnu",
-                host_cfg: &linux,
-            },
-        )
-        .unwrap();
-        crate::offline::validate_selected_resolution(&manifest, &resolution).unwrap();
-        assert!(
-            resolution
-                .packages
-                .iter()
-                .all(|package| package.key.name != "moto-rt")
         );
     }
 }

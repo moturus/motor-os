@@ -354,14 +354,6 @@ impl Config {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn load_for_test(
-        package_root: &Path,
-        environment: &BTreeMap<String, String>,
-    ) -> Result<Self> {
-        Self::load_with_environment(package_root, environment)
-    }
-
     pub fn selected_target(&self, command_target: Option<&str>) -> Result<Option<String>> {
         let target = command_target
             .map(str::to_owned)
