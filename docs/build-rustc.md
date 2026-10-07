@@ -195,8 +195,8 @@ Lorry's [inspect and check commands](../src/bin/lorry/README.md#inspect-and-chec
 define the Cargo-compatible boundary, including `metadata`, JSON `check`
 output, named targets, and `tree`. The analyzer also uses the supported
 `locate-project` and read-only `rustc --print` queries. Resolved metadata
-describes one selected package per invocation; input manifests remain
-immutable. Client notifications of manifest or lock changes trigger metadata
+describes the whole workspace, even through a member manifest; input
+manifests remain immutable. Client notifications of manifest or lock changes trigger metadata
 reloads, and build-script input changes trigger a new build-script pass. Run/test/debug
 runnables remain upstream Cargo command templates outside native acceptance.
 

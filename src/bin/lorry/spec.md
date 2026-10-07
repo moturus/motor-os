@@ -38,32 +38,25 @@ checks are validation infrastructure and are not operational Lorry inputs.
 
 ## Current capability baseline
 
-The current product builds dependency-free and locked crates.io/Git/path graphs,
-multiple ordinary binaries and selected workspace members,
-dependency build scripts, and compiler-host procedural-macro dependencies. It
-vendors crates.io sources, maintains compact admission state, caches
-dependency units, builds and runs test harnesses, and operates on Linux,
-Linux-to-Motor, and native Motor. Direct Git dependencies and root Git patches
-are vendored natively on both supported hosts through the Git source model
-specified below.
+Lorry builds dependency-free and locked crates.io, Git, and path graphs. It
+supports multiple binaries, selected workspace members, build scripts, and
+compiler-host procedural macros. It vendors crates.io and Git sources,
+maintains compact admission state, caches dependency units, and builds and
+runs test harnesses. It operates on Linux, Linux-to-Motor, and native Motor.
 
 Workspace membership and inheritance, shared resolution, metadata, fetch,
-tree, and scoped root admission are implemented. Ordinary build, check, and
-Clippy compile several members together with shared CLI feature resolution.
-Run, test, and test-target checking retain their single-member default-feature
-path until remaining target support lands. Ordinary build/check/Clippy execute
-selected member build scripts under named path grants. Custom/build-std targets
-remain unsupported. `full-native-build.md` is a
-non-normative audit of those and the
-other gaps exposed by the repository `Makefile`; future source-model rationale
-belongs in `design.md`.
+tree, and scoped root admission are implemented. Build, check, Clippy, run,
+and test share one workspace graph with CLI feature resolution. They run
+selected member build scripts under named path grants. Custom and build-std
+targets are unsupported. `full-native-build.md` is a non-normative audit of
+the remaining gaps exposed by the repository `Makefile`.
 
 ## Platforms, toolchains, and compatibility
 
 - Lorry must run natively on Linux and Motor OS and build Linux and
   `x86_64-unknown-motor` targets.
-- Development may iterate on Linux, but portability-sensitive changes and
-  milestone closure require Linux-to-Motor and native-Motor coverage.
+- Development may iterate on Linux, but portability-sensitive changes
+  require Linux-to-Motor and native-Motor coverage.
 - Linux compiler discovery follows Cargo-compatible precedence: a leading
   `+toolchain` asks rustup only to locate that toolchain's `rustc`; otherwise
   `RUSTC` precedes `rustc` from `PATH`.
@@ -112,9 +105,6 @@ complete feature lists. Cargo's `build.target` does not filter metadata.
 Metadata reads verified sources without reconstructing an execution admission
 record or preparing compilation units. Explicit denies and source resource
 limits still apply. Locks and admission records are never changed.
-Compilation verifies recorded workspace admission and requested coverage before
-reusing a completed profile. An unchanged ordinary build or run can then reuse
-that profile without starting build scripts or compilers.
 Target `required-features` preserves absent, explicitly empty, and nonempty
 declarations in the JSON document.
 Outside path packages retain their development declarations and all described
@@ -340,9 +330,9 @@ root compilation, freshness validation, and artifact publication.
   required when Cargo.lock contains more than one version with that name.
   Direct dependencies must be edited in Cargo.toml and reconciled with
   ordinary `vendor`.
-- Tool/build/operational failures return 101, usage errors return 1,
-  help/version return 0, and POSIX-style interruption returns 130 where
-  supported.
+- Tool, build, and operational failures return 101, including a failed write
+  to stdout or stderr. Usage errors return 1, help and version return 0, and
+  POSIX-style interruption returns 130 where supported.
 - Build, check, run, test, and clean select a target directory in this order:
   `--target-dir`, `CARGO_TARGET_DIR`, Cargo `build.target-dir`, then the
   workspace's `target/`. Relative CLI and environment paths use the invocation
@@ -372,7 +362,7 @@ the working directory and its parents. `--manifest-path` establishes the
 workspace independently of `-p`, which may select any member.
 Package selectors accept names, partial or full `name@version`, Cargo
 file package IDs, and member-name patterns. An unmatched selector fails;
-ordinary build, check, and Clippy execute all matching members together. Repeated `-p` options are combined and deduplicated.
+build, check, Clippy, and test execute all matching members together.
 Build, check, Clippy, test, and tree accept `--workspace` and repeated
 `--exclude`; clean accepts `--workspace`. Exclusions require `--workspace`.
 Clean supports repeated package selections through source-only discovery and
@@ -383,20 +373,20 @@ report how to add the member without rewriting existing workspace files.
 Excluded destinations remain standalone packages with their own lockfiles.
 Cargo's workspace precedence applies: without exclusions `-p` is validated
 but all members are selected; with exclusions `-p` is ignored. Unmatched
-exclusions warn, except in quiet mode. Empty selections fail explicitly.
-Workspace test targets execute through the shared graph. Run accepts one `-p` and
+exclusions warn, except in quiet mode. Run accepts one `-p` and
 rejects package patterns. Package IDs do not require a manifest-path option.
 Build, check, Clippy, run, test, tree, metadata, and vendor share
 repeated `--features`/`-F`, comma/space lists, qualified and weak dependency
 features, `--all-features`, and `--no-default-features`. Explicit `dep:`
 names and multiple slashes fail as in Cargo. Source-only metadata describes
 declared features regardless of selection. Metadata, tree, and vendor resolve
-those flags. Ordinary build, check, and Clippy also resolve those flags across
-selected members, retaining feature unions when a member is a dependency too.
-Run and test resolve CLI features through the shared graph. Several selected members use
-one unit graph, package-specific primary compiler roles and Cargo JSON IDs,
-and binary owner records. Shared execution currently reuses individual units;
-single-member default-feature builds retain completed-profile reuse.
+those flags. Build, check, Clippy, run, and test resolve them across selected
+members through the shared graph, keeping feature unions when a member is a
+dependency too. Several selected members use one unit graph,
+package-specific primary compiler roles and Cargo JSON IDs, and binary owner
+records. Shared execution reuses individual units. Completed-profile reuse
+needs a `build` or `run` of one member with default features and no member
+build script.
 Selected binaries with the same top-level output name produce Cargo's collision
 warning before compilation, unless quiet mode is selected. Each unit retains its
 own published executable and package identity; the shared top-level path is
@@ -406,13 +396,14 @@ compiler failure, retain successful per-unit artifacts, and still return failure
 Run and test reject `--keep-going`, matching Cargo's command option boundaries.
 Editable members use Cargo's package file discovery: Git ignores and tracked
 files, include/exclude rules, symbolic links, and nested package boundaries.
-Dependency archive size/file limits do not constrain member source trees.
+A member's source walk fails above 20,000 files or 128 MiB, the default
+path-package limits.
 Git file discovery calls Cargo's `gix-dir` walker directly with gix's index,
 ignore stack, pathspecs, and filesystem capabilities.
 Compiler dep-info permits member reads outside their directories and tracks
 those inputs through unit-cache restores and completed-profile reuse.
 Completed profiles also track the workspace manifest and member compiler
-dep-info, including host-profile paths, with version-5 freshness records.
+dep-info, including host-profile paths.
 Every manifest-reading command accepts --manifest-path. Relative paths use
 the invocation directory; package selection and configuration discovery
 remain independent of that path.
@@ -439,9 +430,7 @@ examples, including packages with only example targets. `--example NAME` and
 selectors can be repeated and combined; `--all-targets` takes precedence over
 their names. `--tests` and `--benches` select targets marked for each group,
 including examples and integration tests. Plural groups override corresponding
-named filters. Dynamic/procedural-macro
-example types and explicit build/test/run example/benchmark selectors remain
-deferred and fail explicitly. Default tests compile enabled examples, run
+named filters. Default tests compile enabled examples, run
 examples and benchmarks marked `test = true`, and include those test targets
 in the owning member's bundle. Named integration-test selections omit examples
 and benchmarks.
@@ -525,16 +514,13 @@ Ordinary binary and library examples also publish unqualified output names under
 the profile's `examples/` directory. Default compile-only test examples do too.
 These files have package owner records, and `clean -p` removes only the selected
 owners' examples while preserving other members' outputs.
-A single exact `--bin` retains the completed-profile fast path where applicable. `run`
-selects an explicit `--bin`, then `package.default-run`, then a sole binary;
-an unknown or ambiguous selection fails. `test` builds every enabled binary
-harness and defines `CARGO_BIN_EXE_<name>` for every program while compiling
-integration tests.
+A single exact `--bin` can use the completed-profile fast path. `test` builds
+every enabled binary harness and defines `CARGO_BIN_EXE_<name>` for every
+program while compiling integration tests.
 Run resolves member build scripts under the same grants as build, and passes
 that member's published `OUT_DIR` and script environment to the program. It
-compiles only the selected binary, preserving the caller's directory and child
-arguments. Completed-profile reuse retains admission checks and can skip
-dependency scripts for existing eligible single-member builds/runs.
+compiles only the selected binary. Completed-profile reuse keeps admission
+checks and skips dependency scripts.
 Test uses those same target selectors, including repeated names and combined
 groups. Explicit library, binary, and example selections run harnesses even
 when their `test` flag is false. Plural tests/benches filter the corresponding
@@ -569,17 +555,15 @@ integrations, examples, and benchmarks activate their required dev graph.
 Approved build-dependencies compile on the host for member and dependency
 build scripts.
 
-Compiler manifests now retain top-level and target-qualified build
-dependencies. The shared planner can create the member's host script compiler,
-per-target script execution, and output edges to its library and binaries,
-including binary-only members. Ordinary build, check, and Clippy execute these
-units for single and multiple selections after validating admission and named
-path grants. Script outputs provide cfgs, environment, search paths, and
-`OUT_DIR` to every consuming target. Link libraries follow Cargo: the package
-library receives them when present; otherwise its other targets receive them.
-
-Run and workspace tests execute member scripts after validating their grants.
-Descriptive commands accept these manifests without execution.
+Compiler manifests keep top-level and target-qualified build dependencies.
+The shared planner creates the member's host script compiler, per-target
+script execution, and output edges to its library and binaries, including
+binary-only members. Build, check, Clippy, run, and test execute these units
+after validating admission and named path grants. Script outputs provide
+cfgs, environment, search paths, and `OUT_DIR` to every consuming target.
+Link libraries follow Cargo: the package library receives them when present;
+otherwise its other targets receive them. Descriptive commands accept these
+manifests without execution.
 
 Libraries support `lib`, `rlib`, `staticlib`, and mixed `rlib`/`staticlib`
 outputs. Static archives consume upstream object code and participate in
@@ -849,12 +833,13 @@ in human mode. Any package or feature selector replaces that scope as a whole;
 operational options do not reset it. Unused member declarations preserve the
 commitment when the resolved outside packages, contexts, features, and grants
 are unchanged.
-Human review summarizes source and grant changes, then lists each locked
-registry/Git package once with its transitive member users, locked dependencies,
-verified source evidence, and host/target feature contexts. Sources outside
-the scoped closure are labeled explicitly. If prior inputs cannot reconstruct
-the previous commitment, the report identifies that limitation and shows the
-complete candidate instead of claiming a semantic comparison.
+The plain-text human review summarizes source and grant changes, then lists
+each locked registry/Git package once with its transitive member users, locked
+dependencies, verified source evidence, and host/target feature contexts.
+Sources outside the scoped closure are labeled explicitly. If prior inputs
+cannot reconstruct the previous commitment, the report identifies that
+limitation and shows the complete candidate instead of claiming a semantic
+comparison.
 Old per-member records require explicit review with workspace-root
 `vendor --locked`; their presence never supplies workspace approval.
 A root record in the retired single-package review format 3 is rejected by
@@ -1173,10 +1158,11 @@ Source-only objects retain their source integrity manifest.
    a complete lockfile;
 4. verify HTTPS, checksums, archive structure, source identity, and post-fetch
    policy;
-5. present deterministic evidence and require per-new-package approval, or
-   apply `--accept-all` only after all policy/integrity checks pass;
+5. present deterministic evidence and require one approval of the complete
+   candidate, or apply `--accept-all` only after all policy/integrity checks
+   pass;
 6. fsync and atomically publish immutable objects with no replacement;
-7. atomically commit Cargo.lock last.
+7. atomically replace Cargo.lock when needed, then write portable state last.
 
 Git acquisition works identically on Linux and Motor. Lorry uses embedded gix
 repository and pack handling with a blocking smart-HTTP transport backed by
@@ -1202,8 +1188,8 @@ Its package must have a matching exact `git+` source in Cargo.lock. Lorry
 materializes that locked source in the same content-addressed Git object
 layout, marks the selected package as a crates.io replacement, and preserves
 the Git identity in resolution, review, and lock rendering. Input workspace
-and member manifests remain byte-identical. Legacy explicit path patches keep
-their declared path identities.
+and member manifests remain byte-identical. Explicit path patches keep their
+declared path identities.
 
 On every networked vendor run, default HEAD, branch, tag, and named `rev`
 patch selectors are resolved from the advertised remote refs. A 7- through
@@ -1453,9 +1439,7 @@ Artifact collection is scoped to one package and orders its harnesses by
 library, binary target name, and integration-test target name, independently
 of compiler scheduling order.
 Selected library and binary harnesses execute on that DAG during `test`.
-When selected integration tests need program binaries, the executor runs one
-mixed-profile DAG. It builds normal-profile programs and test-profile
-libraries and harnesses in dependency order. The program executables are
+When selected integration tests need program binaries, those executables are
 installed into the selected profile before the test artifacts are published.
 An integration test with no program binaries needs only the test-profile
 closure.
@@ -1463,11 +1447,10 @@ closure.
 Each compiler unit writes into a private sibling directory, then replaces
 its planned unit directory only after rustc succeeds, its outputs and dep-info
 are validated, and any cache entry is stored. Downstream units and artifact
-messages use the published path. Compiler units now publish directly into the
-profile; successful units remain available if a later unit fails. Build
-scripts run against their stable published `OUT_DIR`, including replacement
-runs after `build.rs` changes. A failed script can change files there, as in
-Cargo. Lorry removes the completed-profile freshness record before rebuilding
+messages use the published path. Successful units remain available if a
+later unit fails. Build scripts run against their stable published `OUT_DIR`,
+including replacement runs after `build.rs` changes. A failed script can
+change files there, as in Cargo. Lorry removes the completed-profile freshness record before rebuilding
 and writes a new one last, after successful compilation and validation.
 The check planner represents selected libraries, binaries, and enabled test
 harnesses with distinct check modes. It gives integration checks test-profile
@@ -1544,8 +1527,7 @@ remain child arguments, including strings starting with `+`.
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected
 library when present. Its hashed executable is installed at the selected
-profile's top level after compilation; these binaries remain outside the
-dependency unit cache until per-unit publication is available.
+profile's top level after compilation.
 
 Each rustc unit writes into a private sibling directory below the profile's
 `build` tree, then publishes to its deterministic unit path. Lorry passes one
@@ -1701,17 +1683,16 @@ The three Cargo-client variables that Lorry removes before starting rustc
 `__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS`) are omitted from rustc
 unit keys and completed-profile freshness records.
 
-After a successful non-test build, the completed root profile contains a
-freshness record scoped to the selected package path. An ordinary unchanged
-`build` or `run` validates parsed
-manifest, lock, compact admission, configuration, compiler, target, flags,
-environment, and tool metadata plus rustc dep-info and mutable path-source
-path/size/mtime fingerprints. It requires the installed artifact to exist but
-does not read artifact or dependency source contents. A matching record is
-accepted before dependency repository opening and admission reconstruction,
-then reuses the profile without invoking build scripts, rustc, native tools,
-or the linker. Strict mode reconstructs admission and rehashes all of those
-contents before reuse. A missing, malformed, stale, or differently-modeled
+After a successful eligible single-member build or run, the completed root
+profile contains a freshness record scoped to the selected package path. An
+ordinary unchanged `build` or `run` validates parsed manifest, lock, compact
+admission, configuration, compiler, target, flags, environment, and tool
+metadata plus rustc dep-info and mutable path-source path/size/mtime
+fingerprints. It requires the installed artifact to exist but does not read
+artifact or dependency source contents. A matching record is checked after
+admission verification. The profile is then reused without invoking build
+scripts, rustc, native tools, or the linker. Strict mode also rehashes all of
+those contents before reuse. A missing, malformed, stale, or differently-modeled
 record causes a normal rebuild. Test harnesses and bundle launchers are not
 reused by this profile-level check.
 The completed-profile record and each top-level selected binary use private
@@ -1761,8 +1742,7 @@ does not print it.
 ## Tests and bundles
 
 Ordinary tests preserve separate root library, root binary, and integration
-harness crates. Integration compilation receives Cargo-compatible
-`CARGO_BIN_EXE_<name>` and `CARGO_TARGET_TMPDIR`.
+harness crates.
 
 Bundle mode packages each selected member's harness executables and required
 program binaries into a separate self-extracting executable. Host-only macro
@@ -1798,12 +1778,12 @@ networked `vendor` before its offline build. Imager inputs, debug/release image
 selection, VM launch, and layout validation remain outside this product
 boundary.
 
-The original dependency-free source was directly bootstrap-compilable with
-rustc. The current source pins the reviewed
-non-derive Clap, pure-Rust flate2, semver, serde/serde_json, SHA-256, and TOML
-parser graph, plus target-specific first-party Motor support and Linux libc
-bindings, documented by Cargo.toml and Cargo.lock. Every third-party direct
-requirement is exact. These two machine-readable files, not duplicated version
+Lorry's source pins the reviewed non-derive Clap, pure-Rust flate2, Motor
+gitoxide fork, semver, serde/serde_json, SHA-256, and TOML parser graph, plus
+target-specific first-party Motor support and Linux libc bindings, documented
+by Cargo.toml and Cargo.lock. Every third-party crates.io requirement is
+exact, and Cargo.lock pins the gitoxide fork's commit. These two
+machine-readable files, not duplicated version
 numbers in prose, are authoritative for direct versions and selected features.
 Every dependency and graph change must record purpose, source identity,
 license, selected features, and transitive justification in generated
@@ -1862,11 +1842,10 @@ their application, image-layout, and OS behavior belongs to those components.
 
 ## Deferred capabilities
 
-Deferred capabilities include workspace-wide tests and additional target/profile modes,
-building the complete `httpd-axum` and `russhd` graphs,
-alternative-registry sources, run/test CLI feature selection, custom targets and
-build-std, broad target declarations, general C/C++/native-tool discovery,
-arbitrary build-script processes, Cargo wrappers, and
+Deferred capabilities include building the complete `httpd-axum` and
+`russhd` graphs, alternative-registry sources, custom targets and build-std,
+dynamic and procedural-macro example types, general C/C++/native-tool
+discovery, arbitrary build-script processes, Cargo wrappers, and
 linked-artifact cache reuse. `design.md` holds accepted future design
-directions; `full-native-build.md` records the current repository-specific
-gap analysis without making those findings normative product commitments.
+directions. `full-native-build.md` records the repository-specific gap
+analysis; its findings are not product commitments.

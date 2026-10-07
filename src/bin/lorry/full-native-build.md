@@ -44,6 +44,12 @@ host-only source-generation step, so curl is intentionally excluded from the
 Motor-native Lorry surface. The installed curl binary remains Lorry's network
 transport on Motor.
 
+Status note: this plan predates Lorry's workspace support. Gaps 1, 2, 4 and 7
+below have since been addressed: member build scripts run, legacy lock formats
+and profile environment overrides are supported, the developer image allows 384
+packages, and `lorry clippy` uses a native Clippy driver. Re-check the other gaps
+before using this plan.
+
 ## Short answer
 
 Lorry cannot yet build and Clippy-check the complete in-scope Rust surface or

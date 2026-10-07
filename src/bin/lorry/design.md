@@ -35,8 +35,14 @@ objects do not become usable merely because they were downloaded.
   review without mutating project or repository state;
 - `fetch` acquires exact locked sources without execution admission;
 - `vendor` resolves, acquires, verifies, reviews, and publishes dependency
-  sources and generated dependency state; or
-- `engine` implements build, run, and test.
+  sources and generated dependency state;
+- `metadata` and `tree` describe the locked workspace without execution
+  admission; or
+- `engine` implements build, check, Clippy, run, and test.
+
+The engine, `metadata`, and `tree` open the locked workspace through one
+shared setup, `dependency::LockedContext`. It holds the registry source, the
+locked Git sources, and the resolver options.
 
 For build, run, and test, `engine` performs these operations in order:
 
@@ -44,8 +50,8 @@ For build, run, and test, `engine` performs these operations in order:
 2. merge Lorry and Cargo configuration and discover the compiler/target;
 3. reconstruct and verify the root admission scope and requested coverage;
 4. resolve the selected locked graph and verify source and policy evidence;
-5. for an ordinary non-test command, reuse a validated completed profile when
-   its parsed identity and mutable metadata match;
+5. for a single-member build or run with default features, reuse a validated
+   completed profile when its parsed identity and mutable metadata match;
 6. create compilation units and their dependency order;
 7. compile or restore eligible library, procedural-macro, and build-script
    results from cache;
@@ -60,9 +66,11 @@ content verification without changing compilation identity or output paths.
 
 ## Input model
 
-`manifest.rs` owns the supported Cargo manifest subset and default target
-discovery. `toml.rs` wraps TOML parsing with byte, nesting, and node limits and
-retains source locations for diagnostics. `config.rs` merges the supported
+`manifest.rs` owns the supported Cargo manifest subset. `manifest/targets.rs`
+discovers all four target kinds with one Cargo-compatible model for members
+and dependencies. `manifest/profiles.rs` resolves the selected profile once
+per command. `toml.rs` wraps TOML parsing with byte, nesting, and node limits
+and retains source locations for diagnostics. `config.rs` merges the supported
 Lorry and Cargo configuration layers while enforcing which layer may control
 security-sensitive settings. `toolchain.rs` discovers `rustc`, identifies the
 Cargo-compatibility family, and evaluates target `cfg` expressions.
@@ -137,7 +145,7 @@ Lookup verifies object metadata and retained content. Writers stage complete
 objects privately and publish with no replacement; an existing different
 object at the same identity is corruption.
 
-The intended ordinary vendor flow is:
+The ordinary vendor flow is:
 
 1. take the project vendor lock;
 2. refresh mutable Git-patch selectors and materialize the candidate's locked
@@ -308,20 +316,19 @@ compiler diagnostics rather than Lorry panics.
 directives and constructs a cleared, explicit environment.
 `native_tool.rs` exposes only configured compiler/archiver roles and includes
 their identities and arguments in build/cache identity. Linux applies the
-filesystem/network/process sandbox in `sandbox.rs`. Motor currently warns and
-runs the same build-script contract without isolation. Linux proc macros
-execute inside rustc; Linux-to-Motor uses the same host artifact and execution
-path.
+filesystem/network/process sandbox in `sandbox.rs`. Motor warns and runs the
+same build-script contract without isolation. Linux proc macros execute
+inside rustc; Linux-to-Motor uses the same host artifact and execution path.
 
 Motor's native compiler toolchain is an installed platform capability, not a
 Lorry bootstrap responsibility. Standard development images provide `/devtools/bin/cc`
 and `/devtools/bin/c++`, the `/devtools/llvm/bin/llvm` multicall with Clang, LLD, and
 LLVM binutils, and the complete C/C++ sysroot below `/devtools/llvm`. Lorry
-should bind and admit these existing entry points and resources. A multicall
-role must preserve and enforce its fixed subcommand (or use an exact approved
-wrapper); it must never broaden into ambient PATH discovery. Tools for
-non-LLVM input formats, such as the kloader's current NASM source, remain
-separate explicit capabilities unless those inputs are converted.
+binds and admits these existing entry points through configured native-tool
+roles. A multicall role keeps its fixed subcommand in `prefix-args`; it never
+broadens into ambient PATH discovery. Tools for non-LLVM input formats, such
+as the kloader's current NASM source, remain separate explicit capabilities
+unless those inputs are converted.
 
 ## Compilation, cache, tests, and bundles
 
@@ -370,9 +377,9 @@ harnesses, bundle launchers, and build-script executables are not unit-cache
 entries.
 
 Root profile records complement the unit cache. Ordinary records contain
-rustc dep-info plus mutable path metadata and can be checked before repository
-opening. Strict records contain content hashes. Debug root and mutable path
-units use stable target-specific rustc incremental directories below
+rustc dep-info plus mutable path metadata and are checked after admission
+verification. Strict records contain content hashes. Debug root and mutable
+path units use stable target-specific rustc incremental directories below
 `target/lorry/.incremental`; atomic output publication never replaces that
 disposable compiler state. Release and immutable registry units omit
 incremental compilation.
@@ -419,7 +426,9 @@ Cargo and is intentionally outside the Motor-native source snapshot set.
 - CLI syntax and command applicability: `cli.rs`, then `main.rs` help;
   cleanup behavior: `clean.rs` and `cache_clean.rs`.
 - Cargo manifest/lock compatibility: `manifest.rs`, `lockfile.rs`.
+- target discovery and profiles: `manifest/targets.rs`, `manifest/profiles.rs`.
 - dependency selection: `resolver.rs`, `patch.rs`.
+- shared locked-workspace setup: `dependency.rs`, `dependency/workspace.rs`.
 - generated admission and upgrades: `admission_state.rs`, `upgrade.rs`,
   `vendor.rs`.
 - configuration or policy: `config.rs`, `policy.rs`.

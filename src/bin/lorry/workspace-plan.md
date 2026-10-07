@@ -35,6 +35,11 @@ The project also made these changes outside Lorry, each as a separate commit:
   thread is killed during a direct CPU handoff. The leak kept a dead
   process in its parent's child list.
 
+A follow-up cleanup came in the commits after `9fbc95ea`. It removed the
+single-package paths that workspace support replaced. It also removed
+admission review format 3 and the remaining dead code. It unified target
+discovery, profile resolution, and the locked-workspace setup code.
+
 ## Goal
 
 The goal was to make Lorry build, check, and test Cargo workspaces on Linux

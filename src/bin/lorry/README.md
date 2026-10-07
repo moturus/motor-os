@@ -19,28 +19,18 @@ Normal Lorry operation consumes a package's `Cargo.toml` and `Cargo.lock`, the
 supported parts of Lorry and Cargo configuration, a rustc toolchain, and
 configured Lorry repositories. `lorry fetch` and `lorry vendor` use the configured
 curl executable for sparse-registry and Git smart-HTTP traffic. With the
-explicit `--use-cargo-registry`
-option, build, check, clippy, run, test, metadata, and tree may instead verify and read
-an already populated local Cargo archive/source cache. Lorry records its
-evidence on first use and trusts that evidence during later ordinary builds.
-None of these operations invokes Cargo.
+explicit `--use-cargo-registry` option, build, check, clippy, run, test,
+metadata, and tree may instead read an already populated local Cargo cache
+(see [Configuration and repositories](#configuration-and-repositories)).
+None of these operations invokes Cargo. Tests use Cargo only as a
+compatibility oracle.
 
 Motor development images install Lorry, curl, the native toolchain, supported
-first-party source snapshots, and small system and user configurations. Curl is
-cross-built by Linux-hosted Cargo because ring's Git checkout performs a
-host-only source-generation step; curl source is not included in the native
-snapshot set. The images do not preinstall a dependency repository. On a fresh
-image, run `lorry fetch` for source navigation, or `lorry vendor` (or
+first-party source snapshots, and small system and user configurations. The
+images do not preinstall a dependency repository. On a fresh image, run
+`lorry fetch` for source navigation, or `lorry vendor` (or
 `lorry vendor --accept-all`) with network access once for each project; build,
-run, test, and review then consume the verified local state offline. Lorry does
-not create VM images or inspect image profiles/layouts.
-
-Everything called a Cargo "oracle" is validation-only: tests run supported
-Cargo versions or compare retained Cargo results to check Lorry compatibility.
-Oracle fixtures are not runtime inputs, repositories, caches, or fallback
-implementations. VM profiles, dedicated images, guest-layout assertions, and
-self-host generations likewise belong to the test harness under `tests/` and
-`src/tests/`, not to normal Lorry operation.
+run, test, and review then consume the verified local state offline.
 
 ## Package requirements
 
@@ -59,39 +49,18 @@ A supported package has:
 - only supported crates.io, Git, and local-path dependency declarations.
 
 The supported dependency model includes renamed and optional dependencies,
-default and forwarded features, target-conditioned dependencies, dependency
-build scripts, procedural-macro dependencies, and root crates.io patches.
-Ordinary build, check, and Clippy run selected members' build scripts and
-build-dependencies through the shared graph, with named path execution grants.
-Scripts receive private output directories and package-specific `caller-env`
-allowlists; editable members can read the workspace without writing it.
-Ordinary test now runs selected scripts and development dependencies through
-one workspace graph, including legal dev cycles. It supports CLI features,
-default members, `--workspace`, repeated `-p`, and `--exclude`, and runs each
-member's harnesses at its package root with its script environment. Run shares
-feature resolution and granted member scripts, compiles only its selected binary,
-and gives it the member's generated-output environment. Alternative registries
-remain unsupported. Build, run,
-check, Clippy, test, metadata, tree, and vendor support CLI feature selection. Ordinary
-workspace build, check, and Clippy share one compilation graph for default
-members, `--workspace`, repeated `-p`, and `--exclude`. Bundle testing produces
-one executable for each member with enabled harnesses, using that member's
-program/extraction paths and script environment. A cross-compiled member bundle
-cannot combine a host macro-library harness with target harnesses; select
-`--lib` or `--test NAME` separately, or omit `--bundle`.
-Workspace `check --all-targets`
-includes examples and benchmarks; `--tests` and `--benches` check targets
-marked for those groups. `check --examples` checks binary, `lib`,
-`rlib`, and `staticlib` examples with their dev-dependencies. Named `--example NAME` and `--bench NAME`
-checks also select targets across the chosen members. Named check target selectors can be repeated; `--all-targets` selects everything
-and takes precedence over named check filters. Example/benchmark
-build selectors use the same target groups and repeated names, compiling harnesses
-without running them. Test accepts the same selectors, repeats, and combinations,
-with ordinary execution, `--no-run`, or `--bundle`. Run can select an executable
-example with `--example NAME`. Default tests compile enabled examples,
-run examples and benchmarks marked `test = true`, and include those test targets
-in member bundles. Ordinary build/check accepts
-root dev-dependencies without activating their features.
+default and forwarded features, target-conditioned dependencies, build
+scripts, procedural macros, and root crates.io patches. Alternative
+registries are unsupported.
+
+Build, check, Clippy, run, and test share one workspace graph. They run
+selected members' build scripts under named path grants. Scripts get private
+output directories and package-specific `caller-env` allowlists. Editable
+members can read the workspace but not write it. Test adds development
+dependencies, including legal dev cycles. Build, run, check, Clippy, test,
+metadata, tree, and vendor accept Cargo's feature options. The
+[package and manifest model](spec.md#package-and-manifest-model) lists the
+exact target and selector rules.
 
 ## Create a package
 
@@ -124,10 +93,11 @@ lorry test  [NAME] [--release|-r] [--target TRIPLE] [--strict-validation]
 Package commands accept Cargo names, package IDs, versions, and member-name
 patterns. A member invocation defaults to itself; workspace-root invocations
 use Cargo's default members. Repeated `-p`, `--workspace`, and `--exclude`
-select members for ordinary build, check, Clippy, and test. Run selects one
-executable across the default members or its selected package. Members share the root lockfile, resolver, profiles, patches,
-and target ownership. Membership, package/dependency/lint inheritance, and
-component globs follow the rules below. External members remain unsupported.
+select members for build, check, Clippy, and test. Run selects one
+executable across the default members or its selected package. Members share
+the root lockfile, resolver, profiles, patches, and target ownership.
+Membership, inheritance, and member globs follow Cargo. External members are
+unsupported.
 
 The dev and release profiles accept `panic = "unwind"` or `panic = "abort"`,
 `debug`, `opt-level`, `lto`, `strip`, `codegen-units`, `debug-assertions`,
@@ -163,6 +133,8 @@ packages. `--no-run` prints the built harness paths. `--no-fail-fast` runs every
 target after runtime failures, reports failures, and returns 101. Default
 testing propagates the first failing harness's exit code. A compilation failure
 prevents all test execution; an empty enabled-test selection succeeds.
+Default tests also compile enabled examples and run examples and benchmarks
+marked `test = true`.
 
 Normal builds report dependency verification and preparation, then each
 dependency unit, build script, and root target when that work starts. `--quiet`
@@ -171,9 +143,10 @@ configuration, and timings.
 
 Ordinary builds trust previously published per-user dependency and
 project-local artifact state, matching Cargo's local-cache model. An unchanged
-`build` or `run` checks parsed inputs and root/path-source size and modification
-metadata, verifies admission and requested coverage, then reuses the existing
-profile without starting build scripts or compilers.
+single-member `build` or `run` with default features checks parsed inputs and
+root/path-source size and modification metadata. It verifies admission and
+requested coverage, then reuses the existing profile without starting build
+scripts or compilers.
 `--strict-validation` instead rehashes repository and Cargo-cache sources,
 mutable path sources, tools, cache entries, root inputs, and artifacts before
 reuse. Structural checks, policy, admission identity, and resource limits are
@@ -181,7 +154,9 @@ never disabled.
 
 `--bundle` packages each member's selected harnesses and required package binary
 into a self-extracting executable. A host-only procedural-macro bundle uses the
-compiler host even during a cross-target invocation. Bundle arguments are sent to
+compiler host even during a cross-target invocation. A cross-compiled bundle
+cannot mix a host macro harness with target harnesses. Select `--lib` or
+`--test NAME` separately, or omit `--bundle`. Bundle arguments are sent to
 every harness and all harness failures are aggregated.
 
 Build output is owned by Lorry and stored below the chosen target directory's
@@ -255,11 +230,8 @@ replay their warnings and report artifacts with `fresh: true`. Diagnostic
 spans and rendered locations refer to actual source files, including the
 persistent source views used for immutable dependencies.
 
-Programs and ordinary harnesses receive Cargo package variables and a library
-search path containing the target profile, its artifact directories, native
-search directories below that profile, and the target's standard library.
-Inherited library search paths are preserved. Test bundles retain their
-separate execution rules.
+Programs and ordinary harnesses receive the same package variables and
+runtime library search paths as under Cargo.
 
 ## Inspect and check
 
@@ -289,22 +261,13 @@ that warning. `--no-deps` describes
 source targets and declared dependencies without requiring Cargo.lock,
 compiler discovery, or dependency preparation. In a workspace it describes
 all members, including when invoked with a member manifest. Metadata rejects
-package selectors, as Cargo does. Path dependencies below the workspace root are members
-too. Source metadata can describe library crate types, development
-dependencies, and binary `required-features` outside Lorry's build admission
-rules.
+package selectors, as Cargo does. Path dependencies below the workspace root
+are members too.
 
-Source metadata reads only workspace membership: `members` (which may list
-`"."`), `exclude`, and `default-members`. An empty `[workspace]` table is
-accepted. Build-only tables, such as profiles and patches, are ignored.
-All 16 Cargo package fields can inherit from `workspace.package`; inherited
-readme and license-file paths are relative to the member. Explicit
-`readme = false` disables discovery. Members and default-members accept
-component globs `*`, `?`, and `[...]`; recursive `**` is rejected.
-`[lints] workspace = true` inherits Rust, Clippy, and rustdoc settings from
-`workspace.lints`; member overrides alongside inheritance are rejected.
-Workspace dependencies inherit sources and add member features. Examples and
-benches follow explicit target declarations and Cargo's auto-discovery rules.
+Workspace membership, `workspace.package` and `workspace.lints` inheritance,
+workspace dependencies, and member globs follow Cargo. The
+[package and manifest model](spec.md#package-and-manifest-model) lists the
+supported fields and limits.
 
 Cargo configuration follows the invocation directory and its parents;
 selecting a package or supplying `--manifest-path` does not move that search.
@@ -316,8 +279,7 @@ is rejected with the location to which its settings should move.
 alone with `--message-format plain`. The manifest is discovered in the
 working directory or its parents, or supplied with `--manifest-path`.
 `--workspace` returns the containing workspace root; otherwise a selected
-member locates itself. Both source and resolved metadata describe the whole
-workspace when given a member manifest.
+member locates itself.
 
 Without `--no-deps`, metadata verifies and resolves the whole workspace against
 the complete lock, then publishes stable content-addressed source views needed
@@ -335,9 +297,10 @@ verified sources without execution admission.
 
 `check` uses the ordinary development dependency plan, then compiles selected
 root targets to metadata without linking them. `--all-targets` includes the
-library, binaries, integration tests, and test-mode library and binaries;
-`--keep-going` continues independent root targets after an error. An explicit
-target directory owns a separate `DIRECTORY/lorry/check` profile. The two JSON
+library, binaries, examples, benchmarks, integration tests, and test-mode
+library and binaries; `--keep-going` continues independent root targets after
+an error. An explicit target directory owns a separate
+`DIRECTORY/lorry/check` profile. The two JSON
 message formats produce newline-delimited Cargo-compatible messages on stdout
 and keep progress on stderr; the ANSI form changes only rendered diagnostics.
 
@@ -400,19 +363,15 @@ to 2 MiB by default. `LORRY_CURL_STDERR_SPILL_LIMIT_BYTES` may raise that limit
 for unusually verbose environments; its value is an integer byte count of at
 least 2097152.
 
-Review lists each locked registry/Git package once with its member users,
-checksum or exact Git source, dependencies, verified evidence, and feature
-contexts. Source and capability changes are summarized. Packages outside the
-scoped closure are labeled explicitly.
-Interactive approval is required whenever the complete candidate differs from
-committed admission, even if its immutable objects already exist.
+The plain-text review lists each locked registry/Git package once with its
+member users, checksum or exact Git source, dependencies, verified evidence,
+and feature contexts. Source and capability changes are summarized. Packages
+outside the scoped closure are labeled explicitly. One interactive approval
+is required whenever the complete candidate differs from committed admission,
+even if its immutable objects already exist.
 `--accept-all` approves every policy-compliant dependency and capability
 change, but it cannot bypass integrity checks, policy denials, redirect trust,
 or native-tool restrictions.
-
-`src/tests/full-test.sh` does not run Lorry tests. Test selection and VM-image
-coverage are contributor-validation concerns described by `AGENTS.md`; they
-do not change Lorry command behavior.
 
 Commit Cargo.lock and the generated `.lorry/` dependency state with the
 project. Do not edit files below `.lorry/`; Lorry writes them deterministically.
@@ -449,52 +408,28 @@ Dependency depth has no default cap, matching Cargo. An explicit
 Build, run, test, and vendor use compact generated state at
 the workspace root's `.lorry/dependencies-v2.toml`. The compact file contains
 a SHA-256 commitment, normalized member/feature scope, explicitly reviewed
-`(host, target)` contexts, and exceptional
-execution capabilities such as build-script, procedural-macro, or native-tool
-grants:
-
-```toml
-format-version = 3
-review-format-version = 4
-review-sha256 = "..."
-
-[review-scope]
-packages = []
-features = []
-all-features = false
-no-default-features = false
-
-[[context]]
-host = "x86_64-unknown-linux-gnu"
-target = "x86_64-unknown-motor"
-```
-
-The hash commits to a deterministic canonical review document reconstructed
-from Cargo.toml, Cargo.lock, verified repository objects, and the compact
-capabilities. It omits raw member dependency declarations and feature tables,
-and records every locked registry/Git node and edge, the selected features in
-each build context, verified source evidence, and explicit execution grants. It is not
-checked in, because doing so would recreate the large synchronized state that
-the compact format removes.
+`(host, target)` contexts, and exceptional execution capabilities such as
+build-script, procedural-macro, or native-tool grants. The hash commits to a
+canonical review document that Lorry reconstructs from Cargo.toml,
+Cargo.lock, and verified repository objects. That document is not checked in.
+[Portable dependency admission state](spec.md#portable-dependency-admission-state)
+defines both formats.
 
 Compilation using registry/Git dependencies requires a reviewed host/target
-pair. It reconstructs every recorded context, verifies the commitment, then checks the requested
-graph's package/feature coverage, including on cache hits. Reviewed Motor
-contexts require a Motor-capable rustc even for host-only builds. Cargo.lock
-remains the graph authority, repository objects remain the source-integrity
-authority, and explicit policy denials continue to override committed
-admission. The compact commitment is not a signature; authorization against
-an untrusted committer would require a separate signing design.
+pair. It verifies the commitment, then checks the requested graph's
+package/feature coverage, including on cache hits. Reviewed Motor contexts
+require a Motor-capable rustc even for host-only builds. Explicit policy
+denials always override committed admission. The commitment is not a
+signature. It does not protect against an untrusted committer.
 
 The first vendor review covers the whole workspace with default features and
 all supported target kinds. Later member or feature selectors replace that
 scope as a whole. Plain vendor repeats the stored scope; operational flags
 do not reset it. `vendor --locked --workspace` restores the whole-workspace
 default scope. Unused local feature declarations do not invalidate approval.
-Legacy member records require explicit root review; only records replaced by
-the accepted scope are then removed. A root record in the retired
-single-package review format 3 is rejected; workspace-root
-`lorry vendor --locked` replaces it with a new review.
+Old per-member records and root records in the retired review format 3 are
+rejected. Workspace-root `lorry vendor --locked` writes one root review and
+removes the member records that its scope replaces.
 
 The offline, non-mutating `lorry review` command reconstructs the committed
 document, verifies its hash, and writes exact canonical TOML to stdout. It
@@ -510,10 +445,9 @@ stdout if state, resolution, evidence, or the commitment is stale.
 
 ## Upgrade a dependency
 
-Cargo.toml remains the only dependency file intended for human editing. Lorry
-records the reviewed contexts, capabilities, and review commitment in
-`.lorry/dependencies-v2.toml`. That file is an admission record, not another
-version requirement.
+Cargo.toml remains the only dependency file intended for human editing.
+`.lorry/dependencies-v2.toml` is an admission record, not another version
+requirement.
 
 Upgrade a direct dependency by editing its requirement and vendoring:
 
@@ -553,11 +487,6 @@ Review and adopt the change with:
 Restore Cargo.toml and Cargo.lock to the old version if the change was not
 intentional.
 
-Dependency changes to an existing admission record require one interactive
-confirmation of the displayed identity and capability changes. In automation,
-`--accept-all` approves the complete policy-compliant candidate without a
-prompt.
-
 ## Toolchains and targets
 
 A leading rustup-style selector chooses an installed compiler on Linux:
@@ -576,8 +505,7 @@ Lorry supports only Cargo compiler-identity compatibility family 1.99, the
 family selected by the current Motor Rust toolchain. It infers that family
 from a Rust 1.99 compiler. Installation configuration must set
 `cargo-compat-version = "1.99"` for an equivalent custom or unpaired
-toolchain; older and newer families are rejected until Lorry and the Motor
-toolchain advance together.
+toolchain. Older and newer families are rejected.
 
 Cross-target run and test require a configured target runner. Lorry executes
 the runner as an argument vector and never through a shell.
@@ -621,25 +549,23 @@ A direct Git dependency must already have an exact 40-hex commit in
 Cargo.lock. Its branch, tag, `rev`, or default-HEAD selector remains update
 intent, while the locked commit is the immutable identity. Lorry supports
 renaming, version requirements, features, optional and target-conditioned
-direct dependencies, and multiple packages selected from one repository. It
-stores the verified snapshot below:
-
-```text
-.lorry/vendor/git/<cargo-source-sha256>/source
-```
+direct dependencies, and multiple packages selected from one repository.
 
 A root Git patch may select a branch, tag, revision, or default HEAD. Its
-package must already have a matching exact Git source in Cargo.lock. Vendoring
-uses that commit as the immutable identity and stores the verified snapshot in
-the same content-addressed layout as a direct Git dependency:
+package must already have a matching exact Git source in Cargo.lock. The
+patch remains a first-class Git source throughout resolution, review, and
+lock rendering. Lorry never modifies an input workspace or member Cargo.toml.
+Explicit path patches keep their declared paths.
+
+Both forms use a shallow fetch, record their provenance, and store the
+verified snapshot below:
 
 ```text
 .lorry/vendor/git/<cargo-source-sha256>/source
 ```
 
-The patch remains a first-class Git source throughout resolution, review, and
-lock rendering. Lorry never modifies an input workspace or member Cargo.toml;
-legacy explicit path patches continue to use their declared paths.
+Submodules and symbolic links are rejected. Offline graph commands verify the
+materialized source and provenance before use.
 
 Every networked `lorry vendor` checks mutable Git-patch selectors: default
 HEAD, branches, tags, and named `rev` references. Full or abbreviated
@@ -649,12 +575,6 @@ and presents one combined dependency and capability review; moved tags carry
 an explicit retargeting warning. Interactive approval defaults to no and is
 requested exactly once. Non-interactive changed runs fail unless
 `--accept-all` approves the complete policy-compliant candidate.
-
-Both forms use a shallow fetch and record the canonical URL, requested
-selector, commit, Git tree, canonical source digest, file count, and byte
-count. Materialization accepts only bounded regular files and directories;
-submodules and symbolic links are rejected. Offline graph commands verify the
-materialized source and provenance before use.
 
 ## Package build-script security
 
@@ -668,8 +588,8 @@ Registry and Git scripts may also read and watch the exact workspace
 `Cargo.lock`. Directory watches and lock symlinks escaping the workspace are
 rejected.
 
-Motor OS currently prints an explicit warning and runs build scripts without
-that isolation. Do not interpret the warning mode as sandboxed.
+Motor OS prints an explicit warning and runs build scripts without that
+isolation. Do not interpret the warning mode as sandboxed.
 
 ## Procedural macros
 
@@ -678,8 +598,8 @@ crate and its dependency closure for the compiler host, keeps resolver-2/3
 host features separate from target features, and passes the resulting host
 artifact to rustc. Linux rustc uses its ordinary dynamic-library artifact.
 Motor rustc uses a static PIE executable and exchanges the existing private
-proc-macro bridge messages with it over framed stdin/stdout. Ordinary build,
-check, and Clippy also support selecting macro members. Selected macro features
+proc-macro bridge messages with it over framed stdin/stdout. Build, check,
+Clippy, and test also support selecting macro members. Selected macro features
 activate both Cargo contexts, and selected check metadata remains separate from
 the executable macro needed by consumers.
 
@@ -716,6 +636,6 @@ Global options precede the command. Long value options accept `--name value`
 and `--name=value`.
 
 Command-line usage errors return 1. Build, vendoring, policy, and operational
-failures return 101. Help and version return 0. Run and test return the
-executed program or harness status; POSIX interruption returns 130 where the
-platform supports it.
+failures return 101, including a failed write to stdout or stderr. Help and
+version return 0. Run and test return the executed program or harness status;
+POSIX interruption returns 130 where the platform supports it.
