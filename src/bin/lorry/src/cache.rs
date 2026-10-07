@@ -19,14 +19,17 @@ use crate::process;
 use crate::resolver::{CompileKind, PackageSourceKey};
 use crate::source_tree::{EntryKind, Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::{TargetInfo, Toolchain};
+use crate::tracked_env::{self, Tracked};
 use crate::unit::{PlannedUnit, UnitKey, UnitKind};
 use crate::validation::ValidationMode;
 
 const FORMAT_VERSION: u64 = 1;
-const KEY_TAG: &[u8] = b"lorry-unit-cache-key-v2\0";
+const KEY_TAG: &[u8] = b"lorry-unit-cache-key-v3\0";
 const PUBLISHED_RECORD: &str = ".lorry-unit-v1";
 const PUBLISHED_STDOUT: &str = ".lorry-rustc-stdout-v1";
 const PUBLISHED_STDERR: &str = ".lorry-rustc-stderr-v1";
+const PUBLISHED_ENVIRONMENT: &str = ".lorry-tracked-environment-v1";
+const PAYLOAD_ENVIRONMENT: &str = "tracked-environment.json";
 
 pub struct Options<'a> {
     pub cargo: &'a Path,
@@ -78,6 +81,13 @@ pub struct SelectedInputs<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheKey([u8; 32]);
+
+/// A unit restored from a cache entry.
+pub struct Restored {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub tracked: Tracked,
+}
 
 pub struct BuildCache {
     units: PathBuf,
@@ -393,15 +403,49 @@ impl BuildCache {
         Ok(CacheKey(digest.finish()))
     }
 
+    /// The identity that dependents compose: the unit key plus the inputs
+    /// checked only after compilation (tracked variables and a selected
+    /// unit's external dep-info inputs), so a change rebuilds them too.
+    pub fn dependency_key(
+        &self,
+        key: CacheKey,
+        output: &RustcOutput,
+        selected: Option<SelectedInputs<'_>>,
+        tracked: &Tracked,
+    ) -> Result<CacheKey> {
+        if tracked.is_empty() && selected.is_none() {
+            return Ok(key);
+        }
+        let mut digest = KeyDigest::new();
+        digest.bytes("unit-key", &key.0);
+        digest.bytes("tracked-environment", &tracked_env::encode(tracked));
+        if let Some(inputs) = selected {
+            digest.bytes(
+                "external-inputs",
+                &external_inputs_digest(output.dep_info(), inputs)?,
+            );
+        }
+        Ok(CacheKey(digest.finish()))
+    }
+
     pub fn restore(
         &self,
         key: CacheKey,
         output: &RustcOutput,
         selected: Option<SelectedInputs<'_>>,
-    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    ) -> Result<Option<Restored>> {
         let Some(entry) = self.verified_or_quarantine(key)? else {
             return Ok(None);
         };
+        let Some(tracked) = fs::read(entry.payload.join(PAYLOAD_ENVIRONMENT))
+            .ok()
+            .and_then(|bytes| tracked_env::decode(&bytes))
+        else {
+            return Ok(None);
+        };
+        if !tracked_env::matches_current(&tracked) {
+            return Ok(None);
+        }
         if archive_path(output).is_some()
             && !fs::symlink_metadata(entry.payload.join("library.a"))
                 .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
@@ -432,30 +476,42 @@ impl BuildCache {
         }
         let stdout = fs::read(entry.payload.join(PUBLISHED_STDOUT))?;
         let stderr = fs::read(entry.payload.join(PUBLISHED_STDERR))?;
-        Ok(Some((stdout, stderr)))
+        Ok(Some(Restored {
+            stdout,
+            stderr,
+            tracked,
+        }))
     }
 
+    /// Returns the variables a published unit read when it is still fresh.
     pub fn published_fresh(
         &self,
         key: CacheKey,
         output: &RustcOutput,
         selected: Option<SelectedInputs<'_>>,
         package: &crate::resolver::PackageKey,
-    ) -> Result<bool> {
+    ) -> Result<Option<Tracked>> {
         let directory = published_unit_directory(output)?;
         if !artifact_owner::matches(directory, package) {
-            return Ok(false);
+            return Ok(None);
         }
         let record = directory.join(PUBLISHED_RECORD);
         match fs::symlink_metadata(&record) {
             Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 32 => {}
-            _ => return Ok(false),
+            _ => return Ok(None),
         }
+        let Some(tracked) = fs::read(directory.join(PUBLISHED_ENVIRONMENT))
+            .ok()
+            .and_then(|bytes| tracked_env::decode(&bytes))
+            .filter(tracked_env::matches_current)
+        else {
+            return Ok(None);
+        };
         let Some(current) = published_fingerprint(key, output, selected, self.validation).ok()
         else {
-            return Ok(false);
+            return Ok(None);
         };
-        Ok(fs::read(record).ok().as_deref() == Some(current.as_slice()))
+        Ok((fs::read(record).ok().as_deref() == Some(current.as_slice())).then_some(tracked))
     }
 
     pub fn record_published(
@@ -465,10 +521,15 @@ impl BuildCache {
         selected: Option<SelectedInputs<'_>>,
         package: &crate::resolver::PackageKey,
         (stdout, stderr): (&[u8], &[u8]),
+        tracked: &Tracked,
     ) -> Result<()> {
         let directory = published_unit_directory(output)?;
         write_synced(&directory.join(PUBLISHED_STDOUT), stdout)?;
         write_synced(&directory.join(PUBLISHED_STDERR), stderr)?;
+        write_synced(
+            &directory.join(PUBLISHED_ENVIRONMENT),
+            &tracked_env::encode(tracked),
+        )?;
         let fingerprint = published_fingerprint(key, output, selected, self.validation)?;
         artifact_owner::write(directory, package)?;
         write_synced(&directory.join(PUBLISHED_RECORD), &fingerprint)
@@ -493,6 +554,7 @@ impl BuildCache {
         build_script: Option<&BuildScriptInput<'_>>,
         selected: Option<SelectedInputs<'_>>,
         diagnostics: (&[u8], &[u8]),
+        tracked: &Tracked,
     ) -> Result<()> {
         let (rlib, rmeta) = library_paths(output)?;
         let dep_info = selected.map(|_| output.dep_info());
@@ -500,6 +562,7 @@ impl BuildCache {
         let external_inputs = selected
             .map(|inputs| external_inputs_digest(dep_info.unwrap(), inputs))
             .transpose()?;
+        let environment = tracked_env::encode(tracked);
         let mut replace = false;
         if let Some(existing) = self.verified_or_quarantine(key)? {
             replace = external_inputs.as_ref().is_some_and(|wanted| {
@@ -507,7 +570,8 @@ impl BuildCache {
                     .ok()
                     .as_deref()
                     != Some(wanted.as_slice())
-            });
+            }) || fs::read(existing.payload.join(PAYLOAD_ENVIRONMENT)).ok()
+                != Some(environment.clone());
             if !replace {
                 if !self.validation.is_strict() {
                     return Ok(());
@@ -518,6 +582,7 @@ impl BuildCache {
                     external_inputs.as_ref(),
                     build_script,
                     diagnostics,
+                    &environment,
                     self.payload_limits,
                 )?;
                 if existing.payload_manifest == wanted {
@@ -548,6 +613,7 @@ impl BuildCache {
         }
         write_synced(&payload.join(PUBLISHED_STDOUT), diagnostics.0)?;
         write_synced(&payload.join(PUBLISHED_STDERR), diagnostics.1)?;
+        write_synced(&payload.join(PAYLOAD_ENVIRONMENT), &environment)?;
         if let Some(dep_info) = dep_info {
             copy_synced_file(dep_info, &payload.join("library.d"))?;
             write_synced(
@@ -1217,13 +1283,15 @@ fn published_fingerprint(
         }
     }
     let directory = published_unit_directory(output)?;
-    for name in [PUBLISHED_STDOUT, PUBLISHED_STDERR] {
+    for name in [PUBLISHED_STDOUT, PUBLISHED_STDERR, PUBLISHED_ENVIRONMENT] {
         let path = directory.join(name);
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            Error::failure(format!("failed to inspect compiler messages: {error}"))
+            Error::failure(format!("failed to inspect published unit record: {error}"))
         })?;
         if !metadata.file_type().is_file() {
-            return Err(Error::failure("compiler messages are not a regular file"));
+            return Err(Error::failure(
+                "published unit record is not a regular file",
+            ));
         }
         digest.file_contents(name, &path)?;
     }
@@ -1271,6 +1339,7 @@ fn payload_manifest(
     external_inputs: Option<&[u8; 32]>,
     build_script: Option<&BuildScriptInput<'_>>,
     diagnostics: (&[u8], &[u8]),
+    environment: &[u8],
     limits: TreeLimits,
 ) -> Result<Vec<u8>> {
     let (rlib, rmeta) = library_paths(output)?;
@@ -1301,6 +1370,7 @@ fn payload_manifest(
     }
     write_synced(&payload.join(PUBLISHED_STDOUT), diagnostics.0)?;
     write_synced(&payload.join(PUBLISHED_STDERR), diagnostics.1)?;
+    write_synced(&payload.join(PAYLOAD_ENVIRONMENT), environment)?;
     if let Some(dep_info) = dep_info {
         copy_synced_file(dep_info, &payload.join("library.d"))?;
         write_synced(
@@ -1703,7 +1773,9 @@ mod tests {
                 unreachable!()
             };
             *extra = Some(archive);
-            cache.store(key, &built, None, None, (b"", b"")).unwrap();
+            cache
+                .store(key, &built, None, None, (b"", b""), &Tracked::new())
+                .unwrap();
             let target = fixture.0.join("restored/deps");
             fs::create_dir_all(&target).unwrap();
             let restored = RustcOutput::Library {
@@ -1723,18 +1795,20 @@ mod tests {
                 source: crate::resolver::PackageSourceKey::Path(fixture.0.join("source")),
             };
             cache
-                .record_published(key, &restored, None, &package, (b"", b""))
+                .record_published(key, &restored, None, &package, (b"", b""), &Tracked::new())
                 .unwrap();
             assert!(
                 cache
                     .published_fresh(key, &restored, None, &package)
                     .unwrap()
+                    .is_some()
             );
             fs::remove_file(archive_path(&restored).unwrap()).unwrap();
             assert!(
-                !cache
+                cache
                     .published_fresh(key, &restored, None, &package)
                     .unwrap()
+                    .is_none()
             );
             fs::remove_file(cache.entry_path(key).join("payload/library.a")).unwrap();
             assert!(cache.restore(key, &restored, None).unwrap().is_none());
@@ -1756,7 +1830,9 @@ mod tests {
             unreachable!()
         };
         *extra = Some(archive.clone());
-        cache.store(key, &built, None, None, (b"", b"")).unwrap();
+        cache
+            .store(key, &built, None, None, (b"", b""), &Tracked::new())
+            .unwrap();
         let cached = cache.entry_path(key).join("payload/library.a");
         fs::remove_file(&cached).unwrap();
         std::os::unix::fs::symlink(archive, cached).unwrap();
@@ -1772,7 +1848,7 @@ mod tests {
         let built = output(&fixture.0.join("built"), b"library");
         let warning = b"{\"message\":\"unused variable\",\"rendered\":\"warning\\n\"}\n";
         cache
-            .store(key, &built, None, None, (b"", warning))
+            .store(key, &built, None, None, (b"", warning), &Tracked::new())
             .unwrap();
         let package = crate::resolver::PackageKey {
             name: "library".to_owned(),
@@ -1790,13 +1866,54 @@ mod tests {
             archive: None,
             dep_info: restored_root.join("restored.d"),
         };
-        let (stdout, stderr) = cache.restore(key, &restored, None).unwrap().unwrap();
+        let Restored { stdout, stderr, .. } = cache.restore(key, &restored, None).unwrap().unwrap();
         assert!(stdout.is_empty());
         assert_eq!(stderr, warning);
         let (rlib, rmeta) = library_paths(&restored).unwrap();
         assert_eq!(fs::read(rlib).unwrap(), b"library");
         assert_eq!(fs::read(rmeta).unwrap(), b"metadata");
         assert!(!restored_root.join("restored.d").exists());
+    }
+
+    #[test]
+    fn restores_only_when_tracked_variables_match_and_replaces_stale_entries() {
+        let fixture = Fixture::new();
+        let cache = BuildCache::for_test(&fixture.0.join("cache"));
+        let key = CacheKey([10; 32]);
+        let path = std::env::var("PATH").unwrap();
+        let stale = Tracked::from([("PATH".to_owned(), Some("/nowhere".to_owned()))]);
+        let current = Tracked::from([("PATH".to_owned(), Some(path))]);
+        let restore = |name: &str| {
+            let root = fixture.0.join(name);
+            fs::create_dir(&root).unwrap();
+            let output = output(&root, b"unused");
+            fs::remove_file(root.join("library.rlib")).unwrap();
+            fs::remove_file(root.join("library.rmeta")).unwrap();
+            cache.restore(key, &output, None).unwrap()
+        };
+
+        let built = output(&fixture.0.join("old"), b"old");
+        cache
+            .store(key, &built, None, None, (b"", b""), &stale)
+            .unwrap();
+        assert!(restore("miss").is_none());
+
+        let built = output(&fixture.0.join("new"), b"new");
+        cache
+            .store(key, &built, None, None, (b"", b""), &current)
+            .unwrap();
+        let restored = restore("hit").unwrap();
+        assert_eq!(restored.tracked, current);
+        assert_eq!(
+            fs::read(fixture.0.join("hit/library.rlib")).unwrap(),
+            b"new"
+        );
+
+        let identity =
+            |tracked: &Tracked| cache.dependency_key(key, &built, None, tracked).unwrap();
+        assert_eq!(identity(&Tracked::new()), key);
+        assert_ne!(identity(&current), key);
+        assert_ne!(identity(&current), identity(&stale));
     }
 
     #[test]
@@ -1816,7 +1933,7 @@ mod tests {
         let dep_info = built.dep_info();
         fs::write(dep_info, b"library.rlib: src/lib.rs\n").unwrap();
         cache
-            .store(key, &built, None, Some(inputs), (b"", b""))
+            .store(key, &built, None, Some(inputs), (b"", b""), &Tracked::new())
             .unwrap();
 
         let restored_root = fixture.0.join("restored");
@@ -1834,7 +1951,7 @@ mod tests {
                 .is_some()
         );
         cache
-            .store(key, &built, None, Some(inputs), (b"", b""))
+            .store(key, &built, None, Some(inputs), (b"", b""), &Tracked::new())
             .unwrap();
         assert_eq!(
             fs::read(restored_root.join("library.d")).unwrap(),
@@ -1863,7 +1980,7 @@ mod tests {
         )
         .unwrap();
         cache
-            .store(key, &built, None, Some(inputs), (b"", b""))
+            .store(key, &built, None, Some(inputs), (b"", b""), &Tracked::new())
             .unwrap();
 
         let restored_root = fixture.0.join("restored");
@@ -1893,7 +2010,7 @@ mod tests {
         );
         fs::write(library_paths(&built).unwrap().0, b"new library").unwrap();
         cache
-            .store(key, &built, None, Some(inputs), (b"", b""))
+            .store(key, &built, None, Some(inputs), (b"", b""), &Tracked::new())
             .unwrap();
         assert!(
             cache
@@ -1942,30 +2059,50 @@ mod tests {
         };
 
         assert!(
-            !cache
+            cache
                 .published_fresh(key, &output, Some(inputs), &package)
                 .unwrap()
+                .is_none()
         );
         cache
-            .record_published(key, &output, Some(inputs), &package, (b"", b""))
+            .record_published(
+                key,
+                &output,
+                Some(inputs),
+                &package,
+                (b"", b""),
+                &Tracked::new(),
+            )
             .unwrap();
         assert!(
             cache
                 .published_fresh(key, &output, Some(inputs), &package)
                 .unwrap()
+                .is_some()
         );
+        let identity = || {
+            cache
+                .dependency_key(key, &output, Some(inputs), &Tracked::new())
+                .unwrap()
+        };
+        let first = identity();
         fs::write(&external, b"second").unwrap();
         assert!(
-            !cache
+            cache
                 .published_fresh(key, &output, Some(inputs), &package)
                 .unwrap()
+                .is_none()
         );
+        // Dependents must rebuild when a selected unit's external input changes.
+        assert_ne!(identity(), first);
         fs::write(&external, b"first").unwrap();
+        assert_eq!(identity(), first);
         fs::write(library_paths(&output).unwrap().0, b"tampered").unwrap();
         assert!(
-            !cache
+            cache
                 .published_fresh(key, &output, Some(inputs), &package)
                 .unwrap()
+                .is_none()
         );
     }
 
@@ -1981,14 +2118,36 @@ mod tests {
             source: crate::resolver::PackageSourceKey::Path(fixture.0.clone()),
         };
         let warning = b"{\"message\":\"warning marker\"}\n";
-        assert!(!cache.published_fresh(key, &output, None, &package).unwrap());
+        assert!(
+            cache
+                .published_fresh(key, &output, None, &package)
+                .unwrap()
+                .is_none()
+        );
         cache
-            .record_published(key, &output, None, &package, (warning, b""))
+            .record_published(
+                key,
+                &output,
+                None,
+                &package,
+                (warning, b""),
+                &Tracked::new(),
+            )
             .unwrap();
-        assert!(cache.published_fresh(key, &output, None, &package).unwrap());
+        assert!(
+            cache
+                .published_fresh(key, &output, None, &package)
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(cache.published_messages(&output).unwrap().0, warning);
         fs::write(fixture.0.join("unit").join(PUBLISHED_STDOUT), b"changed").unwrap();
-        assert!(!cache.published_fresh(key, &output, None, &package).unwrap());
+        assert!(
+            cache
+                .published_fresh(key, &output, None, &package)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[cfg(unix)]
@@ -2085,7 +2244,7 @@ mod tests {
         );
 
         cache
-            .store(key, &built, Some(&first), None, (b"", b""))
+            .store(key, &built, Some(&first), None, (b"", b""), &Tracked::new())
             .unwrap();
         let payload = cache.entry_path(key).join("payload");
         assert_eq!(
@@ -2101,7 +2260,9 @@ mod tests {
         let cache = BuildCache::for_test(&fixture.0.join("cache"));
         let key = CacheKey([7; 32]);
         let built = output(&fixture.0.join("built"), b"good");
-        cache.store(key, &built, None, None, (b"", b"")).unwrap();
+        cache
+            .store(key, &built, None, None, (b"", b""), &Tracked::new())
+            .unwrap();
         fs::write(cache.entry_path(key).join("payload/library.rlib"), b"bad").unwrap();
 
         let restore = RustcOutput::Library {
@@ -2112,7 +2273,9 @@ mod tests {
         };
         assert!(!cache.restore(key, &restore, None).unwrap().is_some());
         assert_eq!(fs::read_dir(&cache.quarantine).unwrap().count(), 1);
-        cache.store(key, &built, None, None, (b"", b"")).unwrap();
+        cache
+            .store(key, &built, None, None, (b"", b""), &Tracked::new())
+            .unwrap();
         assert!(cache.entry_path(key).is_dir());
     }
 
@@ -2123,7 +2286,9 @@ mod tests {
             BuildCache::for_test_with_validation(&fixture.0.join("cache"), ValidationMode::Trusted);
         let key = CacheKey([6; 32]);
         let built = output(&fixture.0.join("built"), b"original");
-        cache.store(key, &built, None, None, (b"", b"")).unwrap();
+        cache
+            .store(key, &built, None, None, (b"", b""), &Tracked::new())
+            .unwrap();
         fs::write(
             cache.entry_path(key).join("payload/library.rlib"),
             b"changed",
@@ -2210,7 +2375,9 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    cache.store(key, &output, None, None, (b"", b"")).unwrap();
+                    cache
+                        .store(key, &output, None, None, (b"", b""), &Tracked::new())
+                        .unwrap();
                 })
             })
             .collect::<Vec<_>>();

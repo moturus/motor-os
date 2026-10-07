@@ -49,6 +49,7 @@ mod sparse;
 mod toml;
 mod toolchain;
 mod trace;
+mod tracked_env;
 mod tree;
 mod unit;
 mod upgrade;

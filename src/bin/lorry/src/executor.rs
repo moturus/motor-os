@@ -6,11 +6,12 @@ use std::time::Duration;
 use crate::atomic::AtomicDirectory;
 use crate::build_script::{self, EnvironmentOptions, RunOptions};
 use crate::cache::{
-    BuildCaches, BuildScriptInput, CacheKey, DependencyInput, SelectedInputs, UnitInput,
+    BuildCache, BuildCaches, BuildScriptInput, CacheKey, DependencyInput, SelectedInputs, UnitInput,
 };
 use crate::compile::{
-    BuildOutput, CommandOptions, RustcOutput, dependency_directories, dependency_rustc_invocation,
-    dependency_rustc_invocation_with_build_output, unit_output_directory,
+    BuildOutput, CommandOptions, RustcInvocation, RustcOutput, dependency_directories,
+    dependency_rustc_invocation, dependency_rustc_invocation_with_build_output,
+    unit_output_directory,
 };
 use crate::diagnostic::{Error, Result};
 use crate::hash::sha256_file;
@@ -22,6 +23,7 @@ use crate::resolver::{CompileKind, PackageKey};
 use crate::sandbox::Executable;
 use crate::source_tree::Limits as TreeLimits;
 use crate::toolchain::{TargetInfo, Toolchain};
+use crate::tracked_env::{self, Tracked};
 use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind};
 
 pub trait EventReporter: Sync {
@@ -103,6 +105,21 @@ enum Executed {
         output: RustcOutput,
         cache_key: CacheKey,
     },
+}
+
+impl Executed {
+    fn artifact(
+        cache: &BuildCache,
+        cache_key: CacheKey,
+        output: RustcOutput,
+        selected: Option<SelectedInputs<'_>>,
+        tracked: Tracked,
+    ) -> Result<Self> {
+        Ok(Self::Artifact {
+            cache_key: cache.dependency_key(cache_key, &output, selected, &tracked)?,
+            output,
+        })
+    }
 }
 
 /// Shared scheduling state: units become ready when their last dependency
@@ -648,7 +665,7 @@ fn execute_unit(
                     dependencies: &dependencies,
                     build_script: cache_build_script,
                 })?;
-                if cache.published_fresh(
+                if let Some(tracked) = cache.published_fresh(
                     cache_key,
                     &planned_invocation.output,
                     selected_inputs,
@@ -670,10 +687,13 @@ fn execute_unit(
                         &planned_invocation.output,
                         true,
                     )?;
-                    return Ok(Executed::Artifact {
-                        output: planned_invocation.output,
+                    return Executed::artifact(
+                        cache,
                         cache_key,
-                    });
+                        planned_invocation.output,
+                        selected_inputs,
+                        tracked,
+                    );
                 }
                 let staging = AtomicDirectory::new(parent, label)?;
                 let invocation = planned_invocation.with_output_directory(
@@ -685,16 +705,18 @@ fn execute_unit(
                 )?;
                 create_output_directories(&invocation.output)?;
                 if restorable
-                    && let Some((stdout, stderr)) =
+                    && let Some(restored) =
                         cache.restore(cache_key, &invocation.output, selected_inputs)?
                 {
+                    let (stdout, stderr) = (&restored.stdout, &restored.stderr);
                     cache.record_cache_owner(cache_key, &key.package)?;
                     cache.record_published(
                         cache_key,
                         &invocation.output,
                         selected_inputs,
                         &key.package,
-                        (&stdout, &stderr),
+                        (stdout, stderr),
+                        &restored.tracked,
                     )?;
                     staging.commit(unit_dir)?;
                     if options.verbose {
@@ -705,17 +727,20 @@ fn execute_unit(
                     }
                     options
                         .reporter
-                        .compiler_messages(key, planned, &stdout, &stderr)?;
+                        .compiler_messages(key, planned, stdout, stderr)?;
                     options.reporter.compiler_artifact(
                         key,
                         planned,
                         &planned_invocation.output,
                         true,
                     )?;
-                    return Ok(Executed::Artifact {
-                        output: planned_invocation.output,
+                    return Executed::artifact(
+                        cache,
                         cache_key,
-                    });
+                        planned_invocation.output,
+                        selected_inputs,
+                        restored.tracked,
+                    );
                 }
                 if restorable && !options.quiet && caches.report_shared_rebuild(planned) {
                     let _guard = print
@@ -797,6 +822,7 @@ fn execute_unit(
                     planned.source_remap.as_ref(),
                     &clippy_inputs,
                 )?;
+                let tracked = tracked_environment(&invocation)?;
                 if restorable {
                     cache.store(
                         cache_key,
@@ -804,6 +830,7 @@ fn execute_unit(
                         cache_build_script.as_ref(),
                         selected_inputs,
                         (&diagnostics.0, &diagnostics.1),
+                        &tracked,
                     )?;
                     cache.record_cache_owner(cache_key, &key.package)?;
                 }
@@ -821,6 +848,7 @@ fn execute_unit(
                     selected_inputs,
                     &key.package,
                     (&diagnostics.0, &diagnostics.1),
+                    &tracked,
                 )?;
                 staging.commit(unit_dir)?;
                 options.reporter.compiler_artifact(
@@ -829,13 +857,31 @@ fn execute_unit(
                     &planned_invocation.output,
                     false,
                 )?;
-                Ok(Executed::Artifact {
-                    output: planned_invocation.output,
+                Executed::artifact(
+                    cache,
                     cache_key,
-                })
+                    planned_invocation.output,
+                    selected_inputs,
+                    tracked,
+                )
             }
         }
     }
+}
+
+/// The process variables rustc reported reading. Variables Lorry set for this
+/// invocation are already part of the unit key.
+fn tracked_environment(invocation: &RustcInvocation) -> Result<Tracked> {
+    let dep_info = invocation.output.dep_info();
+    let bytes = fs::read(dep_info).map_err(|error| {
+        Error::failure(format!(
+            "failed to read rustc dep-info `{}`: {error}",
+            dep_info.display()
+        ))
+    })?;
+    let mut tracked = tracked_env::parse(&bytes)?;
+    tracked.retain(|name, _| !invocation.environment.contains_key(name));
+    Ok(tracked)
 }
 
 fn cache_build_script_input(output: &ExecutedBuildScript) -> BuildScriptInput<'_> {
