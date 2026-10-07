@@ -1,5 +1,7 @@
 //! Byte, exact decimal and human-size sorting in the C locale.
 
+#[path = "sort_keys.rs"]
+mod keys;
 #[path = "sort_numeric.rs"]
 mod numeric;
 
@@ -8,6 +10,8 @@ use std::io::{Read, Write};
 
 #[derive(Default)]
 struct Options {
+    keys: Vec<keys::Key>,
+    delimiter: Option<u8>,
     numeric: bool,
     human: bool,
     reverse: bool,
@@ -39,15 +43,24 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
         }
         if argument == "--help" {
             println!(
-                "usage: sort [-nhrufsc] [-o FILE] [--] [FILE]...\n\
+                "usage: sort [-nhrufsc] [-k KEY] [-t BYTE] [-o FILE] [--] [FILE]...\n\
                       Sort lines (byte order by default); no files or '-' reads standard input.\n\
+                      -k FIELD[.BYTE][,FIELD[.BYTE]] select a key; -t BYTE separate fields.\n\
                       -n decimal prefix; -h human sizes;\n\
                       -r reverse; -u unique; -f fold ASCII case; -s stable;\n\
                       -c check order without output; -o FILE write sorted lines to FILE."
             );
             std::process::exit(0);
         }
-        let flags = match argument.as_str() {
+        let (name, value) = argument
+            .split_once('=')
+            .filter(|(name, _)| matches!(*name, "--key" | "--field-separator" | "--output"))
+            .map_or((argument.as_str(), None), |(name, value)| {
+                (name, Some(value))
+            });
+        let flags = match name {
+            "--key" => "k",
+            "--field-separator" => "t",
             "--numeric-sort" => "n",
             "--human-numeric-sort" => "h",
             "--reverse" => "r",
@@ -68,14 +81,16 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
                 'f' => options.fold = true,
                 's' => options.stable = true,
                 'c' => options.check = true,
-                'o' => {
+                'o' | 'k' | 't' => {
                     let rest = &flags[position + 1..];
-                    let file = if rest.is_empty() {
+                    let file = if let Some(value) = value {
+                        value
+                    } else if rest.is_empty() {
                         arguments.next().unwrap_or_else(|| {
                             let message = if argument.starts_with("--") {
                                 format!("option '{argument}' requires an argument")
                             } else {
-                                "option requires an argument -- 'o'".into()
+                                format!("option requires an argument -- '{flag}'")
                             };
                             fail(&format!(
                                 "{message}\nTry 'sort --help' for more information."
@@ -84,14 +99,36 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
                     } else {
                         rest
                     };
-                    if options
-                        .output
-                        .as_ref()
-                        .is_some_and(|previous| previous != file)
-                    {
-                        fail("multiple output files specified");
+                    match flag {
+                        'k' => options
+                            .keys
+                            .push(keys::Key::parse(file).unwrap_or_else(|error| fail(&error))),
+                        't' => {
+                            let delimiter = match file.as_bytes() {
+                                [delimiter] => *delimiter,
+                                b"\\0" => 0,
+                                [] => fail("empty tab"),
+                                _ => fail(&format!("multi-character tab '{file}'")),
+                            };
+                            if options
+                                .delimiter
+                                .is_some_and(|previous| previous != delimiter)
+                            {
+                                fail("incompatible tabs");
+                            }
+                            options.delimiter = Some(delimiter);
+                        }
+                        _ => {
+                            if options
+                                .output
+                                .as_ref()
+                                .is_some_and(|previous| previous != file)
+                            {
+                                fail("multiple output files specified");
+                            }
+                            options.output = Some(file.to_owned());
+                        }
                     }
-                    options.output = Some(file.to_owned());
                     break;
                 }
                 _ => fail(&format!("unsupported option '{argument}'")),
@@ -115,16 +152,31 @@ fn parse(args: &[String]) -> (Options, Vec<String>) {
 
 impl Options {
     fn compare(&self, left: &[u8], right: &[u8]) -> Ordering {
-        let mut order = if self.numeric || self.human {
-            numeric::compare(left, right, self.human, self.fold)
-        } else if self.fold {
-            left.iter()
-                .map(u8::to_ascii_uppercase)
-                .cmp(right.iter().map(u8::to_ascii_uppercase))
-        } else {
-            left.cmp(right)
+        let compare_key = |left: &[u8], right: &[u8]| {
+            if self.numeric || self.human {
+                numeric::compare(left, right, self.human, self.fold)
+            } else if self.fold {
+                left.iter()
+                    .map(u8::to_ascii_uppercase)
+                    .cmp(right.iter().map(u8::to_ascii_uppercase))
+            } else {
+                left.cmp(right)
+            }
         };
-        // Stable and unique modes retain input order among equal comparison keys.
+        let mut order = if self.keys.is_empty() {
+            compare_key(left, right)
+        } else {
+            self.keys
+                .iter()
+                .map(|key| {
+                    compare_key(
+                        key.slice(left, self.delimiter),
+                        key.slice(right, self.delimiter),
+                    )
+                })
+                .find(|order| *order != Ordering::Equal)
+                .unwrap_or(Ordering::Equal)
+        };
         if order == Ordering::Equal && !self.stable && !self.unique {
             order = left.cmp(right);
         }

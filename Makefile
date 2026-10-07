@@ -71,7 +71,7 @@ user-dev: user curl gears gears-batteries gears-mock-provider gix lorry mdbg rne
 .PHONY: base.img main.img raw.img dev.img wasm.img system-tty.img vsock-test.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
-.PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
+.PHONY: sysbox sysbox-tests systest mio-test tokio-tests crossterm-smoke
 .PHONY: rush kibim red rmux russhd ssh httpd httpd-axum gears gears-batteries gears-mock-provider
 .PHONY: gix lorry curl
 .PHONY: mdbg rnetbench crossbench
@@ -140,6 +140,11 @@ sysbox:
 	mkdir -p $(BIN_DIR)
 	cd src/sys/tools/sysbox && CARGO_TARGET_DIR="$(OBJ_DIR)/sysbox" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/sysbox" "$(OBJ_DIR)/sysbox/$(SUB_DIR)/sysbox"
+
+sysbox-tests:
+	mkdir -p $(BIN_DIR)
+	cd src/sys/tools/sysbox && CARGO_TARGET_DIR="$(OBJ_DIR)/sysbox" $(DO_BUILD) --example utility-tests
+	strip -o "$(BIN_DIR)/sysbox-utility-tests" "$(OBJ_DIR)/sysbox/$(SUB_DIR)/examples/utility-tests"
 
 mdbg:
 	mkdir -p $(BIN_DIR)

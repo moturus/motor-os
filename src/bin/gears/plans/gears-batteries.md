@@ -9,8 +9,8 @@ cutoff-based cleanup proposals with approval-only archival. Phase 9's manual
 multi-task evaluation command, frozen workspace/state copies, repeated arms and
 reports pass focused host/native fixtures and the release developer-image gate;
 the first real-model run is pending.
-Sysbox S1 and S2's byte/numeric/human sorting are complete and
-core-gated; field keys remain. Design revised 2026-10-06. See the
+Sysbox S1 and S2's byte/numeric/human comparisons, field ranges and separators
+are complete and core-gated; local key modifiers remain. Design revised 2026-10-06. See the
 [remaining-work checklist](gears-batteries-progress.md#what-remains) for current
 status; that document also retains the implementation history. Two questions wait
 for later phases: question 7 is needed before the first real-model evaluation, and
@@ -825,20 +825,25 @@ file; apply the permission order decided
 in question 1; replace references to the old G and Q labels and to "step
 8a" with this plan's phase and question numbers. Documents only, one patch.
 
-**Sysbox track (independent).** One patch each, with a systest beside
-`sysbox_head.rs`, a `docs/tools.md` entry, a wrapper in
+**Sysbox track (independent).** Small patches, with command regressions in
+sysbox's `examples/utility-tests.rs`, a `docs/tools.md` entry, a wrapper in
 `img_files/motor-os-base/system/bin` and the developer image's command list.
+The sysbox-owned test executable runs from `full-test.sh` in both profiles.
+Per the user's 2026-10-06 scope restriction, do not modify any other Motor OS
+crate except Gears; build/test scripts, documentation and packaging can connect
+the utilities without changing `systest` or OS libraries.
 Each covers the flags models use, matches GNU's output and exit statuses for
 them, and refuses any other flag with a message naming it.
 - S1. `mkdir -p` through `create_dir_all`.
 - S2. `sort`: `-n -r -u -k -t -f -h -s -c -o`, byte order, no locale, in
-  three patches. First add byte comparisons, `-r -u -f -s -c -o`, literal
+  four patches. First add byte comparisons, `-r -u -f -s -c -o`, literal
   operands and output handling; then exact numeric/human comparisons
-  (`-n -h`); finally field keys (`-k -t`). Each patch receives the full
-  core gate.
+  (`-n -h`); then field ranges and separators (`-k -t`); finally local key
+  modifiers (`b/n/h/f/r`). Each patch receives the full core gate.
 - S3. `uniq`: `-c -d -u -i`.
-- S4. `cut`: `-b -c -d -f -s --complement`.
-- S5. `tr`: `-d -s -c`, ranges and POSIX classes.
+- S4. `cut`: `-b -c --complement`, followed by `-d -f -s` field selection.
+- S5. `tr`: single-set `-d -s -c`, ranges and POSIX classes; then translation
+  and two-set deletion/squeezing.
 - S6. `xargs`: `-0 -d -n -I -r -t`, running the command directly, never
   through a shell.
 

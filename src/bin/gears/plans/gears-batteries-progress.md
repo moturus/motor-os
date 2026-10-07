@@ -18,7 +18,7 @@ that Gears works with OpenRouter on Motor OS.
 | --- | --- |
 | First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model(s), and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness, rather than adding another feature. |
 | Hands-on validation | Finish the Linux/Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. A live local-model result has not been reported. |
-| Motor OS command utilities | Separate coding work remains: `sort -k -t`, then `uniq`, `cut`, `tr` and `xargs`. `mkdir -p` and byte/numeric/human-size sorting are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
+| Motor OS command utilities | Separate coding work remains: local sort-key modifiers, then `uniq`, `cut`, `tr` and `xargs`. `mkdir -p`, byte/numeric/human-size comparisons and `sort -k/-t` field ranges/separators are implemented and core-gated. These additions are not prerequisites for using the implemented Gears/batteries features. |
 | Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without this import. |
 | Optional orchestration (10) | Implement supervised worker agents and their budgets. |
 | Optional web tools (11) | Implement web search and page extraction using curl. |
@@ -1229,3 +1229,25 @@ No live model requests were made for these evaluation fixtures. The first
 real-model run still needs held-out tasks, the selected model and the user's
 quality/cost criterion; the descriptive reports do not establish that reviews
 improve work or enable reviews automatically.
+
+## Sysbox utility continuation (2026-10-06)
+
+Field/byte ranges and separators (`sort -k/-t`) now pass the full core gate
+three times in debug and three times in release on unchanged final sources.
+Repeated keys, inherited ordering, stable/unique ties, NUL separators, huge
+positions, order checks and output protection have real-command regressions.
+The sysbox-owned example is built/uploaded by `full-test.sh`; no other Motor OS
+crate is edited. This first patch also establishes the standalone native test
+driver and its build/test wiring, making it larger than subsequent utility patches.
+
+The first debug fixture failed because it treated the Motor debug runtime's
+filesystem DEBUG records as command diagnostics. The corrected fixture recognizes
+only timestamped rt.vdso DEBUG records, while exit status, stdout, command
+diagnostics and other stderr remain asserted. The focused debug reproduction and
+all six final suites pass. Original failure: `/tmp/gears-sysbox-sort-fields-full-debug-1.log`;
+final logs: `/tmp/gears-sysbox-sort-fields-full-*-diagnostics-fixed.log`.
+The original temporary gate driver separately checked the wrong success footer;
+that driver error and its passing release log are preserved. GNU output/status/
+diagnostic comparisons (3,888 cases), native Clippy with warnings denied and the
+focused native fixtures pass. Build-generated lockfiles are restored only after
+matching their recorded hashes; the user's sys workspace lock is preserved.

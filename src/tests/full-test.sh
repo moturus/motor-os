@@ -231,14 +231,14 @@ echo "full-test: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE target=$IMG_TAR
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-kernel-wait-set.sh" --release
   bash "$WD/test-moto-ipc-sync.sh" --release
-  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
+  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest sysbox-tests mio-test tokio-tests \
     crossterm-smoke BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
   bash "$WD/test-kloader-image.sh" --release
 else
   bash "$WD/test-kernel-wait-set.sh"
   bash "$WD/test-moto-ipc-sync.sh"
-  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
+  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest sysbox-tests mio-test tokio-tests \
     crossterm-smoke -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
   bash "$WD/test-kloader-image.sh"
@@ -635,6 +635,16 @@ echo "$out"
   fail "systest mem-placement did not pass: $out"
 
 "$WD/test-unwind.sh"
+
+printf '%s\n' "put $ROOT_DIR/build/bin/$BUILD/sysbox-utility-tests $TEST_BIN/sysbox-utility-tests" |
+  sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+    -i "$WD/test.key" motor@192.168.4.2
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_BIN/sysbox-utility-tests /system/bin/sysbox")" ||
+  fail "sysbox utility tests failed: $out"
+[ "${out##*$'\n'}" = "sysbox utility-tests: ALL PASS" ] || fail "sysbox utility tests did not finish: $out"
+printf '%s\n' "$out"
+
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rust-analyzer-crates.sh"
   "$WD/test-rust-analyzer-native.sh"

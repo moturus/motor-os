@@ -66,13 +66,16 @@ The shell is somewhat barebones now (contributions are welcome!).
 - `mkdir [-p | --parents] [--] DIRECTORY...` creates directories. With `-p`,
   it creates missing parents and accepts directories that already exist;
   files blocking a directory are errors. Other creation flags are refused;
-- `sort [-nhrufsc] [-o FILE] [--] [FILE]...` sorts newline-delimited byte
+- `sort [-nhrufsc] [-k KEY] [-t BYTE] [-o FILE] [--] [FILE]...` sorts newline-delimited byte
   strings, reading standard input for no file or `-`. Flags reverse order,
   remove equal keys, fold ASCII case, keep equal keys stable, check order,
   or select an output file. Numeric mode (`-n`) compares decimal prefixes
   exactly; human-size mode (`-h`) compares suffix ranks and then mantissas.
   Neither rounds through floating point. Input is read before opening output.
-  Field-key options are not yet supported;
+  Keys use `FIELD[.BYTE][,FIELD[.BYTE]]`, with repeated `-k` for tie breakers;
+  `-t` selects a single-byte separator (including `\0`), otherwise fields
+  start with their leading spaces/tabs. Ordering flags apply to all keys;
+  per-key flags are a later patch;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
   numeric IPv4 and IPv6 addresses, `localhost`, and DNS names;
 - `head [-n [-]NUM | -c [-]NUM] [-q | -v] [-z] [FILE]...` prints the first 10
