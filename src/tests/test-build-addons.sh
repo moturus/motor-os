@@ -159,4 +159,49 @@ if (ensure_addon test source-3 "$overlay" bin/tool build_nothing) 2>/dev/null; t
 	fail "an add-on build that staged nothing was accepted"
 fi
 
+# Javy builds with the orchestrator's selection, managed or authoring, and the
+# selection is part of the add-on's source identity.
+javy_root="$temporary/javy"
+javy_log="$javy_root/toolchains.log"
+mkdir -p "$javy_root/motorh/javy"
+cat > "$javy_root/motorh/javy/motor-build.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'build %s\n' "$RUSTUP_TOOLCHAIN" >> "$JAVY_TOOLCHAIN_LOG"
+EOF
+chmod +x "$javy_root/motorh/javy/motor-build.sh"
+for selection in managed-probe authoring-probe; do
+	(
+		export RUSTUP_TOOLCHAIN="$selection" JAVY_TOOLCHAIN_LOG="$javy_log"
+		MOTORH="$javy_root/motorh"
+		ASSEMBLY_BUILD_ROOT="$javy_root/build"
+		JAVY_IMG="$javy_root/images/javy"
+		JAVY_PLUGIN_SHA=plugin JAVY_TYPESCRIPT_SHA=typescript JAVY_SOURCE_MANIFEST=manifest
+		javy_download() { : > "$3"; }
+		cargo() { printf 'fetch %s\n' "$RUSTUP_TOOLCHAIN" >> "$JAVY_TOOLCHAIN_LOG"; }
+		gzip() { :; }
+		tar() { :; }
+		install() { :; }
+		sha256sum() { cat > /dev/null; }
+		build_javy
+	) < /dev/null > /dev/null 2>&1 || fail "the Javy stage failed with selection $selection"
+done
+[ "$(cat "$javy_log")" = $'fetch managed-probe\nbuild managed-probe\nfetch authoring-probe\nbuild authoring-probe' ] ||
+	fail "Javy did not fetch and build with the selected toolchain"
+javy_manifest() (
+	RUSTUP_TOOLCHAIN="$1"
+	rustc() { printf 'rustc for %s\n' "$RUSTUP_TOOLCHAIN"; }
+	JAVY_SOURCES=()
+	JAVY_PLUGIN_SHA=plugin
+	JAVY_TYPESCRIPT_SHA=typescript
+	javy_source_manifest
+)
+managed_manifest="$(javy_manifest managed-probe)"
+authoring_manifest="$(javy_manifest authoring-probe)"
+case "$authoring_manifest" in
+	*'toolchain=authoring-probe'*'rustc=rustc for authoring-probe'*) ;;
+	*) fail "the Javy manifest does not name the selected toolchain" ;;
+esac
+[ "$managed_manifest" != "$authoring_manifest" ] ||
+	fail "a changed toolchain selection would reuse the Javy add-on"
+
 echo "test-build-addons PASS"

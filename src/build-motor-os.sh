@@ -927,6 +927,12 @@ main() {
 	}
 	if [ "$JAVY_ONLY" = true ]; then
 		[ "$SOURCE_MODE" = managed ] || die "--javy-only uses the selected installed toolchain"
+		# Select once, as ordinary builds do, and pass that choice to every step.
+		if [ -z "${RUSTUP_TOOLCHAIN:-}" ]; then
+			RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$MOTOR/rust-toolchain.toml")"
+			[ -n "$RUSTUP_TOOLCHAIN" ] || die "no Rust channel in $MOTOR/rust-toolchain.toml"
+		fi
+		export RUSTUP_TOOLCHAIN
 		ASSEMBLY_IMAGE_ROOT="$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)"
 		ASSEMBLY_ROOT="${ASSEMBLY_IMAGE_ROOT%/images}"
 		ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"

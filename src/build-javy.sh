@@ -14,6 +14,7 @@ javy_download() {
 javy_source_manifest() (
 	cd "$MOTOR"
 	printf 'assembly=%s\n' "${ASSEMBLY_ROOT##*/}"
+	printf 'toolchain=%s\n' "$RUSTUP_TOOLCHAIN"
 	printf 'rustc=%s\n' "$(rustc --version)"
 	printf 'target=x86_64-unknown-motor\nprofile=release\n'
 	local spec repo branch
@@ -48,13 +49,11 @@ build_javy() {
 	printf '%s  %s\n' "$JAVY_PLUGIN_SHA" "$inputs/plugin.wasm" | sha256sum -c -
 	javy_download https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz \
 		10e108c9cf7d5f2879053dff18515fb405abf2ccef63eaaf017d9c571687a1d3 "$inputs/typescript.tgz"
-	# Fetch with the Motor toolchain that motor-build.sh selects, not Javy's own
-	# rust-toolchain.toml, so one Cargo resolves and builds the lockfile.
+	# The orchestrator's selection (managed or authoring) overrides Javy's own
+	# rust-toolchain.toml for the fetch and is inherited by motor-build.sh.
+	[ -n "${RUSTUP_TOOLCHAIN:-}" ] || die "no Rust toolchain was selected for Javy"
 	(
 		cd "$MOTORH/javy"
-		RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$MOTOR/rust-toolchain.toml")"
-		[ -n "$RUSTUP_TOOLCHAIN" ] || die "no Rust channel in $MOTOR/rust-toolchain.toml"
-		export RUSTUP_TOOLCHAIN
 		cargo fetch --locked --target x86_64-unknown-motor
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" JOBS="$(javy_jobs)" \
 			JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" ./motor-build.sh
