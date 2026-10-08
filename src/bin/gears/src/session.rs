@@ -742,27 +742,39 @@ impl Session {
     }
 
     pub fn record_request_prefix(&mut self, prefix: &RequestPrefix) -> Result<(), String> {
-        if self.request_prefix()?.as_ref() != Some(prefix) {
+        // Hook resources can change even when the advertised prefix is identical,
+        // so a checkpoint follows any hook state saved since the last request.
+        let (mut changed, mut checkpointed, mut previous) = (false, false, None);
+        for entry in self.active_backwards()? {
+            match entry.kind.as_str() {
+                "hook_state" if !checkpointed => changed = true,
+                "request_prefix_checkpoint" => checkpointed = true,
+                "request_prefix" => {
+                    previous = Some(parse_prefix(entry)?);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let new_prefix = previous.as_ref() != Some(prefix);
+        if new_prefix {
             self.append("request_prefix", prefix)?;
         }
-        // Hook resources can change even when the advertised prefix is identical.
-        self.append(
-            "request_prefix_checkpoint",
-            &serde_json::json!({"version": 1}),
-        )?;
+        if new_prefix || changed {
+            self.append(
+                "request_prefix_checkpoint",
+                &serde_json::json!({"version": 1}),
+            )?;
+        }
         Ok(())
     }
 
     /// Read the last actual request prefix on the selected branch, including across compaction.
     pub fn request_prefix(&self) -> Result<Option<RequestPrefix>, String> {
-        self.active_entries()?
+        self.active_backwards()?
             .into_iter()
-            .rev()
             .find(|entry| entry.kind == "request_prefix")
-            .map(|entry| {
-                serde_json::from_value(entry.data)
-                    .map_err(|error| format!("entry {}: bad request prefix: {error}", entry.id))
-            })
+            .map(parse_prefix)
             .transpose()
     }
 
@@ -866,6 +878,25 @@ impl Session {
 
     pub fn active_entries(&self) -> Result<Vec<Entry>, String> {
         self.path_to(self.active_leaf())
+    }
+
+    /// The active branch from its leaf back to the root, without copying entries.
+    fn active_backwards(&self) -> Result<Vec<&Entry>, String> {
+        let by_id = self
+            .entries
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect::<HashMap<_, _>>();
+        let mut path = Vec::new();
+        let mut cursor = self.active_leaf();
+        while let Some(id) = cursor {
+            let entry = *by_id
+                .get(id)
+                .ok_or_else(|| format!("entry {id:?} does not exist"))?;
+            path.push(entry);
+            cursor = entry.parent_id.as_deref();
+        }
+        Ok(path)
     }
 
     fn path_to(&self, leaf: Option<&str>) -> Result<Vec<Entry>, String> {
@@ -1191,6 +1222,11 @@ fn write_line(writer: &mut impl RecordFile, value: &impl Serialize) -> Result<()
             "cannot write session record: {error}; its partial bytes remain: {cut}"
         )),
     }
+}
+
+fn parse_prefix(entry: &Entry) -> Result<RequestPrefix, String> {
+    serde_json::from_value(entry.data.clone())
+        .map_err(|error| format!("entry {}: bad request prefix: {error}", entry.id))
 }
 
 fn entry_summary(entry: &Entry) -> String {
@@ -1956,6 +1992,40 @@ mod tests {
         assert!(lock.exists());
         std::fs::remove_file(&lock).unwrap();
         store.open(&id).unwrap();
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn request_checkpoints_follow_only_new_prefixes_and_hook_state_changes() {
+        let (base, _, store) = fixture("prefix-checkpoints");
+        let mut session = store.create(true, None).unwrap();
+        let prefix = RequestPrefix {
+            system: vec!["system".into()],
+            tools: Vec::new(),
+        };
+        let checkpoints = |session: &Session| {
+            session
+                .entries()
+                .iter()
+                .filter(|entry| entry.kind == "request_prefix_checkpoint")
+                .count()
+        };
+        session.record_request_prefix(&prefix).unwrap();
+        session.record_request_prefix(&prefix).unwrap();
+        assert_eq!(checkpoints(&session), 1);
+        session
+            .append_hook_state(&HookState {
+                hook: "batteries".into(),
+                state: serde_json::json!({"resource": "later"}),
+                context: None,
+            })
+            .unwrap();
+        session.record_request_prefix(&prefix).unwrap();
+        session.record_request_prefix(&prefix).unwrap();
+        assert_eq!(checkpoints(&session), 2);
+        let saved = session.request_prefix_hook_states().unwrap().unwrap();
+        assert!(saved.checkpointed);
+        assert_eq!(saved.states["batteries"]["resource"], "later");
         std::fs::remove_dir_all(base).unwrap();
     }
 }
