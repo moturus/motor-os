@@ -2059,7 +2059,9 @@ fn report_finished(
 }
 
 const FRESH_PROFILE_FILE: &str = ".lorry-fresh-v6";
-const MAX_FRESH_PROFILE_BYTES: u64 = 4 * 1024 * 1024;
+// A verbose Helix build records 6 MB of dependency warnings. A larger record
+// would never be reused, and each build would write it again.
+const MAX_FRESH_PROFILE_BYTES: u64 = 64 * 1024 * 1024;
 
 // The unit cache handles dependency compilation. This record additionally
 // proves that the installed root artifact can be reused as one complete unit.
@@ -4040,6 +4042,54 @@ mod tests {
             symlink(&first, &link).unwrap();
             assert!(fresh());
         }
+    }
+
+    #[test]
+    fn completed_profiles_with_many_messages_are_reused() {
+        let fixture = Fixture::new();
+        let profile = fixture.0.join("target/lorry/debug");
+        fs::create_dir_all(&profile).unwrap();
+        let artifact = profile.join("root-bin");
+        let dep_info = profile.join("root-bin.d");
+        fs::write(&artifact, b"artifact").unwrap();
+        fs::write(
+            &dep_info,
+            format!(
+                "{}: {}\n",
+                artifact.display(),
+                fixture.0.join("src/main.rs").display()
+            ),
+        )
+        .unwrap();
+        let warning = serde_json::json!({
+            "reason": "compiler-message",
+            "message": {"rendered": "w".repeat(1024 * 1024)},
+        });
+        let staged = StagedArtifacts {
+            primary: artifact.clone(),
+            binaries: BTreeMap::from([("root-bin".to_owned(), artifact)]),
+            dep_info: vec![dep_info],
+            script_inputs: Vec::new(),
+            messages: vec![warning; 8],
+            environment: Tracked::new(),
+            library_paths: Vec::new(),
+        };
+        let owner = owner(&fixture.0);
+        let base = [7; 32];
+        write_fresh_profile(
+            &profile,
+            &fixture.0,
+            &owner,
+            base,
+            &staged,
+            &[],
+            ValidationMode::Trusted,
+        )
+        .unwrap();
+        assert!(fs::metadata(profile.join(&owner)).unwrap().len() > 8 * 1024 * 1024);
+        let reused =
+            restore_fresh_profile(&profile, &fixture.0, &owner, base, ValidationMode::Trusted);
+        assert_eq!(reused.unwrap().messages.len(), 8);
     }
 
     #[test]
