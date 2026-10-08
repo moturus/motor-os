@@ -103,10 +103,11 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
             resolve_selected_workspace(&complete, catalog, &locked.options, &requests, selection)
         },
     )?;
-    let rendered = prepared
-        .resolution
-        .root_edges
-        .iter()
+    // Like Cargo, print the roots in package-id order.
+    let mut roots = prepared.resolution.root_edges.iter().collect::<Vec<_>>();
+    roots.sort_by(|left, right| left.package.cmp(&right.package));
+    let rendered = roots
+        .into_iter()
         .map(|edge| {
             let root = prepared
                 .resolution

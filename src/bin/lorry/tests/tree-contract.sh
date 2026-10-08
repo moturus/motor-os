@@ -134,4 +134,22 @@ if grep -F 'linux-only v1.0.0' "$WORK/lorry.tree" >/dev/null; then
     exit 1
 fi
 
-echo "PASS: tree is deterministic and matches Cargo for path, build, and proc-macro edges"
+# Cargo prints several roots in package-id order, not member-path order.
+ROOTS="$WORK/roots"
+mkdir -p "$ROOTS/client/src" "$ROOTS/server/src"
+printf '[workspace]\nmembers = ["client", "server"]\nresolver = "2"\n' >"$ROOTS/Cargo.toml"
+printf '[package]\nname = "zclient"\nversion = "0.1.0"\nedition = "2024"\n' >"$ROOTS/client/Cargo.toml"
+printf '[package]\nname = "api"\nversion = "0.1.0"\nedition = "2024"\n' >"$ROOTS/server/Cargo.toml"
+printf 'pub fn value() {}\n' | tee "$ROOTS/client/src/lib.rs" >"$ROOTS/server/src/lib.rs"
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" generate-lockfile --offline \
+    --manifest-path "$ROOTS/Cargo.toml"
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" tree --locked --offline --workspace \
+    --manifest-path "$ROOTS/Cargo.toml" >"$WORK/cargo-roots.tree"
+HOME="$HOME_DIR" RUSTC="$LORRY_TEST_RUSTC" "$LORRY" tree --workspace \
+    --manifest-path "$ROOTS/Cargo.toml" >"$WORK/lorry-roots.tree"
+if ! cmp "$WORK/cargo-roots.tree" "$WORK/lorry-roots.tree"; then
+    diff -u "$WORK/cargo-roots.tree" "$WORK/lorry-roots.tree" >&2
+    exit 1
+fi
+
+echo "PASS: tree is deterministic and matches Cargo for path, build, and proc-macro edges and root order"
