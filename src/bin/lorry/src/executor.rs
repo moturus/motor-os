@@ -238,8 +238,8 @@ fn reads_metadata(
             })
 }
 
-/// Whether a unit links its library dependencies rather than reading their
-/// metadata alone.
+/// Whether a unit needs a library dependency's full outputs, not just its
+/// metadata: it links, or a dependency also builds a linked crate type.
 fn links_libraries(manifests: &BTreeMap<PackageKey, Manifest>, planned: &PlannedUnit) -> bool {
     planned.unit.dependencies.iter().any(|edge| {
         edge.kind == UnitEdgeKind::RustDependency
