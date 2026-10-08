@@ -32,15 +32,12 @@ pub fn system() -> &'static str {
 }
 
 pub fn load(context: &ToolContext, system: &str) -> Result<Option<Vec<String>>, String> {
-    let path = context.resolve(".gears/batteries.toml", false)?;
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if !metadata.is_file() => {
-            return Err("batteries.toml must be a regular file".into());
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    }
+    // Not followed through links: the check must be declared in this workspace.
+    let Some(path) = gears::state::StateRoot::new(context.workspace.join(".gears"))?
+        .existing_file(Path::new("batteries.toml"))?
+    else {
+        return Ok(None);
+    };
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -160,7 +157,7 @@ mod tests {
             assert!(
                 load(&context, "linux")
                     .unwrap_err()
-                    .contains("symbolic link")
+                    .contains("found symlink")
             );
         }
         std::fs::remove_dir_all(root).unwrap();

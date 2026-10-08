@@ -171,7 +171,9 @@ fn forbidden_rm(arguments: &[&str], cwd: &Path, state: &Path, home: Option<&Path
             recursive |= *argument == "--recursive"
                 || (!argument.starts_with("--") && argument.contains(['r', 'R']));
         } else {
-            paths.push(absolute(cwd, home, argument));
+            let path = absolute(cwd, home, argument);
+            // The Gears directory is compared by its real location.
+            paths.push(crate::paths::resolve_links(&path).unwrap_or(path));
         }
     }
     paths.iter().any(|path| {

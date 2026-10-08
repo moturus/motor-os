@@ -1,4 +1,5 @@
-//! File-tool paths and per-session data; these checks prevent accidents.
+//! File-tool paths and per-session data; these checks prevent accidents, and
+//! symbolic links are resolved before them.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -45,19 +46,17 @@ impl ToolContext {
         {
             return Err("invalid session id for batteries data".into());
         }
-        let workspace = normalize(&workspace)?;
-        no_links(&workspace)?;
+        let workspace = resolve_links(&normalize(&workspace)?)?;
         if !workspace.is_dir() {
             return Err("selected workspace is not a directory".into());
         }
-        let state = normalize(&state)?;
-        no_links(&state)?;
+        let state = resolve_links(&normalize(&state)?)?;
         let state = StateRoot::new(state)?;
         let results = path
             .map(|path| {
                 let mut name = path.as_os_str().to_os_string();
                 name.push(".results");
-                normalize(Path::new(&name))
+                resolve_links(&normalize(Path::new(&name))?)
             })
             .transpose()?;
         Ok(Self {
@@ -73,11 +72,11 @@ impl ToolContext {
             return Err("file path is empty".into());
         }
         let path = Path::new(input);
-        let path = normalize(&if path.is_absolute() {
+        let path = resolve_links(&normalize(&if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.workspace.join(path)
-        })?;
+        })?)?;
         if path.starts_with(self.state.path())
             && (writing
                 || self
@@ -87,7 +86,6 @@ impl ToolContext {
         {
             return Err("file tools cannot access the Gears directory".into());
         }
-        no_links(&path)?;
         Ok(path)
     }
 
@@ -148,23 +146,27 @@ fn normalize(path: &Path) -> Result<PathBuf, String> {
     Ok(result)
 }
 
-fn no_links(path: &Path) -> Result<(), String> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(format!("symbolic link refused: {}", current.display()));
+/// Resolve symbolic links in the longest existing ancestor, so checks see the
+/// real location; the part that does not exist yet is kept as written.
+pub(crate) fn resolve_links(path: &Path) -> Result<PathBuf, String> {
+    let mut existing = path;
+    let mut missing = Vec::new();
+    loop {
+        match existing.canonicalize() {
+            Ok(mut real) => {
+                real.extend(missing.iter().rev());
+                return Ok(real);
             }
-            Ok(metadata) if current != path && !metadata.is_dir() => {
-                return Err(format!("not a directory: {}", current.display()));
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+                    return Err(format!("{}: {error}", path.display()));
+                };
+                missing.push(name);
+                existing = parent;
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("{}: {error}", current.display())),
+            Err(error) => return Err(format!("{}: {error}", existing.display())),
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -211,18 +213,44 @@ mod tests {
         );
         assert!(context.resolve(own_result.to_str().unwrap(), true).is_err());
         assert!(
-            ToolContext::new(context.workspace.clone(), state, "../escape".into(), None).is_err()
+            ToolContext::new(
+                context.workspace.clone(),
+                state.clone(),
+                "../escape".into(),
+                None
+            )
+            .is_err()
         );
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(root.join("outside"), context.workspace.join("link"))
-                .unwrap();
-            assert!(
-                context
-                    .resolve("link/file", false)
-                    .unwrap_err()
-                    .contains("symbolic link")
+            use std::os::unix::fs::symlink;
+            let real = root.canonicalize().unwrap();
+            std::fs::create_dir(root.join("outside")).unwrap();
+            symlink(root.join("outside"), context.workspace.join("link")).unwrap();
+            assert_eq!(
+                context.resolve("link/file", false).unwrap(),
+                real.join("outside/file")
             );
+            std::fs::create_dir_all(&state).unwrap();
+            symlink(&state, context.workspace.join("state-link")).unwrap();
+            assert!(context.resolve("state-link/key", true).is_err());
+            // A linked ancestor of both roots no longer disables the tools.
+            symlink(&root, real.with_extension("alias")).unwrap();
+            let alias = real.with_extension("alias");
+            let linked = ToolContext::new(
+                alias.join("workspace"),
+                alias.join("state"),
+                "s1".into(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(linked.workspace, real.join("workspace"));
+            assert!(
+                linked
+                    .resolve(alias.join("state/key").to_str().unwrap(), false)
+                    .is_err()
+            );
+            std::fs::remove_file(alias).unwrap();
         }
         std::fs::remove_dir_all(root).unwrap();
     }
