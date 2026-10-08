@@ -102,6 +102,19 @@ this stall was elsewhere in the test: most likely the first `do_rpc(None)`,
 which has no deadline, or a read from the peer or the hoarder. The next run
 on the same commit passed the test in under 5 s, as did three more runs.
 
+Not reproduced on 2026-10-08 (`94a97b45`), with a temporary watchdog that
+named the step that stopped for 60 s. These all passed, on the release dev
+image with 8 GiB and 4 vCPUs:
+
+- 15 full systest runs, each in a fresh boot;
+- 3 runs of the developer gate's `full-test.sh` phase, where systest runs
+  after the rest of the suite;
+- 150 runs of the IPC tests alone while busy loops kept all 16 host CPUs
+  busy.
+
+Next time, a step watchdog in the test would name where it stops. That is a
+test change under `src/sys`, so it needs the full debug and release gates.
+
 ## A process can take an rmux server's name first (2026-09-27)
 
 rmux on Motor finds its server by a service name made of the server's mask
