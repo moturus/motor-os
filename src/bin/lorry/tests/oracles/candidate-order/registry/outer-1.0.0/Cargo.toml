@@ -1,0 +1,8 @@
+[package]
+name = "outer"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+inner = { version = "^1" }

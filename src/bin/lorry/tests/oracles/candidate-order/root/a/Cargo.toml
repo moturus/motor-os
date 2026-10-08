@@ -1,0 +1,12 @@
+[package]
+name = "a"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chain = "1"
+low = "1"
+outer = "1"
+
+[build-dependencies]
+wide = "1"

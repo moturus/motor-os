@@ -18,10 +18,18 @@ by the current Motor Cargo, compatibility family 1.99. Lorry parses the checked-
 resolves the same complete lock graph, renders the same lockfile, and
 separately verifies the selected Linux subgraph.
 
-Re-run the Cargo oracle lane with:
+## Candidate order
+
+`candidate-order/` has the same layout. Its fresh lock checks that a wider
+requirement takes the highest compatible version instead of a selected lower
+one, and that one declaration used from host and target code resolves to one
+version. Lorry's unit test resolves it without a lock and renders the same
+bytes.
+
+Re-run the Cargo oracle lane for both fixtures with:
 
 ```sh
-./tests/verify-stage2-resolution-oracle.sh
+./tests/verify-resolution-oracles.sh
 ```
 
 `../fixtures/cargo-identity/` is the dependency-free release artifact fixture.

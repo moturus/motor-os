@@ -1,0 +1,1 @@
+{"name":"wide","vers":"1.0.0","deps":[{"name":"bar","req":">=0.52, <0.60","features":[],"optional":false,"default_features":true,"target":null,"kind":"normal"},{"name":"foo","req":">=1, <3","features":[],"optional":false,"default_features":true,"target":null,"kind":"normal"}],"cksum":"e03046703f59f43547f3f52a59d321e8564d0ea7ce31e51072343695320307e8","features":{},"yanked":false}

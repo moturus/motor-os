@@ -9,10 +9,12 @@ struct Frame {
     state: State,
     queue: VecDeque<Event>,
     event: Option<Event>,
+    // Untried candidates in Cargo's order, including selected packages.
     choices: VecDeque<Choice>,
-    fallback: VecDeque<Choice>,
+    tried: BTreeSet<PackageKey>,
+    // Catalog records for the dependency name when `choices` was ordered.
+    ordered_records: Option<usize>,
     preferred: Option<BTreeSet<locked::Identity>>,
-    candidates_loaded: bool,
     locked_package: Option<PackageKey>,
     allowed: Option<BTreeSet<locked::Identity>>,
     last_failure: Option<Failure>,
@@ -25,9 +27,9 @@ impl Frame {
             queue,
             event: None,
             choices: VecDeque::new(),
-            fallback: VecDeque::new(),
+            tried: BTreeSet::new(),
+            ordered_records: None,
             preferred: None,
-            candidates_loaded: false,
             locked_package: None,
             allowed: None,
             last_failure: None,
@@ -84,71 +86,25 @@ impl Frame {
                     event.dependency.package, limit
                 )));
             }
-            let reused = self
-                .state
-                .nodes
-                .iter()
-                .filter(|(key, node)| {
-                    key.name == event.dependency.package
-                        && event.dependency.matches_version(&key.version)
-                        && source_matches(&node.record.source, &event.dependency.source)
-                        && locked_package.is_none_or(|locked| locked == *key)
-                        && self.allowed.as_ref().is_none_or(|allowed| {
-                            allowed.contains(&locked::Identity::from_key(key))
-                        })
-                })
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>();
-            for key in reused {
-                if self.is_preferred(&key) {
-                    self.choices.push_back(Choice::Selected(key));
-                } else {
-                    self.fallback.push_back(Choice::Selected(key));
-                }
-            }
             self.locked_package = locked_package.cloned();
             self.event = Some(event);
         }
-        let event = self.event.as_ref().unwrap();
         loop {
-            if self.choices.is_empty() && !self.candidates_loaded {
-                // A failed existing selection may load more versions through
-                // its children. Query fresh candidates only after that failure.
-                let fresh = candidates(catalog, event, options, locked)
-                    .into_iter()
-                    .filter_map(|record| {
-                        let key = PackageKey {
-                            name: record.name.clone(),
-                            version: record.version.clone(),
-                            source: record.source.key(),
-                        };
-                        self.locked_package
-                            .as_ref()
-                            .is_none_or(|locked| locked == &key)
-                            .then_some((key, record))
-                            .filter(|(key, _)| {
-                                self.allowed.as_ref().is_none_or(|allowed| {
-                                    allowed.contains(&locked::Identity::from_key(key))
-                                })
-                            })
-                            .map(|(key, record)| Choice::New(key, record))
-                    })
-                    .collect::<Vec<_>>();
-                let (preferred, fallback): (Vec<_>, Vec<_>) =
-                    fresh.into_iter().partition(|choice| {
-                        let Choice::New(key, _) = choice else {
-                            unreachable!()
-                        };
-                        self.is_preferred(key)
-                    });
-                self.choices.extend(preferred);
-                self.choices.append(&mut self.fallback);
-                self.choices.extend(fallback);
-                self.candidates_loaded = true;
+            let known = catalog
+                .records(&self.event.as_ref().unwrap().dependency.package)
+                .len();
+            if self.ordered_records != Some(known) {
+                // A failed choice may have loaded more versions through its
+                // children; order them with the untried candidates.
+                self.order_choices(catalog, options, locked);
+                self.ordered_records = Some(known);
             }
             let Some(choice) = self.choices.pop_front() else {
                 break;
             };
+            let (Choice::Selected(key) | Choice::New(key, _)) = &choice;
+            self.tried.insert(key.clone());
+            let event = self.event.as_ref().unwrap();
             let mut state;
             let key = match choice {
                 Choice::Selected(key) => {
@@ -207,12 +163,69 @@ impl Frame {
                 Err(failure) => self.last_failure = Some(failure),
             }
         }
+        let event = self.event.as_ref().unwrap();
         Err(self.last_failure.take().unwrap_or_else(|| {
             Failure::new(format!(
                 "no version of `{}` matches `{}`",
                 event.dependency.package, event.dependency.requirement
             ))
         }))
+    }
+
+    /// Orders candidates as Cargo does: edge preferences, then lock
+    /// preferences, Rust-version compatibility, and the highest version. A
+    /// selected package keeps its place in that order, so a higher
+    /// semver-incompatible version wins over reusing a lower one.
+    fn order_choices(&mut self, catalog: &Catalog, options: &Options, locked: &[LockedPreference]) {
+        let event = self.event.as_ref().unwrap();
+        let mut records = self
+            .state
+            .nodes
+            .iter()
+            .filter(|(key, node)| {
+                key.name == event.dependency.package
+                    && event.dependency.matches_version(&key.version)
+                    && source_matches(&node.record.source, &event.dependency.source)
+            })
+            .map(|(key, node)| (key.clone(), node.record.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for record in candidates(catalog, event, locked) {
+            let key = PackageKey {
+                name: record.name.clone(),
+                version: record.version.clone(),
+                source: record.source.key(),
+            };
+            records.entry(key).or_insert(record);
+        }
+        let mut ordered = records
+            .into_iter()
+            .filter(|(key, _)| {
+                !self.tried.contains(key)
+                    && self
+                        .locked_package
+                        .as_ref()
+                        .is_none_or(|locked| locked == key)
+                    && self
+                        .allowed
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(&locked::Identity::from_key(key)))
+            })
+            .collect::<Vec<_>>();
+        ordered.sort_by(|(left_key, left), (right_key, right)| {
+            self.is_preferred(right_key)
+                .cmp(&self.is_preferred(left_key))
+                .then_with(|| candidate_order(left, right, options, locked))
+        });
+        self.choices = ordered
+            .into_iter()
+            .map(|(key, record)| {
+                if self.state.nodes.contains_key(&key) {
+                    Choice::Selected(key)
+                } else {
+                    Choice::New(key, record)
+                }
+            })
+            .collect();
     }
 
     /// In an exact locked resolution, fresh candidates are limited to the
@@ -249,23 +262,17 @@ impl Frame {
     }
 
     fn can_retry(&self) -> bool {
-        if !self.candidates_loaded
-            && self.locked_package.is_none()
-            && !matches!(
-                self.event.as_ref().unwrap().dependency.source,
-                RequirementSource::Path(_)
-            )
+        // The loader may still add versions of a crates.io package.
+        if self.locked_package.is_none()
+            && self.event.as_ref().unwrap().dependency.source == RequirementSource::CratesIo
             && !self.locked_candidates_selected()
         {
             return true;
         }
-        self.choices
-            .iter()
-            .chain(&self.fallback)
-            .any(|choice| match choice {
-                Choice::Selected(_) => true,
-                Choice::New(_, record) => !self.conflicts(record),
-            })
+        self.choices.iter().any(|choice| match choice {
+            Choice::Selected(_) => true,
+            Choice::New(_, record) => !self.conflicts(record),
+        })
     }
 }
 

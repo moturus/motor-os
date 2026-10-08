@@ -116,7 +116,9 @@ contains crates.io records and local candidates. Lockfile identities are
 preferences, not unconditional choices: requirements, target predicates,
 features, Rust versions, checksums, patches, links uniqueness, an optional
 configured graph-depth bound, and package limits still apply. Dependency depth
-has no default cap, matching Cargo.
+has no default cap, matching Cargo. As in Cargo, candidates are tried in
+preference order and then from the highest version; a selected package keeps
+its place in that order instead of being tried first.
 
 Every package has a logical identity independent of its installation path:
 

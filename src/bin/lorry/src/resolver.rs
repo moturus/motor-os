@@ -1835,10 +1835,9 @@ fn expand_feature_reference(
 fn candidates(
     catalog: &Catalog,
     event: &Event,
-    options: &Options,
     locked: &[LockedPreference],
 ) -> Vec<Arc<Candidate>> {
-    let mut candidates = catalog
+    catalog
         .records(&event.dependency.package)
         .iter()
         .filter(|candidate| source_matches(&candidate.source, &event.dependency.source))
@@ -1858,24 +1857,28 @@ fn candidates(
                 })
         })
         .cloned()
-        .collect::<Vec<_>>();
-    let rust_policy = options.rust_policy();
-    candidates.sort_unstable_by(|left, right| {
-        let left_locked = lock_rank(left, locked);
-        let right_locked = lock_rank(right, locked);
-        right_locked.cmp(&left_locked).then_with(|| {
-            if rust_policy == IncompatibleRustVersions::Fallback {
-                let left_compatible = rust_compatibility_count(left, &options.rust_versions);
-                let right_compatible = rust_compatibility_count(right, &options.rust_versions);
-                right_compatible
-                    .cmp(&left_compatible)
-                    .then_with(|| right.version.cmp(&left.version))
+        .collect()
+}
+
+/// Cargo's candidate order: locked versions, then Rust-version compatibility
+/// under the fallback policy, then the highest version.
+fn candidate_order(
+    left: &Candidate,
+    right: &Candidate,
+    options: &Options,
+    locked: &[LockedPreference],
+) -> std::cmp::Ordering {
+    lock_rank(right, locked)
+        .cmp(&lock_rank(left, locked))
+        .then_with(|| {
+            if options.rust_policy() == IncompatibleRustVersions::Fallback {
+                rust_compatibility_count(right, &options.rust_versions)
+                    .cmp(&rust_compatibility_count(left, &options.rust_versions))
             } else {
-                right.version.cmp(&left.version)
+                std::cmp::Ordering::Equal
             }
         })
-    });
-    candidates
+        .then_with(|| right.version.cmp(&left.version))
 }
 
 fn registry_candidate_is_patched(catalog: &Catalog, event: &Event, candidate: &Candidate) -> bool {
@@ -5235,6 +5238,45 @@ dev = ["dep:leaf"]
                 .map(|package| package.key.name.as_str())
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["a", "defaultdep", "optional", "platform", "shared"])
+        );
+    }
+
+    #[test]
+    fn fresh_resolution_matches_the_frozen_candidate_order_cargo_oracle() {
+        // Cargo tries the highest compatible version first, so a selected
+        // lower version does not capture a wider requirement. That also keeps
+        // one declaration on one version in host and target contexts.
+        let root = Path::new("tests/oracles/candidate-order/root");
+        let mut workspace = crate::manifest::SourceWorkspace::load(root, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        for member in &mut workspace.packages {
+            member.lock = None;
+        }
+        let mut catalog = Catalog::default();
+        for entry in fs::read_dir("tests/oracles/candidate-order/index-records").unwrap() {
+            let path = entry.unwrap().path();
+            catalog
+                .insert(Record::parse(&path, &fs::read(&path).unwrap()).unwrap())
+                .unwrap();
+        }
+        let options = Options {
+            resolver: ResolverVersion::V2,
+            incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
+            rust_versions: vec![Version::parse("1.98.0").unwrap()],
+            package_limit: PackageLimit::with_max(64),
+            max_depth: Some(16),
+        };
+        let complete =
+            resolve_complete_workspace(&workspace, &mut catalog, &options, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(
+                crate::lockfile::render_workspace(&complete, crate::lockfile::Format::V4).unwrap()
+            )
+            .unwrap(),
+            fs::read_to_string(root.join("Cargo.lock")).unwrap()
         );
     }
 }

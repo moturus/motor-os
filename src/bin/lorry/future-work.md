@@ -24,12 +24,6 @@ workspace work.
 
 ## Differences from Cargo
 
-- **Resolver candidate order (from dev).** `src/resolver/search.rs` tries
-  already-selected versions first, lowest first. Cargo tries the highest
-  compatible version first. With `foo = "1"` in one member and
-  `foo = ">=1, <3"` in another, Lorry picks 1.x for both, while Cargo locks
-  2.x for the second. One declaration can also bind to two versions in
-  different platform contexts. An exact `--locked` build is not affected.
 - **Config `rustflags` are always appended (from dev).** Cargo appends only
   arrays. A string value replaces the lower layer, and mixing a string with
   an array is an error. See `src/config.rs`.
@@ -69,5 +63,4 @@ workspace work.
 - `artifact-lock-contract.sh` and `helpers/cancel-probe.rs` wait 0.1-0.2 s
   before checking that nothing happened, so they pass trivially when Lorry is
   slow.
-- `stage2-differential.sh` and `verify-stage2-resolution-oracle.sh` keep the
-  old "stage 2" names.
+- `stage2-differential.sh` keeps the old "stage 2" name.

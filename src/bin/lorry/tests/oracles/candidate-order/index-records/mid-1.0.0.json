@@ -1,0 +1,1 @@
+{"name":"mid","vers":"1.0.0","deps":[{"name":"foo","req":"^1","features":[],"optional":false,"default_features":true,"target":null,"kind":"normal"}],"cksum":"68abcdfb5d542e1a7ea3bf8056d05d450d9a8abf11d7d72530d2e916638f5aa5","features":{},"yanked":false}
