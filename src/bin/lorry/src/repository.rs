@@ -279,7 +279,7 @@ impl RepositorySet {
                 object.name, object.version
             )));
         }
-        let manifest = Manifest::load_path_dependency(&object.root.join("source"))?;
+        let manifest = Manifest::load_registry_dependency(&object.root.join("source"), false)?;
         lock_cache(&self.verified_registry_manifests).insert(checksum, manifest.clone());
         Ok(manifest)
     }
@@ -453,11 +453,7 @@ impl RepositoryTransaction {
         archive: &Path,
         describe: bool,
     ) -> Result<&StagedRegistryObject> {
-        let load = if describe {
-            Manifest::load_source_dependency
-        } else {
-            Manifest::load_path_dependency
-        };
+        let load = |root: &Path| Manifest::load_registry_dependency(root, describe);
         if self
             .objects
             .iter()

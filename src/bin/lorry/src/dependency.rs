@@ -748,12 +748,10 @@ fn registry_package_evidence(
                 )?;
                 (extracted.path().to_owned(), Some(extracted))
             };
-            let inspected_manifest = if describe {
-                Manifest::load_source_dependency(&source_root)?
-            } else if object.retained_source {
+            let inspected_manifest = if !describe && object.retained_source {
                 repositories.load_registry_manifest(&object)?
             } else {
-                Manifest::load_path_dependency(&source_root)?
+                Manifest::load_registry_dependency(&source_root, describe)?
             };
             let package_evidence = match (&extracted, object.source_tree.as_ref()) {
                 (Some(extracted), _) => PackageEvidence::from_registry(

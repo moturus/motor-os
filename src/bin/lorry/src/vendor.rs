@@ -519,12 +519,10 @@ impl<'a> Acquisition<'a> {
                             self.inspections.push(extracted);
                             (source, tree)
                         };
-                        let manifest = if self.describe {
-                            Manifest::load_source_dependency(&source)?
-                        } else if object.retained_source {
+                        let manifest = if !self.describe && object.retained_source {
                             repositories.load_registry_manifest(&object)?
                         } else {
-                            Manifest::load_path_dependency(&source)?
+                            Manifest::load_registry_dependency(&source, self.describe)?
                         };
                         PackageEvidence::from_registry(package, &object, &manifest, &tree, false)?
                     }

@@ -435,6 +435,36 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /// Loads a registry package. It is published with any workspace
+    /// inheritance resolved, so unlike a path or Git package it never reads
+    /// an enclosing directory's manifest, such as one planted in a shared
+    /// temporary directory above an extracted archive.
+    pub(crate) fn load_registry_dependency(root: &Path, describe: bool) -> Result<Self> {
+        let root = fs::canonicalize(root).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize registry package `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        let path = root.join(MANIFEST_NAME);
+        let document = Document::load(&path, "Cargo registry package manifest")?;
+        let mode = if describe {
+            ManifestMode::Source
+        } else {
+            ManifestMode::Dependency
+        };
+        let mut manifest =
+            Self::parse_document_with_inheritance(&root, &path, &document, mode, None)?;
+        manifest.path = root.join(MANIFEST_NAME);
+        resolve_target_defaults(&mut manifest, !describe)?;
+        if describe {
+            manifest.workspace_root.clone_from(&root);
+            manifest.editable = false;
+        }
+        manifest.root = root;
+        Ok(manifest)
+    }
+
     pub(crate) fn load_source_dependency(root: &Path) -> Result<Self> {
         let root = fs::canonicalize(root).map_err(|error| {
             Error::failure(format!(
@@ -3900,6 +3930,27 @@ bench = false
         let error = Manifest::load_path_dependency(&root).unwrap_err().render();
         assert!(error.contains("unsupported target name"), "{error}");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registry_packages_ignore_enclosing_manifests() {
+        let parent = target_fixture("registry-enclosing");
+        // Another user could plant this in a shared temporary directory.
+        fs::write(parent.join("Cargo.toml"), "[workspace\nbroken").unwrap();
+        let package = parent.join("demo-1.0.0");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(package.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        for describe in [false, true] {
+            let manifest = Manifest::load_registry_dependency(&package, describe).unwrap();
+            assert_eq!(manifest.name, "demo");
+        }
+        assert!(Manifest::load_path_dependency(&package).is_err());
+        fs::remove_dir_all(parent).unwrap();
     }
 
     fn target_fixture(name: &str) -> PathBuf {

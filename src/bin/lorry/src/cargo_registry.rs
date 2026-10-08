@@ -176,11 +176,7 @@ impl CargoRegistry {
         };
 
         verify_marker(&source.join(".cargo-ok"))?;
-        let manifest = if describe {
-            Manifest::load_source_dependency(&source)?
-        } else {
-            Manifest::load_path_dependency(&source)?
-        };
+        let manifest = Manifest::load_registry_dependency(&source, describe)?;
         let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
             Error::failure(format!(
                 "Cargo registry manifest has invalid version `{} {}`: {error}",
