@@ -700,9 +700,22 @@ fn execute_unit<'a>(
                             key.package.name, key.package.version
                         ))
                     })?;
+                let mut granted = admission.native_tools.clone();
+                if admission.configured_native_tools {
+                    granted.extend(
+                        crate::config::NativeToolRole::ALL
+                            .into_iter()
+                            .filter(|role| {
+                                options
+                                    .native_tools
+                                    .get(&(target.triple.clone(), *role))
+                                    .is_some_and(|tool| tool.program.is_some())
+                            }),
+                    );
+                }
                 let native = native_tool::project(
                     options.native_tools,
-                    &admission.native_tools,
+                    &granted,
                     &target.triple,
                     planned.source_remap.as_ref(),
                 )?;
@@ -1954,6 +1967,7 @@ mod tests {
                 key,
                 PackageAdmission {
                     native_tools: BTreeSet::new(),
+                    configured_native_tools: false,
                     caller_env: Default::default(),
                 },
             )]),
@@ -2089,6 +2103,7 @@ mod tests {
                 key,
                 PackageAdmission {
                     native_tools: BTreeSet::new(),
+                    configured_native_tools: false,
                     caller_env: Default::default(),
                 },
             )]),

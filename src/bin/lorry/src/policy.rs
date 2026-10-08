@@ -116,6 +116,9 @@ pub struct Admission {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageAdmission {
     pub native_tools: BTreeSet<NativeToolRole>,
+    /// A trusted build script from Cargo's cache also gets every native tool
+    /// configured for its target.
+    pub configured_native_tools: bool,
     pub caller_env: BTreeSet<String>,
 }
 
@@ -202,6 +205,7 @@ fn preflight_depth(policy: &Policy, resolution: &Resolution, depth: u64) -> Resu
             return Err(not_admitted(package, &facts, None));
         }
         if known_build_script
+            && !policy.trust_cargo_cache
             && !potential_rules
                 .iter()
                 .any(|id| script_rule_authorizes(&policy.rules[id], package))
@@ -215,6 +219,7 @@ fn preflight_depth(policy: &Policy, resolution: &Resolution, depth: u64) -> Resu
                 .is_some_and(|library| library.proc_macro)
         });
         if known_proc_macro
+            && !policy.trust_cargo_cache
             && !potential_rules
                 .iter()
                 .any(|id| proc_macro_rule_authorizes(&policy.rules[id], package))
@@ -283,7 +288,8 @@ pub fn inspect(
             .filter(|id| script_rule_authorizes(&preflight.policy.rules[id.as_str()], package))
             .copied()
             .collect::<Vec<_>>();
-        if evidence.build_script && script_allows.is_empty() {
+        let trusted = preflight.policy.trust_cargo_cache;
+        if evidence.build_script && script_allows.is_empty() && !trusted {
             return Err(build_script_not_admitted(package, &facts, Some(evidence)));
         }
         let proc_macro_allows = allows
@@ -291,7 +297,7 @@ pub fn inspect(
             .filter(|id| proc_macro_rule_authorizes(&preflight.policy.rules[id.as_str()], package))
             .copied()
             .collect::<Vec<_>>();
-        if evidence.proc_macro && proc_macro_allows.is_empty() {
+        if evidence.proc_macro && proc_macro_allows.is_empty() && !trusted {
             return Err(proc_macro_not_admitted(package, &facts, Some(evidence)));
         }
         let native_tools = script_allows
@@ -316,6 +322,7 @@ pub fn inspect(
             package.key.clone(),
             PackageAdmission {
                 native_tools,
+                configured_native_tools: trusted && evidence.build_script,
                 caller_env,
             },
         );
@@ -717,7 +724,8 @@ fn source_kind(package: &ResolvedPackage) -> SourceKind {
 }
 
 fn base_requires_allow(policy: &Policy, source: SourceKind) -> bool {
-    matches!(source, SourceKind::CratesIo | SourceKind::Git)
+    !policy.trust_cargo_cache
+        && matches!(source, SourceKind::CratesIo | SourceKind::Git)
         && policy.default == PolicyDefault::Deny
 }
 
@@ -1202,6 +1210,7 @@ mod tests {
             path_roots: vec![Path::new("/allowed").to_owned()],
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
+            trust_cargo_cache: false,
         };
         let resolution = make_resolution(vec![member.clone(), outside]);
         preflight_sources(&policy, &resolution).unwrap();
@@ -1353,6 +1362,7 @@ mod tests {
             path_roots: vec![],
             limits: PolicyLimits::default(),
             rules: BTreeMap::from([("veto".into(), veto)]),
+            trust_cargo_cache: false,
         };
         assert!(
             preflight_locked_sources(&policy, &lock)
@@ -1376,6 +1386,7 @@ mod tests {
             path_roots: Vec::new(),
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
+            trust_cargo_cache: false,
         };
         let mut inspected = evidence(&package, true);
         inspected.proc_macro = true;
@@ -1448,6 +1459,7 @@ mod tests {
             path_roots: Vec::new(),
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
+            trust_cargo_cache: false,
         };
         policy.limits.max_depth = Some(1);
         policy.limits.max_packages = 1;
@@ -1517,6 +1529,7 @@ mod tests {
             path_roots: Vec::new(),
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
+            trust_cargo_cache: false,
         };
         let pass = preflight(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
@@ -1528,6 +1541,33 @@ mod tests {
         policy.rules.insert("allow-script".to_owned(), allow);
         let pass = preflight(&policy, &resolution).unwrap();
         inspect(&pass, &resolution, &evidence).unwrap();
+    }
+
+    #[test]
+    fn cargo_cache_builds_need_no_allows_or_grants_but_keep_denies() {
+        let package = registry_package("demo", "1.2.3", 4);
+        let resolution = make_resolution(vec![package.clone()]);
+        let mut config = crate::config::Config::default();
+        config.trust_cargo_cache();
+        assert_eq!(config.policy.limits.max_packages, u64::MAX);
+        let mut policy = config.policy;
+        let pass = preflight(&policy, &resolution).unwrap();
+        let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
+        let admission = inspect(&pass, &resolution, &evidence).unwrap();
+        assert!(admission.packages[&package.key].configured_native_tools);
+
+        let local = path_package(Path::new("/project/local-demo"), true, true);
+        preflight(&policy, &make_resolution(vec![local])).unwrap();
+
+        policy
+            .rules
+            .insert("deny-demo".to_owned(), rule(PolicyAction::Deny, None, None));
+        assert!(
+            preflight(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("deny-demo")
+        );
     }
 
     #[test]
@@ -1765,6 +1805,7 @@ mod tests {
             path_roots: Vec::new(),
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
+            trust_cargo_cache: false,
         };
         policy.limits.max_depth = Some(1);
         assert!(

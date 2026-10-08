@@ -164,18 +164,26 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             }
         }
     }
-    for manifest in &selected {
-        if manifest.root != manifest.workspace_root && CompactState::path(&manifest.root).exists() {
-            return Err(Error::failure(
-                "per-member admission must be migrated to the workspace root",
-            )
-            .with_help("run workspace-root `lorry vendor --locked` to review the workspace"));
-        }
-    }
-    let compact_state = CompactState::load(&manifest.workspace_root)?;
     let mut config = Config::load(&current, &manifest)?;
     config.apply_max_packages(cli.max_packages)?;
     let use_cargo_registry = crate::cargo_registry::selected(cli, &config);
+    // Builds from Cargo's cache need no admission, so they do not read it.
+    let compact_state = if use_cargo_registry {
+        config.trust_cargo_cache();
+        None
+    } else {
+        for manifest in &selected {
+            if manifest.root != manifest.workspace_root
+                && CompactState::path(&manifest.root).exists()
+            {
+                return Err(Error::failure(
+                    "per-member admission must be migrated to the workspace root",
+                )
+                .with_help("run workspace-root `lorry vendor --locked` to review the workspace"));
+            }
+        }
+        CompactState::load(&manifest.workspace_root)?
+    };
     let target_directory = config.target_directory(
         &current,
         &manifest.workspace_root,
@@ -279,12 +287,13 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         matches!(&cli.command, Command::Check(_)),
     );
     let ordinary_freshness_base = (!validation.is_strict()
-        && !(compact_state.is_none()
-            && manifest
-                .lock
-                .iter()
-                .flat_map(|lock| &lock.packages)
-                .any(|package| package.source.is_some()))
+        && (use_cargo_registry
+            || !(compact_state.is_none()
+                && manifest
+                    .lock
+                    .iter()
+                    .flat_map(|lock| &lock.packages)
+                    .any(|package| package.source.is_some())))
         && (matches!(&cli.command, Command::Build(_) | Command::Run(_)) || fresh_check.is_some()))
     .then(|| {
         trusted_freshness_base(&TrustedFreshness {
@@ -316,8 +325,9 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     .transpose()?;
 
     // A completed profile is recorded only after a build that verified
-    // admission, and its base covers the admission state, lock, manifests,
-    // configuration, and toolchain. Reusing it compiles and runs nothing new.
+    // admission or used Cargo's cache, which needs none. Its base covers the
+    // registry mode, admission state, lock, manifests, configuration, and
+    // toolchain. Reusing it compiles and runs nothing new.
     if let Some(base) = ordinary_freshness_base
         && let Some(artifacts) = restore_fresh_profile(
             &if fresh_check.is_some() {

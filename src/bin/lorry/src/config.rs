@@ -130,6 +130,10 @@ pub enum NativeToolRole {
     CxxCompiler,
 }
 
+impl NativeToolRole {
+    pub const ALL: [Self; 3] = [Self::CCompiler, Self::Archiver, Self::CxxCompiler];
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NativeTool {
     pub cpp_stdlib: Option<String>,
@@ -150,6 +154,9 @@ pub struct Policy {
     pub path_roots: Vec<PathBuf>,
     pub limits: PolicyLimits,
     pub rules: BTreeMap<String, PolicyRule>,
+    /// Set for builds from Cargo's cache: like Cargo, they need no allow
+    /// rules or capability grants. Deny rules and configured limits apply.
+    pub trust_cargo_cache: bool,
 }
 
 impl Default for Policy {
@@ -159,6 +166,7 @@ impl Default for Policy {
             path_roots: Vec::new(),
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
+            trust_cargo_cache: false,
         }
     }
 }
@@ -238,6 +246,15 @@ enum LayerKind {
 }
 
 impl Config {
+    /// Builds from Cargo's cache trust their packages as Cargo does. Lorry's
+    /// default package limit does not apply; a configured limit still does.
+    pub(crate) fn trust_cargo_cache(&mut self) {
+        self.policy.trust_cargo_cache = true;
+        if self.policy.limits.max_packages_source == LimitSource::Default {
+            self.policy.limits.max_packages = u64::MAX;
+        }
+    }
+
     pub(crate) fn apply_max_packages(&mut self, requested: Option<u64>) -> Result<()> {
         let Some(max) = requested else {
             return Ok(());

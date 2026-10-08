@@ -37,8 +37,11 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
     }
     workspace.load_locked_context()?;
     let manifest = &workspace.packages[0];
-    let config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
+    let mut config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
     let use_cargo_registry = crate::cargo_registry::selected(cli, &config);
+    if use_cargo_registry {
+        config.trust_cargo_cache();
+    }
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let physical_target = config.selected_target(options.target.as_deref())?;

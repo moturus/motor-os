@@ -228,6 +228,7 @@ mod tests {
                             caller_env: ["EMPTY".into(), "PUBLIC".into()].into(),
                             native_tools: [NativeToolRole::CCompiler, NativeToolRole::Archiver]
                                 .into(),
+                            configured_native_tools: false,
                         },
                     )]),
                 },

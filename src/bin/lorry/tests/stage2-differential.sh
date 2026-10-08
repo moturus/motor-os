@@ -22,28 +22,12 @@ CARGO_HOME_DIR="${CARGO_HOME:-${HOME:?}/.cargo}"
 mkdir -p "$HOME_DIR/.config/lorry" "$PROJECT/src" \
     "$PROJECT/generated/src" "$PROJECT/build-helper/src" "$PROJECT/derive/src"
 
+# Builds from Cargo's cache need no allow rules or capability grants.
 cat >"$HOME_DIR/.config/lorry/lorry.toml" <<EOF
 config-version = 1
 
 [cache]
 directory = "$WORK/cache"
-
-[policy]
-default = "allow"
-
-[policy.rules.generated]
-action = "allow"
-name = "generated"
-version = "=1.0.0"
-source = "path"
-allow-build-script = true
-
-[policy.rules.derive]
-action = "allow"
-name = "derive-fixture"
-version = "=1.0.0"
-source = "path"
-allow-proc-macro = true
 EOF
 cat >"$PROJECT/Cargo.toml" <<'EOF'
 [package]
