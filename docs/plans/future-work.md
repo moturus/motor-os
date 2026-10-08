@@ -115,6 +115,19 @@ image with 8 GiB and 4 vCPUs:
 Next time, a step watchdog in the test would name where it stops. That is a
 test change under `src/sys`, so it needs the full debug and release gates.
 
+Seen a third time on 2026-10-08, on the `dev` branch at `a4d30f3c` (the
+lorry branch's kernel and sys-io fixes cherry-picked onto `99a13d6f`), in a
+release `full-test-dev.sh` run with 8 GiB. The last systest line was again
+`test_listener_pool_growth PASS`, and the suite ran out its 1500 s clock.
+That tree has no step watchdog, so the stopped step is unknown. The console
+shows nothing after 297 s and no `fatal: sys-io exited` line, but it also
+dropped records. `dev`'s own future-work list traces an identical-looking
+timeout on 2026-10-04 to sys-io aborting when a TCP connection is
+established at the memory floor, and says these stalls probably share that
+cause. The same tree had just passed `full-test.sh` three times in debug and
+three times in release. Logs:
+`/tmp/claude-1000/-home-posk-motor-dev-motor-os/8e448414-375a-41fc-8871-292a39ae0700/scratchpad/devbranch-stall/`.
+
 ## A directory listing ends when another process removes an entry (2026-10-08)
 
 `readdir` in rt.vdso (`src/sys/lib/rt.vdso/src/rt_fs.rs`) remembers the next
