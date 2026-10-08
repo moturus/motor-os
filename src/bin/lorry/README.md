@@ -170,7 +170,8 @@ then Cargo's `build.target-dir`, then the workspace's `target` directory.
 `build`, `check`, `run`, and `test` accept `-j N` or `--jobs N`.
 Positive counts set the worker limit; negative counts subtract from available
 CPUs, with at least one worker. `default` uses the available CPU count.
-An explicit option overrides `LORRY_JOBS`. Build scripts receive the effective
+An explicit option overrides `LORRY_JOBS`, then Cargo's `CARGO_BUILD_JOBS` and
+`build.jobs`. Build scripts receive the effective
 count as `NUM_JOBS`, and changing it invalidates completed-profile reuse.
 Debug root crates and mutable path dependencies use persistent rustc state
 below `target/lorry/.incremental/<target-triple>/`; release and immutable
@@ -276,7 +277,9 @@ supported fields and limits.
 
 Cargo configuration follows the invocation directory and its parents;
 selecting a package or supplying `--manifest-path` does not move that search.
-Cargo alias tables are accepted, but aliases are not executed. Project
+Cargo alias tables are accepted, but aliases are not executed. Tables that
+cannot change a build, such as `term`, `net`, and `http`, are ignored with a
+note; the spec lists the rest. Project
 `lorry.toml` belongs at the workspace root or above it. A member-local file
 is rejected with the location to which its settings should move.
 

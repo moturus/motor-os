@@ -33,6 +33,7 @@ fn execute_with(cli: &Cli, notes: Verbosity, options: &MetadataOptions) -> Resul
     warn_default_format(notes, options);
     Manifest::report_warnings(&workspace.packages, notes);
     let mut config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
+    config.report_ignored(notes);
     let use_cargo_registry = crate::cargo_registry::selected(cli, &config);
     if use_cargo_registry {
         config.trust_cargo_cache();

@@ -25,6 +25,10 @@ pub struct Config {
     pub build_target_dir: Option<PathBuf>,
     pub environment_target_dir: Option<PathBuf>,
     pub build_rustflags: Vec<String>,
+    /// Cargo's `build.jobs` or `CARGO_BUILD_JOBS`.
+    pub build_jobs: Option<crate::cli::Jobs>,
+    /// Cargo settings that Lorry reads but ignores, reported as notes.
+    pub ignored: Vec<String>,
     pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
     pub targets: BTreeMap<TargetSelector, TargetOptions>,
     pub cache: CacheConfig,
@@ -327,6 +331,15 @@ impl Config {
         Self::load_global_with_environment(&current_environment())
     }
 
+    /// Notes the Cargo settings that this configuration ignores.
+    pub fn report_ignored(&self, verbosity: crate::cli::Verbosity) {
+        if verbosity != crate::cli::Verbosity::Quiet {
+            for setting in &self.ignored {
+                eprintln!("note: ignoring {setting}");
+            }
+        }
+    }
+
     #[cfg(test)]
     fn load_with_environment(
         package_root: &Path,
@@ -477,12 +490,14 @@ fn default_cache_directory(environment: &BTreeMap<String, String>, motor: bool) 
 
 fn reject_environment(environment: &BTreeMap<String, String>) -> Result<()> {
     for variable in environment.keys() {
-        let unsupported = variable == "CARGO_INCREMENTAL"
-            || variable.starts_with("CARGO_UNSTABLE_")
+        let unsupported = variable.starts_with("CARGO_UNSTABLE_")
             || (variable.starts_with("CARGO_BUILD_")
                 && !matches!(
                     variable.as_str(),
-                    "CARGO_BUILD_TARGET" | "CARGO_BUILD_RUSTFLAGS"
+                    "CARGO_BUILD_TARGET"
+                        | "CARGO_BUILD_RUSTFLAGS"
+                        | "CARGO_BUILD_JOBS"
+                        | "CARGO_BUILD_INCREMENTAL"
                 ));
         if unsupported {
             return Err(Error::failure(format!(
@@ -1381,10 +1396,30 @@ fn cargo_config_in(directory: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Cargo tables that cannot change what a build produces.
+const IGNORED_CARGO_TABLES: &[&str] = &[
+    "cache",
+    "cargo-new",
+    "credential-alias",
+    "doc",
+    "future-incompat-report",
+    "http",
+    "install",
+    "net",
+    "registries",
+    "registry",
+    "term",
+];
+
 fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
     let document = Document::load(path, "Cargo configuration")?;
     for (key, item) in document.root().iter() {
-        if !matches!(key, "build" | "target" | "resolver" | "alias") {
+        if IGNORED_CARGO_TABLES.contains(&key) {
+            config.ignored.push(format!(
+                "Cargo configuration `{key}` in `{}`; it does not change Lorry builds",
+                path.display()
+            ));
+        } else if !matches!(key, "build" | "target" | "resolver" | "alias") {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
@@ -1411,12 +1446,37 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
                 "target",
                 "rustflags",
                 "target-dir",
+                "jobs",
+                "incremental",
                 "rustc-wrapper",
                 "rustc-workspace-wrapper",
             ],
         )?;
         for (key, item) in build.iter() {
             match key {
+                "jobs" => {
+                    let jobs = match item {
+                        Item::Value(toml_edit::Value::Integer(value)) => {
+                            crate::cli::Jobs::parse(&value.value().to_string())
+                        }
+                        _ => item.as_str().map_or_else(
+                            || Err("must be an integer or `default`".to_owned()),
+                            crate::cli::Jobs::parse,
+                        ),
+                    };
+                    config.build_jobs = Some(jobs.map_err(|error| {
+                        Error::at(
+                            path,
+                            document.line_of_item(item),
+                            format!("Cargo `build.jobs` {error}"),
+                            "use a nonzero integer or `default`",
+                        )
+                    })?);
+                }
+                "incremental" => config.ignored.push(format!(
+                    "Cargo `build.incremental` in `{}`; Lorry follows the profile's `incremental` setting",
+                    path.display()
+                )),
                 "target" => {
                     let value = require_string(path, &document, item, "build.target")?;
                     validate_target_at(path, document.line_of_item(item), &value)?;
@@ -1541,6 +1601,20 @@ fn apply_cargo_environment(
     }
     if let Some(flags) = environment.get("CARGO_BUILD_RUSTFLAGS") {
         config.build_rustflags.extend(split_config_words(flags));
+    }
+    if let Some(jobs) = environment.get("CARGO_BUILD_JOBS") {
+        config.build_jobs = Some(crate::cli::Jobs::parse(jobs).map_err(|error| {
+            Error::failure(format!(
+                "invalid `CARGO_BUILD_JOBS` value `{jobs}`: {error}"
+            ))
+        })?);
+    }
+    for variable in ["CARGO_INCREMENTAL", "CARGO_BUILD_INCREMENTAL"] {
+        if environment.contains_key(variable) {
+            config.ignored.push(format!(
+                "environment variable `{variable}`; Lorry follows the profile's `incremental` setting"
+            ));
+        }
     }
     if let Some(value) = environment.get("CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS") {
         config.incompatible_rust_versions = Some(match value.as_str() {
@@ -2695,6 +2769,42 @@ native-tools = ["cxx-compiler"]
     }
 
     #[test]
+    fn accepts_harmless_cargo_tables_and_build_jobs_with_notes() {
+        let temp = TempDir::new();
+        let package = temp.0.join("pkg");
+        fs::create_dir_all(package.join(".cargo")).unwrap();
+        let environment =
+            BTreeMap::from([("HOME".to_owned(), temp.0.join("home").display().to_string())]);
+        fs::write(
+            package.join(".cargo/config.toml"),
+            "[build]\njobs = 4\nincremental = false\n[term]\ncolor = \"never\"\n\
+             [net]\nretry = 3\n[http]\ntimeout = 30\n",
+        )
+        .unwrap();
+        let config = Config::load_with_environment(&package, &environment).unwrap();
+        assert_eq!(config.build_jobs, Some(crate::cli::Jobs::Number(4)));
+        assert_eq!(config.ignored.len(), 4, "{:?}", config.ignored);
+        for setting in ["build.incremental", "`term`", "`net`", "`http`"] {
+            assert!(
+                config.ignored.iter().any(|note| note.contains(setting)),
+                "{setting} is not noted in {:?}",
+                config.ignored
+            );
+        }
+        for rejected in [
+            "[build]\njobs = 0\n",
+            "[profile.dev]\nopt-level = 1\n",
+            "[env]\nA = \"b\"\n",
+        ] {
+            fs::write(package.join(".cargo/config.toml"), rejected).unwrap();
+            assert!(
+                Config::load_with_environment(&package, &environment).is_err(),
+                "accepted {rejected:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_compiler_wrappers() {
         let temp = TempDir::new();
         let package = temp.0.join("pkg");
@@ -2715,18 +2825,27 @@ native-tools = ["cxx-compiler"]
         let package = temp.0.join("pkg");
         fs::create_dir_all(&package).unwrap();
         let home = temp.0.join("home").display().to_string();
-        for variable in [
-            "CARGO_INCREMENTAL",
-            "CARGO_UNSTABLE_BUILD_STD",
-            "CARGO_BUILD_JOBS",
-            "CARGO_BUILD_TARGET_DIR",
-        ] {
+        for variable in ["CARGO_UNSTABLE_BUILD_STD", "CARGO_BUILD_TARGET_DIR"] {
             let environment = BTreeMap::from([
                 ("HOME".to_owned(), home.clone()),
                 (variable.to_owned(), "1".to_owned()),
             ]);
             assert!(Config::load_with_environment(&package, &environment).is_err());
         }
+        let environment = BTreeMap::from([
+            ("HOME".to_owned(), home.clone()),
+            ("CARGO_BUILD_JOBS".to_owned(), "zero".to_owned()),
+        ]);
+        assert!(Config::load_with_environment(&package, &environment).is_err());
+        let environment = BTreeMap::from([
+            ("HOME".to_owned(), home.clone()),
+            ("CARGO_BUILD_JOBS".to_owned(), "3".to_owned()),
+            ("CARGO_INCREMENTAL".to_owned(), "0".to_owned()),
+        ]);
+        let config = Config::load_with_environment(&package, &environment).unwrap();
+        assert_eq!(config.build_jobs, Some(crate::cli::Jobs::Number(3)));
+        assert_eq!(config.ignored.len(), 1);
+        assert!(config.ignored[0].contains("CARGO_INCREMENTAL"));
         let environment = BTreeMap::from([
             ("HOME".to_owned(), home),
             (

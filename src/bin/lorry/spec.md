@@ -237,7 +237,7 @@ formats described below, and accept their options after the command name.
 A positive count sets compiler concurrency, a negative count subtracts from
 available CPUs with a minimum of one, and `default` uses available CPUs.
 Zero and malformed counts are usage errors. An explicit option overrides
-`LORRY_JOBS`; otherwise the existing positive environment setting applies.
+`LORRY_JOBS`, which overrides Cargo's `CARGO_BUILD_JOBS` and `build.jobs`.
 Build scripts receive the effective count in `NUM_JOBS`. Completed-profile
 freshness includes that count, so changing it reruns scripts that may read it.
 
@@ -344,9 +344,16 @@ root compilation, freshness validation, and artifact publication.
   directory; a relative Cargo config path uses the directory containing its
   `.cargo` directory. Lorry writes only below that target directory's `lorry/`
   subtree.
-- Unimplemented `CARGO_PROFILE_*`, `CARGO_BUILD_*`, `CARGO_UNSTABLE_*`,
-  and `CARGO_INCREMENTAL` build settings are errors. The supported
-  `CARGO_BUILD_TARGET` and `CARGO_BUILD_RUSTFLAGS` settings remain accepted.
+- Unimplemented `CARGO_PROFILE_*`, `CARGO_BUILD_*`, and `CARGO_UNSTABLE_*`
+  build settings are errors. `CARGO_BUILD_TARGET`, `CARGO_BUILD_RUSTFLAGS`,
+  and `CARGO_BUILD_JOBS` work. `CARGO_INCREMENTAL` and
+  `CARGO_BUILD_INCREMENTAL` are ignored with a note; the profile decides.
+- Cargo config files may set `build.target`, `build.rustflags`,
+  `build.target-dir`, `build.jobs`, and the `target`, `resolver`, and `alias`
+  tables. Lorry ignores, with a note, `build.incremental` and the tables that
+  cannot change a build: `cache`, `cargo-new`, `credential-alias`, `doc`,
+  `future-incompat-report`, `http`, `install`, `net`, `registries`,
+  `registry`, and `term`. Other tables and keys are errors.
 
 ## Package and manifest model
 

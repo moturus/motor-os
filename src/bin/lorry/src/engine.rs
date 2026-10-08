@@ -157,6 +157,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
         }
     }
     let mut config = Config::load(&current, &manifest)?;
+    config.report_ignored(notes);
     config.apply_max_packages(cli.max_packages)?;
     let use_cargo_registry = crate::cargo_registry::selected(cli, &config);
     // Builds from Cargo's cache need no admission, so they do not read it.
@@ -251,7 +252,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
     } else {
         None
     };
-    let jobs = compile_jobs(cli.jobs());
+    let jobs = compile_jobs(cli.jobs(), config.build_jobs);
     let color = use_color(cli.color);
     crate::trace::event("resolved effective build configuration");
 
@@ -2762,9 +2763,9 @@ impl FreshDigest {
     }
 }
 
-/// A CLI job count overrides `LORRY_JOBS`; an omitted setting retains the
-/// positive environment count or available hardware parallelism.
-fn compile_jobs(requested: Option<crate::cli::Jobs>) -> usize {
+/// The job count comes from the command line, a positive `LORRY_JOBS`,
+/// Cargo's `CARGO_BUILD_JOBS` or `build.jobs`, or hardware parallelism.
+fn compile_jobs(requested: Option<crate::cli::Jobs>, cargo: Option<crate::cli::Jobs>) -> usize {
     let cpus = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
@@ -2775,6 +2776,7 @@ fn compile_jobs(requested: Option<crate::cli::Jobs>) -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|jobs| *jobs >= 1)
+        .or_else(|| cargo.map(|jobs| jobs.resolve(cpus)))
         .unwrap_or(cpus)
 }
 

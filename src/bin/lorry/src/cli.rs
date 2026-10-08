@@ -103,7 +103,7 @@ pub enum Jobs {
 }
 
 impl Jobs {
-    fn parse(value: &str) -> std::result::Result<Self, String> {
+    pub(crate) fn parse(value: &str) -> std::result::Result<Self, String> {
         if value == "default" {
             return Ok(Self::Default);
         }
