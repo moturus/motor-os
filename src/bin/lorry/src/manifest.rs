@@ -1702,19 +1702,23 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
     let mut result = Vec::new();
     for (alias, item) in crates_io.iter() {
         validate_package_name(path, document.line_of_item(item), alias)?;
-        let table = item.as_inline_table().ok_or_else(|| {
-            type_error(
-                path,
-                document.line_of_item(item),
-                &format!("patch.crates-io.{alias}"),
-                "an inline path or Git table",
-            )
-        })?;
+        let table = match item {
+            Item::Value(Value::InlineTable(table)) => DependencyTable::Inline(table),
+            Item::Table(table) => DependencyTable::Regular(table),
+            _ => {
+                return Err(type_error(
+                    path,
+                    document.line_of_item(item),
+                    &format!("patch.crates-io.{alias}"),
+                    "a path or Git table",
+                ));
+            }
+        };
         let package = match table.get("package") {
             Some(value) => value.as_str().ok_or_else(|| {
                 type_error(
                     path,
-                    document.line_of_value(value),
+                    value.line(document),
                     &format!("patch.crates-io.{alias}.package"),
                     "a string",
                 )
@@ -1733,11 +1737,11 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                 ));
             }
             (Some(value), None) => {
-                for (key, value) in table.iter() {
+                for (key, value) in table.entries() {
                     if !matches!(key, "path" | "package") {
                         return Err(Error::at(
                             path,
-                            document.line_of_value(value),
+                            value.line(document),
                             format!("path patch `{alias}` contains unsupported key `{key}`"),
                             "use only path and optional package",
                         ));
@@ -1746,25 +1750,25 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                 let declared = value.as_str().ok_or_else(|| {
                     type_error(
                         path,
-                        document.line_of_value(value),
+                        value.line(document),
                         &format!("patch.crates-io.{alias}.path"),
                         "a string",
                     )
                 })?;
                 validate_dependency_path(
                     path,
-                    document.line_of_value(value),
+                    value.line(document),
                     &format!("patch.crates-io.{alias}.path"),
                     declared,
                 )?;
                 PatchSource::Path(resolve_declared_path(root, declared))
             }
             (None, Some(value)) => {
-                for (key, value) in table.iter() {
+                for (key, value) in table.entries() {
                     if !matches!(key, "git" | "branch" | "tag" | "rev" | "package") {
                         return Err(Error::at(
                             path,
-                            document.line_of_value(value),
+                            value.line(document),
                             format!("Git patch `{alias}` contains unsupported key `{key}`"),
                             "use only git, one optional branch/tag/rev, and optional package",
                         ));
@@ -1773,12 +1777,12 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                 let url = value.as_str().ok_or_else(|| {
                     type_error(
                         path,
-                        document.line_of_value(value),
+                        value.line(document),
                         &format!("patch.crates-io.{alias}.git"),
                         "a string",
                     )
                 })?;
-                validate_git_url(path, document.line_of_value(value), url)?;
+                validate_git_url(path, value.line(document), url)?;
                 let selectors = ["branch", "tag", "rev"]
                     .into_iter()
                     .filter_map(|key| table.get(key).map(|value| (key, value)))
@@ -1797,12 +1801,12 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                         let revision = value.as_str().ok_or_else(|| {
                             type_error(
                                 path,
-                                document.line_of_value(value),
+                                value.line(document),
                                 &format!("patch.crates-io.{alias}.{key}"),
                                 "a string",
                             )
                         })?;
-                        validate_git_revision(path, document.line_of_value(value), revision)?;
+                        validate_git_revision(path, value.line(document), revision)?;
                         match *key {
                             "branch" => GitSelector::Branch(revision.to_owned()),
                             "tag" => GitSelector::Tag(revision.to_owned()),
@@ -3080,6 +3084,24 @@ unsafe_code = { level = "forbid", priority = 1 }
             );
             assert!(parsed(&invalid).is_err(), "accepted `{declaration}`");
         }
+
+        let regular = "[package]\nname = \"root\"\nversion = \"0.1.0\"\n\
+                       [patch.crates-io.local]\npath = \"../local\"\n\
+                       [patch.crates-io.remote]\ngit = \"https://example.com/repo.git\"\n\
+                       tag = \"v1\"\n";
+        let manifest = parsed(regular).unwrap();
+        assert!(matches!(manifest.patches[0].source, PatchSource::Path(_)));
+        assert_eq!(
+            manifest.patches[1].source,
+            PatchSource::Git(GitDependency {
+                url: "https://example.com/repo.git".to_owned(),
+                selector: GitSelector::Tag("v1".to_owned()),
+            })
+        );
+        let error = parsed(&regular.replace("tag", "branch = \"a\"\ntag"))
+            .unwrap_err()
+            .render();
+        assert!(error.contains("Cargo.toml:6"), "{error}");
     }
 
     #[test]
