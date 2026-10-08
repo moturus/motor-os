@@ -2614,49 +2614,7 @@ fn fresh_input_digest(
 }
 
 fn script_input_digest(inputs: &[PathBuf]) -> Result<[u8; 32]> {
-    let mut digest = FreshDigest::new();
-    let mut pending = inputs.to_vec();
-    let mut directories = std::collections::BTreeSet::new();
-    while let Some(path) = pending.pop() {
-        let canonical = fs::canonicalize(&path).map_err(|error| {
-            Error::failure(format!(
-                "failed to resolve build-script input `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        digest.os("script-input-path", path.as_os_str());
-        digest.os("script-input-resolved", canonical.as_os_str());
-        let metadata = fs::metadata(&canonical).map_err(|error| {
-            Error::failure(format!(
-                "failed to inspect build-script input `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        if metadata.is_file() {
-            digest.file("script-input-file", &canonical)?;
-        } else if metadata.is_dir() {
-            digest.bytes("script-input-kind", b"directory");
-            // Canonical identities prevent loops without hiding link retargets.
-            if directories.insert(canonical) {
-                let mut children = fs::read_dir(&path)
-                    .map_err(|error| Error::failure(error.to_string()))?
-                    .map(|entry| {
-                        entry
-                            .map(|entry| entry.path())
-                            .map_err(|error| Error::failure(error.to_string()))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                children.sort();
-                pending.extend(children);
-            }
-        } else {
-            return Err(Error::failure(format!(
-                "build-script input `{}` is not a regular file or directory",
-                path.display()
-            )));
-        }
-    }
-    Ok(digest.finish())
+    crate::build_script::input_digest(inputs).map(|(digest, _)| digest)
 }
 
 fn trusted_input_digest(

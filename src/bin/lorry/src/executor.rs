@@ -19,7 +19,8 @@ use crate::manifest::Manifest;
 use crate::native_tool;
 use crate::policy::Admission;
 use crate::process::RustcCommand;
-use crate::resolver::{CompileKind, PackageKey};
+use crate::resolver::{CompileKind, PackageKey, PackageSourceKey};
+use crate::run_record;
 use crate::sandbox::Executable;
 use crate::source_tree::Limits as TreeLimits;
 use crate::toolchain::{TargetInfo, Toolchain};
@@ -496,19 +497,8 @@ fn execute_unit(
                     argument_prefix: Vec::new(),
                 }];
                 executables.extend(native.executables);
-                if !options.quiet {
-                    let _guard = print
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    eprintln!(
-                        "Running build script {} v{} ({})",
-                        key.package.name,
-                        key.package.version,
-                        manifest.root.display()
-                    );
-                }
                 let workspace_lock = options.workspace_root.join("Cargo.lock");
-                let build_output = build_script::run(&RunOptions {
+                let run_options = RunOptions {
                     child_lease_fd: options.child_lease_fd,
                     executable,
                     arguments: &[],
@@ -526,36 +516,50 @@ fn execute_unit(
                     max_output_bytes: options.build_script_output_bytes,
                     out_dir_limits: options.out_dir_limits,
                     verbose: options.verbose,
-                })?;
-                for directive in &build_output.directives {
-                    if let build_script::Directive::RerunIfEnvChanged { name, value: None } =
-                        directive
-                        && std::env::var_os(name).is_some()
-                    {
-                        let advice = if build_script::validate_caller_environment_name(name).is_ok()
-                        {
-                            format!(
-                                "add caller-env = [\"{name}\"] to the named path build-script rule"
-                            )
-                        } else {
-                            "use the documented compiler/native-tool configuration; this variable is controlled".into()
-                        };
-                        eprintln!(
-                            "warning: {} build script tracks hidden caller variable `{name}`; {advice}",
-                            key.package.name
-                        );
+                };
+                let executable_sha256 = sha256_file(executable)?;
+                let run_key = run_record::key(
+                    &options.toolchain.verbose_version,
+                    &executable_sha256,
+                    &environment,
+                    &executables,
+                );
+                let package_sources = || match key.package.source {
+                    PackageSourceKey::Path(_) => {
+                        crate::member_source::snapshot(manifest, false).map(|s| Some(s.sha256))
                     }
-                }
-                {
-                    let _guard = print
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    render_build_script_output(key, &build_output);
-                }
+                    PackageSourceKey::CratesIo | PackageSourceKey::Git(_) => Ok(None),
+                };
+                let build_output =
+                    match run_record::fresh(root, &run_key, &run_options, package_sources) {
+                        Some(output) => {
+                            let _guard = print
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if options.verbose {
+                                eprintln!(
+                                    "Fresh {} v{} (build script)",
+                                    key.package.name, key.package.version
+                                );
+                            }
+                            render_build_script_warnings(key, &output);
+                            output
+                        }
+                        None => run_build_script(
+                            key,
+                            manifest,
+                            options,
+                            &run_options,
+                            root,
+                            &run_key,
+                            package_sources()?,
+                            print,
+                        )?,
+                    };
                 let executed = ExecutedBuildScript {
                     output: build_output,
                     environment,
-                    executable_sha256: sha256_file(executable)?,
+                    executable_sha256,
                     out_dir,
                     temp_dir,
                     caller_variables: admission.caller_env.clone(),
@@ -1305,6 +1309,65 @@ fn sandbox_inputs(
     paths
 }
 
+/// Runs a build script that has no fresh record and records the run.
+#[allow(clippy::too_many_arguments)]
+fn run_build_script(
+    key: &UnitKey,
+    manifest: &Manifest,
+    options: &Options<'_>,
+    run_options: &RunOptions<'_>,
+    directory: &Path,
+    run_key: &[u8; 32],
+    package_sources: Option<[u8; 32]>,
+    print: &std::sync::Mutex<()>,
+) -> Result<build_script::Output> {
+    run_record::remove(directory)?;
+    if !options.quiet {
+        let _guard = print
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        eprintln!(
+            "Running build script {} v{} ({})",
+            key.package.name,
+            key.package.version,
+            manifest.root.display()
+        );
+    }
+    let started = run_record::now();
+    let output = build_script::run(run_options)?;
+    for directive in &output.directives {
+        if let build_script::Directive::RerunIfEnvChanged { name, value: None } = directive
+            && std::env::var_os(name).is_some()
+        {
+            let advice = if build_script::validate_caller_environment_name(name).is_ok() {
+                format!("add caller-env = [\"{name}\"] to the named path build-script rule")
+            } else {
+                "use the documented compiler/native-tool configuration; this variable is controlled"
+                    .into()
+            };
+            eprintln!(
+                "warning: {} build script tracks hidden caller variable `{name}`; {advice}",
+                key.package.name
+            );
+        }
+    }
+    {
+        let _guard = print
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        render_build_script_output(key, &output);
+    }
+    run_record::write(
+        directory,
+        run_key,
+        run_options,
+        &output,
+        package_sources,
+        started,
+    )?;
+    Ok(output)
+}
+
 fn render_build_script_output(key: &UnitKey, output: &build_script::Output) {
     for diagnostic in &output.diagnostics {
         eprintln!(
@@ -1318,6 +1381,11 @@ fn render_build_script_output(key: &UnitKey, output: &build_script::Output) {
             eprintln!();
         }
     }
+    render_build_script_warnings(key, output);
+}
+
+/// A fresh run replays only the script's warnings, as Cargo does.
+fn render_build_script_warnings(key: &UnitKey, output: &build_script::Output) {
     for directive in &output.directives {
         if let build_script::Directive::Warning(warning) = directive {
             eprintln!(

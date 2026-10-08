@@ -171,4 +171,25 @@ PY
 done
 done
 rm a/src/bin/unselected.rs
-echo "PASS: selected member scripts match Cargo binaries and JSON with package-specific caller grants"
+# Like Cargo, a script runs again only when something it tracks changes.
+scripts_run() {
+    env HOME="$WORK/home" SCRIPT_INPUT="$1" "$LORRY" build -j1 2>"$WORK/rerun.err"
+    sed -n 's/^Running build script \([a-z]*\) v.*/\1/p' "$WORK/rerun.err" | sort | tr '\n' ' '
+}
+scripts_run visible >/dev/null
+printf '\n' >>b/src/main.rs
+[ "$(scripts_run visible)" = "" ]
+[ "$(scripts_run changed)" = "a b " ]
+[ "$(target/lorry/debug/b)" = changed ]
+# a tracks one file; b declares nothing, so any edit to b reruns it.
+printf 'one\n' >a/data.txt
+sed -i 's/rerun-if-env-changed=SCRIPT_INPUT/rerun-if-changed=data.txt/' a/build.rs
+sed -i '/rerun-if-env-changed/d' b/build.rs
+[ "$(scripts_run changed)" = "a b " ]
+printf '\n' >>a/src/main.rs
+[ "$(scripts_run changed)" = "" ]
+printf '\n' >>b/src/main.rs
+[ "$(scripts_run changed)" = "b " ]
+printf 'two\n' >a/data.txt
+[ "$(scripts_run changed)" = "a " ]
+echo "PASS: selected member scripts match Cargo binaries and JSON, honor caller grants, and rerun only on tracked changes"

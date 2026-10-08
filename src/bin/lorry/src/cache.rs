@@ -1747,6 +1747,7 @@ mod tests {
                 path: out_dir.clone(),
             }],
             diagnostics: Vec::new(),
+            stdout: String::new(),
             stderr: String::new(),
             out_dir: Tree::scan(
                 &out_dir,

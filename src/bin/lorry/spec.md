@@ -1582,6 +1582,13 @@ including recursive directory contents and canonical identities, so edits,
 additions, removals, and symlink retargets invalidate reuse. Script directives
 retain their declared paths after validating their current canonical locations.
 
+As under Cargo, a build script runs again only when something it depends on
+changes: its executable, the toolchain, its environment, or its granted tools;
+a path it names with `rerun-if-changed`; or, when it names no `rerun-if`
+directive, any file of its path package. Its `OUT_DIR` must also be unchanged.
+A run is not recorded when a named input changed while the script ran. A
+reused run replays only its warnings.
+
 The supported directive protocol accepts both `cargo:` and `cargo::` forms of
 `rustc-cfg`, `rustc-check-cfg`, `rustc-env`, `rustc-link-lib`, `rustc-link-arg`,
 `rustc-link-search`, `rerun-if-changed`, `rerun-if-env-changed`, `warning`,

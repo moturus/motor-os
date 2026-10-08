@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::diagnostic::{Error, Result};
+use crate::hash::{FieldDigest, modified_time, sha256_file};
 use crate::identity::CargoDebugInfo;
 use crate::manifest::Manifest;
 use crate::sandbox::{Executable, NetworkAccess, Policy, Sandbox};
@@ -20,6 +21,8 @@ use crate::unit::{Unit, UnitKind, UnitSettings};
 pub struct Output {
     pub directives: Vec<Directive>,
     pub diagnostics: Vec<String>,
+    /// The raw output, kept so a fresh run can replay it.
+    pub stdout: String,
     pub stderr: String,
     pub out_dir: Tree,
 }
@@ -404,20 +407,91 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
         ));
     }
 
-    let mut output = parse(
+    replay(
+        options,
         &captured.stdout,
+        String::from_utf8_lossy(&captured.stderr).into_owned(),
+    )
+}
+
+/// Parses the recorded output of an earlier run as `run` parses a new one.
+pub fn replay(options: &RunOptions<'_>, stdout: &[u8], stderr: String) -> Result<Output> {
+    let workspace_root = options
+        .workspace_root
+        .map(|root| canonical_directory(root, "workspace root"))
+        .transpose()?;
+    let workspace_lock = canonical_workspace_lock(options.workspace_lock)?;
+    let mut output = parse(
+        stdout,
         &ParseOptions {
-            package_root: &package_root,
+            package_root: options.package_root,
             workspace_root: workspace_root.as_deref(),
             workspace_lock: workspace_lock.as_deref(),
-            out_dir: &out_dir,
+            out_dir: options.out_dir,
             environment: options.environment,
             max_bytes: options.max_output_bytes,
             out_dir_limits: options.out_dir_limits,
         },
     )?;
-    output.stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
+    output.stderr = stderr;
     Ok(output)
+}
+
+/// Digests declared script inputs, following directories recursively, and
+/// returns the newest modification time among them.
+pub(crate) fn input_digest(inputs: &[PathBuf]) -> Result<([u8; 32], Duration)> {
+    let mut digest = FieldDigest::new();
+    let mut newest = Duration::ZERO;
+    let mut pending = inputs.to_vec();
+    let mut directories = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        let canonical = fs::canonicalize(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to resolve build-script input `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        digest.bytes("script-input-path", path.as_os_str().as_encoded_bytes());
+        digest.bytes(
+            "script-input-resolved",
+            canonical.as_os_str().as_encoded_bytes(),
+        );
+        let metadata = fs::metadata(&canonical).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect build-script input `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        newest = newest.max(modified_time(&canonical, &metadata)?);
+        if metadata.is_file() {
+            digest.bytes(
+                "script-input-file-path",
+                canonical.as_os_str().as_encoded_bytes(),
+            );
+            digest.bytes("script-input-file", &sha256_file(&canonical)?);
+        } else if metadata.is_dir() {
+            digest.bytes("script-input-kind", b"directory");
+            // Canonical identities prevent loops without hiding link retargets.
+            if directories.insert(canonical) {
+                let mut children = fs::read_dir(&path)
+                    .map_err(|error| Error::failure(error.to_string()))?
+                    .map(|entry| {
+                        entry
+                            .map(|entry| entry.path())
+                            .map_err(|error| Error::failure(error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                children.sort();
+                pending.extend(children);
+            }
+        } else {
+            return Err(Error::failure(format!(
+                "build-script input `{}` is not a regular file or directory",
+                path.display()
+            )));
+        }
+    }
+    Ok((digest.finish(), newest))
 }
 
 struct Captured {
@@ -551,6 +625,7 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
     let mut output = Output {
         directives: Vec::new(),
         diagnostics: Vec::new(),
+        stdout: stdout.to_owned(),
         stderr: String::new(),
         out_dir: Tree::scan(&out_dir, options.out_dir_limits, Exclusions::None)?,
     };

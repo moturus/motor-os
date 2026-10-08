@@ -1164,6 +1164,7 @@ mod tests {
                 },
             ],
             diagnostics: Vec::new(),
+            stdout: String::new(),
             stderr: String::new(),
             out_dir: crate::source_tree::Tree::scan(
                 &fixture.0,
@@ -1616,6 +1617,7 @@ mod tests {
                 Directive::RustcCheckCfg("cfg(generated_cfg)".to_owned()),
             ],
             diagnostics: Vec::new(),
+            stdout: String::new(),
             stderr: String::new(),
             out_dir: crate::source_tree::Tree {
                 entries: Vec::new(),

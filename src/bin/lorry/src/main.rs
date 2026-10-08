@@ -42,6 +42,7 @@ mod redirect;
 mod repository;
 mod resolver;
 mod review;
+mod run_record;
 mod sandbox;
 mod source_tree;
 mod source_view;
