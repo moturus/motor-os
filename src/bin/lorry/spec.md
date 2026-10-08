@@ -1756,6 +1756,11 @@ corruption found by strict validation is fatal and is never treated as cache
 corruption. Cache contents remain writable per-user performance state and are
 never an integrity authority for immutable dependency sources.
 
+Source views of immutable dependencies are copied into the global cache
+without flushing each file. Every use hashes a view against its content
+address. A view that a crash left torn, or that changed later, is warned
+about, quarantined, and published again.
+
 The first shared-cache miss in a non-quiet build prints `Rebuilding global
 dependency cache` exactly once for that command. Project-local cache misses do
 not print this status, and a project `clean` followed by a fully cached rebuild

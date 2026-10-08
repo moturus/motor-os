@@ -1,7 +1,8 @@
 use semver::Version;
-use std::fs::{self, File};
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::atomic::AtomicDirectory;
 use crate::diagnostic::{Error, Result};
@@ -20,7 +21,15 @@ pub fn publish_package(
     let sources = cache_root.join("sources");
     let destination = sources.join(format!("{name}-{version}-{}", hex(&expected_sha256)));
     match fs::symlink_metadata(&destination) {
-        Ok(_) => return verify(&destination, expected_sha256, limits),
+        // Views are not flushed, so a crash can leave a torn one. Every use
+        // hashes the view, and an invalid one is quarantined and republished.
+        Ok(_) => match verify(&destination, expected_sha256, limits) {
+            Ok(path) => return Ok(path),
+            Err(error) => {
+                eprintln!("warning: quarantining invalid Lorry source view: {error}");
+                quarantine(cache_root, &destination)?;
+            }
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(Error::failure(format!(
@@ -63,6 +72,29 @@ fn verify(path: &Path, expected_sha256: [u8; 32], limits: Limits) -> Result<Path
     Ok(path.to_owned())
 }
 
+fn quarantine(cache_root: &Path, view: &Path) -> Result<()> {
+    let quarantine = cache_root.join("v1/quarantine");
+    fs::create_dir_all(&quarantine).map_err(|error| {
+        Error::failure(format!(
+            "failed to create cache quarantine `{}`: {error}",
+            quarantine.display()
+        ))
+    })?;
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let name = view.file_name().unwrap_or_default().to_string_lossy();
+    let destination = quarantine.join(format!("{name}-{}-{time:x}", std::process::id()));
+    match fs::rename(view, &destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::failure(format!(
+            "failed to quarantine invalid source view `{}`: {error}",
+            view.display()
+        ))),
+    }
+}
+
 fn copy_tree(source: &Path, destination: &Path, tree: &Tree) -> Result<()> {
     for entry in &tree.entries {
         let from = source.join(&entry.path);
@@ -81,14 +113,6 @@ fn copy_tree(source: &Path, destination: &Path, tree: &Tree) -> Result<()> {
                         from.display()
                     ))
                 })?;
-                File::open(&to)
-                    .and_then(|file| file.sync_all())
-                    .map_err(|error| {
-                        Error::failure(format!(
-                            "failed to persist source-view file `{}`: {error}",
-                            to.display()
-                        ))
-                    })?;
             }
         }
     }
@@ -146,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn atomically_publishes_reuses_and_reverifies_source_views() {
+    fn atomically_publishes_reuses_and_replaces_invalid_source_views() {
         let fixture = Fixture::new();
         let source = fixture.0.join("source");
         let cache = fixture.0.join("cache");
@@ -185,7 +209,7 @@ mod tests {
         );
 
         fs::write(paths[0].join("src/lib.rs"), "changed\n").unwrap();
-        let error = publish_package(
+        let republished = publish_package(
             &cache,
             "demo",
             &version,
@@ -194,8 +218,16 @@ mod tests {
             DEFAULT_LIMITS,
             Exclusions::CargoRegistryMarker,
         )
-        .unwrap_err();
-        assert!(error.render().contains("lorry cache clean"));
+        .unwrap();
+        assert_eq!(republished, paths[0]);
+        assert_eq!(
+            fs::read_to_string(republished.join("src/lib.rs")).unwrap(),
+            "pub fn answer() -> u8 { 42 }\n"
+        );
+        assert_eq!(
+            fs::read_dir(cache.join("v1/quarantine")).unwrap().count(),
+            1
+        );
     }
 
     #[test]
