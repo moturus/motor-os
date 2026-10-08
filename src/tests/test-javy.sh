@@ -48,6 +48,10 @@ VMM_PID=""
 snapshot=""
 cleanup() { stop_vm "$VMM_PID"; [ -z "$snapshot" ] || rm -f "$snapshot"; }
 trap cleanup EXIT
+# The VM lock is taken per boot, so hold a checkout-level lock across the whole
+# matrix: a contending run must not replace this run's evidence.
+exec 8>"$ROOT_DIR/build/javy-images.lock"
+flock -n 8 || fail "another test-javy.sh run is active in this checkout"
 # One evidence tree per checkout: a run replaces whatever the previous run left.
 evidence="$ROOT_DIR/build/javy-images"
 rm -rf "$evidence"
