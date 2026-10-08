@@ -158,15 +158,7 @@ fn agent(
     } else {
         None
     };
-    let provider_name = args
-        .provider
-        .clone()
-        .or_else(|| session.provider())
-        .or_else(|| choice.map(|choice| choice.provider.clone()))
-        .unwrap_or_else(|| config.default_provider.clone());
-    let selected_provider = config
-        .provider(&provider_name)
-        .ok_or_else(|| format!("unknown provider {provider_name:?}"))?;
+    let (provider_name, selected_provider, model) = select(args, config, choice, Some(&session))?;
     let key = load_key(&selected_provider, key_from_env.clone())?;
     let provider: Arc<dyn Provider> = Arc::new(connect(
         config,
@@ -178,19 +170,6 @@ fn agent(
     if session.provider().as_deref() != Some(&provider_name) {
         session.set_provider(&provider_name)?;
     }
-    let model = args
-        .model
-        .clone()
-        .or_else(|| session.model())
-        .or_else(|| {
-            choice
-                .filter(|choice| choice.provider == provider_name)
-                .map(|choice| choice.model.clone())
-        })
-        .or_else(|| config.default_model.clone())
-        .or_else(|| selected_provider.model.clone())
-        .or_else(|| config.models.first().cloned())
-        .ok_or("no model selected; use --model or provider.model in the config")?;
     if saved_prefix.is_none() && args.preserve_prefix {
         diagnostic("saved prefix unavailable; using reconstructed instructions");
     }
@@ -286,30 +265,11 @@ fn ask(
     choice: Option<&ProviderChoice>,
     key_from_env: Option<String>,
 ) -> Result<(), String> {
-    let provider_name = args
-        .provider
-        .as_deref()
-        .or_else(|| choice.map(|choice| choice.provider.as_str()))
-        .unwrap_or(&config.default_provider);
-    let selected_provider = config
-        .provider(provider_name)
-        .ok_or_else(|| format!("unknown provider {provider_name:?}"))?;
-    let model = args
-        .model
-        .clone()
-        .or_else(|| {
-            choice
-                .filter(|choice| choice.provider == provider_name)
-                .map(|choice| choice.model.clone())
-        })
-        .or_else(|| config.default_model.clone())
-        .or_else(|| selected_provider.model.clone())
-        .or_else(|| config.models.first().cloned())
-        .ok_or("gears ask needs a model; use --model or provider.model in the config")?;
+    let (provider_name, selected_provider, model) = select(args, config, choice, None)?;
     let key = load_key(&selected_provider, key_from_env)?;
     let provider = connect(
         config,
-        provider_name,
+        &provider_name,
         &selected_provider,
         &key,
         args.verbosity,
@@ -348,6 +308,39 @@ impl EventSink for AskSink {
             }
         }
     }
+}
+
+/// The provider and model, preferring the command line, then the session,
+/// then the saved choice, then the configuration's defaults.
+fn select(
+    args: &Args,
+    config: &Config,
+    choice: Option<&ProviderChoice>,
+    session: Option<&Session>,
+) -> Result<(String, NamedProvider, String), String> {
+    let provider_name = args
+        .provider
+        .clone()
+        .or_else(|| session.and_then(Session::provider))
+        .or_else(|| choice.map(|choice| choice.provider.clone()))
+        .unwrap_or_else(|| config.default_provider.clone());
+    let provider = config
+        .provider(&provider_name)
+        .ok_or_else(|| format!("unknown provider {provider_name:?}"))?;
+    let model = args
+        .model
+        .clone()
+        .or_else(|| session.and_then(Session::model))
+        .or_else(|| {
+            choice
+                .filter(|choice| choice.provider == provider_name)
+                .map(|choice| choice.model.clone())
+        })
+        .or_else(|| config.default_model.clone())
+        .or_else(|| provider.model.clone())
+        .or_else(|| config.models.first().cloned())
+        .ok_or("no model selected; use --model or provider.model in the config")?;
+    Ok((provider_name, provider, model))
 }
 
 fn load_key(provider: &NamedProvider, from_env: Option<String>) -> Result<ApiKey, String> {
