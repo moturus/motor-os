@@ -63,9 +63,6 @@ pub fn decide(event: &Event, context: &ToolContext) -> Result<Decision, String> 
     if !arguments.is_object() {
         return Err("tool arguments must be an object".into());
     }
-    if !review_tool_allowed(event) {
-        return Ok(Decision::Deny);
-    }
     match call.name.as_str() {
         "todo" | "session_search" | "skill_view" | "memory" | "skill_manage" => Ok(Decision::Allow),
         "read_file" | "search_files" => {
