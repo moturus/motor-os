@@ -14,6 +14,7 @@ pub fn tokenize(command: &str) -> Result<Vec<Token>, String> {
     let mut word = String::new();
     let mut started = false;
     let mut quote = None;
+    let mut parameter = false;
     let mut chars = command.chars().peekable();
     while let Some(ch) = chars.next() {
         if quote == Some('\'') {
@@ -44,6 +45,10 @@ pub fn tokenize(command: &str) -> Result<Vec<Token>, String> {
                 }
             }
             tokens.push(Token::Separator('\n'));
+        } else if (ch == '{' && word.ends_with('$')) || (ch == '}' && parameter) {
+            // `${NAME}` is part of a word, not a brace group.
+            parameter = ch == '{';
+            word.push(ch);
         } else if ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '(' | ')' | '{' | '}') {
             if started {
                 tokens.push(Token::Word(std::mem::take(&mut word)));
@@ -104,5 +109,17 @@ mod tests {
         assert!(tokenize("sh -c 'unfinished").is_err());
         assert!(tokenize("echo unfinished\\").is_err());
         assert!(tokenize(&"x".repeat(65537)).is_err());
+        assert_eq!(
+            tokenize("rm ${HOME}/k; { a; }").unwrap(),
+            vec![
+                Token::Word("rm".into()),
+                Token::Word("${HOME}/k".into()),
+                Token::Separator(';'),
+                Token::Separator('{'),
+                Token::Word("a".into()),
+                Token::Separator(';'),
+                Token::Separator('}')
+            ]
+        );
     }
 }

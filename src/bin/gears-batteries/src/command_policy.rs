@@ -7,13 +7,15 @@ use gears::hooks::Decision;
 use crate::shell_words::{Token, tokenize};
 
 pub fn inspect(command: &str, cwd: &Path, state: &Path) -> Result<Decision, String> {
-    inspect_at(command, cwd.to_path_buf(), state, 0)
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    inspect_at(command, cwd.to_path_buf(), state, home.as_deref(), 0)
 }
 
 fn inspect_at(
     command: &str,
     mut cwd: PathBuf,
     state: &Path,
+    home: Option<&Path>,
     depth: usize,
 ) -> Result<Decision, String> {
     if depth > 8 {
@@ -32,7 +34,14 @@ fn inspect_at(
                 _ => None,
             })
             .collect();
-        while words.first().is_some_and(|word| assignment(word)) {
+        // Keywords and assignments can precede the command on the same line.
+        while words.first().is_some_and(|word| {
+            assignment(word)
+                || matches!(
+                    *word,
+                    "if" | "then" | "elif" | "else" | "while" | "until" | "do" | "!" | "time"
+                )
+        }) {
             words.remove(0);
         }
         if words.is_empty() {
@@ -59,7 +68,7 @@ fn inspect_at(
         match program(first) {
             "cd" => {
                 if let Some(path) = words.iter().skip(1).find(|word| !word.starts_with('-')) {
-                    cwd = absolute(&cwd, path);
+                    cwd = absolute(&cwd, home, path);
                 }
             }
             "sh" | "rush" | "bash" | "dash" => {
@@ -67,7 +76,7 @@ fn inspect_at(
                     word.starts_with('-') && !word.starts_with("--") && word[1..].contains('c')
                 }) {
                     let script = words.get(at + 1).ok_or("shell -c has no script")?;
-                    let nested = inspect_at(script, cwd.clone(), state, depth + 1)?;
+                    let nested = inspect_at(script, cwd.clone(), state, home, depth + 1)?;
                     if nested == Decision::Deny {
                         return Ok(nested);
                     }
@@ -76,7 +85,7 @@ fn inspect_at(
                     }
                 }
             }
-            "rm" if forbidden_rm(&words[1..], &cwd, state) => return Ok(Decision::Deny),
+            "rm" if forbidden_rm(&words[1..], &cwd, state, home) => return Ok(Decision::Deny),
             "gix" | "git"
                 if matches!(
                     git_command(&words[1..]),
@@ -120,7 +129,15 @@ fn assignment(word: &str) -> bool {
     })
 }
 
-fn absolute(cwd: &Path, input: &str) -> PathBuf {
+fn absolute(cwd: &Path, home: Option<&Path>, input: &str) -> PathBuf {
+    let rest = ["~", "$HOME", "${HOME}"].iter().find_map(|prefix| {
+        input
+            .strip_prefix(prefix)
+            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+    });
+    if let (Some(home), Some(rest)) = (home, rest) {
+        return absolute(cwd, None, &format!("{}{rest}", home.display()));
+    }
     let path = if Path::new(input).is_absolute() {
         PathBuf::from(input)
     } else {
@@ -143,7 +160,7 @@ fn absolute(cwd: &Path, input: &str) -> PathBuf {
     }
 }
 
-fn forbidden_rm(arguments: &[&str], cwd: &Path, state: &Path) -> bool {
+fn forbidden_rm(arguments: &[&str], cwd: &Path, state: &Path, home: Option<&Path>) -> bool {
     let mut options = true;
     let mut recursive = false;
     let mut paths = Vec::new();
@@ -154,7 +171,7 @@ fn forbidden_rm(arguments: &[&str], cwd: &Path, state: &Path) -> bool {
             recursive |= *argument == "--recursive"
                 || (!argument.starts_with("--") && argument.contains(['r', 'R']));
         } else {
-            paths.push(absolute(cwd, argument));
+            paths.push(absolute(cwd, home, argument));
         }
     }
     paths.iter().any(|path| {
@@ -285,5 +302,39 @@ mod tests {
             .unwrap(),
             Decision::Confirm
         );
+    }
+
+    #[test]
+    fn refuses_deletions_after_shell_keywords_and_through_the_home_directory() {
+        let check = |command: &str| {
+            inspect_at(
+                command,
+                PathBuf::from("/workspace"),
+                Path::new("/home/user/.gears"),
+                Some(Path::new("/home/user")),
+                0,
+            )
+            .unwrap()
+        };
+        for command in [
+            "if [ -d /user/cfg ]; then rm -rf /user/cfg; fi",
+            "for d in x; do rm -rf /user; done",
+            "while true; do rm /user/cfg/key; done",
+            "! rm /user/cfg/key",
+            "time rm -rf /",
+            "rm -rf ~/.gears",
+            "rm -rf \"$HOME/.gears\"",
+            "rm ${HOME}/.gears/key",
+            "cd ~; rm -rf .gears",
+        ] {
+            assert_eq!(check(command), Decision::Deny, "{command}");
+        }
+        for command in [
+            "rm -rf ~/build",
+            "rm ~other/.gears/key",
+            "rm -rf $HOMEDIR/.gears",
+        ] {
+            assert_eq!(check(command), Decision::Ask, "{command}");
+        }
     }
 }
