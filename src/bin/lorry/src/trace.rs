@@ -1,9 +1,13 @@
-use std::cell::RefCell;
 use std::fmt;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-thread_local! {
-    static ACTIVE: RefCell<Option<State>> = const { RefCell::new(None) };
+static ACTIVE: Mutex<Option<State>> = Mutex::new(None);
+
+fn active() -> MutexGuard<'static, Option<State>> {
+    ACTIVE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 struct State {
@@ -11,7 +15,7 @@ struct State {
     previous: Instant,
 }
 
-/// Enables elapsed-time diagnostics for one command on the current thread.
+/// Enables elapsed-time diagnostics for one command on every thread.
 pub struct Session {
     previous: Option<State>,
     enabled: bool,
@@ -26,11 +30,9 @@ impl Session {
             };
         }
         let now = Instant::now();
-        let previous = ACTIVE.with(|active| {
-            active.replace(Some(State {
-                started: now,
-                previous: now,
-            }))
+        let previous = active().replace(State {
+            started: now,
+            previous: now,
         });
         eprintln!("{}", format_event(Duration::ZERO, Duration::ZERO, command));
         Self {
@@ -46,29 +48,25 @@ impl Drop for Session {
             return;
         }
         event("command finished");
-        ACTIVE.with(|active| {
-            active.replace(self.previous.take());
-        });
+        *active() = self.previous.take();
     }
 }
 
 pub fn event(label: impl fmt::Display) {
-    ACTIVE.with(|active| {
-        let mut active = active.borrow_mut();
-        let Some(state) = active.as_mut() else {
-            return;
-        };
-        let now = Instant::now();
-        eprintln!(
-            "{}",
-            format_event(
-                now.duration_since(state.started),
-                now.duration_since(state.previous),
-                label,
-            )
-        );
-        state.previous = now;
-    });
+    let mut active = active();
+    let Some(state) = active.as_mut() else {
+        return;
+    };
+    let now = Instant::now();
+    eprintln!(
+        "{}",
+        format_event(
+            now.duration_since(state.started),
+            now.duration_since(state.previous),
+            label,
+        )
+    );
+    state.previous = now;
 }
 
 fn format_event(total: Duration, phase: Duration, label: impl fmt::Display) -> String {
@@ -93,5 +91,14 @@ mod tests {
             ),
             "[lorry +1.234s] prepared dependencies (0.057s)"
         );
+    }
+
+    #[test]
+    fn records_events_from_other_threads() {
+        let session = Session::new(true, "test started");
+        let before = active().as_ref().unwrap().previous;
+        std::thread::spawn(|| event("worker event")).join().unwrap();
+        assert!(active().as_ref().unwrap().previous > before);
+        drop(session);
     }
 }
