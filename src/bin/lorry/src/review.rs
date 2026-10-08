@@ -2,7 +2,6 @@ use std::env;
 use std::io::{self, Write};
 
 use crate::admission_state::CompactState;
-use crate::atomic::AtomicDirectory;
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::dependency::{self, RegistrySource, ReviewInputs};
@@ -35,7 +34,8 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     let config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let options = dependency::resolver_options(manifest, &config, &toolchain)?;
-    let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-review")?;
+    // Extraction for inspection creates its own private directories here.
+    let scratch = env::temp_dir();
     let repositories = RepositorySet::open(
         &config.repositories,
         engine::repository_tree_limits(&config.policy.limits)?,
@@ -48,7 +48,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             source: RegistrySource::Lorry(&repositories),
             toolchain: &toolchain,
             options: &options,
-            staging_parent: staging.path(),
+            staging_parent: &scratch,
             direct: None,
             prepare_context: None,
         },

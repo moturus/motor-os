@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::{self, Write};
 
-use crate::atomic::AtomicDirectory;
 use crate::cli::{Cli, TreeOptions, Verbosity};
 use crate::config::Config;
 use crate::dependency::{self, LockedContext, RegistryAccess, workspace::PreparedSources};
@@ -57,7 +56,8 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
         );
     }
 
-    let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-tree")?;
+    // Extraction for inspection creates its own private directories here.
+    let scratch = env::temp_dir();
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     progress.report("Verifying dependency state")?;
     let locked = LockedContext::open(
@@ -67,7 +67,7 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
         RegistryAccess {
             use_cargo_registry: cli.use_cargo_registry,
             validation: ValidationMode::Trusted,
-            staging_parent: staging.path(),
+            staging_parent: &scratch,
             evidence_root: &crate::engine::artifact_root(manifest).join(".cargo-evidence"),
         },
         crate::git::load_locked_sources,
@@ -97,7 +97,7 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
         &mut catalog,
         &config,
         locked.source(),
-        staging.path(),
+        &scratch,
         &locked.direct,
         |catalog| {
             resolve_selected_workspace(&complete, catalog, &locked.options, &requests, selection)

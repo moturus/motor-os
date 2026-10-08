@@ -169,16 +169,18 @@ SOURCE_VIEW="$(find "$WORK/cache/sources" -mindepth 1 -maxdepth 1 \
 grep -F "\"manifest_path\":\"$SOURCE_VIEW/Cargo.toml\"" \
     "$WORK/metadata.json" >/dev/null ||
     fail "metadata did not reference the stable registry source view"
-(cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
+# Retained sources need no scratch space, so a read-only temp dir suffices.
+mkdir -m 0500 "$WORK/readonly-tmp"
+(cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" TMPDIR="$WORK/readonly-tmp" \
     "$LORRY" metadata --format-version 1 \
     --filter-platform x86_64-unknown-linux-gnu --locked) >"$WORK/metadata-again.json"
 cmp "$WORK/metadata.json" "$WORK/metadata-again.json"
 
-(cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
+(cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" TMPDIR="$WORK/readonly-tmp" \
     "$LORRY" tree --target x86_64-unknown-linux-gnu) >"$WORK/lorry.tree"
 CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" tree --locked --offline \
     --manifest-path "$PROJECT/Cargo.toml" --target x86_64-unknown-linux-gnu \
     >"$WORK/cargo.tree"
 cmp "$WORK/lorry.tree" "$WORK/cargo.tree"
 
-echo "PASS: cached crates.io acquisition, metadata views, and tree output are stable"
+echo "PASS: cached crates.io acquisition, metadata views, and tree output are stable and need no temp dir"

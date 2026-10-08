@@ -8,7 +8,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::atomic::AtomicDirectory;
 use crate::cli::{Cli, MetadataOptions, Verbosity};
 use crate::config::Config;
 use crate::dependency::{self, PreparedGraph, PreparedPackage};
@@ -63,7 +62,8 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         .as_deref()
         .map(|triple| toolchain.target_info(Some(triple)))
         .transpose()?;
-    let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-metadata")?;
+    // Extraction for inspection creates its own private directories here.
+    let scratch = env::temp_dir();
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     progress.report("Verifying dependency state")?;
     let locked = dependency::LockedContext::open(
@@ -73,7 +73,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         dependency::RegistryAccess {
             use_cargo_registry: cli.use_cargo_registry,
             validation: ValidationMode::Trusted,
-            staging_parent: staging.path(),
+            staging_parent: &scratch,
             evidence_root: &crate::engine::artifact_root(manifest).join(".cargo-evidence"),
         },
         crate::git::load_locked_sources,
@@ -106,7 +106,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         resolution,
         &config,
         locked.source(),
-        staging.path(),
+        &scratch,
         &locked.direct,
     )?;
     let cache_root = config.cache_directory()?;

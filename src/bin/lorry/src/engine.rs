@@ -312,7 +312,8 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     // One registry source serves both admission verification and prepare, so
     // repository objects verified during admission are not re-hashed when the
     // build prepares its dependency graph.
-    let admission_staging = AtomicDirectory::new(&env::temp_dir(), "lorry-admission")?;
+    // Extraction for inspection creates its own private directories here.
+    let admission_scratch = env::temp_dir();
     let locked = dependency::LockedContext::open(
         &manifest,
         &config,
@@ -320,7 +321,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         dependency::RegistryAccess {
             use_cargo_registry: cli.use_cargo_registry,
             validation,
-            staging_parent: admission_staging.path(),
+            staging_parent: &admission_scratch,
             evidence_root: &target_root.join(".cargo-evidence"),
         },
         if shared {
@@ -347,7 +348,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         source,
         toolchain: &toolchain,
         options: &locked.options,
-        staging_parent: admission_staging.path(),
+        staging_parent: &admission_scratch,
         direct: Some(direct),
         prepare_context: Some(crate::admission_state::Context {
             host: host_info.triple.clone(),
