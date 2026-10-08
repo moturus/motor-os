@@ -18,6 +18,11 @@ pub struct Scripted {
 }
 
 impl Scripted {
+    /// Scripted replies not yet requested.
+    pub fn remaining(&self) -> usize {
+        self.responses.lock().unwrap().len()
+    }
+
     pub fn from_responses(responses: Vec<Completion>) -> Self {
         Self {
             requests: Mutex::new(Vec::new()),

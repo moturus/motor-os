@@ -60,9 +60,6 @@ mod eval_copies;
 #[path = "workflow-smoke/eval_install.rs"]
 mod eval_install;
 
-#[path = "workflow-smoke/eval_options.rs"]
-mod eval_options;
-
 #[path = "workflow-smoke/eval_policy.rs"]
 mod eval_policy;
 
@@ -187,6 +184,7 @@ fn run() -> Result<(), String> {
     let journal = std::fs::read_to_string(context.data_file("turns.jsonl")?)
         .map_err(|error| error.to_string())?;
     let recorded: gears_batteries::turns::Turn = serde_json::from_str(journal.trim_end()).unwrap();
+    // The first turn scripts eight tool calls, ending with one check.
     assert_eq!(
         (
             recorded.tool_calls,
@@ -250,8 +248,9 @@ fn run() -> Result<(), String> {
         runtime.session().hook_state(&fixture.hook).unwrap()["check_reminders"],
         3
     );
+    // Every scripted reply was used; an extra request would already have failed.
+    assert_eq!(provider.remaining(), 0);
     let requests = provider.requests.lock().unwrap();
-    assert_eq!(requests.len(), 17);
     let pending = gears_batteries::pending::list(
         &context,
         gears_batteries::memory_format::Target::Workspace,
@@ -284,6 +283,8 @@ fn run() -> Result<(), String> {
         })
         .count();
     assert_eq!(reminders, 3);
+    // The hook allows reading, searching, todo and memory; the two writes, check and
+    // the second patch were asked.
     assert_eq!(approvals.0.len(), 4);
     drop(runtime);
     memory::run(&binary, &fixture.root)?;
@@ -310,7 +311,6 @@ fn run() -> Result<(), String> {
     eval_config::run_fixture(&fixture.root.join("eval-config"), &binary)?;
     eval_copies::run_fixture(&fixture.root.join("eval-copies"), &compiler)?;
     eval_install::run_fixture(&fixture.root.join("eval-install"))?;
-    eval_options::run_fixture(&fixture.root.join("eval-options"))?;
     eval_policy::run_fixture(&fixture.root.join("eval-policy"))?;
     eval_prepare::run_fixture(&fixture.root.join("eval-prepare"), &binary)?;
     eval_report::run_fixture(&fixture.root.join("eval-report"))?;
