@@ -890,17 +890,11 @@ impl Runtime {
             "status": status, "error": result.as_ref().err(),
             "tool_rounds": tool_rounds, "last_entry_id": last_entry_id,
         });
-        // The interrupted work has stopped. Lifecycle hooks need a fresh
-        // token so they can observe the cancelled turn and session changes.
-        self.cancellation.reset();
         let end_result = self
-            .notify("turn_end", payload, observer)
-            .and_then(|()| {
-                if status == "cancelled" {
-                    self.cancellation.cancel();
-                }
-                self.handle_hook_questions(approver, observer).map(|_| ())
+            .after_cancellation(status == "cancelled", |runtime| {
+                runtime.notify("turn_end", payload, observer)
             })
+            .and_then(|()| self.handle_hook_questions(approver, observer).map(|_| ()))
             .and_then(|()| {
                 observer.event(Event::TurnEnd {
                     status,
@@ -1034,6 +1028,18 @@ impl Runtime {
         self.fail_turn(error, false, observer)
     }
 
+    /// Lifecycle hooks still observe a cancelled turn: they run with a fresh
+    /// token, and the cancellation is restored for whatever follows.
+    fn after_cancellation<T>(&mut self, cancelled: bool, run: impl FnOnce(&mut Self) -> T) -> T {
+        if !cancelled {
+            return run(self);
+        }
+        self.cancellation.reset();
+        let result = run(self);
+        self.cancellation.cancel();
+        result
+    }
+
     fn fail_turn(
         &mut self,
         error: String,
@@ -1042,15 +1048,13 @@ impl Runtime {
     ) -> Result<(), String> {
         let cancelled = cancelled || self.cancellation.cancelled();
         let entry = self.session.append_error(&error, cancelled)?;
-        self.cancellation.reset();
-        let notification = self.notify(
-            "entry",
-            serde_json::json!({"id": entry, "type": "turn_error"}),
-            observer,
-        );
-        if cancelled {
-            self.cancellation.cancel();
-        }
+        let notification = self.after_cancellation(cancelled, |runtime| {
+            runtime.notify(
+                "entry",
+                serde_json::json!({"id": entry, "type": "turn_error"}),
+                observer,
+            )
+        });
         // An observer failure must not replace the recorded turn error.
         let _ = notification;
         Err(error)
@@ -1602,12 +1606,8 @@ impl Runtime {
                     true,
                     ToolOutcome::NotStarted,
                 ))?;
-            if cancelled {
-                self.cancellation.reset();
-            }
-            let notification = self.notify(
-                "entry",
-                self.tool_entry(
+            let notification = self.after_cancellation(cancelled, |runtime| {
+                let payload = runtime.tool_entry(
                     &entry,
                     call,
                     &ToolResult {
@@ -1615,12 +1615,9 @@ impl Runtime {
                         is_error: true,
                     },
                     ToolOutcome::NotStarted,
-                ),
-                observer,
-            );
-            if cancelled {
-                self.cancellation.cancel();
-            }
+                );
+                runtime.notify("entry", payload, observer)
+            });
             let _ = notification;
             let _ = observer.event(Event::ToolEnd {
                 call_id: call.id.clone(),
