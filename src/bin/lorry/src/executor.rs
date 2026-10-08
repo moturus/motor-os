@@ -756,7 +756,7 @@ fn execute_unit<'a>(
                     &executable_sha256,
                     &environment,
                     &executables,
-                );
+                )?;
                 let package_sources = || match key.package.source {
                     PackageSourceKey::Path(_) => {
                         crate::member_source::snapshot(manifest, false).map(|s| Some(s.sha256))
@@ -1010,6 +1010,8 @@ fn execute_unit<'a>(
                     drop(staging);
                     create_output_directories(&planned_invocation.output)?;
                     cache.unpublish(&planned_invocation.output)?;
+                    // Output checks then see only what this compile writes.
+                    remove_outputs(&planned_invocation.output)?;
                     (planned_invocation.clone(), None)
                 } else {
                     (invocation, Some(staging))
@@ -1337,6 +1339,33 @@ fn create_directory(path: &Path, description: &str) -> Result<()> {
             path.display()
         ))
     })
+}
+
+fn remove_outputs(output: &RustcOutput) -> Result<()> {
+    let mut paths = vec![output.dep_info()];
+    if let RustcOutput::Library {
+        rlib,
+        rmeta,
+        archive,
+        ..
+    } = output
+    {
+        paths.extend([rlib.as_path(), rmeta.as_path()]);
+        paths.extend(archive.as_deref());
+    }
+    for path in paths {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to remove old output `{}`: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn verify_outputs(output: &RustcOutput) -> Result<()> {
