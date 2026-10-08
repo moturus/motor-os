@@ -48,7 +48,10 @@ VMM_PID=""
 snapshot=""
 cleanup() { stop_vm "$VMM_PID"; [ -z "$snapshot" ] || rm -f "$snapshot"; }
 trap cleanup EXIT
-evidence="$(mktemp -d "$ROOT_DIR/build/javy-images.XXXXXX")"
+# One evidence tree per checkout: a run replaces whatever the previous run left.
+evidence="$ROOT_DIR/build/javy-images"
+rm -rf "$evidence"
+mkdir -p "$evidence"
 assembly="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
 export MOTO_SMP=2
 export MOTO_CHV_RUNTIME_DIR="$evidence/chv"
