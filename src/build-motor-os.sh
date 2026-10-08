@@ -155,6 +155,9 @@ SED_BRANCH=main
 CLANG_MAJOR=""                      # detected after the host toolchain is built
 
 HOST=x86_64-unknown-linux-gnu
+# Guest WebAssembly fixtures of the wasm add-ons are built with this pinned
+# upstream Rust; the Motor toolchain itself carries no wasm32 targets.
+WASM_GUEST_TOOLCHAIN=1.99.0
 TARGET=x86_64-unknown-motor
 MAKE_LOG="$MOTORH/build-motor-os-make.log"
 
@@ -869,6 +872,12 @@ ensure_addon() {
 	printf '%s\n' "$source" > "$stamp"
 }
 
+ensure_wasm_guest_toolchain() {
+	log "providing Rust $WASM_GUEST_TOOLCHAIN with wasm32-wasip1 and wasm32-wasip2 for wasm fixtures"
+	rustup toolchain install "$WASM_GUEST_TOOLCHAIN" --profile minimal --no-self-update \
+		--target wasm32-wasip1 --target wasm32-wasip2
+}
+
 build_addons() {
 	configure_exact_cross_driver
 	ensure_addon lua "$LUA_VER" "$LUA_IMG" devtools/bin/lua build_lua
@@ -882,6 +891,7 @@ build_addons() {
 	ensure_addon sed "$(git -C "$SED" rev-parse HEAD)" \
 		"$SED_IMG" devtools/bin/sed build_sed
 	build_javy_addon
+	ensure_wasm_guest_toolchain
 	build_wasmtime_addon
 }
 
@@ -944,7 +954,10 @@ main() {
 		ASSEMBLY_ROOT="${ASSEMBLY_IMAGE_ROOT%/images}"
 		ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
 		[ "$JAVY_ONLY" = false ] || build_javy_addon
-		[ "$WASMTIME_ONLY" = false ] || build_wasmtime_addon
+		if [ "$WASMTIME_ONLY" = true ]; then
+			ensure_wasm_guest_toolchain
+			build_wasmtime_addon
+		fi
 		return
 	fi
 	log "complete Motor OS build starting"

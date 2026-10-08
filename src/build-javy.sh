@@ -2,6 +2,11 @@
 # Javy/Wasmi add-on and helpers shared with the Wasmtime add-on, sourced by
 # build-motor-os.sh after toolchain selection.
 
+# Digests of the default plugin and the TypeScript workload; the Wasmtime add-on
+# compiles the same inputs into its fixtures.
+JAVY_PLUGIN_SHA=180230f9346dc4b7d7139791280c9f4da09b2292eef751a3d35ae80154d88350
+JAVY_TYPESCRIPT_SHA=4969f6546b830e751b6797be028accd242fd24e6e506661c51ddcd16b2646d68
+
 javy_download() {
 	local url="$1" digest="$2" output="$3"
 	if [ ! -f "$output" ]; then
@@ -86,8 +91,6 @@ build_javy() {
 
 build_javy_addon() {
 	JAVY_SOURCES=(javy:motor-9.1.0 wasmi:motor-1.1.0 wasmtime:motor-48.0.1)
-	JAVY_PLUGIN_SHA=180230f9346dc4b7d7139791280c9f4da09b2292eef751a3d35ae80154d88350
-	JAVY_TYPESCRIPT_SHA=4969f6546b830e751b6797be028accd242fd24e6e506661c51ddcd16b2646d68
 	JAVY_IMG="$ASSEMBLY_IMAGE_ROOT/javy"
 	[ "$(readlink -f "$MOTORH/motor-os")" = "$MOTOR" ] ||
 		die "Javy's sibling motor-os path must resolve to this checkout: $MOTORH/motor-os"

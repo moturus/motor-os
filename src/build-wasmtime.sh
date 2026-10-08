@@ -1,6 +1,67 @@
 #!/usr/bin/env bash
-# Runtime-only Wasmtime add-on, sourced by build-motor-os.sh after toolchain
-# selection and after build-javy.sh, whose helpers it shares.
+# Runtime-only Wasmtime add-on and its precompiled test fixtures, sourced by
+# build-motor-os.sh after toolchain selection and after build-javy.sh, whose
+# helpers and inputs it shares.
+
+# Motor variants of upstream p2 socket programs, built from the fork.
+WASMTIME_GUEST_PROGRAMS=(p2_tcp_bind p2_tcp_bind_listen_order p2_tcp_connect
+	p2_tcp_sample_application p2_tcp_sockopts p2_tcp_states p2_tcp_streams p2_udp_bind
+	p2_udp_connect p2_udp_sample_application p2_udp_send_to_closed_receiver
+	p2_udp_sockopts p2_udp_states)
+# Core-module fixtures in the fork's motor-runtime/fixtures.
+WASMTIME_CORE_FIXTURES=(lifecycle limits-elements limits-memories limits-tables memory-grow
+	memory-too-large)
+# Upstream Javy 9.1.0 for Linux compiles the TypeScript fixture; with the same
+# plugin its output equals Motor Javy's apart from the compressed source.
+WASMTIME_JAVY_LINUX_GZ_SHA=a68b122d48eb3dfc1b801d4e14c39271fde3638243d3272d206e376ac9189e39
+WASMTIME_JAVY_LINUX_SHA=f6f12dc42ffcaa1c19244b1a332893d636d0d56d26e02089d94dc296b22fa719
+
+# Fixtures are precompiled by a host compiler built from the runtime's own
+# sources, so their engine version and configuration always match it.
+build_wasmtime_fixtures() {
+	local root="$MOTORH/wasmtime" build="$ASSEMBLY_BUILD_ROOT/wasmtime"
+	local inputs="$ASSEMBLY_BUILD_ROOT/wasmtime-inputs"
+	local out="$WASMTIME_IMG/devtools/cfg/wasmtime/fixtures"
+	local plugin="$ASSEMBLY_BUILD_ROOT/javy-inputs/plugin.wasm"
+	local typescript="$ASSEMBLY_IMAGE_ROOT/javy/devtools/cfg/javy/typescript-workload.js"
+	printf '%s  %s\n%s  %s\n' "$JAVY_PLUGIN_SHA" "$plugin" "$JAVY_TYPESCRIPT_SHA" "$typescript" |
+		sha256sum --quiet -c - || die "the Wasmtime fixtures need the Javy add-on's inputs"
+	mkdir -p "$inputs" "$out"
+	javy_download https://github.com/bytecodealliance/javy/releases/download/v9.1.0/javy-x86_64-linux-v9.1.0.gz \
+		"$WASMTIME_JAVY_LINUX_GZ_SHA" "$inputs/javy-linux.gz"
+	gzip -dc "$inputs/javy-linux.gz" > "$inputs/javy-linux"
+	printf '%s  %s\n' "$WASMTIME_JAVY_LINUX_SHA" "$inputs/javy-linux" | sha256sum -c -
+	chmod 755 "$inputs/javy-linux"
+	(
+		cd "$root"
+		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build/host" cargo build --locked --release \
+			--manifest-path motor-runtime/Cargo.toml --features compile --bin compile \
+			-j "$(wasm_addon_jobs)"
+		export RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"
+		cargo fetch --locked --target wasm32-wasip2
+		local bins=() program
+		for program in "${WASMTIME_GUEST_PROGRAMS[@]}"; do bins+=(--bin "$program"); done
+		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build/guests" cargo build --locked --release \
+			--target wasm32-wasip2 -p test-programs --features motor "${bins[@]}"
+	)
+	local compile="$build/host/release/compile" name
+	rm -f "$out"/*.cwasm "$build/typescript.wasm"
+	for name in "${WASMTIME_CORE_FIXTURES[@]}"; do
+		"$compile" pulley64 core "$root/motor-runtime/fixtures/$name.wat" "$out/$name.cwasm"
+	done
+	"$compile" pulley64 core "$root/motor-runtime/fixtures/lifecycle.wat" \
+		"$out/lifecycle-epoch.cwasm" --epoch
+	# Native code for a Pulley runtime: the runtime must refuse it.
+	"$compile" x86_64-unknown-motor core "$root/motor-runtime/fixtures/lifecycle.wat" \
+		"$out/lifecycle-native.cwasm"
+	for name in "${WASMTIME_GUEST_PROGRAMS[@]}"; do
+		"$compile" pulley64 component "$build/guests/wasm32-wasip2/release/$name.wasm" \
+			"$out/$name.cwasm"
+	done
+	"$inputs/javy-linux" build "$typescript" -C plugin="$plugin" -C deterministic \
+		-o "$build/typescript.wasm"
+	"$compile" pulley64 core "$build/typescript.wasm" "$out/typescript.cwasm"
+}
 
 build_wasmtime() {
 	# The orchestrator's selection (managed or authoring) overrides Wasmtime's
@@ -9,6 +70,7 @@ build_wasmtime() {
 	(
 		cd "$MOTORH/wasmtime/motor-runtime"
 		cargo fetch --locked --target x86_64-unknown-motor
+		cargo fetch --locked --target x86_64-unknown-linux-gnu
 		cd ..
 		CARGO_NET_OFFLINE=true MOTOR_BUILD_DIR="$ASSEMBLY_BUILD_ROOT/wasmtime" \
 			JOBS="$(wasm_addon_jobs)" ./motor-build.sh runtime
@@ -17,9 +79,10 @@ build_wasmtime() {
 	mkdir -p "$WASMTIME_IMG/devtools/bin" "$cfg"
 	install -m 755 "$ASSEMBLY_BUILD_ROOT/wasmtime/runtime/x86_64-unknown-motor/release/wasmtime-rt" \
 		"$WASMTIME_IMG/devtools/bin/wasmtime-rt"
+	build_wasmtime_fixtures
 	printf '%s\n' "$WASMTIME_SOURCE_MANIFEST" > "$cfg/sources.txt"
 	(cd "$WASMTIME_IMG" && sha256sum devtools/bin/wasmtime-rt devtools/cfg/wasmtime/sources.txt \
-		> "$cfg/SHA256SUMS")
+		devtools/cfg/wasmtime/fixtures/* > "$cfg/SHA256SUMS")
 }
 
 build_wasmtime_addon() {
@@ -32,7 +95,12 @@ build_wasmtime_addon() {
 		repo=${spec%%:*}; branch=${spec#*:}
 		update_addon_source "$repo" "$MOTORH/$repo" "https://github.com/moturus/$repo.git" "$branch"
 	done
-	WASMTIME_SOURCE_MANIFEST="$(wasm_source_manifest "${WASMTIME_SOURCES[*]}" src/build-wasmtime.sh)"
+	WASMTIME_SOURCE_MANIFEST="$(
+		wasm_source_manifest "${WASMTIME_SOURCES[*]}" src/build-wasmtime.sh
+		printf 'guest-toolchain=%s\n' "$(RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" rustc --version)"
+		printf 'plugin=%s\ntypescript=%s\njavy-linux=%s\n' "$JAVY_PLUGIN_SHA" \
+			"$JAVY_TYPESCRIPT_SHA" "$WASMTIME_JAVY_LINUX_SHA"
+	)"
 	source="$(printf '%s\n' "$WASMTIME_SOURCE_MANIFEST" | sha256sum | cut -d' ' -f1)"
 	# All outputs must still match, not just the executable used by ensure_addon.
 	if ! (cd "$WASMTIME_IMG" && sha256sum --status -c devtools/cfg/wasmtime/SHA256SUMS) 2>/dev/null; then

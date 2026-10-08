@@ -190,6 +190,7 @@ for selection in managed-probe authoring-probe; do
 		tar() { :; }
 		install() { :; }
 		sha256sum() { cat > /dev/null; }
+		build_wasmtime_fixtures() { printf 'fixtures %s\n' "$RUSTUP_TOOLCHAIN" >> "$JAVY_TOOLCHAIN_LOG"; }
 		build_javy
 		build_wasmtime
 	) < /dev/null > /dev/null 2>&1 || fail "a wasm add-on stage failed with selection $selection"
@@ -197,10 +198,22 @@ done
 expected=""
 for selection in managed-probe authoring-probe; do
 	expected+="fetch $selection javy"$'\n'"build $selection "$'\n'
-	expected+="fetch $selection motor-runtime"$'\n'"build $selection runtime"$'\n'
+	expected+="fetch $selection motor-runtime"$'\n'"fetch $selection motor-runtime"$'\n'
+	expected+="build $selection runtime"$'\n'"fixtures $selection"$'\n'
 done
 [ "$(cat "$javy_log")"$'\n' = "$expected" ] ||
 	fail "the wasm add-ons did not fetch and build with the selected toolchain"
+# The host Pulley compiler uses the selected toolchain; guest programs use the
+# pinned upstream one with wasm32 targets, which the Motor toolchain lacks.
+case "$(declare -f build_wasmtime_fixtures)" in
+	*'--features compile --bin compile'*'RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"'*\
+*'--target wasm32-wasip2 -p test-programs --features motor'*) ;;
+	*) fail "the Wasmtime fixtures are not built with the expected toolchains" ;;
+esac
+case "$(declare -f build_addons)" in
+	*'ensure_wasm_guest_toolchain'*'build_wasmtime_addon'*) ;;
+	*) fail "the guest toolchain is not provided before the Wasmtime add-on" ;;
+esac
 javy_manifest() (
 	RUSTUP_TOOLCHAIN="$1"
 	rustc() { printf 'rustc for %s\n' "$RUSTUP_TOOLCHAIN"; }
