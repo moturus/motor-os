@@ -282,6 +282,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     .then(|| {
         trusted_freshness_base(&TrustedFreshness {
             manifest: &manifest,
+            members: &workspace.packages,
             compact_state: compact_state.as_ref(),
             config: &config,
             toolchain: &toolchain,
@@ -2105,6 +2106,8 @@ struct LocalSource {
 
 struct TrustedFreshness<'a> {
     manifest: &'a Manifest,
+    /// Every workspace member: admission reads all of their manifests.
+    members: &'a [Manifest],
     compact_state: Option<&'a CompactState>,
     config: &'a Config,
     toolchain: &'a Toolchain,
@@ -2163,6 +2166,9 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
         "workspace-manifest",
         &inputs.manifest.workspace_root.join("Cargo.toml"),
     )?;
+    for member in inputs.members {
+        digest.metadata("member-manifest", &member.path)?;
+    }
     compiler_environment_digest(&mut digest);
     for path in [
         inputs.host_options.linker.as_deref(),

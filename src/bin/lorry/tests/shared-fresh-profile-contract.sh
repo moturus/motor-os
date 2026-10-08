@@ -226,6 +226,14 @@ grep -F 'deny-app' "$WORK/$step.err" >/dev/null || fail "a new denial had the wr
 cp "$WORK/policy.before" lorry.toml
 lorry build
 expect_fresh
+# Admission reads every member's manifest, so an edit to one that is not
+# selected also takes the full path.
+lorry build -p app
+lorry build -p app
+expect_fresh
+printf '\n' >>other/Cargo.toml
+lorry build -p app
+expect_rebuilt "unselected member manifest"
 
 # Alternating selections that install the same binaries keep separate
 # records, so after one round each stays fresh. (The default selection is
