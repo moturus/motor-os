@@ -67,52 +67,20 @@ impl DirectoryLock {
                 owner,
             });
         }
-        for attempt in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    let owner = std::process::id();
-                    if let Err(error) = writeln!(file, "{owner}").and_then(|()| file.sync_data()) {
-                        let _ = std::fs::remove_file(&path);
-                        return Err(format!("{}: {error}", path.display()));
-                    }
-                    return Ok(Self {
-                        state,
-                        path: Some(path),
-                        owner,
-                    });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
-                    let metadata = std::fs::symlink_metadata(&path)
-                        .map_err(|error| format!("{}: {error}", path.display()))?;
-                    if !metadata.file_type().is_file() {
-                        return Err(format!("unsafe Gears lock {}", path.display()));
-                    }
-                    match lock_pid(&path) {
-                        Some(pid)
-                            if pid != std::process::id()
-                                && platform::process_alive(pid)
-                                && platform::process_is_gears(pid) =>
-                        {
-                            return Err(format!("Gears directory is locked by process {pid}"));
-                        }
-                        None if metadata
-                            .modified()
-                            .ok()
-                            .and_then(|time| time.elapsed().ok())
-                            .is_none_or(|age| age < INCOMPLETE_GRACE) =>
-                        {
-                            return Err("Gears lock is being initialized".to_string());
-                        }
-                        _ => {}
-                    }
-                    // The publication race is tracked in docs/plans/future-work.md.
-                    std::fs::remove_file(&path)
-                        .map_err(|error| format!("cannot remove stale lock: {error}"))?;
-                }
-                Err(error) => return Err(format!("cannot lock {}: {error}", path.display())),
-            }
-        }
-        Err(format!("cannot lock {}", path.display()))
+        create_pid_file(
+            &path,
+            |pid| {
+                pid != std::process::id()
+                    && platform::process_alive(pid)
+                    && platform::process_is_gears(pid)
+            },
+            |pid| format!("Gears directory is locked by process {pid}"),
+        )?;
+        Ok(Self {
+            state,
+            path: Some(path),
+            owner: std::process::id(),
+        })
     }
 
     pub fn cleanup_temporaries(&self) -> Result<usize, String> {
@@ -147,6 +115,52 @@ impl Drop for DirectoryLock {
 
 fn lock_pid(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Create a lock file holding this process id. A file whose owner is gone is
+/// replaced; one still being written gets a short grace period.
+pub(crate) fn create_pid_file(
+    path: &Path,
+    live_owner: fn(u32) -> bool,
+    held: impl Fn(u32) -> String,
+) -> Result<(), String> {
+    for attempt in 0..2 {
+        match OpenOptions::new().write(true).create_new(true).open(path) {
+            Ok(mut file) => {
+                let owner = std::process::id();
+                if let Err(error) = writeln!(file, "{owner}").and_then(|()| file.sync_data()) {
+                    let _ = std::fs::remove_file(path);
+                    return Err(format!("{}: {error}", path.display()));
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                let metadata = std::fs::symlink_metadata(path)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                if !metadata.file_type().is_file() {
+                    return Err(format!("unsafe lock {}", path.display()));
+                }
+                match lock_pid(path) {
+                    Some(pid) if live_owner(pid) => return Err(held(pid)),
+                    None if metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.elapsed().ok())
+                        .is_none_or(|age| age < INCOMPLETE_GRACE) =>
+                    {
+                        return Err(format!("lock {} is being initialized", path.display()));
+                    }
+                    _ => {}
+                }
+                // The publication race is tracked in docs/plans/future-work.md.
+                std::fs::remove_file(path).map_err(|error| {
+                    format!("cannot remove stale lock {}: {error}", path.display())
+                })?;
+            }
+            Err(error) => return Err(format!("cannot lock {}: {error}", path.display())),
+        }
+    }
+    Err(format!("cannot lock {}", path.display()))
 }
 
 #[cfg(test)]

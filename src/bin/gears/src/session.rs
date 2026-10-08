@@ -1153,38 +1153,10 @@ fn create_session_file(directory: &Path, id: &str) -> Result<(PathBuf, File), St
 
 fn acquire_lock(path: &Path) -> Result<PathBuf, String> {
     let lock = path.with_extension("jsonl.lock");
-    for attempt in 0..2 {
-        match OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(mut file) => {
-                writeln!(file, "{}", std::process::id())
-                    .map_err(|error| format!("{}: {error}", lock.display()))?;
-                file.sync_data()
-                    .map_err(|error| format!("{}: {error}", lock.display()))?;
-                return Ok(lock);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
-                let metadata = std::fs::symlink_metadata(&lock)
-                    .map_err(|error| format!("{}: {error}", lock.display()))?;
-                if !metadata.file_type().is_file() {
-                    return Err(format!("unsafe session lock {}", lock.display()));
-                }
-                let owner = std::fs::read_to_string(&lock)
-                    .ok()
-                    .and_then(|text| text.trim().parse::<u32>().ok());
-                if owner.is_some_and(crate::platform::process_alive) {
-                    return Err(format!(
-                        "session is already open by process {}",
-                        owner.unwrap()
-                    ));
-                }
-                std::fs::remove_file(&lock).map_err(|error| {
-                    format!("cannot remove stale lock {}: {error}", lock.display())
-                })?;
-            }
-            Err(error) => return Err(format!("cannot lock {}: {error}", path.display())),
-        }
-    }
-    Err(format!("cannot lock {}", path.display()))
+    crate::run_lock::create_pid_file(&lock, crate::platform::process_alive, |pid| {
+        format!("session is already open by process {pid}")
+    })?;
+    Ok(lock)
 }
 
 /// A file that a failed record can be cut back from.
@@ -1966,5 +1938,24 @@ mod tests {
         file.room = 100;
         write_line(&mut file, &serde_json::json!({"b": 2})).unwrap();
         assert_eq!(file.inner.into_inner(), b"{\"a\":1}\n{\"b\":2}\n");
+    }
+
+    #[test]
+    fn a_session_lock_still_being_written_is_not_taken_over() {
+        let (base, _, store) = fixture("fresh-lock");
+        let session = store.create(false, Some("fresh")).unwrap();
+        let (id, path) = (
+            session.id().to_string(),
+            session.path().unwrap().to_path_buf(),
+        );
+        drop(session);
+        let lock = path.with_extension("jsonl.lock");
+        std::fs::write(&lock, "").unwrap();
+        let error = store.open(&id).err().unwrap();
+        assert!(error.contains("being initialized"), "{error}");
+        assert!(lock.exists());
+        std::fs::remove_file(&lock).unwrap();
+        store.open(&id).unwrap();
+        std::fs::remove_dir_all(base).unwrap();
     }
 }
