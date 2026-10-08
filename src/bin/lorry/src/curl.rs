@@ -91,13 +91,7 @@ pub fn archive_url(name: &str, version: &Version) -> Result<String> {
 }
 
 fn canonical_name(name: &str) -> Result<String> {
-    if name.is_empty()
-        || name.len() > 64
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        || !name.bytes().any(|byte| byte.is_ascii_alphabetic())
-    {
+    if !crate::manifest::valid_package_name(name) {
         return Err(Error::failure(format!(
             "cannot construct a crates.io URL for invalid package name `{name}`"
         )));
@@ -220,7 +214,7 @@ impl ResponseBody {
             }
             match options.open(&path) {
                 Ok(file) => {
-                    if let Err(error) = crate::atomic::set_private_file(&file, &path) {
+                    if let Err(error) = crate::fs_check::set_file_mode(&file, &path, false) {
                         drop(file);
                         let _ = fs::remove_file(&path);
                         return Err(error);
@@ -722,7 +716,7 @@ impl StderrSpill {
             }
             match options.open(&path) {
                 Ok(file) => {
-                    if let Err(error) = crate::atomic::set_private_file(&file, &path) {
+                    if let Err(error) = crate::fs_check::set_file_mode(&file, &path, false) {
                         drop(file);
                         let _ = fs::remove_file(&path);
                         return Err(std::io::Error::other(error.to_string()));

@@ -99,15 +99,11 @@ fn package_name(path: &Path) -> Result<&str> {
             ))
             .with_help("use a path ending in a valid Rust package name")
         })?;
-    let valid = name.len() <= 64
+    let valid = crate::manifest::valid_package_name(name)
         && name
             .bytes()
             .next()
             .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        && name.bytes().any(|byte| byte.is_ascii_alphabetic())
         && !is_rust_keyword(name)
         && name != "test";
     if !valid {

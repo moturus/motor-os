@@ -2605,14 +2605,19 @@ fn parse_requirement(path: &Path, line: usize, name: &str, value: &str) -> Resul
     })
 }
 
-fn validate_package_name(path: &Path, line: usize, name: &str) -> Result<()> {
-    let valid = !name.is_empty()
+/// Lorry's package names: 1–64 ASCII letters, digits, `-`, or `_`, with at
+/// least one letter.
+pub(crate) fn valid_package_name(name: &str) -> bool {
+    !name.is_empty()
         && name.len() <= 64
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        && name.bytes().any(|byte| byte.is_ascii_alphabetic());
-    if !valid {
+        && name.bytes().any(|byte| byte.is_ascii_alphabetic())
+}
+
+fn validate_package_name(path: &Path, line: usize, name: &str) -> Result<()> {
+    if !valid_package_name(name) {
         return Err(Error::at(
             path,
             line,

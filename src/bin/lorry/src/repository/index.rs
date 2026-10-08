@@ -118,7 +118,7 @@ fn read(root: &Path, checksum: &str) -> Result<Option<SparseRecord>> {
         checksum,
     ] {
         path.push(part);
-        if !entry_exists(&path)? {
+        if !entry_exists(&path, "sparse resolution directory")? {
             return Ok(None);
         }
         require_real_directory(&path, "sparse resolution directory")?;

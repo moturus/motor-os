@@ -2063,17 +2063,12 @@ fn validate_constraint_key(path: &Path, line: usize, value: &str) -> Result<()> 
 }
 
 fn validate_package_name(path: &Path, line: usize, value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    if !crate::manifest::valid_package_name(value) {
         return Err(Error::at(
             path,
             line,
             format!("invalid package name `{value}`"),
-            "use ASCII letters, digits, `-`, and `_`",
+            "use 1–64 ASCII letters, digits, `-`, or `_`, including at least one letter",
         ));
     }
     Ok(())

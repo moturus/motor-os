@@ -111,7 +111,7 @@ fn collect(manifest: &Manifest, max_files: usize) -> Result<Vec<PathBuf>> {
         files.retain(|path| {
             fs::metadata(path)
                 .ok()
-                .and_then(|metadata| crate::source_tree::path_identity(path, &metadata).ok())
+                .and_then(|metadata| crate::fs_check::path_identity(path, &metadata).ok())
                 .is_none_or(|identity| !outputs.contains(&identity))
         });
     }
@@ -132,7 +132,7 @@ fn own_outputs() -> &'static [(u128, u128)] {
                 if !metadata.is_file() {
                     return None;
                 }
-                crate::source_tree::file_identity(&file, &metadata).ok()
+                crate::fs_check::file_identity(&file, &metadata).ok()
             })
             .collect()
     })

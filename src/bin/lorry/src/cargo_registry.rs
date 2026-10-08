@@ -10,6 +10,7 @@ use crate::atomic::AtomicFile;
 use crate::cli::{Cli, Verbosity};
 use crate::config::{Config, PolicyLimits};
 use crate::diagnostic::{Error, Result};
+use crate::fs_check::{entry_exists, require_real_directory, require_real_file};
 use crate::hash::{decode_hex, hex};
 use crate::manifest::{DependencySource, Manifest};
 use crate::policy::PackageEvidence;
@@ -178,11 +179,13 @@ impl CargoRegistry {
                 .join("registry/cache")
                 .join(registry)
                 .join(format!("{leaf}.crate"));
-            let source_present = entry_exists(&source)?;
-            let archive_present = entry_exists(&archive)?;
+            let source_present = entry_exists(&source, "Cargo registry entry")?;
+            let archive_present = entry_exists(&archive, "Cargo registry entry")?;
             if source_present && archive_present {
-                require_real_directory(&source, "Cargo registry package source")?;
-                require_real_file(&archive, "Cargo registry package archive")?;
+                require_real_directory(&source, "Cargo registry package source")
+                    .map_err(Error::cargo_cache_miss)?;
+                require_real_file(&archive, "Cargo registry package archive")
+                    .map_err(Error::cargo_cache_miss)?;
                 candidates.push((registry, source, archive));
             } else if source_present || archive_present {
                 partial.push((registry, source_present, archive_present));
@@ -526,23 +529,10 @@ impl Package {
 }
 
 fn real_directory_names(root: &Path, description: &str) -> Result<Vec<String>> {
-    let metadata = match fs::symlink_metadata(root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(Error::failure(format!(
-                "failed to inspect {description} `{}`: {error}",
-                root.display()
-            )));
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::failure(format!(
-            "{description} `{}` is not a real directory",
-            root.display()
-        ))
-        .cargo_cache_miss());
+    if !entry_exists(root, description)? {
+        return Ok(Vec::new());
     }
+    require_real_directory(root, description).map_err(Error::cargo_cache_miss)?;
     let mut names = Vec::new();
     for entry in fs::read_dir(root).map_err(|error| {
         Error::failure(format!(
@@ -556,19 +546,8 @@ fn real_directory_names(root: &Path, description: &str) -> Result<Vec<String>> {
                 root.display()
             ))
         })?;
-        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
-            Error::failure(format!(
-                "failed to inspect Cargo registry directory `{}`: {error}",
-                entry.path().display()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(Error::failure(format!(
-                "Cargo registry entry `{}` is not a real directory",
-                entry.path().display()
-            ))
-            .cargo_cache_miss());
-        }
+        require_real_directory(&entry.path(), "Cargo registry entry")
+            .map_err(Error::cargo_cache_miss)?;
         let name = entry.file_name().into_string().map_err(|_| {
             Error::failure(format!(
                 "Cargo registry directory name is not valid UTF-8 under `{}`",
@@ -581,62 +560,17 @@ fn real_directory_names(root: &Path, description: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn entry_exists(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(Error::failure(format!(
-            "failed to inspect Cargo registry entry `{}`: {error}",
-            path.display()
-        ))),
-    }
-}
-
-fn require_real_directory(path: &Path, description: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect {description} `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::failure(format!(
-            "{description} `{}` is not a real directory",
-            path.display()
-        ))
-        .cargo_cache_miss());
-    }
-    Ok(())
-}
-
-fn require_real_file(path: &Path, description: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect {description} `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(Error::failure(format!(
-            "{description} `{}` is not a real regular file",
-            path.display()
-        ))
-        .cargo_cache_miss());
-    }
-    Ok(())
-}
-
 /// An absent or unknown marker means Cargo has not finished extracting the
 /// package in a form Lorry reads.
 fn verify_marker(path: &Path) -> Result<()> {
-    if !entry_exists(path)? {
+    if !entry_exists(path, "Cargo registry extraction marker")? {
         return Err(Error::failure(format!(
             "Cargo registry extraction marker `{}` is missing",
             path.display()
         ))
         .cargo_cache_miss());
     }
-    require_real_file(path, "Cargo registry extraction marker")?;
+    require_real_file(path, "Cargo registry extraction marker").map_err(Error::cargo_cache_miss)?;
     let bytes = fs::read(path).map_err(|error| {
         Error::failure(format!(
             "failed to read Cargo registry extraction marker `{}`: {error}",

@@ -1,4 +1,5 @@
 use crate::diagnostic::{Error, Result};
+use crate::fs_check::{require_real_file_if_present, verify_open_file};
 use std::fs::{self, File, OpenOptions};
 use std::path::Path;
 #[cfg(target_os = "motor")]
@@ -39,7 +40,7 @@ impl ArtifactLock {
             ))
         })?;
         let path = directory.join(LOCK_NAME);
-        require_regular_or_absent(&path)?;
+        require_real_file_if_present(&path, "artifact lock")?;
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true);
         #[cfg(unix)]
@@ -55,14 +56,14 @@ impl ArtifactLock {
                 path.display()
             ))
         })?;
-        verify_open_file(&file, &path)?;
+        verify_open_file(&file, &path, "artifact lock")?;
         file.lock().map_err(|error| {
             Error::failure(format!(
                 "failed to acquire artifact lock `{}`: {error}",
                 path.display()
             ))
         })?;
-        verify_open_file(&file, &path)?;
+        verify_open_file(&file, &path, "artifact lock")?;
         #[cfg(target_os = "linux")]
         let lease = acquire_child_lease(&directory)?;
         #[cfg(target_os = "motor")]
@@ -219,7 +220,7 @@ fn acquire_child_lease(directory: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
     let path = directory.join(LEASE_NAME);
-    require_regular_or_absent(&path)?;
+    require_real_file_if_present(&path, "artifact child lease")?;
     let mut create = OpenOptions::new();
     create.read(true).write(true).create(true);
     create
@@ -231,7 +232,7 @@ fn acquire_child_lease(directory: &Path) -> Result<File> {
             path.display()
         ))
     })?;
-    verify_open_file(&created, &path)?;
+    verify_open_file(&created, &path, "artifact child lease")?;
     drop(created);
 
     // The descriptor remains close-on-exec in the parent. Only compiler and
@@ -245,63 +246,15 @@ fn acquire_child_lease(directory: &Path) -> Result<File> {
             path.display()
         ))
     })?;
-    verify_open_file(&lease, &path)?;
+    verify_open_file(&lease, &path, "artifact child lease")?;
     lease.lock().map_err(|error| {
         Error::failure(format!(
             "failed to wait for artifact child lease `{}`: {error}",
             path.display()
         ))
     })?;
-    verify_open_file(&lease, &path)?;
+    verify_open_file(&lease, &path, "artifact child lease")?;
     Ok(lease)
-}
-
-fn require_regular_or_absent(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            Err(Error::failure(format!(
-                "artifact lock `{}` is not a regular file",
-                path.display()
-            )))
-        }
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::failure(format!(
-            "failed to inspect artifact lock `{}`: {error}",
-            path.display()
-        ))),
-    }
-}
-
-fn verify_open_file(file: &File, path: &Path) -> Result<()> {
-    let visible = fs::symlink_metadata(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect visible artifact lock `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if !visible.is_file() || visible.file_type().is_symlink() {
-        return Err(Error::failure(format!(
-            "artifact lock `{}` is not a regular file",
-            path.display()
-        )));
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let opened = file
-            .metadata()
-            .map_err(|error| Error::failure(format!("failed to inspect artifact lock: {error}")))?;
-        if opened.dev() != visible.dev() || opened.ino() != visible.ino() {
-            return Err(Error::failure(format!(
-                "artifact lock `{}` changed while being acquired",
-                path.display()
-            )));
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = file;
-    Ok(())
 }
 
 #[cfg(test)]

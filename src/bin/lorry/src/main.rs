@@ -21,6 +21,7 @@ mod dependency;
 mod diagnostic;
 mod engine;
 mod executor;
+mod fs_check;
 mod git;
 mod glob;
 mod hash;

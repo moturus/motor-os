@@ -13,6 +13,9 @@ use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::{AtomicDirectory, move_no_replace};
 use crate::config::Repositories;
 use crate::diagnostic::{Error, Result};
+use crate::fs_check::{
+    entry_exists, file_identity, path_identity, require_real_directory, require_real_file,
+};
 use crate::hash::{Sha256, decode_hex, hex};
 use crate::json::Value;
 use crate::lockfile::write_toml_string;
@@ -176,7 +179,7 @@ impl RepositorySet {
                 .join("objects/crates-io/sha256")
                 .join(&checksum[..2])
                 .join(checksum);
-            if !entry_exists(&object_path)? {
+            if !entry_exists(&object_path, "repository object")? {
                 continue;
             }
             let object = verify_registry_object(
@@ -536,7 +539,7 @@ impl RepositoryTransaction {
 
             let destination = self.object_destination(&staged.object)?;
             ensure_object_prefix(destination.parent().unwrap(), &self.writer.sync_file)?;
-            if entry_exists(&destination)? {
+            if entry_exists(&destination, "repository object")? {
                 verify_matching_object(&self.writer, staged, &destination)?;
             }
         }
@@ -1145,49 +1148,6 @@ fn verify_exact_entries(root: &Path, expected: &BTreeSet<&str>) -> Result<()> {
     Ok(())
 }
 
-fn require_real_directory(path: &Path, context: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect {context} `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::failure(format!(
-            "{context} `{}` is not a real directory",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-fn require_real_file(path: &Path, context: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect {context} `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(Error::failure(format!(
-            "{context} `{}` is not a real regular file",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-fn entry_exists(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(Error::failure(format!(
-            "failed to inspect repository object `{}`: {error}",
-            path.display()
-        ))),
-    }
-}
-
 fn hash_bounded_file(path: &Path, limit: u64) -> Result<(u64, [u8; 32])> {
     let bytes = read_bounded_file(path, limit)?;
     let mut hasher = Sha256::new();
@@ -1211,7 +1171,7 @@ fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
             path.display()
         )));
     }
-    let before_identity = path_file_identity(path, &before)?;
+    let before_identity = path_identity(path, &before)?;
     let before_modified = file_modified(path, &before)?;
     let mut file = File::open(path)
         .map_err(|error| Error::failure(format!("failed to open `{}`: {error}", path.display())))?;
@@ -1226,7 +1186,7 @@ fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
         before_modified,
         &opened,
         file_modified(path, &opened)?,
-    ) || before_identity != open_file_identity(&file, &opened)?
+    ) || before_identity != file_identity(&file, &opened)?
     {
         return Err(Error::failure(format!(
             "`{}` changed while being opened",
@@ -1261,8 +1221,8 @@ fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
         before_modified,
         &path_after,
         file_modified(path, &path_after)?,
-    ) || before_identity != open_file_identity(&file, &after)?
-        || before_identity != path_file_identity(path, &path_after)?
+    ) || before_identity != file_identity(&file, &after)?
+        || before_identity != path_identity(path, &path_after)?
         || bytes.len() as u64 != before.len()
     {
         return Err(Error::failure(format!(
@@ -1292,59 +1252,6 @@ fn file_modified(path: &Path, metadata: &Metadata) -> Result<std::time::SystemTi
             path.display()
         ))
     })
-}
-
-#[cfg(unix)]
-fn path_file_identity(_path: &Path, metadata: &Metadata) -> Result<(u128, u128)> {
-    use std::os::unix::fs::MetadataExt;
-    Ok((metadata.dev() as u128, metadata.ino() as u128))
-}
-
-#[cfg(target_os = "motor")]
-fn path_file_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
-    let path = path.to_str().ok_or_else(|| {
-        Error::failure(format!(
-            "repository path is not UTF-8: `{}`",
-            path.display()
-        ))
-    })?;
-    let attr = moto_rt::fs::stat(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect Motor file identity `{path}`: {error}"
-        ))
-    })?;
-    Ok((0, attr.entry_id))
-}
-
-#[cfg(not(any(unix, target_os = "motor")))]
-fn path_file_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
-    Err(Error::failure(format!(
-        "repository file identity is unsupported on this platform: `{}`",
-        path.display()
-    )))
-}
-
-#[cfg(unix)]
-fn open_file_identity(_file: &File, metadata: &Metadata) -> Result<(u128, u128)> {
-    path_file_identity(Path::new(""), metadata)
-}
-
-#[cfg(target_os = "motor")]
-fn open_file_identity(file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
-    use std::os::fd::AsRawFd;
-    let attr = moto_rt::fs::get_file_attr(file.as_raw_fd()).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect open Motor file identity: {error}"
-        ))
-    })?;
-    Ok((0, attr.entry_id))
-}
-
-#[cfg(not(any(unix, target_os = "motor")))]
-fn open_file_identity(_file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
-    Err(Error::failure(
-        "repository file identity is unsupported on this platform",
-    ))
 }
 
 fn require_format_one(path: &Path, document: &Document) -> Result<()> {
@@ -1499,12 +1406,7 @@ fn parse_version(path: &Path, document: &Document, table: &Table, key: &str) -> 
 }
 
 fn validate_package_name(path: &Path, name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.len() > 64
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    if !crate::manifest::valid_package_name(name) {
         return Err(Error::failure(format!(
             "`{}` contains invalid package name `{name}`",
             path.display()

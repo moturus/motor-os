@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path};
 
 use crate::config::PolicyLimits;
 use crate::diagnostic::{Error, Result};
+use crate::fs_check::set_file_mode;
 use crate::source_tree::Limits;
 
 pub(super) fn extract_tree(
@@ -247,41 +248,6 @@ pub(super) fn gix_error(error: impl std::error::Error) -> Error {
         source = error.source();
     }
     Error::failure(message)
-}
-
-fn set_file_mode(_file: &File, _path: &Path, executable: bool) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        _file
-            .set_permissions(fs::Permissions::from_mode(if executable {
-                0o700
-            } else {
-                0o600
-            }))
-            .map_err(|error| {
-                Error::failure(format!(
-                    "failed to set Git file permissions `{}`: {error}",
-                    _path.display()
-                ))
-            })?;
-    }
-    #[cfg(target_os = "motor")]
-    {
-        use std::os::fd::AsRawFd;
-        let permissions = if executable {
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC
-        } else {
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE
-        };
-        moto_rt::fs::set_file_perm(_file.as_raw_fd(), permissions).map_err(|error| {
-            Error::failure(format!(
-                "failed to set Git file permissions `{}`: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

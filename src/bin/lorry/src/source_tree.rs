@@ -5,6 +5,7 @@ use std::path::{Component, Path};
 use std::time::SystemTime;
 
 use crate::diagnostic::{Error, Result};
+use crate::fs_check::{file_identity, path_identity};
 use crate::hash::{Sha256, hex};
 use crate::json::Value;
 
@@ -505,57 +506,6 @@ fn modified(path: &Path, metadata: &Metadata) -> Result<SystemTime> {
             path.display()
         ))
     })
-}
-
-#[cfg(unix)]
-pub(crate) fn path_identity(_path: &Path, metadata: &Metadata) -> Result<(u128, u128)> {
-    use std::os::unix::fs::MetadataExt;
-    Ok((metadata.dev() as u128, metadata.ino() as u128))
-}
-
-#[cfg(target_os = "motor")]
-pub(crate) fn path_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
-    let path = path.to_str().ok_or_else(|| {
-        Error::failure(format!(
-            "source path is not valid UTF-8: `{}`",
-            path.display()
-        ))
-    })?;
-    let attr = moto_rt::fs::stat(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect Motor source identity `{path}`: {error}"
-        ))
-    })?;
-    Ok((0, attr.entry_id))
-}
-
-#[cfg(not(any(unix, target_os = "motor")))]
-pub(crate) fn path_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
-    Err(Error::failure(format!(
-        "source identity is unsupported on this platform: `{}`",
-        path.display()
-    )))
-}
-
-#[cfg(unix)]
-pub(crate) fn file_identity(_file: &File, metadata: &Metadata) -> Result<(u128, u128)> {
-    path_identity(Path::new(""), metadata)
-}
-
-#[cfg(target_os = "motor")]
-pub(crate) fn file_identity(file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
-    use std::os::fd::AsRawFd;
-    let attr = moto_rt::fs::get_file_attr(file.as_raw_fd()).map_err(|error| {
-        Error::failure(format!("failed to inspect open Motor source file: {error}"))
-    })?;
-    Ok((0, attr.entry_id))
-}
-
-#[cfg(not(any(unix, target_os = "motor")))]
-pub(crate) fn file_identity(_file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
-    Err(Error::failure(
-        "source identity is unsupported on this platform",
-    ))
 }
 
 #[cfg(unix)]

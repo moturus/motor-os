@@ -9,6 +9,7 @@ use semver::Version;
 use crate::atomic::AtomicDirectory;
 use crate::config::PolicyLimits;
 use crate::diagnostic::{Error, Result};
+use crate::fs_check::{require_real_directory, set_directory_private, set_file_mode};
 use crate::hash::{Sha256, hex};
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 
@@ -881,7 +882,7 @@ fn join_portable(root: &Path, relative: &str) -> PathBuf {
 
 fn ensure_real_directories(root: &Path, relative: &str) -> Result<()> {
     let mut current = root.to_owned();
-    require_real_directory(&current)?;
+    require_real_directory(&current, "archive parent")?;
     if relative.is_empty() {
         return Ok(());
     }
@@ -890,7 +891,7 @@ fn ensure_real_directories(root: &Path, relative: &str) -> Result<()> {
         match fs::create_dir(&current) {
             Ok(()) => set_directory_private(&current)?,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                require_real_directory(&current)?;
+                require_real_directory(&current, "archive parent")?;
             }
             Err(error) => {
                 return Err(Error::failure(format!(
@@ -906,8 +907,10 @@ fn ensure_real_directories(root: &Path, relative: &str) -> Result<()> {
 fn create_or_validate_directory(path: &Path, relative: &str) -> Result<()> {
     match fs::create_dir(path) {
         Ok(()) => set_directory_private(path),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => require_real_directory(path)
-            .map_err(|_| Error::failure(format!("conflicting archive entry `{relative}`"))),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            require_real_directory(path, "archive parent")
+                .map_err(|_| Error::failure(format!("conflicting archive entry `{relative}`")))
+        }
         Err(error) => Err(Error::failure(format!(
             "failed to create archive directory `{}`: {error}",
             path.display()
@@ -916,29 +919,13 @@ fn create_or_validate_directory(path: &Path, relative: &str) -> Result<()> {
 }
 
 fn revalidate_parent_chain(root: &Path, relative: &str) -> Result<()> {
-    require_real_directory(root)?;
+    require_real_directory(root, "archive parent")?;
     let mut current = root.to_owned();
     if let Some((parent, _)) = relative.rsplit_once('/') {
         for component in parent.split('/') {
             current.push(component);
-            require_real_directory(&current)?;
+            require_real_directory(&current, "archive parent")?;
         }
-    }
-    Ok(())
-}
-
-fn require_real_directory(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect archive directory `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::failure(format!(
-            "archive parent `{}` is not a real directory",
-            path.display()
-        )));
     }
     Ok(())
 }
@@ -978,71 +965,6 @@ fn read_exact_context(input: &mut impl Read, buffer: &mut [u8], context: &str) -
 
 fn is_zero_block(block: &[u8; BLOCK_BYTES]) -> bool {
     block.iter().all(|byte| *byte == 0)
-}
-
-fn set_directory_private(_path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(_path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            Error::failure(format!(
-                "failed to set archive directory permissions `{}`: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    #[cfg(target_os = "motor")]
-    {
-        let path = _path.to_str().ok_or_else(|| {
-            Error::failure(format!(
-                "archive directory path is not UTF-8: `{}`",
-                _path.display()
-            ))
-        })?;
-        moto_rt::fs::set_perm(
-            path,
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC,
-        )
-        .map_err(|error| {
-            Error::failure(format!(
-                "failed to set archive directory permissions `{}`: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    Ok(())
-}
-
-fn set_file_mode(_file: &File, _path: &Path, executable: bool) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = if executable { 0o700 } else { 0o600 };
-        _file
-            .set_permissions(fs::Permissions::from_mode(mode))
-            .map_err(|error| {
-                Error::failure(format!(
-                    "failed to set extracted file permissions `{}`: {error}",
-                    _path.display()
-                ))
-            })?;
-    }
-    #[cfg(target_os = "motor")]
-    {
-        use std::os::fd::AsRawFd;
-        let permissions = if executable {
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC
-        } else {
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE
-        };
-        moto_rt::fs::set_file_perm(_file.as_raw_fd(), permissions).map_err(|error| {
-            Error::failure(format!(
-                "failed to set extracted file permissions `{}`: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

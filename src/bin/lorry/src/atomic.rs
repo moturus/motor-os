@@ -100,7 +100,7 @@ impl AtomicFile {
             }
             match options.open(&path) {
                 Ok(file) => {
-                    if let Err(error) = set_private_file(&file, &path) {
+                    if let Err(error) = crate::fs_check::set_file_mode(&file, &path, false) {
                         drop(file);
                         let _ = fs::remove_file(&path);
                         return Err(error);
@@ -408,7 +408,7 @@ impl AtomicDirectory {
             let path = parent.join(next_name());
             match create_private_directory(&path) {
                 Ok(()) => {
-                    set_private(&path)?;
+                    crate::fs_check::set_directory_private(&path)?;
                     return Ok(Self {
                         path,
                         committed: false,
@@ -630,67 +630,6 @@ fn unique_suffix() -> String {
         .map_or(0, |duration| duration.as_nanos());
     let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
     format!("{:x}-{time:x}-{sequence:x}", std::process::id())
-}
-
-fn set_private(_path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(_path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            Error::failure(format!(
-                "failed to make staging `{}` private: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    #[cfg(target_os = "motor")]
-    {
-        let path = _path.to_str().ok_or_else(|| {
-            Error::failure(format!(
-                "private staging path is not UTF-8: `{}`",
-                _path.display()
-            ))
-        })?;
-        moto_rt::fs::set_perm(
-            path,
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC,
-        )
-        .map_err(|error| {
-            Error::failure(format!(
-                "failed to make staging `{}` private: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    Ok(())
-}
-
-pub(crate) fn set_private_file(_file: &File, _path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(_path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-            Error::failure(format!(
-                "failed to make staged file `{}` private: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    #[cfg(target_os = "motor")]
-    {
-        use std::os::fd::AsRawFd;
-        moto_rt::fs::set_file_perm(
-            _file.as_raw_fd(),
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE,
-        )
-        .map_err(|error| {
-            Error::failure(format!(
-                "failed to make staged file `{}` private: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

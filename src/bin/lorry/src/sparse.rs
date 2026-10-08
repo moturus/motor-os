@@ -455,17 +455,7 @@ fn valid_publish_time(value: &str) -> bool {
 }
 
 fn validate_package_name(path: &Path, name: &str) -> Result<()> {
-    let valid = !name.is_empty()
-        && name.len() <= 64
-        && name
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic())
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        && name.bytes().any(|byte| byte.is_ascii_alphabetic());
-    if valid {
+    if crate::manifest::valid_package_name(name) {
         Ok(())
     } else {
         Err(invalid(
