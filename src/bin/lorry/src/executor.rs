@@ -1628,8 +1628,12 @@ fn sandbox_inputs(
     options: &Options<'_>,
     dependency_directories: impl IntoIterator<Item = PathBuf>,
 ) -> Vec<PathBuf> {
+    // A member's script reads the workspace through its own grant. Member
+    // roots stay out of every script's inputs: the root package's directory
+    // can be the whole workspace, including `target/`.
     let mut paths = manifests
         .values()
+        .filter(|manifest| !manifest.editable)
         .map(|manifest| manifest.root.clone())
         .collect::<Vec<_>>();
     paths.extend(dependency_directories);
