@@ -17,6 +17,10 @@ use crate::toolchain::Toolchain;
 use crate::validation::ValidationMode;
 
 pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
+    crate::cargo_registry::with_fallback(cli, |cli| execute_with(cli, options))
+}
+
+fn execute_with(cli: &Cli, options: &TreeOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let mut workspace = SourceWorkspace::load(

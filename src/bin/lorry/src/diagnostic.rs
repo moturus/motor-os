@@ -16,6 +16,8 @@ pub struct Error {
     message: String,
     help: Option<String>,
     location: Option<(PathBuf, usize)>,
+    // Cargo's cache lacks what the command needs; see `cargo_registry`.
+    cargo_cache_miss: bool,
 }
 
 impl Error {
@@ -25,6 +27,7 @@ impl Error {
             message: message.into(),
             help: Some(help.into()),
             location: None,
+            cargo_cache_miss: false,
         }
     }
 
@@ -34,6 +37,7 @@ impl Error {
             message: message.into(),
             help: None,
             location: None,
+            cargo_cache_miss: false,
         }
     }
 
@@ -43,6 +47,7 @@ impl Error {
             message: message.into(),
             help: None,
             location: None,
+            cargo_cache_miss: false,
         }
     }
 
@@ -57,12 +62,23 @@ impl Error {
             message: message.to_string(),
             help: Some(help.into()),
             location: Some((path.to_owned(), line)),
+            cargo_cache_miss: false,
         }
     }
 
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
         self
+    }
+
+    /// Marks a failure that only means Cargo's cache lacks something.
+    pub(crate) fn cargo_cache_miss(mut self) -> Self {
+        self.cargo_cache_miss = true;
+        self
+    }
+
+    pub(crate) fn is_cargo_cache_miss(&self) -> bool {
+        self.cargo_cache_miss
     }
 
     pub(crate) fn with_context(mut self, context: &str) -> Self {

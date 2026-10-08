@@ -29,7 +29,7 @@ const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 
 pub fn execute(cli: &Cli) -> Result<i32> {
     let mut reported = false;
-    let result = execute_inner(cli, &mut reported);
+    let result = crate::cargo_registry::with_fallback(cli, |cli| execute_inner(cli, &mut reported));
     if cli.message_format() != MessageFormat::Human && !reported {
         let finished = crate::check_message::build_finished(matches!(&result, Ok(0)));
         return match (result, finished) {

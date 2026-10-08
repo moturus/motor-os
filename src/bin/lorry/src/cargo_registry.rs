@@ -7,7 +7,7 @@ use semver::Version;
 
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::AtomicFile;
-use crate::cli::Cli;
+use crate::cli::{Cli, Verbosity};
 use crate::config::{Config, PolicyLimits};
 use crate::diagnostic::{Error, Result};
 use crate::hash::{decode_hex, hex};
@@ -47,6 +47,23 @@ pub(crate) fn selected(cli: &Cli, config: &Config) -> bool {
         .unwrap_or(false)
 }
 
+/// Runs a command that may read Cargo's cache. Unless the command line asked
+/// for that cache, a command that finds it lacking runs again with Lorry
+/// repositories only, as if the mode were off.
+pub(crate) fn with_fallback<T>(cli: &Cli, mut run: impl FnMut(&Cli) -> Result<T>) -> Result<T> {
+    match run(cli) {
+        Err(error) if cli.use_cargo_registry.is_none() && error.is_cargo_cache_miss() => {
+            if cli.verbosity == Verbosity::Verbose {
+                eprintln!("Using Lorry repositories because Cargo's cache cannot be used: {error}");
+            }
+            let mut fallback = cli.clone();
+            fallback.use_cargo_registry = Some(false);
+            run(&fallback)
+        }
+        result => result,
+    }
+}
+
 impl CargoRegistry {
     pub fn discover_with_validation(
         staging_parent: &Path,
@@ -64,6 +81,7 @@ impl CargoRegistry {
                     Error::failure(
                         "--use-cargo-registry needs CARGO_HOME or HOME to locate Cargo's cache",
                     )
+                    .cargo_cache_miss()
                 })?,
         };
         let home = if home.is_absolute() {
@@ -160,7 +178,8 @@ impl CargoRegistry {
                 .join(", ");
             return Err(Error::failure(format!(
                 "Cargo registry package `{name} {version}` is ambiguous across: {paths}"
-            )));
+            ))
+            .cargo_cache_miss());
         }
         let Some((registry, source, archive)) = candidates.pop() else {
             let detail = partial
@@ -182,7 +201,8 @@ impl CargoRegistry {
             return Err(Error::failure(format!(
                 "Cargo registry cache does not contain both the archive and extracted source for `{name} {version}`{detail}"
             ))
-            .with_help("run Cargo for this locked package first; Lorry does not fetch or repair Cargo's cache"));
+            .with_help("run Cargo for this locked package first; Lorry does not fetch or repair Cargo's cache")
+            .cargo_cache_miss());
         };
 
         verify_marker(&source.join(".cargo-ok"))?;
@@ -584,7 +604,16 @@ fn require_real_file(path: &Path, description: &str) -> Result<()> {
     Ok(())
 }
 
+/// An absent or unknown marker means Cargo has not finished extracting the
+/// package in a form Lorry reads.
 fn verify_marker(path: &Path) -> Result<()> {
+    if !entry_exists(path)? {
+        return Err(Error::failure(format!(
+            "Cargo registry extraction marker `{}` is missing",
+            path.display()
+        ))
+        .cargo_cache_miss());
+    }
     require_real_file(path, "Cargo registry extraction marker")?;
     let bytes = fs::read(path).map_err(|error| {
         Error::failure(format!(
@@ -596,7 +625,8 @@ fn verify_marker(path: &Path) -> Result<()> {
         return Err(Error::failure(format!(
             "Cargo registry extraction marker `{}` is invalid",
             path.display()
-        )));
+        ))
+        .cargo_cache_miss());
     }
     Ok(())
 }
@@ -618,6 +648,40 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn only_a_default_mode_cache_miss_falls_back_to_lorry_repositories() {
+        let parse = |arguments: &[&str]| {
+            Cli::parse(arguments.iter().map(|value| (*value).to_owned())).unwrap()
+        };
+        let miss = || Error::failure("Cargo's cache lacks a package").cargo_cache_miss();
+        let mut modes = Vec::new();
+        let result = with_fallback(&parse(&["build"]), |cli| {
+            modes.push(cli.use_cargo_registry);
+            if cli.use_cargo_registry.is_none() {
+                Err(miss())
+            } else {
+                Ok(0)
+            }
+        });
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(modes, [None, Some(false)]);
+
+        let mut runs = 0;
+        let result = with_fallback(&parse(&["--use-cargo-registry", "build"]), |_| {
+            runs += 1;
+            Err::<i32, _>(miss())
+        });
+        assert!(result.unwrap_err().is_cargo_cache_miss());
+        assert_eq!(runs, 1);
+
+        let result = with_fallback(&parse(&["build"]), |_| {
+            runs += 1;
+            Err::<i32, _>(Error::failure("Cargo archive and source differ"))
+        });
+        assert!(!result.unwrap_err().is_cargo_cache_miss());
+        assert_eq!(runs, 2);
+    }
 
     struct Fixture(PathBuf);
 
