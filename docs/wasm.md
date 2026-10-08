@@ -24,7 +24,15 @@ yet.
 | `/devtools/www/wasm.html` | This guide in the image's HTML documentation. |
 
 The smaller `wasm.img` also includes the three tools and their configuration
-directories. The example and HTML documentation are part of `dev.img`.
+directories.
+
+`wasmtime-rt` runs as role None (`MOTOR_OS_CAPS=0`, `0x100`, `0x200` or
+`0x300`) and needs `--allow-precompiled`. Each linear memory is limited to
+96 MiB, and a process to four memories reserving 128 MiB in total; `-W
+max-memory-size` and `-W max-memories` can only lower these. A store defaults
+to 64 instances, 16 tables and 32,768 table elements, which `-W max-instances`,
+`-W max-tables` and `-W max-table-elements` override. `-W timeout=DURATION`
+interrupts a guest compiled with epoch interruption. The example and HTML documentation are part of `dev.img`.
 
 ## Run the example
 
