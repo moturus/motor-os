@@ -258,6 +258,31 @@ cmp "$WORKSPACE/target/lorry/$MOTOR_TARGET/release/app" \
 
 compare_shared_workspace "$MOTOR_TARGET" "$MOTOR_RUSTC" Motor
 
+echo "== Comparing a custom build-script path with Cargo =="
+# Cargo names the script `build-script-<file stem>`, and that name feeds the
+# unit hashes in every artifact that depends on the script.
+mkdir -p "$WORK/scripted/build" "$WORK/scripted/src"
+printf '[package]\nname = "scripted"\nversion = "0.1.0"\nedition = "2024"\nbuild = "build/main.rs"\n' \
+    >"$WORK/scripted/Cargo.toml"
+printf 'config-version = 1\n[policy.rules.scripted]\naction = "allow"\nname = "scripted"\nsource = "path"\nallow-build-script = true\n' \
+    >"$WORK/scripted/lorry.toml"
+printf 'fn main() { println!("cargo:rustc-env=FROM=script"); }\n' >"$WORK/scripted/build/main.rs"
+printf 'fn main() { println!("{}", env!("FROM")); }\n' >"$WORK/scripted/src/main.rs"
+(
+    cd "$WORK/scripted"
+    RUSTC="$NATIVE_RUSTC" "$CARGO" generate-lockfile --offline
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        RUSTC="$NATIVE_RUSTC" "$LORRY" build --release
+    RUSTC="$NATIVE_RUSTC" "$CARGO" build --locked --offline --release \
+        --target-dir "$WORK/cargo-scripted"
+    [ "$(HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" RUSTC="$NATIVE_RUSTC" \
+        "$LORRY" metadata --format-version 1 --no-deps |
+        grep -o '"name":"build-script-[a-z]*"')" = '"name":"build-script-main"' ] ||
+        fail "metadata does not name the build script after its file"
+)
+cmp "$WORK/scripted/target/lorry/release/scripted" "$WORK/cargo-scripted/release/scripted" ||
+    fail "executable with a custom build-script path differs from Cargo"
+
 echo "== Cleaning the package-independent global Lorry cache =="
 [ -d "$GLOBAL_CACHE/v1/units/sha256" ] ||
     fail "configured global cache was not created"

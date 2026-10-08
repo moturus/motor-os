@@ -1951,6 +1951,7 @@ pub fn plan_dependency_units_with_remaps(
                     })
             })
             .collect::<Result<Vec<_>>>()?;
+        let build_script_name = manifest.build_script_name();
         let (target_name, target_kind) = match key.kind {
             UnitKind::Library | UnitKind::ProcMacro => {
                 let library = manifest.library.as_ref().ok_or_else(|| {
@@ -2002,9 +2003,12 @@ pub fn plan_dependency_units_with_remaps(
                     CargoTargetKind::Bench
                 },
             ),
-            UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
-                ("build-script-build", CargoTargetKind::CustomBuild)
-            }
+            UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => (
+                build_script_name
+                    .as_deref()
+                    .ok_or_else(|| Error::failure("build-script unit has no build script"))?,
+                CargoTargetKind::CustomBuild,
+            ),
         };
         let identity = cargo_unit_identity(&CargoUnitIdentityInput {
             package_name: &manifest.name,

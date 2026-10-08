@@ -198,7 +198,12 @@ pub fn dependency_rustc_invocation_with_build_output(
         ))
     })?;
     let output_dir = unit_output_directory(planned, options);
-    let binary_crate_name = key.target.as_deref().map(|name| name.replace('-', "_"));
+    let binary_crate_name = if key.kind == UnitKind::BuildScriptCompile {
+        manifest.build_script_name()
+    } else {
+        key.target.clone()
+    }
+    .map(|name| name.replace('-', "_"));
     let (crate_name, source, crate_type, mut emit, output_dir) = match key.kind {
         UnitKind::Library | UnitKind::ProcMacro => {
             let library = manifest.library.as_ref().ok_or_else(|| {
@@ -263,19 +268,16 @@ pub fn dependency_rustc_invocation_with_build_output(
             )
         }
         UnitKind::BuildScriptCompile => {
-            let source = manifest.build_script.as_deref().ok_or_else(|| {
-                Error::failure(format!(
+            let (Some(source), Some(name)) = (
+                manifest.build_script.as_deref(),
+                binary_crate_name.as_deref(),
+            ) else {
+                return Err(Error::failure(format!(
                     "dependency `{} {}` has no build script",
                     key.package.name, key.package.version
-                ))
-            })?;
-            (
-                "build_script_build",
-                source,
-                "bin",
-                "dep-info,link",
-                output_dir,
-            )
+                )));
+            };
+            (name, source, "bin", "dep-info,link", output_dir)
         }
         UnitKind::BuildScriptRun => unreachable!(),
     };
@@ -860,7 +862,7 @@ fn expected_output(
         },
         UnitKind::BuildScriptCompile => RustcOutput::BuildScript {
             executable: output_dir.join(&stem),
-            unhashed_executable: output_dir.join("build-script-build"),
+            unhashed_executable: output_dir.join(manifest.build_script_name().unwrap_or_default()),
             dep_info: output_dir.join(format!("{stem}.d")),
         },
         UnitKind::BuildScriptRun => unreachable!(),

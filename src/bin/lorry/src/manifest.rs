@@ -295,6 +295,12 @@ pub struct LockedPackage {
 }
 
 impl Manifest {
+    /// Cargo's target name for the build script: `build-script-<file stem>`.
+    pub fn build_script_name(&self) -> Option<String> {
+        let stem = self.build_script.as_ref()?.file_stem()?.to_str()?;
+        Some(format!("build-script-{stem}"))
+    }
+
     pub fn report_warnings<'a>(
         manifests: impl IntoIterator<Item = &'a Self>,
         verbosity: crate::cli::Verbosity,
@@ -1086,6 +1092,14 @@ fn parse_build_script(
         Some(item) if item.as_str().is_some() => {
             let value = item.as_str().unwrap();
             validate_relative_path(path, document.line_of_item(item), "package.build", value)?;
+            if Path::new(value).file_stem().is_none() {
+                return Err(Error::at(
+                    path,
+                    document.line_of_item(item),
+                    "`package.build` must name a file",
+                    "use the path of the build script's source file",
+                ));
+            }
             Ok(Some(root.join(value)))
         }
         Some(item) => Err(type_error(

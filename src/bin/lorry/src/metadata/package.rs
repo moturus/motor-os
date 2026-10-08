@@ -179,9 +179,10 @@ pub(crate) fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::
             doc: target.doc,
         });
     }
-    if let Some(build_script) = &manifest.build_script {
+    if let (Some(build_script), Some(name)) = (&manifest.build_script, manifest.build_script_name())
+    {
         targets.push(wire::Target {
-            name: "build-script-build".to_owned(),
+            name,
             kind: vec!["custom-build".to_owned()],
             crate_types: vec!["bin".to_owned()],
             required_features: None,
