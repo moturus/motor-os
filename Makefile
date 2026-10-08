@@ -353,7 +353,7 @@ dev.img: assembly-resolved boot core sys user-dev
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS dev image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2"
 
-# Release wasm add-ons are prepared by src/build-motor-os.sh --javy-only.
+# Release wasm add-ons are prepared by src/build-motor-os.sh --javy-only --wasmtime-only.
 wasm.img: assembly-resolved boot core sys user
 	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \

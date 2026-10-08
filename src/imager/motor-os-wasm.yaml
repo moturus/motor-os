@@ -31,6 +31,7 @@ directories:
   - "/devtools/bin"
   - "/devtools/cfg"
   - "/devtools/cfg/javy"
+  - "/devtools/cfg/wasmtime"
 static_dirs:
   - "img_files/motor-os-base"
   - "img_files/motor-os"
@@ -38,10 +39,12 @@ assembly_dirs:
   - "libc"
   - "rg"
   - "javy"
+  - "wasmtime"
 assembly_required_executables:
   - "rg/system/bin/rg"
   - "javy/devtools/bin/javy"
   - "javy/devtools/bin/wasmi"
+  - "wasmtime/devtools/bin/wasmtime-rt"
 filesystem: "motor-fs"
 img_name: "motor-os-wasm.qcow2"
 image_format: "qcow2"

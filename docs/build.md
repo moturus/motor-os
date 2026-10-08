@@ -38,27 +38,28 @@ toolchains/      immutable key-qualified host toolchain prefixes
 assemblies/      keyed C sysroots, native tools, and generated image roots
 ripgrep/ helix/ sed/ lua-<version>/
                  sources of the userspace add-ons, built last
-javy/ wasmi/ wasmtime/
-                 published Motor branches for the Javy/Wasmi add-on
+javy/ wasmi/ wasmtime/ target-lexicon/ tokio/ mio/
+                 published Motor branches for the Javy/Wasmi and Wasmtime add-ons
 ```
 
 Re-running `src/build-motor-os.sh` validates and reuses a complete matching
 prefix or assembly. It does not broadly delete older keyed outputs.
 
-With an installed assembly, build just Javy/Wasmi and their images with:
+With an installed assembly, build just the wasm add-ons and their images with:
 
 ```sh
-src/build-motor-os.sh --javy-only
+src/build-motor-os.sh --javy-only --wasmtime-only
 make dev.img wasm.img BUILD=release -j"$(nproc)"
 ```
 
-Both images install `/devtools/bin/javy` and `/devtools/bin/wasmi`, with support
-files under `/devtools/cfg/javy`. See [WebAssembly on Motor OS](wasm.md) for the
-installed files and the developer image's example under `/devtools/src/wasm`.
+Both images install `/devtools/bin/javy`, `/devtools/bin/wasmi` and the
+runtime-only `/devtools/bin/wasmtime-rt`, with support files under
+`/devtools/cfg/javy` and `/devtools/cfg/wasmtime`. See
+[WebAssembly on Motor OS](wasm.md) for the installed files and the developer
+image's example under `/devtools/src/wasm`.
 
-The wasm image has a 1 GiB data partition and
-does not include the native development toolchain. Wasmtime installation follows
-in later slices; the current wasm image delivers Javy/Wasmi.
+The wasm image has a 1 GiB data partition and does not include the native
+development toolchain. The full Wasmtime compiler follows in a later milestone.
 
 On Motor, compile into a writable directory and execute with explicit masks:
 

@@ -1,9 +1,12 @@
 # WebAssembly on Motor OS
 
 The developer image (`make dev.img BUILD=release`, producing
-`motor-os-dev.qcow2`) includes Javy 9.1.0 and Wasmi 1.1.0. Javy compiles
-JavaScript into a WebAssembly module containing the QuickJS runtime. Wasmi
-interprets that module using the Motor port's WASI Preview 1 support.
+`motor-os-dev.qcow2`) includes Javy 9.1.0, Wasmi 1.1.0 and a runtime-only
+Wasmtime 48.0.1. Javy compiles JavaScript into a WebAssembly module containing
+the QuickJS runtime. Wasmi interprets that module using the Motor port's WASI
+Preview 1 support. The runtime-only Wasmtime executes precompiled Pulley
+artifacts; it contains no compiler, and on-Motor compilation is not installed
+yet.
 
 ## Installed files
 
@@ -15,11 +18,13 @@ interprets that module using the Motor port's WASI Preview 1 support.
 | `/devtools/cfg/javy/typescript-workload.js` | TypeScript 5.9.3 plus a transpilation test workload. |
 | `/devtools/cfg/javy/typescript-LICENSE.txt`, `typescript-NOTICES.txt` | License and third-party notices for the bundled TypeScript code. |
 | `/devtools/cfg/javy/sources.txt`, `SHA256SUMS` | Build provenance, source revisions, and staged-file checksums. |
+| `/devtools/bin/wasmtime-rt` | Runtime-only Wasmtime: precompiled Pulley execution with WASI. |
+| `/devtools/cfg/wasmtime/sources.txt`, `SHA256SUMS` | Wasmtime build provenance and checksums. |
 | `/devtools/src/wasm/` | `hello.js` and a README with compile/run instructions. |
 | `/devtools/www/wasm.html` | This guide in the image's HTML documentation. |
 
-The smaller `wasm.img` also includes the two tools and their configuration
-directory. The example and HTML documentation are part of `dev.img`.
+The smaller `wasm.img` also includes the three tools and their configuration
+directories. The example and HTML documentation are part of `dev.img`.
 
 ## Run the example
 

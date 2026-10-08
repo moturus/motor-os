@@ -159,34 +159,48 @@ if (ensure_addon test source-3 "$overlay" bin/tool build_nothing) 2>/dev/null; t
 	fail "an add-on build that staged nothing was accepted"
 fi
 
-# Javy builds with the orchestrator's selection, managed or authoring, and the
-# selection is part of the add-on's source identity.
+# The wasm add-ons build with the orchestrator's selection, managed or
+# authoring, and the selection is part of each add-on's source identity.
+case "$(declare -f build_addons)" in
+	*'build_javy_addon'*'build_wasmtime_addon'*) ;;
+	*) fail "Javy/Wasmi and Wasmtime are not both add-ons" ;;
+esac
 javy_root="$temporary/javy"
 javy_log="$javy_root/toolchains.log"
-mkdir -p "$javy_root/motorh/javy"
-cat > "$javy_root/motorh/javy/motor-build.sh" <<'EOF'
+mkdir -p "$javy_root/motorh/javy" "$javy_root/motorh/wasmtime/motor-runtime"
+for tool in javy wasmtime; do
+	cat > "$javy_root/motorh/$tool/motor-build.sh" <<'EOF'
 #!/usr/bin/env bash
-printf 'build %s\n' "$RUSTUP_TOOLCHAIN" >> "$JAVY_TOOLCHAIN_LOG"
+printf 'build %s %s\n' "$RUSTUP_TOOLCHAIN" "$*" >> "$JAVY_TOOLCHAIN_LOG"
 EOF
-chmod +x "$javy_root/motorh/javy/motor-build.sh"
+	chmod +x "$javy_root/motorh/$tool/motor-build.sh"
+done
 for selection in managed-probe authoring-probe; do
 	(
 		export RUSTUP_TOOLCHAIN="$selection" JAVY_TOOLCHAIN_LOG="$javy_log"
 		MOTORH="$javy_root/motorh"
 		ASSEMBLY_BUILD_ROOT="$javy_root/build"
 		JAVY_IMG="$javy_root/images/javy"
+		WASMTIME_IMG="$javy_root/images/wasmtime"
 		JAVY_PLUGIN_SHA=plugin JAVY_TYPESCRIPT_SHA=typescript JAVY_SOURCE_MANIFEST=manifest
+		WASMTIME_SOURCE_MANIFEST=manifest
 		javy_download() { : > "$3"; }
-		cargo() { printf 'fetch %s\n' "$RUSTUP_TOOLCHAIN" >> "$JAVY_TOOLCHAIN_LOG"; }
+		cargo() { printf 'fetch %s %s\n' "$RUSTUP_TOOLCHAIN" "${PWD##*/}" >> "$JAVY_TOOLCHAIN_LOG"; }
 		gzip() { :; }
 		tar() { :; }
 		install() { :; }
 		sha256sum() { cat > /dev/null; }
 		build_javy
-	) < /dev/null > /dev/null 2>&1 || fail "the Javy stage failed with selection $selection"
+		build_wasmtime
+	) < /dev/null > /dev/null 2>&1 || fail "a wasm add-on stage failed with selection $selection"
 done
-[ "$(cat "$javy_log")" = $'fetch managed-probe\nbuild managed-probe\nfetch authoring-probe\nbuild authoring-probe' ] ||
-	fail "Javy did not fetch and build with the selected toolchain"
+expected=""
+for selection in managed-probe authoring-probe; do
+	expected+="fetch $selection javy"$'\n'"build $selection "$'\n'
+	expected+="fetch $selection motor-runtime"$'\n'"build $selection runtime"$'\n'
+done
+[ "$(cat "$javy_log")"$'\n' = "$expected" ] ||
+	fail "the wasm add-ons did not fetch and build with the selected toolchain"
 javy_manifest() (
 	RUSTUP_TOOLCHAIN="$1"
 	rustc() { printf 'rustc for %s\n' "$RUSTUP_TOOLCHAIN"; }

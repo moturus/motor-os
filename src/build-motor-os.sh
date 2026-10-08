@@ -36,7 +36,7 @@ trap 'die "failed at line $LINENO"' ERR
 usage() {
 	cat << 'EOF'
 Usage: src/build-motor-os.sh [--source-mode managed]
-       src/build-motor-os.sh --javy-only
+       src/build-motor-os.sh [--javy-only] [--wasmtime-only]
        src/build-motor-os.sh --source-mode authoring \
          --rust-source /absolute/path/to/rust --authoring-base FULL_COMMIT
 
@@ -50,11 +50,13 @@ Build the complete Motor OS release environment and all four images, including:
   - uutils sed as /devtools/bin/sed in the development image;
   - native rust-analyzer and matching rust-src in the development image;
   - Javy and Wasmi in the development and small wasm images;
+  - runtime-only Wasmtime as /devtools/bin/wasmtime-rt in both of those images;
   - all standard and dev-image Motor OS binaries;
   - base, standard, dev, and wasm images under vm_images/release.
 
---javy-only builds the Javy/Wasmi add-on with the selected installed assembly;
-it skips toolchain provisioning and image construction.
+--javy-only and --wasmtime-only build the Javy/Wasmi and runtime-only Wasmtime
+add-ons with the selected installed assembly; they skip toolchain provisioning
+and image construction.
 
 Environment:
   MOTORH  Development root for sibling checkouts and build trees.
@@ -75,12 +77,14 @@ EOF
 parse_options() {
 	SOURCE_MODE=managed
 	JAVY_ONLY=false
+	WASMTIME_ONLY=false
 	RUST_SOURCE=
 	AUTHORING_BASE=
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			-h|--help) usage; return 2 ;;
 			--javy-only) JAVY_ONLY=true; shift ;;
+			--wasmtime-only) WASMTIME_ONLY=true; shift ;;
 			--source-mode) [ "$#" -ge 2 ] || die "--source-mode needs a value"; SOURCE_MODE="$2"; shift 2 ;;
 			--rust-source) [ "$#" -ge 2 ] || die "--rust-source needs a value"; RUST_SOURCE="$2"; shift 2 ;;
 			--authoring-base) [ "$#" -ge 2 ] || die "--authoring-base needs a value"; AUTHORING_BASE="$2"; shift 2 ;;
@@ -121,6 +125,7 @@ MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/toolchain-rust-analyzer.sh"
 . "$SCRIPT_DIR/patches/crates.sh"
 . "$SCRIPT_DIR/build-javy.sh"
+. "$SCRIPT_DIR/build-wasmtime.sh"
 toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
 
 MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
@@ -877,6 +882,7 @@ build_addons() {
 	ensure_addon sed "$(git -C "$SED" rev-parse HEAD)" \
 		"$SED_IMG" devtools/bin/sed build_sed
 	build_javy_addon
+	build_wasmtime_addon
 }
 
 build_helix() {
@@ -925,8 +931,9 @@ main() {
 		[ "$parse_status" -eq 2 ] && return 0
 		return "$parse_status"
 	}
-	if [ "$JAVY_ONLY" = true ]; then
-		[ "$SOURCE_MODE" = managed ] || die "--javy-only uses the selected installed toolchain"
+	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ]; then
+		[ "$SOURCE_MODE" = managed ] ||
+			die "--javy-only and --wasmtime-only use the selected installed toolchain"
 		# Select once, as ordinary builds do, and pass that choice to every step.
 		if [ -z "${RUSTUP_TOOLCHAIN:-}" ]; then
 			RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$MOTOR/rust-toolchain.toml")"
@@ -936,7 +943,8 @@ main() {
 		ASSEMBLY_IMAGE_ROOT="$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)"
 		ASSEMBLY_ROOT="${ASSEMBLY_IMAGE_ROOT%/images}"
 		ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
-		build_javy_addon
+		[ "$JAVY_ONLY" = false ] || build_javy_addon
+		[ "$WASMTIME_ONLY" = false ] || build_wasmtime_addon
 		return
 	fi
 	log "complete Motor OS build starting"
@@ -1024,6 +1032,7 @@ main() {
 		"$MOTOR/vm_images/release/motor-os-wasm.qcow2"
 		"$JAVY_IMG/devtools/bin/javy"
 		"$JAVY_IMG/devtools/bin/wasmi"
+		"$WASMTIME_IMG/devtools/bin/wasmtime-rt"
 	)
 	local output
 	for output in "${required_outputs[@]}"; do

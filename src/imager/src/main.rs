@@ -988,10 +988,15 @@ mod tests {
                 "lua",
                 "sed",
                 "rust-analyzer",
-                "javy"
+                "javy",
+                "wasmtime"
             ]
         );
-        assert_eq!(config.assembly_required_executables.len(), 13);
+        assert_eq!(config.assembly_required_executables.len(), 14);
+        assert!(config
+            .assembly_required_executables
+            .iter()
+            .any(|path| path == "wasmtime/devtools/bin/wasmtime-rt"));
         assert!(config
             .assembly_required_executables
             .iter()
@@ -1062,6 +1067,41 @@ mod tests {
     }
 
     #[test]
+    fn wasm_image_has_the_wasm_tools_and_no_native_toolchain() {
+        let config: Config = serde_yaml::from_str(include_str!("../motor-os-wasm.yaml")).unwrap();
+
+        assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
+        assert_eq!(config.img_name, "motor-os-wasm.qcow2");
+        assert_eq!(config.image_format, ImageFormat::Qcow2);
+        assert_eq!(config.data_partition_size_mb, 1024);
+        assert_eq!(
+            config.static_dirs,
+            ["img_files/motor-os-base", "img_files/motor-os"]
+        );
+        assert_eq!(config.assembly_dirs, ["libc", "rg", "javy", "wasmtime"]);
+        assert_eq!(
+            config.assembly_required_executables,
+            [
+                "rg/system/bin/rg",
+                "javy/devtools/bin/javy",
+                "javy/devtools/bin/wasmi",
+                "wasmtime/devtools/bin/wasmtime-rt"
+            ]
+        );
+        for path in ["/devtools/cfg/javy", "/devtools/cfg/wasmtime", "/user/tmp"] {
+            assert!(config.directories.iter().any(|candidate| candidate == path));
+        }
+        assert!(config.directories.iter().all(|path| {
+            !path.starts_with("/devtools/llvm") && !path.starts_with("/devtools/rust")
+        }));
+        assert!(config
+            .input_files
+            .iter()
+            .all(|path| !path.starts_with("/devtools") && !path.contains("/tests/")));
+        assert!(config.source_dirs.is_empty());
+    }
+
+    #[test]
     fn base_image_has_no_dns_or_dev_content() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os-base.yaml")).unwrap();
 
@@ -1095,6 +1135,7 @@ mod tests {
             include_str!("../motor-os-base.yaml"),
             include_str!("../motor-os.yaml"),
             include_str!("../motor-os-dev.yaml"),
+            include_str!("../motor-os-wasm.yaml"),
             include_str!("../motor-os-system-tty.yaml"),
             include_str!("../motor-os-vsock-test.yaml"),
         ] {

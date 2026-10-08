@@ -44,6 +44,7 @@ directories:
   - "/devtools/bin"
   - "/devtools/cfg"
   - "/devtools/cfg/javy"
+  - "/devtools/cfg/wasmtime"
   - "/devtools/cfg/llvm"
   - "/devtools/llvm"
   - "/devtools/llvm/bin"
@@ -78,6 +79,7 @@ assembly_dirs:
   - "sed"
   - "rust-analyzer"
   - "javy"
+  - "wasmtime"
 assembly_required_executables:
   - "rg/system/bin/rg"
   - "llvm/devtools/bin/cc"
@@ -92,6 +94,7 @@ assembly_required_executables:
   - "rust-analyzer/devtools/rust/bin/rust-analyzer"
   - "javy/devtools/bin/javy"
   - "javy/devtools/bin/wasmi"
+  - "wasmtime/devtools/bin/wasmtime-rt"
 source_dirs:
   - source: "src/bin/red"
     destination: "/devtools/src/motor-os/bin/red"

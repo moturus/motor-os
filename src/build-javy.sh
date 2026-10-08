@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Javy/Wasmi add-on, sourced by build-motor-os.sh after toolchain selection.
+# Javy/Wasmi add-on and helpers shared with the Wasmtime add-on, sourced by
+# build-motor-os.sh after toolchain selection.
 
 javy_download() {
 	local url="$1" digest="$2" output="$3"
@@ -11,28 +12,37 @@ javy_download() {
 	printf '%s  %s\n' "$digest" "$output" | sha256sum -c -
 }
 
-javy_source_manifest() (
+# The provenance of a wasm add-on, which is also its reuse key: the selected
+# toolchain, each "repo:branch" source head in $1, the checkout files given
+# after it and the native library content.
+wasm_source_manifest() (
+	local sources="$1" spec repo branch
+	shift
 	cd "$MOTOR"
 	printf 'assembly=%s\n' "${ASSEMBLY_ROOT##*/}"
 	printf 'toolchain=%s\n' "$RUSTUP_TOOLCHAIN"
 	printf 'rustc=%s\n' "$(rustc --version)"
 	printf 'target=x86_64-unknown-motor\nprofile=release\n'
-	local spec repo branch
-	for spec in "${JAVY_SOURCES[@]}"; do
+	for spec in $sources; do
 		repo=${spec%%:*}; branch=${spec#*:}
 		printf '%s=https://github.com/moturus/%s.git %s %s\n' \
 			"$repo" "$repo" "$branch" "$(git -C "$MOTORH/$repo" rev-parse HEAD)"
 	done
-	sha256sum rust-toolchain.toml src/build-javy.sh src/tests/javy-smoke/fixtures/typescript-workload.js
+	sha256sum rust-toolchain.toml "$@"
 	# Include local native-library edits as well as their committed contents.
 	git ls-files -z --cached --others --exclude-standard src/sys/lib |
 		LC_ALL=C sort -zu | xargs -0 sha256sum | sha256sum
-	printf 'plugin=%s\ntypescript=%s\n' "$JAVY_PLUGIN_SHA" "$JAVY_TYPESCRIPT_SHA"
 )
 
-# Binaryen's C++ units are memory-hungry: allow 1.5 GiB per job and bound by
-# CPUs. The fork's own default is two jobs.
-javy_jobs() {
+javy_source_manifest() {
+	wasm_source_manifest "${JAVY_SOURCES[*]}" src/build-javy.sh \
+		src/tests/javy-smoke/fixtures/typescript-workload.js
+	printf 'plugin=%s\ntypescript=%s\n' "$JAVY_PLUGIN_SHA" "$JAVY_TYPESCRIPT_SHA"
+}
+
+# Binaryen's C++ units and fat-LTO links are memory-hungry: allow 1.5 GiB per
+# job and bound by CPUs. The forks' own default is two jobs.
+wasm_addon_jobs() {
 	local cpus memory
 	cpus="$(nproc)"
 	memory="$(awk '/^MemAvailable:/ { print int($2 / 1572864) }' /proc/meminfo)"
@@ -55,7 +65,7 @@ build_javy() {
 	(
 		cd "$MOTORH/javy"
 		cargo fetch --locked --target x86_64-unknown-motor
-		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" JOBS="$(javy_jobs)" \
+		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" JOBS="$(wasm_addon_jobs)" \
 			JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" ./motor-build.sh
 	)
 	mkdir -p "$JAVY_IMG/devtools/bin" "$cfg"
