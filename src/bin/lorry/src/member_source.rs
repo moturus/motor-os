@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use gix::glob::pattern::Case;
 use gix::ignore::Search;
@@ -105,7 +106,36 @@ fn collect(manifest: &Manifest, max_files: usize) -> Result<Vec<PathBuf>> {
     }
     files.sort();
     files.dedup();
+    let outputs = own_outputs();
+    if !outputs.is_empty() {
+        files.retain(|path| {
+            fs::metadata(path)
+                .ok()
+                .and_then(|metadata| crate::source_tree::path_identity(path, &metadata).ok())
+                .is_none_or(|identity| !outputs.contains(&identity))
+        });
+    }
     Ok(files)
+}
+
+/// The regular files that Lorry's stdout and stderr write, as in `lorry build
+/// >build.log 2>&1`. They change during a build, so they are never sources.
+fn own_outputs() -> &'static [(u128, u128)] {
+    static OUTPUTS: OnceLock<Vec<(u128, u128)>> = OnceLock::new();
+    OUTPUTS.get_or_init(|| {
+        use std::os::fd::AsFd;
+        [std::io::stdout().as_fd(), std::io::stderr().as_fd()]
+            .into_iter()
+            .filter_map(|output| {
+                let file = fs::File::from(output.try_clone_to_owned().ok()?);
+                let metadata = file.metadata().ok()?;
+                if !metadata.is_file() {
+                    return None;
+                }
+                crate::source_tree::file_identity(&file, &metadata).ok()
+            })
+            .collect()
+    })
 }
 
 fn tracked_repository(root: &Path) -> Result<Option<gix::Repository>> {

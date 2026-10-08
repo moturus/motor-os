@@ -122,6 +122,12 @@ env HOME="$WORK/home" SCRIPT_INPUT=visible "$LORRY" clippy -p a -j1 --message-fo
 SCRIPT_INPUT=visible "$LORRY_TEST_CARGO" clippy -p a -j1 --offline --message-format=json >"$WORK/cargo-clippy.json"
 "$LORRY_TEST_CARGO" run --quiet --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" \
     --locked --offline -- differential-check-messages "$WORK/lorry-clippy.json" "$WORK/cargo-clippy.json"
+# Lorry's own output inside a member is not one of its sources.
+(cd a && env HOME="$WORK/home" "$LORRY" build -j1 >build.log 2>&1) || {
+    cat a/build.log >&2
+    exit 1
+}
+rm a/build.log
 # A grant for a does not expose its caller variable to b.
 sed -i '/\[policy.rules.b\]/,$ {/caller-env/d;}' lorry.toml
 env HOME="$WORK/home" SCRIPT_INPUT=private-marker "$LORRY" build -j1 2>"$WORK/hidden.err"

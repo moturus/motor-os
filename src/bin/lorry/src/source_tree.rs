@@ -508,13 +508,13 @@ fn modified(path: &Path, metadata: &Metadata) -> Result<SystemTime> {
 }
 
 #[cfg(unix)]
-fn path_identity(_path: &Path, metadata: &Metadata) -> Result<(u128, u128)> {
+pub(crate) fn path_identity(_path: &Path, metadata: &Metadata) -> Result<(u128, u128)> {
     use std::os::unix::fs::MetadataExt;
     Ok((metadata.dev() as u128, metadata.ino() as u128))
 }
 
 #[cfg(target_os = "motor")]
-fn path_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
+pub(crate) fn path_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
     let path = path.to_str().ok_or_else(|| {
         Error::failure(format!(
             "source path is not valid UTF-8: `{}`",
@@ -530,7 +530,7 @@ fn path_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
 }
 
 #[cfg(not(any(unix, target_os = "motor")))]
-fn path_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
+pub(crate) fn path_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
     Err(Error::failure(format!(
         "source identity is unsupported on this platform: `{}`",
         path.display()
@@ -538,12 +538,12 @@ fn path_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
 }
 
 #[cfg(unix)]
-fn file_identity(_file: &File, metadata: &Metadata) -> Result<(u128, u128)> {
+pub(crate) fn file_identity(_file: &File, metadata: &Metadata) -> Result<(u128, u128)> {
     path_identity(Path::new(""), metadata)
 }
 
 #[cfg(target_os = "motor")]
-fn file_identity(file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
+pub(crate) fn file_identity(file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
     use std::os::fd::AsRawFd;
     let attr = moto_rt::fs::get_file_attr(file.as_raw_fd()).map_err(|error| {
         Error::failure(format!("failed to inspect open Motor source file: {error}"))
@@ -552,7 +552,7 @@ fn file_identity(file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
 }
 
 #[cfg(not(any(unix, target_os = "motor")))]
-fn file_identity(_file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
+pub(crate) fn file_identity(_file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
     Err(Error::failure(
         "source identity is unsupported on this platform",
     ))
