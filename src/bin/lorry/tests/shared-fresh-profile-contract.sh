@@ -274,4 +274,19 @@ for round in 1 2; do
     done
 done
 
+# Another selection that reinstalls an example invalidates the record of the
+# selection that installed the previous one.
+mkdir -p examples
+printf '[features]\nx = []\n' >>Cargo.toml
+printf 'fn main() { println!("{}", if cfg!(feature = "x") { "x" } else { "plain" }); }\n' \
+    >examples/demo.rs
+lorry build --example demo
+lorry build --examples --features x
+[ "$(target/lorry/debug/examples/demo)" = x ] || fail "the example was not reinstalled"
+lorry build --example demo
+expect_rebuilt "example reinstalled by another selection"
+[ "$(target/lorry/debug/examples/demo)" = plain ] || fail "a stale example was kept"
+lorry build --example demo
+expect_fresh
+
 echo "PASS: shared workspace builds reuse completed profiles and rebuild on each input change"

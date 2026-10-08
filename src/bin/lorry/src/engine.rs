@@ -1957,6 +1957,7 @@ fn check_profile_artifacts(
     Some(StagedArtifacts {
         primary,
         binaries: BTreeMap::new(),
+        examples: Vec::new(),
         dep_info: selected_outputs
             .iter()
             .map(|output| output.dep_info().to_owned())
@@ -2101,6 +2102,7 @@ struct FreshProfile {
     inputs: [u8; 32],
     primary: FreshArtifact,
     binaries: BTreeMap<String, FreshArtifact>,
+    examples: Vec<FreshArtifact>,
     local_roots: Vec<LocalSource>,
     dep_info: Vec<PathBuf>,
     script_inputs: Vec<PathBuf>,
@@ -2381,6 +2383,9 @@ fn restore_fresh_profile(
         && binaries.iter().all(|(name, path)| {
             artifact_identity(path, validation).ok()
                 == record.binaries.get(name).map(|artifact| artifact.sha256)
+        })
+        && record.examples.iter().all(|example| {
+            artifact_identity(&profile.join(&example.path), validation).ok() == Some(example.sha256)
         });
     if !valid {
         return None;
@@ -2441,7 +2446,7 @@ fn write_fresh_profile(
     let primary_sha256 = artifact_sha256(&artifacts.primary)?;
     let environment = tracked_env::encode(&artifacts.environment);
     let mut document = format!(
-        "lorry-fresh-v7\nbase={}\ninputs={}\nscript-inputs={}\nprimary={}\t{}\nmessages={}\nenvironment={}",
+        "lorry-fresh-v8\nbase={}\ninputs={}\nscript-inputs={}\nprimary={}\t{}\nmessages={}\nenvironment={}",
         hex(&base),
         hex(&inputs),
         hex(&script_input_digest(&artifacts.script_inputs)?),
@@ -2456,6 +2461,14 @@ fn write_fresh_profile(
         let relative = relative_profile_path(profile, path)?;
         document.push_str(&format!(
             "binary={name}\t{}\t{}\n",
+            hex(&artifact_sha256(path)?),
+            relative.display()
+        ));
+    }
+    for path in &artifacts.examples {
+        let relative = relative_profile_path(profile, path)?;
+        document.push_str(&format!(
+            "example={}\t{}\n",
             hex(&artifact_sha256(path)?),
             relative.display()
         ));
@@ -2506,7 +2519,7 @@ fn read_fresh_profile(profile: &Path, owner: &str) -> Option<FreshProfile> {
     }
     let document = String::from_utf8(fs::read(path).ok()?).ok()?;
     let mut lines = document.lines();
-    (lines.next()? == "lorry-fresh-v7").then_some(())?;
+    (lines.next()? == "lorry-fresh-v8").then_some(())?;
     let base = decode_hex(lines.next()?.strip_prefix("base=")?).ok()?;
     let inputs = decode_hex(lines.next()?.strip_prefix("inputs=")?).ok()?;
     let script_inputs_sha256 = decode_hex(lines.next()?.strip_prefix("script-inputs=")?).ok()?;
@@ -2531,6 +2544,7 @@ fn read_fresh_profile(profile: &Path, owner: &str) -> Option<FreshProfile> {
         })
         .then_some(())?;
     let mut binaries = BTreeMap::new();
+    let mut examples = Vec::new();
     let mut local_roots = Vec::new();
     let mut dep_info = Vec::new();
     let mut script_inputs = Vec::new();
@@ -2544,6 +2558,8 @@ fn read_fresh_profile(profile: &Path, owner: &str) -> Option<FreshProfile> {
             {
                 return None;
             }
+        } else if let Some(value) = line.strip_prefix("example=") {
+            examples.push(parse_fresh_artifact(value)?);
         } else if let Some(value) = line
             .strip_prefix("local-root=")
             .or_else(|| line.strip_prefix("editable-root="))
@@ -2573,6 +2589,7 @@ fn read_fresh_profile(profile: &Path, owner: &str) -> Option<FreshProfile> {
         inputs,
         primary,
         binaries,
+        examples,
         local_roots,
         dep_info,
         script_inputs,
@@ -2984,6 +3001,8 @@ fn planned_root_library(outputs: &executor::Outputs, key: &UnitKey) -> Result<Ro
 struct StagedArtifacts {
     primary: PathBuf,
     binaries: BTreeMap<String, PathBuf>,
+    /// Example files installed in the profile's `examples` directory.
+    examples: Vec<PathBuf>,
     dep_info: Vec<PathBuf>,
     script_inputs: Vec<PathBuf>,
     messages: Vec<serde_json::Value>,
@@ -3031,7 +3050,8 @@ fn publish_examples(
     selected: &[PackageKey],
     plan: &CompilationPlan,
     outputs: &executor::Outputs,
-) -> Result<()> {
+) -> Result<Vec<PathBuf>> {
+    let mut installed = Vec::new();
     for key in plan.order.iter().filter(|key| {
         selected.contains(&key.package)
             && key.kind == UnitKind::Example
@@ -3061,10 +3081,12 @@ fn publish_examples(
         let directory = profile.join("examples");
         create_published_profile(&directory)?;
         for (name, path) in files {
-            install_primary(path, &directory.join(name), &key.package)?;
+            let destination = directory.join(name);
+            install_primary(path, &destination, &key.package)?;
+            installed.push(destination);
         }
     }
-    Ok(())
+    Ok(installed)
 }
 
 fn compile_root_targets(
@@ -3075,7 +3097,7 @@ fn compile_root_targets(
     outputs: &executor::Outputs,
     library: Option<&RootLibraryArtifact>,
 ) -> Result<StagedArtifacts> {
-    publish_examples(staging, selected, plan, outputs)?;
+    let examples = publish_examples(staging, selected, plan, outputs)?;
     let mut binaries = BTreeMap::new();
     let mut binary_dep_info = Vec::new();
     for key in plan
@@ -3110,6 +3132,7 @@ fn compile_root_targets(
         return Ok(StagedArtifacts {
             primary,
             binaries,
+            examples,
             dep_info,
             script_inputs: Vec::new(),
             messages: Vec::new(),
@@ -3150,6 +3173,7 @@ fn compile_root_targets(
     Ok(StagedArtifacts {
         primary,
         binaries,
+        examples,
         dep_info: vec![dep_info],
         script_inputs: Vec::new(),
         messages: Vec::new(),
@@ -4070,6 +4094,7 @@ mod tests {
         let staged = StagedArtifacts {
             primary: artifact.clone(),
             binaries: BTreeMap::from([("root-bin".to_owned(), artifact)]),
+            examples: Vec::new(),
             dep_info: vec![dep_info],
             script_inputs: vec![link.clone(), directory.clone()],
             messages: Vec::new(),
@@ -4142,6 +4167,7 @@ mod tests {
         let staged = StagedArtifacts {
             primary: artifact.clone(),
             binaries: BTreeMap::from([("root-bin".to_owned(), artifact)]),
+            examples: Vec::new(),
             dep_info: vec![dep_info],
             script_inputs: Vec::new(),
             messages: vec![warning; 8],
@@ -4184,6 +4210,7 @@ mod tests {
         let staged = StagedArtifacts {
             primary: artifact.clone(),
             binaries: BTreeMap::from([("root-bin".to_owned(), artifact.clone())]),
+            examples: Vec::new(),
             dep_info: vec![dep_info],
             script_inputs: Vec::new(),
             messages: Vec::new(),
@@ -4300,6 +4327,7 @@ mod tests {
         let staged = StagedArtifacts {
             primary: artifact,
             binaries: BTreeMap::new(),
+            examples: Vec::new(),
             dep_info: vec![dep_info],
             script_inputs: Vec::new(),
             messages: Vec::new(),
