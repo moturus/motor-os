@@ -894,7 +894,7 @@ fn validate_manifest_tables(
                 path,
                 document.line_of_item(item),
                 format!("unsupported manifest table or key `{key}`"),
-                "remove it or use a later Lorry stage that supports its build semantics",
+                "remove it; Lorry does not support its build semantics",
             ));
         }
     }
@@ -935,24 +935,14 @@ fn validate_package_keys(
         "autobenches",
         "metadata",
     ];
-    const DEPENDENCY_ONLY: &[&str] = &[
-        "links",
-        "autolib",
-        "autobins",
-        "autoexamples",
-        "autotests",
-        "autobenches",
-    ];
+    let dependency = matches!(mode, ManifestMode::Dependency | ManifestMode::Source);
     for (key, item) in package.iter() {
-        if !ROOT_ALLOWED.contains(&key)
-            && !(matches!(mode, ManifestMode::Dependency | ManifestMode::Source)
-                && DEPENDENCY_ONLY.contains(&key))
-        {
+        if !ROOT_ALLOWED.contains(&key) && !(dependency && key == "links") {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
                 format!("unsupported manifest key `package.{key}`"),
-                "remove the key or use a later Lorry stage that supports its build semantics",
+                "remove the key; Lorry does not support its build semantics",
             ));
         }
     }
@@ -974,33 +964,16 @@ fn validate_package_keys(
             ));
         }
     }
-    if matches!(mode, ManifestMode::Dependency | ManifestMode::Source) {
-        for key in DEPENDENCY_ONLY
-            .iter()
-            .copied()
-            .filter(|key| *key != "links")
-        {
-            if let Some(item) = package.get(key)
-                && item.as_bool().is_none()
-            {
-                return Err(type_error(
-                    path,
-                    document.line_of_item(item),
-                    &format!("package.{key}"),
-                    "a boolean",
-                ));
-            }
-        }
-        if let Some(item) = package.get("links")
-            && item.as_str().is_none()
-        {
-            return Err(type_error(
-                path,
-                document.line_of_item(item),
-                "package.links",
-                "a string",
-            ));
-        }
+    if dependency
+        && let Some(item) = package.get("links")
+        && item.as_str().is_none()
+    {
+        return Err(type_error(
+            path,
+            document.line_of_item(item),
+            "package.links",
+            "a string",
+        ));
     }
     Ok(())
 }
@@ -2760,7 +2733,7 @@ fn unsupported_key(path: &Path, document: &Document, item: &Item, name: &str) ->
         path,
         document.line_of_item(item),
         format!("unsupported manifest key `{name}`"),
-        "remove the key or use a later Lorry stage",
+        "remove the key; Lorry does not support it",
     )
 }
 
