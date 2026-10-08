@@ -204,14 +204,16 @@ Build and images:
   and `docs/build-motor-os.md`.
 - Both a complete managed `src/build-motor-os.sh` run and the javy-only path
   reproduce the add-on from fresh published checkouts and an empty Cargo cache.
-  The authoring-toolchain override found in review remains open as R1 below.
+  R1 below is fixed by 1j: the orchestrator's selection reaches the fetch and
+  the fork build, and the manifest records it.
 
 Tests:
 
 - `src/tests/javy-smoke` is a Rust crate that runs only the installed tools:
-  41 commands covering static/dynamic linkage, default/explicit/initialized
-  plugins, schema/configuration, WIT exports, promises, modern JS, source modes,
-  deterministic repeatability, errors, guest exits/traps/fuel and
+  57 commands covering static/dynamic linkage, default/explicit/initialized
+  plugins, malformed plugins, schema/configuration, WIT exports, promises,
+  modern JS, source modes, deterministic repeatability, errors, guest
+  exits/traps/fuel, runner WASI behavior from hand-written modules and
   role/capability/output denial. It samples whole-VM memory and reports the
   admission-refusal delta.
 - `src/tests/test-javy.sh` (`--prepare`, `--image`, `--memory`,
@@ -738,6 +740,27 @@ confirms or refines them. No latency target is inferred from one run.
 
 ### Milestone 1 close-out: Javy/Wasmi remainder
 
+Status 2026-10-08: 1h–1l are implemented. The Javy fork commits
+`4c2c4c6..bd7a2b1` and the Wasmtime build-script commit `e0e9548fb` await
+publication; until then the published add-on fails the new `javy-smoke`
+runner cases. Before publication, a temporary overlay of the locally built
+binaries passed the QEMU matrix (four boots, 57 commands each, zero
+admission refusals), and the new runner cases failed against the published
+binaries. After publication, rebuild with `--javy-only` and run the matrix
+under both VMMs.
+
+- **1h:** streaming validation passed the matrix and cut sampled peaks where
+  validation dominates: dynamic hello 168.5 to 81.4 MiB and `init-plugin`
+  179.7 to 129.0 MiB at 224 MiB. The static TypeScript peak did not move
+  (210.4/216.4 to 212.6/210.3 MiB on the wasm/dev images at 224 MiB); it is
+  set later in the pipeline, so the headroom remains about 10–12 MiB.
+- **1i:** owned lazy small-page backing costs about 4% of Wasmi TypeScript
+  execution (326 against 314 ms median, five runs, at 256 and 224 MiB) and
+  about 2 ms of instantiation; hello is unchanged. Accepted: the backing
+  bounds memory and avoids grow-by-copy. No fork change.
+- **1j–1l:** fixed with regressions as specified. Evidence is under
+  `build/javy-milestone1/`.
+
 Resolve the review corrections 1j–1l first, in small patches with their
 regressions. Items 1f–1i remain independent of the Wasmtime milestones and
 can be scheduled separately. All new Javy/Wasmi tests in this milestone go
@@ -815,7 +838,10 @@ switch remains in maintained code.
 Deliver `wasmtime-rt` in both images with precompiled Pulley command execution
 under WASI p2, using the native adapters already on `motor-48.0.1`.
 
-1. **2a — add-on delivery.** Add `src/build-wasmtime.sh` on the corrected
+1. **2a — add-on delivery (delivered 2026-10-08, `--wasmtime-only`).** A
+   host-precompiled Pulley hello ran on the wasm image as None, with role and
+   capability refusals; evidence in `build/wasm-milestone2/2a`. Add
+   `src/build-wasmtime.sh` on the corrected
    `build-javy.sh` pattern: follow `moturus/wasmtime`, `target-lexicon`, `tokio`
    and `mio`, build the runtime-only graph with the release profile in its own output
    directory, stage `/devtools/bin/wasmtime-rt`, record the source graph in
