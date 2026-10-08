@@ -587,7 +587,11 @@ using exclusive creation, atomic publication, permission finalization and
 failure/cancellation cleanup. Validate ELF arithmetic, ranges, alignment,
 overlap, lengths and code lifetime; review fixed addresses/envelopes as internal
 implementation. Match packager/template with an exact custom Wasmtime version
-string and retain upstream configuration/CPU checks. Producers must use the
+string and retain upstream configuration/CPU checks. That string is the fixed
+`48.0.1-motor.1` today, so it does not change when fork commits change compiled
+code or engine internals: bump it with every such change, or derive it from the
+fork revision at build time, before any precompiled artifact outlives the
+build that produced it. Producers must use the
 consumer feature graph and compile epoch instrumentation for HTTP deadlines;
 precompiled artifacts cannot acquire missing instrumentation at execution.
 Regenerate artifacts for image/runtime upgrades; an old ELF cannot identify or
@@ -837,6 +841,46 @@ switch remains in maintained code.
 
 Deliver `wasmtime-rt` in both images with precompiled Pulley command execution
 under WASI p2, using the native adapters already on `motor-48.0.1`.
+
+Status 2026-10-08: 2a is delivered; 2b, 2c, 2e and 2g are implemented as
+`moturus/wasmtime` commits `e0e9548fb..146853f2f`, which await publication
+together with the Javy commits, and were qualified with locally built binaries
+on both images at 224 MiB (evidence in `build/wasm-milestone2/`). 2d and 2f
+wait for the guest-fixture decision below.
+
+- **2b:** owned lazy reservations (96 MiB per memory, 128 MiB and four per
+  process) back every memory; `memory-check` grew a memory to the limit in
+  1 MiB steps with zeroed pages in about 82 ms, enforced the limits and left
+  no charge after 256 teardown cycles and failed instantiations. TypeScript
+  through `wasmtime-rt` ran about 3.5% faster than the copying
+  `MallocMemory` path (563 against 583 ms over SSH, five runs).
+- **2c:** new checks cover NUL rejection, renamed subdirectory handles, stale
+  handles to deleted directories, replacement after `stat` and unsupported
+  link operations. A three-level parent-ID walk costs 41–54 µs against
+  98–101 µs for a native path `stat`. A stale handle fails with
+  `InternalError` instead of `NotFound`: Motor FS refuses the stale
+  generation, so confinement holds, but WASI sees an I/O error; mapping it
+  better is a `src/sys` question and is not changed here.
+- **2e:** the stack check passes (teardown, yield, eight-slot limit,
+  zeroing), a deliberate overflow kills only its process, and a 2 MiB stack
+  costs 4,202,496 bytes of charge. `run` delivers stdout and stderr, exit
+  status 7, traps as abnormal exits, and `-W timeout=1s` interrupts a loop
+  compiled with epoch interruption. The arena is documented in the fork's
+  MOTOR.md. Foreground Ctrl-C and parent exit need a terminal and remain open.
+- **2g:** stores default to 64 instances, 16 tables and 32,768 table
+  elements, overridable with `-W`; the reservations are a fixed host bound.
+  Defaults are recorded in `docs/wasm.md`.
+
+**Decision needed (2d, 2f, 1f):** p2 socket fixtures need real WASI p2 guest
+code, which means Rust's `wasm32-wasip2` target on the build host or
+prebuilt components; the TypeScript Wasmtime fixture needs Javy output, and
+precompiled Pulley artifacts must come from the same Wasmtime revision as the
+runtime. The proposed route is to precompile at add-on build time with a host
+`compile` tool built from the same fork sources, from guest inputs that are
+either WAT in this tree or Rust test programs built with host rustup
+`wasm32-wasip1`/`wasm32-wasip2` targets added by `build-base.sh`. The
+alternative is digest-pinned prebuilt components published in a `moturus`
+repository.
 
 1. **2a — add-on delivery (delivered 2026-10-08, `--wasmtime-only`).** A
    host-precompiled Pulley hello ran on the wasm image as None, with role and
