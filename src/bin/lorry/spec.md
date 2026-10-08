@@ -744,7 +744,9 @@ location to which its settings should move. System constraints still apply.
   below `CARGO_HOME`. Unless the command line turned the mode on, a command
   falls back to Lorry repositories and admission when Cargo's cache lacks a
   needed package or its complete extraction, has a missing or unknown
-  extraction marker, or holds the package in more than one registry.
+  extraction marker, holds the package in more than one registry, or has a
+  symbolic link or other non-regular entry where its layout needs a real
+  directory or file.
   Integrity failures never fall back. Verbose mode reports the fallback.
 - A validation-only host helper may prepare a disposable Cargo oracle view
   containing checksum-pinned inactive Cargo.lock entries. This is not a Lorry

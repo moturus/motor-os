@@ -540,7 +540,8 @@ fn real_directory_names(root: &Path, description: &str) -> Result<Vec<String>> {
         return Err(Error::failure(format!(
             "{description} `{}` is not a real directory",
             root.display()
-        )));
+        ))
+        .cargo_cache_miss());
     }
     let mut names = Vec::new();
     for entry in fs::read_dir(root).map_err(|error| {
@@ -565,7 +566,8 @@ fn real_directory_names(root: &Path, description: &str) -> Result<Vec<String>> {
             return Err(Error::failure(format!(
                 "Cargo registry entry `{}` is not a real directory",
                 entry.path().display()
-            )));
+            ))
+            .cargo_cache_miss());
         }
         let name = entry.file_name().into_string().map_err(|_| {
             Error::failure(format!(
@@ -601,7 +603,8 @@ fn require_real_directory(path: &Path, description: &str) -> Result<()> {
         return Err(Error::failure(format!(
             "{description} `{}` is not a real directory",
             path.display()
-        )));
+        ))
+        .cargo_cache_miss());
     }
     Ok(())
 }
@@ -617,7 +620,8 @@ fn require_real_file(path: &Path, description: &str) -> Result<()> {
         return Err(Error::failure(format!(
             "{description} `{}` is not a real regular file",
             path.display()
-        )));
+        ))
+        .cargo_cache_miss());
     }
     Ok(())
 }
@@ -1080,6 +1084,42 @@ mod tests {
             .load("demo", &Version::parse("1.2.3").unwrap(), &checksum)
             .unwrap_err();
         assert!(error.to_string().contains("marker"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symbolic_links_in_cargo_home_are_cache_misses() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        fixture.package("index.crates.io-fixture");
+        let cargo = fixture.0.join("cargo");
+        let staging = fixture.0.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        let open = || {
+            CargoRegistry::open_with_validation(
+                &cargo,
+                &staging,
+                &PolicyLimits::default(),
+                ValidationMode::Strict,
+                None,
+            )
+        };
+        let moved = fixture.0.join("moved-src");
+        fs::rename(cargo.join("registry/src"), &moved).unwrap();
+        symlink(&moved, cargo.join("registry/src")).unwrap();
+        let error = open().unwrap_err();
+        assert!(error.is_cargo_cache_miss(), "{error}");
+
+        fs::remove_file(cargo.join("registry/src")).unwrap();
+        fs::create_dir(cargo.join("registry/src")).unwrap();
+        symlink(
+            moved.join("index.crates.io-fixture"),
+            cargo.join("registry/src/index.crates.io-fixture"),
+        )
+        .unwrap();
+        let error = open().unwrap_err();
+        assert!(error.is_cargo_cache_miss(), "{error}");
     }
 
     fn write_crate(path: &Path, files: &[(&str, Vec<u8>)]) {
