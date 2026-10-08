@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -239,12 +240,6 @@ impl Config {
         let Some(max) = requested else {
             return Ok(());
         };
-        if max == 0 {
-            return Err(Error::usage(
-                "--max-packages must be positive",
-                "supply a positive package limit",
-            ));
-        }
         let key = "policy.limits.max-packages";
         if let Some(constraint) = self.constraints.iter().find(|constraint| {
             key == constraint.key || key.starts_with(&format!("{}.", constraint.key))
@@ -1602,7 +1597,7 @@ pub fn effective_rustflags(config: &Config, target: &TargetOptions) -> Result<Ve
     Ok(select_effective_rustflags(
         config,
         target,
-        process_environment_rustflags()?,
+        environment_rustflags(|key| env::var_os(key))?,
     ))
 }
 
@@ -1615,7 +1610,7 @@ fn effective_rustflags_with_environment(
     Ok(select_effective_rustflags(
         config,
         target,
-        environment_rustflags(environment),
+        environment_rustflags(|key| environment.get(key).map(OsString::from))?,
     ))
 }
 
@@ -1633,25 +1628,16 @@ fn select_effective_rustflags(
     config.build_rustflags.clone()
 }
 
-#[cfg(test)]
-fn environment_rustflags(environment: &BTreeMap<String, String>) -> Option<Vec<String>> {
-    if let Some(encoded) = environment.get("CARGO_ENCODED_RUSTFLAGS") {
-        return Some(decode_encoded_rustflags(encoded));
-    }
-    if let Some(flags) = environment.get("RUSTFLAGS") {
-        return Some(split_plain_rustflags(flags));
-    }
-    None
-}
-
-fn process_environment_rustflags() -> Result<Option<Vec<String>>> {
-    if let Some(encoded) = env::var_os("CARGO_ENCODED_RUSTFLAGS") {
+fn environment_rustflags(
+    variable: impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<Vec<String>>> {
+    if let Some(encoded) = variable("CARGO_ENCODED_RUSTFLAGS") {
         let encoded = encoded
             .into_string()
             .map_err(|_| Error::failure("`CARGO_ENCODED_RUSTFLAGS` contains non-Unicode data"))?;
         return Ok(Some(decode_encoded_rustflags(&encoded)));
     }
-    if let Some(flags) = env::var_os("RUSTFLAGS") {
+    if let Some(flags) = variable("RUSTFLAGS") {
         let flags = flags
             .into_string()
             .map_err(|_| Error::failure("`RUSTFLAGS` contains non-Unicode data"))?;
@@ -2604,7 +2590,6 @@ native-tools = ["cxx-compiler"]
         expected.max_packages_source = LimitSource::CommandLine;
         config.apply_max_packages(Some(384)).unwrap();
         assert_eq!(config.policy.limits, expected);
-        assert!(config.apply_max_packages(Some(0)).is_err());
         for key in ["policy", "policy.limits", "policy.limits.max-packages"] {
             config.constraints = vec![Constraint {
                 key: key.to_owned(),
