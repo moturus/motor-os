@@ -14,7 +14,7 @@ use gears::provider::{
     Completion, ContentBlock, Endpoint, EventSink, FinishReason, Message, OpenAiCompat, Provider,
     ProviderError, Quirks, Request, StreamEvent, ToolCall, ToolOutcome,
 };
-use gears::runtime::{Approval, Approver, Event, Permission, Runtime};
+use gears::runtime::{Approval, Approver, Event, Options, Permission, Runtime};
 use gears::session::{PermissionGrant, Store, ToolState};
 use gears::tools::Registry;
 
@@ -1045,14 +1045,17 @@ fn tool_toggles_update_the_next_request_and_preserve_scope_precedence() {
     };
     let registry = Registry::load_config(&config).unwrap();
     let provider = Scripted::new(vec![answer("one"), answer("two"), answer("three")]);
-    let mut runtime = Runtime::new_with_registry_at(
+    let mut runtime = Runtime::with_options(
         provider.clone(),
         store,
         session,
         &config,
         "test/model".into(),
-        registry,
-        fixture.root.join("global"),
+        Options {
+            tools: Some(registry),
+            tool_state_directory: Some(fixture.root.join("global")),
+            ..Options::default()
+        },
     )
     .unwrap();
     runtime
@@ -1130,14 +1133,17 @@ fn permission_listing_marks_stale_grants_and_revoke_clears_each_scope() {
         },
     );
     global.save(&global_dir).unwrap();
-    let mut runtime = Runtime::new_with_registry_at(
+    let mut runtime = Runtime::with_options(
         Scripted::new(Vec::new()),
         store,
         session,
         &config,
         "test/model".into(),
-        registry,
-        global_dir,
+        Options {
+            tools: Some(registry),
+            tool_state_directory: Some(global_dir),
+            ..Options::default()
+        },
     )
     .unwrap();
     let listed = runtime.permission_statuses().unwrap();
@@ -1197,14 +1203,17 @@ common = ["./run"]
             ..PermissionGrant::default()
         })
         .unwrap();
-    let mut runtime = Runtime::new_with_registry_at(
+    let mut runtime = Runtime::with_options(
         Scripted::new(Vec::new()),
         store,
         session,
         &config,
         "test/model".into(),
-        registry,
-        fixture.root.join("global"),
+        Options {
+            tools: Some(registry),
+            tool_state_directory: Some(fixture.root.join("global")),
+            ..Options::default()
+        },
     )
     .unwrap();
     std::fs::remove_file(directory.join("run")).unwrap();
@@ -1243,14 +1252,17 @@ fn global_allow_survives_new_sessions_but_not_unattended_calls() {
         tool("sh", r#"{"command":"touch third"}"#),
         answer("done"),
     ]);
-    let mut runtime = Runtime::new_with_registry_at(
+    let mut runtime = Runtime::with_options(
         provider,
         store,
         session,
         &config,
         "test/model".into(),
-        registry,
-        fixture.root.join("global"),
+        Options {
+            tools: Some(registry),
+            tool_state_directory: Some(fixture.root.join("global")),
+            ..Options::default()
+        },
     )
     .unwrap();
     let mut grant = CountingApproval {
@@ -1310,14 +1322,17 @@ fn failed_global_grant_write_keeps_the_pending_tool_unapproved() {
     ]);
     let global_dir = fixture.root.join("global");
     std::fs::create_dir(&global_dir).unwrap();
-    let mut runtime = Runtime::new_with_registry_at(
+    let mut runtime = Runtime::with_options(
         provider,
         store,
         session,
         &config,
         "test/model".into(),
-        registry,
-        global_dir.clone(),
+        Options {
+            tools: Some(registry),
+            tool_state_directory: Some(global_dir.clone()),
+            ..Options::default()
+        },
     )
     .unwrap();
     runtime
@@ -1378,14 +1393,17 @@ fn session_answers_override_global_answers_in_both_directions() {
             tool("sh", r#"{"command":"printf made > result"}"#),
             answer("done"),
         ]);
-        let mut runtime = Runtime::new_with_registry_at(
+        let mut runtime = Runtime::with_options(
             provider,
             store,
             session,
             &config,
             "test/model".into(),
-            registry,
-            global_dir,
+            Options {
+                tools: Some(registry),
+                tool_state_directory: Some(global_dir),
+                ..Options::default()
+            },
         )
         .unwrap();
         runtime
@@ -1483,14 +1501,17 @@ fn global_denial_persists_and_refuses_later_attended_calls() {
         answer("done"),
     ]);
     let global_dir = fixture.root.join("global");
-    let mut runtime = Runtime::new_with_registry_at(
+    let mut runtime = Runtime::with_options(
         provider,
         store,
         session,
         &config,
         "test/model".into(),
-        registry,
-        global_dir.clone(),
+        Options {
+            tools: Some(registry),
+            tool_state_directory: Some(global_dir.clone()),
+            ..Options::default()
+        },
     )
     .unwrap();
     let mut deny = CountingApproval {

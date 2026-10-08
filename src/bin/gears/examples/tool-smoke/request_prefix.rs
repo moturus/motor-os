@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use gears::config::{Config, ContextConfig};
 use gears::provider::{Completion, EventSink, Message, Provider, ProviderError, Request, ToolSpec};
-use gears::runtime::{Approval, Permission, Runtime};
+use gears::runtime::{Approval, Options, Permission, Runtime};
 use gears::session::{HookState, RequestPrefix, Store};
 use gears::tools::Registry;
 
@@ -53,14 +53,17 @@ pub fn smoke() -> Result<(), String> {
         },
         ..Config::default()
     };
-    let mut runtime = Runtime::new_with_registry_at(
+    let mut runtime = Runtime::with_options(
         provider.clone(),
         store.clone(),
         parent,
         &config,
         "executor".into(),
-        Registry::default(),
-        base.join("tools"),
+        Options {
+            tools: Some(Registry::default()),
+            tool_state_directory: Some(base.join("tools")),
+            ..Options::default()
+        },
     )?;
     let mut deny = |_: &Permission| Approval::Deny;
     runtime.turn("Original task".into(), &mut deny, &mut |_| Ok(()))?;
@@ -103,14 +106,17 @@ pub fn smoke() -> Result<(), String> {
             .any(|m| m.text_content().contains("Original answer"))
     );
     assert!(
-        Runtime::new_with_registry_preserving_prefix(
+        Runtime::with_options(
             provider.clone(),
             store.clone(),
             store.create(false, None)?,
             &config,
             "executor".into(),
-            Registry::default(),
-            prefix.clone(),
+            Options {
+                tools: Some(Registry::default()),
+                preserved_prefix: Some(prefix.clone()),
+                ..Options::default()
+            },
         )
         .is_err()
     );
@@ -125,14 +131,17 @@ pub fn smoke() -> Result<(), String> {
         "Frozen schema",
         serde_json::json!({"type":"object"}),
     ));
-    let mut review = Runtime::new_with_registry_preserving_prefix(
+    let mut review = Runtime::with_options(
         reader.clone(),
         store.clone(),
         child,
         &config,
         "reviewer".into(),
-        Registry::default(),
-        review_prefix.clone(),
+        Options {
+            tools: Some(Registry::default()),
+            preserved_prefix: Some(review_prefix.clone()),
+            ..Options::default()
+        },
     )?;
     let before = std::fs::read(&path).map_err(|error| error.to_string())?;
     review.turn(
@@ -168,14 +177,17 @@ pub fn smoke() -> Result<(), String> {
         tools: Vec::new(),
     };
     assert!(
-        Runtime::new_with_registry_preserving_prefix(
+        Runtime::with_options(
             reader.clone(),
             store.clone(),
             store.create(true, None)?,
             &config,
             "reviewer".into(),
-            Registry::default(),
-            oversized,
+            Options {
+                tools: Some(Registry::default()),
+                preserved_prefix: Some(oversized),
+                ..Options::default()
+            },
         )
         .err()
         .unwrap()

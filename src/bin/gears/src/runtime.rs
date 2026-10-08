@@ -176,9 +176,15 @@ pub struct Runtime {
     questions_answered: usize,
 }
 
-struct Initialization {
-    tool_state_directory: PathBuf,
-    preserved_prefix: Option<RequestPrefix>,
+/// Choices beyond the configuration; the defaults suit an ordinary run.
+#[derive(Default)]
+pub struct Options {
+    /// Tools to use instead of the configured ones.
+    pub tools: Option<Registry>,
+    /// Where tool enablement is saved, instead of the Gears directory.
+    pub tool_state_directory: Option<PathBuf>,
+    /// Inform hooks before initialization so corrections follow the frozen prefix.
+    pub preserved_prefix: Option<RequestPrefix>,
 }
 
 impl Runtime {
@@ -189,89 +195,30 @@ impl Runtime {
         config: &Config,
         model: String,
     ) -> Result<Self, String> {
-        let tools = Registry::load_config(config)?;
-        Self::new_with_registry(provider, store, session, config, model, tools)
+        Self::with_options(provider, store, session, config, model, Options::default())
     }
 
-    pub fn new_with_registry(
-        provider: Arc<dyn Provider>,
-        store: Store,
-        session: Session,
-        config: &Config,
-        model: String,
-        tools: Registry,
-    ) -> Result<Self, String> {
-        Self::new_with_registry_at(
-            provider,
-            store,
-            session,
-            config,
-            model,
-            tools,
-            Overrides::default_directory()?,
-        )
-    }
-
-    pub fn new_with_registry_at(
-        provider: Arc<dyn Provider>,
-        store: Store,
-        session: Session,
-        config: &Config,
-        model: String,
-        tools: Registry,
-        tool_state_directory: PathBuf,
-    ) -> Result<Self, String> {
-        Self::initialize(
-            provider,
-            store,
-            session,
-            config,
-            model,
-            tools,
-            Initialization {
-                tool_state_directory,
-                preserved_prefix: None,
-            },
-        )
-    }
-
-    /// Inform hooks before initialization so corrections follow the frozen prefix.
-    pub fn new_with_registry_preserving_prefix(
-        provider: Arc<dyn Provider>,
-        store: Store,
-        session: Session,
-        config: &Config,
-        model: String,
-        tools: Registry,
-        prefix: RequestPrefix,
-    ) -> Result<Self, String> {
-        Self::initialize(
-            provider,
-            store,
-            session,
-            config,
-            model,
-            tools,
-            Initialization {
-                tool_state_directory: Overrides::default_directory()?,
-                preserved_prefix: Some(prefix),
-            },
-        )
-    }
-
-    fn initialize(
+    pub fn with_options(
         provider: Arc<dyn Provider>,
         store: Store,
         mut session: Session,
         config: &Config,
         model: String,
-        mut tools: Registry,
-        initialization: Initialization,
+        options: Options,
     ) -> Result<Self, String> {
-        let Initialization {
+        let Options {
+            tools,
             tool_state_directory,
             preserved_prefix,
-        } = initialization;
+        } = options;
+        let mut tools = match tools {
+            Some(tools) => tools,
+            None => Registry::load_config(config)?,
+        };
+        let tool_state_directory = match tool_state_directory {
+            Some(directory) => directory,
+            None => Overrides::default_directory()?,
+        };
         if let Some(prefix) = &preserved_prefix {
             if !session.is_ephemeral() {
                 return Err("preserving a saved prefix requires an ephemeral session".into());

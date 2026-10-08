@@ -11,7 +11,7 @@ use gears::mock::{MockServer, sse_response};
 use gears::net::{EgressPolicy, host_curl::HostCurl};
 use gears::process::{Cancellation, sh};
 use gears::provider::{Endpoint, OpenAiCompat};
-use gears::runtime::{Approval, Event, Permission, Runtime};
+use gears::runtime::{Approval, Event, Options, Permission, Runtime};
 use gears::session::Store;
 
 struct Escaped(PathBuf);
@@ -61,14 +61,17 @@ fn unconfirmed_cleanup_blocks_another_turn_and_session_mutation() {
         }],
         ..Config::default()
     };
-    let mut runtime = Runtime::new_with_registry_at(
+    let mut runtime = Runtime::with_options(
         provider,
         store,
         session,
         &config,
         "test/model".into(),
-        gears::tools::Registry::load_config(&config).unwrap(),
-        base.join("global"),
+        Options {
+            tools: Some(gears::tools::Registry::load_config(&config).unwrap()),
+            tool_state_directory: Some(base.join("global")),
+            ..Options::default()
+        },
     )
     .unwrap();
     let cancellation = runtime.cancellation();

@@ -15,7 +15,7 @@ use gears::provider::{
 };
 use gears::provider_choice::ProviderChoice;
 use gears::run_lock::DirectoryLock;
-use gears::runtime::{ProviderFactory, Runtime};
+use gears::runtime::{Options, ProviderFactory, Runtime};
 use gears::session::{Session, Store};
 use gears::tools::Registry;
 
@@ -191,17 +191,15 @@ fn agent(
         .or_else(|| selected_provider.model.clone())
         .or_else(|| config.models.first().cloned())
         .ok_or("no model selected; use --model or provider.model in the config")?;
-    let mut runtime = match saved_prefix {
-        Some(prefix) => Runtime::new_with_registry_preserving_prefix(
-            provider, store, session, config, model, tools, prefix,
-        )?,
-        None => {
-            if args.preserve_prefix {
-                diagnostic("saved prefix unavailable; using reconstructed instructions");
-            }
-            Runtime::new_with_registry(provider, store, session, config, model, tools)?
-        }
+    if saved_prefix.is_none() && args.preserve_prefix {
+        diagnostic("saved prefix unavailable; using reconstructed instructions");
+    }
+    let options = Options {
+        tools: Some(tools),
+        preserved_prefix: saved_prefix,
+        ..Options::default()
     };
+    let mut runtime = Runtime::with_options(provider, store, session, config, model, options)?;
     let factory_config = config.clone();
     let verbosity = args.verbosity;
     let factory: ProviderFactory = Arc::new(move |name| {

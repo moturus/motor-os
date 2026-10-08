@@ -1479,14 +1479,17 @@ mod tests {
         let id = session.id().to_string();
         drop(session);
         let session = store.open(&id).unwrap();
-        let runtime = Runtime::new_with_registry_at(
+        let runtime = Runtime::with_options(
             std::sync::Arc::new(NoRequests),
             store,
             session,
             &crate::config::Config::default(),
             "test/model".into(),
-            crate::tools::Registry::default(),
-            root.join("global"),
+            crate::runtime::Options {
+                tools: Some(crate::tools::Registry::default()),
+                tool_state_directory: Some(root.join("global")),
+                ..crate::runtime::Options::default()
+            },
         )
         .unwrap();
         (runtime, root)
