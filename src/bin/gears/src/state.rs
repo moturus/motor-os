@@ -109,7 +109,8 @@ impl StateRoot {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
+                // A new workspace file gets the usual umask-based permissions.
+                options.mode(if preserve_access { 0o666 } else { 0o600 });
             }
             let mut file = options
                 .open(&temp)
@@ -375,5 +376,30 @@ mod tests {
         assert!(state.file(Path::new("sessions/x")).is_err());
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_workspace_files_get_ordinary_permissions_and_state_stays_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp("modes");
+        let _ = std::fs::remove_dir_all(&root);
+        let state = StateRoot::new(root.clone()).unwrap();
+        state.directory(Path::new("")).unwrap();
+        std::fs::write(root.join("ordinary"), "x").unwrap();
+        state
+            .replace_file_preserving_access(Path::new("created"), b"x")
+            .unwrap();
+        state.replace_file(Path::new("private"), b"x").unwrap();
+        let mode = |name: &str| {
+            std::fs::metadata(root.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("created"), mode("ordinary"));
+        assert_eq!(mode("private"), 0o600);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
