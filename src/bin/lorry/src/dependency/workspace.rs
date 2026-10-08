@@ -483,7 +483,7 @@ mod tests {
         );
         let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let plan = prepared
-            .workspace_plan(
+            .plan(
                 &PlanOptions {
                     workspace_root: &workspace.root,
                     release: false,
@@ -494,9 +494,10 @@ mod tests {
                     rustflags: &[],
                 },
                 &[app],
-                false,
-                true,
-                None,
+                UnitSelection::Default {
+                    check: false,
+                    binary: None,
+                },
             )
             .unwrap();
         assert_eq!(plan.units.len(), 4);

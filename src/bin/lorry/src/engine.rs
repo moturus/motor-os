@@ -5,6 +5,7 @@ use crate::cache;
 use crate::cli::{CheckOptions, Cli, Color, Command, MessageFormat, Verbosity};
 use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, effective_rustflags};
 use crate::dependency;
+use crate::dependency::UnitSelection;
 use crate::diagnostic::{Error, Result};
 use crate::executor;
 use crate::hash::{FieldDigest, Sha256, decode_hex, hex, modified_time, sha256_file};
@@ -15,7 +16,9 @@ use crate::resolver::{CompileKind, PackageKey, Resolution, TargetSelection};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::tracked_env::{self, Tracked};
-use crate::unit::{CompilationPlan, PlanOptions, UnitKey, UnitKind, selected_library_key};
+use crate::unit::{
+    CompilationPlan, PlanOptions, UnitKey, UnitKind, UnitMode, selected_library_key,
+};
 use crate::validation::ValidationMode;
 use std::collections::BTreeMap;
 use std::env;
@@ -428,115 +431,51 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
     crate::trace::event("verified dependency admission");
 
     let global_cache_root = config.cache_directory()?;
+    let build = Build {
+        target_selection: match &cli.command {
+            Command::Build(options) => Some(&options.targets),
+            Command::Run(_) => Some(&run_targets),
+            Command::Test(options) => Some(&options.build.targets),
+            _ => None,
+        },
+        target_root: &target_root,
+        child_lease_fd: artifact_lock.child_lease_fd(),
+        manifest: &manifest,
+        documents: &workspace.documents,
+        members: &selected,
+        global_cache_root: &global_cache_root,
+        config: &config,
+        toolchain: &toolchain,
+        host: &host_info,
+        target: &target_info,
+        host_options: &host_options,
+        target_options: &target_options,
+        physical_target: physical_target.as_deref(),
+        logical_target,
+        rustflags: &rustflags,
+        release,
+        test: matches!(&cli.command, Command::Test(_)),
+        color,
+        verbosity: cli.verbosity,
+        jobs,
+        keep_going: build_options.keep_going,
+        use_cargo_registry,
+        source: (source, direct),
+        bundle: matches!(&cli.command, Command::Test(options) if options.bundle),
+        validation,
+        ordinary_freshness_base,
+        binary_selection,
+    };
+    let format = cli.message_format();
 
     match &cli.command {
-        Command::Build(options) => {
-            build_inner(
-                Build {
-                    target_selection: Some(&options.targets),
-                    target_root: &target_root,
-                    child_lease_fd: artifact_lock.child_lease_fd(),
-                    manifest: &manifest,
-                    documents: &workspace.documents,
-                    members: &selected,
-                    global_cache_root: &global_cache_root,
-                    config: &config,
-                    toolchain: &toolchain,
-                    host: &host_info,
-                    target: &target_info,
-                    host_options: &host_options,
-                    target_options: &target_options,
-                    physical_target: physical_target.as_deref(),
-                    logical_target,
-                    rustflags: &rustflags,
-                    release,
-                    test: false,
-                    color,
-                    verbosity: cli.verbosity,
-                    jobs,
-                    keep_going: options.keep_going,
-                    use_cargo_registry,
-                    source: (source, direct),
-                    bundle: false,
-                    validation,
-                    ordinary_freshness_base,
-                    binary_selection,
-                },
-                resolution,
-                None,
-                options.message_format,
-            )?;
+        Command::Build(_) => {
+            build_inner(build, resolution, None, format)?;
             Ok(0)
         }
-        Command::Check(options) => check(
-            Build {
-                target_selection: None,
-                target_root: &target_root,
-                child_lease_fd: artifact_lock.child_lease_fd(),
-                manifest: &manifest,
-                documents: &workspace.documents,
-                members: &selected,
-                global_cache_root: &global_cache_root,
-                config: &config,
-                toolchain: &toolchain,
-                host: &host_info,
-                target: &target_info,
-                host_options: &host_options,
-                target_options: &target_options,
-                physical_target: physical_target.as_deref(),
-                logical_target,
-                rustflags: &rustflags,
-                release,
-                test: false,
-                color,
-                verbosity: cli.verbosity,
-                jobs,
-                keep_going: options.build.keep_going,
-                use_cargo_registry,
-                source: (source, direct),
-                bundle: false,
-                validation,
-                ordinary_freshness_base,
-                binary_selection: None,
-            },
-            resolution,
-            options,
-        ),
+        Command::Check(options) => check(build, resolution, options),
         Command::Run(options) => {
-            let artifacts = build_reported(
-                Build {
-                    target_selection: Some(&run_targets),
-                    target_root: &target_root,
-                    child_lease_fd: artifact_lock.child_lease_fd(),
-                    manifest: &manifest,
-                    documents: &workspace.documents,
-                    members: &selected,
-                    global_cache_root: &global_cache_root,
-                    config: &config,
-                    toolchain: &toolchain,
-                    host: &host_info,
-                    target: &target_info,
-                    host_options: &host_options,
-                    target_options: &target_options,
-                    physical_target: physical_target.as_deref(),
-                    logical_target,
-                    rustflags: &rustflags,
-                    release,
-                    test: false,
-                    color,
-                    verbosity: cli.verbosity,
-                    jobs,
-                    keep_going: false,
-                    use_cargo_registry,
-                    source: (source, direct),
-                    bundle: false,
-                    validation,
-                    ordinary_freshness_base,
-                    binary_selection,
-                },
-                resolution,
-                options.build.message_format,
-            )?;
+            let artifacts = build_reported(build, resolution, format)?;
             let artifact = selected_run_artifact(&artifacts, run_binary.unwrap(), run_example)?;
             report_build_completion(cli, reported)?;
             drop(artifact_lock);
@@ -560,41 +499,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
             if cli.verbosity != Verbosity::Quiet {
                 eprintln!("note: documentation tests are not supported");
             }
-            let outcome = build_inner(
-                Build {
-                    target_selection: Some(&options.build.targets),
-                    target_root: &target_root,
-                    child_lease_fd: artifact_lock.child_lease_fd(),
-                    manifest: &manifest,
-                    documents: &workspace.documents,
-                    members: &selected,
-                    global_cache_root: &global_cache_root,
-                    config: &config,
-                    toolchain: &toolchain,
-                    host: &host_info,
-                    target: &target_info,
-                    host_options: &host_options,
-                    target_options: &target_options,
-                    physical_target: physical_target.as_deref(),
-                    logical_target,
-                    rustflags: &rustflags,
-                    release,
-                    test: true,
-                    color,
-                    verbosity: cli.verbosity,
-                    jobs,
-                    keep_going: false,
-                    use_cargo_registry,
-                    source: (source, direct),
-                    bundle: options.bundle,
-                    validation,
-                    ordinary_freshness_base,
-                    binary_selection: None,
-                },
-                resolution,
-                None,
-                options.build.message_format,
-            )?;
+            let outcome = build_inner(build, resolution, None, format)?;
             let BuildOutcome::Tests(members) = outcome else {
                 unreachable!("test build returned no test artifacts")
             };
@@ -1265,55 +1170,20 @@ fn build_inner(
         }
         crate::trace::event("root profile requires rebuilding");
     }
-    let normal_plan = || {
-        let options = PlanOptions {
-            workspace_root: &build.manifest.workspace_root,
-            release: build.release,
-            panic_abort: build.manifest.profile.panic_abort,
-            profile: &build.manifest.profile,
-            rustc: build.toolchain,
-            logical_target: build.logical_target,
-            rustflags: build.rustflags,
-        };
-        if let Some(targets) = build.target_selection
-            && targets.has_target_selector()
-        {
-            return prepared.workspace_compiler_targets(
-                &options,
-                &selected_packages,
-                targets,
-                crate::unit::UnitMode::Build,
-            );
-        }
-        prepared.workspace_plan(
-            &options,
-            &selected_packages,
-            false,
-            true,
-            build.binary_selection,
-        )
+    let plan_options = PlanOptions {
+        workspace_root: &build.manifest.workspace_root,
+        release: build.release,
+        panic_abort: build.manifest.profile.panic_abort,
+        profile: &build.manifest.profile,
+        rustc: build.toolchain,
+        logical_target: build.logical_target,
+        rustflags: build.rustflags,
     };
-    let selected_check_plan = |targets: &crate::cli::TargetSelection| {
-        let options = PlanOptions {
-            workspace_root: &build.manifest.workspace_root,
-            release: build.release,
-            panic_abort: build.manifest.profile.panic_abort,
-            profile: &build.manifest.profile,
-            rustc: build.toolchain,
-            logical_target: build.logical_target,
-            rustflags: build.rustflags,
-        };
-        prepared.workspace_compiler_targets(
-            &options,
-            &selected_packages,
-            targets,
-            if build.manifest.profile_name.as_deref() == Some("test") {
-                crate::unit::UnitMode::CheckTest
-            } else {
-                crate::unit::UnitMode::Check
-            },
-        )
-    };
+    let plan = |selection| prepared.plan(&plan_options, &selected_packages, selection);
+    // Explicit target selectors replace the default units of a build or test.
+    let selectors = build
+        .target_selection
+        .filter(|targets| targets.has_target_selector());
     let roots = crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
     let message_reporter = crate::check_message::Reporter::new(
         build.manifest,
@@ -1356,33 +1226,15 @@ fn build_inner(
         },
     )?;
     crate::trace::event("initialized dependency build cache");
-    let workspace_test_plan = if build.test {
-        let options = PlanOptions {
-            workspace_root: &build.manifest.workspace_root,
-            release: build.release,
-            panic_abort: build.manifest.profile.panic_abort,
-            profile: &build.manifest.profile,
-            rustc: build.toolchain,
-            logical_target: build.logical_target,
-            rustflags: build.rustflags,
-        };
-        Some(
-            if let Some(targets) = build.target_selection
-                && targets.has_target_selector()
-            {
-                prepared.workspace_compiler_targets(
-                    &options,
-                    &selected_packages,
-                    targets,
-                    crate::unit::UnitMode::Test,
-                )?
-            } else {
-                prepared.workspace_test_plan(&options, &selected_packages)?
-            },
-        )
-    } else {
-        None
-    };
+    let workspace_test_plan = build
+        .test
+        .then(|| {
+            plan(match selectors {
+                Some(targets) => UnitSelection::Targets(targets, UnitMode::Test),
+                None => UnitSelection::Tests,
+            })
+        })
+        .transpose()?;
     let bundle_inputs = (build.test && build.bundle)
         .then(|| bundle_build_inputs(&build, &prepared, &cargo))
         .transpose()?;
@@ -1573,7 +1425,14 @@ fn build_inner(
         {
             return Err(Error::failure("selected package has no library target"));
         }
-        let plan = selected_check_plan(&options.build.targets)?;
+        let plan = plan(UnitSelection::Targets(
+            &options.build.targets,
+            if build.manifest.profile_name.as_deref() == Some("test") {
+                UnitMode::CheckTest
+            } else {
+                UnitMode::Check
+            },
+        ))?;
         let plan = if options.compile_time_deps {
             plan.compile_time_dependencies()?
         } else {
@@ -1751,7 +1610,13 @@ fn build_inner(
         return Ok(BuildOutcome::Tests(tests));
     }
     invalidate_fresh_profile(&destination, &fresh_owner)?;
-    let plan = normal_plan()?;
+    let plan = plan(match selectors {
+        Some(targets) => UnitSelection::Targets(targets, UnitMode::Build),
+        None => UnitSelection::Default {
+            check: false,
+            binary: build.binary_selection,
+        },
+    })?;
     if build.verbosity != Verbosity::Quiet {
         for warning in binary_collision_warnings(&plan, &selected_packages, &destination) {
             eprintln!("{warning}");

@@ -42,67 +42,54 @@ pub struct PreparedPackage {
     cargo_registry: bool,
 }
 
-impl PreparedGraph {
-    pub(crate) fn workspace_compiler_targets(
-        &self,
-        options: &PlanOptions<'_>,
-        selected: &[PackageKey],
-        targets: &crate::cli::TargetSelection,
-        mode: crate::unit::UnitMode,
-    ) -> Result<CompilationPlan> {
-        let manifests = self
-            .packages
-            .iter()
-            .map(|(key, package)| (key.clone(), package.manifest.clone()))
-            .collect();
-        let graph = crate::unit::workspace_compiler_targets(
-            &self.resolution,
-            &manifests,
-            selected,
-            targets,
-            options,
-            mode,
-        )?;
-        self.finish_plan(options, manifests, graph)
-    }
-
-    pub(crate) fn workspace_test_plan(
-        &self,
-        options: &PlanOptions<'_>,
-        selected: &[PackageKey],
-    ) -> Result<CompilationPlan> {
-        let manifests = self
-            .packages
-            .iter()
-            .map(|(key, package)| (key.clone(), package.manifest.clone()))
-            .collect();
-        let graph =
-            crate::unit::workspace_test_units(&self.resolution, &manifests, selected, options)?;
-        self.finish_plan(options, manifests, graph)
-    }
-
-    pub(crate) fn workspace_plan(
-        &self,
-        options: &PlanOptions<'_>,
-        selected: &[PackageKey],
+/// The units a plan compiles for the selected workspace members.
+pub(crate) enum UnitSelection<'a> {
+    /// Libraries and binaries, all or one named binary, as a plain build or
+    /// check selects them.
+    Default {
         check: bool,
-        binaries: bool,
-        binary_name: Option<&str>,
+        binary: Option<&'a str>,
+    },
+    /// Explicit target selectors such as `--lib`, `--bins`, or `--test NAME`.
+    Targets(&'a crate::cli::TargetSelection, crate::unit::UnitMode),
+    /// Every test harness, as a plain `lorry test` selects them.
+    Tests,
+}
+
+impl PreparedGraph {
+    pub(crate) fn plan(
+        &self,
+        options: &PlanOptions<'_>,
+        selected: &[PackageKey],
+        selection: UnitSelection<'_>,
     ) -> Result<CompilationPlan> {
         let manifests = self
             .packages
             .iter()
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
-        let graph = crate::unit::workspace_units(
-            &self.resolution,
-            &manifests,
-            selected,
-            check,
-            binaries,
-            binary_name,
-            options.release || options.profile.opt_level != "0",
-        )?;
+        let graph = match selection {
+            UnitSelection::Default { check, binary } => crate::unit::workspace_units(
+                &self.resolution,
+                &manifests,
+                selected,
+                check,
+                true,
+                binary,
+                options.release || options.profile.opt_level != "0",
+            )?,
+            UnitSelection::Targets(targets, mode) => crate::unit::workspace_compiler_targets(
+                &self.resolution,
+                &manifests,
+                selected,
+                targets,
+                options,
+                mode,
+            )?,
+            UnitSelection::Tests => {
+                crate::unit::workspace_test_units(&self.resolution, &manifests, selected, options)?
+            }
+        };
         self.finish_plan(options, manifests, graph)
     }
 
@@ -893,17 +880,33 @@ mod tests {
             rustflags: &[],
         };
         let plan = graph
-            .workspace_plan(&options, selected, false, true, None)
+            .plan(
+                &options,
+                selected,
+                UnitSelection::Default {
+                    check: false,
+                    binary: None,
+                },
+            )
             .unwrap();
         assert!(plan.units.values().all(|unit| unit.source_remap.is_none()));
         let check_plan = graph
-            .workspace_plan(&options, selected, true, true, None)
+            .plan(
+                &options,
+                selected,
+                UnitSelection::Default {
+                    check: true,
+                    binary: None,
+                },
+            )
             .unwrap();
         assert_check_graph_matches_cargo(&fixture.0, &check_plan, &[]);
 
         // Integration harness environments come from the test plan.
         let shared = prepare(true);
-        let focused = shared.workspace_test_plan(&options, selected).unwrap();
+        let focused = shared
+            .plan(&options, selected, UnitSelection::Tests)
+            .unwrap();
         let integration = focused
             .units
             .keys()
