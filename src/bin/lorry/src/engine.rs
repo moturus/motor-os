@@ -835,7 +835,7 @@ pub(crate) fn migrate_artifact_layout(root: &Path) -> Result<()> {
             }
         }
     }
-    if existed {
+    if existed && holds_artifacts(root)? {
         fs::remove_dir_all(root).map_err(|error| {
             Error::failure(format!(
                 "failed to reset legacy Lorry artifacts `{}`: {error}",
@@ -856,6 +856,24 @@ pub(crate) fn migrate_artifact_layout(root: &Path) -> Result<()> {
     let mut record = AtomicFile::new(&marker)?;
     record.write_all(b"lorry-shared-layout-v1\n")?;
     record.commit()
+}
+
+/// `vendor`, `tree`, and `metadata` can create the artifact root before any
+/// build writes the layout record. Their entries are not legacy artifacts.
+fn holds_artifacts(root: &Path) -> Result<bool> {
+    let read_error = |error: std::io::Error| {
+        Error::failure(format!(
+            "failed to read Lorry artifact root `{}`: {error}",
+            root.display()
+        ))
+    };
+    for entry in fs::read_dir(root).map_err(read_error)? {
+        let name = entry.map_err(read_error)?.file_name();
+        if name != crate::vendor_lock::LOCK_NAME && name != ".cargo-evidence" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn profile_destination(
@@ -4046,6 +4064,23 @@ mod tests {
         fs::write(root.join("new-artifact"), b"new").unwrap();
         migrate_artifact_layout(&root).unwrap();
         assert_eq!(fs::read(root.join("new-artifact")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn vendor_lock_and_cargo_evidence_are_not_legacy_artifacts() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("target/lorry");
+        fs::create_dir_all(root.join(".cargo-evidence")).unwrap();
+        fs::write(root.join(".cargo-evidence/record.txt"), b"evidence").unwrap();
+        fs::write(root.join(crate::vendor_lock::LOCK_NAME), b"").unwrap();
+
+        migrate_artifact_layout(&root).unwrap();
+        assert_eq!(
+            fs::read(root.join(".cargo-evidence/record.txt")).unwrap(),
+            b"evidence"
+        );
+        assert!(root.join(crate::vendor_lock::LOCK_NAME).exists());
+        assert!(root.join(SHARED_LAYOUT_RECORD).exists());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::diagnostic::{Error, Result};
 
-const LOCK_NAME: &str = ".vendor.lock";
+pub(crate) const LOCK_NAME: &str = ".vendor.lock";
 
 /// A process-lifetime exclusive lock for one package root.
 ///
