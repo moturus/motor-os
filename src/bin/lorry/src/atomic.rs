@@ -383,6 +383,14 @@ impl AtomicDirectory {
         Self::create(parent, || unique_name(label, "staging"))
     }
 
+    /// Stages a compiler unit under the same name in every build: rustc's
+    /// incremental cache is discarded when its output directory changes. The
+    /// artifact lock admits one writer, which first discards abandoned staging.
+    pub fn new_stable(parent: &Path, label: &str) -> Result<Self> {
+        let name = format!("{}unit", unique_prefix(label, "staging"));
+        Self::create(parent, || name.clone())
+    }
+
     pub fn new_compact(parent: &Path) -> Result<Self> {
         Self::create(parent, compact_unique_name)
     }
@@ -855,6 +863,24 @@ mod tests {
         assert!(!staging.exists());
         assert!(unrelated.is_dir());
         assert_eq!(fs::read(destination.join("complete")).unwrap(), b"old");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stable_staging_reuses_its_path_and_is_discarded_when_abandoned() {
+        let root = temp_root("stable");
+        let destination = root.join("unit");
+        let first = AtomicDirectory::new_stable(&root, "unit").unwrap();
+        let path = first.path().to_owned();
+        first.commit(&destination).unwrap();
+        let second = AtomicDirectory::new_stable(&root, "unit").unwrap();
+        assert_eq!(second.path(), path);
+        // A killed writer leaves its staging behind.
+        std::mem::forget(second);
+        assert!(AtomicDirectory::new_stable(&root, "unit").is_err());
+        AtomicDirectory::discard_abandoned_staging(&destination).unwrap();
+        assert!(!path.exists());
+        assert!(AtomicDirectory::new_stable(&root, "unit").is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 

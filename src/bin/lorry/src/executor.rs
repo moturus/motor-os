@@ -713,7 +713,7 @@ fn execute_unit(
                         tracked,
                     );
                 }
-                let staging = AtomicDirectory::new(parent, label)?;
+                let staging = AtomicDirectory::new_stable(parent, label)?;
                 let invocation = planned_invocation.with_output_directory(
                     &staging.path().join(
                         output_dir

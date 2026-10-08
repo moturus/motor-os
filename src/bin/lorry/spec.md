@@ -1446,7 +1446,9 @@ closure.
 `build`, `test`, and `check` run selected compiler targets on the unit DAG.
 Each compiler unit writes into a private sibling directory, then replaces
 its planned unit directory only after rustc succeeds, its outputs and dep-info
-are validated, and any cache entry is stored. Downstream units and artifact
+are validated, and any cache entry is stored. The sibling has the same name in
+every build, because rustc discards its incremental state when the output
+directory changes. Downstream units and artifact
 messages use the published path. Successful units remain available if a
 later unit fails. Build scripts run against their stable published `OUT_DIR`,
 including replacement runs after `build.rs` changes. A failed script can
