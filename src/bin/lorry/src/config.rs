@@ -18,6 +18,8 @@ pub enum CargoCompat {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Config {
     pub cargo_compat: Option<CargoCompat>,
+    /// The `use-cargo-registry` setting, if any layer sets it.
+    pub use_cargo_registry: Option<bool>,
     pub rustc: Option<PathBuf>,
     pub default_target: Option<String>,
     pub build_target_dir: Option<PathBuf>,
@@ -572,6 +574,12 @@ fn merge_lorry_file(path: &Path, kind: LayerKind, config: &mut Config) -> Result
             }
         });
     }
+    if let Some(item) = document.root().get("use-cargo-registry") {
+        config.use_cargo_registry =
+            Some(item.as_bool().ok_or_else(|| {
+                type_error(path, &document, item, "use-cargo-registry", "a boolean")
+            })?);
+    }
     merge_toolchain(path, &document, config)?;
     merge_cache(path, kind, &document, config)?;
     merge_repositories(path, kind, &document, config)?;
@@ -588,6 +596,7 @@ fn validate_lorry_root(path: &Path, document: &Document) -> Result<()> {
     const ALLOWED: &[&str] = &[
         "config-version",
         "cargo-compat-version",
+        "use-cargo-registry",
         "toolchain",
         "cache",
         "repositories",
@@ -2180,6 +2189,24 @@ mod tests {
         let error =
             merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap_err();
         assert!(error.render().contains("current Motor Cargo"));
+    }
+
+    #[test]
+    fn later_layers_choose_whether_to_use_cargo_registry() {
+        let temp = TempDir::new();
+        let base = temp.0.join("base.toml");
+        let local = temp.0.join("local.toml");
+        fs::write(&base, "config-version = 1\nuse-cargo-registry = true\n").unwrap();
+        fs::write(&local, "config-version = 1\nuse-cargo-registry = false\n").unwrap();
+        let mut config = Config::default();
+        assert_eq!(config.use_cargo_registry, None);
+        merge_lorry_file(&base, LayerKind::LinuxBase, &mut config).unwrap();
+        assert_eq!(config.use_cargo_registry, Some(true));
+        merge_lorry_file(&local, LayerKind::Local, &mut config).unwrap();
+        assert_eq!(config.use_cargo_registry, Some(false));
+        fs::write(&local, "config-version = 1\nuse-cargo-registry = \"no\"\n").unwrap();
+        let error = merge_lorry_file(&local, LayerKind::Local, &mut config).unwrap_err();
+        assert!(error.render().contains("use-cargo-registry"));
     }
 
     #[test]

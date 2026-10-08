@@ -28,7 +28,8 @@ pub struct Cli {
     pub toolchain: Option<String>,
     pub color: Color,
     pub verbosity: Verbosity,
-    pub use_cargo_registry: bool,
+    /// `--use-cargo-registry` or `--no-use-cargo-registry`, if given.
+    pub use_cargo_registry: Option<bool>,
     pub lorry_messages: bool,
     pub max_packages: Option<u64>,
     pub selection: PackageSelection,
@@ -395,7 +396,20 @@ impl Cli {
         } else {
             Verbosity::Normal
         };
-        let use_cargo_registry = matches.get_flag("use-cargo-registry");
+        let use_cargo_registry = match (
+            matches.get_flag("use-cargo-registry"),
+            matches.get_flag("no-use-cargo-registry"),
+        ) {
+            (true, true) => {
+                return Err(Error::usage(
+                    "`--use-cargo-registry` conflicts with `--no-use-cargo-registry`",
+                    "pass only one of them",
+                ));
+            }
+            (true, false) => Some(true),
+            (false, true) => Some(false),
+            (false, false) => None,
+        };
         let selection = matches
             .subcommand()
             .map(|(_, command)| PackageSelection {
@@ -462,15 +476,16 @@ impl Cli {
                 "select one binary or executable example by name",
             ));
         }
-        if use_cargo_registry
+        if let Some(enabled) = use_cargo_registry
             && matches!(
                 command,
                 Command::New { .. } | Command::CacheClean | Command::Clean(_)
             )
         {
+            let option = cargo_registry_option(enabled);
             return Err(Error::usage(
-                "`--use-cargo-registry` does not apply to this command",
-                "remove `--use-cargo-registry`",
+                format!("`{option}` does not apply to this command"),
+                format!("remove `{option}`"),
             ));
         }
         if matches!(command, Command::Review)
@@ -481,7 +496,7 @@ impl Cli {
                 "review writes the committed review of the scope recorded by `lorry vendor`; pass selectors to vendor to change that scope",
             ));
         }
-        if use_cargo_registry && matches!(command, Command::Review) {
+        if use_cargo_registry == Some(true) && matches!(command, Command::Review) {
             return Err(Error::usage(
                 "`--use-cargo-registry` cannot be combined with `review`",
                 "remove `--use-cargo-registry`; review uses verified Lorry repository evidence",
@@ -538,6 +553,7 @@ fn command_line() -> ClapCommand {
                 .value_parser(PossibleValuesParser::new(["auto", "always", "never"])),
         )
         .arg(flag("use-cargo-registry"))
+        .arg(flag("no-use-cargo-registry"))
         .arg(flag("help").short('h').exclusive(true))
         .arg(flag("version").short('V').exclusive(true))
         .subcommand(
@@ -620,6 +636,14 @@ fn command_line() -> ClapCommand {
                         ])),
                 ),
         )
+}
+
+fn cargo_registry_option(enabled: bool) -> &'static str {
+    if enabled {
+        "--use-cargo-registry"
+    } else {
+        "--no-use-cargo-registry"
+    }
 }
 
 fn flag(name: &'static str) -> Arg {
@@ -1211,7 +1235,7 @@ mod tests {
         assert_eq!(cli.toolchain.as_deref(), Some("motor-current"));
         assert_eq!(cli.verbosity, Verbosity::Verbose);
         assert_eq!(cli.color, Color::Always);
-        assert!(cli.use_cargo_registry);
+        assert_eq!(cli.use_cargo_registry, Some(true));
         assert_eq!(cli.selection.packages, ["app"]);
         assert_eq!(
             cli.command,
@@ -1357,6 +1381,21 @@ mod tests {
             })
         );
         assert!(parse(&["--use-cargo-registry", "clean"]).is_err());
+        assert!(parse(&["--no-use-cargo-registry", "clean"]).is_err());
+        assert_eq!(
+            parse(&["--no-use-cargo-registry", "build"])
+                .unwrap()
+                .use_cargo_registry,
+            Some(false)
+        );
+        assert_eq!(parse(&["build"]).unwrap().use_cargo_registry, None);
+        assert!(
+            parse(&["--use-cargo-registry", "--no-use-cargo-registry", "build"])
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts")
+        );
+        assert!(parse(&["--no-use-cargo-registry", "review"]).is_ok());
         assert!(parse(&["clean", "--strict-validation"]).is_err());
         assert!(parse(&["clean", "--bin", "server"]).is_err());
         assert!(parse(&["clean", "--target-dir="]).is_err());

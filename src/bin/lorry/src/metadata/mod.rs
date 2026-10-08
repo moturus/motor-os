@@ -29,6 +29,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     warn_default_format(cli, options);
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
     let config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
+    let use_cargo_registry = crate::cargo_registry::selected(cli, &config);
     let target_directory = package::path_utf8(
         &config.target_directory(&current, &workspace.root, None),
         "metadata target directory",
@@ -71,7 +72,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         &config,
         &toolchain,
         dependency::RegistryAccess {
-            use_cargo_registry: cli.use_cargo_registry,
+            use_cargo_registry,
             validation: ValidationMode::Trusted,
             staging_parent: &scratch,
             evidence_root: &crate::engine::artifact_root(manifest).join(".cargo-evidence"),

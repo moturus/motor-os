@@ -38,6 +38,7 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
     workspace.load_locked_context()?;
     let manifest = &workspace.packages[0];
     let config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
+    let use_cargo_registry = crate::cargo_registry::selected(cli, &config);
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let physical_target = config.selected_target(options.target.as_deref())?;
@@ -65,7 +66,7 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
         &config,
         &toolchain,
         RegistryAccess {
-            use_cargo_registry: cli.use_cargo_registry,
+            use_cargo_registry,
             validation: ValidationMode::Trusted,
             staging_parent: &scratch,
             evidence_root: &crate::engine::artifact_root(manifest).join(".cargo-evidence"),

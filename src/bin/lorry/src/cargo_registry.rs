@@ -7,7 +7,8 @@ use semver::Version;
 
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::AtomicFile;
-use crate::config::PolicyLimits;
+use crate::cli::Cli;
+use crate::config::{Config, PolicyLimits};
 use crate::diagnostic::{Error, Result};
 use crate::hash::{decode_hex, hex};
 use crate::manifest::{DependencySource, Manifest};
@@ -35,6 +36,15 @@ pub struct Package {
     pub evidence: PackageEvidence,
     pub checksum: [u8; 32],
     _extracted: Option<ExtractedArchive>,
+}
+
+/// Whether a build, check, run, test, metadata, or tree command reads
+/// crates.io sources from Cargo's cache: the command line wins over
+/// configuration.
+pub(crate) fn selected(cli: &Cli, config: &Config) -> bool {
+    cli.use_cargo_registry
+        .or(config.use_cargo_registry)
+        .unwrap_or(false)
 }
 
 impl CargoRegistry {

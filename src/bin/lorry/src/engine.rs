@@ -175,6 +175,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let compact_state = CompactState::load(&manifest.workspace_root)?;
     let mut config = Config::load(&current, &manifest)?;
     config.apply_max_packages(cli.max_packages)?;
+    let use_cargo_registry = crate::cargo_registry::selected(cli, &config);
     let target_directory = config.target_directory(
         &current,
         &manifest.workspace_root,
@@ -300,7 +301,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
             logical_target,
             rustflags: &rustflags,
             release,
-            use_cargo_registry: cli.use_cargo_registry,
+            use_cargo_registry,
             binary_selection,
             check_targets: fresh_check.map(|options| &options.build.targets),
             jobs,
@@ -390,7 +391,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         &config,
         &toolchain,
         dependency::RegistryAccess {
-            use_cargo_registry: cli.use_cargo_registry,
+            use_cargo_registry,
             validation,
             staging_parent: &admission_scratch,
             evidence_root: &target_root.join(".cargo-evidence"),
@@ -480,7 +481,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     verbosity: cli.verbosity,
                     jobs,
                     keep_going: options.keep_going,
-                    use_cargo_registry: cli.use_cargo_registry,
+                    use_cargo_registry,
                     source: (source, direct, verified_resolution),
                     bundle: false,
                     validation,
@@ -516,7 +517,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                 verbosity: cli.verbosity,
                 jobs,
                 keep_going: options.build.keep_going,
-                use_cargo_registry: cli.use_cargo_registry,
+                use_cargo_registry,
                 source: (source, direct, verified_resolution),
                 bundle: false,
                 validation,
@@ -550,7 +551,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     verbosity: cli.verbosity,
                     jobs,
                     keep_going: false,
-                    use_cargo_registry: cli.use_cargo_registry,
+                    use_cargo_registry,
                     source: (source, direct, verified_resolution),
                     bundle: false,
                     validation,
@@ -606,7 +607,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
                     verbosity: cli.verbosity,
                     jobs,
                     keep_going: false,
-                    use_cargo_registry: cli.use_cargo_registry,
+                    use_cargo_registry,
                     source: (source, direct, verified_resolution),
                     bundle: options.bundle,
                     validation,

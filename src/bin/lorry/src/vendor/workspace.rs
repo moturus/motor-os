@@ -7,7 +7,7 @@ use crate::resolver::workspace::{
 };
 
 pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
-    if cli.use_cargo_registry {
+    if cli.use_cargo_registry == Some(true) {
         return Err(Error::usage(
             "`--use-cargo-registry` cannot be combined with `fetch`",
             "remove `--use-cargo-registry`; fetch populates verified Lorry repositories",
@@ -127,7 +127,7 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
 }
 
 pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32> {
-    if cli.use_cargo_registry {
+    if cli.use_cargo_registry == Some(true) {
         return Err(Error::usage(
             "vendor uses only verified Lorry repositories",
             "remove --use-cargo-registry",
