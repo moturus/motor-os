@@ -5,33 +5,160 @@ enum Choice {
     New(PackageKey, Arc<Candidate>),
 }
 
+/// Dependencies waiting for resolution, in Cargo's order. Each activation
+/// adds a group of its dependencies. The next dependency comes from the group
+/// whose next dependency has the fewest candidates; ties go to the older group.
+#[derive(Clone, Default)]
+pub(super) struct Pending {
+    // Groups whose candidates are not counted yet, with their insertion time.
+    new: Vec<(u64, Vec<Event>)>,
+    groups: BTreeMap<(usize, u64), VecDeque<(usize, Event)>>,
+    time: u64,
+}
+
+impl Pending {
+    pub(super) fn push_group(&mut self, events: Vec<Event>) {
+        if !events.is_empty() {
+            self.new.push((self.time, events));
+            self.time += 1;
+        }
+    }
+
+    /// Loads and counts the candidates of new groups, as Cargo does when it
+    /// activates a package, then sorts each group by count.
+    fn count(
+        &mut self,
+        catalog: &mut Catalog,
+        locked: &[LockedPreference],
+        scope: Scope<'_>,
+        loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
+    ) -> std::result::Result<(), Failure> {
+        for (time, events) in std::mem::take(&mut self.new) {
+            let mut group = Vec::with_capacity(events.len());
+            for mut event in events {
+                if event.dependency.source == RequirementSource::CratesIo {
+                    loader(
+                        &event.dependency.package,
+                        &event.dependency.requirement,
+                        catalog,
+                    )
+                    .map_err(|error| Failure::from_error(error, true))?;
+                }
+                catalog
+                    .prepare(&mut event.dependency)
+                    .map_err(|error| Failure::from_error(error, false))?;
+                let filter = Filter::new(scope, locked, &event)?;
+                let keys = candidates(catalog, &event, locked)
+                    .iter()
+                    .map(|record| candidate_key(record))
+                    .filter(|key| filter.permits(key))
+                    .collect::<Vec<_>>();
+                // A locked edge narrows Cargo's query to the locked version.
+                let preferred = keys.iter().filter(|key| filter.is_preferred(key)).count();
+                let count = if preferred > 0 { preferred } else { keys.len() };
+                group.push((count, event));
+            }
+            group.sort_by_key(|(count, _)| *count);
+            self.groups.insert((group[0].0, time), group.into());
+        }
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Option<Event> {
+        let ((_, time), mut group) = self.groups.pop_first()?;
+        let (_, event) = group.pop_front().unwrap();
+        if let Some((count, _)) = group.front() {
+            self.groups.insert((*count, time), group);
+        }
+        Some(event)
+    }
+}
+
+/// The locked and preferred identities that limit one dependency's candidates.
+struct Filter {
+    locked_package: Option<PackageKey>,
+    allowed: Option<BTreeSet<locked::Identity>>,
+    preferred: Option<BTreeSet<locked::Identity>>,
+}
+
+impl Filter {
+    fn new(
+        scope: Scope<'_>,
+        locked: &[LockedPreference],
+        event: &Event,
+    ) -> std::result::Result<Self, Failure> {
+        let mut preferred = scope.dependency_preferences(event).cloned();
+        let forced = locked
+            .iter()
+            .filter(|preference| {
+                preference.name == event.dependency.package && preference.checksum.is_none()
+            })
+            .map(|preference| {
+                locked::Identity::from_key(&PackageKey {
+                    name: preference.name.clone(),
+                    version: preference.version.clone(),
+                    source: PackageSourceKey::CratesIo,
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        if !forced.is_empty() && event.dependency.source == RequirementSource::CratesIo {
+            preferred = Some(forced);
+        }
+        Ok(Self {
+            locked_package: scope.locked_package(event)?.cloned(),
+            allowed: scope.locked_dependencies(event)?.cloned(),
+            preferred,
+        })
+    }
+
+    fn permits(&self, key: &PackageKey) -> bool {
+        self.locked_package
+            .as_ref()
+            .is_none_or(|locked| locked == key)
+            && self
+                .allowed
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&locked::Identity::from_key(key)))
+    }
+
+    fn is_preferred(&self, key: &PackageKey) -> bool {
+        self.preferred
+            .as_ref()
+            .is_none_or(|preferred| preferred.contains(&locked::Identity::from_key(key)))
+    }
+}
+
+fn candidate_key(record: &Candidate) -> PackageKey {
+    PackageKey {
+        name: record.name.clone(),
+        version: record.version.clone(),
+        source: record.source.key(),
+    }
+}
+
 struct Frame {
     state: State,
-    queue: VecDeque<Event>,
+    pending: Pending,
     event: Option<Event>,
+    filter: Option<Filter>,
     // Untried candidates in Cargo's order, including selected packages.
     choices: VecDeque<Choice>,
     tried: BTreeSet<PackageKey>,
     // Catalog records for the dependency name when `choices` was ordered.
     ordered_records: Option<usize>,
-    preferred: Option<BTreeSet<locked::Identity>>,
-    locked_package: Option<PackageKey>,
-    allowed: Option<BTreeSet<locked::Identity>>,
     last_failure: Option<Failure>,
 }
 
 impl Frame {
-    fn new(state: State, queue: VecDeque<Event>) -> Self {
+    fn new(state: State, pending: Pending) -> Self {
         Self {
             state,
-            queue,
+            pending,
             event: None,
+            filter: None,
             choices: VecDeque::new(),
             tried: BTreeSet::new(),
             ordered_records: None,
-            preferred: None,
-            locked_package: None,
-            allowed: None,
             last_failure: None,
         }
     }
@@ -43,41 +170,12 @@ impl Frame {
         locked: &[LockedPreference],
         scope: Scope<'_>,
         loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
-    ) -> std::result::Result<Option<(State, VecDeque<Event>)>, Failure> {
+    ) -> std::result::Result<Option<(State, Pending)>, Failure> {
         if self.event.is_none() {
-            let Some(mut event) = self.queue.pop_front() else {
+            self.pending.count(catalog, locked, scope, loader)?;
+            let Some(event) = self.pending.pop() else {
                 return Ok(None);
             };
-            let locked_package = scope.locked_package(&event)?;
-            self.allowed = scope.locked_dependencies(&event)?.cloned();
-            self.preferred = scope.dependency_preferences(&event).cloned();
-            let forced = locked
-                .iter()
-                .filter(|preference| {
-                    preference.name == event.dependency.package && preference.checksum.is_none()
-                })
-                .map(|preference| {
-                    locked::Identity::from_key(&PackageKey {
-                        name: preference.name.clone(),
-                        version: preference.version.clone(),
-                        source: PackageSourceKey::CratesIo,
-                    })
-                })
-                .collect::<BTreeSet<_>>();
-            if !forced.is_empty() && event.dependency.source == RequirementSource::CratesIo {
-                self.preferred = Some(forced);
-            }
-            if event.dependency.source == RequirementSource::CratesIo {
-                loader(
-                    &event.dependency.package,
-                    &event.dependency.requirement,
-                    catalog,
-                )
-                .map_err(|error| Failure::from_error(error, true))?;
-            }
-            catalog
-                .prepare(&mut event.dependency)
-                .map_err(|error| Failure::from_error(error, false))?;
             if let Some(limit) = options.max_depth
                 && event.depth > limit
             {
@@ -86,7 +184,7 @@ impl Frame {
                     event.dependency.package, limit
                 )));
             }
-            self.locked_package = locked_package.cloned();
+            self.filter = Some(Filter::new(scope, locked, &event)?);
             self.event = Some(event);
         }
         loop {
@@ -156,9 +254,9 @@ impl Frame {
                     key
                 }
             };
-            let mut queue = self.queue.clone();
-            match fulfill(&mut state, &mut queue, event, &key, options, scope) {
-                Ok(()) => return Ok(Some((state, queue))),
+            let mut pending = self.pending.clone();
+            match fulfill(&mut state, &mut pending, event, &key, options, scope) {
+                Ok(()) => return Ok(Some((state, pending))),
                 Err(failure) if failure.fatal => return Err(failure),
                 Err(failure) => self.last_failure = Some(failure),
             }
@@ -178,6 +276,7 @@ impl Frame {
     /// semver-incompatible version wins over reusing a lower one.
     fn order_choices(&mut self, catalog: &Catalog, options: &Options, locked: &[LockedPreference]) {
         let event = self.event.as_ref().unwrap();
+        let filter = self.filter.as_ref().unwrap();
         let mut records = self
             .state
             .nodes
@@ -190,30 +289,16 @@ impl Frame {
             .map(|(key, node)| (key.clone(), node.record.clone()))
             .collect::<BTreeMap<_, _>>();
         for record in candidates(catalog, event, locked) {
-            let key = PackageKey {
-                name: record.name.clone(),
-                version: record.version.clone(),
-                source: record.source.key(),
-            };
-            records.entry(key).or_insert(record);
+            records.entry(candidate_key(&record)).or_insert(record);
         }
         let mut ordered = records
             .into_iter()
-            .filter(|(key, _)| {
-                !self.tried.contains(key)
-                    && self
-                        .locked_package
-                        .as_ref()
-                        .is_none_or(|locked| locked == key)
-                    && self
-                        .allowed
-                        .as_ref()
-                        .is_none_or(|allowed| allowed.contains(&locked::Identity::from_key(key)))
-            })
+            .filter(|(key, _)| !self.tried.contains(key) && filter.permits(key))
             .collect::<Vec<_>>();
         ordered.sort_by(|(left_key, left), (right_key, right)| {
-            self.is_preferred(right_key)
-                .cmp(&self.is_preferred(left_key))
+            filter
+                .is_preferred(right_key)
+                .cmp(&filter.is_preferred(left_key))
                 .then_with(|| candidate_order(left, right, options, locked))
         });
         self.choices = ordered
@@ -234,7 +319,8 @@ impl Frame {
     /// need not be kept for backtracking.
     fn locked_candidates_selected(&self) -> bool {
         let name = &self.event.as_ref().unwrap().dependency.package;
-        self.allowed.as_ref().is_some_and(|allowed| {
+        let filter = self.filter.as_ref().unwrap();
+        filter.allowed.as_ref().is_some_and(|allowed| {
             allowed
                 .iter()
                 .filter(|identity| identity.name() == name)
@@ -244,12 +330,6 @@ impl Frame {
                     })
                 })
         })
-    }
-
-    fn is_preferred(&self, key: &PackageKey) -> bool {
-        self.preferred
-            .as_ref()
-            .is_none_or(|preferred| preferred.contains(&locked::Identity::from_key(key)))
     }
 
     fn conflicts(&self, record: &Candidate) -> bool {
@@ -263,7 +343,7 @@ impl Frame {
 
     fn can_retry(&self) -> bool {
         // The loader may still add versions of a crates.io package.
-        if self.locked_package.is_none()
+        if self.filter.as_ref().unwrap().locked_package.is_none()
             && self.event.as_ref().unwrap().dependency.source == RequirementSource::CratesIo
             && !self.locked_candidates_selected()
         {
@@ -278,7 +358,7 @@ impl Frame {
 
 pub(super) fn solve(
     state: State,
-    queue: VecDeque<Event>,
+    pending: Pending,
     catalog: &mut Catalog,
     options: &Options,
     locked: &[LockedPreference],
@@ -287,13 +367,13 @@ pub(super) fn solve(
 ) -> std::result::Result<State, Failure> {
     // Preserve backtracking on the heap; a forced choice replaces its frame.
     // Process-stack depth is independent of graph width and queued features.
-    let mut frames = vec![Frame::new(state, queue)];
+    let mut frames = vec![Frame::new(state, pending)];
     loop {
         let frame = frames.last_mut().unwrap();
         match frame.next(catalog, options, locked, scope, loader) {
             Ok(None) => return Ok(frames.pop().unwrap().state),
-            Ok(Some((state, queue))) => {
-                let child = Frame::new(state, queue);
+            Ok(Some((state, pending))) => {
+                let child = Frame::new(state, pending);
                 if frame.can_retry() {
                     frames.push(child);
                 } else {

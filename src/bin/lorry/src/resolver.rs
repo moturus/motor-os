@@ -872,7 +872,7 @@ pub fn resolve_selected(
     catalog.workspace_root.clone_from(&manifest.workspace_root);
     validate_locked_checksums(&catalog, locked)?;
     let scope = Scope::Selected(selection);
-    let mut queue = VecDeque::new();
+    let mut roots = Vec::new();
     for requirement in root_requirements(manifest)? {
         if !scope.matches(
             CompileKind::Target,
@@ -880,7 +880,7 @@ pub fn resolve_selected(
         )? {
             continue;
         }
-        queue.push_back(Event {
+        roots.push(Event {
             parent: None,
             parent_compile_kind: None,
             dependency_index: requirement.index,
@@ -891,8 +891,11 @@ pub fn resolve_selected(
             ancestors: BTreeSet::new(),
         });
     }
+    roots.sort_by(|left, right| {
+        manifest_order(&left.dependency).cmp(&manifest_order(&right.dependency))
+    });
     solve_request(
-        queue,
+        roots,
         &mut catalog,
         options,
         locked,
@@ -932,16 +935,18 @@ pub(crate) fn resolve_member(
 }
 
 fn solve_request(
-    queue: VecDeque<Event>,
+    roots: Vec<Event>,
     catalog: &mut Catalog,
     options: &Options,
     locked: &[LockedPreference],
     scope: Scope<'_>,
     loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
+    let mut pending = search::Pending::default();
+    pending.push_group(roots);
     let state = solve(
         State::default(),
-        queue,
+        pending,
         catalog,
         options,
         locked,
@@ -1502,7 +1507,7 @@ impl Failure {
 
 fn fulfill(
     state: &mut State,
-    queue: &mut VecDeque<Event>,
+    pending: &mut search::Pending,
     event: &Event,
     key: &PackageKey,
     options: &Options,
@@ -1519,7 +1524,7 @@ fn fulfill(
             // Cargo also activates a selected macro's normal feature context.
             // Its library stays on the host; selected auxiliary targets may
             // also compile the dependencies activated in the target context.
-            activate(state, queue, key, &event, options, scope)?;
+            activate(state, pending, key, &event, options, scope)?;
         }
         event.compile_kind = CompileKind::Host;
         event.context = normalize_scope_context(options.resolver, scope, FeatureContext::Host);
@@ -1576,12 +1581,12 @@ fn fulfill(
             ));
         }
     }
-    activate(state, queue, key, &event, options, scope)
+    activate(state, pending, key, &event, options, scope)
 }
 
 fn activate(
     state: &mut State,
-    queue: &mut VecDeque<Event>,
+    pending: &mut search::Pending,
     key: &PackageKey,
     event: &Event,
     options: &Options,
@@ -1662,6 +1667,7 @@ fn activate(
         }
     }
 
+    let mut group = Vec::new();
     // Unified feature changes must reach dependencies of every already active
     // compilation kind, even when the new request arrived in only one kind.
     let compile_kinds = if event.context == FeatureContext::Unified {
@@ -1735,7 +1741,7 @@ fn activate(
             ancestors.insert(key.clone());
             ancestors
         };
-        queue.push_back(Event {
+        group.push(Event {
             parent: Some(key.clone()),
             parent_compile_kind: Some(parent_kind),
             dependency_index: index,
@@ -1746,7 +1752,27 @@ fn activate(
             ancestors,
         });
     }
+    // A registry package keeps its index order.
+    if record.local_manifest.is_some() {
+        group.sort_by(|left, right| {
+            manifest_order(&left.dependency).cmp(&manifest_order(&right.dependency))
+        });
+    }
+    pending.push_group(group);
     Ok(())
+}
+
+/// Cargo's order of a path or Git package's dependencies: `[dependencies]`,
+/// `[dev-dependencies]` and `[build-dependencies]`, then each target table in
+/// name order with dependencies, build-dependencies and dev-dependencies.
+/// Names are sorted within each table.
+fn manifest_order(dependency: &Dependency) -> (Option<&str>, u8, &str) {
+    let table = match (dependency.target.is_some(), dependency.kind) {
+        (_, DependencyKind::Normal) => 0,
+        (false, DependencyKind::Dev) | (true, DependencyKind::Build) => 1,
+        (false, DependencyKind::Build) | (true, DependencyKind::Dev) => 2,
+    };
+    (dependency.target.as_deref(), table, &dependency.alias)
 }
 
 fn defines_feature(record: &Candidate, feature: &str) -> bool {
@@ -2507,6 +2533,20 @@ mod tests {
                 .iter()
                 .any(|package| package.key.name == "optional")
         );
+        limits.package_limit = PackageLimit::with_max(1);
+        // Restore the yanked version so the only failure is the limit; an
+        // unmatched `=1.0.0` would be resolved first and fail first.
+        Arc::make_mut(
+            catalog
+                .records
+                .get_mut("shared")
+                .unwrap()
+                .iter_mut()
+                .find(|candidate| candidate.version == Version::new(1, 0, 0))
+                .unwrap(),
+        )
+        .record
+        .yanked = false;
         limits.package_limit = PackageLimit::with_max(1);
         assert!(
             resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| Ok(
@@ -5241,19 +5281,18 @@ dev = ["dep:leaf"]
         );
     }
 
-    #[test]
-    fn fresh_resolution_matches_the_frozen_candidate_order_cargo_oracle() {
-        // Cargo tries the highest compatible version first, so a selected
-        // lower version does not capture a wider requirement. That also keeps
-        // one declaration on one version in host and target contexts.
-        let root = Path::new("tests/oracles/candidate-order/root");
-        let mut workspace = crate::manifest::SourceWorkspace::load(root, None).unwrap();
+    /// Resolves an oracle workspace without its lock and compares the result
+    /// with the lock Cargo generated for it.
+    fn assert_fresh_resolution_matches_cargo_oracle(oracle: &str) {
+        let fixture = Path::new("tests/oracles").join(oracle);
+        let root = fixture.join("root");
+        let mut workspace = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
         workspace.load_locked_context().unwrap();
         for member in &mut workspace.packages {
             member.lock = None;
         }
         let mut catalog = Catalog::default();
-        for entry in fs::read_dir("tests/oracles/candidate-order/index-records").unwrap() {
+        for entry in fs::read_dir(fixture.join("index-records")).unwrap() {
             let path = entry.unwrap().path();
             catalog
                 .insert(Record::parse(&path, &fs::read(&path).unwrap()).unwrap())
@@ -5278,5 +5317,21 @@ dev = ["dep:leaf"]
             .unwrap(),
             fs::read_to_string(root.join("Cargo.lock")).unwrap()
         );
+    }
+
+    #[test]
+    fn fresh_resolution_matches_the_frozen_candidate_order_cargo_oracle() {
+        // Cargo tries the highest compatible version first, so a selected
+        // lower version does not capture a wider requirement. That also keeps
+        // one declaration on one version in host and target contexts.
+        assert_fresh_resolution_matches_cargo_oracle("candidate-order");
+    }
+
+    #[test]
+    fn fresh_resolution_matches_the_frozen_dependency_order_cargo_oracle() {
+        // Cargo resolves the dependency with the fewest candidates first, and
+        // breaks ties in its manifest order: dev before build dependencies,
+        // sorted names, and target tables sorted by name.
+        assert_fresh_resolution_matches_cargo_oracle("dependency-order");
     }
 }

@@ -118,7 +118,12 @@ features, Rust versions, checksums, patches, links uniqueness, an optional
 configured graph-depth bound, and package limits still apply. Dependency depth
 has no default cap, matching Cargo. As in Cargo, candidates are tried in
 preference order and then from the highest version; a selected package keeps
-its place in that order instead of being tried first.
+its place in that order instead of being tried first. Dependencies are also
+resolved in Cargo's order. Each selected package adds a group of its
+dependencies, sorted by candidate count, with ties in Cargo's manifest order
+for path and Git packages and in index order for registry packages. The next
+dependency comes from the group whose next dependency has the fewest
+candidates, and ties go to the older group.
 
 Every package has a logical identity independent of its installation path:
 

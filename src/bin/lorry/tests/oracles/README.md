@@ -26,7 +26,14 @@ one, and that one declaration used from host and target code resolves to one
 version. Lorry's unit test resolves it without a lock and renders the same
 bytes.
 
-Re-run the Cargo oracle lane for both fixtures with:
+## Dependency order
+
+`dependency-order/` checks the order in which dependencies are resolved when
+the resolver must backtrack. Cargo takes the dependency with the fewest
+candidates first. Ties follow its manifest order: dev-dependencies before
+build-dependencies, sorted names, and target tables sorted by name.
+
+Re-run the Cargo oracle lane for all three fixtures with:
 
 ```sh
 ./tests/verify-resolution-oracles.sh

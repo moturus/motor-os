@@ -84,7 +84,7 @@ fn resolve_workspace_request(
     members: &[MemberRequest],
     scope: Scope<'_>,
 ) -> Result<Resolution> {
-    let mut queue = VecDeque::new();
+    let mut roots = Vec::new();
     for (index, member) in members.iter().enumerate() {
         let package = complete
             .packages
@@ -117,7 +117,7 @@ fn resolve_workspace_request(
             },
             source: RequirementSource::Path(member.root.clone()),
         };
-        queue.push_back(Event {
+        roots.push(Event {
             parent: None,
             parent_compile_kind: None,
             dependency_index: index,
@@ -135,7 +135,7 @@ fn resolve_workspace_request(
         .with_members(catalog.workspace_members.values().cloned());
     let locked = LockedPreference::from_resolution(complete);
     let mut resolution = solve_request(
-        queue,
+        roots,
         &mut catalog,
         &options,
         &locked,
@@ -295,7 +295,7 @@ fn resolve_workspace_complete(
         .package_limit
         .with_members(catalog.workspace_members.values().cloned());
     validate_locked_checksums(catalog, locked)?;
-    let mut queue = VecDeque::new();
+    let mut roots = Vec::new();
     for (index, member) in workspace.packages.iter().enumerate() {
         let mut member = member.clone();
         member
@@ -348,7 +348,7 @@ fn resolve_workspace_complete(
             },
             source: RequirementSource::Path(member.root),
         };
-        queue.push_back(Event {
+        roots.push(Event {
             parent: None,
             parent_compile_kind: None,
             dependency_index: index,
@@ -359,7 +359,7 @@ fn resolve_workspace_complete(
             ancestors: BTreeSet::new(),
         });
     }
-    let resolution = solve_request(queue, catalog, &options, locked, scope, loader)?;
+    let resolution = solve_request(roots, catalog, &options, locked, scope, loader)?;
     let packages = resolution
         .packages
         .iter()

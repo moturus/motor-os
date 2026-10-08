@@ -1,0 +1,8 @@
+[package]
+name = "r"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zeta = "1"
+alpha = "1"

@@ -44,4 +44,5 @@ verify() {
 
 verify "1.99" "$LORRY_TEST_CARGO" stage2-resolution
 verify "1.99" "$LORRY_TEST_CARGO" candidate-order
+verify "1.99" "$LORRY_TEST_CARGO" dependency-order
 echo "PASS: the current Motor Cargo matches the frozen resolution oracles"

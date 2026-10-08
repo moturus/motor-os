@@ -24,9 +24,12 @@ workspace work.
 
 ## Differences from Cargo
 
-- **Resolver dependency order.** Lorry resolves dependencies first in, first
-  out; Cargo takes the one with the fewest candidates first. Locks differ
-  only when the resolver backtracks. See `resolver-order-plan.md`.
+- **Resolver contexts.** Lorry resolves host and target feature contexts
+  separately, so one package can add more than one group of dependencies.
+  The extra groups normally select packages that are already chosen. If one
+  of them causes backtracking, the lock can still differ from Cargo's. So can
+  a `vendor` run that counts only the cached index entries of a crate, since
+  Lorry fetches a crate's index only when no cached version matches.
 - **Config `rustflags` are always appended (from dev).** Cargo appends only
   arrays. A string value replaces the lower layer, and mixing a string with
   an array is an error. See `src/config.rs`.

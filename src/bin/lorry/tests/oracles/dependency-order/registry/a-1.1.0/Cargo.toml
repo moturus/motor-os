@@ -1,0 +1,8 @@
+[package]
+name = "a"
+version = "1.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+s = { version = "=1.0.0" }
