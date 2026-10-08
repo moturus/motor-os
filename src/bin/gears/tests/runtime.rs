@@ -1859,185 +1859,87 @@ fn shipped_sh_uses_a_bounded_per_call_timeout() {
     );
 }
 
-#[test]
-fn shipped_ls_passes_literal_paths_to_the_program() {
-    let fixture = Fixture::new("shipped-ls");
-    let spaced = fixture.workspace.join("dir with spaces");
-    let option_like = fixture.workspace.join("-lh");
-    std::fs::create_dir_all(&spaced).unwrap();
-    std::fs::create_dir_all(&option_like).unwrap();
-    std::fs::write(spaced.join("literal[?].txt"), "data").unwrap();
-    std::fs::write(option_like.join("marker.txt"), "data").unwrap();
+/// Run shipped tool `name` once per argument object in one turn, collecting its output.
+fn run_shipped(fixture: &Fixture, name: &str, calls: &[&str]) -> (String, Runtime) {
     let config = Config {
         tools: vec![ToolDirectory {
-            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/ls"),
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tools")
+                .join(name),
             enabled: true,
         }],
         ..Config::default()
     };
-    let provider = Scripted::new(vec![
-        tool("ls", r#"{"path":"dir with spaces"}"#),
-        tool("ls", r#"{"path":"-lh"}"#),
-        answer("done"),
-    ]);
-    let mut runtime = fixture.runtime(provider.clone(), &config);
+    let mut script: Vec<_> = calls.iter().map(|call| tool(name, call)).collect();
+    script.push(answer("done"));
+    let mut runtime = fixture.runtime(Scripted::new(script), &config);
     let mut output = String::new();
     runtime
-        .turn("list".to_string(), &mut FixedApproval(true), &mut |event| {
-            if let Event::ToolOutput { name, text, .. } = event {
-                assert_eq!(name, "ls");
+        .turn("use it".into(), &mut FixedApproval(true), &mut |event| {
+            if let Event::ToolOutput { text, .. } = event {
                 output.push_str(&text);
             }
             Ok(())
         })
         .unwrap();
-    assert!(output.contains("literal[?].txt"), "{output}");
-    assert!(output.contains("marker.txt"), "{output}");
-    assert!(
-        provider.requests.lock().unwrap()[0]
-            .tools
-            .iter()
-            .any(|spec| spec.name == "ls")
+    (output, runtime)
+}
+
+#[test]
+fn shipped_read_tools_pass_spaces_globs_and_leading_dashes_literally() {
+    // Tool, workspace files, argument objects, and what the output must show.
+    type Case<'a> = (
+        &'a str,
+        &'a [(&'a str, &'a str)],
+        &'a [&'a str],
+        fn(&str) -> bool,
     );
-}
-
-#[test]
-fn shipped_head_limits_a_literal_file_path() {
-    let fixture = Fixture::new("shipped-head");
-    std::fs::write(
-        fixture.workspace.join("-input [glob].txt"),
-        "first\nsecond\nthird\n",
-    )
-    .unwrap();
-    let config = Config {
-        tools: vec![ToolDirectory {
-            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/head"),
-            enabled: true,
-        }],
-        ..Config::default()
-    };
-    let provider = Scripted::new(vec![
-        tool("head", r#"{"lines":2,"path":"-input [glob].txt"}"#),
-        answer("done"),
-    ]);
-    let mut runtime = fixture.runtime(provider.clone(), &config);
-    let mut output = String::new();
-    runtime
-        .turn("read".to_string(), &mut FixedApproval(true), &mut |event| {
-            if let Event::ToolOutput { name, text, .. } = event {
-                assert_eq!(name, "head");
-                output.push_str(&text);
-            }
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(output, "first\nsecond\n");
-    assert!(
-        provider.requests.lock().unwrap()[0]
-            .tools
-            .iter()
-            .any(|spec| spec.name == "head")
-    );
-}
-
-#[test]
-fn shipped_tail_limits_a_literal_file_path() {
-    let fixture = Fixture::new("shipped-tail");
-    std::fs::write(
-        fixture.workspace.join("-input [glob].txt"),
-        "first\nsecond\nthird\n",
-    )
-    .unwrap();
-    let config = Config {
-        tools: vec![ToolDirectory {
-            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/tail"),
-            enabled: true,
-        }],
-        ..Config::default()
-    };
-    let provider = Scripted::new(vec![
-        tool("tail", r#"{"lines":2,"path":"-input [glob].txt"}"#),
-        answer("done"),
-    ]);
-    let mut runtime = fixture.runtime(provider, &config);
-    let mut output = String::new();
-    runtime
-        .turn("read".to_string(), &mut FixedApproval(true), &mut |event| {
-            if let Event::ToolOutput { name, text, .. } = event {
-                assert_eq!(name, "tail");
-                output.push_str(&text);
-            }
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(output, "second\nthird\n");
-}
-
-#[test]
-fn shipped_wc_counts_a_literal_file_path() {
-    let fixture = Fixture::new("shipped-wc");
-    std::fs::write(fixture.workspace.join("-count [glob].txt"), "one\ntwo\n").unwrap();
-    let config = Config {
-        tools: vec![ToolDirectory {
-            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/wc"),
-            enabled: true,
-        }],
-        ..Config::default()
-    };
-    let provider = Scripted::new(vec![
-        tool("wc", r#"{"mode":"lines","path":"-count [glob].txt"}"#),
-        answer("done"),
-    ]);
-    let mut runtime = fixture.runtime(provider, &config);
-    let mut output = String::new();
-    runtime
-        .turn(
-            "count".to_string(),
-            &mut FixedApproval(true),
-            &mut |event| {
-                if let Event::ToolOutput { name, text, .. } = event {
-                    assert_eq!(name, "wc");
-                    output.push_str(&text);
-                }
-                Ok(())
-            },
-        )
-        .unwrap();
-    assert!(output.trim_start().starts_with("2 "), "{output}");
-    assert!(output.contains("-count [glob].txt"), "{output}");
-}
-
-#[test]
-fn shipped_cat_reads_a_literal_file_path() {
-    let fixture = Fixture::new("shipped-cat");
-    std::fs::write(
-        fixture.workspace.join("-read [glob].txt"),
-        "literal contents\n",
-    )
-    .unwrap();
-    let config = Config {
-        tools: vec![ToolDirectory {
-            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/cat"),
-            enabled: true,
-        }],
-        ..Config::default()
-    };
-    let provider = Scripted::new(vec![
-        tool("cat", r#"{"path":"-read [glob].txt"}"#),
-        answer("done"),
-    ]);
-    let mut runtime = fixture.runtime(provider, &config);
-    let mut output = String::new();
-    runtime
-        .turn("read".to_string(), &mut FixedApproval(true), &mut |event| {
-            if let Event::ToolOutput { name, text, .. } = event {
-                assert_eq!(name, "cat");
-                output.push_str(&text);
-            }
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(output, "literal contents\n");
+    let lines = [("-input [glob].txt", "first\nsecond\nthird\n")];
+    let limited = [r#"{"lines":2,"path":"-input [glob].txt"}"#];
+    let cases: [Case; 6] = [
+        (
+            "ls",
+            &[
+                ("dir with spaces/literal[?].txt", "data"),
+                ("-lh/marker.txt", "data"),
+            ],
+            &[r#"{"path":"dir with spaces"}"#, r#"{"path":"-lh"}"#],
+            |out| out.contains("literal[?].txt") && out.contains("marker.txt"),
+        ),
+        ("head", &lines, &limited, |out| out == "first\nsecond\n"),
+        ("tail", &lines, &limited, |out| out == "second\nthird\n"),
+        (
+            "wc",
+            &[("-count [glob].txt", "one\ntwo\n")],
+            &[r#"{"mode":"lines","path":"-count [glob].txt"}"#],
+            |out| out.trim_start().starts_with("2 ") && out.contains("-count [glob].txt"),
+        ),
+        (
+            "cat",
+            &[("-read [glob].txt", "literal contents\n")],
+            &[r#"{"path":"-read [glob].txt"}"#],
+            |out| out == "literal contents\n",
+        ),
+        (
+            "find",
+            &[
+                ("dir [glob]/wanted file.txt", "yes"),
+                ("dir [glob]/other.txt", "no"),
+            ],
+            &[r#"{"path":"dir [glob]","name":"wanted*","type":"file"}"#],
+            |out| out.contains("dir [glob]/wanted file.txt") && !out.contains("other.txt"),
+        ),
+    ];
+    for (name, files, calls, check) in cases {
+        let fixture = Fixture::new(&format!("shipped-{name}"));
+        for (path, text) in files {
+            let path = fixture.workspace.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let (output, _) = run_shipped(&fixture, name, calls);
+        assert!(check(&output), "{name}: {output}");
+    }
 }
 
 #[test]
@@ -2096,67 +1998,18 @@ fn shipped_curl_returns_headers_without_following_redirects() {
 }
 
 #[test]
-fn shipped_find_keeps_paths_literal_and_filters_results() {
-    let fixture = Fixture::new("shipped-find");
-    let directory = fixture.workspace.join("dir [glob]");
-    std::fs::create_dir(&directory).unwrap();
-    std::fs::write(directory.join("wanted file.txt"), "yes").unwrap();
-    std::fs::write(directory.join("other.txt"), "no").unwrap();
-    let config = Config {
-        tools: vec![ToolDirectory {
-            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/find"),
-            enabled: true,
-        }],
-        ..Config::default()
-    };
-    let provider = Scripted::new(vec![
-        tool(
-            "find",
-            r#"{"path":"dir [glob]","name":"wanted*","type":"file"}"#,
-        ),
-        answer("done"),
-    ]);
-    let mut runtime = fixture.runtime(provider, &config);
-    let mut output = String::new();
-    runtime
-        .turn("find".to_string(), &mut FixedApproval(true), &mut |event| {
-            if let Event::ToolOutput { name, text, .. } = event {
-                assert_eq!(name, "find");
-                output.push_str(&text);
-            }
-            Ok(())
-        })
-        .unwrap();
-    assert!(output.contains("dir [glob]/wanted file.txt"), "{output}");
-    assert!(!output.contains("other.txt"), "{output}");
-}
-
-#[test]
 fn shipped_diff_treats_differences_as_a_normal_result() {
     let fixture = Fixture::new("shipped-diff");
     std::fs::write(fixture.workspace.join("old [file].txt"), "old\n").unwrap();
     std::fs::write(fixture.workspace.join("new [file].txt"), "new\n").unwrap();
-    let config = Config {
-        tools: vec![ToolDirectory {
-            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/diff"),
-            enabled: true,
-        }],
-        ..Config::default()
-    };
-    let provider = Scripted::new(vec![
-        tool(
-            "diff",
+    let (_, runtime) = run_shipped(
+        &fixture,
+        "diff",
+        &[
             r#"{"left":"old [file].txt","right":"new [file].txt"}"#,
-        ),
-        tool("diff", r#"{"left":"old [file].txt","right":"missing"}"#),
-        answer("done"),
-    ]);
-    let mut runtime = fixture.runtime(provider, &config);
-    runtime
-        .turn("compare".to_string(), &mut FixedApproval(true), &mut |_| {
-            Ok(())
-        })
-        .unwrap();
+            r#"{"left":"old [file].txt","right":"missing"}"#,
+        ],
+    );
     let results = runtime
         .session()
         .context_messages()
@@ -2185,31 +2038,12 @@ fn shipped_sed_maps_script_and_literal_path_without_a_shell() {
     let fixture = Fixture::new("shipped-sed");
     let path = fixture.workspace.join("a * b.txt");
     std::fs::write(&path, "first line\n").unwrap();
-    let config = Config {
-        tools: vec![ToolDirectory {
-            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sed"),
-            enabled: true,
-        }],
-        ..Config::default()
-    };
-    let provider = Scripted::new(vec![
-        tool("sed", r#"{"script":"s/first/second/","path":"a * b.txt"}"#),
-        answer("done"),
-    ]);
-    let mut runtime = fixture.runtime(provider, &config);
-    runtime
-        .turn(
-            "transform".into(),
-            &mut FixedApproval(true),
-            &mut |_| Ok(()),
-        )
-        .unwrap();
-    let context = runtime.session().context_messages().unwrap();
-    assert!(
-        context
-            .iter()
-            .any(|message| message.text_content().contains("second line"))
+    let (output, _) = run_shipped(
+        &fixture,
+        "sed",
+        &[r#"{"script":"s/first/second/","path":"a * b.txt"}"#],
     );
+    assert!(output.contains("second line"), "{output}");
     assert_eq!(std::fs::read_to_string(path).unwrap(), "first line\n");
 }
 
