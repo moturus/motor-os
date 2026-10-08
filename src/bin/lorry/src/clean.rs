@@ -133,69 +133,22 @@ fn clean_package_artifacts(
     if !real_directory(root, "Lorry artifact root")? {
         return Ok(false);
     }
-    let mut profile = root.to_owned();
+    let name =
+        manifest
+            .profile_directory
+            .as_deref()
+            .unwrap_or(if release { "release" } else { "debug" });
+    // Like Cargo, also remove the package's check output and, for a target,
+    // its host build scripts and procedural macros.
+    let mut layouts = vec![root.to_owned()];
     if let Some(target) = target {
-        profile.push(target);
+        layouts.insert(0, root.join(target));
     }
-    profile.push(manifest.profile_directory.as_deref().unwrap_or(if release {
-        "release"
-    } else {
-        "debug"
-    }));
     let mut removed = false;
-    if real_directory(&profile, "selected profile")? {
-        let package_units = profile.join("build").join(&package.name);
-        if real_directory(&package_units, "package unit directory")? {
-            for child in fs::read_dir(&package_units)
-                .map_err(|error| Error::failure(format!("failed to list package units: {error}")))?
-            {
-                let path = child
-                    .map_err(|error| {
-                        Error::failure(format!("failed to read package unit: {error}"))
-                    })?
-                    .path();
-                if real_directory(&path, "package unit")?
-                    && crate::artifact_owner::matches(&path, package)
-                {
-                    remove_directory(&path)?;
-                    removed = true;
-                }
-            }
+    for layout in &layouts {
+        for profile in [name, "check", "clippy"] {
+            removed |= clean_package_profile(&layout.join(profile), manifest, package)?;
         }
-        for directory in [profile.clone(), profile.join("examples")] {
-            if !real_directory(&directory, "published artifact directory")? {
-                continue;
-            }
-            for child in fs::read_dir(&directory)
-                .map_err(|error| Error::failure(format!("failed to list profile: {error}")))?
-            {
-                let child = child
-                    .map_err(|error| Error::failure(format!("failed to read profile: {error}")))?;
-                let name = child.file_name();
-                let Some(primary_name) = name
-                    .to_str()
-                    .and_then(|name| name.strip_suffix(crate::artifact_owner::PRIMARY_SUFFIX))
-                else {
-                    continue;
-                };
-                let primary = directory.join(primary_name);
-                if crate::artifact_owner::matches_primary(&primary, package) {
-                    if primary.exists() {
-                        fs::remove_file(&primary).map_err(|error| {
-                            Error::failure(format!(
-                                "failed to remove primary artifact `{}`: {error}",
-                                primary.display()
-                            ))
-                        })?;
-                    }
-                    fs::remove_file(child.path()).map_err(|error| {
-                        Error::failure(format!("failed to remove primary owner: {error}"))
-                    })?;
-                    removed = true;
-                }
-            }
-        }
-        removed |= crate::engine::remove_fresh_records(&profile, &manifest.root)?;
     }
     let units = root.join(".cache/v1/units/sha256");
     if real_directory(&units, "project unit cache")? {
@@ -225,6 +178,70 @@ fn clean_package_artifacts(
             }
         }
     }
+    Ok(removed)
+}
+
+/// Removes a package's units, installed artifacts, and completed-profile
+/// records from one profile directory.
+fn clean_package_profile(
+    profile: &Path,
+    manifest: &crate::manifest::Manifest,
+    package: &PackageKey,
+) -> Result<bool> {
+    let mut removed = false;
+    if !real_directory(profile, "selected profile")? {
+        return Ok(false);
+    }
+    let package_units = profile.join("build").join(&package.name);
+    if real_directory(&package_units, "package unit directory")? {
+        for child in fs::read_dir(&package_units)
+            .map_err(|error| Error::failure(format!("failed to list package units: {error}")))?
+        {
+            let path = child
+                .map_err(|error| Error::failure(format!("failed to read package unit: {error}")))?
+                .path();
+            if real_directory(&path, "package unit")?
+                && crate::artifact_owner::matches(&path, package)
+            {
+                remove_directory(&path)?;
+                removed = true;
+            }
+        }
+    }
+    for directory in [profile.to_owned(), profile.join("examples")] {
+        if !real_directory(&directory, "published artifact directory")? {
+            continue;
+        }
+        for child in fs::read_dir(&directory)
+            .map_err(|error| Error::failure(format!("failed to list profile: {error}")))?
+        {
+            let child = child
+                .map_err(|error| Error::failure(format!("failed to read profile: {error}")))?;
+            let name = child.file_name();
+            let Some(primary_name) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(crate::artifact_owner::PRIMARY_SUFFIX))
+            else {
+                continue;
+            };
+            let primary = directory.join(primary_name);
+            if crate::artifact_owner::matches_primary(&primary, package) {
+                if primary.exists() {
+                    fs::remove_file(&primary).map_err(|error| {
+                        Error::failure(format!(
+                            "failed to remove primary artifact `{}`: {error}",
+                            primary.display()
+                        ))
+                    })?;
+                }
+                fs::remove_file(child.path()).map_err(|error| {
+                    Error::failure(format!("failed to remove primary owner: {error}"))
+                })?;
+                removed = true;
+            }
+        }
+    }
+    removed |= crate::engine::remove_fresh_records(profile, &manifest.root)?;
     Ok(removed)
 }
 
@@ -473,6 +490,60 @@ mod tests {
         assert!(!fresh.exists());
         assert!(!selection.exists());
         assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn package_clean_covers_check_and_host_profiles() {
+        let fixture = Fixture::new("package-layouts");
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fixture.directory("src");
+        fs::write(fixture.0.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            fixture.0.join("Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let manifest = crate::manifest::Manifest::load_for_build(&fixture.0).unwrap();
+        let package = crate::unit::selected_library_key(&manifest)
+            .unwrap()
+            .package;
+        let owned = [
+            "target/lorry/x86_64-unknown-none/debug/build/app/owned",
+            "target/lorry/x86_64-unknown-none/check/build/app/owned",
+            "target/lorry/x86_64-unknown-none/clippy/build/app/owned",
+            "target/lorry/debug/build/app/owned",
+            "target/lorry/check/build/app/owned",
+        ]
+        .map(|path| fixture.directory(path));
+        let release = fixture.directory("target/lorry/release/build/app/owned");
+        for directory in owned.iter().chain([&release]) {
+            crate::artifact_owner::write(directory, &package).unwrap();
+        }
+        let prefix = crate::engine::fresh_record_prefix(&manifest.root);
+        let record = fixture
+            .0
+            .join("target/lorry/x86_64-unknown-none/check")
+            .join(&prefix);
+        fs::write(&record, b"record").unwrap();
+
+        assert!(
+            clean_manifest_artifacts(
+                &manifest,
+                &fixture.0.join("target"),
+                false,
+                Some("x86_64-unknown-none"),
+            )
+            .unwrap()
+        );
+        for directory in &owned {
+            assert!(!directory.exists(), "{} was kept", directory.display());
+        }
+        assert!(release.exists());
+        assert!(!record.exists());
     }
 
     #[test]
