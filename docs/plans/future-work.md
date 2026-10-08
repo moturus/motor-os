@@ -95,6 +95,13 @@ gates. Log: `/tmp/claude-1000/-home-posk-motor-dev-motor-os/44e5b204-1009-467e-b
 future stall fails the test quickly and names itself instead of running out
 the suite's clock.
 
+Seen again on 2026-10-07, on `0a91105d` (release `full-test-dev.sh`, 8 GiB):
+the last systest line was again `test_listener_pool_growth PASS`, and the
+suite ran out its 1500 s clock. The late `do_rpc` deadline did not fire, so
+this stall was elsewhere in the test: most likely the first `do_rpc(None)`,
+which has no deadline, or a read from the peer or the hoarder. The next run
+on the same commit passed the test in under 5 s, as did three more runs.
+
 ## A process can take an rmux server's name first (2026-09-27)
 
 rmux on Motor finds its server by a service name made of the server's mask
