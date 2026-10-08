@@ -946,7 +946,7 @@ mod tests {
             }],
         )
         .unwrap();
-        assert_eq!(review.locked_git[0].source, locked.cargo_source);
+        assert_eq!(review.locked_git[0].id, locked.cargo_source);
         assert_eq!(
             fs::read_to_string(workspace.join("Cargo.toml")).unwrap(),
             manifest_source

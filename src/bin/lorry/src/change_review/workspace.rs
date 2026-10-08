@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
 
-use crate::admission_state::{Capability, Context, Review, UnitKind, native_tool_name};
+use crate::admission_state::{
+    Capability, Context, ContextPackage, Review, UnitKind, native_tool_name,
+};
 use crate::diagnostic::{Error, Result};
 use crate::resolver::{PackageKey, Resolution};
 
@@ -161,7 +163,7 @@ fn write(
                 "  - locked package: {} {} (crates.io); checksum: {}; dependencies: {}",
                 package.name,
                 package.version,
-                package.checksum,
+                package.id,
                 list(&package.dependencies)
             )?;
         }
@@ -175,7 +177,7 @@ fn write(
                 "  - locked Git package: {} {} ({}); dependencies: {}",
                 package.name,
                 package.version,
-                package.source,
+                package.id,
                 list(&package.dependencies)
             )?;
         }
@@ -200,7 +202,7 @@ fn write(
             "\n  Package: {} {} (crates.io)",
             package.name, package.version
         )?;
-        writeln!(output, "    checksum: {}", package.checksum)?;
+        writeln!(output, "    checksum: {}", package.id)?;
         write_users(output, users, &package.name, &package.version, None)?;
         writeln!(
             output,
@@ -210,7 +212,7 @@ fn write(
         let source = next.registry_sources.iter().find(|source| {
             source.name == package.name
                 && source.version == package.version
-                && source.checksum == package.checksum
+                && source.id == package.id
         });
         write_source(
             output,
@@ -223,22 +225,25 @@ fn write(
                 )
             }),
         )?;
-        let rows =
-            |review| registry_rows(review, &package.name, &package.version, &package.checksum);
-        write_contexts(output, previous.map(rows), rows(next))?;
+        let rows = |selected| context_rows(selected, &package.name, &package.version, &package.id);
+        write_contexts(
+            output,
+            previous.map(|old| rows(&old.context_registry)),
+            rows(&next.context_registry),
+        )?;
     }
     for package in &next.locked_git {
         writeln!(
             output,
             "\n  Package: {} {} ({})",
-            package.name, package.version, package.source
+            package.name, package.version, package.id
         )?;
         write_users(
             output,
             users,
             &package.name,
             &package.version,
-            Some(&package.source),
+            Some(&package.id),
         )?;
         writeln!(
             output,
@@ -248,7 +253,7 @@ fn write(
         let source = next.git_sources.iter().find(|source| {
             source.name == package.name
                 && source.version == package.version
-                && source.source == package.source
+                && source.id == package.id
         });
         write_source(
             output,
@@ -261,8 +266,12 @@ fn write(
                 )
             }),
         )?;
-        let rows = |review| git_rows(review, &package.name, &package.version, &package.source);
-        write_contexts(output, previous.map(rows), rows(next))?;
+        let rows = |selected| context_rows(selected, &package.name, &package.version, &package.id);
+        write_contexts(
+            output,
+            previous.map(|old| rows(&old.context_git)),
+            rows(&next.context_git),
+        )?;
     }
     Ok(())
 }
@@ -329,42 +338,15 @@ fn write_source(
 /// Host, target, compile kinds, host features, and target features.
 type ContextRow<'a> = (&'a str, &'a str, &'a [UnitKind], &'a [String], &'a [String]);
 
-fn registry_rows<'a>(
-    review: &'a Review,
+fn context_rows<'a>(
+    selected: &'a [ContextPackage],
     name: &str,
     version: &str,
-    checksum: &str,
+    id: &str,
 ) -> Vec<ContextRow<'a>> {
-    review
-        .context_registry
+    selected
         .iter()
-        .filter(|context| {
-            context.name == name && context.version == version && context.checksum == checksum
-        })
-        .map(|context| {
-            (
-                context.host.as_str(),
-                context.target.as_str(),
-                context.compile_kinds.as_slice(),
-                context.host_features.as_slice(),
-                context.target_features.as_slice(),
-            )
-        })
-        .collect()
-}
-
-fn git_rows<'a>(
-    review: &'a Review,
-    name: &str,
-    version: &str,
-    source: &str,
-) -> Vec<ContextRow<'a>> {
-    review
-        .context_git
-        .iter()
-        .filter(|context| {
-            context.name == name && context.version == version && context.source == source
-        })
+        .filter(|context| context.name == name && context.version == version && context.id == id)
         .map(|context| {
             (
                 context.host.as_str(),
@@ -439,7 +421,7 @@ fn write_users(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admission_state::{ContextRegistry, LockedRegistry, RegistrySource};
+    use crate::admission_state::{LockedRegistry, SourceEvidence};
     use crate::config::NativeToolRole;
 
     #[test]
@@ -462,27 +444,27 @@ mod tests {
         let locked = |name: &str, checksum: &str| LockedRegistry {
             name: name.to_owned(),
             version: "1.0.0".to_owned(),
-            checksum: checksum.to_owned(),
+            id: checksum.to_owned(),
             dependencies: vec![],
         };
         let mut previous = Review {
             resolver_version: 2,
             contexts: vec![context("target")],
             locked_registry: vec![locked("helper", &checksum)],
-            context_registry: vec![ContextRegistry {
+            context_registry: vec![ContextPackage {
                 host: "host".to_owned(),
                 target: "target".to_owned(),
                 name: "helper".to_owned(),
                 version: "1.0.0".to_owned(),
-                checksum: checksum.clone(),
+                id: checksum.clone(),
                 compile_kinds: vec![UnitKind::Host],
                 host_features: vec![],
                 target_features: vec![],
             }],
-            registry_sources: vec![RegistrySource {
+            registry_sources: vec![SourceEvidence {
                 name: "helper".to_owned(),
                 version: "1.0.0".to_owned(),
-                checksum: checksum.clone(),
+                id: checksum.clone(),
                 license: String::new(),
                 source_tree_sha256: "2".repeat(64),
                 build_script: true,

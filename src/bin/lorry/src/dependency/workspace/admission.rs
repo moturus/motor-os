@@ -202,43 +202,27 @@ fn cover(review: &Review, context: &Context, selected: &Resolution) -> Result<()
                 CompileKind::Target => crate::admission_state::UnitKind::Target,
             })
             .collect::<Vec<_>>();
-        let admitted = match &package.source {
+        let (reviewed, id) = match &package.source {
             ResolvedSource::Path { .. } => continue,
-            ResolvedSource::CratesIo { checksum } => review
-                .context_registry
-                .iter()
-                .find(|admitted| {
-                    admitted.host == context.host
-                        && admitted.target == context.target
-                        && admitted.name == package.key.name
-                        && admitted.version == package.key.version.to_string()
-                        && admitted.checksum == hex(checksum)
-                })
-                .map(|admitted| {
-                    (
-                        &admitted.compile_kinds,
-                        &admitted.host_features,
-                        &admitted.target_features,
-                    )
-                }),
-            ResolvedSource::Git { cargo_source, .. } => review
-                .context_git
-                .iter()
-                .find(|admitted| {
-                    admitted.host == context.host
-                        && admitted.target == context.target
-                        && admitted.name == package.key.name
-                        && admitted.version == package.key.version.to_string()
-                        && admitted.source == *cargo_source
-                })
-                .map(|admitted| {
-                    (
-                        &admitted.compile_kinds,
-                        &admitted.host_features,
-                        &admitted.target_features,
-                    )
-                }),
+            ResolvedSource::CratesIo { checksum } => (&review.context_registry, hex(checksum)),
+            ResolvedSource::Git { cargo_source, .. } => (&review.context_git, cargo_source.clone()),
         };
+        let admitted = reviewed
+            .iter()
+            .find(|admitted| {
+                admitted.host == context.host
+                    && admitted.target == context.target
+                    && admitted.name == package.key.name
+                    && admitted.version == package.key.version.to_string()
+                    && admitted.id == id
+            })
+            .map(|admitted| {
+                (
+                    &admitted.compile_kinds,
+                    &admitted.host_features,
+                    &admitted.target_features,
+                )
+            });
         let Some((admitted_kinds, host, target)) = admitted else {
             return Err(uncovered(&package.key.name));
         };

@@ -25,21 +25,29 @@ pub(crate) fn approve_json(
     if previous == Some(next) && matches!(mode, Mode::Change) {
         return Ok(());
     }
-    let packages =
-        |review: &Review| {
-            review.registry_sources.iter().map(|package| serde_json::json!({
-            "name": package.name, "version": package.version,
-            "source": "registry+https://github.com/rust-lang/crates.io-index",
-            "checksum": package.checksum, "source_tree_sha256": package.source_tree_sha256,
-            "license": package.license, "build_script": package.build_script,
-            "proc_macro": package.proc_macro,
-        })).chain(review.git_sources.iter().map(|package| serde_json::json!({
-            "name": package.name, "version": package.version, "source": package.source,
-            "checksum": null, "source_tree_sha256": package.source_tree_sha256,
-            "license": package.license, "build_script": package.build_script,
-            "proc_macro": package.proc_macro,
-        }))).collect::<Vec<_>>()
-        };
+    let packages = |review: &Review| {
+        review
+            .registry_sources
+            .iter()
+            .map(|package| {
+                serde_json::json!({
+                    "name": package.name, "version": package.version,
+                    "source": "registry+https://github.com/rust-lang/crates.io-index",
+                    "checksum": package.id, "source_tree_sha256": package.source_tree_sha256,
+                    "license": package.license, "build_script": package.build_script,
+                    "proc_macro": package.proc_macro,
+                })
+            })
+            .chain(review.git_sources.iter().map(|package| {
+                serde_json::json!({
+                    "name": package.name, "version": package.version, "source": package.id,
+                    "checksum": null, "source_tree_sha256": package.source_tree_sha256,
+                    "license": package.license, "build_script": package.build_script,
+                    "proc_macro": package.proc_macro,
+                })
+            }))
+            .collect::<Vec<_>>()
+    };
     let capabilities = |review: &Review| {
         review
             .capabilities
@@ -132,12 +140,12 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use crate::admission_state::RegistrySource;
+    use crate::admission_state::SourceEvidence;
 
     #[test]
     fn json_reports_changed_execution_and_native_tool_grants() {
         use crate::admission_state::{
-            Capability, Context, ContextRegistry, LockedRegistry, UnitKind,
+            Capability, Context, ContextPackage, LockedRegistry, UnitKind,
         };
         use crate::config::NativeToolRole;
         let checksum = "1".repeat(64);
@@ -150,23 +158,23 @@ mod tests {
             locked_registry: vec![LockedRegistry {
                 name: "helper".to_owned(),
                 version: "1.0.0".to_owned(),
-                checksum: checksum.clone(),
+                id: checksum.clone(),
                 dependencies: vec![],
             }],
-            context_registry: vec![ContextRegistry {
+            context_registry: vec![ContextPackage {
                 host: "host".to_owned(),
                 target: "target".to_owned(),
                 name: "helper".to_owned(),
                 version: "1.0.0".to_owned(),
-                checksum: checksum.clone(),
+                id: checksum.clone(),
                 compile_kinds: vec![UnitKind::Host],
                 host_features: vec![],
                 target_features: vec![],
             }],
-            registry_sources: vec![RegistrySource {
+            registry_sources: vec![SourceEvidence {
                 name: "helper".to_owned(),
                 version: "1.0.0".to_owned(),
-                checksum: checksum.clone(),
+                id: checksum.clone(),
                 license: "MIT".to_owned(),
                 source_tree_sha256: "2".repeat(64),
                 build_script: true,
