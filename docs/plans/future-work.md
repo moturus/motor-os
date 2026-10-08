@@ -129,6 +129,19 @@ files there, so the listing could miss a library and the build would fail
 with "can't find crate". Lorry pipelines on Linux only, until `readdir` keeps
 going past a removed entry.
 
+## Lorry keeps an older single-package build path (2026-10-08)
+
+Lorry has two build paths. The shared workspace path can build everything.
+The older narrow path still builds one package that has no build script, no
+feature flags, and no binaries with `required-features`.
+
+The narrow path used to make unchanged builds faster. It no longer does:
+both paths now reuse a completed-profile record before admission is checked
+(1887b34d, 31bd3bd6). So the narrow path can go, together with the `shared`
+predicate in `src/bin/lorry/src/engine.rs`. `--use-cargo-registry`
+(`src/bin/lorry/src/cargo_registry.rs`) also uses the narrow prepare code,
+so it must move to the shared path first.
+
 ## A process can take an rmux server's name first (2026-09-27)
 
 rmux on Motor finds its server by a service name made of the server's mask
