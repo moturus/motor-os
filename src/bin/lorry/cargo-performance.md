@@ -1,7 +1,8 @@
 # Lorry vs Cargo build performance on Linux
 
-First measured on 2026-10-07 at `520cb274`, and again on 2026-10-08 at
-`93ba0e3a` after the fixes below. Both tools use the same Motor toolchain rustc
+First measured on 2026-10-07 at `520cb274`, then on 2026-10-08 at `93ba0e3a`
+and at `aba5c563` (Helix at `82f27ed3`, which differs only in docs and a
+record fix that Helix does not reach). Both tools use the same Motor toolchain rustc
 (1.99), the dev profile, and default job counts on a 16-CPU host.
 Dependencies were vendored for Lorry from this host's Cargo caches without
 network access. Both tools build C code with clang. For Helix, both set
@@ -11,23 +12,23 @@ network access. Both tools build C code with clang. For Helix, both set
 
 sys-io (`src/sys` workspace, built for `x86_64-unknown-motor`):
 
-| Step | Cargo | Lorry `520cb274` | Lorry `93ba0e3a` |
-| --- | --- | --- | --- |
-| Cold build | 17.9 s | 36.7 s | 19.1 s |
-| No-op build | 0.06 s | 0.9 s | 0.7 s |
-| Edit a library (`moto-sys-io`) | 1.3 s | 7.4 s | 2.3 s |
-| Edit the binary (`sys-io/src/main.rs`) | 1.2 s | 7.5 s | 2.2 s |
-| Cold target, warm Lorry cache | — | 13.4 s | 12.5 s |
+| Step | Cargo | Lorry `520cb274` | Lorry `93ba0e3a` | Lorry `aba5c563` |
+| --- | --- | --- | --- | --- |
+| Cold build | 17.9 s | 36.7 s | 19.1 s | 18.8 s |
+| No-op build | 0.06 s | 0.9 s | 0.7 s | 0.04 s |
+| Edit a library (`moto-sys-io`) | 1.3 s | 7.4 s | 2.3 s | 2.3 s |
+| Edit the binary (`sys-io/src/main.rs`) | 1.2 s | 7.5 s | 2.2 s | 2.1 s |
+| Cold target, warm Lorry cache | — | 13.4 s | 12.5 s | 12.4 s |
 
 Helix (`hx`, 334 units, host build):
 
-| Step | Cargo | Lorry `520cb274` | Lorry `93ba0e3a` |
-| --- | --- | --- | --- |
-| Cold build | 66.7 s | 145.6 s | 79.4 s |
-| No-op build | 0.12 s | 2.5 s | 1.2 s |
-| Edit a library (`helix-core`) | 8.1 s | 37.4 s | 10.4 s |
-| Edit the binary (`helix-term/src/main.rs`) | 6.6 s | 28.0 s | 7.2 s |
-| Cold target, warm Lorry cache | — | 56.2 s | 51.1 s |
+| Step | Cargo | Lorry `520cb274` | Lorry `93ba0e3a` | Lorry `82f27ed3` |
+| --- | --- | --- | --- | --- |
+| Cold build | 66.7 s | 145.6 s | 79.4 s | 70.4 s |
+| No-op build | 0.12 s | 2.5 s | 1.2 s | 0.04 s |
+| Edit a library (`helix-core`) | 8.1 s | 37.4 s | 10.4 s | 10.3 s |
+| Edit the binary (`helix-term/src/main.rs`) | 6.6 s | 28.0 s | 7.2 s | 7.0 s |
+| Cold target, warm Lorry cache | — | 56.2 s | 51.1 s | 47.0 s |
 
 ## Fixed
 
@@ -54,23 +55,24 @@ Helix (`hx`, 334 units, host build):
 - Each worker copied its library into the cache, with fsync, before taking
   the next unit: 854 MB for Helix. Background threads do this now
   (`a3fa644a`).
+- Lorry waited for a whole crate before starting its dependents. Now, as
+  under Cargo's pipelining, a library's dependents start once rustc has
+  written its metadata (`5f05fe08`). Motor does not pipeline yet
+  (`46b3cb0b`).
+- Every command rebuilt admission first: 0.6 s for sys-io and 1.1 s for
+  Helix. An unchanged build now reuses its completed profile before that
+  (`31bd3bd6`), and its record also survives a build whose scripts generate
+  sources (`aba5c563`).
 
 ## Remaining causes, largest first
 
-1. **No pipelining.** Cargo starts a dependent as soon as rustc has written
-   the dependency's metadata, while code generation continues. Lorry waits
-   for the whole crate. On Helix's last chain (`helix-lsp-types`,
-   `helix-lsp`, `helix-view`, `helix-term`, `hx`) this costs Lorry about 5 s.
-   Lorry would have to let dependents read metadata from a crate that is
-   still in staging.
-2. **Admission is verified on every command.** This is most of a no-op build:
-   0.6 s for sys-io and 1.1 s for Helix. It is resolver work: the complete
-   lock, then one resolution per reviewed host/target context. Keeping a
-   verified admission between commands would remove it, but the design now
-   requires admission to be rebuilt before any reuse.
-3. **Lorry starts compiling later.** Admission and checking the dependency
+1. **Admission is rebuilt on every build that changes something.** This
+   costs about 0.6 s for sys-io and 1.1 s for Helix after an edit. It is
+   resolver work: the complete lock, then one resolution per reviewed
+   host/target context.
+2. **Lorry starts compiling later.** Admission and checking the dependency
    sources take 2 s on a cold Helix build before the first rustc starts.
-4. **A warm cache saves less than it could.** With a warm cache and an empty
+3. **A warm cache saves less than it could.** With a warm cache and an empty
    target, Lorry still compiles every member and every binary.
 
 ## Corrections
@@ -90,8 +92,9 @@ Cargo stages next to the destination. It even creates `target/` under a
 temporary name and renames it into place. rustc stages inside its output
 directories. During a Cargo build, only the C linker wrote to the temp dir.
 
-Lorry stages each compiler unit in a sibling of the unit's directory, and the
-source views in the cache. It no longer creates a directory per command in
+On Linux, Lorry compiles a library in place, like Cargo. It stages every
+other compiler unit in a sibling of the unit's directory, and the source views
+in the cache. It no longer creates a directory per command in
 the temp dir. The temp dir is used only to unpack a `.crate` archive whose
 repository does not keep its sources (`keep-sources = false`), and for curl's
 stderr when it grows large.

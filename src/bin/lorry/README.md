@@ -9,9 +9,10 @@ Lorry never invokes Cargo during normal operation. Builds are offline and use
 only verified sources already present in configured Lorry repositories.
 
 This README is the short user guide. `spec.md` defines the supported behavior,
-`design.md` explains the implementation and deferred design choices, and
-`full-native-build.md` audits the remaining work needed to replace the Cargo
-builds reached from the repository `Makefile`.
+`design.md` explains the implementation, and `full-native-build.md` lists the
+remaining work needed to replace the Cargo builds reached from the repository
+`Makefile`. `cargo-performance.md` compares build times with Cargo, and
+`future-work.md` lists known gaps that are not scheduled.
 
 ## Operational and validation boundaries
 
@@ -143,10 +144,11 @@ configuration, and timings.
 
 Ordinary builds trust previously published per-user dependency and
 project-local artifact state, matching Cargo's local-cache model. An unchanged
-single-member `build` or `run` with default features checks parsed inputs and
-root/path-source size and modification metadata. It verifies admission and
-requested coverage, then reuses the existing profile without starting build
-scripts or compilers.
+`build`, `run`, or plain `check` reuses its completed profile without starting
+build scripts or compilers. The profile's record covers the selection, the
+admission state, the lockfile, every member manifest, configuration, policy,
+and the toolchain. Lorry checks source sizes and modification times against
+it, so an unchanged build does not rebuild admission.
 `--strict-validation` instead rehashes repository and Cargo-cache sources,
 mutable path sources, tools, cache entries, root inputs, and artifacts before
 reuse. Structural checks, policy, admission identity, and resource limits are

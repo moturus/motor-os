@@ -265,8 +265,10 @@ root compilation, freshness validation, and artifact publication.
   either selective form also removes the project-local mutable-unit cache so a
   later build cannot restore a mutable artifact that was explicitly cleaned.
   `clean -p NAME` removes that package's owned units, top-level executables,
-  freshness record, and project-local cache entries in the selected profile.
-  It leaves other packages' and shared dependencies' outputs intact.
+  freshness records, and project-local cache entries. Like Cargo, it cleans
+  the selected profile and the check and Clippy profiles. With `--target`, it
+  also cleans the host profiles, which hold build scripts and procedural
+  macros. It leaves other packages' and shared dependencies' outputs intact.
   Project cleaning never removes the per-user immutable-unit cache.
 - `build`, `check`, `run`, `test`, and `clean` serialize artifact reads and
   mutations for one target directory with `target/.lorry-artifacts.lock`.
@@ -384,9 +386,8 @@ those flags. Build, check, Clippy, run, and test resolve them across selected
 members through the shared graph, keeping feature unions when a member is a
 dependency too. Several selected members use one unit graph,
 package-specific primary compiler roles and Cargo JSON IDs, and binary owner
-records. Shared execution reuses individual units. Completed-profile reuse
-needs a `build` or `run` of one member with default features and no member
-build script.
+records. Shared execution reuses individual units. An unchanged `build`,
+`run`, or plain `check` of any selection reuses its completed profile.
 Selected binaries with the same top-level output name produce Cargo's collision
 warning before compilation, unless quiet mode is selected. Each unit retains its
 own published executable and package identity; the shared top-level path is
@@ -815,8 +816,9 @@ requirement and never trusted evidence. The workspace record contains:
 Compilation using registry/Git dependencies requires an exact reviewed
 host/target context. It reconstructs the canonical document for every recorded
 context, verifies its digest and grants, and checks the requested package and
-feature coverage before reuse or compilation. Missing, corrupt, conflicting, or extra evidence fails
-closed, and an explicit configured deny always wins over committed admission.
+feature coverage before unit reuse or compilation. An unchanged build's
+completed profile is checked earlier, because its record covers the admission
+state. Missing, corrupt, conflicting, or extra evidence fails closed, and an explicit configured deny always wins over committed admission.
 Ordinary non-root path dependency edits remain governed by path policy and
 source verification and do not require dependency upgrades.
 
@@ -969,10 +971,10 @@ Compile kinds are `host` and `target`. Every array is present, including
 when empty. A locked registry
 dependency is rendered as exactly `SOURCE NAME VERSION`, where `SOURCE` is
 `crates.io`, `git`, or `path`; original Cargo.lock dependency spelling is first
-resolved to one exact semantic node. Locked Git dependencies retain sorted,
-duplicate-free Cargo.lock spellings. An empty dependency array is inline. A
-non-empty dependency array has one four-space-indented quoted value and
-trailing comma per line.
+resolved to one exact semantic node. An empty locked registry dependency
+array is inline. A non-empty one has one four-space-indented quoted value and
+trailing comma per line. Locked Git dependencies retain sorted, duplicate-free
+Cargo.lock spellings in an inline array.
 
 Canonical strings are TOML basic strings. Quote, backslash, LF, CR, and tab use
 `\"`, `\\`, `\n`, `\r`, and `\t`; other control characters use uppercase
@@ -1003,7 +1005,7 @@ project policy; lower project limits still apply:
 | reviewed contexts | 64 |
 | distinct registry or Git lock nodes / selected packages / source entries / capabilities | 4,096 each |
 | Cargo.lock dependency edges | 131,072 |
-| context/package memberships | 65,536 |
+| registry context/package memberships, and Git ones | 65,536 each |
 | feature values and activated-feature occurrences | 262,144 combined |
 
 The writer enforces the report byte bound incrementally and never hashes or
@@ -1737,8 +1739,8 @@ admission, configuration, compiler, target, flags, tracked variables, and
 tool metadata plus rustc dep-info and mutable path-source path/size/mtime
 fingerprints. Tracked variables are those that any unit read and the caller
 variables granted to build scripts. It checks the size and mtime of each
-installed root artifact, so a binary that another selection reinstalls
-invalidates the record. It does not read artifact or dependency source
+installed root artifact and example, so a file that another selection
+reinstalls invalidates the record. It does not read artifact or dependency source
 contents. An ordinary record is checked before admission is rebuilt. It is
 written only after a build that passed admission, and it covers the admission
 state, lock, manifests, configuration, and policy that admission checked. The
@@ -1907,6 +1909,5 @@ Deferred capabilities include building the complete `httpd-axum` and
 `russhd` graphs, alternative-registry sources, custom targets and build-std,
 dynamic and procedural-macro example types, general C/C++/native-tool
 discovery, arbitrary build-script processes, Cargo wrappers, and
-linked-artifact cache reuse. `design.md` holds accepted future design
-directions. `full-native-build.md` records the repository-specific gap
-analysis; its findings are not product commitments.
+linked-artifact cache reuse. `full-native-build.md` records the
+repository-specific gap analysis; its findings are not product commitments.

@@ -385,10 +385,10 @@ is rebuilt. Strict records contain content hashes and are checked after
 admission. Debug root and mutable
 path units use stable target-specific rustc incremental directories below
 `target/lorry/.incremental`; output publication never replaces that
-disposable compiler state. Library units compile in place so that their
-dependents can start on their metadata, as Cargo pipelines; other units
-publish through a sibling staging directory. Release and immutable registry units omit
-incremental compilation.
+disposable compiler state. On Linux, library units compile in place so that
+their dependents can start on their metadata, as Cargo pipelines. Other units,
+strict builds, and every unit on Motor publish through a sibling staging
+directory. Release and immutable registry units omit incremental compilation.
 
 Clippy reuses the check planner and executor. Toolchain discovery verifies
 the sibling driver's embedded rustc and hashes the driver. Member unit keys

@@ -129,7 +129,7 @@ pub(crate) fn verify(
 }
 
 /// Verify every requested root and feature before exposing the shared member
-/// resolution to compilation or a completed-profile shortcut.
+/// resolution to compilation.
 pub(crate) fn verify_requested(
     inputs: &ReviewInputs<'_>,
     compact: &CompactState,
