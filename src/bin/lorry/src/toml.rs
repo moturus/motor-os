@@ -136,11 +136,11 @@ impl Document {
     }
 
     pub fn line_of_item(&self, item: &Item) -> usize {
-        line_for_span(&self.source, item.span())
+        line_for_span(&self.source, item_span(item))
     }
 
     pub fn line_of_table(&self, table: &Table) -> usize {
-        line_for_span(&self.source, table.span())
+        line_for_span(&self.source, table_span(table))
     }
 
     pub fn line_of_value(&self, value: &Value) -> usize {
@@ -271,6 +271,24 @@ fn limit_error(path: &Path, line: usize, context: &str, kind: &str, limit: usize
     )
 }
 
+/// An implicit table, such as `a` in `[a.b]`, has no span of its own. It
+/// starts where its first explicit descendant starts.
+fn table_span(table: &Table) -> Option<Range<usize>> {
+    table.span().or_else(|| {
+        table
+            .iter()
+            .filter_map(|(_, item)| item_span(item))
+            .min_by_key(|span| span.start)
+    })
+}
+
+fn item_span(item: &Item) -> Option<Range<usize>> {
+    match item {
+        Item::Table(table) => table_span(table),
+        _ => item.span(),
+    }
+}
+
 fn line_for_span(source: &str, span: Option<Range<usize>>) -> usize {
     span.map_or(1, |span| line_for_offset(source, span.start))
 }
@@ -309,6 +327,16 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn implicit_tables_start_at_their_first_explicit_descendant() {
+        let source = "config-version = 1\n\n[a.b.c]\nkey = 1\n[a.d]\n".to_owned();
+        let document = Document::parse(Path::new("lorry.toml"), "configuration", source).unwrap();
+        let a = document.root().get("a").unwrap();
+        assert_eq!(document.line_of_item(a), 3);
+        let b = a.as_table().unwrap().get("b").unwrap();
+        assert_eq!(document.line_of_table(b.as_table().unwrap()), 3);
     }
 
     #[test]
