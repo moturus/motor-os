@@ -53,6 +53,7 @@ EOF
 chmod 0700 "$WORK/curl"
 cat >"$HOME/.config/lorry/lorry.toml" <<EOF
 config-version = 1
+use-cargo-registry = false
 [repositories]
 user = "$WORK/repository"
 [network]

@@ -238,8 +238,8 @@ fn print_help(topic: Option<&str>) {
              -v, --verbose               Show commands, configuration, and timings\n  \
                  --color <WHEN>          auto, always, or never\n  \
                  --max-packages <N>      Set this run's outside-package limit\n  \
-                 --use-cargo-registry    Use Cargo's verified offline registry cache\n  \
-                 --no-use-cargo-registry Use only Lorry repositories\n\n\
+                 --use-cargo-registry    Require Cargo's offline registry cache\n  \
+                 --no-use-cargo-registry Use only Lorry repositories and admission\n\n\
              Commands:\n  \
              build                       Build the package\n  \
              cache                       Manage the global Lorry cache\n  \

@@ -25,7 +25,7 @@ TEST_HOME="$WORK/home"
 PROJECT="$WORK/metadata-fixture"
 DEPENDENCY="$WORK/dep"
 mkdir -p "$TEST_HOME/.config/lorry" "$PROJECT/src" "$PROJECT/tests" "$DEPENDENCY/src"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$TEST_HOME/.config/lorry/lorry.toml"
 
 printf '%s\n' \

@@ -9,7 +9,7 @@ export RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-release-profile-contract-XXXXXX)"
 trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained profile fixture: $WORK" >&2; fi' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project"/{app,shared,builder}/src "$WORK/project/.cargo"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" >"$WORK/home/.config/lorry/lorry.toml"
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" >"$WORK/home/.config/lorry/lorry.toml"
 cat >"$WORK/manifest.toml" <<'EOF'
 [workspace]
 members = ["app", "shared", "builder"]
@@ -52,6 +52,7 @@ fn main() {
 EOF
 cat >"$WORK/project/lorry.toml" <<'EOF'
 config-version = 1
+use-cargo-registry = false
 [policy.rules.shared-script]
 action = "allow"
 source = "path"

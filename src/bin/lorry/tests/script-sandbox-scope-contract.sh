@@ -17,7 +17,7 @@ export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 export RUSTC="$LORRY_TEST_RUSTC"
 mkdir -p "$WORK/home/.config/lorry" "$WORK/app/src" "$WORK/dep/src"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
 printf '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2024"\n[dependencies]\ndep = { path = "../dep" }\n' \
     >"$WORK/app/Cargo.toml"
@@ -34,6 +34,7 @@ fn main() {
 EOF
 cat >"$WORK/app/lorry.toml" <<'EOF'
 config-version = 1
+use-cargo-registry = false
 [policy.rules.dep]
 action = "allow"
 name = "dep"

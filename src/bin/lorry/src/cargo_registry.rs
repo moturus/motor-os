@@ -39,12 +39,41 @@ pub struct Package {
 }
 
 /// Whether a build, check, run, test, metadata, or tree command reads
-/// crates.io sources from Cargo's cache: the command line wins over
-/// configuration.
+/// crates.io sources from Cargo's cache. The command line wins over
+/// configuration. By default the mode is on whenever Cargo's cache exists.
 pub(crate) fn selected(cli: &Cli, config: &Config) -> bool {
-    cli.use_cargo_registry
-        .or(config.use_cargo_registry)
-        .unwrap_or(false)
+    match cli.use_cargo_registry {
+        Some(explicit) => explicit,
+        None => config.use_cargo_registry.unwrap_or(true) && cache_exists(),
+    }
+}
+
+fn cache_exists() -> bool {
+    cargo_home().is_ok_and(|home| {
+        home.join("registry/src").is_dir() && home.join("registry/cache").is_dir()
+    })
+}
+
+fn cargo_home() -> Result<PathBuf> {
+    let home = match env::var_os("CARGO_HOME") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => env::var_os("HOME")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .map(|home| home.join(".cargo"))
+            .ok_or_else(|| {
+                Error::failure(
+                    "--use-cargo-registry needs CARGO_HOME or HOME to locate Cargo's cache",
+                )
+                .cargo_cache_miss()
+            })?,
+    };
+    if home.is_absolute() {
+        return Ok(home);
+    }
+    Ok(env::current_dir()
+        .map_err(|error| Error::failure(format!("failed to resolve relative CARGO_HOME: {error}")))?
+        .join(home))
 }
 
 /// Runs a command that may read Cargo's cache. Unless the command line asked
@@ -71,29 +100,13 @@ impl CargoRegistry {
         validation: ValidationMode,
         evidence_root: Option<&Path>,
     ) -> Result<Self> {
-        let home = match env::var_os("CARGO_HOME") {
-            Some(path) if !path.is_empty() => PathBuf::from(path),
-            _ => env::var_os("HOME")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
-                .map(|home| home.join(".cargo"))
-                .ok_or_else(|| {
-                    Error::failure(
-                        "--use-cargo-registry needs CARGO_HOME or HOME to locate Cargo's cache",
-                    )
-                    .cargo_cache_miss()
-                })?,
-        };
-        let home = if home.is_absolute() {
-            home
-        } else {
-            env::current_dir()
-                .map_err(|error| {
-                    Error::failure(format!("failed to resolve relative CARGO_HOME: {error}"))
-                })?
-                .join(home)
-        };
-        Self::open_with_validation(&home, staging_parent, limits, validation, evidence_root)
+        Self::open_with_validation(
+            &cargo_home()?,
+            staging_parent,
+            limits,
+            validation,
+            evidence_root,
+        )
     }
 
     pub fn open_with_validation(

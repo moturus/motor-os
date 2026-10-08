@@ -67,6 +67,7 @@ echo "== Preparing the fail-closed Cargo-cache crates.io fixture =="
     "$WORK/crates-io" "$PROJECT/Cargo.lock"
 cat >"$CONFIG" <<EOF
 config-version = 1
+use-cargo-registry = false
 
 [repositories]
 user = "$REPOSITORY"

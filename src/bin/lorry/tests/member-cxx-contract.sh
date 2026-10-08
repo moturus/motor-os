@@ -78,6 +78,7 @@ cd "$WORK/project"
 "$WORK/cache-curl" prepare "$HOST_CARGO_HOME" "$WORK/crates-io" Cargo.lock
 cat >"$WORK/home/.config/lorry/lorry.toml" <<EOF
 config-version = 1
+use-cargo-registry = false
 [repositories]
 user = "$WORK/repository"
 [network]
@@ -89,6 +90,7 @@ default = "allow"
 EOF
 cat >lorry.toml <<EOF
 config-version = 1
+use-cargo-registry = false
 [policy.rules.grammar]
 action = "allow"
 name = "grammar"

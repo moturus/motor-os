@@ -49,6 +49,7 @@ outside = { path = "../outside", optional = true }
 EOF
 cat >"$HOME/.config/lorry/lorry.toml" <<EOF
 config-version = 1
+use-cargo-registry = false
 [repositories]
 user = "$WORK/repository"
 [network]

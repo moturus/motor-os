@@ -9,7 +9,7 @@ export RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-workspace-build-target-XXXXXX)"
 trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained build target fixture: $WORK" >&2; fi' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project/.cargo"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" >"$WORK/home/.config/lorry/lorry.toml"
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" >"$WORK/home/.config/lorry/lorry.toml"
 cat >"$WORK/project/Cargo.toml" <<'EOF'
 [workspace]
 members = ["a", "b"]

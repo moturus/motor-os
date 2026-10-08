@@ -5,9 +5,10 @@ retained Cargo output to verify Lorry's compatibility behavior. Lorry never
 loads these files, invokes Cargo, or falls back to an oracle during normal
 operation.
 
-Do not confuse an oracle with `--use-cargo-registry`. That explicit Lorry mode
-is an operational, offline reader for an already populated local Cargo
-archive/source cache; it does not execute Cargo or compare results with Cargo.
+Do not confuse an oracle with Cargo cache mode (`--use-cargo-registry`). That
+Lorry mode, the default, is an operational, offline reader for an already
+populated local Cargo archive/source cache; it does not execute Cargo or
+compare results with Cargo.
 
 ## Stage 2 resolution
 

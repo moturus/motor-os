@@ -22,6 +22,7 @@ mkdir -p "$HOME_DIR/.config/lorry" "$PROJECT/src"
 
 cat >"$HOME_DIR/.config/lorry/lorry.toml" <<EOF
 config-version = 1
+use-cargo-registry = false
 
 [cache]
 directory = "$WORK/cache"

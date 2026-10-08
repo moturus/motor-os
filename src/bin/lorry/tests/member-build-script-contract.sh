@@ -11,7 +11,7 @@ export PATH="$(dirname "$RUSTC"):$PATH"
 WORK="$(mktemp -d /tmp/lorry-member-script-contract-XXXXXX)"
 trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained member-script fixture: $WORK" >&2; fi' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project"/{a,b,builder}/src
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
 cat >"$WORK/project/Cargo.toml" <<'EOF'
 [workspace]
@@ -69,6 +69,7 @@ pub const VALUE: &str = include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 EOF
 cat >"$WORK/project/lorry.toml" <<'EOF'
 config-version = 1
+use-cargo-registry = false
 [policy.rules.a]
 action = "allow"
 name = "a"

@@ -14,7 +14,7 @@ from pathlib import Path
 work = Path(os.environ['WORK'])
 home = work / 'home'
 (home / '.config/lorry').mkdir(parents=True)
-(home / '.config/lorry/lorry.toml').write_text('config-version = 1\n')
+(home / '.config/lorry/lorry.toml').write_text('config-version = 1\nuse-cargo-registry = false\n')
 env = dict(os.environ, HOME=str(home), RUSTC=os.environ['LORRY_TEST_RUSTC'])
 variants = ('legacy', 'both', 'member-legacy', 'root-legacy',
             'root-legacy-member-new', 'member-both')

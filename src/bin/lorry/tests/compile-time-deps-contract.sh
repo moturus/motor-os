@@ -9,7 +9,7 @@ export RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-compile-time-deps-XXXXXX)"
 trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained compile-time fixture: $WORK" >&2; fi' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project"/{app,normal,derive,helper}/src "$WORK/project/.cargo"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" >"$WORK/home/.config/lorry/lorry.toml"
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" >"$WORK/home/.config/lorry/lorry.toml"
 cat >"$WORK/project/Cargo.toml" <<'EOF'
 [workspace]
 members = ["app", "normal", "derive", "helper"]
@@ -48,7 +48,7 @@ EOF
 for member in app normal; do
     printf 'compile_error!("ordinary source must be skipped");\n' >"$WORK/project/$member/src/lib.rs"
 done
-printf 'config-version = 1\n' >"$WORK/project/lorry.toml"
+printf 'config-version = 1\nuse-cargo-registry = false\n' >"$WORK/project/lorry.toml"
 for member in app normal derive; do
     cat >"$WORK/project/$member/build.rs" <<'EOF'
 fn main() {

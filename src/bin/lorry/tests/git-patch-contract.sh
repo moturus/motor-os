@@ -140,6 +140,7 @@ source = "$TAG_SOURCE"
 EOF
 cat >"$HOME_DIR/.config/lorry/lorry.toml" <<EOF
 config-version = 1
+use-cargo-registry = false
 
 [network]
 curl = "$WORK/bin/git-curl"

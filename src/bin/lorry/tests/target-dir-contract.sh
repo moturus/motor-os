@@ -19,7 +19,7 @@ export CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 WORK="$(mktemp -d /tmp/lorry-target-dir-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project/.cargo" "$WORK/project/app/src"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
 export HOME="$WORK/home"
 cat >"$WORK/project/Cargo.toml" <<'EOF'
@@ -91,7 +91,7 @@ printf '[build]\ntarget-dir = "member-configured"\n[alias]\nagent-build = ["buil
         exit 1
     fi
 )
-printf 'config-version = 1\n' >"$WORK/project/app/lorry.toml"
+printf 'config-version = 1\nuse-cargo-registry = false\n' >"$WORK/project/app/lorry.toml"
 if (cd "$WORK/project" && "$LORRY" build -p app) 2>"$WORK/member-config.err"; then
     echo "target-dir-contract: accepted member-local project configuration" >&2
     exit 1

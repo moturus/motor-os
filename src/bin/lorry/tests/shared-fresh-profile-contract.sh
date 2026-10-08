@@ -17,7 +17,7 @@ trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained 
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project"/{app,util,other}/src
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
 cd "$WORK/project"
 cat >Cargo.toml <<'EOF'
@@ -63,6 +63,7 @@ EOF
 printf 'pub fn value() -> &%sstatic str { util::describe() }\n' "'" >other/src/lib.rs
 cat >lorry.toml <<'EOF'
 config-version = 1
+use-cargo-registry = false
 [policy.rules.app]
 action = "allow"
 name = "app"

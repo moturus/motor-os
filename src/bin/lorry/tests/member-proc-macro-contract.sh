@@ -10,7 +10,7 @@ export RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-member-macro-contract-XXXXXX)"
 trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained failed fixture: $WORK" >&2; fi' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project"/{app,derive,helper}/src "$WORK/project/.cargo"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" >"$WORK/home/.config/lorry/lorry.toml"
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" >"$WORK/home/.config/lorry/lorry.toml"
 cat >"$WORK/project/Cargo.toml" <<'EOF'
 [workspace]
 members = ["app", "derive", "helper"]
@@ -56,6 +56,7 @@ printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s
     "$LORRY_MOTOR_LINKER" "$LORRY_MOTOR_SYSROOT" >"$WORK/project/.cargo/config.toml"
 cat >"$WORK/project/lorry.toml" <<'EOF'
 config-version = 1
+use-cargo-registry = false
 [policy.rules.member-macro]
 action = "allow"
 name = "derive"
@@ -296,7 +297,7 @@ cat >../helper/src/lib.rs <<'EOF'
 compile_error!("macro helper must activate its host feature");
 pub fn expansion() -> &'static str { "41" }
 EOF
-printf 'config-version = 1\n[policy]\npath-roots = ["%s"]\n[policy.rules.dev-macro]\naction = "allow"\nname = "derive"\nversion = "=1.0.0"\nsource = "path"\nallow-proc-macro = true\n' \
+printf 'config-version = 1\nuse-cargo-registry = false\n[policy]\npath-roots = ["%s"]\n[policy.rules.dev-macro]\naction = "allow"\nname = "derive"\nversion = "=1.0.0"\nsource = "path"\nallow-proc-macro = true\n' \
     "$WORK/dev-only" >../lorry.toml
 "$LORRY_TEST_CARGO" generate-lockfile --offline
 cp ../Cargo.lock "$WORK/dev-only.lock"

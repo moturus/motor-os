@@ -19,7 +19,7 @@ trap 'rm -rf "$WORK"' EXIT
 PROJECT="$WORK/project"
 mkdir -p "$WORK/home/.config/lorry" "$PROJECT/app/src" \
     "$PROJECT/shared/src" "$WORK/external/src"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
 export HOME="$WORK/home"
 printf '[workspace]\nmembers = ["app"]\nresolver = "2"\n' \
@@ -34,7 +34,7 @@ for package in app shared; do
 done
 printf '[dependencies]\nshared = { path = "../shared" }\nexternal = { path = "../../external" }\n' \
     >>"$PROJECT/app/Cargo.toml"
-printf '%s\n' 'config-version = 1' '[policy.rules.shared]' \
+printf '%s\n' 'config-version = 1' 'use-cargo-registry = false' '[policy.rules.shared]' \
     'action = "allow"' 'name = "shared"' 'version = "=0.1.0"' \
     'source = "path"' 'allow-build-script = true' >"$PROJECT/lorry.toml"
 cat >"$PROJECT/shared/build.rs" <<'RS'

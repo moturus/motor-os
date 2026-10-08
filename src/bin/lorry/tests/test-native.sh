@@ -218,7 +218,7 @@ write_host_config() {
     local host_ca_bundle="$3"
     mkdir -p "$host_home/.config/lorry"
     printf '%s\n' \
-        'config-version = 1' \
+        'config-version = 1' 'use-cargo-registry = false' \
         'cargo-compat-version = "1.99"' \
         '' \
         '[repositories]' \

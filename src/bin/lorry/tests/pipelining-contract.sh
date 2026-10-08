@@ -17,7 +17,7 @@ trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained 
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project"/{app,base,middle}/src
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
 cd "$WORK/project"
 printf '[workspace]\nmembers = ["app", "base", "middle"]\nresolver = "2"\n' >Cargo.toml

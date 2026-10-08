@@ -18,7 +18,7 @@ export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 WORK="$(mktemp -d /tmp/lorry-artifact-lock-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/home/.config/lorry" "$WORK/src" "$WORK/tests"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
 export HOME="$WORK/home"
 cat >"$WORK/Cargo.toml" <<'EOF'

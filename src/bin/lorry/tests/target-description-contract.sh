@@ -12,7 +12,7 @@ WORK="$(mktemp -d /tmp/lorry-target-description-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 mkdir -p "$WORK/home/.config/lorry" "$WORK/app/src" "$WORK/dep/src" "$WORK/dep/tests"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
 export HOME="$WORK/home"
 cat >"$WORK/app/Cargo.toml" <<'EOF'
