@@ -78,7 +78,6 @@ pub fn execute(
                     &target_directory,
                     options.build.release,
                     target.as_deref(),
-                    true,
                 )?;
             }
         }
@@ -110,26 +109,17 @@ fn clean_manifest_artifacts(
     target_parent: &Path,
     release: bool,
     target: Option<&str>,
-    package_selected: bool,
 ) -> Result<bool> {
-    if package_selected {
-        if !real_directory(target_parent, "artifact parent")? {
-            return Ok(false);
-        }
-        let package = crate::unit::selected_library_key(manifest)?.package;
-        return clean_package_artifacts(
-            &target_parent.join("lorry"),
-            manifest,
-            &package,
-            release,
-            target,
-        );
+    if !real_directory(target_parent, "artifact parent")? {
+        return Ok(false);
     }
-    clean_artifacts_root(
+    let package = crate::unit::selected_library_key(manifest)?.package;
+    clean_package_artifacts(
         &target_parent.join("lorry"),
+        manifest,
+        &package,
         release,
         target,
-        manifest.profile_directory.as_deref(),
     )
 }
 
@@ -410,23 +400,14 @@ mod tests {
             manifest.root.join("editor-target")
         );
 
-        assert!(
-            clean_manifest_artifacts(&manifest, &fixture.0.join("target"), false, None, false)
-                .unwrap()
-        );
+        assert!(clean_artifacts_root(&fixture.0.join("target/lorry"), false, None, None).unwrap());
         assert!(!fixture.0.join("target/lorry").exists());
 
         fixture.directory("editor-target/lorry/debug/build/app");
         fixture.directory("editor-target/lorry/debug/build/other");
         assert!(
-            clean_manifest_artifacts(
-                &manifest,
-                &fixture.0.join("editor-target"),
-                false,
-                None,
-                false
-            )
-            .unwrap()
+            clean_artifacts_root(&fixture.0.join("editor-target/lorry"), false, None, None)
+                .unwrap()
         );
         assert!(!fixture.0.join("editor-target/lorry").exists());
     }
@@ -480,8 +461,7 @@ mod tests {
         }
 
         assert!(
-            clean_manifest_artifacts(&manifest, &fixture.0.join("target"), false, None, true,)
-                .unwrap()
+            clean_manifest_artifacts(&manifest, &fixture.0.join("target"), false, None).unwrap()
         );
         assert!(!owned.exists());
         assert!(foreign.exists());
