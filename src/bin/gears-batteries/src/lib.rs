@@ -84,7 +84,7 @@ use serde_json::{Value, json};
 
 const MAX_EVENT_BYTES: usize = 2 * 1024 * 1024;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Event {
     pub protocol_version: u32,
     pub event: String,
@@ -94,7 +94,7 @@ pub struct Event {
     pub payload: Value,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Session {
     pub id: String,
     pub path: Option<PathBuf>,
@@ -229,135 +229,84 @@ pub fn hook(event: Event) -> Result<Value, String> {
     })
 }
 
-pub fn context_at(mut event: Event, context: &paths::ToolContext) -> Value {
+type Feature = fn(&Event, &paths::ToolContext) -> Result<Value, String>;
+
+/// Run features in order; each sees the hook state the previous one returned.
+fn run_features(mut event: Event, context: &paths::ToolContext, features: &[Feature]) -> Value {
     let mut response = json!({});
-    for observe in [memory_context::observe, skill_context::observe] {
-        let feature = observe(&event, context);
-        if let Ok(feature) = &feature
-            && let Some(state) = feature.get("state")
-        {
+    for feature in features {
+        let result = feature(&event, context);
+        if let Some(state) = result.as_ref().ok().and_then(|value| value.get("state")) {
             event.session.state = Some(state.clone());
         }
-        merge_optional(&mut response, feature);
+        merge_optional(&mut response, result);
     }
     response
 }
 
-fn observe_features(mut event: Event) -> Value {
-    let context = match paths::ToolContext::for_event(&event) {
-        Ok(context) => context,
-        Err(error) => {
-            return json!({"notice": format!("batteries observations unavailable: {error}")});
-        }
-    };
-    let mut response = json!({});
-    let mut notices = Vec::new();
-    for observe in [
-        check_state::observe,
-        skill_observation::observe,
-        turns::observe,
-    ] {
-        match observe(&event, &context) {
-            Ok(feature) => {
-                for (name, value) in feature.as_object().unwrap() {
-                    if name == "state" {
-                        event.session.state = Some(value.clone());
-                    }
-                    if name == "notice" {
-                        notices.push(value.as_str().unwrap().to_string());
-                    } else {
-                        response[name] = value.clone();
-                    }
-                }
-            }
-            Err(error) => notices.push(format!("batteries observation failed: {error}")),
-        }
+pub fn context_at(event: Event, context: &paths::ToolContext) -> Value {
+    run_features(
+        event,
+        context,
+        &[memory_context::observe, skill_context::observe],
+    )
+}
+
+fn observe_features(event: Event) -> Value {
+    match paths::ToolContext::for_event(&event) {
+        Ok(context) => run_features(
+            event,
+            &context,
+            &[
+                check_state::observe,
+                skill_observation::observe,
+                turns::observe,
+            ],
+        ),
+        Err(error) => json!({"notice": format!("batteries observations unavailable: {error}")}),
     }
-    if !notices.is_empty() {
-        response["notice"] = json!(notices.join("\n"));
-    }
-    response
 }
 
 pub fn initialize_at(event: &Event, root: &gears::state::StateRoot) -> Value {
     let mut response = snapshot::initialize(event, root).unwrap_or_else(initialization_notice);
-    let state = response
-        .get("state")
-        .cloned()
-        .or_else(|| event.session.state.clone())
-        .unwrap_or_else(|| json!({}));
-    if state.is_object() {
-        merge_optional(
-            &mut response,
-            paths::ToolContext::new(
-                event.workspace.clone(),
-                root.path().to_path_buf(),
-                event.session.id.clone(),
-                event.session.path.as_deref(),
-            )
-            .and_then(|context| {
-                let workspace_state =
-                    gears::state::StateRoot::new(context.workspace.join(".gears"))?;
-                let discarded = workspace_state.cleanup_temporary_files()?;
-                let mut feature = workspace_memory::question(event, &context, &state)?;
-                if discarded != 0 {
-                    let notice =
-                        format!("discarded {discarded} temporary batteries workspace files");
-                    let prefix = feature
-                        .get("notice")
-                        .and_then(Value::as_str)
-                        .map(|text| format!("{text}\n"))
-                        .unwrap_or_default();
-                    feature["notice"] = json!(format!("{prefix}{notice}"));
-                }
-                Ok(feature)
-            }),
-        );
-    }
-    if response.get("prompt_fragments").is_some() {
-        let mut skill_event = Event {
-            protocol_version: event.protocol_version,
-            event: event.event.clone(),
-            workspace: event.workspace.clone(),
-            session: Session {
-                id: event.session.id.clone(),
-                path: event.session.path.clone(),
-                state: response
-                    .get("state")
-                    .cloned()
-                    .or_else(|| event.session.state.clone()),
-            },
-            payload: event.payload.clone(),
-        };
-        skill_event.session.state = response
+    let context = paths::ToolContext::new(
+        event.workspace.clone(),
+        root.path().to_path_buf(),
+        event.session.id.clone(),
+        event.session.path.as_deref(),
+    );
+    let context = || context.as_ref().map_err(Clone::clone);
+    let state = |response: &Value| {
+        response
             .get("state")
             .cloned()
-            .or_else(|| event.session.state.clone());
-        merge_optional(
-            &mut response,
-            paths::ToolContext::new(
-                event.workspace.clone(),
-                root.path().to_path_buf(),
-                event.session.id.clone(),
-                event.session.path.as_deref(),
-            )
-            .and_then(|context| skill_context::initialize(&skill_event, &context)),
-        );
+            .or_else(|| event.session.state.clone())
+    };
+    let current = state(&response).unwrap_or_else(|| json!({}));
+    if current.is_object() {
+        let feature = context().and_then(|context| {
+            let workspace_state = gears::state::StateRoot::new(context.workspace.join(".gears"))?;
+            let discarded = workspace_state.cleanup_temporary_files()?;
+            let mut feature = workspace_memory::question(event, context, &current)?;
+            if discarded != 0 {
+                let notice = format!("discarded {discarded} temporary batteries workspace files");
+                merge_optional(&mut feature, Ok(json!({"notice": notice})));
+            }
+            Ok(feature)
+        });
+        merge_optional(&mut response, feature);
     }
-    let state = response
-        .get("state")
-        .cloned()
-        .or_else(|| event.session.state.clone())
-        .unwrap_or_else(|| json!({}));
-    if state.is_object() {
+    if response.get("prompt_fragments").is_some() {
+        let mut skill_event = event.clone();
+        skill_event.session.state = state(&response);
+        let skills = context().and_then(|context| skill_context::initialize(&skill_event, context));
+        merge_optional(&mut response, skills);
+    }
+    let current = state(&response).unwrap_or_else(|| json!({}));
+    if current.is_object() {
         let defer = response.get("question").is_some();
-        let reviews = paths::ToolContext::new(
-            event.workspace.clone(),
-            root.path().to_path_buf(),
-            event.session.id.clone(),
-            event.session.path.as_deref(),
-        )
-        .and_then(|context| review_resume::initialize(event, &context, &state, defer));
+        let reviews = context()
+            .and_then(|context| review_resume::initialize(event, context, &current, defer));
         merge_optional(&mut response, reviews);
     }
     with_tools(event, response)
