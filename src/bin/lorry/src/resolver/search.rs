@@ -190,12 +190,12 @@ impl Frame {
                     }
                     state.nodes.insert(
                         key.clone(),
-                        Node {
+                        Arc::new(Node {
                             record,
                             activations: BTreeMap::new(),
                             compile_kinds: BTreeSet::new(),
                             edges: BTreeMap::new(),
-                        },
+                        }),
                     );
                     key
                 }

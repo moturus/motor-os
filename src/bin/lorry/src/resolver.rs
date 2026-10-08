@@ -1300,7 +1300,8 @@ struct Node {
 
 #[derive(Clone, Default)]
 struct State {
-    nodes: BTreeMap<PackageKey, Node>,
+    // Search copies the state at every step; shared nodes keep that cheap.
+    nodes: BTreeMap<PackageKey, Arc<Node>>,
     links: BTreeMap<String, PackageKey>,
     root_edges: BTreeMap<(CompileKind, FeatureContext, usize), PackageKey>,
     root_declarations: BTreeMap<usize, CandidateDependency>,
@@ -1315,6 +1316,7 @@ impl State {
             .collect::<Vec<_>>();
         let mut packages = Vec::with_capacity(self.nodes.len());
         for (key, node) in self.nodes {
+            let node = Arc::unwrap_or_clone(node);
             let feature_sets = node
                 .activations
                 .iter()
@@ -1513,6 +1515,7 @@ fn fulfill(
         let node = state
             .nodes
             .get_mut(parent)
+            .map(Arc::make_mut)
             .ok_or_else(|| Failure::new("dependency parent disappeared during resolution"))?;
         let edge = (
             event.parent_compile_kind.ok_or_else(|| {
@@ -1571,7 +1574,7 @@ fn activate(
         .ok_or_else(|| Failure::new("selected package disappeared during activation"))?
         .record
         .clone();
-    let node = state.nodes.get_mut(key).unwrap();
+    let node = Arc::make_mut(state.nodes.get_mut(key).unwrap());
     node.compile_kinds.insert(event.compile_kind);
     let activation = node.activations.entry(event.context.clone()).or_default();
 
@@ -2092,16 +2095,16 @@ mod tests {
         let mut state = State::default();
         state.nodes.insert(
             key.clone(),
-            Node {
+            Arc::new(Node {
                 record: Arc::new(candidate),
                 activations: BTreeMap::from([(FeatureContext::Unified, Activation::default())]),
                 compile_kinds: BTreeSet::from([CompileKind::Target]),
                 edges: BTreeMap::new(),
-            },
+            }),
         );
         let mut branch = state.clone();
         let original = &state.nodes[&key];
-        let changed = branch.nodes.get_mut(&key).unwrap();
+        let changed = Arc::make_mut(branch.nodes.get_mut(&key).unwrap());
         assert!(Arc::ptr_eq(&original.record, &changed.record));
         assert!(original.record.local_manifest.is_some());
         let activation = changed
