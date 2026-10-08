@@ -4,9 +4,9 @@ use std::io::Read;
 
 use serde_json::{Value, json};
 
+use crate::file_read::MAX_FILE_BYTES;
 use crate::paths::ToolContext;
 
-const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DIFF_BYTES: usize = 30_000;
 
 pub fn patch(context: &ToolContext, input: &str, old: &str, new: &str) -> Result<Value, String> {
@@ -20,16 +20,17 @@ pub fn patch(context: &ToolContext, input: &str, old: &str, new: &str) -> Result
     let mut bytes = Vec::new();
     std::fs::File::open(&path)
         .map_err(|error| error.to_string())?
-        .take(MAX_PATCH_BYTES as u64 + 1)
+        .take(MAX_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_PATCH_BYTES {
-        return Err("patch supports files up to 4 MiB; use read_file and write_file".into());
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err("file tools support files up to 4 MiB; use sh for larger ones".into());
     }
+    let version = crate::file_record::FileVersion::of(&bytes);
     let source = String::from_utf8(bytes).map_err(|_| "patch requires UTF-8 text")?;
     let source = source.strip_prefix('\u{feff}').unwrap_or(&source);
     let matched = crate::patch_match::locate(source, old, new)?;
-    let replacement = if crate::file_read::version(&path)?.windows_lines {
+    let replacement = if version.windows_lines {
         matched
             .replacement
             .replace("\r\n", "\n")
@@ -40,7 +41,7 @@ pub fn patch(context: &ToolContext, input: &str, old: &str, new: &str) -> Result
     let mut changed = source.to_string();
     changed.replace_range(matched.range.clone(), &replacement);
     let diff = diff(source, &changed, matched.range, replacement.len());
-    let mut receipt = crate::file_write::write(context, input, &changed)?;
+    let mut receipt = crate::file_write::write_over(context, &path, Some(version), &changed)?;
     receipt["match_rule"] = json!(matched.rule);
     receipt["diff"] = json!(diff.0);
     receipt["diff_truncated"] = json!(diff.1);

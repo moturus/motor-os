@@ -11,16 +11,25 @@ use crate::paths::ToolContext;
 pub fn write(context: &ToolContext, input: &str, content: &str) -> Result<Value, String> {
     let path = context.resolve(input, true)?;
     let previous = match std::fs::symlink_metadata(&path) {
-        Ok(_) => {
-            let version = crate::file_read::version(&path)?;
-            if !fully_read(context, &path, &version)? {
-                return Err("read every page of the current file before overwriting it".into());
-            }
-            Some(version)
-        }
+        Ok(_) => Some(crate::file_read::version(&path)?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.to_string()),
     };
+    write_over(context, &path, previous, content)
+}
+
+/// Replace `path`, whose current version the caller has already determined.
+pub(crate) fn write_over(
+    context: &ToolContext,
+    path: &Path,
+    previous: Option<FileVersion>,
+    content: &str,
+) -> Result<Value, String> {
+    if let Some(version) = &previous
+        && !fully_read(context, path, version)?
+    {
+        return Err("read every page of the current file before overwriting it".into());
+    }
     if content.contains('\0') {
         return Err("binary files are not supported".into());
     }
@@ -43,37 +52,11 @@ pub fn write(context: &ToolContext, input: &str, content: &str) -> Result<Value,
     }
     StateRoot::new(Path::new("/").to_path_buf())?
         .replace_file_preserving_access(path.strip_prefix("/").unwrap(), content.as_bytes())?;
-    let version = FileVersion {
-        hash: crate::snapshot::digest(content.as_bytes()),
-        size: content.len() as u64,
-        bom: content.starts_with('\u{feff}'),
-        windows_lines: content.contains('\n')
-            && content
-                .split_inclusive('\n')
-                .filter(|line| line.ends_with('\n'))
-                .all(|line| line.ends_with("\r\n")),
-    };
-    let receipt = json!({"path": context.relative(&path), "hash": version.hash,
+    let version = FileVersion::of(content.as_bytes());
+    let mut receipt = json!({"path": context.relative(path), "hash": version.hash,
         "total_bytes": version.size, "written": true});
     // A bookkeeping failure must not misreport a workspace write as refused.
-    let bookkeeping = record(context, &path, &version, 0, version.size).and_then(|_| {
-        let name = format!(
-            "writes/{}.json",
-            crate::snapshot::digest(
-                context
-                    .relative(&path)
-                    .to_str()
-                    .ok_or("file path is not UTF-8")?
-                    .as_bytes()
-            )
-        );
-        context.replace_data(
-            &name,
-            &serde_json::to_vec(&receipt).map_err(|error| error.to_string())?,
-        )
-    });
-    let mut receipt = receipt;
-    if let Err(error) = bookkeeping {
+    if let Err(error) = record(context, path, &version, 0, version.size) {
         receipt["warning"] = json!(format!("file was written, but its record failed: {error}"));
     }
     Ok(receipt)

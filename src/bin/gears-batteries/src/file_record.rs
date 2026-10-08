@@ -12,6 +12,23 @@ pub struct FileVersion {
     pub windows_lines: bool,
 }
 
+impl FileVersion {
+    /// The version of text already in memory, as `file_read` reports it for a file.
+    pub fn of(bytes: &[u8]) -> Self {
+        let mut lines = bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .filter(|line| line.ends_with(b"\n"));
+        let first = lines.next();
+        Self {
+            hash: crate::snapshot::digest(bytes),
+            size: bytes.len() as u64,
+            bom: bytes.starts_with(&[0xef, 0xbb, 0xbf]),
+            windows_lines: first.is_some_and(|line| line.ends_with(b"\r\n"))
+                && lines.all(|line| line.ends_with(b"\r\n")),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct ReadRecord {
     version: u32,

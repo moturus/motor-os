@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use crate::paths::ToolContext;
 
 const PAGE_BYTES: usize = 30_000;
+/// The file tools read, patch and overwrite text files up to this size.
+pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct Page {
@@ -47,6 +49,9 @@ fn scan(path: &Path, offset: u64) -> Result<(FileVersion, Vec<u8>, u64, bool), S
     let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
     if !metadata.is_file() {
         return Err("read_file requires a regular file".into());
+    }
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err("file tools support files up to 4 MiB; use sh for larger ones".into());
     }
     if offset > metadata.len() {
         return Err("offset is beyond the end of the file".into());
@@ -197,6 +202,11 @@ mod tests {
         }
         let current = version(&path).unwrap();
         assert!(current.bom && current.windows_lines);
+        let memory = FileVersion::of(text.as_bytes());
+        assert_eq!(
+            (memory.hash, memory.size, memory.bom, memory.windows_lines),
+            (current.hash.clone(), current.size, true, true)
+        );
         assert!(fully_read(&context, &path, &current).unwrap());
         std::fs::write(&path, text.replace("first", "other")).unwrap();
         assert!(!fully_read(&context, &path, &version(&path).unwrap()).unwrap());
@@ -205,6 +215,11 @@ mod tests {
         assert!(read(&context, "text", 0).unwrap_err().contains("binary"));
         std::fs::write(&path, [0xff]).unwrap();
         assert!(read(&context, "text", 0).is_err());
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert!(read(&context, "text", 0).unwrap_err().contains("4 MiB"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
