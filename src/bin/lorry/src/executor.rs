@@ -117,14 +117,14 @@ impl Executed {
         cache: &BuildCache,
         cache_key: CacheKey,
         output: RustcOutput,
-        selected: Option<SelectedInputs<'_>>,
+        sources: Option<[u8; 32]>,
         tracked: Tracked,
-    ) -> Result<Self> {
-        Ok(Self::Artifact {
-            cache_key: cache.dependency_key(cache_key, &output, selected, &tracked)?,
+    ) -> Self {
+        Self::Artifact {
+            cache_key: cache.dependency_key(cache_key, sources, &tracked),
             output,
             tracked,
-        })
+        }
     }
 }
 
@@ -552,18 +552,13 @@ struct CacheStore<'a> {
     package: PackageKey,
     output: RustcOutput,
     build_script: Option<ExecutedBuildScript>,
-    working_dir: Option<PathBuf>,
-    source_remap: Option<&'a crate::unit::SourceRemap>,
+    sources: Option<[u8; 32]>,
     diagnostics: Vec<u8>,
     tracked: Tracked,
 }
 
 impl CacheStore<'_> {
     fn run(&self) -> Result<()> {
-        let selected = self.working_dir.as_ref().map(|working_dir| SelectedInputs {
-            working_dir,
-            source_remap: self.source_remap,
-        });
         self.cache.store(
             self.key,
             &self.output,
@@ -571,7 +566,7 @@ impl CacheStore<'_> {
                 .as_ref()
                 .map(cache_build_script_input)
                 .as_ref(),
-            selected,
+            self.sources,
             (&[], &self.diagnostics),
             &self.tracked,
         )?;
@@ -915,7 +910,7 @@ fn execute_unit<'a>(
                     dependencies: &dependencies,
                     build_script: cache_build_script,
                 })?;
-                if let Some(tracked) = cache.published_fresh(
+                if let Some((tracked, sources)) = cache.published_fresh(
                     cache_key,
                     &planned_invocation.output,
                     selected_inputs,
@@ -940,13 +935,13 @@ fn execute_unit<'a>(
                         &planned_invocation.output,
                         true,
                     )?;
-                    return Executed::artifact(
+                    return Ok(Executed::artifact(
                         cache,
                         cache_key,
                         planned_invocation.output,
-                        selected_inputs,
+                        sources,
                         tracked,
-                    );
+                    ));
                 }
                 let staging = AtomicDirectory::new_stable(parent, label)?;
                 let invocation = planned_invocation.with_output_directory(
@@ -966,7 +961,7 @@ fn execute_unit<'a>(
                     cache.record_published(
                         cache_key,
                         &invocation.output,
-                        selected_inputs,
+                        restored.sources,
                         &key.package,
                         (stdout, stderr),
                         &restored.tracked,
@@ -989,13 +984,13 @@ fn execute_unit<'a>(
                         &planned_invocation.output,
                         true,
                     )?;
-                    return Executed::artifact(
+                    return Ok(Executed::artifact(
                         cache,
                         cache_key,
                         planned_invocation.output,
-                        selected_inputs,
+                        restored.sources,
                         restored.tracked,
-                    );
+                    ));
                 }
                 // Like Cargo, a library compiles in place, so a dependent that
                 // reads only its metadata can start during code generation.
@@ -1070,6 +1065,7 @@ fn execute_unit<'a>(
                     verbose: options.verbose,
                     color: options.color,
                 };
+                let started = run_record::now();
                 let metadata_written = || -> Result<Executed> {
                     validate_dep_info(
                         &invocation.output,
@@ -1080,13 +1076,18 @@ fn execute_unit<'a>(
                         planned.source_remap.as_ref(),
                         &clippy_inputs,
                     )?;
-                    Executed::artifact(
+                    let (sources, racing) =
+                        compiled_sources(&invocation.output, selected_inputs, started)?;
+                    if racing {
+                        return Err(Error::failure("a member source changed during compilation"));
+                    }
+                    Ok(Executed::artifact(
                         cache,
                         cache_key,
                         planned_invocation.output.clone(),
-                        selected_inputs,
+                        sources,
                         tracked_environment(&invocation)?,
-                    )
+                    ))
                 };
                 let rustc_output = if pipelined {
                     let mut signaled = false;
@@ -1134,18 +1135,25 @@ fn execute_unit<'a>(
                 {
                     install_unhashed(executable, unhashed_executable)?;
                 }
-                cache.record_published(
-                    cache_key,
-                    &invocation.output,
-                    selected_inputs,
-                    &key.package,
-                    (&diagnostics.0, &diagnostics.1),
-                    &tracked,
-                )?;
+                // A unit whose sources changed while rustc ran is used by this
+                // build only: it is neither recorded nor stored, and its
+                // dependents get a key that no later build matches.
+                let (sources, racing) =
+                    compiled_sources(&invocation.output, selected_inputs, started)?;
+                if !racing {
+                    cache.record_published(
+                        cache_key,
+                        &invocation.output,
+                        sources,
+                        &key.package,
+                        (&diagnostics.0, &diagnostics.1),
+                        &tracked,
+                    )?;
+                }
                 if let Some(staging) = staging {
                     staging.commit(unit_dir)?;
                 }
-                if restorable {
+                if restorable && !racing {
                     stores
                         .send(CacheStore {
                             cache,
@@ -1153,9 +1161,7 @@ fn execute_unit<'a>(
                             package: key.package.clone(),
                             output: planned_invocation.output.clone(),
                             build_script: executed_build_script.cloned(),
-                            working_dir: selected_inputs
-                                .map(|_| planned_invocation.current_dir.clone()),
-                            source_remap: planned.source_remap.as_ref(),
+                            sources,
                             diagnostics: diagnostics.1.clone(),
                             tracked: tracked.clone(),
                         })
@@ -1167,16 +1173,45 @@ fn execute_unit<'a>(
                     &planned_invocation.output,
                     false,
                 )?;
-                Executed::artifact(
+                Ok(Executed::artifact(
                     cache,
                     cache_key,
                     planned_invocation.output,
-                    selected_inputs,
+                    if racing {
+                        Some(racing_sources())
+                    } else {
+                        sources
+                    },
                     tracked,
-                )
+                ))
             }
         }
     }
+}
+
+/// Digests a member unit's sources after rustc, and reports whether one of
+/// them changed after rustc started, so its outputs may not reflect it.
+fn compiled_sources(
+    output: &RustcOutput,
+    selected: Option<SelectedInputs<'_>>,
+    started: Duration,
+) -> Result<(Option<[u8; 32]>, bool)> {
+    let Some(inputs) = selected else {
+        return Ok((None, false));
+    };
+    let (digest, newest) = crate::cache::source_inputs(output, inputs)?;
+    Ok((Some(digest), newest >= started))
+}
+
+/// A source digest that no real sources produce.
+fn racing_sources() -> [u8; 32] {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut digest = crate::hash::FieldDigest::tagged(b"lorry-racing-sources\0");
+    digest.bytes("time", &run_record::now().as_nanos().to_le_bytes());
+    digest.bytes("process", &std::process::id().to_le_bytes());
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    digest.bytes("sequence", &next.to_le_bytes());
+    digest.finish()
 }
 
 /// Whether a rustc stderr line reports that the metadata file is written.

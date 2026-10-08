@@ -86,6 +86,8 @@ pub struct Restored {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub tracked: Tracked,
+    /// The member's source digest that the entry matched.
+    pub sources: Option<[u8; 32]>,
 }
 
 pub struct BuildCache {
@@ -415,23 +417,19 @@ impl BuildCache {
     pub fn dependency_key(
         &self,
         key: CacheKey,
-        output: &RustcOutput,
-        selected: Option<SelectedInputs<'_>>,
+        sources: Option<[u8; 32]>,
         tracked: &Tracked,
-    ) -> Result<CacheKey> {
-        if tracked.is_empty() && selected.is_none() {
-            return Ok(key);
+    ) -> CacheKey {
+        if tracked.is_empty() && sources.is_none() {
+            return key;
         }
         let mut digest = KeyDigest::new();
         digest.bytes("unit-key", &key.0);
         digest.bytes("tracked-environment", &tracked_env::encode(tracked));
-        if let Some(inputs) = selected {
-            digest.bytes(
-                "source-inputs",
-                &source_inputs_digest(output.dep_info(), inputs)?,
-            );
+        if let Some(sources) = sources {
+            digest.bytes("source-inputs", &sources);
         }
-        Ok(CacheKey(digest.finish()))
+        CacheKey(digest.finish())
     }
 
     pub fn restore(
@@ -459,15 +457,17 @@ impl BuildCache {
             self.quarantine(&self.entry_path(key), key)?;
             return Ok(None);
         }
+        let mut sources = None;
         if let Some(inputs) = selected {
             let dep_info = entry.payload.join("library.d");
             let recorded = entry.payload.join("source-inputs.sha256");
-            let Some(current) = source_inputs_digest(&dep_info, inputs).ok() else {
+            let Some((current, _)) = source_inputs_digest(&dep_info, inputs).ok() else {
                 return Ok(None);
             };
             if fs::read(recorded).ok().as_deref() != Some(current.as_slice()) {
                 return Ok(None);
             }
+            sources = Some(current);
         }
         let (rlib, rmeta) = library_paths(output)?;
         copy_new_file(&entry.payload.join("library.rlib"), rlib)?;
@@ -486,17 +486,19 @@ impl BuildCache {
             stdout,
             stderr,
             tracked,
+            sources,
         }))
     }
 
-    /// Returns the variables a published unit read when it is still fresh.
+    /// Returns the variables a published unit read, and a member's source
+    /// digest, when it is still fresh.
     pub fn published_fresh(
         &self,
         key: CacheKey,
         output: &RustcOutput,
         selected: Option<SelectedInputs<'_>>,
         package: &crate::resolver::PackageKey,
-    ) -> Result<Option<Tracked>> {
+    ) -> Result<Option<(Tracked, Option<[u8; 32]>)>> {
         let directory = published_unit_directory(output)?;
         if !artifact_owner::matches(directory, package) {
             return Ok(None);
@@ -513,18 +515,28 @@ impl BuildCache {
         else {
             return Ok(None);
         };
-        let Some(current) = published_fingerprint(key, output, selected, self.validation).ok()
+        let Some(sources) = selected
+            .map(|inputs| source_inputs_digest(output.dep_info(), inputs).map(|(digest, _)| digest))
+            .transpose()
+            .ok()
         else {
             return Ok(None);
         };
-        Ok((fs::read(record).ok().as_deref() == Some(current.as_slice())).then_some(tracked))
+        let Some(current) = published_fingerprint(key, output, sources, self.validation).ok()
+        else {
+            return Ok(None);
+        };
+        Ok(
+            (fs::read(record).ok().as_deref() == Some(current.as_slice()))
+                .then_some((tracked, sources)),
+        )
     }
 
     pub fn record_published(
         &self,
         key: CacheKey,
         output: &RustcOutput,
-        selected: Option<SelectedInputs<'_>>,
+        sources: Option<[u8; 32]>,
         package: &crate::resolver::PackageKey,
         (stdout, stderr): (&[u8], &[u8]),
         tracked: &Tracked,
@@ -536,7 +548,7 @@ impl BuildCache {
             &directory.join(PUBLISHED_ENVIRONMENT),
             &tracked_env::encode(tracked),
         )?;
-        let fingerprint = published_fingerprint(key, output, selected, self.validation)?;
+        let fingerprint = published_fingerprint(key, output, sources, self.validation)?;
         artifact_owner::write(directory, package)?;
         write_synced(&directory.join(PUBLISHED_RECORD), &fingerprint)
     }
@@ -577,16 +589,14 @@ impl BuildCache {
         key: CacheKey,
         output: &RustcOutput,
         build_script: Option<&BuildScriptInput<'_>>,
-        selected: Option<SelectedInputs<'_>>,
+        sources: Option<[u8; 32]>,
         diagnostics: (&[u8], &[u8]),
         tracked: &Tracked,
     ) -> Result<()> {
         let (rlib, rmeta) = library_paths(output)?;
-        let dep_info = selected.map(|_| output.dep_info());
+        let dep_info = sources.map(|_| output.dep_info());
         let destination = self.entry_path(key);
-        let source_inputs = selected
-            .map(|inputs| source_inputs_digest(dep_info.unwrap(), inputs))
-            .transpose()?;
+        let source_inputs = sources;
         let environment = tracked_env::encode(tracked);
         let mut replace = false;
         if let Some(existing) = self.verified_or_quarantine(key)? {
@@ -1231,7 +1241,7 @@ fn published_unit_directory(output: &RustcOutput) -> Result<&Path> {
 fn published_fingerprint(
     key: CacheKey,
     output: &RustcOutput,
-    selected: Option<SelectedInputs<'_>>,
+    sources: Option<[u8; 32]>,
     validation: ValidationMode,
 ) -> Result<[u8; 32]> {
     let files: Vec<&Path> = match output {
@@ -1246,7 +1256,7 @@ fn published_fingerprint(
             if rmeta != rlib {
                 files.push(rmeta);
             }
-            if selected.is_some() {
+            if sources.is_some() {
                 files.push(dep_info);
             }
             files
@@ -1260,7 +1270,7 @@ fn published_fingerprint(
             dep_info,
         } => {
             let mut files = vec![dynamic_library.as_path()];
-            if selected.is_some() {
+            if sources.is_some() {
                 files.push(dep_info);
             }
             files
@@ -1324,11 +1334,8 @@ fn published_fingerprint(
         }
         digest.file_contents(name, &path)?;
     }
-    if let Some(inputs) = selected {
-        digest.bytes(
-            "source-inputs",
-            &source_inputs_digest(output.dep_info(), inputs)?,
-        );
+    if let Some(sources) = sources {
+        digest.bytes("source-inputs", &sources);
     }
     Ok(digest.finish())
 }
@@ -1628,8 +1635,20 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     digest.finish()
 }
 
+/// Digests a member unit's sources and returns the newest modification time
+/// among them. A caller compares that with when rustc started.
+pub fn source_inputs(
+    output: &RustcOutput,
+    inputs: SelectedInputs<'_>,
+) -> Result<([u8; 32], std::time::Duration)> {
+    source_inputs_digest(output.dep_info(), inputs)
+}
+
 /// Digests every source that a unit's dep-info lists.
-fn source_inputs_digest(dep_info: &Path, inputs: SelectedInputs<'_>) -> Result<[u8; 32]> {
+fn source_inputs_digest(
+    dep_info: &Path,
+    inputs: SelectedInputs<'_>,
+) -> Result<([u8; 32], std::time::Duration)> {
     let parsed = crate::executor::read_dep_info(dep_info, "rustc dep-info input", |source| {
         inputs
             .source_remap
@@ -1637,13 +1656,21 @@ fn source_inputs_digest(dep_info: &Path, inputs: SelectedInputs<'_>) -> Result<[
             .unwrap_or_else(|| inputs.working_dir.join(source))
     })?;
     let mut digest = KeyDigest::new();
+    let mut newest = std::time::Duration::ZERO;
     digest.bytes("schema", b"dep-info-inputs-v1");
     for (path, resolved) in parsed.inputs.into_iter().collect::<BTreeMap<_, _>>() {
         digest.os("source-path", path.as_os_str(), &[]);
         digest.os("resolved-path", resolved.as_os_str(), &[]);
+        let metadata = fs::metadata(&resolved).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect source `{}`: {error}",
+                resolved.display()
+            ))
+        })?;
+        newest = newest.max(modified_time(&resolved, &metadata)?);
         digest.file_contents("source-contents", &resolved)?;
     }
-    Ok(digest.finish())
+    Ok((digest.finish(), newest))
 }
 
 struct KeyDigest(FieldDigest);
@@ -1928,8 +1955,7 @@ mod tests {
             b"new"
         );
 
-        let identity =
-            |tracked: &Tracked| cache.dependency_key(key, &built, None, tracked).unwrap();
+        let identity = |tracked: &Tracked| cache.dependency_key(key, None, tracked);
         assert_eq!(identity(&Tracked::new()), key);
         assert_ne!(identity(&current), key);
         assert_ne!(identity(&current), identity(&stale));
@@ -1951,7 +1977,14 @@ mod tests {
         let dep_info = built.dep_info();
         fs::write(dep_info, b"library.rlib: src/lib.rs\n").unwrap();
         cache
-            .store(key, &built, None, Some(inputs), (b"", b""), &Tracked::new())
+            .store(
+                key,
+                &built,
+                None,
+                Some(source_inputs(&built, inputs).unwrap().0),
+                (b"", b""),
+                &Tracked::new(),
+            )
             .unwrap();
 
         let restored_root = fixture.0.join("restored");
@@ -1969,7 +2002,14 @@ mod tests {
                 .is_some()
         );
         cache
-            .store(key, &built, None, Some(inputs), (b"", b""), &Tracked::new())
+            .store(
+                key,
+                &built,
+                None,
+                Some(source_inputs(&built, inputs).unwrap().0),
+                (b"", b""),
+                &Tracked::new(),
+            )
             .unwrap();
         assert_eq!(
             fs::read(restored_root.join("library.d")).unwrap(),
@@ -2005,7 +2045,14 @@ mod tests {
         )
         .unwrap();
         cache
-            .store(key, &built, None, Some(inputs), (b"", b""), &Tracked::new())
+            .store(
+                key,
+                &built,
+                None,
+                Some(source_inputs(&built, inputs).unwrap().0),
+                (b"", b""),
+                &Tracked::new(),
+            )
             .unwrap();
 
         let restored_root = fixture.0.join("restored");
@@ -2035,7 +2082,14 @@ mod tests {
         );
         fs::write(library_paths(&built).unwrap().0, b"new library").unwrap();
         cache
-            .store(key, &built, None, Some(inputs), (b"", b""), &Tracked::new())
+            .store(
+                key,
+                &built,
+                None,
+                Some(source_inputs(&built, inputs).unwrap().0),
+                (b"", b""),
+                &Tracked::new(),
+            )
             .unwrap();
         assert!(
             cache
@@ -2092,7 +2146,7 @@ mod tests {
             .record_published(
                 key,
                 &output,
-                Some(inputs),
+                Some(source_inputs(&output, inputs).unwrap().0),
                 &package,
                 (b"", b""),
                 &Tracked::new(),
@@ -2105,9 +2159,11 @@ mod tests {
                 .is_some()
         );
         let identity = || {
-            cache
-                .dependency_key(key, &output, Some(inputs), &Tracked::new())
-                .unwrap()
+            cache.dependency_key(
+                key,
+                Some(source_inputs(&output, inputs).unwrap().0),
+                &Tracked::new(),
+            )
         };
         let first = identity();
         fs::write(&external, b"second").unwrap();
@@ -2192,10 +2248,10 @@ mod tests {
             working_dir: &source,
             source_remap: None,
         };
-        let previous = source_inputs_digest(&dep_info, inputs).unwrap();
+        let previous = source_inputs_digest(&dep_info, inputs).unwrap().0;
         fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&second, &link).unwrap();
-        assert_ne!(previous, source_inputs_digest(&dep_info, inputs).unwrap());
+        assert_ne!(previous, source_inputs_digest(&dep_info, inputs).unwrap().0);
     }
 
     #[test]

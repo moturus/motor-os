@@ -1693,6 +1693,10 @@ rebuilds only that binary. Member cache entries and published units retain
 the dep-info and a digest of every listed input, including each resolved path
 and file contents. An edit, removal, or symlink retarget makes the unit stale;
 after a successful rebuild, the project-local entry is atomically replaced.
+A member source saved after rustc started may be missing from the outputs, as
+Cargo also assumes. Lorry then records and caches nothing for that unit,
+writes no completed-profile record, and gives its dependents a key that no
+later build matches, so the next build compiles them again.
 A dependent's key covers each dependency's key, recorded variable values, and,
 for a member unit, its input digest. A change to any of them rebuilds the
 dependents too.

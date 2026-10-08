@@ -1134,6 +1134,7 @@ fn build_inner(
     check: Option<&CheckOptions>,
     format: MessageFormat,
 ) -> Result<BuildOutcome> {
+    let started = crate::run_record::now();
     let target_root = build.target_root;
     let incremental = incremental_roots_in(&build, target_root);
     if build.manifest.profile.incremental {
@@ -1636,6 +1637,7 @@ fn build_inner(
                 &compiled,
                 &local_source_roots(&prepared.resolution),
                 build.validation,
+                started,
             )?;
         }
         drop(prepared);
@@ -1849,6 +1851,7 @@ fn build_inner(
             &compiled,
             &local_source_roots(&prepared.resolution),
             build.validation,
+            started,
         )?;
         crate::trace::event("wrote root freshness record");
     }
@@ -2364,6 +2367,7 @@ fn restore_fresh_profile(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_fresh_profile(
     profile: &Path,
     package_root: &Path,
@@ -2372,6 +2376,7 @@ fn write_fresh_profile(
     artifacts: &StagedArtifacts,
     local_roots: &[LocalSource],
     validation: ValidationMode,
+    started: std::time::Duration,
 ) -> Result<()> {
     // A root outside this profile, such as a host proc macro in a cross
     // build, has no profile-relative record.
@@ -2390,6 +2395,11 @@ fn write_fresh_profile(
         })
         .collect::<Result<Vec<_>>>()?;
     dep_info.sort();
+    // A source saved while the build ran may be missing from its outputs, so
+    // the next build must not reuse them.
+    if newest_source(profile, package_root, &dep_info)? >= started {
+        return Ok(());
+    }
     let inputs = if validation.is_strict() {
         fresh_input_digest(profile, package_root, base, &dep_info)?
     } else {
@@ -2622,6 +2632,37 @@ fn fresh_input_digest(
 
 fn script_input_digest(inputs: &[PathBuf]) -> Result<[u8; 32]> {
     crate::build_script::input_digest(inputs).map(|(digest, _)| digest)
+}
+
+/// The newest modification time among the sources the dep-info files list.
+fn newest_source(
+    profile: &Path,
+    package_root: &Path,
+    dep_info: &[PathBuf],
+) -> Result<std::time::Duration> {
+    let root = fs::canonicalize(package_root).map_err(|error| {
+        Error::failure(format!(
+            "failed to resolve package root `{}`: {error}",
+            package_root.display()
+        ))
+    })?;
+    let mut newest = std::time::Duration::ZERO;
+    for relative in dep_info {
+        let parsed =
+            executor::read_dep_info(&profile.join(relative), "root source input", |source| {
+                root.join(source)
+            })?;
+        for (_, source) in parsed.inputs {
+            let metadata = fs::metadata(&source).map_err(|error| {
+                Error::failure(format!(
+                    "failed to inspect root source input `{}`: {error}",
+                    source.display()
+                ))
+            })?;
+            newest = newest.max(modified_time(&source, &metadata)?);
+        }
+    }
+    Ok(newest)
 }
 
 fn trusted_input_digest(
@@ -4013,6 +4054,7 @@ mod tests {
                 &staged,
                 &[],
                 validation,
+                crate::run_record::now(),
             )
             .unwrap();
             assert_eq!(
@@ -4084,6 +4126,7 @@ mod tests {
             &staged,
             &[],
             ValidationMode::Trusted,
+            crate::run_record::now(),
         )
         .unwrap();
         assert!(fs::metadata(profile.join(&owner)).unwrap().len() > 8 * 1024 * 1024);
@@ -4125,6 +4168,7 @@ mod tests {
             &staged,
             &[],
             ValidationMode::Trusted,
+            crate::run_record::now(),
         )
         .unwrap();
         let installed = fs::metadata(&artifact).unwrap().modified().unwrap();
@@ -4181,6 +4225,7 @@ mod tests {
             &staged,
             &[],
             ValidationMode::Strict,
+            crate::run_record::now(),
         )
         .unwrap();
         assert!(
@@ -4251,6 +4296,7 @@ mod tests {
             &staged,
             &[],
             ValidationMode::Trusted,
+            crate::run_record::now(),
         )
         .unwrap();
         overwrite_preserving_metadata(b'/');
@@ -4273,6 +4319,7 @@ mod tests {
             &staged,
             &[],
             ValidationMode::Strict,
+            crate::run_record::now(),
         )
         .unwrap();
         overwrite_preserving_metadata(b'f');
