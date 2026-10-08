@@ -13,7 +13,8 @@ SSH=(ssh -F /dev/null -p 2222 -o IdentitiesOnly=yes -o BatchMode=yes
 BATTERIES_BIN="${GEARS_BATTERIES_VM_BIN:-/devtools/bin/gears-batteries}"
 EVENT='{"protocol_version":1,"event":"permission","workspace":"/user","session":{"id":"fixture"}}'
 OUTPUT="$(printf '%s' "$EVENT" | "${SSH[@]}" "$BATTERIES_BIN" hook)"
-python3 -c 'import json, sys; reply = json.load(sys.stdin); assert reply["decision"] == "deny"; assert "invalid permission call" in reply["notice"]' <<< "$OUTPUT"
+[[ "$OUTPUT" == '{"decision":"deny",'* && "$OUTPUT" == *"invalid permission call"* ]] ||
+  { echo "unexpected malformed-call reply: $OUTPUT" >&2; exit 1; }
 EVENT='{"protocol_version":1,"event":"permission","workspace":"/user","session":{"id":"fixture"},"payload":{"tool_call":{"id":"c1","name":"todo","arguments":"{}"}}}'
 OUTPUT="$(printf '%s' "$EVENT" | "${SSH[@]}" "$BATTERIES_BIN" hook)"
 [ "$OUTPUT" = '{"decision":"allow"}' ]
@@ -31,5 +32,6 @@ fi
 OUTPUT="$(printf '/tools\n/quit\n' | "${SSH[@]}" \
   'OPENROUTER_API_KEY=fixture-local /devtools/bin/gears --ui line --ephemeral --config /user/cfg/gears/gears-batteries.toml --provider local --model fixture --workspace /user/tmp' 2>&1)"
 # /tools lists directory tools; hook setup failures appear as gears: notices.
-python3 -c 'import sys; output = sys.stdin.read(); assert "read_file: enabled (config)" in output and "check: enabled (config)" in output, output; assert "gears:" not in output, output' <<< "$OUTPUT"
+[[ "$OUTPUT" == *"read_file: enabled (config)"* && "$OUTPUT" == *"check: enabled (config)"* &&
+  "$OUTPUT" != *"gears:"* ]] || { echo "unexpected /tools output: $OUTPUT" >&2; exit 1; }
 echo "test-gears-batteries-vm.sh ALL PASS"

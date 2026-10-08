@@ -32,9 +32,11 @@ if [ "$PREPARE" = 1 ]; then
   exit 0
 fi
 
-cargo build --quiet --locked --offline --manifest-path "$ROOT_DIR/src/bin/gears/Cargo.toml" --bin gears "${PROFILE_ARGS[@]}"
-GEARS_TARGET="$(cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT_DIR/src/bin/gears/Cargo.toml" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
-cargo test --quiet --locked --manifest-path "$ROOT_DIR/src/bin/gears-batteries/Cargo.toml" "${PROFILE_ARGS[@]}"
-WORKFLOW_TARGET="$(cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT_DIR/src/bin/gears-batteries/Cargo.toml" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
-cargo run --quiet --locked --manifest-path "$ROOT_DIR/src/bin/gears-batteries/Cargo.toml" --example workflow-smoke "${PROFILE_ARGS[@]}" -- "$WORKFLOW_TARGET/$WORKFLOW_PROFILE/gears-batteries" "$(rustup which rustc)" "$GEARS_TARGET/$WORKFLOW_PROFILE/gears"
+GEARS_TARGET="$ROOT_DIR/src/bin/gears/target"
+WORKFLOW_TARGET="$ROOT_DIR/src/bin/gears-batteries/target"
+cargo build --quiet --locked --offline --manifest-path "$ROOT_DIR/src/bin/gears/Cargo.toml" \
+  --target-dir "$GEARS_TARGET" --bin gears "${PROFILE_ARGS[@]}"
+cargo test --quiet --locked --offline --manifest-path "$ROOT_DIR/src/bin/gears-batteries/Cargo.toml" \
+  --target-dir "$WORKFLOW_TARGET" "${PROFILE_ARGS[@]}"
+cargo run --quiet --locked --offline --target-dir "$WORKFLOW_TARGET" --manifest-path "$ROOT_DIR/src/bin/gears-batteries/Cargo.toml" --example workflow-smoke "${PROFILE_ARGS[@]}" -- "$WORKFLOW_TARGET/$WORKFLOW_PROFILE/gears-batteries" "$(rustup which rustc)" "$GEARS_TARGET/$WORKFLOW_PROFILE/gears"
 echo "test-gears-batteries.sh ALL PASS"
