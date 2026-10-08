@@ -713,6 +713,9 @@ location to which its settings should move. System constraints still apply.
   disabled.
 - Crates.io's sparse HTTPS index is the only supported registry. Its SHA-256 is
   authoritative, and Lorry preserves Cargo's canonical crates.io lock source.
+- Like Cargo, Lorry ignores unknown index keys and reads an unknown dependency
+  kind as normal. It skips an index entry with a schema version above 2 or a
+  `pubtime` that Cargo cannot read.
 - A locked checksum that conflicts with the index or archive is an integrity
   failure and must never be repaired silently.
 - Locked resolution constrains every dependency to its parent package's lock

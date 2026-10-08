@@ -53,7 +53,20 @@ pub struct Record {
 }
 
 impl Record {
+    /// Parses one retained record. An entry that Cargo skips is an error.
     pub fn parse(path: &Path, bytes: &[u8]) -> Result<Self> {
+        Self::parse_entry(path, bytes)?.ok_or_else(|| {
+            invalid(
+                path,
+                "sparse index entry has a schema version above 2 or a `pubtime` that Cargo skips",
+            )
+        })
+    }
+
+    /// Parses one index line as Cargo does. Unknown keys are ignored. `None`
+    /// is an entry that Cargo skips: a newer schema version or a publish time
+    /// it cannot read.
+    fn parse_entry(path: &Path, bytes: &[u8]) -> Result<Option<Self>> {
         if !bytes.ends_with(b"\n") || bytes[..bytes.len().saturating_sub(1)].contains(&b'\n') {
             return Err(Error::failure(format!(
                 "sparse index record `{}` is not exactly one newline-terminated record",
@@ -62,24 +75,6 @@ impl Record {
         }
         let value = Value::parse(path, "sparse index record", &bytes[..bytes.len() - 1])?;
         let object = require_object(path, &value, "record")?;
-        reject_unknown_keys(
-            path,
-            object,
-            &[
-                "name",
-                "vers",
-                "deps",
-                "cksum",
-                "features",
-                "yanked",
-                "links",
-                "v",
-                "features2",
-                "rust_version",
-                "pubtime",
-            ],
-            "record",
-        )?;
         require_exact_keys(
             path,
             object,
@@ -105,11 +100,12 @@ impl Record {
         })?;
         let yanked = require_bool(path, object, "yanked", "record")?;
         let schema = optional_u64(path, object, "v", "record")?.unwrap_or(1);
-        if schema > u32::MAX as u64 || !matches!(schema, 1 | 2) {
-            return Err(invalid(
-                path,
-                format!("unsupported sparse index schema version {schema}"),
-            ));
+        if schema == 0 {
+            return Err(invalid(path, "sparse index schema version 0 is invalid"));
+        }
+        let published = optional_nullable_string(path, object, "pubtime", "record")?;
+        if schema > 2 || published.is_some_and(|value| !valid_publish_time(value)) {
+            return Ok(None);
         }
         let dependencies =
             parse_dependencies(path, require_array(path, object, "deps", "record")?)?;
@@ -159,11 +155,8 @@ impl Record {
         let rust_version = optional_nullable_string(path, object, "rust_version", "record")?
             .map(|value| parse_rust_version(path, value))
             .transpose()?;
-        let published = optional_nullable_string(path, object, "pubtime", "record")?
-            .map(|value| validate_publish_time(path, value).map(|()| value.to_owned()))
-            .transpose()?;
 
-        Ok(Self {
+        Ok(Some(Self {
             name,
             version,
             dependencies,
@@ -174,9 +167,9 @@ impl Record {
             links,
             schema,
             rust_version,
-            published,
+            published: published.map(str::to_owned),
             exact_bytes: bytes.to_vec(),
-        })
+        }))
     }
 }
 
@@ -202,7 +195,9 @@ pub fn parse_response(path: &Path, expected_name: &str, bytes: &[u8]) -> Result<
     }
     let mut records = Vec::new();
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        let record = Record::parse(path, line)?;
+        let Some(record) = Record::parse_entry(path, line)? else {
+            continue;
+        };
         if record.name != expected_name {
             return Err(invalid(
                 path,
@@ -243,25 +238,6 @@ fn parse_dependencies(path: &Path, values: &[Value]) -> Result<Vec<Dependency>> 
     for (index, value) in values.iter().enumerate() {
         let context = format!("record.deps[{index}]");
         let object = require_object(path, value, &context)?;
-        reject_unknown_keys(
-            path,
-            object,
-            &[
-                "name",
-                "req",
-                "features",
-                "optional",
-                "default_features",
-                "target",
-                "kind",
-                "registry",
-                "package",
-                "artifact",
-                "bindep_target",
-                "lib",
-            ],
-            &context,
-        )?;
         require_exact_keys(path, object, &["name", "req"], &context)?;
         reject_artifact_dependency(path, object, &context)?;
         if optional_nullable_string(path, object, "registry", &context)?.is_some() {
@@ -313,16 +289,11 @@ fn parse_dependencies(path: &Path, values: &[Value]) -> Result<Vec<Dependency>> 
                 format!("{context}.target is not a supported target selector"),
             ));
         }
+        // Cargo reads any other kind as a normal dependency.
         let kind = match optional_nullable_string(path, object, "kind", &context)? {
-            None | Some("normal") => DependencyKind::Normal,
             Some("build") => DependencyKind::Build,
             Some("dev") => DependencyKind::Dev,
-            Some(kind) => {
-                return Err(invalid(
-                    path,
-                    format!("{context}.kind `{kind}` is unsupported"),
-                ));
-            }
+            _ => DependencyKind::Normal,
         };
 
         let identity = format!(
@@ -452,7 +423,8 @@ fn parse_rust_version(path: &Path, value: &str) -> Result<RustVersion> {
     })
 }
 
-fn validate_publish_time(path: &Path, value: &str) -> Result<()> {
+/// Cargo reads only canonical UTC ISO-8601 without fractions.
+fn valid_publish_time(value: &str) -> bool {
     let bytes = value.as_bytes();
     let punctuation = [
         (4, b'-'),
@@ -470,26 +442,16 @@ fn validate_publish_time(path: &Path, value: &str) -> Result<()> {
             !punctuation.iter().any(|(position, _)| *position == index) && !byte.is_ascii_digit()
         })
     {
-        return Err(invalid(
-            path,
-            "sparse index `pubtime` is not canonical UTC ISO-8601",
-        ));
+        return false;
     }
     let number = |range: std::ops::Range<usize>| -> u32 {
         std::str::from_utf8(&bytes[range]).unwrap().parse().unwrap()
     };
-    if !(1..=12).contains(&number(5..7))
-        || !(1..=31).contains(&number(8..10))
-        || number(11..13) > 23
-        || number(14..16) > 59
-        || number(17..19) > 59
-    {
-        return Err(invalid(
-            path,
-            "sparse index `pubtime` has an out-of-range field",
-        ));
-    }
-    Ok(())
+    (1..=12).contains(&number(5..7))
+        && (1..=31).contains(&number(8..10))
+        && number(11..13) <= 23
+        && number(14..16) <= 59
+        && number(17..19) <= 59
 }
 
 fn validate_package_name(path: &Path, name: &str) -> Result<()> {
@@ -677,21 +639,6 @@ fn optional_u64(
         .transpose()
 }
 
-fn reject_unknown_keys(
-    path: &Path,
-    object: &BTreeMap<String, Value>,
-    allowed: &[&str],
-    context: &str,
-) -> Result<()> {
-    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
-        return Err(invalid(
-            path,
-            format!("unknown sparse index {context} key `{key}`"),
-        ));
-    }
-    Ok(())
-}
-
 fn require_exact_keys(
     path: &Path,
     object: &BTreeMap<String, Value>,
@@ -862,13 +809,34 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_fields_sources_artifacts_and_schema_mismatches() {
+    fn follows_cargo_for_unknown_keys_kinds_and_newer_entries() {
+        let record = parse(&format!(
+            "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\
+             \"deps\":[{{\"name\":\"dependency\",\"req\":\"1\",\
+             \"kind\":\"future\",\"public\":true,\"mystery\":false}}],\
+             \"cksum\":\"{CHECKSUM}\",\"yanked\":false,\"unknown\":true}}\n"
+        ))
+        .unwrap();
+        assert_eq!(record.dependencies[0].kind, DependencyKind::Normal);
+
+        let newer = basic(",\"v\":3,\"deps2\":[]").replace("\"1.2.3\"", "\"2.0.0\"");
+        let unreadable_time =
+            basic(",\"pubtime\":\"2026-07-20 12:34:56\"").replace("\"1.2.3\"", "\"3.0.0\"");
+        let records = parse_response(
+            Path::new("/fixture/de/mo/demo"),
+            "demo",
+            format!("{}{newer}{unreadable_time}", basic("")).as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].version, Version::parse("1.2.3").unwrap());
+        let error = parse(&newer).unwrap_err().to_string();
+        assert!(error.contains("schema version above 2"));
+    }
+
+    #[test]
+    fn rejects_alternative_sources_artifacts_and_schema_mismatches() {
         let cases = [
-            (
-                basic(",\"unknown\":true"),
-                "unknown sparse index record key",
-            ),
-            (basic(",\"v\":3"), "unsupported sparse index schema"),
             (
                 basic(",\"features2\":{\"new\":[\"dep:dependency\"]}"),
                 "features2",
@@ -890,15 +858,6 @@ mod tests {
                      \"cksum\":\"{CHECKSUM}\",\"yanked\":false}}\n"
                 ),
                 "artifact dependency",
-            ),
-            (
-                format!(
-                    "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\
-                     \"deps\":[{{\"name\":\"dependency\",\"req\":\"1\",\
-                     \"mystery\":false}}],\
-                     \"cksum\":\"{CHECKSUM}\",\"yanked\":false}}\n"
-                ),
-                "unknown sparse index record.deps",
             ),
         ];
         for (source, expected) in cases {
