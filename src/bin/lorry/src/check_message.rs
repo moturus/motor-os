@@ -479,8 +479,11 @@ pub fn build_finished(success: bool) -> Result<()> {
     write_line(&json!({"reason": "build-finished", "success": success}))
 }
 
-pub fn replay(messages: &[Value], format: MessageFormat, color: bool) -> Result<()> {
-    for message in messages {
+/// Replays a completed profile's messages. As for a reused unit, registry and
+/// Git dependencies' messages, which only a verbose build records, replay only
+/// in verbose builds.
+pub fn replay(messages: &[Value], format: MessageFormat, color: bool, verbose: bool) -> Result<()> {
+    for message in messages.iter().filter(|message| replays(message, verbose)) {
         let mut message = message.clone();
         if message.get("reason").and_then(Value::as_str) == Some("compiler-artifact") {
             message["fresh"] = Value::Bool(true);
@@ -488,6 +491,15 @@ pub fn replay(messages: &[Value], format: MessageFormat, color: bool) -> Result<
         emit(&message, format, color)?;
     }
     Ok(())
+}
+
+fn replays(message: &Value, verbose: bool) -> bool {
+    verbose
+        || message.get("reason").and_then(Value::as_str) != Some("compiler-message")
+        || message
+            .get("package_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with("path+"))
 }
 
 fn emit(value: &Value, format: MessageFormat, color: bool) -> Result<()> {
@@ -535,6 +547,18 @@ fn write_line(value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_shows_dependency_messages_only_when_verbose() {
+        let message = |id: &str| json!({"reason": "compiler-message", "package_id": id});
+        let member = message("path+file:///work/app#0.1.0");
+        let registry = message("registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0");
+        let artifact = json!({"reason": "compiler-artifact", "package_id": "registry+x#y@1"});
+        assert!(replays(&member, false));
+        assert!(!replays(&registry, false));
+        assert!(replays(&registry, true));
+        assert!(replays(&artifact, false));
+    }
 
     #[test]
     fn restores_nested_spans_and_rendered_locations_without_changing_source_text() {

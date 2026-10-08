@@ -329,7 +329,12 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         )
     {
         crate::trace::event("accepted fresh root profile before dependency admission");
-        crate::check_message::replay(&artifacts.messages, cli.message_format(), color)?;
+        crate::check_message::replay(
+            &artifacts.messages,
+            cli.message_format(),
+            color,
+            cli.verbosity == Verbosity::Verbose,
+        )?;
         report_finished(
             manifest
                 .profile_name
@@ -1255,7 +1260,12 @@ fn build_inner(
             build.validation,
         ) {
             crate::trace::event("validated fresh root profile");
-            crate::check_message::replay(&artifacts.messages, format, build.color)?;
+            crate::check_message::replay(
+                &artifacts.messages,
+                format,
+                build.color,
+                build.verbosity == Verbosity::Verbose,
+            )?;
             if check.is_some() {
                 if build.verbosity != Verbosity::Quiet {
                     eprintln!("Finished `{}` profile", active_profile_name(&build));
