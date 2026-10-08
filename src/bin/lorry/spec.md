@@ -1671,16 +1671,18 @@ identity, use bounded path/size/mtime fingerprints for mutable path packages,
 and compose dependency cache keys without rereading rlib/rmeta bytes. Strict
 keys hash rustc, sysroot, tools, source trees, dependency artifacts, and
 manifests.
-Selected-library cache entries retain rustc dep-info and a digest of inputs
-outside the package tree, including each resolved path and file contents.
-An edit, removal, or symlink retarget makes the entry stale; after a
-successful rebuild, the project-local entry is atomically replaced.
+A member's keys do not cover its sources. As in Cargo, each member unit
+depends on the inputs its rustc dep-info lists, so editing one binary's source
+rebuilds only that binary. Member cache entries and published units retain
+the dep-info and a digest of every listed input, including each resolved path
+and file contents. An edit, removal, or symlink retarget makes the unit stale;
+after a successful rebuild, the project-local entry is atomically replaced.
 A dependent's key covers each dependency's key, recorded variable values, and,
-for a selected unit, its external-input digest. A change to any of them
-rebuilds the dependents too.
+for a member unit, its input digest. A change to any of them rebuilds the
+dependents too.
 Each published compiler unit carries a local success fingerprint. It binds
-its compiler-input identity to installed artifacts; selected units also bind
-dep-info and external inputs. A matching unit is reused at its published path
+its compiler-input identity to installed artifacts; member units also bind
+dep-info and its inputs. A matching unit is reused at its published path
 without copying from the cache. Missing or stale libraries and proc macros
 are restored from a verified cache entry or recompiled; other compiler units
 are recompiled on a miss.
@@ -1752,8 +1754,8 @@ untouched until the lock has established that no child still writes there.
 Before reusing or replacing that unit, it removes only matching abandoned
 staging directories under the unit's parent.
 
-Unit-cache writers publish atomically. A selected-library entry is replaced
-when an external dep-info input changes; other entries are never replaced.
+Unit-cache writers publish atomically. A member library entry is replaced
+when a dep-info input changes; other entries are never replaced.
 Partial entries are ignored. Ordinary reads require the exact entry structure
 and required regular files, then trust the atomically published payload.
 Strict reads compare the payload with its content manifest; corrupt entries

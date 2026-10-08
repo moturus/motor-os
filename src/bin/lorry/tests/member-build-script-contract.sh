@@ -188,6 +188,9 @@ sed -i '/rerun-if-env-changed/d' b/build.rs
 [ "$(scripts_run changed)" = "a b " ]
 printf '\n' >>a/src/main.rs
 [ "$(scripts_run changed)" = "" ]
+# Only the edited binary recompiles; the library's dep-info does not list it.
+grep -F 'Compiling a v1.0.0' "$WORK/rerun.err" | grep -F '[binary `a`]' >/dev/null
+if grep -F 'Compiling a v1.0.0' "$WORK/rerun.err" | grep -F '[library]'; then exit 1; fi
 printf '\n' >>b/src/main.rs
 [ "$(scripts_run changed)" = "b " ]
 printf 'two\n' >a/data.txt

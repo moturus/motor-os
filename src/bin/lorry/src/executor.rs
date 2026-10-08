@@ -659,7 +659,6 @@ fn execute_unit(
                 let selected = options.selected_packages.contains(&key.package);
                 let selected_inputs =
                     (manifest.editable || driver.is_some()).then_some(SelectedInputs {
-                        package_root: &manifest.root,
                         working_dir: &planned_invocation.current_dir,
                         source_remap: planned.source_remap.as_ref(),
                     });

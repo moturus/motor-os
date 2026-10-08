@@ -24,7 +24,7 @@ use crate::unit::{PlannedUnit, UnitKey, UnitKind};
 use crate::validation::ValidationMode;
 
 const FORMAT_VERSION: u64 = 1;
-const KEY_TAG: &[u8] = b"lorry-unit-cache-key-v3\0";
+const KEY_TAG: &[u8] = b"lorry-unit-cache-key-v4\0";
 const PUBLISHED_RECORD: &str = ".lorry-unit-v1";
 const PUBLISHED_STDOUT: &str = ".lorry-rustc-stdout-v1";
 const PUBLISHED_STDERR: &str = ".lorry-rustc-stderr-v1";
@@ -74,7 +74,6 @@ pub struct UnitInput<'a> {
 
 #[derive(Clone, Copy)]
 pub struct SelectedInputs<'a> {
-    pub package_root: &'a Path,
     pub working_dir: &'a Path,
     pub source_remap: Option<&'a crate::unit::SourceRemap>,
 }
@@ -293,7 +292,7 @@ impl BuildCache {
             &input.planned.identity.extra_filename,
         );
         if input.manifest.editable {
-            digest.string("editable-member-cache", "external-dep-info-v3");
+            digest.string("editable-member-cache", "dep-info-inputs-v4");
         }
 
         let mut replacements = vec![
@@ -340,32 +339,33 @@ impl BuildCache {
             digest.os("rustc-environment-value", &value, &replacements);
         }
 
-        if input.manifest.editable {
-            digest.bytes(
-                "editable-source",
-                &crate::member_source::snapshot(input.manifest, self.validation.is_strict())?
-                    .sha256,
-            );
-        } else if self.validation.is_strict() {
-            let source = Tree::scan(
-                &input.manifest.root,
-                self.source_limits,
-                input.planned.source_exclusions,
-            )?;
-            digest.bytes("package-source-tree", &source.manifest_bytes());
-            digest.file("package-manifest", &input.manifest.path)?;
-        } else {
-            match &input.key.package.source {
-                PackageSourceKey::CratesIo => {
-                    digest.string("package-source-identity", "immutable-crates.io")
-                }
-                PackageSourceKey::Git(source) => digest.string("package-source-identity", source),
-                PackageSourceKey::Path(_) => metadata_tree_digest(
-                    &mut digest,
+        // A member's sources are its units' dep-info inputs, checked with the
+        // published record and cache entry, so an edit rebuilds only the units
+        // that read the file, as under Cargo.
+        if !input.manifest.editable {
+            if self.validation.is_strict() {
+                let source = Tree::scan(
                     &input.manifest.root,
                     self.source_limits,
                     input.planned.source_exclusions,
-                )?,
+                )?;
+                digest.bytes("package-source-tree", &source.manifest_bytes());
+                digest.file("package-manifest", &input.manifest.path)?;
+            } else {
+                match &input.key.package.source {
+                    PackageSourceKey::CratesIo => {
+                        digest.string("package-source-identity", "immutable-crates.io")
+                    }
+                    PackageSourceKey::Git(source) => {
+                        digest.string("package-source-identity", source)
+                    }
+                    PackageSourceKey::Path(_) => metadata_tree_digest(
+                        &mut digest,
+                        &input.manifest.root,
+                        self.source_limits,
+                        input.planned.source_exclusions,
+                    )?,
+                }
             }
         }
 
@@ -411,7 +411,7 @@ impl BuildCache {
 
     /// The identity that dependents compose: the unit key plus the inputs
     /// checked only after compilation (tracked variables and a selected
-    /// unit's external dep-info inputs), so a change rebuilds them too.
+    /// unit's dep-info inputs), so a change rebuilds them too.
     pub fn dependency_key(
         &self,
         key: CacheKey,
@@ -427,8 +427,8 @@ impl BuildCache {
         digest.bytes("tracked-environment", &tracked_env::encode(tracked));
         if let Some(inputs) = selected {
             digest.bytes(
-                "external-inputs",
-                &external_inputs_digest(output.dep_info(), inputs)?,
+                "source-inputs",
+                &source_inputs_digest(output.dep_info(), inputs)?,
             );
         }
         Ok(CacheKey(digest.finish()))
@@ -461,8 +461,8 @@ impl BuildCache {
         }
         if let Some(inputs) = selected {
             let dep_info = entry.payload.join("library.d");
-            let recorded = entry.payload.join("external-inputs.sha256");
-            let Some(current) = external_inputs_digest(&dep_info, inputs).ok() else {
+            let recorded = entry.payload.join("source-inputs.sha256");
+            let Some(current) = source_inputs_digest(&dep_info, inputs).ok() else {
                 return Ok(None);
             };
             if fs::read(recorded).ok().as_deref() != Some(current.as_slice()) {
@@ -565,14 +565,14 @@ impl BuildCache {
         let (rlib, rmeta) = library_paths(output)?;
         let dep_info = selected.map(|_| output.dep_info());
         let destination = self.entry_path(key);
-        let external_inputs = selected
-            .map(|inputs| external_inputs_digest(dep_info.unwrap(), inputs))
+        let source_inputs = selected
+            .map(|inputs| source_inputs_digest(dep_info.unwrap(), inputs))
             .transpose()?;
         let environment = tracked_env::encode(tracked);
         let mut replace = false;
         if let Some(existing) = self.verified_or_quarantine(key)? {
-            replace = external_inputs.as_ref().is_some_and(|wanted| {
-                fs::read(existing.payload.join("external-inputs.sha256"))
+            replace = source_inputs.as_ref().is_some_and(|wanted| {
+                fs::read(existing.payload.join("source-inputs.sha256"))
                     .ok()
                     .as_deref()
                     != Some(wanted.as_slice())
@@ -585,7 +585,7 @@ impl BuildCache {
                 let wanted = payload_manifest(
                     output,
                     dep_info,
-                    external_inputs.as_ref(),
+                    source_inputs.as_ref(),
                     build_script,
                     diagnostics,
                     &environment,
@@ -623,8 +623,8 @@ impl BuildCache {
         if let Some(dep_info) = dep_info {
             copy_synced_file(dep_info, &payload.join("library.d"))?;
             write_synced(
-                &payload.join("external-inputs.sha256"),
-                external_inputs.as_ref().unwrap(),
+                &payload.join("source-inputs.sha256"),
+                source_inputs.as_ref().unwrap(),
             )?;
         }
         if let Some(build) = build_script {
@@ -1303,8 +1303,8 @@ fn published_fingerprint(
     }
     if let Some(inputs) = selected {
         digest.bytes(
-            "external-inputs",
-            &external_inputs_digest(output.dep_info(), inputs)?,
+            "source-inputs",
+            &source_inputs_digest(output.dep_info(), inputs)?,
         );
     }
     Ok(digest.finish())
@@ -1342,7 +1342,7 @@ fn canonical_document(path: &Path, context: &str) -> Result<Value> {
 fn payload_manifest(
     output: &RustcOutput,
     dep_info: Option<&Path>,
-    external_inputs: Option<&[u8; 32]>,
+    source_inputs: Option<&[u8; 32]>,
     build_script: Option<&BuildScriptInput<'_>>,
     diagnostics: (&[u8], &[u8]),
     environment: &[u8],
@@ -1380,8 +1380,8 @@ fn payload_manifest(
     if let Some(dep_info) = dep_info {
         copy_synced_file(dep_info, &payload.join("library.d"))?;
         write_synced(
-            &payload.join("external-inputs.sha256"),
-            external_inputs.ok_or_else(|| Error::failure("missing external-input fingerprint"))?,
+            &payload.join("source-inputs.sha256"),
+            source_inputs.ok_or_else(|| Error::failure("missing source-input fingerprint"))?,
         )?;
     }
     if let Some(build) = build_script {
@@ -1605,28 +1605,17 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     digest.finish()
 }
 
-fn external_inputs_digest(dep_info: &Path, inputs: SelectedInputs<'_>) -> Result<[u8; 32]> {
-    let root = fs::canonicalize(inputs.package_root).map_err(|error| {
-        Error::failure(format!(
-            "failed to resolve package root `{}`: {error}",
-            inputs.package_root.display()
-        ))
-    })?;
+/// Digests every source that a unit's dep-info lists.
+fn source_inputs_digest(dep_info: &Path, inputs: SelectedInputs<'_>) -> Result<[u8; 32]> {
     let parsed = crate::executor::read_dep_info(dep_info, "rustc dep-info input", |source| {
         inputs
             .source_remap
             .and_then(|remap| remap.restore_physical_path(&source))
             .unwrap_or_else(|| inputs.working_dir.join(source))
     })?;
-    let mut external = BTreeMap::new();
-    for (path, resolved) in parsed.inputs {
-        if !resolved.starts_with(&root) {
-            external.insert(path, resolved);
-        }
-    }
     let mut digest = KeyDigest::new();
-    digest.bytes("schema", b"external-dep-info-v1");
-    for (path, resolved) in external {
+    digest.bytes("schema", b"dep-info-inputs-v1");
+    for (path, resolved) in parsed.inputs.into_iter().collect::<BTreeMap<_, _>>() {
         digest.os("source-path", path.as_os_str(), &[]);
         digest.os("resolved-path", resolved.as_os_str(), &[]);
         digest.file_contents("source-contents", &resolved)?;
@@ -1933,7 +1922,6 @@ mod tests {
         fs::create_dir_all(source.join("src")).unwrap();
         fs::write(source.join("src/lib.rs"), b"pub fn value() {}\n").unwrap();
         let inputs = SelectedInputs {
-            package_root: &source,
             working_dir: &source,
             source_remap: None,
         };
@@ -1964,6 +1952,14 @@ mod tests {
             fs::read(restored_root.join("library.d")).unwrap(),
             b"library.rlib: src/lib.rs\n"
         );
+        // A member's own sources are inputs too.
+        fs::write(source.join("src/lib.rs"), b"pub fn changed() {}\n").unwrap();
+        assert!(
+            cache
+                .restore(key, &restored, Some(inputs))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1976,7 +1972,6 @@ mod tests {
         let external = fixture.0.join("shared.rs");
         fs::write(&external, b"first").unwrap();
         let inputs = SelectedInputs {
-            package_root: &source,
             working_dir: &source,
             source_remap: None,
         };
@@ -2040,7 +2035,7 @@ mod tests {
     }
 
     #[test]
-    fn published_selected_unit_checks_artifact_and_external_inputs() {
+    fn published_selected_unit_checks_artifact_and_source_inputs() {
         let fixture = Fixture::new();
         let cache = BuildCache::for_test(&fixture.0.join("cache"));
         let key = CacheKey([12; 32]);
@@ -2055,7 +2050,6 @@ mod tests {
         )
         .unwrap();
         let inputs = SelectedInputs {
-            package_root: &source,
             working_dir: &source,
             source_remap: None,
         };
@@ -2159,7 +2153,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn external_dep_info_digest_detects_symlink_retarget() {
+    fn dep_info_digest_detects_symlink_retarget() {
         let fixture = Fixture::new();
         let source = fixture.0.join("package");
         fs::create_dir(&source).unwrap();
@@ -2172,14 +2166,13 @@ mod tests {
         let dep_info = fixture.0.join("library.d");
         fs::write(&dep_info, format!("library.rlib: {}\n", link.display())).unwrap();
         let inputs = SelectedInputs {
-            package_root: &source,
             working_dir: &source,
             source_remap: None,
         };
-        let previous = external_inputs_digest(&dep_info, inputs).unwrap();
+        let previous = source_inputs_digest(&dep_info, inputs).unwrap();
         fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&second, &link).unwrap();
-        assert_ne!(previous, external_inputs_digest(&dep_info, inputs).unwrap());
+        assert_ne!(previous, source_inputs_digest(&dep_info, inputs).unwrap());
     }
 
     #[test]
