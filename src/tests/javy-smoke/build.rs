@@ -1,6 +1,9 @@
 fn main() {
-    println!("cargo:rerun-if-changed=fixtures/runner.wat");
-    let bytes = wat::parse_file("fixtures/runner.wat").unwrap();
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
-    std::fs::write(output.join("runner.wasm"), bytes).unwrap();
+    for name in ["runner", "wasi", "mistyped"] {
+        let source = format!("fixtures/{name}.wat");
+        println!("cargo:rerun-if-changed={source}");
+        let bytes = wat::parse_file(&source).unwrap();
+        std::fs::write(output.join(format!("{name}.wasm")), bytes).unwrap();
+    }
 }

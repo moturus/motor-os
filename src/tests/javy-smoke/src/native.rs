@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -8,6 +8,7 @@ use moto_stats::Collector;
 use moto_sys::stats::MemoryStats;
 
 mod behavior;
+mod runner;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const SUPPORT_DIR: &str = "/devtools/cfg/javy";
@@ -20,15 +21,39 @@ struct Suite {
 
 impl Suite {
     fn command(&mut self, label: &str, command: &str, code: i32) -> Result<(String, String)> {
+        self.command_with_input(label, command, code, None)
+    }
+
+    /// With `input`, stdin is a pipe holding those bytes that stays open until
+    /// the command exits; otherwise stdin is at EOF.
+    fn command_with_input(
+        &mut self,
+        label: &str,
+        command: &str,
+        code: i32,
+        input: Option<&[u8]>,
+    ) -> Result<(String, String)> {
         let stdout_path = self.root.join(format!("{label}.stdout"));
         let stderr_path = self.root.join(format!("{label}.stderr"));
         let mut child = Command::new("/system/bin/rush")
             .args(["-c", command])
             .current_dir(&self.root)
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(fs::File::create(&stdout_path)?)
             .stderr(fs::File::create(&stderr_path)?)
             .spawn()?;
+        let _stdin = match input {
+            Some(bytes) => {
+                let mut pipe = child.stdin.take().ok_or("missing stdin pipe")?;
+                pipe.write_all(bytes)?;
+                Some(pipe)
+            }
+            None => None,
+        };
         let started = Instant::now();
         let mut last = started;
         let mut gap = Duration::ZERO;
@@ -269,6 +294,7 @@ pub fn run() -> Result<()> {
             code,
         )?;
     }
+    runner::run(&mut suite)?;
     fs::write(suite.root.join("invalid.js"), "function { invalid")?;
     suite.command(
         "syntax-error",
