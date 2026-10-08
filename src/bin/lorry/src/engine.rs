@@ -1263,7 +1263,11 @@ fn build_inner(
     let completed_freshness_base = (fresh_check && !build.test)
         .then(|| freshness_base(&build, &prepared, &cargo, check))
         .transpose()?;
-    if let Some(base) = completed_freshness_base {
+    // An ordinary base was already checked against the same record before
+    // admission. Strict builds and builds without that check check here.
+    if let Some(base) = completed_freshness_base
+        && build.ordinary_freshness_base.is_none()
+    {
         crate::trace::event("fingerprinted build inputs");
         if let Some(artifacts) = restore_fresh_profile(
             &destination,
