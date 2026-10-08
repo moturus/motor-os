@@ -584,6 +584,9 @@ impl BuildCache {
         Ok((read(PUBLISHED_STDOUT)?, read(PUBLISHED_STDERR)?))
     }
 
+    /// Stores a library with its owner record. Writing the owner before
+    /// publication keeps a reader from seeing a partly written entry.
+    #[allow(clippy::too_many_arguments)]
     pub fn store(
         &self,
         key: CacheKey,
@@ -592,6 +595,7 @@ impl BuildCache {
         sources: Option<[u8; 32]>,
         diagnostics: (&[u8], &[u8]),
         tracked: &Tracked,
+        owner: &crate::resolver::PackageKey,
     ) -> Result<()> {
         let (rlib, rmeta) = library_paths(output)?;
         let dep_info = sources.map(|_| output.dep_info());
@@ -675,6 +679,7 @@ impl BuildCache {
         )?;
         let manifest = entry_manifest(key, &tree, &payload_manifest);
         write_synced(&staging.path().join("manifest.json"), &manifest)?;
+        artifact_owner::write(staging.path(), owner)?;
 
         if replace {
             staging.commit(&destination)?;
@@ -696,12 +701,18 @@ impl BuildCache {
         Ok(())
     }
 
+    /// Records which package uses an entry. Other builds may read the entry
+    /// meanwhile, so an owner record that already matches is left alone.
     pub fn record_cache_owner(
         &self,
         key: CacheKey,
         package: &crate::resolver::PackageKey,
     ) -> Result<()> {
-        artifact_owner::write(&self.entry_path(key), package)
+        let entry = self.entry_path(key);
+        if artifact_owner::matches(&entry, package) {
+            return Ok(());
+        }
+        artifact_owner::write(&entry, package)
     }
 
     fn entry_path(&self, key: CacheKey) -> PathBuf {
@@ -1737,6 +1748,14 @@ fn normalize(value: &[u8], replacements: &[(&OsStr, &[u8])]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    fn test_owner() -> crate::resolver::PackageKey {
+        crate::resolver::PackageKey {
+            name: "demo".to_owned(),
+            version: "1.0.0".parse().unwrap(),
+            source: crate::resolver::PackageSourceKey::CratesIo,
+        }
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
@@ -1820,7 +1839,15 @@ mod tests {
             };
             *extra = Some(archive);
             cache
-                .store(key, &built, None, None, (b"", b""), &Tracked::new())
+                .store(
+                    key,
+                    &built,
+                    None,
+                    None,
+                    (b"", b""),
+                    &Tracked::new(),
+                    &test_owner(),
+                )
                 .unwrap();
             let target = fixture.0.join("restored/deps");
             fs::create_dir_all(&target).unwrap();
@@ -1877,7 +1904,15 @@ mod tests {
         };
         *extra = Some(archive.clone());
         cache
-            .store(key, &built, None, None, (b"", b""), &Tracked::new())
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
             .unwrap();
         let cached = cache.entry_path(key).join("payload/library.a");
         fs::remove_file(&cached).unwrap();
@@ -1894,7 +1929,15 @@ mod tests {
         let built = output(&fixture.0.join("built"), b"library");
         let warning = b"{\"message\":\"unused variable\",\"rendered\":\"warning\\n\"}\n";
         cache
-            .store(key, &built, None, None, (b"", warning), &Tracked::new())
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", warning),
+                &Tracked::new(),
+                &test_owner(),
+            )
             .unwrap();
         let package = crate::resolver::PackageKey {
             name: "library".to_owned(),
@@ -1940,13 +1983,13 @@ mod tests {
 
         let built = output(&fixture.0.join("old"), b"old");
         cache
-            .store(key, &built, None, None, (b"", b""), &stale)
+            .store(key, &built, None, None, (b"", b""), &stale, &test_owner())
             .unwrap();
         assert!(restore("miss").is_none());
 
         let built = output(&fixture.0.join("new"), b"new");
         cache
-            .store(key, &built, None, None, (b"", b""), &current)
+            .store(key, &built, None, None, (b"", b""), &current, &test_owner())
             .unwrap();
         let restored = restore("hit").unwrap();
         assert_eq!(restored.tracked, current);
@@ -1984,6 +2027,7 @@ mod tests {
                 Some(source_inputs(&built, inputs).unwrap().0),
                 (b"", b""),
                 &Tracked::new(),
+                &test_owner(),
             )
             .unwrap();
 
@@ -2009,6 +2053,7 @@ mod tests {
                 Some(source_inputs(&built, inputs).unwrap().0),
                 (b"", b""),
                 &Tracked::new(),
+                &test_owner(),
             )
             .unwrap();
         assert_eq!(
@@ -2052,6 +2097,7 @@ mod tests {
                 Some(source_inputs(&built, inputs).unwrap().0),
                 (b"", b""),
                 &Tracked::new(),
+                &test_owner(),
             )
             .unwrap();
 
@@ -2089,6 +2135,7 @@ mod tests {
                 Some(source_inputs(&built, inputs).unwrap().0),
                 (b"", b""),
                 &Tracked::new(),
+                &test_owner(),
             )
             .unwrap();
         assert!(
@@ -2323,7 +2370,15 @@ mod tests {
         );
 
         cache
-            .store(key, &built, Some(&first), None, (b"", b""), &Tracked::new())
+            .store(
+                key,
+                &built,
+                Some(&first),
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
             .unwrap();
         let payload = cache.entry_path(key).join("payload");
         assert_eq!(
@@ -2340,7 +2395,15 @@ mod tests {
         let key = CacheKey([7; 32]);
         let built = output(&fixture.0.join("built"), b"good");
         cache
-            .store(key, &built, None, None, (b"", b""), &Tracked::new())
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
             .unwrap();
         fs::write(cache.entry_path(key).join("payload/library.rlib"), b"bad").unwrap();
 
@@ -2353,7 +2416,15 @@ mod tests {
         assert!(!cache.restore(key, &restore, None).unwrap().is_some());
         assert_eq!(fs::read_dir(&cache.quarantine).unwrap().count(), 1);
         cache
-            .store(key, &built, None, None, (b"", b""), &Tracked::new())
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
             .unwrap();
         assert!(cache.entry_path(key).is_dir());
     }
@@ -2366,7 +2437,15 @@ mod tests {
         let key = CacheKey([6; 32]);
         let built = output(&fixture.0.join("built"), b"original");
         cache
-            .store(key, &built, None, None, (b"", b""), &Tracked::new())
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
             .unwrap();
         fs::write(
             cache.entry_path(key).join("payload/library.rlib"),
@@ -2440,6 +2519,33 @@ mod tests {
     }
 
     #[test]
+    fn stored_entries_carry_their_owner_and_keep_a_matching_one() {
+        let fixture = Fixture::new();
+        let cache = BuildCache::for_test(&fixture.0.join("cache"));
+        let key = CacheKey([5; 32]);
+        let built = output(&fixture.0.join("built"), b"library");
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
+        let entry = cache.entry_path(key);
+        assert!(artifact_owner::matches(&entry, &test_owner()));
+        let owner = entry.join(".lorry-owner-v1");
+        let before = fs::metadata(&owner).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cache.record_cache_owner(key, &test_owner()).unwrap();
+        // A reader listing the entry never sees an owner staging file.
+        assert_eq!(fs::metadata(&owner).unwrap().modified().unwrap(), before);
+    }
+
+    #[test]
     fn concurrent_identical_writers_accept_the_first_entry() {
         let fixture = Fixture::new();
         let cache = Arc::new(BuildCache::for_test(&fixture.0.join("cache")));
@@ -2455,7 +2561,15 @@ mod tests {
                 std::thread::spawn(move || {
                     barrier.wait();
                     cache
-                        .store(key, &output, None, None, (b"", b""), &Tracked::new())
+                        .store(
+                            key,
+                            &output,
+                            None,
+                            None,
+                            (b"", b""),
+                            &Tracked::new(),
+                            &test_owner(),
+                        )
                         .unwrap();
                 })
             })

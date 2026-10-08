@@ -574,6 +574,7 @@ impl CacheStore<'_> {
             self.sources,
             (&[], &self.diagnostics),
             &self.tracked,
+            &self.package,
         )?;
         self.cache.record_cache_owner(self.key, &self.package)
     }
