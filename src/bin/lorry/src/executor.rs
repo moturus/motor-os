@@ -76,8 +76,7 @@ pub struct Options<'a> {
     pub admission: &'a Admission,
     pub native_tools:
         &'a BTreeMap<(String, crate::config::NativeToolRole), crate::config::NativeTool>,
-    /// Maximum number of units executed concurrently; 1 preserves strict
-    /// plan-order execution.
+    /// Maximum number of units executed concurrently.
     pub jobs: usize,
     pub keep_going: bool,
     pub reporter: &'a dyn EventReporter,
@@ -130,7 +129,7 @@ impl Executed {
 }
 
 /// Shared scheduling state: units become ready when their last dependency
-/// completes and are dispatched in plan order.
+/// completes and are dispatched by rank.
 struct Scheduler {
     ready: std::collections::BTreeSet<(usize, UnitKey)>,
     remaining: BTreeMap<UnitKey, usize>,
@@ -144,7 +143,7 @@ impl Scheduler {
     fn record(
         &mut self,
         dependents: &BTreeMap<UnitKey, Vec<UnitKey>>,
-        index_of: &BTreeMap<UnitKey, usize>,
+        rank_of: &BTreeMap<UnitKey, usize>,
         key: &UnitKey,
         executed: Executed,
     ) -> Result<()> {
@@ -172,15 +171,42 @@ impl Scheduler {
             *counter -= 1;
             if *counter == 0 {
                 self.remaining.remove(child);
-                let index = *index_of.get(child).ok_or_else(|| {
+                let rank = *rank_of.get(child).ok_or_else(|| {
                     Error::failure("dependency execution order is missing a ready unit")
                 })?;
-                self.ready.insert((index, child.clone()));
+                self.ready.insert((rank, child.clone()));
             }
         }
         self.completed += 1;
         Ok(())
     }
+}
+
+/// Like Cargo, ranks first the units that the most other units wait on, so
+/// long dependency chains start early. Ties keep plan order.
+fn dispatch_ranks(
+    plan: &CompilationPlan,
+    index_of: &BTreeMap<UnitKey, usize>,
+    dependents: &BTreeMap<UnitKey, Vec<UnitKey>>,
+) -> BTreeMap<UnitKey, usize> {
+    let mut waiting = vec![BTreeSet::new(); plan.order.len()];
+    // Plan order lists dependencies first, so dependents are counted first.
+    for (index, key) in plan.order.iter().enumerate().rev() {
+        let mut units = BTreeSet::new();
+        for child in dependents.get(key).into_iter().flatten() {
+            let child = index_of[child];
+            units.insert(child);
+            units.extend(waiting[child].iter().copied());
+        }
+        waiting[index] = units;
+    }
+    let mut order = (0..plan.order.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| (std::cmp::Reverse(waiting[*index].len()), *index));
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(rank, index)| (plan.order[index].clone(), rank))
+        .collect()
 }
 
 /// Clones the direct-dependency outputs one unit needs, so it can execute
@@ -240,7 +266,8 @@ pub fn execute(
         dispatched: 0,
         completed: 0,
     };
-    for (index, key) in plan.order.iter().enumerate() {
+    let mut initially_ready = Vec::new();
+    for key in &plan.order {
         let planned = plan.units.get(key).ok_or_else(|| {
             Error::failure(format!(
                 "dependency execution plan is missing {:?} unit `{} {}`",
@@ -265,11 +292,15 @@ pub fn execute(
                 .push(key.clone());
         }
         if dependencies.is_empty() {
-            state.ready.insert((index, key.clone()));
+            initially_ready.push(key.clone());
         } else {
             state.remaining.insert(key.clone(), dependencies.len());
         }
     }
+    let rank_of = dispatch_ranks(plan, &index_of, &dependents);
+    state
+        .ready
+        .extend(initially_ready.into_iter().map(|key| (rank_of[&key], key)));
 
     // Recovery enumerates shared unit parents. Finish it before workers can
     // rename or remove sibling entries; Motor's iterator needs stable entries.
@@ -297,7 +328,7 @@ pub fn execute(
                     let mut guard = state
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let (index, key) = loop {
+                    let (_, key) = loop {
                         if (!options.keep_going && !guard.failures.is_empty())
                             || guard.completed == total
                         {
@@ -325,6 +356,7 @@ pub fn execute(
                             .wait(guard)
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                     };
+                    let index = index_of[&key];
                     let Some(planned) = plan.units.get(&key) else {
                         guard.failures.push((
                             index,
@@ -343,7 +375,7 @@ pub fn execute(
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     match outcome {
                         Ok(executed) => {
-                            let recorded = guard.record(&dependents, &index_of, &key, executed);
+                            let recorded = guard.record(&dependents, &rank_of, &key, executed);
                             if let Err(error) = recorded {
                                 guard.failures.push((index, error));
                             }

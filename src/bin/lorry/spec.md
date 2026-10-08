@@ -1444,6 +1444,8 @@ installed into the selected profile before the test artifacts are published.
 An integration test with no program binaries needs only the test-profile
 closure.
 `build`, `test`, and `check` run selected compiler targets on the unit DAG.
+As in Cargo, a ready unit that more units wait on runs first, so long
+dependency chains start early.
 Each compiler unit writes into a private sibling directory, then replaces
 its planned unit directory only after rustc succeeds, its outputs and dep-info
 are validated, and any cache entry is stored. The sibling has the same name in
