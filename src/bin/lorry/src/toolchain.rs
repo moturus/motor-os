@@ -403,7 +403,13 @@ impl CfgParser<'_> {
             ));
         }
         if !self.take(b'(') {
-            return Ok((self.cfg.names.contains(&name), name));
+            // Like Cargo, `true` and `false` are literals, not cfg names.
+            let enabled = match name.as_str() {
+                "true" => true,
+                "false" => false,
+                _ => self.cfg.names.contains(&name),
+            };
+            return Ok((enabled, name));
         }
         let mut values = Vec::new();
         loop {
@@ -649,6 +655,8 @@ mod tests {
             .unwrap()
         );
         assert!(!evaluate_selector("cfg(windows)", &cfg).unwrap());
+        assert!(evaluate_selector("cfg(true)", &cfg).unwrap());
+        assert!(!evaluate_selector("cfg(any(false, windows))", &cfg).unwrap());
         assert!(evaluate_selector("cfg(not(unix, windows))", &cfg).is_err());
     }
 }
