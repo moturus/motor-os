@@ -29,6 +29,16 @@ javy_source_manifest() (
 	printf 'plugin=%s\ntypescript=%s\n' "$JAVY_PLUGIN_SHA" "$JAVY_TYPESCRIPT_SHA"
 )
 
+# Binaryen's C++ units are memory-hungry: allow 1.5 GiB per job and bound by
+# CPUs. The fork's own default is two jobs.
+javy_jobs() {
+	local cpus memory
+	cpus="$(nproc)"
+	memory="$(awk '/^MemAvailable:/ { print int($2 / 1572864) }' /proc/meminfo)"
+	[ "${memory:-0}" -ge 2 ] || memory=2
+	[ "$memory" -le "$cpus" ] && echo "$memory" || echo "$cpus"
+}
+
 build_javy() {
 	local inputs="$ASSEMBLY_BUILD_ROOT/javy-inputs" cfg="$JAVY_IMG/devtools/cfg/javy"
 	mkdir -p "$inputs"
@@ -38,10 +48,15 @@ build_javy() {
 	printf '%s  %s\n' "$JAVY_PLUGIN_SHA" "$inputs/plugin.wasm" | sha256sum -c -
 	javy_download https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz \
 		10e108c9cf7d5f2879053dff18515fb405abf2ccef63eaaf017d9c571687a1d3 "$inputs/typescript.tgz"
+	# Fetch with the Motor toolchain that motor-build.sh selects, not Javy's own
+	# rust-toolchain.toml, so one Cargo resolves and builds the lockfile.
 	(
 		cd "$MOTORH/javy"
+		RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$MOTOR/rust-toolchain.toml")"
+		[ -n "$RUSTUP_TOOLCHAIN" ] || die "no Rust channel in $MOTOR/rust-toolchain.toml"
+		export RUSTUP_TOOLCHAIN
 		cargo fetch --locked --target x86_64-unknown-motor
-		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" \
+		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" JOBS="$(javy_jobs)" \
 			JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" ./motor-build.sh
 	)
 	mkdir -p "$JAVY_IMG/devtools/bin" "$cfg"
