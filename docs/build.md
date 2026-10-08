@@ -68,20 +68,24 @@ MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /user/tmp/hello.wasm
 MOTOR_OS_CAPS=0 /devtools/bin/wasmi /user/tmp/hello.wasm
 ```
 
-The add-on follows published `moturus` branches and records resolved revisions,
+The add-ons follow published `moturus` branches and record resolved revisions,
 the selected assembly, native library content, and input digests in
-`/devtools/cfg/javy/sources.txt`. Build-time downloads are digest-checked; the
-installed-tool tests require no Internet access:
+`/devtools/cfg/javy/sources.txt` and `/devtools/cfg/wasmtime/sources.txt`. The
+Wasmtime add-on also installs precompiled test fixtures under
+`/devtools/cfg/wasmtime/fixtures`, built with a pinned upstream Rust that has
+the `wasm32-wasip1`/`wasm32-wasip2` targets. Build-time downloads are
+digest-checked; the installed-tool tests require no Internet access:
 
 ```sh
-src/tests/test-javy.sh --prepare
-src/tests/test-javy.sh
+src/tests/test-wasm.sh --prepare
+src/tests/test-wasm.sh
 ```
 
-These Rust checks run both release images at 256 and 224 MiB, including static
-and dynamic compilation, TypeScript, plugin configuration, execution, errors,
-fuel and permission refusals. `src/tests/full-test-dev.sh --release` prepares
-and runs this entire matrix; debug suites skip it.
+These Rust checks run both release images at 256 and 224 MiB: Javy static and
+dynamic compilation, TypeScript, plugin configuration, Wasmi execution, errors,
+fuel and permission refusals, and `wasmtime-rt` lifecycle, limits, artifact
+refusals, TypeScript and WASI p2 sockets. `src/tests/full-test-dev.sh --release`
+prepares and runs this entire matrix; debug suites skip it.
 Engine regressions remain in the owning forks. Upstream Brotli is used; compressed
 source bytes can differ between Linux and Motor because their math libraries
 round some logarithms differently.

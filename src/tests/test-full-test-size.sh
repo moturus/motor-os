@@ -67,12 +67,12 @@ SH
 done
 printf '#!/bin/sh\nexit 0\n' > "$scratch/src/bin/lorry/tests/test-all.sh"
 chmod +x "$scratch/src/bin/lorry/tests/test-all.sh"
-# Javy selects its own fixed VM sizes; the profile and VMM are forwarded.
-cat > "$scratch/src/tests/test-javy.sh" <<'SH'
+# The wasm tools select their own fixed VM sizes; the profile and VMM are forwarded.
+cat > "$scratch/src/tests/test-wasm.sh" <<'SH'
 #!/bin/bash
-printf 'test-javy.sh:%s\n' "$*" >> "$MOTO_SIZE_TEST_LOG"
+printf 'test-wasm.sh:%s\n' "$*" >> "$MOTO_SIZE_TEST_LOG"
 SH
-chmod +x "$scratch/src/tests/test-javy.sh"
+chmod +x "$scratch/src/tests/test-wasm.sh"
 developer() {
   local cpus="$1" repository_memory="$2" source_memory="$3"
   shift 3
@@ -81,8 +81,8 @@ developer() {
   printf '%s\n' "$cpus:$repository_memory:--release --vmm qemu" \
     "$cpus:$source_memory:--motor --release --vmm qemu" \
     "$cpus:$source_memory:--release --vmm qemu" \
-    'test-javy.sh:--prepare --image both --release --vmm qemu' \
-    'test-javy.sh:--image both --release --vmm qemu' > "$scratch/expected"
+    'test-wasm.sh:--prepare --image both --release --vmm qemu' \
+    'test-wasm.sh:--image both --release --vmm qemu' > "$scratch/expected"
   diff -u "$scratch/expected" "$MOTO_SIZE_TEST_LOG"
 }
 developer 4 8192 4096 "$scratch/src/tests/full-test-dev.sh" --release --vmm=qemu

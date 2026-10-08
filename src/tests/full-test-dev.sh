@@ -104,8 +104,8 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
 
 # The wasm tools have their own 256/224 MiB release-image matrix.
 if [ "$SEEN_RELEASE" = 1 ]; then
-  "$WD/test-javy.sh" --prepare --image both "${FORWARDED_ARGS[@]}"
-  "$WD/test-javy.sh" --image both "${FORWARDED_ARGS[@]}"
+  "$WD/test-wasm.sh" --prepare --image both "${FORWARDED_ARGS[@]}"
+  "$WD/test-wasm.sh" --image both "${FORWARDED_ARGS[@]}"
 fi
 
 echo "full-test-dev.sh ALL PASS"
