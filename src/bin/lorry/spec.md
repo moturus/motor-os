@@ -1445,10 +1445,16 @@ An integration test with no program binaries needs only the test-profile
 closure.
 `build`, `test`, and `check` run selected compiler targets on the unit DAG.
 As in Cargo, a ready unit that more units wait on runs first, so long
-dependency chains start early.
-Each compiler unit writes into a private sibling directory, then replaces
-its planned unit directory only after rustc succeeds and its outputs and
-dep-info are validated. A few background threads then copy libraries into
+dependency chains start early, and builds pipeline: a library compiles in
+place, and a library that depends on it starts as soon as rustc reports the
+metadata, while code generation continues. A unit
+that links waits for every library below it to finish. Lorry removes the
+library's success record before rustc starts and writes it last, so an
+interrupted compile is not reused. Strict validation does not pipeline,
+because strict keys hash dependency libraries.
+Every other compiler unit writes into a private sibling directory, then
+replaces its planned unit directory only after rustc succeeds and its outputs
+and dep-info are validated. A few background threads then copy libraries into
 their cache, so dependents do not wait for the copy; the command waits for
 those copies before it finishes. The sibling has the same name in
 every build, because rustc discards its incremental state when the output
@@ -1535,8 +1541,9 @@ same DAG. Each binary has edges to its normal dependencies and the selected
 library when present. Its hashed executable is installed at the selected
 profile's top level after compilation.
 
-Each rustc unit writes into a private sibling directory below the profile's
-`build` tree, then publishes to its deterministic unit path. Lorry passes one
+Each rustc unit writes into its deterministic unit path below the profile's
+`build` tree, directly or through a private sibling directory as described
+above. Lorry passes one
 `-L dependency` search path for every
 unit in the complete transitive Rust dependency closure and passes direct
 artifacts through exact `--extern` paths. A unit's own output directory is

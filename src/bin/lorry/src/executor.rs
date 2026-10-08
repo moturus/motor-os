@@ -25,7 +25,7 @@ use crate::sandbox::Executable;
 use crate::source_tree::Limits as TreeLimits;
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::tracked_env::{self, Tracked};
-use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind};
+use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind, UnitMode};
 
 pub trait EventReporter: Sync {
     fn compiler_messages(
@@ -128,11 +128,17 @@ impl Executed {
     }
 }
 
+/// Each dependent of a unit, and whether that dependent reads only the unit's
+/// metadata.
+type Dependents = BTreeMap<UnitKey, Vec<(UnitKey, bool)>>;
+
 /// Shared scheduling state: units become ready when their last dependency
-/// completes and are dispatched by rank.
+/// completes, or writes its metadata if that is all they read, and are
+/// dispatched by rank.
 struct Scheduler {
     ready: std::collections::BTreeSet<(usize, UnitKey)>,
     remaining: BTreeMap<UnitKey, usize>,
+    metadata_ready: BTreeSet<UnitKey>,
     outputs: Outputs,
     failures: Vec<(usize, Error)>,
     dispatched: usize,
@@ -142,11 +148,42 @@ struct Scheduler {
 impl Scheduler {
     fn record(
         &mut self,
-        dependents: &BTreeMap<UnitKey, Vec<UnitKey>>,
+        dependents: &Dependents,
         rank_of: &BTreeMap<UnitKey, usize>,
         key: &UnitKey,
         executed: Executed,
     ) -> Result<()> {
+        let released = self.metadata_ready.contains(key);
+        self.record_output(key, executed);
+        for (child, metadata) in dependents.get(key).map(Vec::as_slice).unwrap_or(&[]) {
+            if !(*metadata && released) {
+                self.release(child, rank_of)?;
+            }
+        }
+        self.completed += 1;
+        Ok(())
+    }
+
+    /// A library's metadata is written; dependents that read only that can
+    /// start while its code generation continues.
+    fn record_metadata(
+        &mut self,
+        dependents: &Dependents,
+        rank_of: &BTreeMap<UnitKey, usize>,
+        key: &UnitKey,
+        executed: Executed,
+    ) -> Result<()> {
+        self.record_output(key, executed);
+        self.metadata_ready.insert(key.clone());
+        for (child, metadata) in dependents.get(key).map(Vec::as_slice).unwrap_or(&[]) {
+            if *metadata {
+                self.release(child, rank_of)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn record_output(&mut self, key: &UnitKey, executed: Executed) {
         match executed {
             Executed::BuildScript(output) => {
                 self.outputs
@@ -164,22 +201,70 @@ impl Scheduler {
                 self.outputs.cache_keys.insert(key.clone(), cache_key);
             }
         }
-        for child in dependents.get(key).map(Vec::as_slice).unwrap_or(&[]) {
-            let counter = self.remaining.get_mut(child).ok_or_else(|| {
-                Error::failure("dependency execution lost track of a scheduled unit")
+    }
+
+    fn release(&mut self, child: &UnitKey, rank_of: &BTreeMap<UnitKey, usize>) -> Result<()> {
+        let counter = self
+            .remaining
+            .get_mut(child)
+            .ok_or_else(|| Error::failure("dependency execution lost track of a scheduled unit"))?;
+        *counter -= 1;
+        if *counter == 0 {
+            self.remaining.remove(child);
+            let rank = *rank_of.get(child).ok_or_else(|| {
+                Error::failure("dependency execution order is missing a ready unit")
             })?;
-            *counter -= 1;
-            if *counter == 0 {
-                self.remaining.remove(child);
-                let rank = *rank_of.get(child).ok_or_else(|| {
-                    Error::failure("dependency execution order is missing a ready unit")
-                })?;
-                self.ready.insert((rank, child.clone()));
-            }
+            self.ready.insert((rank, child.clone()));
         }
-        self.completed += 1;
         Ok(())
     }
+}
+
+/// Whether a dependent can start once a library dependency's metadata is
+/// written, as under Cargo's pipelining.
+fn reads_metadata(
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    planned: &PlannedUnit,
+    edge: &crate::unit::UnitEdge,
+) -> bool {
+    edge.kind == UnitEdgeKind::RustDependency
+        && edge.unit.kind == UnitKind::Library
+        && edge.unit.mode == UnitMode::Build
+        && manifests
+            .get(&edge.unit.package)
+            .and_then(|manifest| manifest.library.as_ref())
+            .is_some_and(|library| {
+                crate::compile::uses_dependency_metadata(manifests, planned, &edge.unit, library)
+            })
+}
+
+/// Whether a unit links its library dependencies rather than reading their
+/// metadata alone.
+fn links_libraries(manifests: &BTreeMap<PackageKey, Manifest>, planned: &PlannedUnit) -> bool {
+    planned.unit.dependencies.iter().any(|edge| {
+        edge.kind == UnitEdgeKind::RustDependency
+            && edge.unit.kind == UnitKind::Library
+            && !reads_metadata(manifests, planned, edge)
+    })
+}
+
+/// The libraries reachable from a unit through library dependencies. A
+/// procedural macro's dependencies belong to the macro, not to its user.
+fn linked_libraries<'a>(plan: &'a CompilationPlan, planned: &'a PlannedUnit) -> Vec<&'a UnitKey> {
+    let mut found = BTreeSet::new();
+    let mut pending = vec![planned];
+    while let Some(unit) = pending.pop() {
+        for edge in &unit.unit.dependencies {
+            if edge.kind == UnitEdgeKind::RustDependency
+                && edge.unit.kind == UnitKind::Library
+                && found.insert(&edge.unit)
+                && let Some(child) = plan.units.get(&edge.unit)
+            {
+                pending.push(child);
+            }
+        }
+    }
+    found.into_iter().collect()
 }
 
 /// Like Cargo, ranks first the units that the most other units wait on, so
@@ -187,13 +272,13 @@ impl Scheduler {
 fn dispatch_ranks(
     plan: &CompilationPlan,
     index_of: &BTreeMap<UnitKey, usize>,
-    dependents: &BTreeMap<UnitKey, Vec<UnitKey>>,
+    dependents: &Dependents,
 ) -> BTreeMap<UnitKey, usize> {
     let mut waiting = vec![BTreeSet::new(); plan.order.len()];
     // Plan order lists dependencies first, so dependents are counted first.
     for (index, key) in plan.order.iter().enumerate().rev() {
         let mut units = BTreeSet::new();
-        for child in dependents.get(key).into_iter().flatten() {
+        for (child, _) in dependents.get(key).into_iter().flatten() {
             let child = index_of[child];
             units.insert(child);
             units.extend(waiting[child].iter().copied());
@@ -257,10 +342,13 @@ pub fn execute(
     for (index, key) in plan.order.iter().enumerate() {
         index_of.insert(key.clone(), index);
     }
-    let mut dependents: BTreeMap<UnitKey, Vec<UnitKey>> = BTreeMap::new();
+    let mut dependents = Dependents::new();
+    // Strict keys hash dependency libraries, so dependents wait for them.
+    let pipelining = !options.cache.is_strict();
     let mut state = Scheduler {
         ready: std::collections::BTreeSet::new(),
         remaining: BTreeMap::new(),
+        metadata_ready: BTreeSet::new(),
         outputs: Outputs::default(),
         failures: Vec::new(),
         dispatched: 0,
@@ -274,22 +362,36 @@ pub fn execute(
                 key.kind, key.package.name, key.package.version
             ))
         })?;
-        let dependencies = planned
+        let mut dependencies = planned
             .unit
             .dependencies
             .iter()
             .map(|edge| &edge.unit)
             .collect::<std::collections::BTreeSet<_>>();
+        // A unit that links needs every library below it whole, not just its
+        // direct dependencies, as Cargo arranges when it pipelines.
+        if pipelining && links_libraries(manifests, planned) {
+            dependencies.extend(linked_libraries(plan, planned));
+        }
         for dependency in &dependencies {
             if !index_of.contains_key(*dependency) {
                 return Err(Error::failure(
                     "dependency execution received an incomplete unit graph",
                 ));
             }
+            let mut edges = planned
+                .unit
+                .dependencies
+                .iter()
+                .filter(|edge| &edge.unit == *dependency)
+                .peekable();
+            let metadata = pipelining
+                && edges.peek().is_some()
+                && edges.all(|edge| reads_metadata(manifests, planned, edge));
             dependents
                 .entry((*dependency).clone())
                 .or_default()
-                .push(key.clone());
+                .push((key.clone(), metadata));
         }
         if dependencies.is_empty() {
             initially_ready.push(key.clone());
@@ -374,9 +476,28 @@ pub fn execute(
                         };
                         let inputs = snapshot_inputs(planned, &guard.outputs);
                         drop(guard);
+                        let on_metadata = |executed| {
+                            let mut guard = state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            let recorded =
+                                guard.record_metadata(&dependents, &rank_of, &key, executed);
+                            if let Err(error) = recorded {
+                                guard.failures.push((index, error));
+                            }
+                            wakeup.notify_all();
+                        };
                         let outcome = execute_unit(
-                            plan, manifests, options, &commands, &key, planned, &inputs, &print,
+                            plan,
+                            manifests,
+                            options,
+                            &commands,
+                            &key,
+                            planned,
+                            &inputs,
+                            &print,
                             &stores,
+                            &on_metadata,
                         );
                         let mut guard = state
                             .lock()
@@ -491,6 +612,7 @@ fn execute_unit<'a>(
     outputs: &Outputs,
     print: &std::sync::Mutex<()>,
     stores: &std::sync::mpsc::Sender<CacheStore<'a>>,
+    on_metadata: &dyn Fn(Executed),
 ) -> Result<Executed> {
     {
         match key.kind {
@@ -875,6 +997,21 @@ fn execute_unit<'a>(
                         restored.tracked,
                     );
                 }
+                // Like Cargo, a library compiles in place, so a dependent that
+                // reads only its metadata can start during code generation.
+                // Removing its record first keeps an interrupted compile stale.
+                let pipelined = key.kind == UnitKind::Library
+                    && key.mode == UnitMode::Build
+                    && matches!(planned_invocation.output, RustcOutput::Library { .. })
+                    && !cache.is_strict();
+                let (invocation, staging) = if pipelined {
+                    drop(staging);
+                    create_output_directories(&planned_invocation.output)?;
+                    cache.unpublish(&planned_invocation.output)?;
+                    (planned_invocation.clone(), None)
+                } else {
+                    (invocation, Some(staging))
+                };
                 if restorable && !options.quiet && caches.report_shared_rebuild(planned) {
                     let _guard = print
                         .lock()
@@ -924,7 +1061,7 @@ fn execute_unit<'a>(
                         manifest.root.display()
                     );
                 }
-                let rustc_output = RustcCommand {
+                let command = RustcCommand {
                     child_lease_fd: options.child_lease_fd,
                     program: driver.map_or(&options.toolchain.rustc, |driver| &driver.path),
                     arguments: &invocation.arguments,
@@ -932,8 +1069,41 @@ fn execute_unit<'a>(
                     current_dir: &invocation.current_dir,
                     verbose: options.verbose,
                     color: options.color,
-                }
-                .execute()?;
+                };
+                let metadata_written = || -> Result<Executed> {
+                    validate_dep_info(
+                        &invocation.output,
+                        &manifest.root,
+                        &invocation.current_dir,
+                        manifest.editable,
+                        executed_build_script.map(|build| build.out_dir.as_path()),
+                        planned.source_remap.as_ref(),
+                        &clippy_inputs,
+                    )?;
+                    Executed::artifact(
+                        cache,
+                        cache_key,
+                        planned_invocation.output.clone(),
+                        selected_inputs,
+                        tracked_environment(&invocation)?,
+                    )
+                };
+                let rustc_output = if pipelined {
+                    let mut signaled = false;
+                    command.execute_observed(&mut |line| {
+                        // A failed early check leaves dependents to the end,
+                        // where the same check reports the error.
+                        if !signaled
+                            && is_metadata_artifact(line)
+                            && let Ok(executed) = metadata_written()
+                        {
+                            signaled = true;
+                            on_metadata(executed);
+                        }
+                    })?
+                } else {
+                    command.execute()?
+                };
                 options.reporter.compiler_messages(
                     key,
                     planned,
@@ -972,7 +1142,9 @@ fn execute_unit<'a>(
                     (&diagnostics.0, &diagnostics.1),
                     &tracked,
                 )?;
-                staging.commit(unit_dir)?;
+                if let Some(staging) = staging {
+                    staging.commit(unit_dir)?;
+                }
                 if restorable {
                     stores
                         .send(CacheStore {
@@ -1005,6 +1177,17 @@ fn execute_unit<'a>(
             }
         }
     }
+}
+
+/// Whether a rustc stderr line reports that the metadata file is written.
+fn is_metadata_artifact(line: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(line).is_ok_and(|message| {
+        message
+            .get("$message_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("artifact")
+            && message.get("emit").and_then(serde_json::Value::as_str) == Some("metadata")
+    })
 }
 
 /// Registry and Git dependencies compile with `--cap-lints allow` outside

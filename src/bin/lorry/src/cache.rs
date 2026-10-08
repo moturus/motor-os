@@ -541,6 +541,25 @@ impl BuildCache {
         write_synced(&directory.join(PUBLISHED_RECORD), &fingerprint)
     }
 
+    /// Removes a unit's success record before its outputs are rewritten in
+    /// place, so an interrupted build cannot leave them looking fresh.
+    pub fn unpublish(&self, output: &RustcOutput) -> Result<()> {
+        let record = published_unit_directory(output)?.join(PUBLISHED_RECORD);
+        match fs::remove_file(&record) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Error::failure(format!(
+                "failed to remove published unit record `{}`: {error}",
+                record.display()
+            ))),
+        }
+    }
+
+    /// Strict keys hash dependency libraries, so a dependent needs them whole.
+    pub fn is_strict(&self) -> bool {
+        self.validation.is_strict()
+    }
+
     pub fn published_messages(&self, output: &RustcOutput) -> Result<(Vec<u8>, Vec<u8>)> {
         let directory = published_unit_directory(output)?;
         let read = |name| {
@@ -875,6 +894,10 @@ impl BuildCaches {
         } else {
             &self.local
         }
+    }
+
+    pub fn is_strict(&self) -> bool {
+        self.shared.is_strict()
     }
 
     pub fn report_shared_rebuild(&self, planned: &PlannedUnit) -> bool {

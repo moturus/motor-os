@@ -103,25 +103,64 @@ impl RustcCommand<'_> {
     /// executing units concurrently can print each unit's diagnostics as one
     /// uninterrupted block via `finish`.
     pub fn execute(&self) -> Result<Output> {
+        self.execute_observed(&mut |_| {})
+    }
+
+    /// Like `execute`, and passes each stderr line to `observe` as rustc
+    /// writes it, so a caller can act on an artifact notification early.
+    pub fn execute_observed(&self, observe: &mut dyn FnMut(&[u8])) -> Result<Output> {
         if self.verbose {
             eprintln!(
                 "Running {}",
                 display_command(self.program.as_os_str(), self.arguments)
             );
         }
+        let failure = |error: std::io::Error| {
+            Error::failure(format!(
+                "failed to execute rustc `{}`: {error}",
+                self.program.display()
+            ))
+        };
         let mut command = Command::new(self.program);
         command
             .args(self.arguments)
             .env_remove("CARGO_PRIMARY_PACKAGE")
             .envs(self.environment)
-            .current_dir(self.current_dir);
+            .current_dir(self.current_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         crate::artifact_lock::configure_child_lease(&mut command, self.child_lease_fd);
         remove_cargo_client_environment(&mut command);
-        command.stdin(Stdio::null()).output().map_err(|error| {
-            Error::failure(format!(
-                "failed to execute rustc `{}`: {error}",
-                self.program.display()
-            ))
+        let mut child = command.spawn().map_err(failure)?;
+        let mut stdout = child.stdout.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut stdout, &mut bytes).map(|_| bytes)
+        });
+        let mut stderr = Vec::new();
+        let mut lines = std::io::BufReader::new(child.stderr.take().unwrap());
+        let read = loop {
+            let start = stderr.len();
+            match std::io::BufRead::read_until(&mut lines, b'\n', &mut stderr) {
+                Ok(0) => break Ok(()),
+                Ok(_) => observe(&stderr[start..]),
+                Err(error) => {
+                    let _ = child.kill();
+                    break Err(error);
+                }
+            }
+        };
+        let stdout = reader
+            .join()
+            .map_err(|_| Error::failure("rustc stdout reader panicked"))?;
+        let status = child.wait().map_err(failure)?;
+        read.map_err(failure)?;
+        let stdout = stdout.map_err(failure)?;
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
         })
     }
 

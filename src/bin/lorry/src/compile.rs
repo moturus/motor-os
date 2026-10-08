@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::build_script::{Directive, Output as BuildScriptOutput};
 use crate::diagnostic::{Error, Result};
 use crate::identity::{CargoDebugInfo, CargoPanicStrategy, CargoStrip, CargoUnitLto, Identity};
-use crate::manifest::{Edition, Manifest, TargetKind};
+use crate::manifest::{Edition, LibraryTarget, Manifest, TargetKind};
 use crate::resolver::{CompileKind, PackageKey, PackageSourceKey};
 use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind, UnitMode};
 
@@ -682,19 +682,12 @@ fn dependency_arguments(
         let filename = if dependency.unit.kind == UnitKind::ProcMacro {
             proc_macro_filename(&stem)
         } else {
-            let parent_links_objects = manifests[&planned.unit.key.package]
-                .library
-                .as_ref()
-                .is_some_and(|library| library.requires_upstream_objects());
-            let extension = if matches!(dependency.unit.mode, UnitMode::Check | UnitMode::CheckTest)
-                || ((matches!(planned.unit.key.mode, UnitMode::Check | UnitMode::CheckTest)
-                    || (planned.unit.key.kind == UnitKind::Library && !parent_links_objects))
-                    && !child_library.requires_upstream_objects())
-            {
-                "rmeta"
-            } else {
-                "rlib"
-            };
+            let extension =
+                if uses_dependency_metadata(manifests, planned, &dependency.unit, child_library) {
+                    "rmeta"
+                } else {
+                    "rlib"
+                };
             format!("lib{stem}.{extension}")
         };
         let path = unit_output_directory(child, options).join(filename);
@@ -702,6 +695,24 @@ fn dependency_arguments(
         arguments.push(format!("{alias}={}", path.display()).into());
     }
     Ok(directories)
+}
+
+/// Whether `parent` reads a library dependency's metadata alone, as when Cargo
+/// pipelines. Linking needs the full library.
+pub(crate) fn uses_dependency_metadata(
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    parent: &PlannedUnit,
+    dependency: &UnitKey,
+    library: &LibraryTarget,
+) -> bool {
+    let parent_links_objects = manifests[&parent.unit.key.package]
+        .library
+        .as_ref()
+        .is_some_and(|library| library.requires_upstream_objects());
+    matches!(dependency.mode, UnitMode::Check | UnitMode::CheckTest)
+        || ((matches!(parent.unit.key.mode, UnitMode::Check | UnitMode::CheckTest)
+            || (parent.unit.key.kind == UnitKind::Library && !parent_links_objects))
+            && !library.requires_upstream_objects())
 }
 
 pub(crate) fn dependency_directories(
