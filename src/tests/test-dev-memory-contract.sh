@@ -27,7 +27,7 @@ EOF
 chmod +x "$temporary/src/bin/httpd-axum/tests/run.sh"
 export MEMORY_TEST_LOG="$temporary/observed"
 export PATH="$temporary/bin:$PATH"
-javy_expected=$'\ntest-javy.sh --prepare --image both\ntest-javy.sh --image both'
+javy_expected=$'\ntest-javy.sh --prepare --image both --release\ntest-javy.sh --image both --release'
 
 env -u MOTO_MEMORY_MIB -u MOTO_IMAGE bash "$temporary/src/tests/full-test-dev.sh" --release > "$temporary/wrapper.log"
 expected=$'full-test.sh 8192 --release\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 4096 --release'
@@ -49,7 +49,7 @@ env -u MOTO_MEMORY_MIB \
   bash "$temporary/src/tests/full-test-dev.sh" --release --vmm chv \
   >> "$temporary/wrapper.log"
 expected=$'full-test.sh 8192 --release --vmm chv\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release --vmm chv\ntest-dev-sources.sh 4096 --release --vmm chv'
-expected+="$javy_expected"
+expected+="${javy_expected//--release/--release --vmm chv}"
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VMM selection was not forwarded to every phase' >&2; exit 1;
 }
