@@ -1,23 +1,12 @@
 # Gears batteries: design and implementation plan
 
-Status: implementation through phase 7, including installed native skills
-and `/accept` validated with the selected `dev.3` SDK. Phase 8 has model-pair
-settings, durable marks, exact saved-entry snapshots, review tool policy and
-command/compaction triggers, the resume question, a durable proposal cap and a
-connected runner that preserves the saved prefix after compaction, and explicit
-cutoff-based cleanup proposals with approval-only archival. Phase 9's manual
-multi-task evaluation command, frozen workspace/state copies, repeated arms and
-reports pass focused host/native fixtures and the release developer-image gate;
-the first real-model run is pending.
-Sysbox S1–S6 are complete and core-gated: mkdir, sort, uniq, cut, tr, echo
-and xargs. Omitted xargs commands run sysbox `echo`; Rush's built-in echo
-remains in place.
-Design revised 2026-10-07. See the
-[remaining-work checklist](gears-batteries-progress.md#what-remains) for current
-status; that document also retains the implementation history. Two questions wait
-for later phases: question 7 is needed before the first real-model evaluation, and
-question 10 when phase 12 is. Tool confinement is deferred (see "Deferred:
-tool confinement").
+Status (2026-10-08): phases 0–9 are implemented and pass the host, native
+and release developer-image gates, including the review fixes of 2026-10-08.
+Sysbox S1–S6 (mkdir, sort, uniq, cut, tr, echo and xargs) are complete and
+core-gated. The first real-model evaluation is pending. See "What remains"
+for the current checklist. Question 7 is needed before the first real-model
+evaluation, and question 10 when phase 12 is. Tool confinement is deferred
+(see "Deferred: tool confinement").
 
 ## Purpose and scope
 
@@ -40,12 +29,13 @@ helpful, that unverified learning always hurts, or that a particular model
 size or number of confirming sessions is a reliable threshold. Results
 come from different tasks and budgets, and much of the literature has not
 been independently reproduced. Treat the learning loop as an experiment.
-Task acceptance uses the user's explicit `/accept` command,
-as recorded in [the acceptance decision](gears-acceptance-vcs.md).
+Task acceptance uses the user's explicit `/accept` command.
 
-[Earlier notes](gears-batteries-notes.md) retain investigation history,
-mock-provider prototypes and reproductions of the Gears defects fixed in
-phase 1 (notes §4.4); they are not evidence of real-model usefulness. The
+The investigation notes, the implementation record and the smaller decision
+plans were removed on 2026-10-08; git history keeps them. "Notes §4.4" and
+"notes Appendix D" below refer to the removed `gears-batteries-notes.md`,
+whose reproductions of the Gears defects fixed in phase 1 are not evidence
+of real-model usefulness. The
 previous version of this plan, commit `ef8a1ce3`, is history: where this
 document differs, this document wins. Hermes supplied useful examples of
 tools, skills, prompt caching and failure handling, not an implementation to
@@ -260,9 +250,8 @@ the nested run's next tool call must still run.
 
 ## Tools
 
-The [external-tools plan](gears-external-tools.md) and
-[contract](../external-tools.md) are the starting point. Phase 0 brings
-them in line with this document. Requirements on tool definitions:
+The [external-tools contract](../external-tools.md) is the starting point.
+Phase 0 brought it in line with this document. Requirements on tool definitions:
 
 - **Arguments.** The model never writes a flag vector. As in Claude Code's
   `Grep` and pi's `grep` and `find` tools, each common command exposes typed
@@ -817,7 +806,7 @@ needs 5; 7 needs 5; 8 needs 6 and 7; 9 needs 8; 10 to 12 are optional and
 need 5.
 
 **Phase 0. Reconcile the companion documents.** Update
-`src/bin/gears/external-tools.md` and `gears-external-tools.md`: remove the
+`src/bin/gears/external-tools.md` and its implementation plan: remove the
 `profile` and `spawn` fields from version 1 (confinement is deferred);
 replace `parallel_safe` with `read_only`, since parallel tool runs are out
 of scope; add the exit-status rule and the typed-parameter, `allowed_flags`
@@ -1045,6 +1034,50 @@ services run in an rmux pane or are started from the user's `rush.toml`
 (`spawn-detached`), never at boot (question 9). Done when a VM test
 holds a Telegram conversation with a mock Bot API, with one approved and one
 denied call, and a scheduled job runs once.
+
+## What remains
+
+| Work | Status and next step |
+| --- | --- |
+| First real-model evaluation (phase 9) | The runner is implemented. Choose tasks the learning has not already seen, the model or models, and a quality/cost criterion; compare runs with and without approved agent learning. This measures usefulness rather than adding a feature. |
+| Hands-on validation | Finish the Linux and Motor OS interactive checklist: tool enablement, approvals, revocation, resume and screen rendering. The fixed blank-screen resume needs a visual retry. No live local-model result has been reported. |
+| Optional skill import (6.6) | Select and review useful Hermes skills, preserving the MIT notice. Skills already work without it. |
+| Optional orchestration (10) | Supervised worker agents and their budgets. |
+| Optional web tools (11) | Web search and page extraction using curl. |
+| Optional scheduler and gateway (12) | Scheduled jobs, HTTP/Telegram access, unattended approval and cancellation. Service behavior still needs the phase 12 decision. |
+
+The real-model evaluation needs user input; it does not block other work.
+Reviews remain off by default, and passing mock tests does not show that
+learned material improves later work.
+
+**Deferred learning-stack bugs.** Found in the 2026-10-07 review and left
+for later at the user's request; none is fixed yet:
+
+1. Reviews fail for good once their evidence exceeds 64 KiB. The prompt
+   includes every denied change from all workspaces, with whole skill
+   bodies, and every turn's events; one mark's failure also blocks the
+   session's other marks. Limit denials to this workspace as ids and short
+   summaries, drop `events`, truncate oldest first, and continue past a
+   failed mark.
+2. Session files grow quadratically. `turns::observe` returns its whole hook
+   state, including the growing event list and check output previews, at
+   every `entry` event, and Gears saves each one. Append tool events to
+   `turns.jsonl` instead and keep only counters, the last entry id and the
+   check receipt's hash in state, accepting the old shape when reading.
+3. Memory headers use up the size limits: each entry's ids and hashes take
+   about 220–300 characters, all counted and all sent in the prompt. Use
+   short ids, count only the entry text, and keep provenance out of the
+   prompt, still reading existing entries.
+4. The evaluation sorts memory into the baseline or learned arm by its
+   `kind`, which the model chooses. Classify by the approval record's origin
+   (a review or an agent proposal) instead.
+5. One malformed line in `changes.jsonl`, or one bad pending file, makes
+   the whole read fail and hides all skills and workspace memory. Skip and
+   report bad records, and parse `changes.jsonl` once per hook event.
+
+Optional changes the user has not decided: keep workspace pending proposals
+in the Gears directory rather than in the cloned workspace, and replace the
+three `batteries.toml` parsers with one that rejects unknown keys.
 
 ## Open questions
 

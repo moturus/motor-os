@@ -6,8 +6,8 @@ to preserve the old architecture, CLI, or behavior. The finished
 implementation must preserve Linux and Motor OS support, the hermetic backend,
 and the useful parts of the current TUI.
 
-The later [external-tools plan](plans/gears-external-tools.md) replaces this
-plan's built-in `sh` step with optional directory tools and scoped grants.
+The later [external-tools contract](external-tools.md) replaces this plan's
+built-in `sh` step with optional directory tools and scoped grants.
 
 ## Working rules
 
