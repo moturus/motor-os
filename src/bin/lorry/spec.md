@@ -1562,7 +1562,10 @@ also use host library and harness units, with named member execution grants.
 Rustc arguments, environment, Cargo-compatible metadata/extra-filename hashes,
 target search paths, `--extern` paths, lints/check-cfg, profile/LTO behavior,
 and primary output handling must match Cargo compatibility family 1.99.
-Registry and Git dependencies receive Cargo's `--cap-lints` setting.
+Registry and Git dependencies receive Cargo's `--cap-lints` setting: `warn`
+in verbose builds and `allow` otherwise. A reused unit of theirs replays its
+recorded warnings only in verbose builds, as Cargo does, even when an earlier
+verbose build recorded them.
 Verbose builds pass Cargo 1.99's diagnostic-only `--verbose` flag to rustc;
 the flag does not alter unit identity or executable bytes. Default output is isolated below
 `target/lorry/`, with Cargo-shaped native or explicit-target debug/release

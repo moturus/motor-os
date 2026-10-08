@@ -805,10 +805,13 @@ fn execute_unit<'a>(
                             key.package.name, key.package.version
                         );
                     }
-                    let (stdout, stderr) = cache.published_messages(&planned_invocation.output)?;
-                    options
-                        .reporter
-                        .compiler_messages(key, planned, &stdout, &stderr)?;
+                    if replays_messages(key, options) {
+                        let (stdout, stderr) =
+                            cache.published_messages(&planned_invocation.output)?;
+                        options
+                            .reporter
+                            .compiler_messages(key, planned, &stdout, &stderr)?;
+                    }
                     options.reporter.compiler_artifact(
                         key,
                         planned,
@@ -853,9 +856,11 @@ fn execute_unit<'a>(
                             key.package.name, key.package.version
                         );
                     }
-                    options
-                        .reporter
-                        .compiler_messages(key, planned, stdout, stderr)?;
+                    if replays_messages(key, options) {
+                        options
+                            .reporter
+                            .compiler_messages(key, planned, stdout, stderr)?;
+                    }
                     options.reporter.compiler_artifact(
                         key,
                         planned,
@@ -1000,6 +1005,13 @@ fn execute_unit<'a>(
             }
         }
     }
+}
+
+/// Registry and Git dependencies compile with `--cap-lints allow` outside
+/// verbose builds. Like Cargo, a reused unit of theirs then replays nothing,
+/// even warnings that an earlier verbose build recorded.
+fn replays_messages(key: &UnitKey, options: &Options<'_>) -> bool {
+    options.verbose || matches!(key.package.source, PackageSourceKey::Path(_))
 }
 
 /// The process variables rustc reported reading. Variables Lorry set for this
@@ -1612,6 +1624,162 @@ mod tests {
         let toolchain = Toolchain::discover(None, &config, false).unwrap();
         let target = toolchain.target_info(None).unwrap();
         (toolchain, target)
+    }
+
+    /// Records whether any reported compiler message mentions `needle`.
+    struct MessageReporter(&'static str, std::sync::atomic::AtomicBool);
+
+    impl EventReporter for MessageReporter {
+        fn compiler_messages(
+            &self,
+            _: &UnitKey,
+            _: &PlannedUnit,
+            stdout: &[u8],
+            stderr: &[u8],
+        ) -> Result<()> {
+            let text = [stdout, stderr].concat();
+            if String::from_utf8_lossy(&text).contains(self.0) {
+                self.1.store(true, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+
+        fn compiler_artifact(
+            &self,
+            _: &UnitKey,
+            _: &PlannedUnit,
+            _: &RustcOutput,
+            _: bool,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn build_script_executed(&self, _: &UnitKey, _: &ExecutedBuildScript) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reused_registry_units_replay_capped_warnings_only_when_verbose() {
+        let fixture = Fixture::new();
+        let package = fixture.0.join("package");
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"warns\"\nversion = \"1.0.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::remove_file(package.join("build.rs")).unwrap();
+        fs::write(package.join("src/lib.rs"), "fn never_called() {}\n").unwrap();
+        let manifest = Manifest::load_path_dependency(&package).unwrap();
+        let key = PackageKey {
+            name: manifest.name.clone(),
+            version: Version::parse(&manifest.version.original).unwrap(),
+            source: PackageSourceKey::CratesIo,
+        };
+        let resolution = Resolution {
+            root_edges: Vec::new(),
+            packages: vec![ResolvedPackage {
+                key: key.clone(),
+                source: ResolvedSource::CratesIo { checksum: [7; 32] },
+                local_manifest: None,
+                feature_sets: BTreeMap::new(),
+                compile_kinds: BTreeSet::from([CompileKind::Target]),
+                target_features: BTreeSet::new(),
+                host_features: BTreeSet::new(),
+                edges: Vec::new(),
+                lock_edges: Vec::new(),
+            }],
+        };
+        let manifests = BTreeMap::from([(key.clone(), manifest)]);
+        let admission = Admission {
+            packages: BTreeMap::from([(
+                key,
+                PackageAdmission {
+                    native_tools: BTreeSet::new(),
+                    caller_env: Default::default(),
+                },
+            )]),
+        };
+        let graph = dependency_units(&resolution, &manifests).unwrap();
+        let (toolchain, target) = actual_toolchain();
+        let plan = plan_dependency_units(
+            &graph,
+            &manifests,
+            &PlanOptions {
+                workspace_root: &fixture.0,
+                release: false,
+                panic_abort: false,
+                profile: &crate::manifest::Profile::default(),
+                rustc: &toolchain,
+                logical_target: None,
+                rustflags: &[],
+            },
+        )
+        .unwrap();
+        let profile = fixture.0.join("output/debug");
+        let cargo = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let cache = BuildCaches::new(
+            &fixture.0.join("global-cache"),
+            &fixture.0.join("local-cache"),
+            &crate::cache::Options {
+                cargo: &cargo,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_linker: None,
+                target_linker: None,
+                root_manifest: manifests.values().next().unwrap(),
+                source_limits: DEFAULT_LIMITS,
+                validation: crate::validation::ValidationMode::Trusted,
+            },
+        )
+        .unwrap();
+        let build = |verbose| {
+            let reporter = MessageReporter("never_called", Default::default());
+            execute(
+                &plan,
+                &manifests,
+                &Options {
+                    cargo: &cargo,
+                    child_lease_fd: None,
+                    workspace_root: &fixture.0,
+                    workspace_members: &BTreeMap::new(),
+                    selected_packages: &[],
+                    toolchain: &toolchain,
+                    host: &target,
+                    target: &target,
+                    host_profile: &profile,
+                    target_profile: &profile,
+                    host_incremental: &fixture.0.join("incremental/host"),
+                    target_incremental: &fixture.0.join("incremental/target"),
+                    physical_target: None,
+                    host_linker: None,
+                    target_linker: None,
+                    integration_binaries: None,
+                    integration_temp_dirs: None,
+                    release: false,
+                    quiet: true,
+                    verbose,
+                    color: false,
+                    build_script_timeout: Duration::from_secs(10),
+                    build_script_output_bytes: 64 * 1024,
+                    out_dir_limits: DEFAULT_LIMITS,
+                    cache: &cache,
+                    admission: &admission,
+                    native_tools: &BTreeMap::new(),
+                    jobs: 1,
+                    keep_going: false,
+                    reporter: &reporter,
+                },
+            )
+            .unwrap();
+            reporter.1.into_inner()
+        };
+        // A verbose build caps dependency lints at `warn` and records them.
+        assert!(build(true));
+        // An ordinary build caps them at `allow`, so its reuse shows none.
+        assert!(!build(false));
+        assert!(build(true));
     }
 
     #[test]
