@@ -24,6 +24,9 @@ workspace work.
 
 ## Differences from Cargo
 
+- **Resolver dependency order.** Lorry resolves dependencies first in, first
+  out; Cargo takes the one with the fewest candidates first. Locks differ
+  only when the resolver backtracks. See `resolver-order-plan.md`.
 - **Config `rustflags` are always appended (from dev).** Cargo appends only
   arrays. A string value replaces the lower layer, and mixing a string with
   an array is an error. See `src/config.rs`.
