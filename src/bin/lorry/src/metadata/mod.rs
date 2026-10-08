@@ -20,18 +20,18 @@ use crate::toolchain::Toolchain;
 use crate::validation::ValidationMode;
 
 pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
-    crate::cargo_registry::with_fallback(cli, |cli| execute_with(cli, options))
+    crate::cargo_registry::with_fallback(cli, |cli, notes| execute_with(cli, notes, options))
 }
 
-fn execute_with(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
+fn execute_with(cli: &Cli, notes: Verbosity, options: &MetadataOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let mut workspace = SourceWorkspace::load(
         &current,
         cli.manifest_path.as_deref().map(std::path::Path::new),
     )?;
-    warn_default_format(cli, options);
-    Manifest::report_warnings(&workspace.packages, cli.verbosity);
+    warn_default_format(notes, options);
+    Manifest::report_warnings(&workspace.packages, notes);
     let mut config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
     let use_cargo_registry = crate::cargo_registry::selected(cli, &config);
     if use_cargo_registry {
@@ -72,8 +72,7 @@ fn execute_with(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         .transpose()?;
     // Extraction for inspection creates its own private directories here.
     let scratch = env::temp_dir();
-    let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
-    progress.report("Verifying dependency state")?;
+    Progress::new(notes != Verbosity::Quiet).report("Verifying dependency state")?;
     let locked = dependency::LockedContext::open(
         manifest,
         &config,
@@ -130,8 +129,8 @@ fn execute_with(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     write_document(&document)
 }
 
-fn warn_default_format(cli: &Cli, options: &MetadataOptions) {
-    if !options.format_version_explicit && cli.verbosity != Verbosity::Quiet {
+fn warn_default_format(notes: Verbosity, options: &MetadataOptions) {
+    if !options.format_version_explicit && notes != Verbosity::Quiet {
         eprintln!(
             "warning: please specify `--format-version` flag explicitly to avoid compatibility problems"
         );

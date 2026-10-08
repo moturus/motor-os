@@ -155,6 +155,10 @@ mv "$CACHE/registry/src/index.crates.io-fixture/derive-answer-1.0.0" "$WORK/move
 expect_failure fallback "$lorry_mode" -v build
 grep -F "Using Lorry repositories because Cargo's cache cannot be used" "$WORK/fallback.err" \
     >/dev/null || fail "the fallback did not explain itself in verbose mode"
+for note in '^Verifying dependency state$' '^Using .*rustc'; do
+    [ "$(grep -c "$note" "$WORK/fallback.err")" -eq 1 ] ||
+        fail "the fallback repeated /$note/: $(cat "$WORK/fallback.err")"
+done
 expect_failure explicit 'does not contain both the archive and extracted source' \
     --use-cargo-registry build
 mv "$WORK/moved" "$CACHE/registry/src/index.crates.io-fixture/derive-answer-1.0.0"

@@ -17,10 +17,10 @@ use crate::toolchain::Toolchain;
 use crate::validation::ValidationMode;
 
 pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
-    crate::cargo_registry::with_fallback(cli, |cli| execute_with(cli, options))
+    crate::cargo_registry::with_fallback(cli, |cli, notes| execute_with(cli, notes, options))
 }
 
-fn execute_with(cli: &Cli, options: &TreeOptions) -> Result<i32> {
+fn execute_with(cli: &Cli, notes: Verbosity, options: &TreeOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let mut workspace = SourceWorkspace::load(
@@ -34,7 +34,7 @@ fn execute_with(cli: &Cli, options: &TreeOptions) -> Result<i32> {
             .map(|member| (member.name.as_str(), &member.version, member.root.as_path())),
         workspace.default_members.iter().map(|root| root.as_path()),
     )?;
-    if cli.verbosity != Verbosity::Quiet {
+    if notes != Verbosity::Quiet {
         for warning in warnings {
             eprintln!("warning: {warning}");
         }
@@ -46,7 +46,7 @@ fn execute_with(cli: &Cli, options: &TreeOptions) -> Result<i32> {
     if use_cargo_registry {
         config.trust_cargo_cache();
     }
-    Manifest::report_warnings(&workspace.packages, cli.verbosity);
+    Manifest::report_warnings(&workspace.packages, notes);
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let physical_target = config.selected_target(options.target.as_deref())?;
     let target = toolchain.target_info(physical_target.as_deref())?;
@@ -55,7 +55,7 @@ fn execute_with(cli: &Cli, options: &TreeOptions) -> Result<i32> {
     } else {
         target.clone()
     };
-    if cli.verbosity == Verbosity::Verbose {
+    if notes == Verbosity::Verbose {
         eprintln!(
             "Using {} (rustc {}, Cargo {:?} compatibility)",
             toolchain.rustc.display(),
@@ -66,8 +66,7 @@ fn execute_with(cli: &Cli, options: &TreeOptions) -> Result<i32> {
 
     // Extraction for inspection creates its own private directories here.
     let scratch = env::temp_dir();
-    let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
-    progress.report("Verifying dependency state")?;
+    Progress::new(notes != Verbosity::Quiet).report("Verifying dependency state")?;
     let locked = LockedContext::open(
         manifest,
         &config,
@@ -100,7 +99,7 @@ fn execute_with(cli: &Cli, options: &TreeOptions) -> Result<i32> {
         &cli.features,
         false,
     )?;
-    progress.report("Preparing dependency graph")?;
+    Progress::new(cli.verbosity != Verbosity::Quiet).report("Preparing dependency graph")?;
     let prepared = dependency::workspace::inspect_selected(
         &mut catalog,
         &config,

@@ -29,7 +29,9 @@ const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 
 pub fn execute(cli: &Cli) -> Result<i32> {
     let mut reported = false;
-    let result = crate::cargo_registry::with_fallback(cli, |cli| execute_inner(cli, &mut reported));
+    let result = crate::cargo_registry::with_fallback(cli, |cli, notes| {
+        execute_inner(cli, notes, &mut reported)
+    });
     if cli.message_format() != MessageFormat::Human && !reported {
         let finished = crate::check_message::build_finished(matches!(&result, Ok(0)));
         return match (result, finished) {
@@ -49,7 +51,7 @@ fn report_build_completion(cli: &Cli, reported: &mut bool) -> Result<()> {
     Ok(())
 }
 
-fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
+fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let (workspace, mut selected) = crate::manifest::SourceWorkspace::load_compilation(
@@ -128,7 +130,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let manifest = run_selection
         .map_or(&selected[0], |(member, _)| member)
         .clone();
-    Manifest::report_warnings(&selected, cli.verbosity);
+    Manifest::report_warnings(&selected, notes);
     let requested_targets = match &cli.command {
         Command::Check(options) => Some(&options.build.targets),
         Command::Build(options) => Some(&options.targets),
@@ -204,7 +206,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         check_rust_version(manifest, &toolchain)?;
     }
     crate::trace::event("discovered rustc toolchain");
-    if cli.verbosity == Verbosity::Verbose {
+    if notes == Verbosity::Verbose {
         eprintln!(
             "Using {} (rustc {}, Cargo {:?} compatibility)",
             toolchain.rustc.display(),
@@ -388,8 +390,7 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         };
     }
 
-    let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
-    progress.report("Verifying dependency state")?;
+    Progress::new(notes != Verbosity::Quiet).report("Verifying dependency state")?;
     // One registry source serves both admission verification and prepare, so
     // registry objects verified during admission are not hashed again when the
     // build prepares its dependency graph. Admission still loads and verifies

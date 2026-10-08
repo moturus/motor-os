@@ -78,16 +78,21 @@ fn cargo_home() -> Result<PathBuf> {
 
 /// Runs a command that may read Cargo's cache. Unless the command line asked
 /// for that cache, a command that finds it lacking runs again with Lorry
-/// repositories only, as if the mode were off.
-pub(crate) fn with_fallback<T>(cli: &Cli, mut run: impl FnMut(&Cli) -> Result<T>) -> Result<T> {
-    match run(cli) {
+/// repositories only, as if the mode were off. `run` also gets the verbosity
+/// for notes printed before dependency sources load. The second run gets
+/// `Quiet`, because the first run already printed them.
+pub(crate) fn with_fallback<T>(
+    cli: &Cli,
+    mut run: impl FnMut(&Cli, Verbosity) -> Result<T>,
+) -> Result<T> {
+    match run(cli, cli.verbosity) {
         Err(error) if cli.use_cargo_registry.is_none() && error.is_cargo_cache_miss() => {
             if cli.verbosity == Verbosity::Verbose {
                 eprintln!("Using Lorry repositories because Cargo's cache cannot be used: {error}");
             }
             let mut fallback = cli.clone();
             fallback.use_cargo_registry = Some(false);
-            run(&fallback)
+            run(&fallback, Verbosity::Quiet)
         }
         result => result,
     }
@@ -669,8 +674,8 @@ mod tests {
         };
         let miss = || Error::failure("Cargo's cache lacks a package").cargo_cache_miss();
         let mut modes = Vec::new();
-        let result = with_fallback(&parse(&["build"]), |cli| {
-            modes.push(cli.use_cargo_registry);
+        let result = with_fallback(&parse(&["build"]), |cli, notes| {
+            modes.push((cli.use_cargo_registry, notes));
             if cli.use_cargo_registry.is_none() {
                 Err(miss())
             } else {
@@ -678,17 +683,20 @@ mod tests {
             }
         });
         assert_eq!(result.unwrap(), 0);
-        assert_eq!(modes, [None, Some(false)]);
+        assert_eq!(
+            modes,
+            [(None, Verbosity::Normal), (Some(false), Verbosity::Quiet)]
+        );
 
         let mut runs = 0;
-        let result = with_fallback(&parse(&["--use-cargo-registry", "build"]), |_| {
+        let result = with_fallback(&parse(&["--use-cargo-registry", "build"]), |_, _| {
             runs += 1;
             Err::<i32, _>(miss())
         });
         assert!(result.unwrap_err().is_cargo_cache_miss());
         assert_eq!(runs, 1);
 
-        let result = with_fallback(&parse(&["build"]), |_| {
+        let result = with_fallback(&parse(&["build"]), |_, _| {
             runs += 1;
             Err::<i32, _>(Error::failure("Cargo archive and source differ"))
         });
