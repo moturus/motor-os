@@ -39,7 +39,22 @@ pub(crate) fn render(
             "failed to render workspace dependency review: {error}"
         ))
     })?;
-    Ok(output)
+    Ok(escape_controls(&output))
+}
+
+/// Package metadata such as a license is third-party text. Escaping its
+/// control characters keeps it from moving the cursor or rewriting earlier
+/// review lines before the approval prompt.
+fn escape_controls(text: &[u8]) -> Vec<u8> {
+    let mut escaped = String::with_capacity(text.len());
+    for character in String::from_utf8_lossy(text).chars() {
+        if character.is_control() && character != '\n' {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped.into_bytes()
 }
 
 // Walk each selected member's units separately so shared transitive packages
@@ -426,6 +441,16 @@ mod tests {
     use super::*;
     use crate::admission_state::{ContextRegistry, LockedRegistry, RegistrySource};
     use crate::config::NativeToolRole;
+
+    #[test]
+    fn review_escapes_control_characters_from_package_metadata() {
+        let license = "MIT\r    tree: x; build script: false\u{1b}[K";
+        let line = format!("    tree: abc; license: {license}; build script: true\n");
+        assert_eq!(
+            String::from_utf8(escape_controls(line.as_bytes())).unwrap(),
+            "    tree: abc; license: MIT\\r    tree: x; build script: false\\u{1b}[K; build script: true\n"
+        );
+    }
 
     #[test]
     fn human_review_writes_plain_stable_text() {
