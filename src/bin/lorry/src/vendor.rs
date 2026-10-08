@@ -430,7 +430,7 @@ impl<'a> Acquisition<'a> {
     fn evidence(
         &mut self,
         resolution: &Resolution,
-        direct: Option<&crate::git::DirectCatalog>,
+        direct: &crate::git::DirectCatalog,
     ) -> Result<BTreeMap<PackageKey, PackageEvidence>> {
         let repositories = self.repositories.clone();
         let mut retained = Vec::new();
@@ -461,13 +461,10 @@ impl<'a> Acquisition<'a> {
             .iter()
             .filter(|package| matches!(package.source, ResolvedSource::Git { .. }))
             .collect::<Vec<_>>();
-        let mut evidence = match direct {
-            Some(direct) => git_packages
-                .iter()
-                .map(|package| Ok((package.key.clone(), direct.evidence(package)?)))
-                .collect::<Result<BTreeMap<_, _>>>()?,
-            None => dependency::inspect_git_package_evidence(&git_packages)?,
-        };
+        let mut evidence = git_packages
+            .iter()
+            .map(|package| Ok((package.key.clone(), direct.evidence(package)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
         for package in &resolution.packages {
             let package_evidence = match &package.source {
                 ResolvedSource::Path { .. } => PackageEvidence::from_path(package)?,

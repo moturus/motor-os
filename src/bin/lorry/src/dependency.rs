@@ -451,46 +451,6 @@ pub fn resolver_options(
     })
 }
 
-/// Inspects independent Git package trees concurrently while preserving
-/// deterministic package and error order.
-pub fn inspect_git_package_evidence(
-    packages: &[&ResolvedPackage],
-) -> Result<BTreeMap<PackageKey, PackageEvidence>> {
-    if packages.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let workers = thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(packages.len());
-    let chunk_size = packages.len().div_ceil(workers);
-    let batches = thread::scope(|scope| {
-        let handles = packages
-            .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(|| {
-                    chunk
-                        .iter()
-                        .map(|package| (package.key.clone(), PackageEvidence::from_git(package)))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle.join().map_err(|_| {
-                    Error::failure("Git package evidence worker terminated unexpectedly")
-                })
-            })
-            .collect::<Result<Vec<_>>>()
-    })?;
-    let mut inspected = BTreeMap::new();
-    for (key, evidence) in batches.into_iter().flatten() {
-        inspected.insert(key, evidence?);
-    }
-    Ok(inspected)
-}
-
 fn git_package_evidence(
     direct: &crate::git::DirectCatalog,
     packages: &[&ResolvedPackage],
@@ -989,68 +949,6 @@ mod tests {
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
         }
-    }
-
-    fn git_package(root: &Path, name: &str) -> ResolvedPackage {
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(
-            root.join("Cargo.toml"),
-            format!(
-                "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nedition = \"2021\"\nlicense = \"MIT\"\nbuild = false\n"
-            ),
-        )
-        .unwrap();
-        fs::write(root.join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
-        let manifest = Manifest::load_path_dependency(root).unwrap();
-        let tree = Tree::scan(root, DEFAULT_LIMITS, Exclusions::None).unwrap();
-        let cargo_source =
-            format!("git+https://example.com/{name}.git#0123456789abcdef0123456789abcdef01234567");
-        ResolvedPackage {
-            key: PackageKey {
-                name: name.to_owned(),
-                version: Version::parse("1.0.0").unwrap(),
-                source: PackageSourceKey::Git(cargo_source.clone()),
-            },
-            source: ResolvedSource::Git {
-                cargo_source,
-                git_url: format!("https://example.com/{name}.git"),
-                requested_revision: "HEAD".to_owned(),
-                resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-                git_tree: "0".repeat(40),
-                repository_tree_sha256: tree.sha256,
-                package_path: String::new(),
-                logical_root: root.to_owned(),
-                physical_root: root.to_owned(),
-                source_tree_sha256: tree.sha256,
-                patched_crates_io: false,
-            },
-            local_manifest: Some(manifest),
-            feature_sets: BTreeMap::new(),
-            compile_kinds: [crate::resolver::CompileKind::Target].into(),
-            target_features: BTreeSet::new(),
-            host_features: BTreeSet::new(),
-            edges: Vec::new(),
-            lock_edges: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn inspects_independent_git_packages_together() {
-        let fixture = Fixture::new();
-        let first = git_package(&fixture.0.join("first"), "first");
-        let second = git_package(&fixture.0.join("second"), "second");
-
-        let evidence = inspect_git_package_evidence(&[&first, &second]).unwrap();
-        let ResolvedSource::Git {
-            source_tree_sha256, ..
-        } = second.source
-        else {
-            unreachable!()
-        };
-
-        assert_eq!(evidence.len(), 2);
-        assert_eq!(evidence[&first.key].license, "MIT");
-        assert_eq!(evidence[&second.key].source_tree_sha256, source_tree_sha256);
     }
 
     fn assert_check_graph_matches_cargo(

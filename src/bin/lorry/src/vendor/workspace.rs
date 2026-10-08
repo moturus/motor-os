@@ -108,7 +108,7 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
                     if !options.offline {
                         acquisition.stage_selected(&single)?;
                     }
-                    let evidence = acquisition.evidence(&single, Some(&direct))?;
+                    let evidence = acquisition.evidence(&single, &direct)?;
                     policy::inspect_sources(&config.policy, &single, &evidence)?;
                     Ok(evidence[&package.key].proc_macro)
                 })?;
@@ -119,7 +119,7 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
     if !options.offline {
         acquisition.stage_selected(&selected)?;
     }
-    let evidence = acquisition.evidence(&selected, Some(&direct))?;
+    let evidence = acquisition.evidence(&selected, &direct)?;
     policy::inspect_sources(&config.policy, &selected, &evidence)?;
     acquisition.publish()?;
     progress.report("Verified locked workspace sources")?;
@@ -291,7 +291,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
             acquisition.stage_selected(&selected)?;
         }
         progress.report("Verifying selected dependency sources")?;
-        let evidence = acquisition.evidence(&selected, Some(&direct))?;
+        let evidence = acquisition.evidence(&selected, &direct)?;
         policy::inspect_sources(&config.policy, &selected, &evidence)?;
         if !dependency::workspace::annotate_proc_macros(&mut catalog, &evidence)? {
             break (resolutions, selected, evidence);

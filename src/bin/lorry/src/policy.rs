@@ -651,49 +651,6 @@ impl PackageEvidence {
             source_tree_sha256: sha256,
         })
     }
-
-    pub fn from_git(package: &ResolvedPackage) -> Result<Self> {
-        let ResolvedSource::Git {
-            physical_root,
-            source_tree_sha256,
-            ..
-        } = &package.source
-        else {
-            return Err(Error::failure(format!(
-                "`{} {}` is not a Git package",
-                package.key.name, package.key.version
-            )));
-        };
-        let manifest = package.local_manifest.as_ref().ok_or_else(|| {
-            Error::failure(format!(
-                "resolved Git package `{} {}` has no inspected manifest",
-                package.key.name, package.key.version
-            ))
-        })?;
-        let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
-            Error::failure(format!(
-                "Git manifest has invalid version `{} {}`: {error}",
-                manifest.name, manifest.version.original
-            ))
-        })?;
-        if manifest.name != package.key.name
-            || manifest_version != package.key.version
-            || manifest.root != *physical_root
-        {
-            return Err(Error::failure(format!(
-                "Git manifest does not match resolved package `{} {}`",
-                package.key.name, package.key.version
-            )));
-        }
-        let tree = Tree::scan(physical_root, DEFAULT_LIMITS, Exclusions::None)?;
-        if tree.sha256 != *source_tree_sha256 {
-            return Err(Error::failure(format!(
-                "Git source for `{} {}` changed after resolution",
-                package.key.name, package.key.version
-            )));
-        }
-        Ok(Self::from_verified_git(manifest, &tree))
-    }
 }
 
 fn preliminary_facts(package: &ResolvedPackage) -> Facts<'_> {
