@@ -1198,18 +1198,37 @@ fn expand_root_reference(
             return require_root_dependency_alias(manifest, dependency);
         }
         enable_root_dependency(manifest, dependency, enabled)?;
+        // As in Cargo, `dep/feature` also activates the dependency's implicit
+        // feature.
+        if implicit_root_feature(manifest, dependency) {
+            active.insert(dependency.to_owned());
+        }
         dependency_features
             .entry(dependency.to_owned())
             .or_default()
             .insert(feature.to_owned());
         return Ok(());
     }
-    if manifest.features.contains_key(reference) {
+    if manifest.features.contains_key(reference) || implicit_root_feature(manifest, reference) {
         active.insert(reference.to_owned());
         Ok(())
     } else {
         enable_root_alias(manifest, reference, enabled)
     }
+}
+
+/// Whether an optional dependency has an implicit feature of its name: no
+/// feature names it with `dep:`, as in `defines_feature`.
+fn implicit_root_feature(manifest: &Manifest, alias: &str) -> bool {
+    manifest
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.optional && dependency.alias == alias)
+        && !manifest
+            .features
+            .values()
+            .flatten()
+            .any(|reference| reference.strip_prefix("dep:") == Some(alias))
 }
 
 fn require_root_dependency_alias(manifest: &Manifest, alias: &str) -> Result<()> {
@@ -3447,6 +3466,31 @@ dev = ["dep:leaf"]
         )
         .unwrap();
         (fixture, manifest)
+    }
+
+    #[test]
+    fn root_features_include_implicit_optional_dependency_features() {
+        let selected = |features: &str| {
+            let (_fixture, manifest) = manifest(
+                "a = { version = \"1\", optional = true }\n\
+                 b = { version = \"1\", optional = true }",
+                features,
+                "2",
+            );
+            selected_root_features(&manifest).unwrap()
+        };
+        let names = |names: &[&str]| names.iter().map(|name| name.to_string()).collect();
+        // As in Cargo, naming an optional dependency activates its implicit
+        // feature, and so does `dep/feature`.
+        assert_eq!(
+            selected("default = [\"a\", \"b/x\"]"),
+            names(&["a", "b", "default"])
+        );
+        // A `dep:` reference removes the implicit feature.
+        assert_eq!(
+            selected("default = [\"dep:a\", \"b/x\"]\nuses-a = [\"dep:a\"]"),
+            names(&["b", "default"])
+        );
     }
 
     fn target_manifest(resolver: &str) -> (LocalFixture, Manifest) {
