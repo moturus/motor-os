@@ -20,6 +20,7 @@ yet.
 | `/devtools/cfg/javy/sources.txt`, `SHA256SUMS` | Build provenance, source revisions, and staged-file checksums. |
 | `/devtools/bin/wasmtime-rt` | Runtime-only Wasmtime: precompiled Pulley execution with WASI. |
 | `/devtools/cfg/wasmtime/sources.txt`, `SHA256SUMS` | Wasmtime build provenance and checksums. |
+| `/devtools/cfg/wasmtime/fixtures/` | Test modules and components precompiled for this runtime, including the TypeScript workload. |
 | `/devtools/src/wasm/` | `hello.js` and a README with compile/run instructions. |
 | `/devtools/www/wasm.html` | This guide in the image's HTML documentation. |
 

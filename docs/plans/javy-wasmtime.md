@@ -772,7 +772,10 @@ into `src/tests/javy-smoke`; its build script already assembles WAT fixtures
 from `fixtures/` with the `wat` build dependency, so hand-written modules need
 no new dependency.
 
-1. **1f — retained plugin and exhaustion matrix.** Run the retained custom
+1. **1f — retained plugin and exhaustion matrix.** Decision needed: the
+   custom GC/p2 plugin source survives only in the prototype source archive;
+   choose its maintained home (this tree under `javy-smoke` or the fork) and
+   accept the wasi-sdk download its QuickJS build needs. Run the retained custom
    GC/p2 plugin cases and the four deliberate fault-exhaustion cases on the
    delivered pipeline, all through the installed tools in `javy-smoke`.
    Backing cases (reservation growth to the limit, failed `memory.grow`,
@@ -781,7 +784,14 @@ no new dependency.
    deterministic output use digest-pinned plugins under `/devtools/cfg/javy`.
    Expected refusals are recorded separately from the zero-delta rule. Output:
    tree tests, evidence at 256/224 on both images.
-2. **1g — compressed byte identity.** Settle the Linux/Motor equality rule for
+2. **1g — compressed byte identity.** Recommendation 2026-10-08, awaiting
+   owner confirmation: Motor output equals upstream Linux Javy 9.1.0
+   (digest-pinned release, same explicit plugin, `-C deterministic`) in every
+   section except `javy_source`, which must decompress to the exact input; with
+   source omitted or uncompressed the whole file is identical. Measured: hello in
+   all three source modes and TypeScript omitted/uncompressed are identical;
+   compressed TypeScript differs only in `javy_source` (1,151,218 against
+   1,151,115 bytes), and both decompress to the 9,112,951-byte workload. Settle the Linux/Motor equality rule for
    compressed-source artifacts under the deterministic reference recipe. The
    two candidates are an identity requirement on uncompressed-source output
    plus decompressed-equivalence for compressed output, or a Linux reference
@@ -871,16 +881,41 @@ wait for the guest-fixture decision below.
   elements, overridable with `-W`; the reservations are a fixed host bound.
   Defaults are recorded in `docs/wasm.md`.
 
-**Decision needed (2d, 2f, 1f):** p2 socket fixtures need real WASI p2 guest
-code, which means Rust's `wasm32-wasip2` target on the build host or
-prebuilt components; the TypeScript Wasmtime fixture needs Javy output, and
-precompiled Pulley artifacts must come from the same Wasmtime revision as the
-runtime. The proposed route is to precompile at add-on build time with a host
-`compile` tool built from the same fork sources, from guest inputs that are
-either WAT in this tree or Rust test programs built with host rustup
-`wasm32-wasip1`/`wasm32-wasip2` targets added by `build-base.sh`. The
-alternative is digest-pinned prebuilt components published in a `moturus`
-repository.
+**2d and 2f, 2026-10-08.** `src/build-motor-os.sh` installs a pinned upstream
+Rust (`WASM_GUEST_TOOLCHAIN`, 1.99.0) with `wasm32-wasip1`/`wasm32-wasip2` for
+guest programs; the Motor toolchain still has no wasm32 targets. The Wasmtime
+add-on builds a host Pulley `compile` tool from its own sources and precompiles
+22 fixtures (about 12 MiB) into `/devtools/cfg/wasmtime/fixtures`: the fork's
+lifecycle, limit and memory WAT modules, a native-target artifact for refusal,
+13 p2 socket programs, and the TypeScript workload compiled by the
+digest-pinned upstream Linux Javy 9.1.0 with the pinned plugin.
+`src/tests/wasmtime-smoke` (43 commands) and `javy-smoke` share
+`src/tests/wasm-smoke-suite`; `src/tests/test-wasm.sh` replaces `test-javy.sh`
+and runs both suites in each boot. With a locally built overlay, the QEMU and
+Cloud Hypervisor matrices passed (four boots, 57 + 43 commands, zero admission
+refusals, about 4.6 minutes per VMM). TypeScript through `wasmtime-rt` peaks at
+89.6/99.9 MiB at 224/256 MiB.
+
+The fork commits `62a4ed98a..113ca953f` await publication. Running upstream's
+socket programs on Motor found four adapter defects, now fixed: every WASI UDP
+socket was bound at creation (upstream's writability wait reached the lazy
+bind), native in-use and non-local binds surfaced as `unknown`/
+`invalid-argument`, accepted TCP sockets ignored listener options, and without
+`CAP_NET` guests saw `invalid-state` instead of `access-denied`. Twelve upstream
+programs gain Motor branches under a `motor` test-programs feature, plus a
+bind/listen ordering program; the non-Motor builds still pass on Linux under
+upstream Wasmtime 48.0.1.
+
+Native behaviors found and left unchanged (`src/sys`): a wildcard UDP bind
+selects the non-loopback address, and that socket's sends to loopback succeed
+but are never delivered; without `CAP_NET`, native socket calls fail with
+`NotConnected`; TCP connection rings default to 64 KiB at 224 MiB and 128 KiB at
+256 MiB and only grow; UDP has no buffer options; a closed UDP receiver reports
+nothing to the sender.
+
+Still open in 2f: p2 filesystem rights, preopens, EOF and descriptor programs
+through the installed tool (2c covers the adapter itself), and the Pulley
+disposition below.
 
 1. **2a — add-on delivery (delivered 2026-10-08, `--wasmtime-only`).** A
    host-precompiled Pulley hello ran on the wasm image as None, with role and
@@ -940,7 +975,16 @@ repository.
    original binary/configuration/fixture and preserve its diagnostics. Record
    either a diagnosed fix with a regression or an explicit owner-reviewed
    scope/acceptance decision before milestone 2 exits; non-recurrence alone
-   does not resolve it. Record sizes and the disk budget. Output: tree, fork
+   does not resolve it. Analysis 2026-10-08: the retained
+   `build/javy-prototype/logs/vm-serial.log` shows the kernel's
+   `INVALID OPCODE in uspace` (an x86 `#UD` in some user process, which the
+   kernel does not name), not a Pulley decoder error. Native panics and
+   `abort()` on Motor no longer raise `#UD` (both exit -1, checked), and no run
+   in this milestone raised one. The likely sources are native code: wasm
+   traps compiled as `ud2` under signal-based traps, which
+   `Config::motor_runtime()` now disables, or CPU features missing in the VM.
+   Proposed disposition, awaiting owner acceptance: close it for Pulley and
+   carry a native trap check (no `#UD`, trap reported) into 4d. Record sizes and the disk budget. Output: tree, fork
    regression/fix as indicated, evidence on both images at 256/224 under both VMMs.
 7. **2g — command resource defaults.** Before 2f acceptance, set finite
    StoreLimits and limits for tables/resources, instances and command stack
