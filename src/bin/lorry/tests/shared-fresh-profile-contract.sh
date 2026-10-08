@@ -91,7 +91,7 @@ fail() {
     exit 1
 }
 reused() {
-    grep -F 'accepted fresh root profile after dependency admission' "$WORK/$step.err" >/dev/null
+    grep -F 'accepted fresh root profile before dependency admission' "$WORK/$step.err" >/dev/null
 }
 expect_fresh() {
     reused || fail "did not reuse the completed profile"
@@ -207,6 +207,23 @@ if cmp -s Cargo.lock "$WORK/lock.before"; then fail "adding a member did not cha
 lorry build
 expect_rebuilt "member set and lock"
 compiled added
+lorry build
+expect_fresh
+
+# Reuse skips admission only while the admission state and the policy that
+# admitted the build are unchanged.
+cp .lorry/dependencies-v2.toml "$WORK/admission.before"
+sed -i 's/^review-sha256 = "./review-sha256 = "0/' .lorry/dependencies-v2.toml
+cmp -s .lorry/dependencies-v2.toml "$WORK/admission.before" && fail "did not change the commitment"
+if lorry build; then fail "reused a profile with a changed admission commitment"; fi
+grep -F 'workspace admission commitment does not match' "$WORK/$step.err" >/dev/null ||
+    fail "a changed commitment had the wrong diagnostic"
+cp "$WORK/admission.before" .lorry/dependencies-v2.toml
+cp lorry.toml "$WORK/policy.before"
+printf '[policy.rules.deny-app]\naction = "deny"\nname = "app"\nsource = "path"\n' >>lorry.toml
+if lorry build; then fail "reused a profile that policy now denies"; fi
+grep -F 'deny-app' "$WORK/$step.err" >/dev/null || fail "a new denial had the wrong diagnostic"
+cp "$WORK/policy.before" lorry.toml
 lorry build
 expect_fresh
 

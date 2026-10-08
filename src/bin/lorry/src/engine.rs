@@ -307,6 +307,64 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     })
     .transpose()?;
 
+    // A completed profile is recorded only after a build that verified
+    // admission, and its base covers the admission state, lock, manifests,
+    // configuration, and toolchain. Reusing it compiles and runs nothing new.
+    if let Some(base) = ordinary_freshness_base
+        && let Some(artifacts) = restore_fresh_profile(
+            &if fresh_check.is_some() {
+                check_destination(&target_root, physical_target.as_deref(), false)
+            } else {
+                profile_destination(
+                    &target_root,
+                    physical_target.as_deref(),
+                    release,
+                    manifest.profile_directory.as_deref(),
+                )
+            },
+            &manifest.workspace_root,
+            &fresh_owner,
+            base,
+            validation,
+        )
+    {
+        crate::trace::event("accepted fresh root profile before dependency admission");
+        crate::check_message::replay(&artifacts.messages, cli.message_format(), color)?;
+        report_finished(
+            manifest
+                .profile_name
+                .as_deref()
+                .unwrap_or(if release { "release" } else { "dev" }),
+            cli.verbosity,
+            validation,
+            &artifacts,
+        )?;
+        report_build_completion(cli, reported)?;
+        return match &cli.command {
+            Command::Build(_) | Command::Check(_) => Ok(0),
+            Command::Run(options) => {
+                let artifact = selected_run_artifact(&artifacts, run_binary.unwrap(), run_example)?;
+                drop(artifact_lock);
+                crate::trace::event("starting program");
+                let status = run_artifact(
+                    artifact,
+                    &options.arguments,
+                    physical_target.as_deref(),
+                    &target_options,
+                    &RuntimeOptions {
+                        current_dir: &current,
+                        environment: &program_environment(&cargo, &manifest, &artifacts)?,
+                        kind: process::ChildKind::Program,
+                        verbosity: cli.verbosity,
+                    },
+                )?;
+                crate::trace::event("program exited");
+                Ok(status)
+            }
+            _ => unreachable!("only build, check, and run use the ordinary freshness fast path"),
+        };
+    }
+
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     progress.report("Verifying dependency state")?;
     // One registry source serves both admission verification and prepare, so
@@ -380,60 +438,6 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         None
     };
     crate::trace::event("verified dependency admission");
-    if let Some(base) = ordinary_freshness_base
-        && let Some(artifacts) = restore_fresh_profile(
-            &if fresh_check.is_some() {
-                check_destination(&target_root, physical_target.as_deref(), false)
-            } else {
-                profile_destination(
-                    &target_root,
-                    physical_target.as_deref(),
-                    release,
-                    manifest.profile_directory.as_deref(),
-                )
-            },
-            &manifest.workspace_root,
-            &fresh_owner,
-            base,
-            validation,
-        )
-    {
-        crate::trace::event("accepted fresh root profile after dependency admission");
-        crate::check_message::replay(&artifacts.messages, cli.message_format(), color)?;
-        report_finished(
-            manifest
-                .profile_name
-                .as_deref()
-                .unwrap_or(if release { "release" } else { "dev" }),
-            cli.verbosity,
-            validation,
-            &artifacts,
-        )?;
-        report_build_completion(cli, reported)?;
-        return match &cli.command {
-            Command::Build(_) | Command::Check(_) => Ok(0),
-            Command::Run(options) => {
-                let artifact = selected_run_artifact(&artifacts, run_binary.unwrap(), run_example)?;
-                drop(artifact_lock);
-                crate::trace::event("starting program");
-                let status = run_artifact(
-                    artifact,
-                    &options.arguments,
-                    physical_target.as_deref(),
-                    &target_options,
-                    &RuntimeOptions {
-                        current_dir: &current,
-                        environment: &program_environment(&cargo, &manifest, &artifacts)?,
-                        kind: process::ChildKind::Program,
-                        verbosity: cli.verbosity,
-                    },
-                )?;
-                crate::trace::event("program exited");
-                Ok(status)
-            }
-            _ => unreachable!("only build, check, and run use the ordinary freshness fast path"),
-        };
-    }
 
     let global_cache_root = config.cache_directory()?;
 

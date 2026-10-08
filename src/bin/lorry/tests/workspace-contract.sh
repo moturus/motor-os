@@ -308,8 +308,7 @@ printf 'fn main() { println!("{}|{}", shared::VALUE, shared::LINK); }\n' \
     done
     "$LORRY" -v build -p tool 2>"$WORK/member-first-build.err"
     "$LORRY" -v build -p tool 2>"$WORK/member-warm.err"
-    grep -F 'Verifying dependency state' "$WORK/member-warm.err" >/dev/null
-    if grep -E 'Preparing dependency graph|Compiling ' "$WORK/member-warm.err"; then
+    if grep -E 'Verifying dependency state|Preparing dependency graph|Compiling ' "$WORK/member-warm.err"; then
         echo 'workspace-contract: unchanged member build missed completed-profile freshness' >&2
         exit 1
     fi

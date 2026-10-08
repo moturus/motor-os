@@ -48,10 +48,10 @@ For build, run, and test, `engine` performs these operations in order:
 
 1. load and validate `Cargo.toml`, `Cargo.lock`, and generated admission state;
 2. merge Lorry and Cargo configuration and discover the compiler/target;
-3. reconstruct and verify the root admission scope and requested coverage;
-4. resolve the selected locked graph and verify source and policy evidence;
-5. for a single-member build or run with default features, reuse a validated
-   completed profile when its parsed identity and mutable metadata match;
+3. for an unchanged build, run, or plain check, reuse a completed profile
+   whose record matches, and stop;
+4. reconstruct and verify the root admission scope and requested coverage;
+5. resolve the selected locked graph and verify source and policy evidence;
 6. create compilation units and their dependency order;
 7. compile or restore eligible library, procedural-macro, and build-script
    results from cache;
@@ -236,10 +236,13 @@ source digests and configured policy rather than being copied into immutable
 dependency admission.
 
 At build time `engine.rs` requires the discovered host and selected target to
-be an exact reviewed context. Before even completed-profile reuse,
+be an exact reviewed context. Before anything compiles,
 `dependency::workspace::admission` reconstructs the canonical document for
 every recorded context, verifies the digest and grants, and checks the
-requested graph's package/feature coverage. Only then does
+requested graph's package/feature coverage. An ordinary completed profile is
+reused before this check. Its record is written only after a build that passed
+admission, and it covers the admission state, lock, manifests, configuration,
+and policy. Reuse compiles and runs nothing new. Only after verification does
 `admission_state.rs` translate reconstructed
 evidence and explicit capabilities into exact generated allow rules. Policy
 evaluation still considers every matching explicit deny, so a generated allow
@@ -377,8 +380,9 @@ harnesses, bundle launchers, and build-script executables are not unit-cache
 entries.
 
 Root profile records complement the unit cache. Ordinary records contain
-rustc dep-info plus mutable path metadata and are checked after admission
-verification. Strict records contain content hashes. Debug root and mutable
+rustc dep-info plus mutable path metadata and are checked before admission
+is rebuilt. Strict records contain content hashes and are checked after
+admission. Debug root and mutable
 path units use stable target-specific rustc incremental directories below
 `target/lorry/.incremental`; atomic output publication never replaces that
 disposable compiler state. Release and immutable registry units omit

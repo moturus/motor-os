@@ -519,8 +519,8 @@ every enabled binary harness and defines `CARGO_BIN_EXE_<name>` for every
 program while compiling integration tests.
 Run resolves member build scripts under the same grants as build, and passes
 that member's published `OUT_DIR` and script environment to the program. It
-compiles only the selected binary. Completed-profile reuse keeps admission
-checks and skips dependency scripts.
+compiles only the selected binary. Completed-profile reuse skips admission and
+dependency scripts.
 Test uses those same target selectors, including repeated names and combined
 groups. Explicit library, binary, and example selections run harnesses even
 when their `test` flag is false. Plural tests/benches filter the corresponding
@@ -1722,9 +1722,11 @@ fingerprints. Tracked variables are those that any unit read and the caller
 variables granted to build scripts. It checks the size and mtime of each
 installed root artifact, so a binary that another selection reinstalls
 invalidates the record. It does not read artifact or dependency source
-contents. A matching record is checked after
-admission verification. The profile is then reused without invoking build
-scripts, rustc, native tools, or the linker. Strict mode also rehashes all of
+contents. An ordinary record is checked before admission is rebuilt. It is
+written only after a build that passed admission, and it covers the admission
+state, lock, manifests, configuration, and policy that admission checked. The
+profile is then reused without invoking build scripts, rustc, native tools, or
+the linker. A strict record is checked after admission and also rehashes all of
 those contents before reuse. A missing, malformed, stale, or differently-modeled
 record causes a normal rebuild. Test harnesses and bundle launchers are not
 reused by this profile-level check.
