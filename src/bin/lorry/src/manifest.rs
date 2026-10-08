@@ -863,7 +863,7 @@ fn validate_manifest_tables(
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                format!("unsupported Stage-2 manifest table or key `{key}`"),
+                format!("unsupported manifest table or key `{key}`"),
                 "remove it or use a later Lorry stage that supports its build semantics",
             ));
         }
@@ -921,7 +921,7 @@ fn validate_package_keys(
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                format!("unsupported Stage-2 manifest key `package.{key}`"),
+                format!("unsupported manifest key `package.{key}`"),
                 "remove the key or use a later Lorry stage that supports its build semantics",
             ));
         }
@@ -1175,7 +1175,7 @@ fn parse_library(
         return Err(Error::at(
             path,
             document.line_of_item(table.get("crate-type").unwrap()),
-            "custom library crate types are not supported in Stage 2",
+            "custom library crate types are not supported",
             "use a supported Rust library crate type",
         ));
     }
@@ -1356,7 +1356,7 @@ fn parse_dependency(
                 key,
                 "registry" | "registry-index" | "workspace" | "artifact" | "lib"
             ) {
-                format!("dependency source or mode `{key}` is not supported in Stage 2")
+                format!("dependency source or mode `{key}` is not supported")
             } else {
                 format!("unknown dependency key `{key}`")
             };
@@ -1624,8 +1624,8 @@ fn parse_target_dependencies(
                     return Err(Error::at(
                         path,
                         document.line_of_item(item),
-                        format!("root `target.{selector}.{key}` is not supported in Stage 2"),
-                        "root build-dependencies and dev-dependencies are deferred",
+                        format!("unsupported manifest key `target.{selector}.{key}`"),
+                        "use dependencies, build-dependencies, or dev-dependencies",
                     ));
                 }
             };
@@ -1673,7 +1673,7 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                format!("patch source `{source}` is not supported in Stage 2"),
+                format!("patch source `{source}` is not supported"),
                 "use `[patch.crates-io]` with exact local path replacements",
             ));
         }
@@ -1835,7 +1835,7 @@ fn parse_lint_namespace(
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                format!("lint namespace `lints.{key}` is not supported in Stage 2"),
+                format!("lint namespace `lints.{key}` is not supported"),
                 "configure lints under rust, clippy, or rustdoc namespaces",
             ));
         }
@@ -2595,7 +2595,7 @@ fn validate_package_name(path: &Path, line: usize, name: &str) -> Result<()> {
         return Err(Error::at(
             path,
             line,
-            format!("unsupported Stage-2 package name `{name}`"),
+            format!("unsupported package name `{name}`"),
             "use 1–64 ASCII letters, digits, `-`, or `_`, including at least one letter",
         ));
     }
@@ -2729,7 +2729,7 @@ fn unsupported_key(path: &Path, document: &Document, item: &Item, name: &str) ->
     Error::at(
         path,
         document.line_of_item(item),
-        format!("unsupported Stage-2 manifest key `{name}`"),
+        format!("unsupported manifest key `{name}`"),
         "remove the key or use a later Lorry stage",
     )
 }
@@ -3863,6 +3863,42 @@ bench = false
             target_names(&manifest, TargetKind::Test),
             ["auto-test", "directory-test"]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dependency_target_names_follow_cargo_rules() {
+        let root = target_fixture("dependency-target-names");
+        fs::create_dir_all(root.join("examples")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        // prettyplease ships such an example and disables example discovery.
+        fs::write(root.join("examples/output.pretty.rs"), "fn main() {}\n").unwrap();
+        let long = "t".repeat(70);
+        fs::write(root.join(format!("tests/{long}.rs")), "").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"dep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+                 autoexamples = false\n[[test]]\nname = \"{long}\"\n"
+            ),
+        )
+        .unwrap();
+        let manifest = Manifest::load_path_dependency(&root).unwrap();
+        assert!(
+            manifest
+                .targets
+                .iter()
+                .all(|target| target.kind != TargetKind::Example)
+        );
+        assert!(manifest.targets.iter().any(|target| target.name == long));
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"dep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             [[test]]\nname = \"../escape\"\n",
+        )
+        .unwrap();
+        let error = Manifest::load_path_dependency(&root).unwrap_err().render();
+        assert!(error.contains("unsupported target name"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -480,7 +480,7 @@ fn reject_environment(environment: &BTreeMap<String, String>) -> Result<()> {
     for variable in ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
         if environment.contains_key(variable) {
             return Err(Error::failure(format!(
-                "environment variable `{variable}` is not supported: compiler wrappers are outside the Stage-2 identity contract"
+                "environment variable `{variable}` is not supported: Lorry does not support compiler wrappers"
             ))
             .with_help(format!("unset `{variable}` before invoking Lorry")));
         }
@@ -608,7 +608,7 @@ fn validate_lorry_root(path: &Path, document: &Document) -> Result<()> {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                format!("unsupported Stage-2 Lorry configuration key `{key}`"),
+                format!("unsupported Lorry configuration key `{key}`"),
                 "remove the unknown key",
             ));
         }
@@ -1431,7 +1431,7 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
                         path,
                         document.line_of_item(item),
                         format!("Cargo `build.{key}` is not supported"),
-                        "remove the wrapper; compiler wrappers are outside Stage 2",
+                        "remove the wrapper; Lorry does not support compiler wrappers",
                     ));
                 }
                 _ => unreachable!(),

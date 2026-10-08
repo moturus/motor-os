@@ -253,7 +253,7 @@ fn print_help(topic: Option<&str>) {
              run                         Build and run its binary\n  \
              test                        Build and run unit and integration tests\n  \
              tree                        Display a package dependency tree\n  \
-             vendor                      Vendor dependencies (Stage 2)\n  \
+             vendor                      Vendor dependencies\n  \
              help                        Show this help"
         ),
     }

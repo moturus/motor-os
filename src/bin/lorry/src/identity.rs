@@ -229,7 +229,7 @@ fn hash_profile(profile: &CargoProfile<'_>, hasher: &mut StableHasher) {
     profile.rpath.hash(hasher);
     (profile.incremental, profile.panic, profile.strip).hash(hasher);
     profile.rustflags.hash(hasher);
-    // Stage 2 does not admit Cargo's unstable trim-paths profile setting.
+    // Lorry does not admit Cargo's unstable trim-paths profile setting.
     Option::<&str>::None.hash(hasher);
 }
 

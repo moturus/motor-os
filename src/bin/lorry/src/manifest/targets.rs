@@ -7,7 +7,7 @@ use toml_edit::{Item, Table};
 
 use super::{
     Edition, optional_bool, optional_string, optional_string_array, parse_edition, required_string,
-    type_error, unsupported_key, validate_package_name, validate_relative_path,
+    type_error, unsupported_key, validate_relative_path,
 };
 use crate::diagnostic::{Error, Result};
 use crate::toml::Document;
@@ -157,11 +157,10 @@ pub(super) fn parse(
         .collect::<Vec<_>>();
     let auto = package.table.get(kind.auto_key()).and_then(Item::as_bool);
     if auto.unwrap_or(explicit.is_none() || package.edition != Edition::E2015) {
-        targets.extend(
-            remaining
-                .into_iter()
-                .map(|(name, source)| Target::new(kind, name, source, package.edition)),
-        );
+        for (name, source) in remaining {
+            validate_target_name(path, 1, &name)?;
+            targets.push(Target::new(kind, name, source, package.edition));
+        }
     } else if auto.is_none() && !remaining.is_empty() {
         warnings.push(format!(
             "{}: an explicit [[{}]] section disables automatic {} target inference in edition 2015; set `{}` explicitly",
@@ -237,7 +236,7 @@ fn parse_table(
     }
     let name = required_string(path, document, table, section, "name")?;
     let line = document.line_of_table(table);
-    validate_package_name(path, line, &name)?;
+    validate_target_name(path, line, &name)?;
     let mut source = PathBuf::new();
     if let Some(relative) = optional_string(path, document, table, section, "path")? {
         validate_relative_path(path, line, &format!("{section}.path"), &relative)?;
@@ -288,6 +287,27 @@ fn parse_table(
         }
     }
     Ok(target)
+}
+
+/// Like Cargo, accepts any non-empty name; rustc rejects one that is not a
+/// valid crate name when the target is built. Lorry also uses the name as a
+/// file name, so it must be one.
+fn validate_target_name(path: &Path, line: usize, name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 255
+        || matches!(name, "." | "..")
+        || name
+            .chars()
+            .any(|character| matches!(character, '/' | '\\') || character.is_control())
+    {
+        return Err(Error::at(
+            path,
+            line,
+            format!("unsupported target name `{name}`"),
+            "use a name that is also a file name",
+        ));
+    }
+    Ok(())
 }
 
 /// Returns the single inferred source for `name`. Only a binary fails here.
@@ -382,7 +402,6 @@ fn infer(package: &Package<'_>, kind: TargetKind) -> Result<Vec<(String, PathBuf
         } else {
             continue;
         };
-        validate_package_name(package.path, 1, &name)?;
         inferred.push((name, source));
     }
     inferred.sort();
