@@ -75,8 +75,7 @@ dependencies = [
 name = "javy-smoke"
 version = "0.1.0"
 dependencies = [
- "moto-stats",
- "moto-sys",
+ "wasm-smoke-suite",
  "wat",
 ]
 
@@ -168,6 +167,14 @@ checksum = "3f9dca005e69bf015e45577e415b9af8c67e8ee3c0e38b5b0add5aa92581ed5c"
 dependencies = [
  "leb128fmt",
  "wasmparser",
+]
+
+[[package]]
+name = "wasm-smoke-suite"
+version = "0.1.0"
+dependencies = [
+ "moto-stats",
+ "moto-sys",
 ]
 
 [[package]]

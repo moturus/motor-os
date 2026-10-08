@@ -1,4 +1,4 @@
-use super::{Result, SUPPORT_DIR, Suite, fs};
+use super::{JavyTools, Result, SUPPORT_DIR, Suite, fs};
 
 pub(super) fn run(suite: &mut Suite) -> Result<()> {
     fs::write(
