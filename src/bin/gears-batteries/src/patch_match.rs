@@ -15,8 +15,14 @@ pub fn locate(source: &str, old: &str, new: &str) -> Result<Match, String> {
     }
     let rules = ["exact", "trailing spaces", "repeated spaces", "indentation"];
     for escaped in [false, true] {
+        // Text with real line breaks was not escaped twice; its `\n` stays literal.
         let (old, new) = if escaped {
-            (unescape(old), unescape(new))
+            let new = if new.contains(['\n', '\t']) {
+                new.to_string()
+            } else {
+                unescape(new)
+            };
+            (unescape(old), new)
         } else {
             (old.to_string(), new.to_string())
         };
@@ -36,7 +42,11 @@ pub fn locate(source: &str, old: &str, new: &str) -> Result<Match, String> {
             }
             let range = haystack.positions[start].0..haystack.positions[start + needle.len() - 1].1;
             return Ok(Match {
-                replacement: reindent(source, range.start, &new),
+                replacement: if mode == 3 {
+                    reindent(source, range.start, &old, &new)
+                } else {
+                    new
+                },
                 range,
                 rule: if escaped {
                     "escaped newlines/tabs"
@@ -79,16 +89,14 @@ fn normalized(text: &str, mode: usize) -> Normalized {
         } else {
             body
         };
-        let skip = if mode >= 3 {
-            body.len() - body.trim_start_matches([' ', '\t']).len()
-        } else {
-            0
-        };
+        let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+        let skip = if mode >= 3 { indent } else { 0 };
         let mut space = false;
         for (at, ch) in body[skip..].char_indices() {
             let start = offset + skip + at;
             let end = start + ch.len_utf8();
-            let is_space = matches!(ch, ' ' | '\t');
+            // Indentation is left to the indentation rule, which re-indents.
+            let is_space = matches!(ch, ' ' | '\t') && skip + at >= indent;
             if mode >= 2 && is_space && space {
                 if let Some(position) = result.positions.last_mut() {
                     position.1 = end;
@@ -114,33 +122,39 @@ fn normalized(text: &str, mode: usize) -> Normalized {
     result
 }
 
-fn reindent(source: &str, start: usize, new: &str) -> String {
+/// Only the indentation rule ignores leading whitespace, so only it moves
+/// `new` by the difference between the matched source line and `old`.
+fn reindent(source: &str, start: usize, old: &str, new: &str) -> String {
     let line_start = source[..start].rfind('\n').map_or(0, |at| at + 1);
-    let retained = &source[line_start..start];
-    if !retained.chars().all(|ch| matches!(ch, ' ' | '\t')) {
+    let found = &source[line_start..start];
+    if found.len() != indentation(found).len() {
         return new.into();
     }
-    let rest = &source[line_start..];
-    let indent = &rest[..rest.len() - rest.trim_start_matches([' ', '\t']).len()];
-    let common = new
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.len() - line.trim_start_matches([' ', '\t']).len())
-        .min()
-        .unwrap_or(0);
+    let wrote = indentation(old);
     let mut result = String::new();
     for (index, line) in new.split_inclusive('\n').enumerate() {
-        let skip = common.min(line.len() - line.trim_start_matches([' ', '\t']).len());
-        if !line.trim().is_empty() {
-            result.push_str(if index == 0 {
-                &indent[retained.len()..]
-            } else {
-                indent
-            });
+        let own = indentation(line);
+        let body = &line[own.len()..];
+        if index == 0 {
+            // The source keeps its own indentation before the match.
+        } else if body.trim().is_empty() {
+            result.push_str(own);
+        } else if let Some(deeper) = own.strip_prefix(wrote) {
+            result.push_str(found);
+            result.push_str(deeper);
+        } else if wrote.starts_with(own) {
+            let shallower = wrote.len() - own.len();
+            result.push_str(&found[..found.len().saturating_sub(shallower)]);
+        } else {
+            result.push_str(own);
         }
-        result.push_str(&line[skip..]);
+        result.push_str(body);
     }
     result
+}
+
+fn indentation(text: &str) -> &str {
+    &text[..text.len() - text.trim_start_matches([' ', '\t']).len()]
 }
 
 #[cfg(test)]
@@ -181,6 +195,38 @@ mod tests {
         assert_eq!(apply("let x = 1;", "1", "2").0, "let x = 2;");
         // Literal escapes stay literal when an exact match succeeds.
         assert_eq!(apply("literal\\n", "literal\\n", "keep\\n").0, "keep\\n");
+    }
+
+    #[test]
+    fn whole_line_edits_keep_relative_indentation() {
+        let source = "    if a {\n        b();\n    }\n}\n";
+        let (output, rule) = apply(source, "        b();\n    }\n", "        c();\n    }\n");
+        assert_eq!(rule, "exact");
+        assert_eq!(output, "    if a {\n        c();\n    }\n}\n");
+        // Written two levels too shallow: every line moves by the same amount.
+        let (output, rule) = apply(source, "    b();\n}\n", "    c();\n      d();\n}\n");
+        assert_eq!(rule, "indentation");
+        assert_eq!(
+            output,
+            "    if a {\n        c();\n          d();\n    }\n}\n"
+        );
+        // Written too deep: lines shallower than the first move up as well.
+        let (output, rule) = apply(
+            source,
+            "            b();\n        }\n",
+            "            c();\n        }\n",
+        );
+        assert_eq!(rule, "indentation");
+        assert_eq!(output, "    if a {\n        c();\n    }\n}\n");
+    }
+
+    #[test]
+    fn escaped_matches_unescape_replacements_only_when_escaped_too() {
+        let source = "let a = 1;\nlet b = 2;\n";
+        let doubled = apply(source, "let a = 1;\\nlet b = 2;\\n", "let c = 3;\\n").0;
+        assert_eq!(doubled, "let c = 3;\n");
+        let literal = apply(source, "let a = 1;\\nlet b = 2;\\n", "print!(\"x\\n\");\n").0;
+        assert_eq!(literal, "print!(\"x\\n\");\n");
     }
 
     #[test]
