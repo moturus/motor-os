@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1187,15 +1187,38 @@ fn acquire_lock(path: &Path) -> Result<PathBuf, String> {
     Err(format!("cannot lock {}", path.display()))
 }
 
-fn write_line(writer: &mut File, value: &impl Serialize) -> Result<(), String> {
-    serde_json::to_writer(&mut *writer, value)
+/// A file that a failed record can be cut back from.
+trait RecordFile: Write + Seek {
+    fn cut(&mut self, len: u64) -> std::io::Result<()>;
+}
+
+impl RecordFile for File {
+    fn cut(&mut self, len: u64) -> std::io::Result<()> {
+        self.set_len(len)
+    }
+}
+
+/// Write one record with one call. A failed write is cut off, so the next
+/// record cannot continue a partial line in the middle of the file.
+fn write_line(writer: &mut impl RecordFile, value: &impl Serialize) -> Result<(), String> {
+    let mut line = serde_json::to_vec(value)
         .map_err(|error| format!("cannot serialize session record: {error}"))?;
-    writer
-        .write_all(b"\n")
+    line.push(b'\n');
+    let start = writer
+        .seek(SeekFrom::End(0))
         .map_err(|error| format!("cannot write session record: {error}"))?;
-    writer
-        .flush()
-        .map_err(|error| format!("cannot flush session record: {error}"))
+    let Err(error) = writer.write_all(&line) else {
+        return Ok(());
+    };
+    match writer
+        .cut(start)
+        .and_then(|()| writer.seek(SeekFrom::Start(start)))
+    {
+        Ok(_) => Err(format!("cannot write session record: {error}")),
+        Err(cut) => Err(format!(
+            "cannot write session record: {error}; its partial bytes remain: {cut}"
+        )),
+    }
 }
 
 fn entry_summary(entry: &Entry) -> String {
@@ -1895,5 +1918,53 @@ mod tests {
         assert!(second.list().unwrap().is_empty());
         drop(session);
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Accepts `room` more bytes, then fails like a full disk.
+    struct Full {
+        inner: std::io::Cursor<Vec<u8>>,
+        room: usize,
+    }
+
+    impl Write for Full {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.room == 0 {
+                return Err(std::io::Error::other("disk full"));
+            }
+            let count = buf.len().min(self.room);
+            self.room -= count;
+            self.inner.write(&buf[..count])
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for Full {
+        fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(to)
+        }
+    }
+
+    impl RecordFile for Full {
+        fn cut(&mut self, len: u64) -> std::io::Result<()> {
+            self.inner.get_mut().truncate(len as usize);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failed_record_write_leaves_only_whole_lines() {
+        let mut file = Full {
+            inner: std::io::Cursor::new(Vec::new()),
+            room: 20,
+        };
+        write_line(&mut file, &serde_json::json!({"a": 1})).unwrap();
+        let long = serde_json::json!({"long": "x".repeat(40)});
+        assert!(write_line(&mut file, &long).is_err());
+        file.room = 100;
+        write_line(&mut file, &serde_json::json!({"b": 2})).unwrap();
+        assert_eq!(file.inner.into_inner(), b"{\"a\":1}\n{\"b\":2}\n");
     }
 }
