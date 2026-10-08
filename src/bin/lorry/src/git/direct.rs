@@ -114,7 +114,7 @@ pub(crate) fn materialize_locked_sources(
     if manifest.lock.is_none() && !has_git_dependency(manifest) {
         return Ok(DirectCatalog::default());
     }
-    materialize_locked_catalog(manifest, network, policy, verbose, progress, true)
+    materialize_locked_catalog(manifest, network, policy, verbose, progress)
 }
 
 fn materialize_locked_catalog(
@@ -123,7 +123,6 @@ fn materialize_locked_catalog(
     policy: &PolicyLimits,
     verbose: bool,
     progress: Progress,
-    describe: bool,
 ) -> Result<DirectCatalog> {
     let mut objects = BTreeMap::new();
     let mut materialized = BTreeSet::new();
@@ -138,7 +137,7 @@ fn materialize_locked_catalog(
         };
         objects.insert(locked.cargo_source.clone(), object);
     }
-    direct_catalog(manifest, policy, &objects, materialized, describe)
+    direct_catalog(manifest, policy, &objects, materialized, true)
 }
 
 pub(crate) fn load_locked_dependencies(

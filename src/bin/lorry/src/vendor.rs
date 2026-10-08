@@ -172,7 +172,6 @@ struct Acquisition<'a> {
     inspections: Vec<ExtractedArchive>,
     state: Option<AcquisitionState>,
     progress: Progress,
-    describe: bool,
 }
 
 struct AcquisitionState {
@@ -242,14 +241,7 @@ impl<'a> Acquisition<'a> {
             inspections: Vec::new(),
             state: None,
             progress,
-            describe: false,
         })
-    }
-
-    fn for_sources(config: &'a Config, manifest: &Manifest, progress: Progress) -> Result<Self> {
-        let mut acquisition = Self::new(config, manifest, progress)?;
-        acquisition.describe = true;
-        Ok(acquisition)
     }
 
     fn load_locked_sparse(
@@ -407,7 +399,6 @@ impl<'a> Acquisition<'a> {
 
     fn stage_selected(&mut self, resolution: &Resolution) -> Result<usize> {
         let max_package_bytes = self.config.policy.limits.max_package_bytes;
-        let describe = self.describe;
         self.stage_selected_with(resolution, |state, package, record| {
             let url = archive_url(&package.key.name, &package.key.version)?;
             let download = state.client.download(
@@ -416,13 +407,9 @@ impl<'a> Acquisition<'a> {
                 state.transaction.path(),
                 max_package_bytes,
             )?;
-            if describe {
-                state
-                    .transaction
-                    .stage_registry_description(record, download.path())?;
-            } else {
-                state.transaction.stage_registry(record, download.path())?;
-            }
+            state
+                .transaction
+                .stage_registry_description(record, download.path())?;
             Ok(())
         })
     }
@@ -433,29 +420,6 @@ impl<'a> Acquisition<'a> {
         direct: &crate::git::DirectCatalog,
     ) -> Result<BTreeMap<PackageKey, PackageEvidence>> {
         let repositories = self.repositories.clone();
-        let mut retained = Vec::new();
-        for package in &resolution.packages {
-            let ResolvedSource::CratesIo { checksum } = package.source else {
-                continue;
-            };
-            if self.has_staged_registry(checksum) {
-                continue;
-            }
-            let object = repositories
-                .lookup_registry(&hex(&checksum))?
-                .ok_or_else(|| {
-                    Error::failure(format!(
-                        "selected crates.io package `{} {}` is absent",
-                        package.key.name, package.key.version
-                    ))
-                })?;
-            if object.retained_source {
-                retained.push(object);
-            }
-        }
-        if !self.describe {
-            repositories.load_registry_manifests(&retained)?;
-        }
         let git_packages = resolution
             .packages
             .iter()
@@ -516,11 +480,7 @@ impl<'a> Acquisition<'a> {
                             self.inspections.push(extracted);
                             (source, tree)
                         };
-                        let manifest = if !self.describe && object.retained_source {
-                            repositories.load_registry_manifest(&object)?
-                        } else {
-                            Manifest::load_registry_dependency(&source, self.describe)?
-                        };
+                        let manifest = Manifest::load_registry_dependency(&source, true)?;
                         PackageEvidence::from_registry(package, &object, &manifest, &tree, false)?
                     }
                 }

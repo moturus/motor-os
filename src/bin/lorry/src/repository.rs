@@ -283,47 +283,6 @@ impl RepositorySet {
         lock_cache(&self.verified_registry_manifests).insert(checksum, manifest.clone());
         Ok(manifest)
     }
-
-    pub fn load_registry_manifests(
-        &self,
-        objects: &[RegistryObject],
-    ) -> Result<BTreeMap<String, Manifest>> {
-        if objects.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let workers = thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(objects.len());
-        let chunk_size = objects.len().div_ceil(workers);
-        let batches = thread::scope(|scope| {
-            let handles = objects
-                .chunks(chunk_size)
-                .map(|chunk| {
-                    scope.spawn(|| {
-                        chunk
-                            .iter()
-                            .map(|object| {
-                                (hex(&object.checksum), self.load_registry_manifest(object))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle.join().map_err(|_| {
-                        Error::failure("registry manifest worker terminated unexpectedly")
-                    })
-                })
-                .collect::<Result<Vec<_>>>()
-        })?;
-        let mut manifests = BTreeMap::new();
-        for (checksum, manifest) in batches.into_iter().flatten() {
-            manifests.insert(checksum, manifest?);
-        }
-        Ok(manifests)
-    }
 }
 
 /// Locks a verification cache, recovering from a poisoned lock: cache entries
@@ -431,29 +390,14 @@ impl RepositoryTransaction {
         self.staging.path()
     }
 
-    pub fn stage_registry(
-        &mut self,
-        record: &SparseRecord,
-        archive: &Path,
-    ) -> Result<&StagedRegistryObject> {
-        self.stage_registry_package(record, archive, false)
-    }
-
+    /// Stages a crates.io package with the manifest description admission
+    /// reviews; build targets are checked when a build loads it.
     pub(crate) fn stage_registry_description(
         &mut self,
         record: &SparseRecord,
         archive: &Path,
     ) -> Result<&StagedRegistryObject> {
-        self.stage_registry_package(record, archive, true)
-    }
-
-    fn stage_registry_package(
-        &mut self,
-        record: &SparseRecord,
-        archive: &Path,
-        describe: bool,
-    ) -> Result<&StagedRegistryObject> {
-        let load = |root: &Path| Manifest::load_registry_dependency(root, describe);
+        let load = |root: &Path| Manifest::load_registry_dependency(root, true);
         if self
             .objects
             .iter()
@@ -523,12 +467,6 @@ impl RepositoryTransaction {
             return Err(Error::failure(format!(
                 "downloaded archive identifies `{} {}`, but sparse index selected `{} {}`",
                 manifest.name, manifest.version.original, record.name, record.version
-            )));
-        }
-        if !describe && manifest.metadata.license.is_empty() {
-            return Err(Error::failure(format!(
-                "downloaded package `{} {}` has no license expression",
-                record.name, record.version
             )));
         }
         let tree = extracted.tree().clone();
@@ -1775,7 +1713,9 @@ mod tests {
             record_bytes.as_bytes(),
         )
         .unwrap();
-        transaction.stage_registry(&record, &archive).unwrap();
+        transaction
+            .stage_registry_description(&record, &archive)
+            .unwrap();
         checksum
     }
 
@@ -1873,17 +1813,7 @@ mod tests {
             .as_bytes(),
         )
         .unwrap();
-        let mut compilation = writer.begin().unwrap();
-        assert!(compilation.stage_registry(&record, &archive).is_err());
-        drop(compilation);
-        let mut transaction = RepositoryWriter::open(
-            &repositories,
-            crate::source_tree::DEFAULT_LIMITS,
-            archive_limits(),
-        )
-        .unwrap()
-        .begin()
-        .unwrap();
+        let mut transaction = writer.begin().unwrap();
         let staged = transaction
             .stage_registry_description(&record, &archive)
             .unwrap();
