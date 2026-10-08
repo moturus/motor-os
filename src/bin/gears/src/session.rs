@@ -379,6 +379,61 @@ impl std::ops::Deref for Snapshot {
 
 /// Read while another process appends. Partial records and unfinished tool
 /// rounds are omitted in memory; the source file is never changed.
+/// Every session file under a Gears directory, in each workspace's group
+/// directory. Entries that cannot be read safely are reported, not followed.
+pub fn discover(
+    directory: &Path,
+    files: &mut Vec<PathBuf>,
+    unavailable: &mut Vec<(PathBuf, String)>,
+) -> Result<(), String> {
+    let root = directory;
+    let sessions = root.join("sessions");
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if directory == root && entry.file_name() == "sessions" {
+                let kind = entry.file_type().map_err(|error| error.to_string())?;
+                if kind.is_symlink() || !kind.is_dir() {
+                    unavailable.push((
+                        entry.path(),
+                        "session directory is not a plain directory".into(),
+                    ));
+                } else {
+                    pending.push(entry.path());
+                }
+                continue;
+            }
+            if directory == root || directory == sessions {
+                let name = entry.file_name();
+                let group = name
+                    .to_str()
+                    .and_then(|name| name.rsplit_once('-'))
+                    .is_some_and(|(_, hash)| {
+                        hash.len() == 24 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    });
+                if !group {
+                    continue;
+                }
+            }
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            if kind.is_symlink() {
+                unavailable.push((entry.path(), "symbolic link refused".into()));
+            } else if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            {
+                files.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn read_snapshot(path: &Path) -> Result<Snapshot, String> {
     let path = path
         .canonicalize()

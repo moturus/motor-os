@@ -53,7 +53,7 @@ pub fn describe_with(
         );
     };
     let mut files = Vec::new();
-    crate::session_search::discover(&root, &mut files, &mut unavailable)?;
+    gears::session::discover(&root, &mut files, &mut unavailable)?;
     for file in files {
         let loaded = std::fs::metadata(&file)
             .map_err(|error| error.to_string())

@@ -1,7 +1,7 @@
 //! Scan immutable session snapshots, retaining every branch and provenance.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gears::provider::{ContentBlock, Message, ToolOutcome};
 use serde_json::{Value, json};
@@ -26,7 +26,7 @@ pub fn search(
         );
     };
     let (mut files, mut unavailable) = (Vec::new(), Vec::new());
-    discover(&root, &mut files, &mut unavailable)?;
+    gears::session::discover(&root, &mut files, &mut unavailable)?;
     files.sort();
     let mut hits = Vec::new();
     let mut total = 0_usize;
@@ -87,11 +87,7 @@ pub fn search(
                     content,
                     ..
                 } => {
-                    (*outcome != ToolOutcome::NotStarted
-                        && matches!(
-                            tool_name.as_str(),
-                            "curl" | "web_fetch" | "web_search" | "worker"
-                        ))
+                    (*outcome != ToolOutcome::NotStarted && tool_name == "curl")
                         || crate::provenance::marked(content)
                 }
                 ContentBlock::Text { text } => crate::provenance::marked(text),
@@ -131,59 +127,6 @@ pub fn search(
         json!({"hits": hits, "total_matches": total, "next_offset": (next < total).then_some(next),
         "unavailable": unavailable, "unavailable_count": unavailable_count}),
     )
-}
-
-pub(crate) fn discover(
-    directory: &Path,
-    files: &mut Vec<PathBuf>,
-    unavailable: &mut Vec<(PathBuf, String)>,
-) -> Result<(), String> {
-    let root = directory;
-    let sessions = root.join("sessions");
-    let mut pending = vec![directory.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory).map_err(|error| error.to_string())? {
-            let entry = entry.map_err(|error| error.to_string())?;
-            if directory == root && entry.file_name() == "sessions" {
-                let kind = entry.file_type().map_err(|error| error.to_string())?;
-                if kind.is_symlink() || !kind.is_dir() {
-                    unavailable.push((
-                        entry.path(),
-                        "session directory is not a plain directory".into(),
-                    ));
-                } else {
-                    pending.push(entry.path());
-                }
-                continue;
-            }
-            if directory == root || directory == sessions {
-                let name = entry.file_name();
-                let group = name
-                    .to_str()
-                    .and_then(|name| name.rsplit_once('-'))
-                    .is_some_and(|(_, hash)| {
-                        hash.len() == 24 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    });
-                if !group {
-                    continue;
-                }
-            }
-            let kind = entry.file_type().map_err(|error| error.to_string())?;
-            if kind.is_symlink() {
-                unavailable.push((entry.path(), "symbolic link refused".into()));
-            } else if kind.is_dir() {
-                pending.push(entry.path());
-            } else if kind.is_file()
-                && entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "jsonl")
-            {
-                files.push(entry.path());
-            }
-        }
-    }
-    Ok(())
 }
 
 fn excerpt(text: &str, at: usize) -> &str {

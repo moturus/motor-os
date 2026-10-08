@@ -99,7 +99,7 @@ pub fn scan(context: &ToolContext) -> Result<Usage, String> {
     };
     let mut files = Vec::new();
     let mut unavailable = Vec::new();
-    crate::session_search::discover(&root, &mut files, &mut unavailable)?;
+    gears::session::discover(&root, &mut files, &mut unavailable)?;
     usage.unavailable.extend(unavailable.into_iter().map(
         |(path, error)| json!({"file": path.strip_prefix(&root).unwrap_or(&path), "error": error}),
     ));
