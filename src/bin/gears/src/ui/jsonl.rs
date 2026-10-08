@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::process::Stream;
 use crate::provider::{Role, UsageMeter};
-use crate::runtime::{Approval, Approver, Event, Observer, Permission, Runtime};
+use crate::runtime::{Event, Observer, Runtime, Unattended};
 
 pub const VERSION: u32 = 1;
 
@@ -56,18 +56,6 @@ pub fn run(runtime: &mut Runtime, prompt: String, writer: impl Write) -> Result<
         "session_usage": usage_value(runtime.usage()),
     }))?;
     result
-}
-
-struct Unattended;
-
-impl Approver for Unattended {
-    fn attended(&self) -> bool {
-        false
-    }
-
-    fn approve(&mut self, _: &Permission) -> Approval {
-        Approval::Deny
-    }
 }
 
 struct Renderer<W> {

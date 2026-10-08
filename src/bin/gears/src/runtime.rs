@@ -140,7 +140,8 @@ where
 
 pub type ProviderFactory = Arc<dyn Fn(&str) -> Result<Arc<dyn Provider>, String> + Send + Sync>;
 
-struct Unattended;
+/// Answers every question with a denial, for runs nobody is watching.
+pub struct Unattended;
 
 impl Approver for Unattended {
     fn approve(&mut self, _: &Permission) -> Approval {
@@ -257,7 +258,7 @@ impl Runtime {
         if let Some(prefix) = &preserved_prefix {
             preserve_hook_payload(&session, prefix, &mut payload, &mut startup_notices)?;
         }
-        let hooks = Hooks::initialize_with_payload(
+        let hooks = Hooks::initialize(
             config.hooks.clone(),
             store.workspace().to_path_buf(),
             &reserved_names,

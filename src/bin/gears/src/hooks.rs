@@ -163,35 +163,6 @@ impl Manager {
     pub fn initialize(
         configs: Vec<HookConfig>,
         workspace: PathBuf,
-        session: &mut Session,
-        cancellation: &Cancellation,
-        notice: &mut dyn FnMut(String),
-    ) -> Result<Self, String> {
-        Self::initialize_with_reserved(configs, workspace, &[], session, cancellation, notice)
-    }
-
-    pub fn initialize_with_reserved(
-        configs: Vec<HookConfig>,
-        workspace: PathBuf,
-        reserved_names: &[String],
-        session: &mut Session,
-        cancellation: &Cancellation,
-        notice: &mut dyn FnMut(String),
-    ) -> Result<Self, String> {
-        Self::initialize_with_payload(
-            configs,
-            workspace,
-            reserved_names,
-            Value::Object(Default::default()),
-            session,
-            cancellation,
-            notice,
-        )
-    }
-
-    pub fn initialize_with_payload(
-        configs: Vec<HookConfig>,
-        workspace: PathBuf,
         reserved_names: &[String],
         payload: Value,
         session: &mut Session,
@@ -270,7 +241,7 @@ impl Manager {
         cancellation: &Cancellation,
         notice: &mut dyn FnMut(String),
     ) -> Result<Self, String> {
-        Self::initialize_with_payload(
+        Self::initialize(
             self.hooks.iter().map(|hook| hook.config.clone()).collect(),
             self.workspace.clone(),
             reserved_names,
@@ -439,28 +410,6 @@ impl Manager {
             }
         }
         Ok(messages)
-    }
-
-    pub fn permission(
-        &self,
-        call: &ToolCall,
-        session: &mut Session,
-        cancellation: &Cancellation,
-        notice: &mut dyn FnMut(String),
-    ) -> Decision {
-        self.permission_with_metadata(call, Value::Null, session, cancellation, notice)
-    }
-
-    pub fn permission_with_metadata(
-        &self,
-        call: &ToolCall,
-        metadata: Value,
-        session: &mut Session,
-        cancellation: &Cancellation,
-        notice: &mut dyn FnMut(String),
-    ) -> Decision {
-        self.permission_review(call, metadata, session, cancellation, notice)
-            .decision
     }
 
     pub fn permission_review(
@@ -1036,6 +985,8 @@ mod tests {
         let manager = Manager::initialize(
             vec![config.clone()],
             workspace.clone(),
+            &[],
+            Value::Object(Default::default()),
             &mut session,
             &cancellation,
             &mut |_| {},
@@ -1117,6 +1068,8 @@ mod tests {
             Manager::initialize(
                 vec![unsubscribed],
                 workspace.clone(),
+                &[],
+                Value::Object(Default::default()),
                 &mut session,
                 &Cancellation::new(),
                 &mut |_| {}
@@ -1171,6 +1124,8 @@ mod tests {
             let result = Manager::initialize(
                 vec![config],
                 workspace.clone(),
+                &[],
+                Value::Object(Default::default()),
                 &mut session,
                 &Cancellation::new(),
                 &mut |_| {},
@@ -1233,6 +1188,8 @@ esac"#,
         let manager = Manager::initialize(
             vec![first, second],
             workspace,
+            &[],
+            Value::Object(Default::default()),
             &mut session,
             &cancellation,
             &mut |notice| notices.push(notice),
@@ -1264,16 +1221,19 @@ printf '%s' '{"tools":[{"name":"same","description":"test","parameters":{"type":
                 hook("two", script, std::time::Duration::from_secs(2)),
             ],
             workspace,
+            &[],
+            Value::Object(Default::default()),
             &mut session,
             &Cancellation::new(),
             &mut |_| {},
         );
         assert!(matches!(result, Err(error) if error.contains("duplicate tool name")));
         let (workspace, mut session) = fixture("reserved-tool");
-        let result = Manager::initialize_with_reserved(
+        let result = Manager::initialize(
             vec![hook("one", script, std::time::Duration::from_secs(2))],
             workspace,
             &["same".to_string()],
+            Value::Object(Default::default()),
             &mut session,
             &Cancellation::new(),
             &mut |_| {},
@@ -1305,18 +1265,23 @@ esac"#
                 permission_hook("deny", "deny"),
             ],
             workspace,
+            &[],
+            Value::Object(Default::default()),
             &mut session,
             &cancellation,
             &mut |_| {},
         )
         .unwrap();
         assert_eq!(
-            manager.permission(
-                &ToolCall::new("c1", "sh", r#"{"command":"true"}"#),
-                &mut session,
-                &cancellation,
-                &mut |_| {},
-            ),
+            manager
+                .permission_review(
+                    &ToolCall::new("c1", "sh", r#"{"command":"true"}"#),
+                    Value::Null,
+                    &mut session,
+                    &cancellation,
+                    &mut |_| {},
+                )
+                .decision,
             Decision::Deny
         );
     }
@@ -1344,6 +1309,8 @@ esac"#
             let mut manager = Manager::initialize(
                 vec![hook(name, &script, std::time::Duration::from_secs(2))],
                 workspace,
+                &[],
+                Value::Object(Default::default()),
                 &mut session,
                 &Cancellation::new(),
                 &mut |_| {},
@@ -1355,12 +1322,15 @@ esac"#
             }
             let mut notices = Vec::new();
             assert_eq!(
-                manager.permission(
-                    &ToolCall::new("c1", "sh", r#"{"command":"true"}"#),
-                    &mut session,
-                    &cancellation,
-                    &mut |notice| notices.push(notice),
-                ),
+                manager
+                    .permission_review(
+                        &ToolCall::new("c1", "sh", r#"{"command":"true"}"#),
+                        Value::Null,
+                        &mut session,
+                        &cancellation,
+                        &mut |notice| notices.push(notice),
+                    )
+                    .decision,
                 Decision::Deny,
                 "{name}"
             );
@@ -1383,6 +1353,8 @@ esac"#
         let manager = Manager::initialize(
             vec![config],
             workspace.clone(),
+            &[],
+            Value::Object(Default::default()),
             &mut session,
             &Cancellation::new(),
             &mut |_| {},
@@ -1399,12 +1371,15 @@ esac"#
             .unwrap();
         assert!(!log.exists());
         assert_eq!(
-            manager.permission(
-                &ToolCall::new("c1", "sh", "{}"),
-                &mut session,
-                &Cancellation::new(),
-                &mut |_| {}
-            ),
+            manager
+                .permission_review(
+                    &ToolCall::new("c1", "sh", "{}"),
+                    Value::Null,
+                    &mut session,
+                    &Cancellation::new(),
+                    &mut |_| {}
+                )
+                .decision,
             Decision::Allow
         );
         let events = std::fs::read_to_string(&log).unwrap();
@@ -1415,18 +1390,23 @@ esac"#
         let manager = Manager::initialize(
             vec![config],
             workspace,
+            &[],
+            Value::Object(Default::default()),
             &mut session,
             &Cancellation::new(),
             &mut |_| {},
         )
         .unwrap();
         assert_eq!(
-            manager.permission(
-                &ToolCall::new("c2", "sh", "{}"),
-                &mut session,
-                &Cancellation::new(),
-                &mut |_| {}
-            ),
+            manager
+                .permission_review(
+                    &ToolCall::new("c2", "sh", "{}"),
+                    Value::Null,
+                    &mut session,
+                    &Cancellation::new(),
+                    &mut |_| {}
+                )
+                .decision,
             Decision::Ask
         );
     }
@@ -1448,6 +1428,8 @@ esac"#
             let manager = Manager::initialize(
                 vec![config],
                 workspace,
+                &[],
+                Value::Object(Default::default()),
                 &mut session,
                 &Cancellation::new(),
                 &mut |_| {},
@@ -1484,6 +1466,8 @@ esac"#
         let manager = Manager::initialize(
             vec![hook("setup", &script, std::time::Duration::from_secs(2))],
             workspace.clone(),
+            &[],
+            Value::Object(Default::default()),
             &mut session,
             &Cancellation::new(),
             &mut |_| {},

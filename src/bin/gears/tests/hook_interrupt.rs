@@ -28,6 +28,8 @@ fn an_interrupted_question_still_delivers_its_cancelled_answer() {
     let manager = Manager::initialize(
         vec![config],
         root.clone(),
+        &[],
+        serde_json::json!({}),
         &mut session,
         &cancellation,
         &mut |_| {},
