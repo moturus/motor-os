@@ -1,6 +1,34 @@
 # Gears review fixes
 
-Status: plan, awaiting review. No code has changed.
+Status (2026-10-08): steps 1–15 are done, one commit each. The
+learning-stack bugs (steps 16–20) are not started: the user asked to keep the
+learning stack as it is for now. Where the work differed from the steps below:
+
+- **Step 2, session lock.** It keeps the plain "process alive" owner rule.
+  Sessions are also opened by gears-batteries and by test processes, so a
+  "process is Gears" check would remove their live locks.
+- **Step 4, lifecycle hooks.** Most of the 11 `reset()` calls start a new
+  operation and are correct. A separate token would also need its own handling
+  of the global Ctrl+C flag. The three reset/run/restore sites now share one
+  helper, with no change in behavior.
+- **Step 12, approval identities.**
+  - They are not cached. An identity hashes the tool's executable, so a
+    binary replaced mid-session must stop matching earlier approvals.
+  - Removing the manifest fields kept every shipped tool's identity
+    byte-identical, so saved grants stay valid.
+- **Step 15, `workflow-smoke`.**
+  - Only `eval_options` was pure logic. It moved into a unit test.
+  - The other modules exercise files through the library. They stay in the
+    native Motor OS gate.
+  - The request total became a check that the script was used up. The
+    other totals pin real behavior and now carry comments.
+- **Additional fixes:**
+  - The "repeated spaces" patch rule matched indentation differences and
+    inserted the text unchanged. It now leaves indentation to the
+    indentation rule.
+  - `${HOME}` is now kept as one word by the shell tokenizer.
+  - A symlinked workspace `.gears/batteries.toml` is still refused, because
+    the check command must be declared in the workspace itself.
 
 This plan fixes the Gears and gears-batteries findings from the 2026-10-07
 branch review (non-Gears findings are in
