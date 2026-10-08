@@ -6,9 +6,7 @@ mod http;
 mod materialize;
 mod refresh;
 
-pub(crate) use direct::{
-    DirectCatalog, load_locked_dependencies, load_locked_sources, materialize_locked_sources,
-};
+pub(crate) use direct::{DirectCatalog, load_locked_sources, materialize_locked_sources};
 pub(crate) use refresh::{PatchRefresh, resolve_patch_refreshes};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

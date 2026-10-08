@@ -83,7 +83,6 @@ fn execute_with(cli: &Cli, notes: Verbosity, options: &MetadataOptions) -> Resul
             staging_parent: &scratch,
             evidence_root: &crate::engine::artifact_root(manifest).join(".cargo-evidence"),
         },
-        crate::git::load_locked_sources,
     )?;
     let (complete, catalog) = dependency::workspace::resolve_locked(
         &workspace,

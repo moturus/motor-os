@@ -4,50 +4,17 @@ use semver::Version;
 
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
-use crate::manifest::{LockedPackage, Lockfile, Manifest};
+use crate::manifest::{LockedPackage, Lockfile};
 use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedSource};
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
-
-pub fn validate_selected_resolution(manifest: &Manifest, resolution: &Resolution) -> Result<()> {
-    let lock = manifest
-        .lock
-        .as_ref()
-        .ok_or_else(|| stale("Cargo.lock is missing"))?;
-    let root = lock
-        .packages
-        .iter()
-        .find(|package| {
-            package.name == manifest.name
-                && package.version.original == manifest.version.original
-                && package.source.is_none()
-        })
-        .ok_or_else(|| {
-            stale(format!(
-                "Cargo.lock has no root path package `{} {}`",
-                manifest.name, manifest.version.original
-            ))
-        })?;
-    let source_kinds = source_kinds(resolution);
-    validate_edges(
-        "root package",
-        &resolution.root_edges,
-        &root.dependencies,
-        &lock.packages,
-        &source_kinds,
-        EdgeMode::SelectedSubset,
-        lock.format,
-    )?;
-
-    validate_packages(lock, resolution, &source_kinds, EdgeMode::SelectedSubset)
-}
 
 /// Workspace roots are ordinary packages; no synthetic root edges are locked.
 pub(crate) fn validate_workspace_resolution(
     lock: &Lockfile,
     resolution: &Resolution,
 ) -> Result<()> {
-    validate_packages(lock, resolution, &source_kinds(resolution), EdgeMode::Exact)
+    validate_packages(lock, resolution, &source_kinds(resolution))
 }
 
 fn source_kinds(resolution: &Resolution) -> BTreeMap<PackageKey, Option<String>> {
@@ -71,7 +38,6 @@ fn validate_packages(
     lock: &Lockfile,
     resolution: &Resolution,
     source_kinds: &BTreeMap<PackageKey, Option<String>>,
-    edge_mode: EdgeMode,
 ) -> Result<()> {
     let mut selected = BTreeSet::new();
     for package in &resolution.packages {
@@ -104,17 +70,10 @@ fn validate_packages(
             &locked.dependencies,
             &lock.packages,
             source_kinds,
-            edge_mode,
             lock.format,
         )?;
     }
     Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum EdgeMode {
-    Exact,
-    SelectedSubset,
 }
 
 fn find_registry_package<'a>(
@@ -202,7 +161,6 @@ fn validate_edges(
     locked: &[String],
     packages: &[LockedPackage],
     source_kinds: &BTreeMap<PackageKey, Option<String>>,
-    mode: EdgeMode,
     format: crate::lockfile::Format,
 ) -> Result<()> {
     let expected = resolved
@@ -240,11 +198,7 @@ fn validate_edges(
             source: package.source.clone(),
         });
     }
-    let agrees = match mode {
-        EdgeMode::Exact => actual == expected,
-        EdgeMode::SelectedSubset => expected.is_subset(&actual),
-    };
-    if !agrees {
+    if actual != expected {
         return Err(stale(format!(
             "{owner} dependency edges disagree with Cargo.lock: resolved [{}], locked [{}]",
             display_keys(&expected),
@@ -391,9 +345,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::config::IncompatibleRustVersions;
-    use crate::manifest::Resolver;
+    use crate::manifest::{Manifest, Resolver};
     use crate::resolver::workspace::resolve_locked_workspace;
-    use crate::resolver::{Catalog, Options, TargetSelection, resolve_selected};
+    use crate::resolver::{Catalog, Options};
     use crate::sparse::Record;
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -442,8 +396,8 @@ mod tests {
         )
     }
 
-    /// Returns the selected Linux graph and the complete locked graph.
-    fn fixture() -> (TempDir, Manifest, Resolution, Resolution) {
+    /// Returns the complete locked graph.
+    fn fixture() -> (TempDir, Manifest, Resolution) {
         let temp = TempDir::new();
         fs::write(
             temp.0.join("Cargo.toml"),
@@ -479,8 +433,6 @@ mod tests {
             ))
             .unwrap();
         catalog.insert(record("b", "2.0.0", "[]", 0x22)).unwrap();
-        let locked =
-            crate::resolver::LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
         let options = Options {
             resolver: Resolver::V2,
             incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
@@ -488,20 +440,6 @@ mod tests {
             package_limit: crate::policy::PackageLimit::with_max(16),
             max_depth: Some(8),
         };
-        let cfg = crate::toolchain::CfgSet::parse("unix\n").unwrap();
-        let selected = resolve_selected(
-            &manifest,
-            &catalog,
-            &options,
-            &locked,
-            TargetSelection {
-                target_triple: "x86_64-unknown-linux-gnu",
-                target_cfg: &cfg,
-                host_triple: "x86_64-unknown-linux-gnu",
-                host_cfg: &cfg,
-            },
-        )
-        .unwrap();
         let workspace = crate::manifest::SourceWorkspace::load(&temp.0, None).unwrap();
         let complete = resolve_locked_workspace(
             &workspace,
@@ -511,19 +449,18 @@ mod tests {
             &mut |_, _, _| Ok(()),
         )
         .unwrap();
-        (temp, manifest, selected, complete)
+        (temp, manifest, complete)
     }
 
     #[test]
-    fn accepts_the_selected_subgraph_and_unused_lock_nodes() {
-        let (_temp, manifest, selected, complete) = fixture();
-        validate_selected_resolution(&manifest, &selected).unwrap();
+    fn accepts_the_complete_graph_and_unused_lock_nodes() {
+        let (_temp, manifest, complete) = fixture();
         validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete).unwrap();
     }
 
     #[test]
-    fn selected_validation_allows_inactive_locked_edges_but_exact_validation_does_not() {
-        let (_temp, mut manifest, selected, complete) = fixture();
+    fn exact_validation_rejects_extra_locked_edges() {
+        let (_temp, mut manifest, complete) = fixture();
         let root = manifest
             .lock
             .as_mut()
@@ -534,7 +471,6 @@ mod tests {
             .unwrap();
         root.dependencies.push("unused".to_owned());
 
-        validate_selected_resolution(&manifest, &selected).unwrap();
         assert!(
             validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete)
                 .unwrap_err()
@@ -545,7 +481,7 @@ mod tests {
 
     #[test]
     fn rejects_checksum_node_and_edge_drift() {
-        let (_temp, mut manifest, _, complete) = fixture();
+        let (_temp, mut manifest, complete) = fixture();
         let lock = manifest.lock.as_mut().unwrap();
         lock.packages
             .iter_mut()
@@ -559,7 +495,7 @@ mod tests {
                 .contains("checksum")
         );
 
-        let (_temp, mut manifest, _, complete) = fixture();
+        let (_temp, mut manifest, complete) = fixture();
         let lock = manifest.lock.as_mut().unwrap();
         lock.packages
             .iter_mut()
@@ -574,7 +510,7 @@ mod tests {
                 .contains("dependency edges")
         );
 
-        let (_temp, mut manifest, _, complete) = fixture();
+        let (_temp, mut manifest, complete) = fixture();
         manifest
             .lock
             .as_mut()

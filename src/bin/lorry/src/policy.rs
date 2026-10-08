@@ -154,16 +154,8 @@ struct Facts<'a> {
     license: Fact,
 }
 
-pub fn preflight(policy: &Policy, resolution: &Resolution) -> Result<Preflight> {
-    let depth = selected_depth(resolution)?;
-    preflight_depth(policy, resolution, depth)
-}
-
 pub(crate) fn preflight_workspace(policy: &Policy, resolution: &Resolution) -> Result<Preflight> {
-    preflight_depth(policy, resolution, graph_depth(resolution, true)?)
-}
-
-fn preflight_depth(policy: &Policy, resolution: &Resolution, depth: u64) -> Result<Preflight> {
+    let depth = graph_depth(resolution)?;
     if let Some(limit) = policy.limits.max_depth
         && depth > limit
     {
@@ -404,7 +396,7 @@ pub(crate) fn preflight_sources(policy: &Policy, resolution: &Resolution) -> Res
             .collect(),
     }
     .check(resolution)?;
-    let depth = graph_depth(resolution, true)?;
+    let depth = graph_depth(resolution)?;
     if let Some(limit) = policy.limits.max_depth
         && depth > limit
     {
@@ -920,11 +912,8 @@ fn check_package_limits(
     Ok(())
 }
 
-fn selected_depth(resolution: &Resolution) -> Result<u64> {
-    graph_depth(resolution, false)
-}
-
-fn graph_depth(resolution: &Resolution, member_roots: bool) -> Result<u64> {
+/// Root edges point at workspace members, which do not count as a level.
+fn graph_depth(resolution: &Resolution) -> Result<u64> {
     let packages = resolution
         .packages
         .iter()
@@ -935,28 +924,26 @@ fn graph_depth(resolution: &Resolution, member_roots: bool) -> Result<u64> {
     let mut depth = 0;
     for edge in &resolution.root_edges {
         let tail = tail_depth(&edge.package, &packages, &mut memo, &mut visiting, None)?;
-        depth = depth.max(tail.saturating_sub(u64::from(member_roots)));
+        depth = depth.max(tail.saturating_sub(1));
     }
     let mut reachable = memo.keys().cloned().collect::<BTreeSet<_>>();
-    if member_roots {
-        for edge in &resolution.root_edges {
-            for dev in packages[&edge.package]
-                .edges
-                .iter()
-                .filter(|edge| edge.kind == crate::sparse::DependencyKind::Dev)
-            {
-                // A development dependency may depend back on this member.
-                // Its ordinary dependencies were already traversed above.
-                let mut dev_memo = BTreeMap::new();
-                depth = depth.max(tail_depth(
-                    &dev.package,
-                    &packages,
-                    &mut dev_memo,
-                    &mut visiting,
-                    Some(&edge.package),
-                )?);
-                reachable.extend(dev_memo.into_keys());
-            }
+    for edge in &resolution.root_edges {
+        for dev in packages[&edge.package]
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == crate::sparse::DependencyKind::Dev)
+        {
+            // A development dependency may depend back on this member.
+            // Its ordinary dependencies were already traversed above.
+            let mut dev_memo = BTreeMap::new();
+            depth = depth.max(tail_depth(
+                &dev.package,
+                &packages,
+                &mut dev_memo,
+                &mut visiting,
+                Some(&edge.package),
+            )?);
+            reachable.extend(dev_memo.into_keys());
         }
     }
     if reachable.len() != packages.len() {
@@ -1391,7 +1378,7 @@ mod tests {
         let mut inspected = evidence(&package, true);
         inspected.proc_macro = true;
         let evidence = BTreeMap::from([(package.key.clone(), inspected)]);
-        assert!(preflight(&policy, &resolution).is_err());
+        assert!(preflight_workspace(&policy, &resolution).is_err());
         inspect_sources(&policy, &resolution, &evidence).unwrap();
         policy.limits.max_package_bytes = 99;
         assert!(
@@ -1495,7 +1482,7 @@ mod tests {
             "allow-demo".to_owned(),
             rule(PolicyAction::Allow, Some(hex(&checksum(4))), Some("MIT")),
         );
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, false))]);
         let admission = inspect(&pass, &resolution, &evidence).unwrap();
         assert!(admission.packages.contains_key(&package.key));
@@ -1504,7 +1491,7 @@ mod tests {
             "deny-demo".to_owned(),
             rule(PolicyAction::Deny, Some(hex(&checksum(4))), Some("MIT")),
         );
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let error = inspect(&pass, &resolution, &evidence).unwrap_err();
         assert!(error.to_string().contains("deny-demo"));
         assert!(error.to_string().contains("/system/lorry.toml"));
@@ -1514,7 +1501,7 @@ mod tests {
     fn preflight_rejects_default_deny_without_a_possible_allow() {
         let package = registry_package("demo", "1.2.3", 4);
         let resolution = make_resolution(vec![package]);
-        let error = preflight(&Policy::default(), &resolution).unwrap_err();
+        let error = preflight_workspace(&Policy::default(), &resolution).unwrap_err();
         assert!(error.to_string().contains("not admitted"));
         assert!(error.render().contains("[policy.rules.allow-demo-1_2_3]"));
         assert!(error.render().contains(&hex(&checksum(4))));
@@ -1531,7 +1518,7 @@ mod tests {
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
         };
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
         let error = inspect(&pass, &resolution, &evidence).unwrap_err();
         assert!(error.to_string().contains("build script"));
@@ -1539,7 +1526,7 @@ mod tests {
         let mut allow = rule(PolicyAction::Allow, None, None);
         allow.allow_build_script = true;
         policy.rules.insert("allow-script".to_owned(), allow);
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         inspect(&pass, &resolution, &evidence).unwrap();
     }
 
@@ -1551,19 +1538,19 @@ mod tests {
         config.trust_cargo_cache();
         assert_eq!(config.policy.limits.max_packages, u64::MAX);
         let mut policy = config.policy;
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
         let admission = inspect(&pass, &resolution, &evidence).unwrap();
         assert!(admission.packages[&package.key].configured_native_tools);
 
         let local = path_package(Path::new("/project/local-demo"), true, true);
-        preflight(&policy, &make_resolution(vec![local])).unwrap();
+        preflight_workspace(&policy, &make_resolution(vec![local])).unwrap();
 
         policy
             .rules
             .insert("deny-demo".to_owned(), rule(PolicyAction::Deny, None, None));
         assert!(
-            preflight(&policy, &resolution)
+            preflight_workspace(&policy, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("deny-demo")
@@ -1577,7 +1564,7 @@ mod tests {
         let mut policy = Policy::default();
         policy.path_roots.push(Path::new("/allowed").to_owned());
         assert!(
-            preflight(&policy, &resolution)
+            preflight_workspace(&policy, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("procedural macro")
@@ -1600,7 +1587,7 @@ mod tests {
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
         );
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(
             package.key.clone(),
             PackageEvidence {
@@ -1623,7 +1610,7 @@ mod tests {
         let resolution = make_resolution(vec![package.clone()]);
         let mut policy = Policy::default();
         policy.path_roots.push(Path::new("/allowed").to_owned());
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(
             package.key.clone(),
             PackageEvidence {
@@ -1641,7 +1628,7 @@ mod tests {
 
         policy.path_roots = vec![Path::new("/different-root").to_owned()];
         assert!(
-            preflight(&policy, &resolution)
+            preflight_workspace(&policy, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("path-roots")
@@ -1651,7 +1638,7 @@ mod tests {
         let resolution = make_resolution(vec![package.clone()]);
         policy.path_roots = vec![Path::new("/allowed").to_owned()];
         assert!(
-            preflight(&policy, &resolution)
+            preflight_workspace(&policy, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("build script")
@@ -1674,7 +1661,7 @@ mod tests {
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
         );
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(
             package.key.clone(),
             PackageEvidence {
@@ -1725,7 +1712,7 @@ mod tests {
             candidate.name = name.clone();
             policy.rules.insert("member".into(), candidate);
             let resolution = make_resolution(vec![package.clone()]);
-            let result = preflight(&policy, &resolution);
+            let result = preflight_workspace(&policy, &resolution);
             assert_eq!(result.is_ok(), name == grant.name);
             if let Ok(pass) = result {
                 let admission = inspect(&pass, &resolution, &evidence).unwrap();
@@ -1745,7 +1732,7 @@ mod tests {
             manifest.build_script = None;
             manifest.library = None;
             let unknown_resolution = make_resolution(vec![unknown]);
-            let pass = preflight(&policy, &unknown_resolution).unwrap();
+            let pass = preflight_workspace(&policy, &unknown_resolution).unwrap();
             assert_eq!(
                 inspect(&pass, &unknown_resolution, &evidence).is_ok(),
                 name == grant.name
@@ -1754,7 +1741,7 @@ mod tests {
         let resolution = make_resolution(vec![package.clone()]);
         policy.rules.get_mut("member").unwrap().allow_proc_macro = false;
         assert!(
-            preflight(&policy, &resolution)
+            preflight_workspace(&policy, &resolution)
                 .unwrap_err()
                 .render()
                 .contains("procedural macro")
@@ -1763,13 +1750,13 @@ mod tests {
         package.local_manifest.as_mut().unwrap().editable = false;
         let outside = make_resolution(vec![package]);
         assert!(
-            preflight(&policy, &outside)
+            preflight_workspace(&policy, &outside)
                 .unwrap_err()
                 .render()
                 .contains("build script")
         );
         policy.rules.get_mut("member").unwrap().source_tree_sha256 = Some(hex(&checksum(7)));
-        let pass = preflight(&policy, &outside).unwrap();
+        let pass = preflight_workspace(&policy, &outside).unwrap();
         inspect(&pass, &outside, &evidence).unwrap();
     }
 
@@ -1807,17 +1794,18 @@ mod tests {
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
         };
-        policy.limits.max_depth = Some(1);
+        // The root edge points at a member, so `second` is at depth 1.
+        policy.limits.max_depth = Some(0);
         assert!(
-            preflight(&policy, &resolution)
+            preflight_workspace(&policy, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("depth")
         );
 
-        policy.limits.max_depth = Some(2);
+        policy.limits.max_depth = Some(1);
         policy.limits.max_package_bytes = 99;
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([
             (first.key.clone(), evidence(&first, false)),
             (second.key.clone(), evidence(&second, false)),
@@ -1831,7 +1819,7 @@ mod tests {
 
         policy.limits.max_package_bytes = 100;
         policy.limits.max_transaction_bytes = 150;
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         assert!(
             inspect(&pass, &resolution, &evidence)
                 .unwrap_err()

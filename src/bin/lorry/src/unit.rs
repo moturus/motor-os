@@ -176,19 +176,6 @@ impl UnitGraph {
         Ok(())
     }
 
-    fn with_selected_check_mode(self, selected: &PackageKey) -> Result<Self> {
-        self.rekey(|mut key| {
-            if &key.package == selected {
-                key.mode = if key.mode == UnitMode::Test {
-                    UnitMode::CheckTest
-                } else {
-                    UnitMode::Check
-                };
-            }
-            key
-        })
-    }
-
     fn rekey(mut self, rekey: impl Fn(UnitKey) -> UnitKey) -> Result<Self> {
         let mut units = BTreeMap::new();
         for (_, mut unit) in std::mem::take(&mut self.units) {
@@ -946,36 +933,7 @@ fn workspace_target_units(
     Ok(graph)
 }
 
-/// Checks the selected library and, with `binaries`, its binaries.
-/// Without `normal`, nothing is selected.
-pub fn selected_check_units(
-    resolution: &Resolution,
-    manifests: &BTreeMap<PackageKey, Manifest>,
-    selected: &Manifest,
-    normal: bool,
-    binaries: bool,
-    binary_name: Option<&str>,
-) -> Result<UnitGraph> {
-    let package = selected_library_key(selected)?.package;
-    if normal {
-        let mut graph = dependency_units(resolution, manifests)?;
-        if selected.library.is_some() {
-            add_selected_library(&mut graph, resolution, manifests, selected)?;
-        }
-        if binaries {
-            add_selected_binaries(&mut graph, resolution, manifests, selected, binary_name)?;
-        }
-        graph.with_selected_check_mode(&package)
-    } else {
-        Ok(UnitGraph {
-            units: BTreeMap::new(),
-            order: Vec::new(),
-            selected_packages: BTreeSet::new(),
-            primary_macros: BTreeSet::new(),
-        })
-    }
-}
-
+#[cfg(test)]
 pub fn dependency_units(
     resolution: &Resolution,
     manifests: &BTreeMap<PackageKey, Manifest>,
@@ -1662,27 +1620,6 @@ fn target_enabled(
     Ok(false)
 }
 
-pub fn add_selected_library(
-    graph: &mut UnitGraph,
-    resolution: &Resolution,
-    manifests: &BTreeMap<PackageKey, Manifest>,
-    manifest: &Manifest,
-) -> Result<UnitKey> {
-    if manifest.library.is_none() {
-        return Err(Error::failure("selected package has no library target"));
-    }
-    let key = selected_library_key(manifest)?;
-    if graph.units.contains_key(&key) {
-        return Err(Error::failure(
-            "selected library is already in the unit graph",
-        ));
-    }
-    insert_unit(&mut graph.units, key.clone());
-    add_selected_normal_edges(graph, resolution, manifests, manifest, &key)?;
-    graph.order = topological_order(&graph.units)?;
-    Ok(key)
-}
-
 pub fn selected_library_key(manifest: &Manifest) -> Result<UnitKey> {
     Ok(UnitKey {
         package: PackageKey {
@@ -1702,99 +1639,6 @@ pub fn selected_library_key(manifest: &Manifest) -> Result<UnitKey> {
         profile: ProfileContext::Normal,
         features: selected_root_features(manifest)?,
     })
-}
-
-pub fn add_selected_binaries(
-    graph: &mut UnitGraph,
-    resolution: &Resolution,
-    manifests: &BTreeMap<PackageKey, Manifest>,
-    manifest: &Manifest,
-    selected_name: Option<&str>,
-) -> Result<Vec<UnitKey>> {
-    let library = manifest
-        .library
-        .as_ref()
-        .map(|_| selected_library_key(manifest))
-        .transpose()?;
-    let mut binaries = Vec::new();
-    for target in manifest
-        .targets_of(TargetKind::Bin)
-        .filter(|target| selected_name.is_none_or(|name| name == target.name))
-    {
-        let mut key = selected_library_key(manifest)?;
-        if !target_enabled(
-            resolution,
-            manifest,
-            &key.features,
-            &target.name,
-            target.required_features.as_deref(),
-            selected_name.is_some(),
-        )? {
-            continue;
-        }
-        key.kind = UnitKind::Binary;
-        key.target = Some(target.name.clone());
-        insert_unit(&mut graph.units, key.clone());
-        add_selected_normal_edges(graph, resolution, manifests, manifest, &key)?;
-        if let Some(library) = &library {
-            add_edge(
-                &mut graph.units,
-                &key,
-                library.clone(),
-                UnitEdgeKind::RustDependency,
-                manifest.library.as_ref().map(|target| target.name.clone()),
-            )?;
-        }
-        binaries.push(key);
-    }
-    graph.order = topological_order(&graph.units)?;
-    Ok(binaries)
-}
-
-fn add_selected_normal_edges(
-    graph: &mut UnitGraph,
-    resolution: &Resolution,
-    manifests: &BTreeMap<PackageKey, Manifest>,
-    manifest: &Manifest,
-    parent: &UnitKey,
-) -> Result<()> {
-    let packages = resolution
-        .packages
-        .iter()
-        .map(|package| (&package.key, package))
-        .collect::<BTreeMap<_, _>>();
-    for edge in resolution
-        .root_edges
-        .iter()
-        .filter(|edge| edge.kind == DependencyKind::Normal)
-    {
-        let package = packages.get(&edge.package).ok_or_else(|| {
-            Error::failure(format!(
-                "selected target dependency `{} {}` has no resolved package",
-                edge.package.name, edge.package.version
-            ))
-        })?;
-        let child_manifest = manifests.get(&edge.package).ok_or_else(|| {
-            Error::failure(format!(
-                "selected target dependency `{} {}` has no manifest",
-                edge.package.name, edge.package.version
-            ))
-        })?;
-        let child = unit_key(
-            package,
-            library_unit_kind(child_manifest),
-            edge.compile_kind,
-            &features_for(package, edge.compile_kind),
-        );
-        add_edge(
-            &mut graph.units,
-            parent,
-            child,
-            UnitEdgeKind::RustDependency,
-            Some(dependency_alias(edge, manifest, child_manifest)),
-        )?;
-    }
-    Ok(())
 }
 
 fn dependency_alias(edge: &ResolvedEdge, parent: &Manifest, child: &Manifest) -> String {
@@ -2670,7 +2514,6 @@ fn topological_order(units: &BTreeMap<UnitKey, Unit>) -> Result<Vec<UnitKey>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::{CommandOptions, RustcOutput, dependency_rustc_invocation};
     use crate::config::CargoCompat;
     use crate::manifest::Manifest;
     use crate::manifest::Strip as ManifestStrip;
@@ -2815,11 +2658,7 @@ mod tests {
                 .iter()
                 .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
                 .collect::<BTreeMap<_, _>>();
-            let mut graph = dependency_units(&resolution, &manifests).unwrap();
-            let library = add_selected_library(&mut graph, &resolution, &manifests, &root).unwrap();
-            let edge = graph.units[&library].dependencies.iter().next().unwrap();
-            assert_eq!(edge.alias.as_deref(), Some(cargo_alias), "{declaration}");
-            // The same crate name is needed when this root is a dependency.
+            let library = selected_library_key(&root).unwrap();
             let mut resolved_root = resolution.packages[0].clone();
             resolved_root.key = library.package.clone();
             resolved_root.local_manifest = Some(root.clone());
@@ -2839,186 +2678,6 @@ mod tests {
                 "dependency {declaration}"
             );
         }
-    }
-
-    #[test]
-    fn selected_targets_use_dependency_units_and_aliases() {
-        let fixture = Fixture::new();
-        fs::write(fixture.0.join("src/one.rs"), "fn main() {}\n").unwrap();
-        fs::write(fixture.0.join("src/two.rs"), "fn main() {}\n").unwrap();
-        fixture.package(
-            "shared",
-            "[package]\nname = \"shared\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
-            false,
-        );
-        let root = Manifest::parse(
-            &fixture.0,
-            &fixture.0.join("Cargo.toml"),
-            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             [dependencies]\nrenamed = { package = \"shared\", path = \"shared\" }\n\
-             [[bin]]\nname = \"one\"\npath = \"src/one.rs\"\n\
-             [[bin]]\nname = \"two\"\npath = \"src/two.rs\"\n",
-        )
-        .unwrap();
-        let cfg = CfgSet::parse("unix\n").unwrap();
-        let resolution = resolve_selected(
-            &root,
-            &Catalog::default(),
-            &Options {
-                resolver: root.resolver,
-                incompatible_rust_versions: None,
-                rust_versions: vec![Version::parse("1.98.0").unwrap()],
-                package_limit: crate::policy::PackageLimit::with_max(16),
-                max_depth: Some(8),
-            },
-            &[],
-            TargetSelection {
-                target_triple: "x86_64-unknown-linux-gnu",
-                target_cfg: &cfg,
-                host_triple: "x86_64-unknown-linux-gnu",
-                host_cfg: &cfg,
-            },
-        )
-        .unwrap();
-        let mut manifests = resolution
-            .packages
-            .iter()
-            .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
-            .collect::<BTreeMap<_, _>>();
-        let mut graph = dependency_units(&resolution, &manifests).unwrap();
-        let selected = add_selected_library(&mut graph, &resolution, &manifests, &root).unwrap();
-        let binaries =
-            add_selected_binaries(&mut graph, &resolution, &manifests, &root, None).unwrap();
-        assert_eq!(binaries.len(), 2);
-        assert_eq!(binaries[0].target.as_deref(), Some("one"));
-        assert_eq!(binaries[1].target.as_deref(), Some("two"));
-        for binary in &binaries {
-            assert!(
-                graph.units[binary]
-                    .dependencies
-                    .iter()
-                    .any(|edge| edge.unit == selected)
-            );
-            assert!(
-                graph.units[binary]
-                    .dependencies
-                    .iter()
-                    .any(|edge| edge.alias.as_deref() == Some("renamed"))
-            );
-        }
-        manifests.insert(selected.package.clone(), root.clone());
-        let edge = graph.units[&selected].dependencies.iter().next().unwrap();
-        assert_eq!(edge.alias.as_deref(), Some("renamed"));
-        assert_eq!(edge.unit.package.name, "shared");
-        assert!(
-            graph
-                .order
-                .iter()
-                .position(|key| key == &edge.unit)
-                .unwrap()
-                < graph.order.iter().position(|key| key == &selected).unwrap()
-        );
-        let plan = plan_dependency_units(
-            &graph,
-            &manifests,
-            &PlanOptions {
-                workspace_root: &fixture.0,
-                release: true,
-                panic_abort: false,
-                profile: &Profile::release(),
-                rustc: &toolchain(),
-                logical_target: None,
-                rustflags: &[],
-            },
-        )
-        .unwrap();
-        assert!(plan.units.contains_key(&selected));
-        assert_ne!(
-            plan.units[&binaries[0]].identity,
-            plan.units[&binaries[1]].identity
-        );
-        let test_graph = graph.clone().with_profile(ProfileContext::Test, true);
-        let test_key = UnitKey {
-            profile: ProfileContext::Test,
-            ..selected.clone()
-        };
-        assert_eq!(test_graph.units.len(), graph.units.len());
-        assert!(
-            test_graph.units[&test_key]
-                .dependencies
-                .iter()
-                .all(|edge| edge.unit.profile == ProfileContext::Test)
-        );
-        let options = PlanOptions {
-            workspace_root: &fixture.0,
-            release: true,
-            panic_abort: true,
-            profile: &Profile::release(),
-            rustc: &toolchain(),
-            logical_target: None,
-            rustflags: &[],
-        };
-        let normal_plan = plan_dependency_units(&graph, &manifests, &options).unwrap();
-        let test_plan = plan_dependency_units(&test_graph, &manifests, &options).unwrap();
-        assert_eq!(
-            normal_plan.units[&selected].settings.profile.panic,
-            CargoPanicStrategy::Abort
-        );
-        assert_eq!(
-            test_plan.units[&test_key].settings.profile.panic,
-            CargoPanicStrategy::Unwind
-        );
-        assert_ne!(
-            normal_plan.units[&selected].identity,
-            test_plan.units[&test_key].identity
-        );
-        let mut merged = graph.clone();
-        merged.merge(test_graph).unwrap();
-        assert_eq!(merged.units.len(), graph.units.len() * 2);
-        assert!(merged.units.contains_key(&selected));
-        assert!(merged.units.contains_key(&test_key));
-        let test_dependency = &merged.units[&test_key]
-            .dependencies
-            .iter()
-            .next()
-            .unwrap()
-            .unit;
-        assert_eq!(test_dependency.profile, ProfileContext::Test);
-        assert!(
-            merged.order.iter().position(|key| key == test_dependency)
-                < merged.order.iter().position(|key| key == &test_key)
-        );
-        let mut equivalent = graph.clone();
-        equivalent
-            .merge(graph.clone().with_profile(ProfileContext::Test, false))
-            .unwrap();
-        assert_eq!(equivalent, graph);
-        let invocation = dependency_rustc_invocation(
-            &plan,
-            &manifests,
-            &binaries[0],
-            &CommandOptions {
-                cargo: Path::new("/cargo"),
-                workspace_root: &fixture.0,
-                selected_packages: std::slice::from_ref(&selected.package),
-                host_profile: Path::new("/target/debug"),
-                target_profile: Path::new("/target/debug"),
-                host_incremental: Path::new("/incremental/host"),
-                target_incremental: Path::new("/incremental/target"),
-                physical_target: None,
-                host_linker: None,
-                target_linker: None,
-                integration_binaries: None,
-                integration_temp_dirs: None,
-                verbose: false,
-            },
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(invocation.arguments[3], "src/one.rs");
-        assert_eq!(invocation.environment["CARGO_BIN_NAME"], "one");
-        assert_eq!(invocation.environment["CARGO_PRIMARY_PACKAGE"], "1");
-        assert!(matches!(invocation.output, RustcOutput::Binary { .. }));
     }
 
     #[test]
@@ -3053,19 +2712,36 @@ mod tests {
         fs::write(workspace.join("app/src/main.rs"), "fn main() {}\n").unwrap();
         fs::write(workspace.join("shared/src/lib.rs"), "pub fn value() {}\n").unwrap();
 
-        let root = Manifest::load_for_build(&workspace.join("app")).unwrap();
+        let source = crate::manifest::SourceWorkspace::load(&workspace, None).unwrap();
         let cfg = CfgSet::parse("unix\n").unwrap();
-        let resolution = resolve_selected(
-            &root,
-            &Catalog::default(),
-            &Options {
-                resolver: root.resolver,
-                incompatible_rust_versions: None,
-                rust_versions: vec![Version::parse("1.99.0").unwrap()],
-                package_limit: crate::policy::PackageLimit::with_max(16),
-                max_depth: Some(8),
-            },
+        let options = Options {
+            resolver: source.packages[0].resolver,
+            incompatible_rust_versions: None,
+            rust_versions: vec![Version::parse("1.99.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: Some(8),
+        };
+        let mut catalog = Catalog::default();
+        let complete = crate::resolver::workspace::resolve_complete_workspace(
+            &source,
+            &mut catalog,
+            &options,
             &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let resolution = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &options,
+            &[crate::resolver::workspace::MemberRequest {
+                root: workspace.join("app"),
+                features: BTreeSet::new(),
+                default_features: true,
+                dev: false,
+                selected: true,
+                target_units: false,
+            }],
             TargetSelection {
                 target_triple: "x86_64-unknown-linux-gnu",
                 target_cfg: &cfg,
@@ -3074,16 +2750,28 @@ mod tests {
             },
         )
         .unwrap();
-        let mut manifests = resolution
+        let manifests = resolution
             .packages
             .iter()
             .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
             .collect::<BTreeMap<_, _>>();
-        let mut graph = dependency_units(&resolution, &manifests).unwrap();
-        let library = add_selected_library(&mut graph, &resolution, &manifests, &root).unwrap();
-        let binaries =
-            add_selected_binaries(&mut graph, &resolution, &manifests, &root, None).unwrap();
-        manifests.insert(library.package.clone(), root.clone());
+        let app = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "app")
+            .unwrap()
+            .key
+            .clone();
+        let graph = workspace_units(
+            &resolution,
+            &manifests,
+            std::slice::from_ref(&app),
+            false,
+            true,
+            None,
+            false,
+        )
+        .unwrap();
         let plan = plan_dependency_units(
             &graph,
             &manifests,
@@ -3120,7 +2808,12 @@ mod tests {
             String::from_utf8_lossy(&result.stderr)
         );
         let cargo: Value = serde_json::from_slice(&result.stdout).unwrap();
-        let roots = std::iter::once(library).chain(binaries).collect::<Vec<_>>();
+        let roots = plan
+            .units
+            .keys()
+            .filter(|key| key.package == app)
+            .cloned()
+            .collect::<Vec<_>>();
         assert_ordinary_cargo_plan(&cargo, &plan, &manifests, &roots, "dev");
     }
 

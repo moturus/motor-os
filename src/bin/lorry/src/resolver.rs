@@ -858,50 +858,31 @@ pub fn merge_resolutions(resolutions: impl IntoIterator<Item = Resolution>) -> R
     })
 }
 
-pub fn resolve_selected(
-    manifest: &Manifest,
-    catalog: &Catalog,
-    options: &Options,
-    locked: &[LockedPreference],
-    selection: TargetSelection<'_>,
-) -> Result<Resolution> {
-    let mut catalog = catalog.clone();
-    catalog
-        .workspace_members
-        .clone_from(&manifest.workspace_members);
-    catalog.workspace_root.clone_from(&manifest.workspace_root);
-    validate_locked_checksums(&catalog, locked)?;
-    let scope = Scope::Selected(selection);
-    let mut roots = Vec::new();
-    for requirement in root_requirements(manifest)? {
-        if !scope.matches(
-            CompileKind::Target,
-            requirement.dependency.target.as_deref(),
-        )? {
-            continue;
-        }
-        roots.push(Event {
-            parent: None,
-            parent_compile_kind: None,
-            dependency_index: requirement.index,
-            context: root_context(options.resolver, scope),
-            compile_kind: CompileKind::Target,
-            dependency: requirement.dependency,
-            depth: 1,
-            ancestors: BTreeSet::new(),
-        });
+#[cfg(test)]
+fn single_member_workspace(manifest: &Manifest) -> crate::manifest::SourceWorkspace {
+    crate::manifest::SourceWorkspace {
+        manifest_path: manifest.path.clone(),
+        root: manifest.workspace_root.clone(),
+        packages: vec![manifest.clone()],
+        default_members: vec![manifest.root.clone()],
+        metadata: serde_json::Value::Null,
+        virtual_root: false,
+        documents: Default::default(),
     }
-    roots.sort_by(|left, right| {
-        manifest_order(&left.dependency).cmp(&manifest_order(&right.dependency))
-    });
-    solve_request(
-        roots,
-        &mut catalog,
-        options,
-        locked,
-        scope,
-        &mut |_, _, _| Ok(()),
-    )
+}
+
+/// Moves the member at `root` out of `resolution`; its edges become the root
+/// edges.
+#[cfg(test)]
+fn without_member(mut resolution: Resolution, root: &std::path::Path) -> Resolution {
+    let member = PackageSourceKey::Path(root.to_owned());
+    let index = resolution
+        .packages
+        .iter()
+        .position(|package| package.key.source == member)
+        .unwrap();
+    resolution.root_edges = resolution.packages.remove(index).edges;
+    resolution
 }
 
 /// Resolves `manifest` as the only member of a complete workspace. The
@@ -914,24 +895,46 @@ pub(crate) fn resolve_member(
     locked: &[LockedPreference],
     loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
-    let workspace = crate::manifest::SourceWorkspace {
-        manifest_path: manifest.path.clone(),
-        root: manifest.workspace_root.clone(),
-        packages: vec![manifest.clone()],
-        default_members: vec![manifest.root.clone()],
-        metadata: serde_json::Value::Null,
-        virtual_root: false,
-        documents: Default::default(),
+    let workspace = single_member_workspace(manifest);
+    let resolution = resolve_complete_workspace(&workspace, catalog, options, locked, loader)?;
+    Ok(without_member(resolution, &manifest.root))
+}
+
+/// Selects `manifest` with default features as the only member of its
+/// workspace, as a build does. The member's non-dev edges become the root
+/// edges and its package is dropped.
+#[cfg(test)]
+pub(crate) fn resolve_selected(
+    manifest: &Manifest,
+    catalog: &Catalog,
+    options: &Options,
+    locked: &[LockedPreference],
+    selection: TargetSelection<'_>,
+) -> Result<Resolution> {
+    let workspace = single_member_workspace(manifest);
+    let mut catalog = catalog.clone();
+    let complete =
+        resolve_complete_workspace(&workspace, &mut catalog, options, locked, &mut |_, _, _| {
+            Ok(())
+        })?;
+    let request = workspace::MemberRequest {
+        root: manifest.root.clone(),
+        features: BTreeSet::new(),
+        default_features: true,
+        dev: false,
+        selected: true,
+        target_units: false,
     };
-    let mut resolution = resolve_complete_workspace(&workspace, catalog, options, locked, loader)?;
-    let member = PackageSourceKey::Path(manifest.root.clone());
-    let index = resolution
-        .packages
-        .iter()
-        .position(|package| package.key.source == member)
-        .unwrap();
-    resolution.root_edges = resolution.packages.remove(index).edges;
-    Ok(resolution)
+    let selected =
+        workspace::resolve_selected_workspace(&complete, &catalog, options, &[request], selection)?;
+    let mut selected = without_member(selected, &manifest.root);
+    selected
+        .root_edges
+        .retain(|edge| edge.kind != DependencyKind::Dev);
+    for edge in &mut selected.root_edges {
+        edge.parent_compile_kind = None;
+    }
+    Ok(selected)
 }
 
 fn solve_request(
@@ -967,17 +970,16 @@ fn solve_request(
 
 #[derive(Clone, Copy)]
 enum Scope<'a> {
-    WorkspaceComplete {
+    Complete {
         locked: Option<&'a locked::Edges>,
         exact: bool,
     },
-    Selected(TargetSelection<'a>),
-    WorkspaceSelected {
+    Selected {
         selection: TargetSelection<'a>,
         complete: &'a Resolution,
         dev_members: &'a BTreeSet<PathBuf>,
     },
-    WorkspaceMetadata {
+    Metadata {
         complete: &'a Resolution,
     },
 }
@@ -989,7 +991,7 @@ impl<'a> Scope<'a> {
     ) -> std::result::Result<Option<&'a BTreeSet<locked::Identity>>, Failure> {
         match (self, &event.parent) {
             (
-                Self::WorkspaceComplete {
+                Self::Complete {
                     locked: Some(edges),
                     exact: true,
                 },
@@ -1001,7 +1003,7 @@ impl<'a> Scope<'a> {
     fn dependency_preferences(self, event: &Event) -> Option<&'a BTreeSet<locked::Identity>> {
         match (self, &event.parent) {
             (
-                Self::WorkspaceComplete {
+                Self::Complete {
                     locked: Some(edges),
                     exact: false,
                 },
@@ -1016,7 +1018,7 @@ impl<'a> Scope<'a> {
             return Ok(true);
         };
         let selection = match self {
-            Self::Selected(selection) | Self::WorkspaceSelected { selection, .. } => selection,
+            Self::Selected { selection, .. } => selection,
             _ => return Ok(true),
         };
         let (triple, cfg) = match compile_kind {
@@ -1032,9 +1034,7 @@ impl<'a> Scope<'a> {
 
     fn locked_package(self, event: &Event) -> std::result::Result<Option<&'a PackageKey>, Failure> {
         let complete = match self {
-            Self::WorkspaceSelected { complete, .. } | Self::WorkspaceMetadata { complete } => {
-                complete
-            }
+            Self::Selected { complete, .. } | Self::Metadata { complete } => complete,
             _ => return Ok(None),
         };
         let Some(parent) = &event.parent else {
@@ -1072,37 +1072,14 @@ pub enum CompileKind {
     Host,
 }
 
-#[derive(Clone)]
-struct RootRequirement {
-    index: usize,
-    dependency: CandidateDependency,
-}
-
-fn root_requirements(manifest: &Manifest) -> Result<Vec<RootRequirement>> {
-    root_requirements_and_features(manifest).map(|(requirements, _)| requirements)
-}
-
+/// The features that a selected package enables by default, expanded as
+/// Cargo expands them.
 pub fn selected_root_features(manifest: &Manifest) -> Result<BTreeSet<String>> {
-    root_requirements_and_features(manifest).map(|(_, features)| features)
-}
-
-fn root_requirements_and_features(
-    manifest: &Manifest,
-) -> Result<(Vec<RootRequirement>, BTreeSet<String>)> {
-    let mut enabled = BTreeSet::new();
-    for (index, dependency) in manifest.dependencies.iter().enumerate() {
-        if !dependency.optional {
-            enabled.insert(index);
-        }
-    }
-
     let mut active = BTreeSet::new();
     if manifest.features.contains_key("default") {
         active.insert("default".to_owned());
     }
-
     let mut expanded = BTreeSet::new();
-    let mut dependency_features: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     while let Some(feature) = active
         .iter()
         .find(|feature| !expanded.contains(*feature))
@@ -1111,114 +1088,40 @@ fn root_requirements_and_features(
         expanded.insert(feature.clone());
         if let Some(references) = manifest.features.get(&feature) {
             for reference in references {
-                expand_root_reference(
-                    manifest,
-                    reference,
-                    &mut active,
-                    &mut enabled,
-                    &mut dependency_features,
-                )?;
+                expand_root_reference(manifest, reference, &mut active)?;
             }
         } else {
-            enable_root_alias(manifest, &feature, &mut enabled)?;
+            require_optional_alias(manifest, &feature)?;
         }
     }
-
-    let weak = manifest
-        .features
-        .iter()
-        .filter(|(feature, _)| active.contains(*feature))
-        .flat_map(|(_, references)| references)
-        .filter_map(|reference| {
-            let (dependency, feature) = reference.split_once('/')?;
-            dependency
-                .strip_suffix('?')
-                .map(|dependency| (dependency, feature))
-        })
-        .collect::<Vec<_>>();
-    for (dependency, feature) in weak {
-        if manifest
-            .dependencies
-            .iter()
-            .enumerate()
-            .any(|(index, value)| value.alias == dependency && enabled.contains(&index))
-        {
-            dependency_features
-                .entry(dependency.to_owned())
-                .or_default()
-                .insert(feature.to_owned());
-        }
-    }
-
-    let mut output = Vec::new();
-    for (index, dependency) in manifest.dependencies.iter().enumerate() {
-        if !enabled.contains(&index) {
-            continue;
-        }
-        let mut features = dependency.features.clone();
-        if let Some(additional) = dependency_features.get(&dependency.alias) {
-            for feature in additional {
-                if !features.contains(feature) {
-                    features.push(feature.clone());
-                }
-            }
-        }
-        output.push(RootRequirement {
-            index,
-            dependency: CandidateDependency {
-                any_version: !dependency.version_specified,
-                dependency: Dependency {
-                    alias: dependency.alias.clone(),
-                    package: dependency.package.clone(),
-                    requirement: dependency.requirement.clone(),
-                    features,
-                    optional: false,
-                    default_features: dependency.default_features,
-                    target: dependency.target.clone(),
-                    kind: DependencyKind::Normal,
-                },
-                source: match &dependency.source {
-                    DependencySource::CratesIo => RequirementSource::CratesIo,
-                    DependencySource::Path(path) => RequirementSource::Path(path.clone()),
-                    DependencySource::Git(git) => RequirementSource::Git(git.clone()),
-                },
-            },
-        });
-    }
-    Ok((output, active))
+    Ok(active)
 }
 
 fn expand_root_reference(
     manifest: &Manifest,
     reference: &str,
     active: &mut BTreeSet<String>,
-    enabled: &mut BTreeSet<usize>,
-    dependency_features: &mut BTreeMap<String, BTreeSet<String>>,
 ) -> Result<()> {
     if let Some(dependency) = reference.strip_prefix("dep:") {
-        return enable_root_alias(manifest, dependency, enabled);
+        return require_optional_alias(manifest, dependency);
     }
-    if let Some((dependency, feature)) = reference.split_once('/') {
+    if let Some((dependency, _)) = reference.split_once('/') {
         if let Some(dependency) = dependency.strip_suffix('?') {
             return require_root_dependency_alias(manifest, dependency);
         }
-        enable_root_dependency(manifest, dependency, enabled)?;
+        require_root_dependency_alias(manifest, dependency)?;
         // As in Cargo, `dep/feature` also activates the dependency's implicit
         // feature.
         if implicit_root_feature(manifest, dependency) {
             active.insert(dependency.to_owned());
         }
-        dependency_features
-            .entry(dependency.to_owned())
-            .or_default()
-            .insert(feature.to_owned());
         return Ok(());
     }
     if manifest.features.contains_key(reference) || implicit_root_feature(manifest, reference) {
         active.insert(reference.to_owned());
         Ok(())
     } else {
-        enable_root_alias(manifest, reference, enabled)
+        require_optional_alias(manifest, reference)
     }
 }
 
@@ -1250,33 +1153,12 @@ fn require_root_dependency_alias(manifest: &Manifest, alias: &str) -> Result<()>
     }
 }
 
-fn enable_root_dependency(
-    manifest: &Manifest,
-    alias: &str,
-    enabled: &mut BTreeSet<usize>,
-) -> Result<()> {
-    require_root_dependency_alias(manifest, alias)?;
-    for (index, dependency) in manifest.dependencies.iter().enumerate() {
-        if dependency.alias == alias && dependency.optional {
-            enabled.insert(index);
-        }
-    }
-    Ok(())
-}
-
-fn enable_root_alias(
-    manifest: &Manifest,
-    alias: &str,
-    enabled: &mut BTreeSet<usize>,
-) -> Result<()> {
-    let mut found = false;
-    for (index, dependency) in manifest.dependencies.iter().enumerate() {
-        if dependency.alias == alias && dependency.optional {
-            enabled.insert(index);
-            found = true;
-        }
-    }
-    if found {
+fn require_optional_alias(manifest: &Manifest, alias: &str) -> Result<()> {
+    if manifest
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.alias == alias && dependency.optional)
+    {
         Ok(())
     } else {
         Err(Error::failure(format!(
@@ -1520,7 +1402,7 @@ fn fulfill(
         .get(key)
         .is_some_and(|node| node.record.proc_macro)
     {
-        if event.parent.is_none() && matches!(scope, Scope::WorkspaceSelected { .. }) {
+        if event.parent.is_none() && matches!(scope, Scope::Selected { .. }) {
             // Cargo also activates a selected macro's normal feature context.
             // Its library stays on the host; selected auxiliary targets may
             // also compile the dependencies activated in the target context.
@@ -1641,10 +1523,7 @@ fn activate(
     for (dependency, dependency_feature) in weak {
         // Cargo's package resolver follows weak references too. Only the
         // compilation feature resolver defers inactive optional dependencies.
-        if matches!(
-            scope,
-            Scope::WorkspaceComplete { .. } | Scope::WorkspaceMetadata { .. }
-        ) {
+        if matches!(scope, Scope::Complete { .. } | Scope::Metadata { .. }) {
             activation.enabled_optional.insert(dependency.clone());
         }
         if activation.enabled_optional.contains(&dependency)
@@ -1686,13 +1565,8 @@ fn activate(
             .local_manifest
             .as_ref()
             .is_some_and(|manifest| match scope {
-                Scope::WorkspaceComplete { .. } | Scope::WorkspaceMetadata { .. } => {
-                    manifest.editable
-                }
-                Scope::WorkspaceSelected { dev_members, .. } => {
-                    dev_members.contains(&manifest.root)
-                }
-                _ => false,
+                Scope::Complete { .. } | Scope::Metadata { .. } => manifest.editable,
+                Scope::Selected { dev_members, .. } => dev_members.contains(&manifest.root),
             });
         if (dependency.kind == DependencyKind::Dev && !include_dev)
             || (dependency.optional && !activation.enabled_optional.contains(&dependency.alias))
@@ -2044,10 +1918,8 @@ fn child_target_context(
     selector: Option<&str>,
 ) -> FeatureContext {
     match scope {
-        Scope::WorkspaceComplete { .. } => target_dependency_context(parent, selector),
-        Scope::Selected(_) | Scope::WorkspaceSelected { .. } | Scope::WorkspaceMetadata { .. } => {
-            parent
-        }
+        Scope::Complete { .. } => target_dependency_context(parent, selector),
+        Scope::Selected { .. } | Scope::Metadata { .. } => parent,
     }
 }
 
@@ -2058,7 +1930,7 @@ fn normalize_scope_context(
     scope: Scope<'_>,
     context: FeatureContext,
 ) -> FeatureContext {
-    if matches!(scope, Scope::WorkspaceMetadata { .. }) {
+    if matches!(scope, Scope::Metadata { .. }) {
         FeatureContext::Unified
     } else {
         normalize_context(resolver, context)
@@ -4387,9 +4259,12 @@ dev = ["dep:leaf"]
                 .insert(record(name, "1.0.0", "[]", "{}", ""))
                 .unwrap();
         }
+        let fixture = LocalFixture::new();
+        fs::create_dir(fixture.0.join("src")).unwrap();
+        fs::write(fixture.0.join("src/lib.rs"), "").unwrap();
         let root = Manifest::parse(
-            Path::new("/fixture"),
-            Path::new("/fixture/Cargo.toml"),
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
             "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
              [dependencies]\n\
              default-dep = { version = \"1\", optional = true }\n\
@@ -4930,7 +4805,7 @@ dev = ["dep:leaf"]
     }
 
     #[test]
-    fn locked_repository_loading_skips_inactive_objects_and_reports_selected_missing_objects() {
+    fn locked_repository_loading_defers_missing_objects_to_resolution() {
         let fixture = LocalFixture::new();
         fixture.package(
             "local",
@@ -4967,24 +4842,6 @@ dev = ["dep:leaf"]
         .unwrap();
         let mut catalog = Catalog::from_locked_repository(&manifest, &repositories).unwrap();
         let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
-        let unix = CfgSet::parse("unix\n").unwrap();
-        let selected = resolve_selected(
-            &manifest,
-            &catalog,
-            &options(ResolverVersion::V2),
-            &locked,
-            TargetSelection {
-                target_triple: "x86_64-unknown-linux-musl",
-                target_cfg: &unix,
-                host_triple: "x86_64-unknown-linux-gnu",
-                host_cfg: &unix,
-            },
-        )
-        .unwrap();
-        crate::offline::validate_selected_resolution(&manifest, &selected).unwrap();
-        assert_eq!(selected.packages.len(), 1);
-        assert_eq!(selected.packages[0].key.name, "local");
-
         let error = resolve_member(
             &manifest,
             &mut catalog,
@@ -5270,7 +5127,6 @@ dev = ["dep:leaf"]
             },
         )
         .unwrap();
-        crate::offline::validate_selected_resolution(&manifest, &selected).unwrap();
         assert_eq!(
             selected
                 .packages

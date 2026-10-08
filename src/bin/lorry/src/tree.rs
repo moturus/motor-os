@@ -77,7 +77,6 @@ fn execute_with(cli: &Cli, notes: Verbosity, options: &TreeOptions) -> Result<i3
             staging_parent: &scratch,
             evidence_root: &crate::engine::artifact_root(manifest).join(".cargo-evidence"),
         },
-        crate::git::load_locked_sources,
     )?;
     let selection = TargetSelection {
         target_triple: &target.triple,

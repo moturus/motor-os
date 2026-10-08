@@ -5,7 +5,7 @@ use std::thread;
 use crate::admission_state::{Capability, CompactState, Context, Review};
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::cargo_registry::CargoRegistry;
-use crate::config::{Config, PolicyLimits};
+use crate::config::Config;
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
 use crate::manifest::Manifest;
@@ -14,8 +14,8 @@ use crate::patch;
 use crate::policy::{self, Admission, PackageEvidence};
 use crate::repository::RepositorySet;
 use crate::resolver::{
-    Catalog, LockedPreference, Options, PackageKey, PackageSourceKey, Resolution, ResolvedPackage,
-    ResolvedSource, TargetSelection, resolve_selected,
+    Catalog, Options, PackageKey, PackageSourceKey, Resolution, ResolvedPackage, ResolvedSource,
+    TargetSelection,
 };
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::Toolchain;
@@ -23,9 +23,7 @@ use crate::validation::ValidationMode;
 pub(crate) mod workspace;
 
 use crate::unit::{
-    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, add_selected_binaries,
-    add_selected_library, dependency_units, plan_dependency_units_with_remaps,
-    selected_check_units, selected_library_key,
+    CompilationPlan, PlanOptions, SourceRemap, UnitGraph, plan_dependency_units_with_remaps,
 };
 
 #[derive(Debug)]
@@ -105,68 +103,6 @@ impl PreparedGraph {
             binary_name,
             options.release || options.profile.opt_level != "0",
         )?;
-        self.finish_plan(options, manifests, graph)
-    }
-
-    pub fn selected_targets_plan(
-        &self,
-        options: &PlanOptions<'_>,
-        selected: &Manifest,
-        binary_name: Option<&str>,
-    ) -> Result<CompilationPlan> {
-        let mut manifests = self
-            .packages
-            .iter()
-            .map(|(key, package)| (key.clone(), package.manifest.clone()))
-            .collect();
-        let mut graph = dependency_units(&self.resolution, &manifests)?;
-        let key = if selected.library.is_some() {
-            add_selected_library(&mut graph, &self.resolution, &manifests, selected)?
-        } else {
-            selected_library_key(selected)?
-        };
-        add_selected_binaries(
-            &mut graph,
-            &self.resolution,
-            &manifests,
-            selected,
-            binary_name,
-        )?;
-        if manifests.insert(key.package, selected.clone()).is_some() {
-            return Err(Error::failure(
-                "selected package duplicates a dependency package",
-            ));
-        }
-        self.finish_plan(options, manifests, graph)
-    }
-
-    pub fn selected_check_plan(
-        &self,
-        options: &PlanOptions<'_>,
-        selected: &Manifest,
-        normal: bool,
-        binaries: bool,
-        binary_name: Option<&str>,
-    ) -> Result<CompilationPlan> {
-        let mut manifests = self
-            .packages
-            .iter()
-            .map(|(key, package)| (key.clone(), package.manifest.clone()))
-            .collect();
-        let graph = selected_check_units(
-            &self.resolution,
-            &manifests,
-            selected,
-            normal,
-            binaries,
-            binary_name,
-        )?;
-        let key = selected_library_key(selected)?;
-        if manifests.insert(key.package, selected.clone()).is_some() {
-            return Err(Error::failure(
-                "selected package duplicates a dependency package",
-            ));
-        }
         self.finish_plan(options, manifests, graph)
     }
 
@@ -309,62 +245,6 @@ impl PreparedPackage {
     }
 }
 
-pub fn prepare_locked_source(
-    manifest: &Manifest,
-    config: &Config,
-    source: LockedSource<'_>,
-    options: &Options,
-    selection: TargetSelection<'_>,
-    staging_parent: &Path,
-) -> Result<PreparedGraph> {
-    if let Some(resolution) = source.verified_resolution {
-        return prepare_verified_resolution(
-            manifest,
-            config,
-            source.registry,
-            staging_parent,
-            source.direct,
-            resolution,
-        );
-    }
-    if matches!(source.registry, RegistrySource::Lorry(_))
-        && CompactState::load(&manifest.workspace_root)?.is_none()
-    {
-        let catalog = locked_catalog(manifest, source.registry, source.direct, false)?;
-        let resolution = resolve_selected(
-            manifest,
-            &catalog,
-            options,
-            &LockedPreference::from_lockfile(manifest.lock.as_ref())?,
-            selection,
-        )?;
-        if resolution.packages.iter().any(|package| {
-            matches!(
-                package.source,
-                ResolvedSource::CratesIo { .. } | ResolvedSource::Git { .. }
-            )
-        }) {
-            return Err(Error::failure("compilation using crates.io or Git packages requires workspace admission")
-                .with_help("run workspace-root `lorry vendor --locked [--offline]` to review and approve these sources"));
-        }
-    }
-    prepare_locked_with(
-        manifest,
-        config,
-        source.registry,
-        options,
-        selection,
-        staging_parent,
-        source.direct,
-    )
-}
-
-pub struct LockedSource<'a> {
-    pub registry: RegistrySource<'a>,
-    pub direct: &'a crate::git::DirectCatalog,
-    pub verified_resolution: Option<Resolution>,
-}
-
 #[derive(Clone, Copy)]
 pub enum RegistrySource<'a> {
     Lorry(&'a RepositorySet),
@@ -398,7 +278,6 @@ impl LockedContext {
         config: &Config,
         toolchain: &Toolchain,
         access: RegistryAccess<'_>,
-        git: fn(&Manifest, &PolicyLimits) -> Result<crate::git::DirectCatalog>,
     ) -> Result<Self> {
         let registry = if access.use_cargo_registry {
             OpenRegistry::Cargo(CargoRegistry::discover_with_validation(
@@ -417,7 +296,7 @@ impl LockedContext {
         };
         Ok(Self {
             registry,
-            direct: git(manifest, &config.policy.limits)?,
+            direct: crate::git::load_locked_sources(manifest, &config.policy.limits)?,
             options: resolver_options(manifest, config, toolchain)?,
         })
     }
@@ -571,46 +450,6 @@ pub struct ReviewInputs<'a> {
     pub staging_parent: &'a Path,
     pub direct: Option<&'a crate::git::DirectCatalog>,
     pub prepare_context: Option<Context>,
-}
-
-pub struct VerifiedAdmission {
-    review: Review,
-    resolution: Option<Resolution>,
-}
-
-impl VerifiedAdmission {
-    pub fn into_parts(self) -> (Review, Option<Resolution>) {
-        (self.review, self.resolution)
-    }
-
-    pub fn into_review(self) -> Review {
-        self.review
-    }
-}
-
-fn prepare_verified_resolution(
-    manifest: &Manifest,
-    config: &Config,
-    source: RegistrySource<'_>,
-    staging_parent: &Path,
-    direct: &crate::git::DirectCatalog,
-    resolution: Resolution,
-) -> Result<PreparedGraph> {
-    offline::validate_selected_resolution(manifest, &resolution)?;
-    let preflight = policy::preflight(&config.policy, &resolution)?;
-    let packages =
-        prepare_resolution_packages(&resolution, config, source, staging_parent, direct, false)?;
-    let evidence = packages
-        .iter()
-        .map(|(key, package)| (key.clone(), package.evidence.clone()))
-        .collect();
-    let admission = policy::inspect(&preflight, &resolution, &evidence)?;
-    Ok(PreparedGraph {
-        resolution,
-        admission,
-        packages,
-        cargo_registry_mode: matches!(source, RegistrySource::Cargo(_)),
-    })
 }
 
 fn prepare_resolution_packages(
@@ -770,121 +609,6 @@ fn registry_package_evidence(
     }
 }
 
-fn prepare_locked_with(
-    manifest: &Manifest,
-    config: &Config,
-    source: RegistrySource<'_>,
-    options: &Options,
-    selection: TargetSelection<'_>,
-    staging_parent: &Path,
-    direct: &crate::git::DirectCatalog,
-) -> Result<PreparedGraph> {
-    let mut catalog = locked_catalog(manifest, source, direct, false)?;
-    let locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
-    let mut packages = BTreeMap::new();
-    let (resolution, preflight) = loop {
-        let resolution = resolve_selected(manifest, &catalog, options, &locked, selection)?;
-        offline::validate_selected_resolution(manifest, &resolution)?;
-        let preflight = policy::preflight(&config.policy, &resolution)?;
-        let pending_git = resolution
-            .packages
-            .iter()
-            .filter(|package| {
-                matches!(package.source, ResolvedSource::Git { .. })
-                    && !packages.contains_key(&package.key)
-            })
-            .collect::<Vec<_>>();
-        let mut git_evidence = git_package_evidence(direct, &pending_git)?;
-        for package in pending_git {
-            let manifest = package.local_manifest.clone().ok_or_else(|| {
-                Error::failure(format!(
-                    "resolved Git package `{} {}` has no inspected manifest",
-                    package.key.name, package.key.version
-                ))
-            })?;
-            let evidence = git_evidence
-                .remove(&package.key)
-                .expect("every inspected Git package has evidence");
-            packages.insert(
-                package.key.clone(),
-                PreparedPackage {
-                    manifest,
-                    evidence,
-                    _extracted: None,
-                    cargo_registry: false,
-                },
-            );
-        }
-        let pending_registry = resolution
-            .packages
-            .iter()
-            .filter_map(|package| match package.source {
-                ResolvedSource::CratesIo { checksum } if !packages.contains_key(&package.key) => {
-                    Some((package, checksum))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        packages.extend(registry_package_evidence_set(
-            source,
-            config,
-            staging_parent,
-            &pending_registry,
-            false,
-        )?);
-        for package in &resolution.packages {
-            if !packages.contains_key(&package.key) {
-                let prepared = match &package.source {
-                    ResolvedSource::CratesIo { .. } => {
-                        unreachable!("registry evidence was prepared above")
-                    }
-                    ResolvedSource::Path { .. } => {
-                        let inspected_manifest =
-                            package.local_manifest.clone().ok_or_else(|| {
-                                Error::failure(format!(
-                                    "resolved path package `{} {}` has no inspected manifest",
-                                    package.key.name, package.key.version
-                                ))
-                            })?;
-                        let package_evidence = PackageEvidence::from_path(package)?;
-                        PreparedPackage {
-                            manifest: inspected_manifest,
-                            evidence: package_evidence,
-                            _extracted: None,
-                            cargo_registry: false,
-                        }
-                    }
-                    ResolvedSource::Git { .. } => unreachable!("Git evidence was prepared above"),
-                };
-                packages.insert(package.key.clone(), prepared);
-            }
-            catalog
-                .annotate_proc_macro(&package.key, packages[&package.key].evidence.proc_macro)?;
-        }
-        let refined = resolve_selected(manifest, &catalog, options, &locked, selection)?;
-        if refined == resolution {
-            break (resolution, preflight);
-        }
-    };
-    let selected = resolution
-        .packages
-        .iter()
-        .map(|package| package.key.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    packages.retain(|key, _| selected.contains(key));
-    let evidence = packages
-        .iter()
-        .map(|(key, package)| (key.clone(), package.evidence.clone()))
-        .collect();
-    let admission = policy::inspect(&preflight, &resolution, &evidence)?;
-    Ok(PreparedGraph {
-        resolution,
-        admission,
-        packages,
-        cargo_registry_mode: matches!(source, RegistrySource::Cargo(_)),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,7 +617,7 @@ mod tests {
     use crate::resolver::PackageSourceKey;
     use crate::source_tree::DEFAULT_LIMITS;
     use crate::toolchain::{CfgSet, Toolchain};
-    use crate::unit::{ProfileContext, UnitKind, UnitMode};
+    use crate::unit::{ProfileContext, UnitKind, UnitMode, selected_library_key};
     use semver::Version;
     use serde_json::Value;
     use std::fs;
@@ -1129,26 +853,33 @@ mod tests {
         let source = RegistrySource::Lorry(&repositories);
         let direct = crate::git::DirectCatalog::default();
         let resolver_options = options(&manifest);
-        let graph = prepare_locked_source(
-            &manifest,
-            &config,
-            LockedSource {
-                registry: source,
-                direct: &direct,
-                verified_resolution: None,
-            },
-            &resolver_options,
-            selection,
-            &staging,
-        )
-        .unwrap();
+        let prepare = |dev| {
+            workspace::prepare_member(
+                &fixture.0,
+                &config,
+                source,
+                &direct,
+                &resolver_options,
+                selection,
+                &staging,
+                dev,
+            )
+            .unwrap()
+        };
+        let graph = prepare(false);
+        let library = selected_library_key(&manifest).unwrap();
+        let selected = std::slice::from_ref(&library.package);
 
         assert!(!staging.exists());
-        assert_eq!(graph.packages.len(), 1);
-        let (key, package) = graph.packages.first_key_value().unwrap();
-        assert!(matches!(key.source, PackageSourceKey::Path(_)));
-        assert_eq!(package.source_root(), fixture.0.join("local"));
-        assert!(graph.admission.packages.contains_key(key));
+        assert_eq!(graph.packages.len(), 2);
+        let local = graph
+            .packages
+            .keys()
+            .find(|key| key.name == "local")
+            .unwrap();
+        assert!(matches!(local.source, PackageSourceKey::Path(_)));
+        assert_eq!(graph.packages[local].source_root(), fixture.0.join("local"));
+        assert!(graph.admission.packages.contains_key(local));
         let options = PlanOptions {
             workspace_root: &manifest.root,
             release: true,
@@ -1162,54 +893,17 @@ mod tests {
             rustflags: &[],
         };
         let plan = graph
-            .selected_targets_plan(&options, &manifest, None)
+            .workspace_plan(&options, selected, false, true, None)
             .unwrap();
         assert!(plan.units.values().all(|unit| unit.source_remap.is_none()));
         let check_plan = graph
-            .selected_check_plan(&options, &manifest, true, true, None)
+            .workspace_plan(&options, selected, true, true, None)
             .unwrap();
         assert_check_graph_matches_cargo(&fixture.0, &check_plan, &[]);
 
-        // Integration harness environments come from the shared test plan.
-        let mut workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
-        workspace.load_locked_context().unwrap();
-        let (complete, catalog) = workspace::resolve_locked(
-            &workspace,
-            &config,
-            source,
-            &direct,
-            &resolver_options,
-            None,
-        )
-        .unwrap();
-        let requests = crate::resolver::workspace::features::member_requests(
-            &workspace,
-            &[fixture.0.clone()].into(),
-            &crate::cli::FeatureSelection::default(),
-            true,
-        )
-        .unwrap();
-        let resolution = crate::resolver::workspace::resolve_selected_workspace(
-            &complete,
-            &catalog,
-            &resolver_options,
-            &requests,
-            selection,
-        )
-        .unwrap();
-        let shared = workspace::prepare_compilation(
-            resolution,
-            &config,
-            source,
-            &staging,
-            &direct,
-            &Default::default(),
-        )
-        .unwrap();
-        let library = selected_library_key(&manifest).unwrap();
-        let focused = shared
-            .workspace_test_plan(&options, std::slice::from_ref(&library.package))
-            .unwrap();
+        // Integration harness environments come from the test plan.
+        let shared = prepare(true);
+        let focused = shared.workspace_test_plan(&options, selected).unwrap();
         let integration = focused
             .units
             .keys()

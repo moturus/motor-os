@@ -137,27 +137,12 @@ fn materialize_locked_catalog(
         };
         objects.insert(locked.cargo_source.clone(), object);
     }
-    direct_catalog(manifest, policy, &objects, materialized, true)
-}
-
-pub(crate) fn load_locked_dependencies(
-    manifest: &Manifest,
-    policy: &PolicyLimits,
-) -> Result<DirectCatalog> {
-    load_locked_catalog(manifest, policy, false)
+    direct_catalog(manifest, policy, &objects, materialized)
 }
 
 pub(crate) fn load_locked_sources(
     manifest: &Manifest,
     policy: &PolicyLimits,
-) -> Result<DirectCatalog> {
-    load_locked_catalog(manifest, policy, true)
-}
-
-fn load_locked_catalog(
-    manifest: &Manifest,
-    policy: &PolicyLimits,
-    describe: bool,
 ) -> Result<DirectCatalog> {
     let locked_git = manifest
         .lock
@@ -192,7 +177,7 @@ fn load_locked_catalog(
             );
         }
     }
-    direct_catalog(manifest, policy, &objects, BTreeSet::new(), describe)
+    direct_catalog(manifest, policy, &objects, BTreeSet::new())
 }
 
 fn direct_catalog(
@@ -200,7 +185,6 @@ fn direct_catalog(
     policy: &PolicyLimits,
     objects: &BTreeMap<String, Object>,
     materialized: BTreeSet<String>,
-    describe: bool,
 ) -> Result<DirectCatalog> {
     let mut packages = Vec::new();
     let mut evidence = BTreeMap::new();
@@ -220,14 +204,8 @@ fn direct_catalog(
             .get(source)
             .ok_or_else(|| Error::failure(format!("Git source `{source}` was not prepared")))?;
         let patched_crates_io = is_git_patch(manifest, package, &object.locked);
-        let (inspected, source, tree) = locked_package(
-            manifest,
-            package,
-            object,
-            policy,
-            patched_crates_io,
-            describe,
-        )?;
+        let (inspected, source, tree) =
+            locked_package(manifest, package, object, policy, patched_crates_io)?;
         let version = semver::Version::parse(&package.version.original).map_err(|error| {
             Error::failure(format!(
                 "invalid locked Git version `{} {}`: {error}",
@@ -549,7 +527,6 @@ fn locked_package(
     object: &Object,
     policy: &PolicyLimits,
     patched_crates_io: bool,
-    describe: bool,
 ) -> Result<(Manifest, ResolvedSource, Tree)> {
     let matches = object
         .package_roots
@@ -572,11 +549,7 @@ fn locked_package(
     let package_path = relative
         .to_str()
         .ok_or_else(|| Error::failure("Git package path is not valid UTF-8"))?;
-    let mut inspected = if describe {
-        Manifest::load_source_dependency(root)?
-    } else {
-        Manifest::load_path_dependency(root)?
-    };
+    let mut inspected = Manifest::load_source_dependency(root)?;
     bind_internal_dependencies(&mut inspected, object)?;
     let package_tree = object
         .source_tree
@@ -846,7 +819,7 @@ mod tests {
             ))
             .unwrap();
         assert!(manifest.dependencies.is_empty());
-        let error = load_locked_dependencies(&manifest, &PolicyLimits::default())
+        let error = load_locked_sources(&manifest, &PolicyLimits::default())
             .err()
             .expect("the shared lock requires the other member's Git source");
         assert!(error.to_string().contains("Git source is not materialized"));
@@ -916,7 +889,6 @@ mod tests {
         fs::set_permissions(workspace.join("Cargo.toml"), permissions).unwrap();
 
         let manifest = Manifest::load_for_build(&workspace).unwrap();
-        let direct = load_locked_dependencies(&manifest, &limits).unwrap();
         let described = load_locked_sources(&manifest, &limits).unwrap();
         let description = &described.packages[0].0;
         assert_eq!(
@@ -938,16 +910,8 @@ mod tests {
             matches!(&description.dependencies[0].source, DependencySource::Git(git)
             if locked.matches(git))
         );
-        assert_eq!(described.evidence, direct.evidence);
-        assert!(
-            direct.packages[0]
-                .0
-                .targets_of(crate::manifest::TargetKind::Bin)
-                .next()
-                .is_none()
-        );
         let mut catalog = Catalog::default();
-        direct.configure(&mut catalog).unwrap();
+        described.configure(&mut catalog).unwrap();
         let options = crate::resolver::Options {
             resolver: crate::manifest::Resolver::V2,
             incompatible_rust_versions: None,

@@ -101,31 +101,8 @@ pub(crate) fn reconstruct(
     })
 }
 
-pub(crate) fn verify(
-    inputs: &ReviewInputs<'_>,
-    compact: &CompactState,
-) -> Result<VerifiedAdmission> {
-    let reconstructed = reconstruct(inputs, compact)?;
-    let resolution = if inputs.prepare_context.is_some() {
-        let members = member_requests(
-            &reconstructed.workspace,
-            &[inputs.manifest.root.clone()].into(),
-            &FeatureSelection::default(),
-            false,
-        )?;
-        let selected = select_requested(&reconstructed, inputs, compact, &members)?;
-        Some(legacy_dependency_graph(
-            selected,
-            &inputs.manifest.root,
-            &reconstructed.workspace.documents,
-        )?)
-    } else {
-        None
-    };
-    Ok(VerifiedAdmission {
-        review: reconstructed.review,
-        resolution,
-    })
+pub(crate) fn verify(inputs: &ReviewInputs<'_>, compact: &CompactState) -> Result<Review> {
+    Ok(reconstruct(inputs, compact)?.review)
 }
 
 /// Verify every requested root and feature before exposing the shared member
@@ -134,13 +111,10 @@ pub(crate) fn verify_requested(
     inputs: &ReviewInputs<'_>,
     compact: &CompactState,
     members: &[MemberRequest],
-) -> Result<VerifiedAdmission> {
+) -> Result<(Review, Resolution)> {
     let reconstructed = reconstruct(inputs, compact)?;
     let selected = select_requested(&reconstructed, inputs, compact, members)?;
-    Ok(VerifiedAdmission {
-        review: reconstructed.review,
-        resolution: Some(selected),
-    })
+    Ok((reconstructed.review, selected))
 }
 
 fn select_requested(
@@ -282,32 +256,6 @@ fn cover(review: &Review, context: &Context, selected: &Resolution) -> Result<()
         }
     }
     Ok(())
-}
-
-// The existing single-package compiler consumes dependency roots. Milestone 7
-// consumes member roots directly and removes this transitional projection.
-fn legacy_dependency_graph(
-    mut selected: Resolution,
-    root: &Path,
-    documents: &crate::manifest::Documents,
-) -> Result<Resolution> {
-    let position = selected
-        .packages
-        .iter()
-        .position(|package| package.key.source == PackageSourceKey::Path(root.to_owned()))
-        .ok_or_else(|| Error::failure("requested member is absent from selected resolution"))?;
-    let member = selected.packages.remove(position);
-    selected.root_edges = member
-        .edges
-        .into_iter()
-        .filter(|edge| edge.kind != crate::sparse::DependencyKind::Dev)
-        .map(|mut edge| {
-            edge.parent_compile_kind = None;
-            edge
-        })
-        .collect();
-    compilation_manifests(&mut selected, &[], documents)?;
-    Ok(selected)
 }
 
 pub(crate) fn requests(
@@ -482,10 +430,8 @@ mod tests {
         let roots = [fixture.0.join("a"), fixture.0.join("b")].into();
         let members =
             member_requests(&workspace, &roots, &FeatureSelection::default(), false).unwrap();
-        let verified = verify_requested(&inputs, &compact, &members).unwrap();
-        let (actual_review, selected) = verified.into_parts();
+        let (actual_review, selected) = verify_requested(&inputs, &compact, &members).unwrap();
         assert_eq!(actual_review, candidate);
-        let selected = selected.unwrap();
         assert_eq!(selected.root_edges.len(), 2);
         assert_eq!(selected.packages.len(), 3);
         assert!(selected.packages.iter().all(|package| {
@@ -579,16 +525,12 @@ mod tests {
             .collect::<Vec<_>>();
         let before = PackageEvidence::from_path(&packages[1]).unwrap();
         let original = packages[1].local_manifest.as_ref().unwrap().clone();
-        let projected = legacy_dependency_graph(
-            Resolution {
-                root_edges: vec![],
-                packages,
-            },
-            &fixture.0.join("app"),
-            &Default::default(),
-        )
-        .unwrap();
-        let shared = &projected.packages[0];
+        let mut projected = Resolution {
+            root_edges: vec![],
+            packages,
+        };
+        compilation_manifests(&mut projected, &[], &Default::default()).unwrap();
+        let shared = &projected.packages[1];
         let compilation = shared.local_manifest.as_ref().unwrap();
         let after = PackageEvidence::from_path(shared).unwrap_or_else(|error| {
             panic!(
@@ -676,8 +618,17 @@ mod tests {
             prepare_context: Some(compact.contexts[0].clone()),
             ..inputs
         };
+        let mut workspace = SourceWorkspace::load(&fixture.0, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        let members = member_requests(
+            &workspace,
+            &[manifest.root.clone()].into(),
+            &FeatureSelection::default(),
+            false,
+        )
+        .unwrap();
         assert!(
-            verify(&build_inputs, &narrow)
+            verify_requested(&build_inputs, &narrow, &members)
                 .err()
                 .unwrap()
                 .render()

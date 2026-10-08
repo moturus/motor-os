@@ -26,7 +26,7 @@ pub(crate) fn resolve_selected_workspace(
         .filter(|member| member.dev)
         .map(|member| member.root.clone())
         .collect();
-    let scope = Scope::WorkspaceSelected {
+    let scope = Scope::Selected {
         selection,
         complete,
         dev_members: &dev_members,
@@ -34,7 +34,7 @@ pub(crate) fn resolve_selected_workspace(
     // Cargo's resolver 1 activates features from inactive platforms and
     // member dev-dependencies, then builds only reachable active units.
     let features = if options.resolver == ResolverVersion::V1 {
-        Scope::WorkspaceMetadata { complete }
+        Scope::Metadata { complete }
     } else {
         scope
     };
@@ -73,7 +73,7 @@ pub(crate) fn resolve_metadata_workspace(
         catalog,
         options,
         members,
-        Scope::WorkspaceMetadata { complete },
+        Scope::Metadata { complete },
     )
 }
 
@@ -234,7 +234,7 @@ pub(crate) fn resolve_complete_workspace(
         catalog,
         options,
         locked,
-        Scope::WorkspaceComplete {
+        Scope::Complete {
             locked: edges.as_ref(),
             exact: false,
         },
@@ -255,7 +255,7 @@ pub(crate) fn resolve_locked_workspace(
         catalog,
         options,
         &LockedPreference::from_lockfile(Some(lock))?,
-        Scope::WorkspaceComplete {
+        Scope::Complete {
             locked: Some(&edges),
             exact: true,
         },

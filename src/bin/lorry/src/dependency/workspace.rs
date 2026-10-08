@@ -193,6 +193,41 @@ pub(crate) fn prepare_compilation(
     })
 }
 
+/// Prepares a default build of the one member at `root` without admission.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_member(
+    root: &Path,
+    config: &Config,
+    source: RegistrySource<'_>,
+    direct: &crate::git::DirectCatalog,
+    options: &Options,
+    selection: TargetSelection<'_>,
+    staging_parent: &Path,
+    dev: bool,
+) -> Result<PreparedGraph> {
+    let mut workspace = SourceWorkspace::load(root, None)?;
+    workspace.load_locked_context()?;
+    let (complete, catalog) = resolve_locked(&workspace, config, source, direct, options, None)?;
+    let requests = crate::resolver::workspace::features::member_requests(
+        &workspace,
+        &[root.to_owned()].into(),
+        &crate::cli::FeatureSelection::default(),
+        dev,
+    )?;
+    let resolution = crate::resolver::workspace::resolve_selected_workspace(
+        &complete, &catalog, options, &requests, selection,
+    )?;
+    prepare_compilation(
+        resolution,
+        config,
+        source,
+        staging_parent,
+        direct,
+        &workspace.documents,
+    )
+}
+
 // Compiler loading validates executable target descriptions. Preserve the
 // workspace ownership that also defines member source identity and freshness.
 pub(super) fn compilation_manifests(

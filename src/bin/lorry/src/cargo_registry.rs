@@ -969,14 +969,11 @@ mod tests {
         let staging = fixture.0.join("graph-staging");
         fs::create_dir(&staging).unwrap();
         let registry = fixture.registry();
-        let prepared = dependency::prepare_locked_source(
-            &manifest,
+        let prepared = dependency::workspace::prepare_member(
+            &root,
             &config,
-            dependency::LockedSource {
-                registry: dependency::RegistrySource::Cargo(&registry),
-                direct: &crate::git::DirectCatalog::default(),
-                verified_resolution: None,
-            },
+            dependency::RegistrySource::Cargo(&registry),
+            &crate::git::DirectCatalog::default(),
             &Options {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
@@ -991,13 +988,17 @@ mod tests {
                 host_cfg: &cfg,
             },
             &staging,
+            false,
         )
         .unwrap();
-        assert_eq!(prepared.packages.len(), 1);
-        assert_eq!(
-            prepared.packages.values().next().unwrap().source_root(),
-            source
-        );
+        assert_eq!(prepared.packages.len(), 2);
+        let demo = prepared
+            .packages
+            .iter()
+            .find(|(key, _)| key.name == "demo")
+            .unwrap()
+            .1;
+        assert_eq!(demo.source_root(), source);
         fs::write(source.join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
         let error = prepared
             .revalidate_cargo_registry_sources(crate::source_tree::DEFAULT_LIMITS)

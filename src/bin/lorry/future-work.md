@@ -6,18 +6,10 @@ workspace work.
 
 ## Simplifications
 
-- **Delete the older single-package build path.** The shared workspace path
-  can build everything. The narrow path still builds one package with no
-  build script, no feature flags, and no binaries with `required-features`.
-  It used to make unchanged builds faster. It no longer does, because both
-  paths now reuse a completed-profile record before admission. Remove it and
-  the `shared` predicate in `src/engine.rs`. `--use-cargo-registry`
-  (`src/cargo_registry.rs`) uses the narrow prepare code, so move it first.
 - **Admission verifies Git sources twice.** `reconstruct` in
   `src/dependency/workspace/admission.rs` loads and hashes every locked Git
-  source again, although the engine already did. It cannot simply reuse the
-  engine's catalog: a single-package build loads only the root's
-  dependencies, while admission needs the whole workspace.
+  source again, although the engine already did. Every build now loads the
+  whole lock's Git sources, so admission could take the engine's catalog.
 - **Vendor extracts some archives more than once.** `Acquisition::evidence`
   in `src/vendor.rs` unpacks every archive-only object on each call, and
   `fetch --target` calls it once per proc-macro discovery round.

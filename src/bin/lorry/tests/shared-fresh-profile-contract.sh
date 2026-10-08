@@ -245,7 +245,7 @@ expect_rebuilt "unselected member manifest"
 
 # Alternating selections that install the same binaries keep separate
 # records, so after one round each stays fresh. (The default selection is
-# different: it enables util/extra.) A single package takes the narrow path.
+# different: it enables util/extra.)
 lorry build -p app
 lorry run -p app
 for round in 1 2; do

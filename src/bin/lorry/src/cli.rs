@@ -242,10 +242,6 @@ impl TargetSelection {
         self.all_targets || self.lib || !self.has_target_selector()
     }
 
-    pub(crate) fn selects_binaries(&self) -> bool {
-        self.all_targets || self.bins || !self.bin.is_empty() || !self.has_target_selector()
-    }
-
     pub(crate) fn selects_tests(&self) -> bool {
         self.all_targets || self.tests || !self.test.is_empty()
     }
@@ -1787,7 +1783,7 @@ mod tests {
             let targets = options.build.targets;
             assert!(targets.tests && targets.benches);
             assert!(targets.selects_dev_targets());
-            assert!(!targets.selects_library() && !targets.selects_binaries());
+            assert!(!targets.selects_library());
         }
     }
 

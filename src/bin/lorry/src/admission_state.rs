@@ -3119,7 +3119,7 @@ mod tests {
             context: FeatureContext::Unified,
             package: package.key.clone(),
         };
-        let error = crate::policy::preflight(
+        let error = crate::policy::preflight_workspace(
             &policy,
             &Resolution {
                 root_edges: vec![root_edge],

@@ -86,33 +86,20 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
         _ => {}
     }
     let cli = &expanded_cli;
-    let ordinary = matches!(
-        &cli.command,
-        Command::Build(_) | Command::Check(_) | Command::Run(_)
-    );
     let run_example =
         matches!(&cli.command, Command::Run(options) if !options.build.targets.example.is_empty());
-    let shared_tests = matches!(&cli.command, Command::Test(_));
-    let shared_auxiliary_builds = matches!(&cli.command, Command::Build(options) if options.targets.has_target_selector() && options.targets.single_binary().is_none());
-    let shared_test_checks = matches!(&cli.command, Command::Check(options) if options.build.targets.selects_dev_targets() || options.build.targets.bin.len() > 1 || options.build.profile.as_deref() == Some("test"));
-    let shared = shared_tests
-        || run_example
-        || shared_auxiliary_builds
-        || shared_test_checks
-        || matches!(&cli.command, Command::Check(options) if options.compile_time_deps)
-        || ordinary
-            && (selected.len() > 1
-                || cli.features != crate::cli::FeatureSelection::default()
-                || selected.iter().any(|member| {
-                    member.build_script.is_some()
-                        || member
-                            .targets_of(TargetKind::Bin)
-                            .any(|binary| binary.required_features.is_some())
-                        || member
-                            .library
-                            .as_ref()
-                            .is_some_and(|library| library.requires_upstream_objects())
-                }));
+    // These selections also resolve the selected members' dev-dependencies.
+    let dev = match &cli.command {
+        Command::Test(_) => true,
+        Command::Run(_) => run_example,
+        Command::Build(options) => options.targets.selects_dev_targets(),
+        Command::Check(options) => {
+            options.build.targets.selects_dev_targets()
+                || options.build.targets.bin.len() > 1
+                || options.build.profile.as_deref() == Some("test")
+        }
+        _ => false,
+    };
     let run_selection = match &cli.command {
         Command::Run(options) => Some(select_run_member(
             &selected,
@@ -280,14 +267,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
         Command::Check(options) => Some(&options.build.targets),
         _ => None,
     };
-    let shared_members = shared.then_some(selected.as_slice());
-    let fresh_owner = fresh_record_name(
-        &manifest,
-        shared_members,
-        fresh_targets,
-        binary_selection,
-        matches!(&cli.command, Command::Check(_)),
-    );
+    let fresh_owner = fresh_record_name(&manifest, &selected, fresh_targets, binary_selection);
     let ordinary_freshness_base = (!validation.is_strict()
         && (use_cargo_registry
             || !(compact_state.is_none()
@@ -317,11 +297,9 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
             check_targets: fresh_check.map(|options| &options.build.targets),
             jobs,
             cargo: &cargo,
-            shared: shared_members.map(|members| SharedSelection {
-                members,
-                features: &cli.features,
-                targets: fresh_targets,
-            }),
+            selected: &selected,
+            features: &cli.features,
+            targets: fresh_targets,
         })
     })
     .transpose()?;
@@ -407,23 +385,14 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
             staging_parent: &admission_scratch,
             evidence_root: &target_root.join(".cargo-evidence"),
         },
-        if shared {
-            crate::git::load_locked_sources
-        } else {
-            crate::git::load_locked_dependencies
-        },
     )?;
     let (source, direct) = (locked.source(), &locked.direct);
-    let members = shared
-        .then(|| {
-            crate::resolver::workspace::features::member_requests(
-                &workspace,
-                &selected.iter().map(|member| member.root.clone()).collect(),
-                &cli.features,
-                shared_tests || shared_test_checks || run_example || matches!(&cli.command, Command::Build(options) if options.targets.selects_dev_targets()),
-            )
-        })
-        .transpose()?;
+    let members = crate::resolver::workspace::features::member_requests(
+        &workspace,
+        &selected.iter().map(|member| member.root.clone()).collect(),
+        &cli.features,
+        dev,
+    )?;
     crate::trace::event("opened dependency source");
     let inputs = dependency::ReviewInputs {
         manifest: &manifest,
@@ -438,29 +407,23 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
             target: target_info.triple.clone(),
         }),
     };
-    let verified_resolution = if let Some(compact) = &compact_state {
-        let verified = if let Some(members) = &members {
-            dependency::workspace::admission::verify_requested(&inputs, compact, members)?
-        } else {
-            dependency::workspace::admission::verify(&inputs, compact)?
-        };
-        let (review, resolution) = verified.into_parts();
+    let resolution = if let Some(compact) = &compact_state {
+        let (review, resolution) =
+            dependency::workspace::admission::verify_requested(&inputs, compact, &members)?;
         review.apply_to_policy(&mut config.policy, &manifest.root)?;
         resolution
-    } else if let Some(members) = &members {
-        Some(dependency::workspace::resolve_compilation(
+    } else {
+        dependency::workspace::resolve_compilation(
             &inputs,
             &workspace,
-            members,
+            &members,
             TargetSelection {
                 host_triple: &host_info.triple,
                 host_cfg: &host_info.cfg,
                 target_triple: &target_info.triple,
                 target_cfg: &target_info.cfg,
             },
-        )?)
-    } else {
-        None
+        )?
     };
     crate::trace::event("verified dependency admission");
 
@@ -475,7 +438,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
                     documents: &workspace.documents,
-                    members: shared.then_some(selected.as_slice()),
+                    members: &selected,
                     global_cache_root: &global_cache_root,
                     config: &config,
                     toolchain: &toolchain,
@@ -493,12 +456,13 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                     jobs,
                     keep_going: options.keep_going,
                     use_cargo_registry,
-                    source: (source, direct, verified_resolution),
+                    source: (source, direct),
                     bundle: false,
                     validation,
                     ordinary_freshness_base,
                     binary_selection,
                 },
+                resolution,
                 None,
                 options.message_format,
             )?;
@@ -511,7 +475,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                 child_lease_fd: artifact_lock.child_lease_fd(),
                 manifest: &manifest,
                 documents: &workspace.documents,
-                members: shared.then_some(selected.as_slice()),
+                members: &selected,
                 global_cache_root: &global_cache_root,
                 config: &config,
                 toolchain: &toolchain,
@@ -529,12 +493,13 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                 jobs,
                 keep_going: options.build.keep_going,
                 use_cargo_registry,
-                source: (source, direct, verified_resolution),
+                source: (source, direct),
                 bundle: false,
                 validation,
                 ordinary_freshness_base,
                 binary_selection: None,
             },
+            resolution,
             options,
         ),
         Command::Run(options) => {
@@ -545,7 +510,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
                     documents: &workspace.documents,
-                    members: shared.then_some(selected.as_slice()),
+                    members: &selected,
                     global_cache_root: &global_cache_root,
                     config: &config,
                     toolchain: &toolchain,
@@ -563,12 +528,13 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                     jobs,
                     keep_going: false,
                     use_cargo_registry,
-                    source: (source, direct, verified_resolution),
+                    source: (source, direct),
                     bundle: false,
                     validation,
                     ordinary_freshness_base,
                     binary_selection,
                 },
+                resolution,
                 options.build.message_format,
             )?;
             let artifact = selected_run_artifact(&artifacts, run_binary.unwrap(), run_example)?;
@@ -601,7 +567,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                     child_lease_fd: artifact_lock.child_lease_fd(),
                     manifest: &manifest,
                     documents: &workspace.documents,
-                    members: shared.then_some(selected.as_slice()),
+                    members: &selected,
                     global_cache_root: &global_cache_root,
                     config: &config,
                     toolchain: &toolchain,
@@ -619,12 +585,13 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                     jobs,
                     keep_going: false,
                     use_cargo_registry,
-                    source: (source, direct, verified_resolution),
+                    source: (source, direct),
                     bundle: options.bundle,
                     validation,
                     ordinary_freshness_base,
                     binary_selection: None,
                 },
+                resolution,
                 None,
                 options.build.message_format,
             )?;
@@ -712,8 +679,8 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
 struct Build<'a> {
     manifest: &'a Manifest,
     documents: &'a crate::manifest::Documents,
-    /// Selected workspace roots; legacy single-package callers use `None`.
-    members: Option<&'a [Manifest]>,
+    /// Selected workspace members.
+    members: &'a [Manifest],
     target_root: &'a Path,
     child_lease_fd: Option<i32>,
     global_cache_root: &'a Path,
@@ -738,7 +705,6 @@ struct Build<'a> {
     source: (
         dependency::RegistrySource<'a>,
         &'a crate::git::DirectCatalog,
-        Option<crate::resolver::Resolution>,
     ),
     bundle: bool,
     validation: ValidationMode,
@@ -929,27 +895,20 @@ pub(crate) fn fresh_record_prefix(package_root: &Path) -> String {
 
 /// Names the completed-profile record of one selection. Selections whose
 /// digests differ keep separate records, so alternating `build`, `run --bin`,
-/// and other selections all stay fresh, while `build` and the `run` of a
-/// single binary share one. The name starts with the owning package's prefix.
+/// and other selections all stay fresh. The name starts with the owning
+/// package's prefix.
 fn fresh_record_name(
     manifest: &Manifest,
-    members: Option<&[Manifest]>,
+    members: &[Manifest],
     targets: Option<&crate::cli::TargetSelection>,
     binary: Option<&str>,
-    check: bool,
 ) -> String {
     let mut digest = FreshDigest::new();
     digest.bytes("schema", b"lorry-fresh-selection-v1");
-    // A single package's build and single-binary run share one record; its
-    // checks and every shared selection keep one per target selection.
-    if let Some(members) = members {
-        for member in members {
-            digest.os("member", member.root.as_os_str());
-        }
+    for member in members {
+        digest.os("member", member.root.as_os_str());
     }
-    if members.is_some() || check {
-        digest.debug("targets", &targets);
-    }
+    digest.debug("targets", &targets);
     digest.debug("binary", &binary);
     let selection = hex(&digest.finish());
     format!(
@@ -1152,12 +1111,16 @@ enum BuildOutcome {
 }
 
 #[cfg(test)]
-fn build(build: Build<'_>) -> Result<BuildArtifacts> {
-    build_reported(build, MessageFormat::Human)
+fn build(build: Build<'_>, resolution: Resolution) -> Result<BuildArtifacts> {
+    build_reported(build, resolution, MessageFormat::Human)
 }
 
-fn build_reported(build: Build<'_>, format: MessageFormat) -> Result<BuildArtifacts> {
-    match build_inner(build, None, format)? {
+fn build_reported(
+    build: Build<'_>,
+    resolution: Resolution,
+    format: MessageFormat,
+) -> Result<BuildArtifacts> {
+    match build_inner(build, resolution, None, format)? {
         BuildOutcome::Artifacts(artifacts) => Ok(artifacts),
         BuildOutcome::Check(_) => unreachable!("ordinary build returned a check result"),
         BuildOutcome::NoTargets => Err(Error::failure(
@@ -1167,8 +1130,13 @@ fn build_reported(build: Build<'_>, format: MessageFormat) -> Result<BuildArtifa
     }
 }
 
-fn check(build: Build<'_>, options: &CheckOptions) -> Result<i32> {
-    match build_inner(build, Some(options), options.build.message_format)? {
+fn check(build: Build<'_>, resolution: Resolution, options: &CheckOptions) -> Result<i32> {
+    match build_inner(
+        build,
+        resolution,
+        Some(options),
+        options.build.message_format,
+    )? {
         BuildOutcome::Check(code) => Ok(code),
         BuildOutcome::Artifacts(_) => unreachable!("check returned ordinary build artifacts"),
         BuildOutcome::NoTargets => unreachable!("check returned an ordinary no-target build"),
@@ -1177,7 +1145,8 @@ fn check(build: Build<'_>, options: &CheckOptions) -> Result<i32> {
 }
 
 fn build_inner(
-    mut build: Build<'_>,
+    build: Build<'_>,
+    resolution: Resolution,
     check: Option<&CheckOptions>,
     format: MessageFormat,
 ) -> Result<BuildOutcome> {
@@ -1220,41 +1189,14 @@ fn build_inner(
     crate::trace::event("created dependency preparation directory");
 
     Progress::new(build.verbosity != Verbosity::Quiet).report("Preparing dependency graph")?;
-    let resolver_options =
-        dependency::resolver_options(build.manifest, build.config, build.toolchain)?;
-    let selection = TargetSelection {
-        target_triple: &build.target.triple,
-        target_cfg: &build.target.cfg,
-        host_triple: &build.host.triple,
-        host_cfg: &build.host.cfg,
-    };
-    let (source, direct) = (build.source.0, build.source.1);
-    let verified_resolution = build.source.2.take();
-    let prepared = if build.members.is_some() {
-        dependency::workspace::prepare_compilation(
-            verified_resolution.ok_or_else(|| {
-                Error::failure("shared compilation requires a selected workspace resolution")
-            })?,
-            build.config,
-            source,
-            staging.path(),
-            direct,
-            build.documents,
-        )?
-    } else {
-        dependency::prepare_locked_source(
-            build.manifest,
-            build.config,
-            dependency::LockedSource {
-                registry: source,
-                direct,
-                verified_resolution,
-            },
-            &resolver_options,
-            selection,
-            staging.path(),
-        )?
-    };
+    let prepared = dependency::workspace::prepare_compilation(
+        resolution,
+        build.config,
+        build.source.0,
+        staging.path(),
+        build.source.1,
+        build.documents,
+    )?;
     crate::trace::event(format_args!(
         "prepared and verified {} dependency packages",
         prepared.packages.len()
@@ -1267,7 +1209,6 @@ fn build_inner(
     let selected_root = selected_library_key(build.manifest)?;
     let selected_packages = build
         .members
-        .unwrap_or_else(|| std::slice::from_ref(build.manifest))
         .iter()
         .map(|manifest| selected_library_key(manifest).map(|key| key.package))
         .collect::<Result<Vec<_>>>()?;
@@ -1286,7 +1227,6 @@ fn build_inner(
             .target_selection
             .or(check.map(|options| &options.build.targets)),
         build.binary_selection,
-        check.is_some(),
     );
     let fresh_check =
         check.is_none_or(|options| options.clippy.is_none() && !options.compile_time_deps);
@@ -1335,27 +1275,23 @@ fn build_inner(
             logical_target: build.logical_target,
             rustflags: build.rustflags,
         };
-        if build.members.is_some() {
-            if let Some(targets) = build.target_selection
-                && targets.has_target_selector()
-            {
-                return prepared.workspace_compiler_targets(
-                    &options,
-                    &selected_packages,
-                    targets,
-                    crate::unit::UnitMode::Build,
-                );
-            }
-            prepared.workspace_plan(
+        if let Some(targets) = build.target_selection
+            && targets.has_target_selector()
+        {
+            return prepared.workspace_compiler_targets(
                 &options,
                 &selected_packages,
-                false,
-                true,
-                build.binary_selection,
-            )
-        } else {
-            prepared.selected_targets_plan(&options, build.manifest, build.binary_selection)
+                targets,
+                crate::unit::UnitMode::Build,
+            );
         }
+        prepared.workspace_plan(
+            &options,
+            &selected_packages,
+            false,
+            true,
+            build.binary_selection,
+        )
     };
     let selected_check_plan = |targets: &crate::cli::TargetSelection| {
         let options = PlanOptions {
@@ -1367,30 +1303,16 @@ fn build_inner(
             logical_target: build.logical_target,
             rustflags: build.rustflags,
         };
-        if build.members.is_some() {
-            prepared.workspace_compiler_targets(
-                &options,
-                &selected_packages,
-                targets,
-                if build.manifest.profile_name.as_deref() == Some("test") {
-                    crate::unit::UnitMode::CheckTest
-                } else {
-                    crate::unit::UnitMode::Check
-                },
-            )
-        } else {
-            prepared.selected_check_plan(
-                &options,
-                build.manifest,
-                targets.selects_library() || targets.selects_binaries(),
-                targets.selects_binaries(),
-                if targets.all_targets || targets.bins {
-                    None
-                } else {
-                    targets.bin.first().map(String::as_str)
-                },
-            )
-        }
+        prepared.workspace_compiler_targets(
+            &options,
+            &selected_packages,
+            targets,
+            if build.manifest.profile_name.as_deref() == Some("test") {
+                crate::unit::UnitMode::CheckTest
+            } else {
+                crate::unit::UnitMode::Check
+            },
+        )
     };
     let roots = crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
     let message_reporter = crate::check_message::Reporter::new(
@@ -1434,7 +1356,7 @@ fn build_inner(
         },
     )?;
     crate::trace::event("initialized dependency build cache");
-    let workspace_test_plan = if build.test && build.members.is_some() {
+    let workspace_test_plan = if build.test {
         let options = PlanOptions {
             workspace_root: &build.manifest.workspace_root,
             release: build.release,
@@ -1521,10 +1443,8 @@ fn build_inner(
     };
     let mut bundle_layouts = BTreeMap::new();
     let mut bundle_kinds = BTreeMap::new();
-    if bundle_inputs.is_some()
-        && let Some(members) = build.members
-    {
-        for member in members {
+    if bundle_inputs.is_some() {
+        for member in build.members {
             let package = selected_library_key(member)?.package;
             let kind = bundle_kind(&package)?;
             bundle_kinds.insert(package.clone(), kind);
@@ -1536,39 +1456,30 @@ fn build_inner(
         || build.target_selection.is_some_and(|targets| {
             targets.selects_tests() || targets.benches || !targets.bench.is_empty()
         }))
-        && build
-            .members
-            .unwrap_or_else(|| std::slice::from_ref(build.manifest))
-            .iter()
-            .any(|member| {
-                member.targets_of(TargetKind::Test).next().is_some()
-                    || member.targets_of(TargetKind::Bench).any(|target| {
-                        target.test
-                            || build.target_selection.is_some_and(|targets| {
-                                targets.benches || !targets.bench.is_empty() || targets.all_targets
-                            })
-                    })
-            });
+        && build.members.iter().any(|member| {
+            member.targets_of(TargetKind::Test).next().is_some()
+                || member.targets_of(TargetKind::Bench).any(|target| {
+                    target.test
+                        || build.target_selection.is_some_and(|targets| {
+                            targets.benches || !targets.bench.is_empty() || targets.all_targets
+                        })
+                })
+        });
     let check_integration = check.is_some_and(|options| {
         (options.build.targets.selects_tests()
             || options.build.targets.benches
             || !options.build.targets.bench.is_empty())
-            && build
-                .members
-                .unwrap_or_else(|| std::slice::from_ref(build.manifest))
-                .iter()
-                .any(|member| {
-                    member
-                        .targets
-                        .iter()
-                        .any(|target| matches!(target.kind, TargetKind::Test | TargetKind::Bench))
-                })
+            && build.members.iter().any(|member| {
+                member
+                    .targets
+                    .iter()
+                    .any(|target| matches!(target.kind, TargetKind::Test | TargetKind::Bench))
+            })
     });
     let integration_binaries = (selected_integration || check_integration)
         .then(|| {
             build
                 .members
-                .unwrap_or_else(|| std::slice::from_ref(build.manifest))
                 .iter()
                 .map(|member| {
                     let package = selected_library_key(member)?.package;
@@ -1656,12 +1567,9 @@ fn build_inner(
         reporter: &message_reporter,
     };
     if let Some(options) = check {
-        let members = build
-            .members
-            .unwrap_or_else(|| std::slice::from_ref(build.manifest));
         if options.build.targets.lib
             && !options.build.targets.all_targets
-            && members.iter().all(|member| member.library.is_none())
+            && build.members.iter().all(|member| member.library.is_none())
         {
             return Err(Error::failure("selected package has no library target"));
         }
@@ -1704,9 +1612,7 @@ fn build_inner(
         }
         return Ok(BuildOutcome::Check(0));
     }
-    if build.test
-        && let Some(members) = build.members
-    {
+    if build.test {
         let plan =
             workspace_test_plan.ok_or_else(|| Error::failure("missing workspace test plan"))?;
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
@@ -1731,7 +1637,7 @@ fn build_inner(
                 runtime_library_paths(&build, profile, &message_reporter.messages(), kind)?,
             );
         }
-        let mut members = members.iter().collect::<Vec<_>>();
+        let mut members = build.members.iter().collect::<Vec<_>>();
         members.sort_by_key(|member| &member.name);
         let mut tests = Vec::new();
         for member in members {
@@ -1844,7 +1750,6 @@ fn build_inner(
         }
         return Ok(BuildOutcome::Tests(tests));
     }
-    // Test builds always select workspace members and return above.
     invalidate_fresh_profile(&destination, &fresh_owner)?;
     let plan = normal_plan()?;
     if build.verbosity != Verbosity::Quiet {
@@ -1863,15 +1768,14 @@ fn build_inner(
         "executed {} normal dependency units",
         plan.units.len()
     ));
-    let workspace_library = build.members.and_then(|_| {
-        plan.order
-            .iter()
-            .filter(|key| {
-                selected_packages.contains(&key.package)
-                    && matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
-            })
-            .max_by_key(|key| key.profile == crate::unit::ProfileContext::Selected)
-    });
+    let workspace_library = plan
+        .order
+        .iter()
+        .filter(|key| {
+            selected_packages.contains(&key.package)
+                && matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
+        })
+        .max_by_key(|key| key.profile == crate::unit::ProfileContext::Selected);
     let normal_library = match workspace_library.or(selected_library.as_ref()) {
         Some(key) if plan.units.contains_key(key) => Some(planned_root_library(&outputs, key)?),
         _ => None,
@@ -2174,12 +2078,7 @@ struct TrustedFreshness<'a> {
     check_targets: Option<&'a crate::cli::TargetSelection>,
     jobs: usize,
     cargo: &'a Path,
-    shared: Option<SharedSelection<'a>>,
-}
-
-/// What a shared workspace selection adds to the single-package inputs.
-struct SharedSelection<'a> {
-    members: &'a [Manifest],
+    selected: &'a [Manifest],
     features: &'a crate::cli::FeatureSelection,
     targets: Option<&'a crate::cli::TargetSelection>,
 }
@@ -2205,11 +2104,9 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
         digest.debug("check-targets", targets);
     }
     digest.debug("jobs", &inputs.jobs);
-    if let Some(shared) = &inputs.shared {
-        digest.debug("shared-members", &shared.members);
-        digest.debug("shared-features", shared.features);
-        digest.debug("shared-targets", &shared.targets);
-    }
+    digest.debug("selected-members", &inputs.selected);
+    digest.debug("features", inputs.features);
+    digest.debug("targets", &inputs.targets);
     digest.metadata("lorry", inputs.cargo)?;
     digest.metadata("rustc", &inputs.toolchain.rustc)?;
     digest.metadata(
@@ -2275,9 +2172,7 @@ fn freshness_base(
         digest.debug("check-targets", &options.build.targets);
     }
     digest.debug("jobs", &build.jobs);
-    if let Some(members) = build.members {
-        digest.debug("shared-members", &members);
-    }
+    digest.debug("selected-members", &build.members);
     if build.validation.is_strict() {
         digest.file("lorry", cargo)?;
         digest.file("rustc", &build.toolchain.rustc)?;
@@ -3746,25 +3641,19 @@ mod tests {
             }
         }
 
-        fn locked(
-            &self,
-            resolution: Option<Resolution>,
-        ) -> (
-            dependency::RegistrySource<'_>,
-            &crate::git::DirectCatalog,
-            Option<Resolution>,
-        ) {
+        fn locked(&self) -> (dependency::RegistrySource<'_>, &crate::git::DirectCatalog) {
             (
                 dependency::RegistrySource::Lorry(&self.repositories),
                 &self.direct,
-                resolution,
             )
         }
     }
 
-    /// Selects the default members at `root` and resolves them as `lorry test`.
-    fn test_members(
+    /// Selects the default members at `root` and resolves them as a build
+    /// does, or with `dev` as `lorry test` does.
+    fn select_members(
         root: &Path,
+        dev: bool,
         config: &Config,
         toolchain: &Toolchain,
         target: &TargetInfo,
@@ -3780,11 +3669,11 @@ mod tests {
             &workspace,
             &members.iter().map(|member| member.root.clone()).collect(),
             &crate::cli::FeatureSelection::default(),
-            true,
+            dev,
         )
         .unwrap();
         let options = dependency::resolver_options(&members[0], config, toolchain).unwrap();
-        let (source, direct, _) = sources.locked(None);
+        let (source, direct) = sources.locked();
         let resolution = dependency::workspace::resolve_compilation(
             &dependency::ReviewInputs {
                 manifest: &members[0],
@@ -3809,8 +3698,8 @@ mod tests {
         (members, resolution)
     }
 
-    fn test_build(build: Build<'_>) -> Vec<MemberTestArtifacts> {
-        match build_inner(build, None, MessageFormat::Human).unwrap() {
+    fn test_build(build: Build<'_>, resolution: Resolution) -> Vec<MemberTestArtifacts> {
+        match build_inner(build, resolution, None, MessageFormat::Human).unwrap() {
             BuildOutcome::Tests(members) => members,
             _ => panic!("expected test artifacts"),
         }
@@ -3915,7 +3804,7 @@ mod tests {
                     documents: &Default::default(),
                     target_selection: None,
                     manifest,
-                    members: Some(&members),
+                    members: &members,
                     target_root: &target_root,
                     child_lease_fd: None,
                     global_cache_root: &global_cache,
@@ -3935,12 +3824,13 @@ mod tests {
                     jobs: 2,
                     keep_going: false,
                     use_cargo_registry: false,
-                    source: (source, &direct, Some(resolution.clone())),
+                    source: (source, &direct),
                     bundle: false,
                     validation: ValidationMode::Trusted,
                     ordinary_freshness_base: None,
                     binary_selection: None,
                 },
+                resolution.clone(),
                 check_options,
                 MessageFormat::Human,
             )
@@ -4479,36 +4369,41 @@ mod tests {
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
         let build_once = || {
-            build(Build {
-                documents: &Default::default(),
-                target_selection: None,
-                target_root: &artifact_root(&manifest),
-                child_lease_fd: None,
-                manifest: &manifest,
-                members: None,
-                global_cache_root: &manifest.root.join("global-cache"),
-                config: &config,
-                toolchain: &toolchain,
-                host: &target,
-                target: &target,
-                host_options: &target_options,
-                target_options: &target_options,
-                physical_target: None,
-                logical_target: None,
-                rustflags: &[],
-                release: false,
-                test: false,
-                color: false,
-                verbosity: Verbosity::Quiet,
-                jobs: 1,
-                keep_going: false,
-                use_cargo_registry: false,
-                source: sources.locked(None),
-                bundle: false,
-                validation: ValidationMode::Trusted,
-                ordinary_freshness_base: None,
-                binary_selection: None,
-            })
+            let (members, resolution) =
+                select_members(&fixture.0, false, &config, &toolchain, &target, &sources);
+            build(
+                Build {
+                    documents: &Default::default(),
+                    target_selection: None,
+                    target_root: &artifact_root(&manifest),
+                    child_lease_fd: None,
+                    manifest: &members[0],
+                    members: &members,
+                    global_cache_root: &manifest.root.join("global-cache"),
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &target,
+                    target: &target,
+                    host_options: &target_options,
+                    target_options: &target_options,
+                    physical_target: None,
+                    logical_target: None,
+                    rustflags: &[],
+                    release: false,
+                    test: false,
+                    color: false,
+                    verbosity: Verbosity::Quiet,
+                    jobs: 1,
+                    keep_going: false,
+                    use_cargo_registry: false,
+                    source: sources.locked(),
+                    bundle: false,
+                    validation: ValidationMode::Trusted,
+                    ordinary_freshness_base: None,
+                    binary_selection: None,
+                },
+                resolution,
+            )
             .unwrap()
         };
 
@@ -4608,36 +4503,41 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
-        let artifact = build(Build {
-            documents: &Default::default(),
-            target_selection: None,
-            target_root: &artifact_root(&manifest),
-            child_lease_fd: None,
-            manifest: &manifest,
-            members: None,
-            global_cache_root: &manifest.root.join("global-cache"),
-            config: &config,
-            toolchain: &toolchain,
-            host: &target,
-            target: &target,
-            host_options: &target_options,
-            target_options: &target_options,
-            physical_target: None,
-            logical_target: None,
-            rustflags: &[],
-            release: false,
-            test: false,
-            color: false,
-            verbosity: Verbosity::Quiet,
-            jobs: 1,
-            keep_going: false,
-            use_cargo_registry: false,
-            source: sources.locked(None),
-            bundle: false,
-            validation: ValidationMode::Trusted,
-            ordinary_freshness_base: None,
-            binary_selection: None,
-        })
+        let (members, resolution) =
+            select_members(&fixture.0, false, &config, &toolchain, &target, &sources);
+        let artifact = build(
+            Build {
+                documents: &Default::default(),
+                target_selection: None,
+                target_root: &artifact_root(&manifest),
+                child_lease_fd: None,
+                manifest: &members[0],
+                members: &members,
+                global_cache_root: &manifest.root.join("global-cache"),
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: false,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                jobs: 1,
+                keep_going: false,
+                use_cargo_registry: false,
+                source: sources.locked(),
+                bundle: false,
+                validation: ValidationMode::Trusted,
+                ordinary_freshness_base: None,
+                binary_selection: None,
+            },
+            resolution,
+        )
         .unwrap();
         let output = std::process::Command::new(only_binary(&artifact))
             .output()
@@ -4666,36 +4566,41 @@ mod tests {
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
         let build_with = |binary_selection| {
-            build(Build {
-                documents: &Default::default(),
-                target_selection: None,
-                target_root: &artifact_root(&manifest),
-                child_lease_fd: None,
-                manifest: &manifest,
-                members: None,
-                global_cache_root: &manifest.root.join("global-cache"),
-                config: &config,
-                toolchain: &toolchain,
-                host: &target,
-                target: &target,
-                host_options: &target_options,
-                target_options: &target_options,
-                physical_target: None,
-                logical_target: None,
-                rustflags: &[],
-                release: false,
-                test: false,
-                color: false,
-                verbosity: Verbosity::Quiet,
-                jobs: 1,
-                keep_going: false,
-                use_cargo_registry: false,
-                source: sources.locked(None),
-                bundle: false,
-                validation: ValidationMode::Trusted,
-                ordinary_freshness_base: None,
-                binary_selection,
-            })
+            let (members, resolution) =
+                select_members(&fixture.0, false, &config, &toolchain, &target, &sources);
+            build(
+                Build {
+                    documents: &Default::default(),
+                    target_selection: None,
+                    target_root: &artifact_root(&manifest),
+                    child_lease_fd: None,
+                    manifest: &members[0],
+                    members: &members,
+                    global_cache_root: &manifest.root.join("global-cache"),
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &target,
+                    target: &target,
+                    host_options: &target_options,
+                    target_options: &target_options,
+                    physical_target: None,
+                    logical_target: None,
+                    rustflags: &[],
+                    release: false,
+                    test: false,
+                    color: false,
+                    verbosity: Verbosity::Quiet,
+                    jobs: 1,
+                    keep_going: false,
+                    use_cargo_registry: false,
+                    source: sources.locked(),
+                    bundle: false,
+                    validation: ValidationMode::Trusted,
+                    ordinary_freshness_base: None,
+                    binary_selection,
+                },
+                resolution,
+            )
             .unwrap()
         };
 
@@ -4740,36 +4645,41 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
-        let artifacts = build(Build {
-            documents: &Default::default(),
-            target_selection: None,
-            target_root: &artifact_root(&manifest),
-            child_lease_fd: None,
-            manifest: &manifest,
-            members: None,
-            global_cache_root: &manifest.workspace_root.join("global-cache"),
-            config: &config,
-            toolchain: &toolchain,
-            host: &target,
-            target: &target,
-            host_options: &target_options,
-            target_options: &target_options,
-            physical_target: None,
-            logical_target: None,
-            rustflags: &[],
-            release: false,
-            test: false,
-            color: false,
-            verbosity: Verbosity::Quiet,
-            jobs: 1,
-            keep_going: false,
-            use_cargo_registry: false,
-            source: sources.locked(None),
-            bundle: false,
-            validation: ValidationMode::Trusted,
-            ordinary_freshness_base: None,
-            binary_selection: None,
-        })
+        let (members, resolution) =
+            select_members(&member, false, &config, &toolchain, &target, &sources);
+        let artifacts = build(
+            Build {
+                documents: &Default::default(),
+                target_selection: None,
+                target_root: &artifact_root(&manifest),
+                child_lease_fd: None,
+                manifest: &members[0],
+                members: &members,
+                global_cache_root: &manifest.workspace_root.join("global-cache"),
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: false,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                jobs: 1,
+                keep_going: false,
+                use_cargo_registry: false,
+                source: sources.locked(),
+                bundle: false,
+                validation: ValidationMode::Trusted,
+                ordinary_freshness_base: None,
+                binary_selection: None,
+            },
+            resolution,
+        )
         .unwrap();
         let binary = only_binary(&artifacts);
         assert!(binary.starts_with(manifest.workspace_root.join("target/lorry/debug")));
@@ -4788,36 +4698,41 @@ mod tests {
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
-        let artifacts = build(Build {
-            documents: &Default::default(),
-            target_selection: None,
-            target_root: &artifact_root(&manifest),
-            child_lease_fd: None,
-            manifest: &manifest,
-            members: None,
-            global_cache_root: &manifest.root.join("global-cache"),
-            config: &config,
-            toolchain: &toolchain,
-            host: &target,
-            target: &target,
-            host_options: &target_options,
-            target_options: &target_options,
-            physical_target: None,
-            logical_target: None,
-            rustflags: &[],
-            release: false,
-            test: false,
-            color: false,
-            verbosity: Verbosity::Quiet,
-            jobs: 1,
-            keep_going: false,
-            use_cargo_registry: false,
-            source: sources.locked(None),
-            bundle: false,
-            validation: ValidationMode::Trusted,
-            ordinary_freshness_base: None,
-            binary_selection: None,
-        })
+        let (members, resolution) =
+            select_members(&fixture.0, false, &config, &toolchain, &target, &sources);
+        let artifacts = build(
+            Build {
+                documents: &Default::default(),
+                target_selection: None,
+                target_root: &artifact_root(&manifest),
+                child_lease_fd: None,
+                manifest: &members[0],
+                members: &members,
+                global_cache_root: &manifest.root.join("global-cache"),
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: false,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                jobs: 1,
+                keep_going: false,
+                use_cargo_registry: false,
+                source: sources.locked(),
+                bundle: false,
+                validation: ValidationMode::Trusted,
+                ordinary_freshness_base: None,
+                binary_selection: None,
+            },
+            resolution,
+        )
         .unwrap();
         let output = std::process::Command::new(only_binary(&artifacts))
             .output()
@@ -4860,36 +4775,41 @@ mod tests {
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
         let build_once = || {
-            build(Build {
-                documents: &Default::default(),
-                target_selection: None,
-                target_root: &artifact_root(&manifest),
-                child_lease_fd: None,
-                manifest: &manifest,
-                members: None,
-                global_cache_root: &manifest.root.join("global-cache"),
-                config: &config,
-                toolchain: &toolchain,
-                host: &target,
-                target: &target,
-                host_options: &target_options,
-                target_options: &target_options,
-                physical_target: None,
-                logical_target: None,
-                rustflags: &[],
-                release: false,
-                test: false,
-                color: false,
-                verbosity: Verbosity::Quiet,
-                jobs: 1,
-                keep_going: false,
-                use_cargo_registry: false,
-                source: sources.locked(None),
-                bundle: false,
-                validation: ValidationMode::Trusted,
-                ordinary_freshness_base: None,
-                binary_selection: None,
-            })
+            let (members, resolution) =
+                select_members(&fixture.0, false, &config, &toolchain, &target, &sources);
+            build(
+                Build {
+                    documents: &Default::default(),
+                    target_selection: None,
+                    target_root: &artifact_root(&manifest),
+                    child_lease_fd: None,
+                    manifest: &members[0],
+                    members: &members,
+                    global_cache_root: &manifest.root.join("global-cache"),
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &target,
+                    target: &target,
+                    host_options: &target_options,
+                    target_options: &target_options,
+                    physical_target: None,
+                    logical_target: None,
+                    rustflags: &[],
+                    release: false,
+                    test: false,
+                    color: false,
+                    verbosity: Verbosity::Quiet,
+                    jobs: 1,
+                    keep_going: false,
+                    use_cargo_registry: false,
+                    source: sources.locked(),
+                    bundle: false,
+                    validation: ValidationMode::Trusted,
+                    ordinary_freshness_base: None,
+                    binary_selection: None,
+                },
+                resolution,
+            )
             .unwrap()
         };
         let artifacts = build_once();
@@ -4964,14 +4884,16 @@ mod tests {
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
         let build_once = |jobs, format| {
+            let (members, resolution) =
+                select_members(&fixture.0, false, &config, &toolchain, &target, &sources);
             build_reported(
                 Build {
                     documents: &Default::default(),
                     target_selection: None,
                     target_root: &artifact_root(&manifest),
                     child_lease_fd: None,
-                    manifest: &manifest,
-                    members: None,
+                    manifest: &members[0],
+                    members: &members,
                     global_cache_root: &manifest.root.join("global-cache"),
                     config: &config,
                     toolchain: &toolchain,
@@ -4989,12 +4911,13 @@ mod tests {
                     jobs,
                     keep_going: false,
                     use_cargo_registry: false,
-                    source: sources.locked(None),
+                    source: sources.locked(),
                     bundle: false,
                     validation: ValidationMode::Trusted,
                     ordinary_freshness_base: None,
                     binary_selection: None,
                 },
+                resolution,
                 format,
             )
         };
@@ -5128,40 +5051,43 @@ mod tests {
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
         let (members, resolution) =
-            test_members(&fixture.0, &config, &toolchain, &target, &sources);
+            select_members(&fixture.0, true, &config, &toolchain, &target, &sources);
         let manifest = &members[0];
         let target_root = artifact_root(manifest);
         let build_once = || {
-            let tests = test_build(Build {
-                documents: &Default::default(),
-                target_selection: None,
-                target_root: &target_root,
-                child_lease_fd: None,
-                manifest,
-                members: Some(&members),
-                global_cache_root: &manifest.root.join("global-cache"),
-                config: &config,
-                toolchain: &toolchain,
-                host: &target,
-                target: &target,
-                host_options: &target_options,
-                target_options: &target_options,
-                physical_target: None,
-                logical_target: None,
-                rustflags: &[],
-                release: false,
-                test: true,
-                color: false,
-                verbosity: Verbosity::Quiet,
-                jobs: 1,
-                keep_going: false,
-                use_cargo_registry: false,
-                source: sources.locked(Some(resolution.clone())),
-                bundle: false,
-                validation: ValidationMode::Trusted,
-                ordinary_freshness_base: None,
-                binary_selection: None,
-            });
+            let tests = test_build(
+                Build {
+                    documents: &Default::default(),
+                    target_selection: None,
+                    target_root: &target_root,
+                    child_lease_fd: None,
+                    manifest,
+                    members: &members,
+                    global_cache_root: &manifest.root.join("global-cache"),
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &target,
+                    target: &target,
+                    host_options: &target_options,
+                    target_options: &target_options,
+                    physical_target: None,
+                    logical_target: None,
+                    rustflags: &[],
+                    release: false,
+                    test: true,
+                    color: false,
+                    verbosity: Verbosity::Quiet,
+                    jobs: 1,
+                    keep_going: false,
+                    use_cargo_registry: false,
+                    source: sources.locked(),
+                    bundle: false,
+                    validation: ValidationMode::Trusted,
+                    ordinary_freshness_base: None,
+                    binary_selection: None,
+                },
+                resolution.clone(),
+            );
             assert_eq!(tests.len(), 1);
             tests[0]
                 .harnesses
@@ -5236,39 +5162,42 @@ mod tests {
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
         let (members, resolution) =
-            test_members(&fixture.0, &config, &toolchain, &target, &sources);
+            select_members(&fixture.0, true, &config, &toolchain, &target, &sources);
         let manifest = &members[0];
         let build_bundle = || {
-            let tests = test_build(Build {
-                documents: &Default::default(),
-                target_selection: None,
-                target_root: &artifact_root(manifest),
-                child_lease_fd: None,
-                manifest,
-                members: Some(&members),
-                global_cache_root: &manifest.root.join("global-cache"),
-                config: &config,
-                toolchain: &toolchain,
-                host: &target,
-                target: &target,
-                host_options: &target_options,
-                target_options: &target_options,
-                physical_target: None,
-                logical_target: None,
-                rustflags: &[],
-                release: false,
-                test: true,
-                color: false,
-                verbosity: Verbosity::Quiet,
-                jobs: 1,
-                keep_going: false,
-                use_cargo_registry: false,
-                source: sources.locked(Some(resolution.clone())),
-                bundle: true,
-                validation: ValidationMode::Trusted,
-                ordinary_freshness_base: None,
-                binary_selection: None,
-            });
+            let tests = test_build(
+                Build {
+                    documents: &Default::default(),
+                    target_selection: None,
+                    target_root: &artifact_root(manifest),
+                    child_lease_fd: None,
+                    manifest,
+                    members: &members,
+                    global_cache_root: &manifest.root.join("global-cache"),
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &target,
+                    target: &target,
+                    host_options: &target_options,
+                    target_options: &target_options,
+                    physical_target: None,
+                    logical_target: None,
+                    rustflags: &[],
+                    release: false,
+                    test: true,
+                    color: false,
+                    verbosity: Verbosity::Quiet,
+                    jobs: 1,
+                    keep_going: false,
+                    use_cargo_registry: false,
+                    source: sources.locked(),
+                    bundle: true,
+                    validation: ValidationMode::Trusted,
+                    ordinary_freshness_base: None,
+                    binary_selection: None,
+                },
+                resolution.clone(),
+            );
             assert_eq!(tests.len(), 1);
             tests[0].bundle.as_ref().unwrap().executable.clone()
         };
@@ -5384,43 +5313,46 @@ mod tests {
         let target_options = TargetOptions::default();
         let sources = Sources::open(&config);
         let (members, resolution) =
-            test_members(&fixture.0, &config, &toolchain, &target, &sources);
+            select_members(&fixture.0, true, &config, &toolchain, &target, &sources);
         let manifest = &members[0];
         let selection = crate::cli::TargetSelection {
             test: vec!["second".to_owned()],
             ..Default::default()
         };
         let build_named = |bundle| {
-            let mut tests = test_build(Build {
-                documents: &Default::default(),
-                target_selection: Some(&selection),
-                target_root: &artifact_root(manifest),
-                child_lease_fd: None,
-                manifest,
-                members: Some(&members),
-                global_cache_root: &manifest.root.join("global-cache"),
-                config: &config,
-                toolchain: &toolchain,
-                host: &target,
-                target: &target,
-                host_options: &target_options,
-                target_options: &target_options,
-                physical_target: None,
-                logical_target: None,
-                rustflags: &[],
-                release: false,
-                test: true,
-                color: false,
-                verbosity: Verbosity::Quiet,
-                jobs: 1,
-                keep_going: false,
-                use_cargo_registry: false,
-                source: sources.locked(Some(resolution.clone())),
-                bundle,
-                validation: ValidationMode::Trusted,
-                ordinary_freshness_base: None,
-                binary_selection: None,
-            });
+            let mut tests = test_build(
+                Build {
+                    documents: &Default::default(),
+                    target_selection: Some(&selection),
+                    target_root: &artifact_root(manifest),
+                    child_lease_fd: None,
+                    manifest,
+                    members: &members,
+                    global_cache_root: &manifest.root.join("global-cache"),
+                    config: &config,
+                    toolchain: &toolchain,
+                    host: &target,
+                    target: &target,
+                    host_options: &target_options,
+                    target_options: &target_options,
+                    physical_target: None,
+                    logical_target: None,
+                    rustflags: &[],
+                    release: false,
+                    test: true,
+                    color: false,
+                    verbosity: Verbosity::Quiet,
+                    jobs: 1,
+                    keep_going: false,
+                    use_cargo_registry: false,
+                    source: sources.locked(),
+                    bundle,
+                    validation: ValidationMode::Trusted,
+                    ordinary_freshness_base: None,
+                    binary_selection: None,
+                },
+                resolution.clone(),
+            );
             assert_eq!(tests.len(), 1);
             tests.remove(0)
         };
