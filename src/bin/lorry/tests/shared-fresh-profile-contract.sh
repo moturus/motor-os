@@ -263,5 +263,15 @@ for round in 1 2; do
     done
 done
 [ "$(cat "$WORK/$step.out")" = b ] || fail "a reused run started the wrong binary"
+# A single package keeps one check record per target selection.
+for selection in check "check --bin a"; do
+    lorry $selection
+done
+for round in 1 2; do
+    for selection in check "check --bin a"; do
+        lorry $selection
+        expect_fresh
+    done
+done
 
 echo "PASS: shared workspace builds reuse completed profiles and rebuild on each input change"

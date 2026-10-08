@@ -270,7 +270,13 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
         _ => None,
     };
     let shared_members = shared.then_some(selected.as_slice());
-    let fresh_owner = fresh_record_name(&manifest, shared_members, fresh_targets, binary_selection);
+    let fresh_owner = fresh_record_name(
+        &manifest,
+        shared_members,
+        fresh_targets,
+        binary_selection,
+        matches!(&cli.command, Command::Check(_)),
+    );
     let ordinary_freshness_base = (!validation.is_strict()
         && !(compact_state.is_none()
             && manifest
@@ -899,14 +905,18 @@ fn fresh_record_name(
     members: Option<&[Manifest]>,
     targets: Option<&crate::cli::TargetSelection>,
     binary: Option<&str>,
+    check: bool,
 ) -> String {
     let mut digest = FreshDigest::new();
     digest.bytes("schema", b"lorry-fresh-selection-v1");
-    // Only the shared path digests its target selection.
+    // A single package's build and single-binary run share one record; its
+    // checks and every shared selection keep one per target selection.
     if let Some(members) = members {
         for member in members {
             digest.os("member", member.root.as_os_str());
         }
+    }
+    if members.is_some() || check {
         digest.debug("targets", &targets);
     }
     digest.debug("binary", &binary);
@@ -1245,6 +1255,7 @@ fn build_inner(
             .target_selection
             .or(check.map(|options| &options.build.targets)),
         build.binary_selection,
+        check.is_some(),
     );
     let fresh_check =
         check.is_none_or(|options| options.clippy.is_none() && !options.compile_time_deps);
