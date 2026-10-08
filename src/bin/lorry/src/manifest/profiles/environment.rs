@@ -4,6 +4,24 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use toml_edit::{Table, value};
 
+/// Cargo profile keys that Lorry does not implement, as environment names
+/// spell them. `build-override` and `package` take a nested key.
+fn unsupported_cargo_key(key: &str) -> bool {
+    const KEYS: [&str; 7] = [
+        "split-debuginfo",
+        "rpath",
+        "trim-paths",
+        "codegen-backend",
+        "dir-name",
+        "rustflags",
+        "frame-pointers",
+    ];
+    KEYS.contains(&key)
+        || ["build-override-", "package-"]
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+}
+
 pub(super) fn overrides(
     environment: &BTreeMap<OsString, OsString>,
     profile: &str,
@@ -21,7 +39,10 @@ pub(super) fn overrides(
         };
         let key = key.to_lowercase().replace('_', "-");
         if key != "inherits" && !KEYS.contains(&key.as_str()) {
-            if !building {
+            // Like Cargo, ignore what is not a profile key: it may be another
+            // profile's, such as `CARGO_PROFILE_RELEASE_LTO_LTO` for a
+            // `release-lto` profile. Fail on a Cargo key Lorry lacks.
+            if !building || !unsupported_cargo_key(&key) {
                 continue;
             }
             return Err(Error::failure(format!(

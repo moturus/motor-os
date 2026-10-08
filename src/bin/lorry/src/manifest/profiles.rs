@@ -266,6 +266,24 @@ mod tests {
     }
 
     #[test]
+    fn another_profiles_environment_is_ignored() {
+        let text = "[profile.release-lto]\ninherits = 'release'\n";
+        let path = Path::new("Cargo.toml");
+        let document = Document::parse(path, "profiles", text.to_owned()).unwrap();
+        let select = |variable: &str| {
+            let environment = BTreeMap::from([(variable.into(), "true".into())]);
+            SelectedProfile::parse(path, &document, "release", true, &environment)
+        };
+        // `release-lto`'s `lto` key, not a `release` key named `lto-lto`.
+        assert!(select("CARGO_PROFILE_RELEASE_LTO_LTO").is_ok());
+        let error = select("CARGO_PROFILE_RELEASE_RPATH")
+            .err()
+            .unwrap()
+            .render();
+        assert!(error.contains("unsupported selected profile environment variable"));
+    }
+
+    #[test]
     fn inherits_settings_and_built_in_directories() {
         let text = "[profile.release]\nlto = 'thin'\n[profile.opt]\ninherits = 'release'\nopt-level = 2\n[profile.small]\ninherits = 'opt'\nstrip = true\n[profile.test]\ninherits = 'small'\n";
         let selected = parse(text, "test").unwrap();
