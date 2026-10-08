@@ -67,6 +67,34 @@ console.log(JSON.stringify({answer: values.get('answer'), text: new TextDecoder(
         "",
         "hello from Motor 42\n",
     )?;
+    // Malformed plugins are refused before compilation and leave no output.
+    fs::write(suite.root.join("not-wasm.wasm"), "not a plugin")?;
+    let plugin = fs::read(format!("{SUPPORT_DIR}/plugin.wasm"))?;
+    fs::write(
+        suite.root.join("truncated.wasm"),
+        &plugin[..plugin.len() / 2],
+    )?;
+    fs::write(
+        suite.root.join("no-exports.wasm"),
+        include_bytes!(concat!(env!("OUT_DIR"), "/runner.wasm")),
+    )?;
+    for (name, diagnostic) in [
+        ("not-wasm", "Expected Wasm module"),
+        ("truncated", "end-of-file"),
+        (
+            "no-exports",
+            "missing export for function named `initialize-runtime`",
+        ),
+    ] {
+        suite.refusal(
+            &format!("plugin-{name}"),
+            &format!(
+                "MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -C plugin={name}.wasm -o {name}-output.wasm"
+            ),
+            diagnostic,
+        )?;
+        assert!(!suite.root.join(format!("{name}-output.wasm")).exists());
+    }
     for mode in ["omitted", "uncompressed"] {
         suite.compile(
             &format!("source-{mode}"),
