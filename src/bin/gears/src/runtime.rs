@@ -218,7 +218,7 @@ impl Runtime {
         };
         let tool_state_directory = match tool_state_directory {
             Some(directory) => directory,
-            None => Overrides::default_directory()?,
+            None => crate::directory::default_root()?,
         };
         if let Some(prefix) = &preserved_prefix {
             if !session.is_ephemeral() {

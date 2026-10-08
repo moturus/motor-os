@@ -132,6 +132,48 @@ impl StateRoot {
         result
     }
 
+    /// Read a TOML file whose `version` must match; a missing file is the default.
+    pub fn load_toml<T: serde::de::DeserializeOwned + Default>(
+        &self,
+        name: &str,
+        version: u32,
+    ) -> Result<T, String> {
+        let Some(path) = self.existing_file(Path::new(name))? else {
+            return Ok(T::default());
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let mut table: toml::Table =
+            toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+        match table.remove("version") {
+            Some(toml::Value::Integer(found)) if found == i64::from(version) => {}
+            found => {
+                return Err(format!(
+                    "{}: unsupported version {} (expected {version})",
+                    path.display(),
+                    found.map_or("none".to_string(), |found| found.to_string())
+                ));
+            }
+        }
+        T::deserialize(toml::Value::Table(table))
+            .map_err(|error| format!("{}: {error}", path.display()))
+    }
+
+    /// Replace a TOML file, recording its format version.
+    pub fn save_toml<T: serde::Serialize>(
+        &self,
+        name: &str,
+        version: u32,
+        data: &T,
+    ) -> Result<(), String> {
+        let mut table = toml::Table::try_from(data)
+            .map_err(|error| format!("cannot serialize {name}: {error}"))?;
+        table.insert("version".into(), toml::Value::Integer(version.into()));
+        let text =
+            toml::to_string(&table).map_err(|error| format!("cannot serialize {name}: {error}"))?;
+        self.replace_file(Path::new(name), text.as_bytes())
+    }
+
     /// Remove only temporary files made by `replace_file` after a crash.
     pub fn cleanup_temporary_files(&self) -> Result<usize, String> {
         let Some(root) = self.existing_directory(Path::new(""))? else {

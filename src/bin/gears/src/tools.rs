@@ -94,10 +94,7 @@ impl Registry {
         if config.tools.is_empty() {
             return Ok(Self::default());
         }
-        let directory = Config::default_path()
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-            .ok_or("cannot locate Gears directory for configured tools")?;
-        Self::load(&config.tools, &directory)
+        Self::load(&config.tools, &crate::directory::default_root()?)
     }
 
     pub fn load(entries: &[ToolDirectory], base: &Path) -> Result<Self, String> {

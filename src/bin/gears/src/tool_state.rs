@@ -1,11 +1,10 @@
 //! Versioned global tool enablement overrides.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
 use crate::state::StateRoot;
 
 const FILE: &str = "tools.toml";
@@ -16,56 +15,35 @@ pub struct Overrides {
     pub tools: BTreeMap<String, bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileFormat {
-    version: u32,
     #[serde(default)]
     tools: BTreeMap<String, bool>,
 }
 
 impl Overrides {
-    pub fn default_directory() -> Result<PathBuf, String> {
-        Config::default_path()
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-            .ok_or("cannot locate Gears state directory".to_string())
-    }
-
     pub fn load(directory: &Path) -> Result<Self, String> {
-        let state = StateRoot::new(directory.to_path_buf())?;
-        let Some(path) = state.existing_file(Path::new(FILE))? else {
-            return Ok(Self::default());
-        };
-        let text = std::fs::read_to_string(&path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        let data: FileFormat =
-            toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-        if data.version != VERSION {
-            return Err(format!(
-                "{}: unsupported version {} (expected {VERSION})",
-                path.display(),
-                data.version
-            ));
-        }
+        let data: FileFormat = StateRoot::new(directory.to_path_buf())?.load_toml(FILE, VERSION)?;
         if data.tools.keys().any(String::is_empty) {
+            let path = directory.join(FILE);
             return Err(format!("{}: empty tool name", path.display()));
         }
         Ok(Self { tools: data.tools })
     }
 
     pub fn save(&self, directory: &Path) -> Result<(), String> {
-        let text = toml::to_string(&FileFormat {
-            version: VERSION,
+        let data = FileFormat {
             tools: self.tools.clone(),
-        })
-        .map_err(|error| format!("cannot serialize tool overrides: {error}"))?;
-        StateRoot::new(directory.to_path_buf())?.replace_file(Path::new(FILE), text.as_bytes())
+        };
+        StateRoot::new(directory.to_path_buf())?.save_toml(FILE, VERSION, &data)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
         let directory =

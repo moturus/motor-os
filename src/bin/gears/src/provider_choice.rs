@@ -1,17 +1,16 @@
 //! User-selected provider and model defaults, independent of `--config`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
 use crate::state::StateRoot;
 
 const FILE: &str = "provider.toml";
+const VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderChoice {
-    version: u32,
     pub provider: String,
     pub model: String,
 }
@@ -26,51 +25,34 @@ impl ProviderChoice {
             return Err("provider and model defaults must not be empty".to_string());
         }
         Ok(Self {
-            version: 1,
             provider: provider.to_string(),
             model: model.to_string(),
         })
     }
 
     pub fn load_default() -> Result<Option<Self>, String> {
-        Self::load_at(&default_dir()?)
+        Self::load_at(&crate::directory::default_root()?)
     }
 
     pub fn save_default(&self) -> Result<(), String> {
-        self.save_at(&default_dir()?)
+        self.save_at(&crate::directory::default_root()?)
     }
 
     fn load_at(directory: &Path) -> Result<Option<Self>, String> {
-        let state = StateRoot::new(directory.to_path_buf())?;
-        let Some(path) = state.existing_file(Path::new(FILE))? else {
-            return Ok(None);
-        };
-        let text = std::fs::read_to_string(&path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        let choice: Self =
-            toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-        if choice.version != 1
-            || choice.provider.trim().is_empty()
-            || choice.model.trim().is_empty()
-            || choice.provider.trim() != choice.provider
-            || choice.model.trim() != choice.model
-        {
-            return Err(format!("{}: invalid provider choice", path.display()));
-        }
-        Ok(Some(choice))
+        let choice: Option<Self> =
+            StateRoot::new(directory.to_path_buf())?.load_toml(FILE, VERSION)?;
+        choice
+            .map(|choice| Self::new(&choice.provider, &choice.model))
+            .transpose()
+            .map_err(|_| {
+                let path = directory.join(FILE);
+                format!("{}: invalid provider choice", path.display())
+            })
     }
 
     fn save_at(&self, directory: &Path) -> Result<(), String> {
-        let state = StateRoot::new(directory.to_path_buf())?;
-        let text = toml::to_string(self).map_err(|error| error.to_string())?;
-        state.replace_file(Path::new(FILE), text.as_bytes())
+        StateRoot::new(directory.to_path_buf())?.save_toml(FILE, VERSION, self)
     }
-}
-
-fn default_dir() -> Result<PathBuf, String> {
-    Config::default_path()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .ok_or("cannot locate Gears directory".to_string())
 }
 
 #[cfg(test)]
