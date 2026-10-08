@@ -202,4 +202,8 @@ printf '\n' >>b/src/main.rs
 [ "$(scripts_run changed)" = "b " ]
 printf 'two\n' >a/data.txt
 [ "$(scripts_run changed)" = "a " ]
+# As in Cargo, a tracked path that does not exist reruns its script each time.
+sed -i 's/rerun-if-changed=data.txt/rerun-if-changed=missing.txt/' a/build.rs
+[ "$(scripts_run changed)" = "a " ]
+[ "$(scripts_run changed)" = "a " ]
 echo "PASS: selected member scripts match Cargo binaries and JSON, honor caller grants, and rerun only on tracked changes"

@@ -2235,6 +2235,10 @@ fn write_fresh_profile(
     if newest_source(profile, artifact_root, package_root, &dep_info)? >= started {
         return Ok(());
     }
+    // A missing script input makes every build run that script again.
+    let Ok(script_inputs) = script_input_digest(&artifacts.script_inputs) else {
+        return Ok(());
+    };
     let inputs = if validation.is_strict() {
         fresh_input_digest(profile, package_root, base, &dep_info)?
     } else {
@@ -2247,7 +2251,7 @@ fn write_fresh_profile(
         "lorry-fresh-v8\nbase={}\ninputs={}\nscript-inputs={}\nprimary={}\t{}\nmessages={}\nenvironment={}",
         hex(&base),
         hex(&inputs),
-        hex(&script_input_digest(&artifacts.script_inputs)?),
+        hex(&script_inputs),
         hex(&primary_sha256),
         primary.display(),
         serde_json::to_string(&artifacts.messages).map_err(|error| {

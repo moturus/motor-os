@@ -673,7 +673,7 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                 }
             }
             "rerun-if-changed" => {
-                resolve_existing(value, &package_root, &input_roots, "rerun-if-changed")?;
+                resolve_input(value, &package_root, &input_roots)?;
                 // Preserve the declared path so freshness detects symlink retargets.
                 Directive::RerunIfChanged(package_root.join(value))
             }
@@ -768,6 +768,41 @@ fn resolve_existing(
         )));
     }
     Ok(canonical)
+}
+
+/// Checks a `rerun-if-changed` path. As in Cargo, a path that does not exist
+/// makes the script run again on every build. Its nearest existing ancestor
+/// must still be inside a permitted root.
+fn resolve_input(value: &str, package_root: &Path, allowed_roots: &[&Path]) -> Result<()> {
+    let path = package_root.join(value);
+    let missing = matches!(
+        fs::symlink_metadata(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    if !missing {
+        return resolve_existing(value, package_root, allowed_roots, "rerun-if-changed").map(drop);
+    }
+    let escapes = || {
+        Error::failure(format!(
+            "build-script rerun-if-changed path `{}` escapes its permitted roots",
+            path.display()
+        ))
+    };
+    for ancestor in path.ancestors().skip(1) {
+        let Ok(canonical) = fs::canonicalize(ancestor) else {
+            continue;
+        };
+        let rest = path.strip_prefix(ancestor).map_err(|_| escapes())?;
+        if rest
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            || !allowed_roots.iter().any(|root| canonical.starts_with(root))
+        {
+            return Err(escapes());
+        }
+        return Ok(());
+    }
+    Err(escapes())
 }
 
 fn split_link_search(value: &str) -> Result<(Option<&str>, &str)> {
@@ -1054,10 +1089,11 @@ mod tests {
                 "cargo:rustc-link-search=native={}\n",
                 fixture.root.display()
             ),
-            "cargo:rerun-if-changed=missing\n".to_owned(),
+            "cargo:rustc-link-search=native=missing\n".to_owned(),
         ] {
             assert!(parse(source.as_bytes(), &fixture.options()).is_err());
         }
+        assert!(parse(b"cargo:rerun-if-changed=missing\n", &fixture.options()).is_ok());
         fs::remove_file(outside).unwrap();
     }
 
@@ -1416,6 +1452,26 @@ mod tests {
         options.workspace_root = None;
         assert!(parse(input.as_bytes(), &options).is_err());
         options.workspace_root = Some(&fixture.root);
+        // A missing input reruns the script each build; it still may not escape.
+        let missing = parse(b"cargo:rerun-if-changed=generated/missing.h\n", &options).unwrap();
+        assert_eq!(
+            missing.directives,
+            [Directive::RerunIfChanged(
+                fixture.package.join("generated/missing.h")
+            )]
+        );
+        let missing_outside = format!(
+            "cargo:rerun-if-changed={}\n",
+            outside.root.join("missing").display()
+        );
+        for input in [
+            missing_outside.as_bytes(),
+            b"cargo:rerun-if-changed=missing/../../outside\n",
+            b"cargo:rerun-if-changed=escape/missing\n",
+        ] {
+            assert!(parse(input, &options).is_err(), "{input:?}");
+        }
+        assert!(crate::build_script::input_digest(&[fixture.package.join("missing")]).is_err());
         let link = format!(
             "cargo:rustc-link-search=native={}\n",
             fixture.outside.display()
