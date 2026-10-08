@@ -131,7 +131,7 @@ impl Frame {
                                     allowed.contains(&locked::Identity::from_key(key))
                                 })
                             })
-                            .map(|(key, record)| Choice::New(key, Arc::new(record)))
+                            .map(|(key, record)| Choice::New(key, record))
                     })
                     .collect::<Vec<_>>();
                 let (preferred, fallback): (Vec<_>, Vec<_>) =

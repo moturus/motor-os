@@ -29,7 +29,7 @@ use workspace::resolve_complete_workspace;
 pub struct Catalog {
     fetch_hint: bool,
     descriptive_sources: bool,
-    records: BTreeMap<String, Vec<Candidate>>,
+    records: BTreeMap<String, Vec<Arc<Candidate>>>,
     paths: BTreeMap<PathBuf, PackageKey>,
     locked_repository: Option<LockedRepository>,
     proc_macros: BTreeSet<PackageKey>,
@@ -83,7 +83,7 @@ impl Catalog {
             version: record.version.clone(),
             source: PackageSourceKey::CratesIo,
         };
-        records.push(Candidate {
+        records.push(Arc::new(Candidate {
             dependencies: record
                 .dependencies
                 .iter()
@@ -100,7 +100,7 @@ impl Catalog {
             local_manifest: None,
             proc_macro: self.proc_macros.contains(&key),
             record,
-        });
+        }));
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
@@ -115,13 +115,13 @@ impl Catalog {
         for candidate in self.records.get_mut(&key.name).into_iter().flatten() {
             if candidate.record.version == key.version && candidate.source.key() == key.source {
                 previous = candidate.proc_macro;
-                candidate.proc_macro = proc_macro;
+                Arc::make_mut(candidate).proc_macro = proc_macro;
             }
         }
         Ok(previous != proc_macro)
     }
 
-    fn records(&self, name: &str) -> &[Candidate] {
+    fn records(&self, name: &str) -> &[Arc<Candidate>] {
         self.records.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
@@ -182,7 +182,7 @@ impl Catalog {
                 candidate.name, candidate.version
             )));
         }
-        records.push(candidate);
+        records.push(Arc::new(candidate));
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
@@ -222,7 +222,7 @@ impl Catalog {
                 candidate.name, candidate.version
             )));
         }
-        records.push(candidate);
+        records.push(Arc::new(candidate));
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
@@ -312,7 +312,7 @@ impl Catalog {
         let candidate = local_candidate(manifest, canonical.clone(), canonical, sha256, false)?;
         debug_assert_eq!(candidate.version, version);
         let records = self.records.entry(candidate.name.clone()).or_default();
-        records.push(candidate);
+        records.push(Arc::new(candidate));
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
@@ -1837,7 +1837,7 @@ fn candidates(
     event: &Event,
     options: &Options,
     locked: &[LockedPreference],
-) -> Vec<Candidate> {
+) -> Vec<Arc<Candidate>> {
     let mut candidates = catalog
         .records(&event.dependency.package)
         .iter()
@@ -2460,15 +2460,17 @@ mod tests {
             target_units: false,
         };
         // A completed locked identity remains usable if the index marks it yanked.
-        catalog
-            .records
-            .get_mut("shared")
-            .unwrap()
-            .iter_mut()
-            .find(|candidate| candidate.version == Version::new(1, 0, 0))
-            .unwrap()
-            .record
-            .yanked = true;
+        Arc::make_mut(
+            catalog
+                .records
+                .get_mut("shared")
+                .unwrap()
+                .iter_mut()
+                .find(|candidate| candidate.version == Version::new(1, 0, 0))
+                .unwrap(),
+        )
+        .record
+        .yanked = true;
         let selected_graph = workspace::resolve_selected_workspace(
             &complete,
             &catalog,

@@ -323,7 +323,7 @@ fn resolve_workspace_complete(
         records.retain(|existing| {
             existing.source.key() != PackageSourceKey::Path(member.root.clone())
         });
-        records.push(candidate);
+        records.push(Arc::new(candidate));
         records.sort_unstable_by(|left, right| right.version.cmp(&left.version));
         catalog.paths.insert(
             member.root.clone(),
