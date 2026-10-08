@@ -14,7 +14,8 @@ use toml_edit::{Item, Table};
 
 pub const RELATIVE_PATH: &str = ".lorry/dependencies-v2.toml";
 
-/// Derives compact grants for registry packages that execute build-time code.
+/// Derives compact grants for registry and Git packages that execute
+/// build-time code.
 pub fn capabilities_from(
     selected: &Resolution,
     evidence: &BTreeMap<PackageKey, PackageEvidence>,
@@ -378,8 +379,8 @@ mod review {
         }
 
         /// Strictly parses the project's compact state. A missing file is not
-        /// an error: the project then has no registry admission and every
-        /// registry package fails closed at policy.
+        /// an error: Lorry-registry builds then reject crates.io and Git
+        /// packages, and Cargo-registry builds rely on policy alone.
         pub fn load(root: &Path) -> Result<Option<Self>> {
             Self::document(root)?
                 .map(|(path, document)| Self::from_document(&path, &document))
@@ -585,9 +586,9 @@ mod review {
             Ok(review)
         }
 
-        /// Records one reviewed context's independently resolved registry
-        /// selection and its verified source evidence. Path packages keep
-        /// their independent rules and never enter registry admission.
+        /// Records one reviewed context's independently resolved registry and
+        /// Git selection and its verified source evidence. Path packages keep
+        /// their independent rules and never enter admission.
         pub fn add_context_resolution(
             &mut self,
             context: &Context,

@@ -380,8 +380,9 @@ fn execute_inner(cli: &Cli, reported: &mut bool) -> Result<i32> {
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     progress.report("Verifying dependency state")?;
     // One registry source serves both admission verification and prepare, so
-    // repository objects verified during admission are not re-hashed when the
-    // build prepares its dependency graph.
+    // registry objects verified during admission are not hashed again when the
+    // build prepares its dependency graph. Admission still loads and verifies
+    // the workspace's direct Git sources itself.
     // Extraction for inspection creates its own private directories here.
     let admission_scratch = env::temp_dir();
     let locked = dependency::LockedContext::open(
