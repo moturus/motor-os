@@ -1447,8 +1447,10 @@ closure.
 As in Cargo, a ready unit that more units wait on runs first, so long
 dependency chains start early.
 Each compiler unit writes into a private sibling directory, then replaces
-its planned unit directory only after rustc succeeds, its outputs and dep-info
-are validated, and any cache entry is stored. The sibling has the same name in
+its planned unit directory only after rustc succeeds and its outputs and
+dep-info are validated. A few background threads then copy libraries into
+their cache, so dependents do not wait for the copy; the command waits for
+those copies before it finishes. The sibling has the same name in
 every build, because rustc discards its incremental state when the output
 directory changes. Downstream units and artifact
 messages use the published path. Successful units remain available if a

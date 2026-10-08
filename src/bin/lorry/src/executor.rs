@@ -321,74 +321,85 @@ pub fn execute(
     let state = std::sync::Mutex::new(state);
     let wakeup = std::sync::Condvar::new();
     let print = std::sync::Mutex::new(());
+    let (stores, store_queue) = std::sync::mpsc::channel::<CacheStore<'_>>();
+    let store_queue = std::sync::Mutex::new(store_queue);
+    let store_failures = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    let mut guard = state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let (_, key) = loop {
-                        if (!options.keep_going && !guard.failures.is_empty())
-                            || guard.completed == total
-                        {
-                            return;
-                        }
-                        if let Some(entry) = guard.ready.iter().next().cloned() {
-                            guard.ready.remove(&entry);
-                            guard.dispatched += 1;
-                            break entry;
-                        }
-                        if guard.dispatched == guard.completed {
-                            if !guard.failures.is_empty() {
+        for _ in 0..CACHE_STORE_THREADS {
+            scope.spawn(|| store_in_caches(&store_queue, &store_failures));
+        }
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let mut guard = state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let (_, key) = loop {
+                            if (!options.keep_going && !guard.failures.is_empty())
+                                || guard.completed == total
+                            {
                                 return;
                             }
+                            if let Some(entry) = guard.ready.iter().next().cloned() {
+                                guard.ready.remove(&entry);
+                                guard.dispatched += 1;
+                                break entry;
+                            }
+                            if guard.dispatched == guard.completed {
+                                if !guard.failures.is_empty() {
+                                    return;
+                                }
+                                guard.failures.push((
+                                    usize::MAX,
+                                    Error::failure(
+                                        "dependency execution stalled with unresolved units",
+                                    ),
+                                ));
+                                wakeup.notify_all();
+                                return;
+                            }
+                            guard = wakeup
+                                .wait(guard)
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        };
+                        let index = index_of[&key];
+                        let Some(planned) = plan.units.get(&key) else {
                             guard.failures.push((
-                                usize::MAX,
-                                Error::failure(
-                                    "dependency execution stalled with unresolved units",
-                                ),
+                                index,
+                                Error::failure("dependency execution plan lost a dispatched unit"),
                             ));
                             wakeup.notify_all();
                             return;
-                        }
-                        guard = wakeup
-                            .wait(guard)
+                        };
+                        let inputs = snapshot_inputs(planned, &guard.outputs);
+                        drop(guard);
+                        let outcome = execute_unit(
+                            plan, manifests, options, &commands, &key, planned, &inputs, &print,
+                            &stores,
+                        );
+                        let mut guard = state
+                            .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    };
-                    let index = index_of[&key];
-                    let Some(planned) = plan.units.get(&key) else {
-                        guard.failures.push((
-                            index,
-                            Error::failure("dependency execution plan lost a dispatched unit"),
-                        ));
-                        wakeup.notify_all();
-                        return;
-                    };
-                    let inputs = snapshot_inputs(planned, &guard.outputs);
-                    drop(guard);
-                    let outcome = execute_unit(
-                        plan, manifests, options, &commands, &key, planned, &inputs, &print,
-                    );
-                    let mut guard = state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    match outcome {
-                        Ok(executed) => {
-                            let recorded = guard.record(&dependents, &rank_of, &key, executed);
-                            if let Err(error) = recorded {
+                        match outcome {
+                            Ok(executed) => {
+                                let recorded = guard.record(&dependents, &rank_of, &key, executed);
+                                if let Err(error) = recorded {
+                                    guard.failures.push((index, error));
+                                }
+                            }
+                            Err(error) => {
                                 guard.failures.push((index, error));
+                                guard.completed += 1;
                             }
                         }
-                        Err(error) => {
-                            guard.failures.push((index, error));
-                            guard.completed += 1;
-                        }
+                        wakeup.notify_all();
                     }
-                    wakeup.notify_all();
-                }
-            });
-        }
+                });
+            }
+        });
+        // Store threads finish the queued copies and exit.
+        drop(stores);
     });
 
     let state = state
@@ -397,22 +408,89 @@ pub fn execute(
     if let Some((_, error)) = state.failures.into_iter().min_by_key(|(index, _)| *index) {
         return Err(error);
     }
+    if let Some(error) = store_failures
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .into_iter()
+        .next()
+    {
+        return Err(error);
+    }
     Ok(state.outputs)
+}
+
+/// Copying a library into its cache is I/O bound, so a few threads keep up
+/// with the compiler workers.
+const CACHE_STORE_THREADS: usize = 4;
+
+/// A published library's copy into its cache. It runs off the compiler
+/// workers, so dependents need not wait for the copy.
+struct CacheStore<'a> {
+    cache: &'a BuildCache,
+    key: CacheKey,
+    package: PackageKey,
+    output: RustcOutput,
+    build_script: Option<ExecutedBuildScript>,
+    working_dir: Option<PathBuf>,
+    source_remap: Option<&'a crate::unit::SourceRemap>,
+    diagnostics: Vec<u8>,
+    tracked: Tracked,
+}
+
+impl CacheStore<'_> {
+    fn run(&self) -> Result<()> {
+        let selected = self.working_dir.as_ref().map(|working_dir| SelectedInputs {
+            working_dir,
+            source_remap: self.source_remap,
+        });
+        self.cache.store(
+            self.key,
+            &self.output,
+            self.build_script
+                .as_ref()
+                .map(cache_build_script_input)
+                .as_ref(),
+            selected,
+            (&[], &self.diagnostics),
+            &self.tracked,
+        )?;
+        self.cache.record_cache_owner(self.key, &self.package)
+    }
+}
+
+fn store_in_caches(
+    queue: &std::sync::Mutex<std::sync::mpsc::Receiver<CacheStore<'_>>>,
+    failures: &std::sync::Mutex<Vec<Error>>,
+) {
+    loop {
+        let job = queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recv();
+        let Ok(job) = job else { return };
+        if let Err(error) = job.run() {
+            failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(error);
+        }
+    }
 }
 
 /// Executes one plan unit against a snapshot of its direct-dependency
 /// outputs. Diagnostics are rendered as one uninterrupted block under the
 /// shared print lock.
 #[allow(clippy::too_many_arguments)]
-fn execute_unit(
-    plan: &CompilationPlan,
+fn execute_unit<'a>(
+    plan: &'a CompilationPlan,
     manifests: &BTreeMap<PackageKey, Manifest>,
-    options: &Options<'_>,
+    options: &Options<'a>,
     commands: &CommandOptions<'_>,
     key: &UnitKey,
-    planned: &crate::unit::PlannedUnit,
+    planned: &'a crate::unit::PlannedUnit,
     outputs: &Outputs,
     print: &std::sync::Mutex<()>,
+    stores: &std::sync::mpsc::Sender<CacheStore<'a>>,
 ) -> Result<Executed> {
     {
         match key.kind {
@@ -873,17 +951,6 @@ fn execute_unit(
                     &clippy_inputs,
                 )?;
                 let tracked = tracked_environment(&invocation)?;
-                if restorable {
-                    cache.store(
-                        cache_key,
-                        &invocation.output,
-                        cache_build_script.as_ref(),
-                        selected_inputs,
-                        (&diagnostics.0, &diagnostics.1),
-                        &tracked,
-                    )?;
-                    cache.record_cache_owner(cache_key, &key.package)?;
-                }
                 if let RustcOutput::BuildScript {
                     executable,
                     unhashed_executable,
@@ -901,6 +968,22 @@ fn execute_unit(
                     &tracked,
                 )?;
                 staging.commit(unit_dir)?;
+                if restorable {
+                    stores
+                        .send(CacheStore {
+                            cache,
+                            key: cache_key,
+                            package: key.package.clone(),
+                            output: planned_invocation.output.clone(),
+                            build_script: executed_build_script.cloned(),
+                            working_dir: selected_inputs
+                                .map(|_| planned_invocation.current_dir.clone()),
+                            source_remap: planned.source_remap.as_ref(),
+                            diagnostics: diagnostics.1.clone(),
+                            tracked: tracked.clone(),
+                        })
+                        .map_err(|_| Error::failure("cache store threads stopped unexpectedly"))?;
+                }
                 options.reporter.compiler_artifact(
                     key,
                     planned,
