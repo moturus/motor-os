@@ -19,6 +19,7 @@ pub fn search(
             "session_search needs a nonempty query up to 256 bytes and a limit of 1–10".into(),
         );
     }
+    let query = query.to_ascii_lowercase();
     let Some(root) = context.state.existing_directory(Path::new(""))? else {
         return Ok(
             json!({"hits": [], "total_matches": 0, "next_offset": null, "unavailable": [], "unavailable_count": 0}),
@@ -100,7 +101,8 @@ pub fn search(
         }
         for (entry, message) in messages {
             let text = message.text_content();
-            let Some(at) = text.find(query) else {
+            // ASCII folding keeps byte offsets, so `at` also indexes `text`.
+            let Some(at) = text.to_ascii_lowercase().find(&query) else {
                 continue;
             };
             if total >= offset && hits.len() < limit {
@@ -290,6 +292,10 @@ mod tests {
         assert_eq!(clean_hit["off_current_branch"], true);
         assert_eq!(std::fs::read(current.path().unwrap()).unwrap(), before);
         assert_eq!(search(&context, "needle", 0, 1).unwrap()["next_offset"], 1);
+        assert_eq!(
+            search(&context, "NEEDLE clean", 0, 10).unwrap()["total_matches"],
+            1
+        );
         assert!(search(&context, "", 0, 10).is_err());
         drop(current);
         drop(clean);
