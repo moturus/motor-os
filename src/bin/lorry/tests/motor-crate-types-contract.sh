@@ -25,7 +25,8 @@ for types in '"rlib","cdylib"' '"rlib","dylib"' '"staticlib","cdylib"' '"cdylib"
             --message-format=json >"$WORK/cargo.json" 2>"$WORK/cargo.err" || cargo_status=$?
         [ "$lorry_status" = "$cargo_status" ]
         if [ "$cargo_status" != 0 ]; then
-            [ "$command" = build ] && [ "$cargo_status" = 101 ]
+            [ "$command" = build ]
+            [ "$cargo_status" = 101 ]
             grep -Eq 'does not support these crate types' "$WORK/lorry.err"
             grep -Eq 'does not support these crate types' "$WORK/cargo.err"
             continue

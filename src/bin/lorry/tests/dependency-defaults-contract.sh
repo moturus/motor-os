@@ -5,6 +5,7 @@ source "$SCRIPT_DIR/current-toolchain.sh"
 lorry_load_current_toolchain
 LORRY="$(realpath "${1:-$SCRIPT_DIR/../target/debug/lorry}")"
 WORK="$(mktemp -d /tmp/lorry-dependency-defaults-XXXXXX)"
+trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained failed fixture: $WORK" >&2; fi' EXIT
 export LORRY WORK
 python3 - <<'PY'
 import json, os, subprocess
@@ -61,4 +62,3 @@ for edition in ('2015', '2018', '2021', '2024'):
             assert defaults(cargo.stdout) == defaults(lorry.stdout), root
 print('PASS: legacy dependency defaults and workspace inheritance match Cargo across editions')
 PY
-rm -rf "$WORK"

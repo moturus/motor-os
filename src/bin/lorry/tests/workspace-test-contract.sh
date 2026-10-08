@@ -359,7 +359,8 @@ for policy in default all; do
     TEST_FAIL=1 "$LORRY_TEST_CARGO" test --workspace --offline "${arguments[@]}" >"$WORK/cargo-failure.out" 2>"$WORK/cargo-failure.err"
     cargo_status=$?
     set -e
-    [ "$lorry_status" = "$expected" ] && [ "$cargo_status" = "$expected" ]
+    [ "$lorry_status" = "$expected" ]
+    [ "$cargo_status" = "$expected" ]
     cmp "$WORK/lorry-failure.out" "$WORK/cargo-failure.out"
     if [ "$policy" = all ]; then grep -F '1 test targets failed:' "$WORK/lorry-failure.err" >/dev/null; fi
 done
@@ -370,7 +371,8 @@ TEST_ABORT=1 "$LORRY_TEST_CARGO" test --workspace --offline >"$WORK/cargo-signal
 cargo_status=$?
 set -e
 printf 'Signal failure exit statuses: lorry=%s cargo=%s\n' "$lorry_status" "$cargo_status"
-[ "$cargo_status" = 101 ] && [ "$lorry_status" = "$cargo_status" ]
+[ "$cargo_status" = 101 ]
+[ "$lorry_status" = "$cargo_status" ]
 cmp "$WORK/lorry-signal.out" "$WORK/cargo-signal.out"
 printf '\ncompile_error!("later target failed");\n' >>zeta/tests/integration.rs
 for compiler in lorry cargo; do

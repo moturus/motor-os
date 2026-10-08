@@ -120,7 +120,9 @@ printf 'fn main() {}\n' >"$WORK/project/app/examples/demo.rs"
     [ "$("$LORRY" run --jobs=default -p app)" = app ]
     "$LORRY" test -p app -- --quiet
     "$LORRY" check -p app --all-targets 2>"$WORK/all-targets.stderr"
-    ! grep -F 'note: --all-targets leaves out examples and benches' "$WORK/all-targets.stderr"
+    if grep -F 'note: --all-targets leaves out examples and benches' "$WORK/all-targets.stderr"; then
+        exit 1
+    fi
     "$LORRY_TEST_CARGO" check -p app --all-targets --offline
     "$LORRY" check -p app --examples
     "$LORRY_TEST_CARGO" check -p app --examples --offline
