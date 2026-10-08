@@ -33,6 +33,12 @@ impl Suite {
         let mut last = started;
         let mut gap = Duration::ZERO;
         let mut peak = 0;
+        let read_log = |path: &Path| -> Result<String> {
+            if fs::metadata(path)?.len() > 256 * 1024 {
+                return Err(format!("oversized command log: {path:?}").into());
+            }
+            Ok(fs::read_to_string(path)?)
+        };
         // Sampled whole-VM peaks include this driver; they are not RSS.
         let status = loop {
             let sample = MemoryStats::get().map_err(|e| format!("memory stats: {e:?}"))?;
@@ -46,28 +52,17 @@ impl Suite {
             if started.elapsed() >= DEADLINE {
                 child.kill()?;
                 child.wait()?;
-                return Err(format!(
-                    "{label}: exceeded {DEADLINE:?}; evidence in {:?}",
-                    self.root
-                )
-                .into());
+                let (stdout, stderr) = (read_log(&stdout_path)?, read_log(&stderr_path)?);
+                return Err(format!("{label}: exceeded {DEADLINE:?}\n{stdout}\n{stderr}").into());
             }
             std::thread::sleep(Duration::from_millis(10));
-        };
-        let read_log = |path: &Path| -> Result<String> {
-            if fs::metadata(path)?.len() > 256 * 1024 {
-                return Err(format!("oversized command log: {path:?}").into());
-            }
-            Ok(fs::read_to_string(path)?)
         };
         let stdout = read_log(&stdout_path)?;
         let stderr = read_log(&stderr_path)?;
         if status.code() != Some(code) {
-            return Err(format!(
-                "{label}: expected exit {code}, got {status}\n{stdout}\n{stderr}\nevidence: {:?}",
-                self.root
-            )
-            .into());
+            return Err(
+                format!("{label}: expected exit {code}, got {status}\n{stdout}\n{stderr}").into(),
+            );
         }
         println!(
             "PASS {label}: exit={code} elapsed_ms={} sampled_vm_peak_bytes={peak} max_gap_us={}",
