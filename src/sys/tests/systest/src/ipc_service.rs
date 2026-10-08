@@ -498,37 +498,93 @@ fn test_dup_races_close() {
     println!("test_dup_races_close PASS ({duplicated} of {ROUNDS} duplicated)");
 }
 
+// The refill test's steps that wait without a deadline. The test stalled twice
+// in developer gates (2026-09-27, 2026-10-07) and ran out the suite's clock;
+// the watchdog names the step that stops instead.
+const REFILL_STEPS: [&str; 10] = [
+    "starting the server",
+    "accepting the first connection",
+    "starting the hoarder",
+    "waiting for the hoarder to take the memory",
+    "waiting for the first answer at the floor",
+    "reading the server's first reply",
+    "waiting for the server to retry",
+    "waiting for the hoarder to exit",
+    "reading the server's late reply",
+    "stopping the server",
+];
+const REFILL_DONE: usize = usize::MAX;
+static REFILL_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn refill_step(step: usize) {
+    REFILL_STEP.store(step, std::sync::atomic::Ordering::Release);
+}
+
+// Started before memory goes to the floor. It allocates nothing afterwards,
+// and its exit closes the children's stdin, which ends them too.
+fn refill_watchdog() {
+    use std::time::{Duration, Instant};
+    const STALL: Duration = Duration::from_secs(60);
+    std::thread::spawn(|| {
+        let mut last = REFILL_STEP.load(std::sync::atomic::Ordering::Acquire);
+        let mut since = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let step = REFILL_STEP.load(std::sync::atomic::Ordering::Acquire);
+            if step == REFILL_DONE {
+                return;
+            }
+            if step != last {
+                (last, since) = (step, Instant::now());
+            } else if since.elapsed() >= STALL {
+                let step = REFILL_STEPS[step];
+                println!("test_refused_refill_retries: STALL while {step} for {STALL:?}");
+                std::process::exit(3);
+            }
+        }
+    });
+}
+
 // When memory is low, the kernel refuses new listeners. The server must keep
 // serving its open connection, and must add a listener again soon after the
 // memory comes back, even if no client wakes it.
 fn test_refused_refill_retries() {
+    refill_step(0);
+    refill_watchdog();
     let url = format!("systest-ipc-refill-{}", std::process::id());
     let mut peer = Peer::start(&url);
     let mut client = ClientConnection::new(ChannelSize::Small).unwrap();
     let mut late = ClientConnection::new(ChannelSize::Small).unwrap();
     client.connect(&url).unwrap();
+    refill_step(1);
     peer.command("accept"); // Takes the only listener; the next wait() refills.
 
+    refill_step(2);
     let mut hoarder = Peer::spawn(&[HOARD]);
     // Nothing here may allocate until the hoarder is gone: at the floor this
     // process cannot grow its heap either.
     let mut hoarded = [0_u8; 8];
+    refill_step(3);
     hoarder.stdout.read_exact(&mut hoarded).unwrap();
     assert_eq!(&hoarded, b"hoarded\n");
     peer.send("rpc"); // The refill is refused.
     client.req::<RequestHeader>().cmd = 1;
+    refill_step(4);
     client.do_rpc(None).unwrap();
     assert_eq!(client.resp::<ResponseHeader>().result, moto_rt::E_OK);
     let mut ok = [0_u8; 3];
+    refill_step(5);
     peer.stdout.read_exact(&mut ok).unwrap();
     assert_eq!(&ok, b"ok\n");
     peer.send("retry");
     // Keep the pressure until the server has actually returned from a wait
     // without a request, rather than merely queuing its next command.
     let mut retrying = [0_u8; 9];
+    refill_step(6);
     peer.stdout.read_exact(&mut retrying).unwrap();
     assert_eq!(&retrying, b"retrying\n");
     drop(hoarder.child.stdin.take());
+    refill_step(7);
     assert!(hoarder.child.wait().unwrap().success());
     drop(hoarder); // A dead process keeps its memory until its last handle closes.
 
@@ -548,8 +604,11 @@ fn test_refused_refill_retries() {
     late.do_rpc(Some(answer_by))
         .expect("the server did not answer the first request on a fresh listener");
     assert_eq!(late.resp::<ResponseHeader>().result, moto_rt::E_OK);
+    refill_step(8);
     peer.expect("ok\n");
     drop((client, late));
+    refill_step(9);
     peer.stop();
+    refill_step(REFILL_DONE);
     println!("test_refused_refill_retries PASS");
 }
