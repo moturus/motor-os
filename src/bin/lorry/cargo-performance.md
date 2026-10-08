@@ -5,7 +5,10 @@ and at `aba5c563` (Helix at `82f27ed3`, which differs only in docs and a
 record fix that Helix does not reach). Both tools use the same Motor toolchain rustc
 (1.99), the dev profile, and default job counts on a 16-CPU host.
 Dependencies were vendored for Lorry from this host's Cargo caches without
-network access. Both tools build C code with clang. For Helix, both set
+network access, and Lorry built from its own repositories with admission.
+Lorry now reads Cargo's cache by default and skips admission there; that mode
+has not been measured yet. `use-cargo-registry = false` reproduces these
+runs. Both tools build C code with clang. For Helix, both set
 `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1`, so neither fetches grammars.
 
 ## Results

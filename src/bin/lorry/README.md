@@ -5,8 +5,11 @@ inspects, builds, checks, lints, runs, and tests a deliberately limited
 Cargo-compatible package model on Linux and Motor OS. Unsupported Cargo
 behavior is rejected explicitly.
 
-Lorry never invokes Cargo during normal operation. Builds are offline and use
-only verified sources already present in configured Lorry repositories.
+Lorry never invokes Cargo during normal operation. Builds are offline. By
+default they read crates.io sources from Cargo's local cache and build like
+Cargo, without Lorry's admission or policy grants. When that cache is off,
+absent, or incomplete, builds use only verified sources in configured Lorry
+repositories, with admission.
 
 This README is the short user guide. `spec.md` defines the supported behavior,
 `design.md` explains the implementation, and `full-native-build.md` lists the
@@ -19,10 +22,9 @@ remaining work needed to replace the Cargo builds reached from the repository
 Normal Lorry operation consumes a package's `Cargo.toml` and `Cargo.lock`, the
 supported parts of Lorry and Cargo configuration, a rustc toolchain, and
 configured Lorry repositories. `lorry fetch` and `lorry vendor` use the configured
-curl executable for sparse-registry and Git smart-HTTP traffic. With the
-explicit `--use-cargo-registry` option, build, check, clippy, run, test,
-metadata, and tree may instead read an already populated local Cargo cache
-(see [Configuration and repositories](#configuration-and-repositories)).
+curl executable for sparse-registry and Git smart-HTTP traffic. By default,
+build, check, clippy, run, test, metadata, and tree read an already populated
+local Cargo cache instead (see [Cargo's cache](#cargos-cache)).
 None of these operations invokes Cargo. Tests use Cargo only as a
 compatibility oracle.
 
@@ -54,8 +56,9 @@ default and forwarded features, target-conditioned dependencies, build
 scripts, procedural macros, and root crates.io patches. Alternative
 registries are unsupported.
 
-Build, check, Clippy, run, and test share one workspace graph. They run
-selected members' build scripts under named path grants. Scripts get private
+Build, check, Clippy, run, and test share one workspace graph. With Lorry
+repositories, they run selected members' build scripts under named path
+grants. Scripts get private
 output directories and package-specific `caller-env` allowlists. Editable
 members can read the workspace but not write it. Test adds development
 dependencies, including legal dev cycles. Build, run, check, Clippy, test,
@@ -336,10 +339,41 @@ Editing a configuration or creating a nearer one invalidates the affected
 units. On Motor, the development image supplies the matching driver through
 `/devtools/bin/clippy-driver`.
 
+## Cargo's cache
+
+By default, build, check, Clippy, run, test, metadata, and tree read crates.io
+sources from Cargo's cache (`$CARGO_HOME/registry`, or `~/.cargo/registry`).
+This works like Cargo. There is no admission, and packages, build scripts,
+and procedural macros need no allow rules or grants. A build script gets
+every native tool configured for its target. Deny rules and configured limits
+still apply; Lorry's default package limit does not. Git sources still come
+from Lorry repositories, which `lorry fetch` fills.
+
+Lorry never fetches or repairs Cargo's cache. Its first use verifies each
+archive against its extracted source and Cargo.lock, and records the evidence
+below `target/lorry/.cargo-evidence`. Strict validation repeats that check.
+Source paths are Cargo's, with no remapping.
+
+If there is no Cargo cache, or it lacks a package the command needs, Lorry
+uses its own repositories with admission instead, as described below. With
+`-v`, Lorry names the missing package. Motor OS images have no Cargo cache, so
+they always work this way.
+
+Turn the mode off with `--no-use-cargo-registry`, or in Lorry configuration:
+
+```toml
+use-cargo-registry = false
+```
+
+An explicit `--use-cargo-registry` requires Cargo's cache: a missing package
+is an error instead of a fallback. System configuration can lock the setting
+through `system-constraints`.
+
 ## Vendor dependencies
 
-Ordinary commands never use the network. Populate the configured immutable
-repository and create or repair Cargo.lock with:
+Ordinary commands never use the network. Lorry repositories hold verified
+sources for builds that do not use Cargo's cache. Populate them, and create or
+repair Cargo.lock, with:
 
 ```sh
 lorry vendor
@@ -399,7 +433,8 @@ package code. Explicit source denials and resource limits still apply.
 Targeted fetch retains complete resolution inputs, but full metadata can still
 need sources outside that target closure.
 
-The ordinary complete-graph limit is 64 outside packages. The developer image
+The ordinary complete-graph limit is 64 outside packages; builds from Cargo's
+cache have no default limit. The developer image
 uses 384; `--max-packages N` overrides it for one command subject to system
 constraints. A scoped review does not reduce complete resolution or its cap.
 Dependency depth has no default cap, matching Cargo. An explicit
@@ -407,7 +442,7 @@ Dependency depth has no default cap, matching Cargo. An explicit
 
 ## Compact dependency review
 
-Build, run, test, and vendor use compact generated state at
+Builds from Lorry repositories, and vendor, use compact generated state at
 the workspace root's `.lorry/dependencies-v2.toml`. The compact file contains
 a SHA-256 commitment, normalized member/feature scope, explicitly reviewed
 `(host, target)` contexts, and exceptional execution capabilities such as
@@ -417,8 +452,8 @@ Cargo.lock, and verified repository objects. That document is not checked in.
 [Portable dependency admission state](spec.md#portable-dependency-admission-state)
 defines both formats.
 
-Compilation using registry/Git dependencies requires a reviewed host/target
-pair. It verifies the commitment, then checks the requested graph's
+Compilation using registry/Git dependencies from Lorry repositories requires
+a reviewed host/target pair. It verifies the commitment, then checks the requested graph's
 package/feature coverage, including on cache hits. Reviewed Motor contexts
 require a Motor-capable rustc even for host-only builds. Explicit policy
 denials always override committed admission. The commitment is not a
@@ -531,13 +566,8 @@ content-addressed, and fully verified before publication. Ordinary builds
 trust their bounded metadata and recorded digests; `--strict-validation`
 rehashes retained archive and source contents before use.
 
-The global `--use-cargo-registry` option is a special offline compatibility
-mode for build, check, run, test, metadata, and tree. Its first use verifies
-Cargo's already populated archive/source cache and atomically records Lorry
-evidence below `target/lorry/.cargo-evidence`; later ordinary builds trust
-Cargo's completion marker and that evidence. Strict validation performs the
-archive/source comparison again. Lorry never fetches or repairs this cache,
-and it is not the normal Lorry repository workflow.
+The top-level `use-cargo-registry` setting chooses whether builds read
+Cargo's cache; see [Cargo's cache](#cargos-cache).
 
 ## Git dependencies and patches
 
@@ -585,7 +615,7 @@ they are unrelated to OS image-build scripts. On Linux, dependency build
 scripts run without network access, with read-only
 sources and toolchains, a cleared environment, and writes limited to their
 private output and temporary directories. Child tools require explicit
-compiler or archiver grants.
+compiler or archiver grants, except in builds from Cargo's cache.
 Registry and Git scripts may also read and watch the exact workspace
 `Cargo.lock`. Directory watches and lock symlinks escaping the workspace are
 rejected.
@@ -605,8 +635,8 @@ Clippy, and test also support selecting macro members. Selected macro features
 activate both Cargo contexts, and selected check metadata remains separate from
 the executable macro needed by consumers.
 
-Procedural macros execute dependency code inside rustc and therefore require
-an explicit matching policy rule:
+Procedural macros execute dependency code inside rustc. Outside builds from
+Cargo's cache, they therefore require an explicit matching policy rule:
 
 ```toml
 [policy.rules.example-derive]
@@ -627,7 +657,8 @@ library because procedural macros always run on the compiler host.
 -q, --quiet
 -v, --verbose  # commands, configuration, and elapsed phase timings
     --color auto|always|never
-    --use-cargo-registry
+    --use-cargo-registry     # require Cargo's cache
+    --no-use-cargo-registry  # use only Lorry repositories and admission
 ```
 
 For `build`, `run`, and `test`, verbose timing records use a monotonic clock.

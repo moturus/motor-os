@@ -37,10 +37,13 @@ workspace work.
   relative program path from these variables against the invocation
   directory and splits a runner on whitespace only. Lorry keeps the path
   relative and splits like a shell.
-- **Options that do not apply are ignored.** `--max-packages` and
-  `--use-cargo-registry` are accepted by commands that do not use them,
-  such as `clean`, `locate-project`, and `help`. The spec says such options
-  are usage errors.
+- **Options that do not apply are ignored.** `--max-packages`,
+  `--use-cargo-registry`, and `--no-use-cargo-registry` are accepted by some
+  commands that do not use them, such as `locate-project` and `help`. The
+  spec says such options are usage errors.
+- **Metadata paths in Cargo cache mode.** `metadata` reports a registry
+  package's manifest in Lorry's global source cache. Cargo reports its own
+  registry source directory.
 - **Metadata `dep_kinds` order.** Lorry sorts platform selectors as strings.
   Cargo puts a target triple before any `cfg(...)`, and `cfg(unix)` before
   `cfg(target_os = ...)`.
@@ -53,10 +56,6 @@ workspace work.
 
 ## Admission and review
 
-- **`--use-cargo-registry` skips admission for Git packages.** Without
-  `.lorry/dependencies-v2.toml`, Git packages compile under policy alone in
-  this mode. The spec says compilation with Git dependencies needs a reviewed
-  context. Either gate Git packages in both modes or document the exception.
 - **Lock format 3 Git selectors.** A version 3 lock spells a branch selector
   decoded (`feature/x`), version 4 keeps it encoded (`feature%2Fx`). The same
   graph then gives two different review digests. This fails closed: the user

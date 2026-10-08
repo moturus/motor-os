@@ -42,15 +42,22 @@ objects do not become usable merely because they were downloaded.
 
 The engine, `metadata`, and `tree` open the locked workspace through one
 shared setup, `dependency::LockedContext`. It holds the registry source, the
-locked Git sources, and the resolver options.
+locked Git sources, and the resolver options. The registry source is Cargo's
+cache or Lorry repositories; `cargo_registry::selected` chooses it. A command
+that finds Cargo's cache lacking reports a marked error, and
+`cargo_registry::with_fallback` runs it again with Lorry repositories unless
+the command line asked for Cargo's cache.
 
 For build, run, and test, `engine` performs these operations in order:
 
-1. load and validate `Cargo.toml`, `Cargo.lock`, and generated admission state;
-2. merge Lorry and Cargo configuration and discover the compiler/target;
+1. load and validate `Cargo.toml` and `Cargo.lock`, merge Lorry and Cargo
+   configuration, choose the registry source, and load generated admission
+   state when the source is Lorry repositories;
+2. discover the compiler/target;
 3. for an unchanged build, run, or plain check, reuse a completed profile
    whose record matches, and stop;
-4. reconstruct and verify the root admission scope and requested coverage;
+4. with Lorry repositories, reconstruct and verify the root admission scope
+   and requested coverage;
 5. resolve the selected locked graph and verify source and policy evidence;
 6. create compilation units and their dependency order;
 7. compile or restore eligible library, procedural-macro, and build-script
@@ -242,14 +249,20 @@ do not force readmission. Path dependencies remain governed by their
 source digests and configured policy rather than being copied into immutable
 dependency admission.
 
-At build time `engine.rs` requires the discovered host and selected target to
-be an exact reviewed context. Before anything compiles,
+Builds from Cargo's cache skip this section: they read no admission state,
+and `Config::trust_cargo_cache` sets a policy flag that removes the default
+deny, the build-script and procedural-macro grants, and Lorry's default
+package limit. Explicit denies and configured limits still apply. Their
+trusted build scripts get the native tools configured for the target.
+
+With Lorry repositories, `engine.rs` requires the discovered host and selected
+target to be an exact reviewed context. Before anything compiles,
 `dependency::workspace::admission` reconstructs the canonical document for
 every recorded context, verifies the digest and grants, and checks the
 requested graph's package/feature coverage. An ordinary completed profile is
 reused before this check. Its record is written only after a build that passed
-admission, and it covers the admission state, lock, manifests, configuration,
-and policy. Reuse compiles and runs nothing new. Only after verification does
+admission or used Cargo's cache, and it covers the registry source, admission
+state, lock, manifests, configuration, and policy. Reuse compiles and runs nothing new. Only after verification does
 `admission_state.rs` translate reconstructed
 evidence and explicit capabilities into exact generated allow rules. Policy
 evaluation still considers every matching explicit deny, so a generated allow

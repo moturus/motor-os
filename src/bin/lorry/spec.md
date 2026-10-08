@@ -29,10 +29,10 @@ resolution, lockfile creation, fetching, building, testing, or running. Tests
 may invoke Cargo only as an independent compatibility oracle.
 
 Normal operation reads `Cargo.toml`, `Cargo.lock`, supported Lorry/Cargo
-configuration, the selected rustc toolchain, and configured Lorry repository
-objects. The explicit `--use-cargo-registry` mode may instead read a local
-Cargo archive/source cache after establishing or loading Lorry evidence; it
-still does not invoke Cargo or use the network. Cargo oracle programs and
+configuration, the selected rustc toolchain, and either Cargo's local
+archive/source cache or configured Lorry repository objects. Cargo cache mode,
+the default, reads Cargo's cache after establishing or loading Lorry evidence.
+Neither invokes Cargo or uses the network. Cargo oracle programs and
 captures, VM profiles, image construction, SSH staging, and guest-layout
 checks are validation infrastructure and are not operational Lorry inputs.
 
@@ -46,8 +46,9 @@ runs test harnesses. It operates on Linux, Linux-to-Motor, and native Motor.
 
 Workspace membership and inheritance, shared resolution, metadata, fetch,
 tree, and scoped root admission are implemented. Build, check, Clippy, run,
-and test share one workspace graph with CLI feature resolution. They run
-selected member build scripts under named path grants. Custom and build-std
+and test share one workspace graph with CLI feature resolution. Outside
+Cargo cache mode, they run selected member build scripts under named path
+grants. Custom and build-std
 targets are unsupported. `full-native-build.md` is a non-normative audit of
 the remaining gaps exposed by the repository `Makefile`.
 
@@ -187,9 +188,10 @@ lorry help [COMMAND]
 ```
 
 Global options are `--quiet|-q`, `--verbose|-v`,
-`--color auto|always|never`, and the offline local-Cargo-cache option
-`--use-cargo-registry` for `build`, `check`, `run`, `test`, resolved `metadata`,
-and `tree`. Long value options
+`--color auto|always|never`, and `--use-cargo-registry` or
+`--no-use-cargo-registry`, which turn Cargo cache mode on or off for `build`,
+`check`, `run`, `test`, resolved `metadata`, and `tree`. `new`, `clean`, and
+`cache clean` reject both. Long value options
 accept both `--name value` and `--name=value`.
 
 The global `--lorry-messages` option emits Lorry errors as newline-delimited
@@ -301,7 +303,8 @@ root compilation, freshness validation, and artifact publication.
 - `review` is offline and non-mutating. It reconstructs and verifies the
   committed canonical dependency review, then writes its exact TOML to stdout.
   The review covers the scope recorded by `vendor`, so package and feature
-  selectors are usage errors. It also rejects `--use-cargo-registry`.
+  selectors are usage errors. It also rejects `--use-cargo-registry`;
+  `vendor` and `fetch` do too. All three always use Lorry repositories.
 - `test` builds all selected harnesses before running them in Cargo-compatible
   fail-fast target order: packages by name, then each package's library,
   binaries by name, and integration tests by name. Ordinary tests accept the
@@ -719,16 +722,30 @@ location to which its settings should move. System constraints still apply.
   they also omit `?branch=master`, while package sources retain it. Validation
   and canonical review accept that legacy spelling only for those formats;
   Git source identities and modern dependency references remain distinct.
-- Builds never fall back to Cargo's cache or the network. Missing selected
-  objects must identify the package/version/source and recommend
-  `lorry fetch`.
-- The explicit `--use-cargo-registry` mode is offline. Its first use verifies
-  Cargo's cached archive and extracted source against each other and
-  Cargo.lock, then atomically records the resulting Lorry evidence below the
-  target tree. Later ordinary builds trust Cargo's completed-cache marker and
-  that evidence; strict builds repeat the content comparison. The mode never
-  fetches, repairs, or weakens policy and is used for physical-path
-  compatibility comparisons.
+- Builds from Lorry repositories never fall back to Cargo's cache or the
+  network. Missing selected objects must identify the package/version/source
+  and recommend `lorry fetch`.
+- Cargo cache mode reads crates.io sources from Cargo's archive/source cache
+  below `CARGO_HOME`, by default `~/.cargo`. It is offline and never fetches or
+  repairs that cache. Its first use verifies each cached archive and extracted
+  source against each other and Cargo.lock, then atomically records the
+  resulting Lorry evidence below the target tree. Later ordinary builds trust
+  Cargo's completed-cache marker and that evidence; strict builds repeat the
+  content comparison. Git sources still come from Lorry repositories.
+- In Cargo cache mode compilation needs no admission state, and policy trusts
+  packages as Cargo does. Crates.io, Git, and path packages need no allow
+  rule; build scripts and procedural macros need no grant; a build script gets
+  every native tool configured for its target; and Lorry's default package
+  limit does not apply. Deny rules, system constraints, configured limits, and
+  integrity checks still apply.
+- `--use-cargo-registry` or `--no-use-cargo-registry` chooses the mode. Without
+  either, the top-level `use-cargo-registry` configuration key chooses it, and
+  without that the mode is on when `registry/src` and `registry/cache` exist
+  below `CARGO_HOME`. Unless the command line turned the mode on, a command
+  falls back to Lorry repositories and admission when Cargo's cache lacks a
+  needed package or its complete extraction, has a missing or unknown
+  extraction marker, or holds the package in more than one registry.
+  Integrity failures never fall back. Verbose mode reports the fallback.
 - A validation-only host helper may prepare a disposable Cargo oracle view
   containing checksum-pinned inactive Cargo.lock entries. This is not a Lorry
   command or normal packaging input. Those entries must not enter Lorry's
@@ -761,8 +778,8 @@ host-independent logical paths without changing their physical storage:
   directory, build-script environment, tool identity, and outputs remain
   cache and audit inputs.
 
-`--use-cargo-registry` preserves Cargo's physical-path compatibility and adds
-no source remapping, including for path dependencies. The root package is not
+Cargo cache mode preserves Cargo's physical-path compatibility and adds no
+source remapping, including for path dependencies. The root package is not
 remapped.
 
 Targeted fetch inspects a registry package's source description before following
@@ -813,8 +830,8 @@ requirement and never trusted evidence. The workspace record contains:
 - the explicit build-script, procedural-macro, and native-tool capability
   grants that must stay visible in a source diff.
 
-Compilation using registry/Git dependencies requires an exact reviewed
-host/target context. It reconstructs the canonical document for every recorded
+Outside Cargo cache mode, compilation using registry/Git dependencies
+requires an exact reviewed host/target context. It reconstructs the canonical document for every recorded
 context, verifies its digest and grants, and checks the requested package and
 feature coverage before unit reuse or compilation. An unchanged build's
 completed profile is checked earlier, because its record covers the admission
@@ -1217,13 +1234,15 @@ Concurrent publication may accept an independently published destination only
 after full identity verification. A corrupt higher-priority object is a hard
 error, not a reason to fall through or repair.
 
-New non-path packages are default-deny. Any matching deny vetoes admission;
+Outside Cargo cache mode, which trusts packages as Cargo does, new non-path
+packages are default-deny. Any matching deny vetoes admission;
 with default deny, at least one allow must match. Integrity checks cannot be
 disabled. Policy may constrain package identity, version/source/checksum,
 exact license expression, build-script presence, source digest, path roots,
 procedural-macro presence, sizes, file counts, dependency depth, package
-count, and native-tool roles. Build scripts and procedural macros always
-require their respective explicit allows, even under default allow.
+count, and native-tool roles. Outside Cargo cache mode, build scripts and
+procedural macros always require their respective explicit allows, even
+under default allow.
 Policy rules express those grants with `allow-build-script = true` and
 `allow-proc-macro = true`; neither grant implies the other. Native-tool roles
 additionally require the build-script grant.
@@ -1243,7 +1262,8 @@ record; changed grants require another vendor review before compilation.
 
 Dependency depth has no default cap, matching Cargo. An explicitly configured
 `policy.limits.max-depth` bounds resolution, source preparation, and admission.
-Default limits are 64 outside packages, 16 MiB compressed and
+Default limits are 64 outside packages (none in Cargo cache mode), 16 MiB
+compressed and
 128 MiB/20,000 files extracted per package, 256 MiB compressed and 1 GiB
 extracted per transaction, and 300 seconds/8 MiB captured output per build
 script. The package limit counts packages from outside the workspace; the
