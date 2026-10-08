@@ -130,16 +130,19 @@ impl ToolContext {
     }
 }
 
-fn normalize(path: &Path) -> Result<PathBuf, String> {
+/// Remove `.` and `..` lexically; as in POSIX, `..` at the root stays there.
+pub(crate) fn normalize(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() {
-        return Err("batteries roots must be absolute".into());
+        return Err("batteries paths must be absolute".into());
     }
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
             Component::RootDir | Component::Normal(_) => result.push(component.as_os_str()),
             Component::CurDir => {}
-            Component::ParentDir if result.pop() => {}
+            Component::ParentDir => {
+                result.pop();
+            }
             _ => return Err(format!("invalid file path {}", path.display())),
         }
     }
@@ -198,6 +201,7 @@ mod tests {
             context.relative(&root.join("outside")),
             Path::new("../outside")
         );
+        assert_eq!(context.resolve("/../..", false).unwrap(), Path::new("/"));
         for file in [
             state.join("key"),
             state.join("sessions/other.jsonl.results/1.txt"),

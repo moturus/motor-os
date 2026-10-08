@@ -1,6 +1,6 @@
 //! A short static destructive list. Tools still run with the user's authority.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use gears::hooks::Decision;
 
@@ -138,26 +138,8 @@ fn absolute(cwd: &Path, home: Option<&Path>, input: &str) -> PathBuf {
     if let (Some(home), Some(rest)) = (home, rest) {
         return absolute(cwd, None, &format!("{}{rest}", home.display()));
     }
-    let path = if Path::new(input).is_absolute() {
-        PathBuf::from(input)
-    } else {
-        cwd.join(input)
-    };
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::Normal(_) => result.push(component.as_os_str()),
-            Component::ParentDir => {
-                result.pop();
-            }
-            _ => {}
-        }
-    }
-    if result.as_os_str().is_empty() {
-        PathBuf::from("/")
-    } else {
-        result
-    }
+    let path = cwd.join(input);
+    crate::paths::normalize(&path).unwrap_or(path)
 }
 
 fn forbidden_rm(arguments: &[&str], cwd: &Path, state: &Path, home: Option<&Path>) -> bool {
