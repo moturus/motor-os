@@ -20,7 +20,6 @@ pub struct Tool {
     pub name: String,
     pub description: String,
     pub parameters: Value,
-    pub prompt: Option<String>,
     pub display: Option<String>,
     pub read_only: bool,
     pub directory: PathBuf,
@@ -46,7 +45,6 @@ pub struct ProcessTool {
     pub stdin_arguments: bool,
     pub stdout_only: bool,
     pub normal_exit_statuses: Vec<i32>,
-    pub allowed_flags: Vec<String>,
     pub shell_state: bool,
 }
 
@@ -171,16 +169,20 @@ impl Tool {
             }
             _ => None,
         };
+        let mut process = serde_json::to_value(&self.process)
+            .map_err(|error| format!("cannot serialize approval identity: {error}"))?;
+        process["allowed_flags"] = serde_json::json!([]);
         let identity = serde_json::json!({
             "name": self.name,
             "kind": "process",
             "owner": self.directory,
             "description": self.description,
             "parameters": self.parameters,
-            "prompt": self.prompt,
+            // Removed manifest fields keep their empty values, so saved approvals stay valid.
+            "prompt": null,
             "display": self.display,
             "read_only": self.read_only,
-            "process": self.process,
+            "process": process,
             "executable_hash": executable_hash,
         });
         let bytes = serde_json::to_vec(&identity)
@@ -338,28 +340,17 @@ impl Tool {
                 raw.name
             ));
         }
+        let file = raw
+            .parameters
+            .as_ref()
+            .ok_or_else(|| format!("{}: tool needs parameters", directory.display()))?;
+        let parameters = read_schema(directory, file)?;
         // Validate both platforms before selecting one, so a dormant override
-        // cannot hide a broken schema or mapping until deployment elsewhere.
-        let mut schemas = BTreeMap::new();
+        // cannot hide a broken mapping until deployment elsewhere.
         let stdin_arguments = raw.process.stdin.as_deref() == Some("arguments");
         for platform in [&raw.linux, &raw.motor] {
-            let file = platform
-                .parameters
-                .as_ref()
-                .or(raw.parameters.as_ref())
-                .ok_or_else(|| format!("{}: tool needs parameters", directory.display()))?;
-            if !schemas.contains_key(file) {
-                schemas.insert(file.clone(), read_schema(directory, file)?);
-            }
-            let schema = &schemas[file];
-            let arguments = platform
-                .process
-                .arguments
-                .as_ref()
-                .unwrap_or(&raw.process.arguments);
-            arguments.validate(directory, schema, stdin_arguments)?;
-            if let Some(file) = &platform.prompt {
-                read_file(directory, file)?;
+            if let Some(arguments) = &platform.process.arguments {
+                arguments.validate(directory, &parameters, stdin_arguments)?;
             }
         }
         #[cfg(unix)]
@@ -373,28 +364,13 @@ impl Tool {
                 directory.display()
             ));
         }
-        let parameters_file = platform
-            .parameters
-            .or(raw.parameters)
-            .ok_or_else(|| format!("{}: tool needs parameters", directory.display()))?;
-        let parameters = schemas
-            .remove(&parameters_file)
-            .expect("selected schema was validated");
-        let prompt = platform
-            .prompt
-            .or(raw.prompt)
-            .map(|file| read_file(directory, &file))
-            .transpose()?;
-        if prompt.as_ref().is_some_and(|text| text.trim().is_empty()) {
-            return Err(format!("{}: tool prompt is empty", directory.display()));
-        }
         let process = ProcessTool::parse_with_arguments(
             raw.process,
             directory,
             &parameters,
             platform.process.arguments,
         )?;
-        let display = platform.display.or(raw.display);
+        let display = raw.display;
         if let Some(template) = display.as_deref() {
             validate_display(template, &parameters, directory)?;
         }
@@ -402,7 +378,6 @@ impl Tool {
             name: raw.name,
             description,
             parameters,
-            prompt,
             display,
             read_only: raw.read_only,
             directory: directory.to_path_buf(),
@@ -465,13 +440,13 @@ fn validate_display(template: &str, schema: &Value, directory: &Path) -> Result<
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawManifest {
     version: u32,
     kind: String,
     name: String,
     description: Option<String>,
     parameters: Option<String>,
-    prompt: Option<String>,
     display: Option<String>,
     #[serde(default)]
     read_only: bool,
@@ -483,28 +458,27 @@ struct RawManifest {
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawPlatform {
     description: Option<String>,
-    parameters: Option<String>,
-    prompt: Option<String>,
-    display: Option<String>,
     #[serde(default)]
     process: RawPlatformProcess,
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawPlatformProcess {
     arguments: Option<Arguments>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawProcess {
     timeout_seconds: Option<u64>,
     max_output_bytes: Option<usize>,
     stdin: Option<String>,
     output: Option<String>,
     normal_exit_statuses: Option<Vec<i32>>,
-    allowed_flags: Option<Vec<String>>,
     #[serde(default)]
     shell_state: bool,
     #[serde(default)]
@@ -513,6 +487,7 @@ struct RawProcess {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawCommand {
     common: Option<Vec<String>>,
     linux: Option<Vec<String>>,
@@ -597,16 +572,6 @@ impl ProcessTool {
                 directory.display()
             ));
         }
-        let allowed_flags = raw.allowed_flags.unwrap_or_default();
-        if allowed_flags.iter().any(|flag| {
-            !flag.starts_with('-')
-                || flag == "--"
-                || flag
-                    .bytes()
-                    .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-        }) {
-            return Err(format!("{}: invalid allowed flag", directory.display()));
-        }
         raw.arguments
             .validate(directory, parameters, stdin_arguments)?;
         #[cfg(unix)]
@@ -621,7 +586,6 @@ impl ProcessTool {
             stdin_arguments,
             stdout_only,
             normal_exit_statuses,
-            allowed_flags,
             shell_state: raw.shell_state,
         })
     }
@@ -871,7 +835,7 @@ impl ProcessTool {
                     .as_str()
                     .ok_or_else(|| format!("{name:?} must be a string"))?;
                 if text.starts_with('-') {
-                    return Err(format!("argument {text:?} needs -- or an allowed flag"));
+                    return Err(format!("argument {text:?} must follow --"));
                 }
                 before.push(flag.clone());
                 before.push(text.to_string());
@@ -935,12 +899,10 @@ impl ProcessTool {
         before: &mut Vec<String>,
         after: &mut Vec<String>,
     ) -> Result<(), String> {
-        if value.starts_with('-') && self.allowed_flags.iter().any(|flag| flag == value) {
-            before.push(value.to_string());
-        } else if after_delimiter {
+        if after_delimiter {
             after.push(value.to_string());
         } else if value.starts_with('-') {
-            return Err(format!("argument {value:?} needs -- or an allowed flag"));
+            return Err(format!("argument {value:?} must follow --"));
         } else {
             before.push(value.to_string());
         }
@@ -1096,12 +1058,6 @@ mod tests {
             changed_description.approval_identity().unwrap(),
             tool.approval_identity().unwrap()
         );
-        let mut changed_prompt = tool.clone();
-        changed_prompt.prompt = Some("New guidance".into());
-        assert_ne!(
-            changed_prompt.approval_identity().unwrap(),
-            tool.approval_identity().unwrap()
-        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1111,22 +1067,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
-            root.join("linux.json"),
+            root.join("parameters.json"),
             r#"{"type":"object","properties":{"path":{"type":"string"}}}"#,
         )
         .unwrap();
-        std::fs::write(root.join("motor.json"),
-            r#"{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}}}"#).unwrap();
-        std::fs::write(
-            root.join("tool.toml"),
-            r#"
+        let manifest = r#"
 version = 1
 kind = "process"
 name = "example"
 description = "Example"
-parameters = "linux.json"
-[motor]
-parameters = "motor.json"
+parameters = "parameters.json"
 [process.command]
 common = ["/no-program"]
 [process.arguments]
@@ -1134,12 +1084,11 @@ after_double_dash = ["path"]
 [process.arguments.path]
 type = "string"
 [motor.process.arguments]
-after_double_dash = ["paths"]
-[motor.process.arguments.paths]
-type = "string_list"
-"#,
-        )
-        .unwrap();
+before_double_dash = ["path"]
+[motor.process.arguments.path]
+type = "string"
+"#;
+        std::fs::write(root.join("tool.toml"), manifest).unwrap();
         let entries = [ToolDirectory {
             directory: root.clone(),
             enabled: true,
@@ -1156,16 +1105,17 @@ type = "string_list"
         #[cfg(not(unix))]
         assert_eq!(
             tool.process
-                .expand_arguments(
-                    &serde_json::json!({"paths":["one","two"]}),
-                    &tool.parameters
-                )
+                .expand_arguments(&serde_json::json!({"path":"one"}), &tool.parameters)
                 .unwrap(),
-            ["/no-program", "--", "one", "two"]
+            ["/no-program", "one"]
         );
+        // The dormant platform's mapping is still checked against the schema.
         std::fs::write(
-            root.join("motor.json"),
-            r#"{"type":"object","properties":{"paths":{"type":"string"}}}"#,
+            root.join("tool.toml"),
+            manifest.replace(
+                "[motor.process.arguments.path]\ntype = \"string\"",
+                "[motor.process.arguments.path]\ntype = \"string_list\"",
+            ),
         )
         .unwrap();
         assert!(
@@ -1286,7 +1236,6 @@ type = "string_list"
         });
         let raw: RawProcess = toml::from_str(
             r#"
-            allowed_flags = ["--release"]
             [command]
             common = ["/bin/rg", "--color=never"]
             [arguments]
@@ -1375,8 +1324,8 @@ type = "string_list"
         process
             .push_model_string("--release", true, &mut before, &mut after)
             .unwrap();
-        assert_eq!(before, ["--release"]);
-        assert!(after.is_empty());
+        assert!(before.is_empty());
+        assert_eq!(after, ["--release"]);
     }
 
     #[cfg(unix)]
@@ -1402,7 +1351,6 @@ type = "string_list"
             name: "print".to_string(),
             description: "Print text".to_string(),
             parameters: schema.clone(),
-            prompt: None,
             display: Some("print {text}".to_string()),
             read_only: true,
             directory: directory.clone(),
@@ -1448,7 +1396,6 @@ type = "string_list"
         let directory = root.join("tools/example");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("parameters.json"), r#"{"type":"object"}"#).unwrap();
-        std::fs::write(directory.join("prompt.md"), "Use this tool when needed.").unwrap();
         std::fs::write(
             directory.join("tool.toml"),
             r#"version = 1
@@ -1456,7 +1403,6 @@ kind = 'process'
 name = 'example'
 description = 'An example.'
 parameters = 'parameters.json'
-prompt = 'prompt.md'
 read_only = true
 [process]
 stdin = 'arguments'
@@ -1479,7 +1425,6 @@ common = ['/no-such-program']
         assert!(tool.enabled_by_default && tool.read_only);
         assert!(tool.process.stdin_arguments && tool.process.stdout_only);
         assert_eq!(tool.process.normal_exit_statuses, [0, 1]);
-        assert_eq!(tool.prompt.as_deref(), Some("Use this tool when needed."));
         let disabled = Registry::load(
             &[ToolDirectory {
                 directory: PathBuf::from("tools/example"),
@@ -1515,11 +1460,16 @@ common = ['/no-such-program']
         )
         .unwrap();
         assert!(Registry::load(&entries, &root).is_ok());
-        std::fs::write(directory.join("prompt.md"), "\n").unwrap();
+        // Fields this version does not support are refused, not ignored.
+        std::fs::write(
+            directory.join("tool.toml"),
+            manifest.replace("read_only = true", "read_only = true\nprompt = 'prompt.md'"),
+        )
+        .unwrap();
         assert!(
             Registry::load(&entries, &root)
                 .unwrap_err()
-                .contains("prompt is empty")
+                .contains("unknown field")
         );
         std::fs::remove_dir_all(root).unwrap();
     }

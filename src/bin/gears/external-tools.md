@@ -53,13 +53,12 @@ my_tool/
 `-- parameters.json
 ```
 
-It may also contain an executable and a prompt fragment:
+It may also contain an executable:
 
 ```text
 my_tool/
 |-- tool.toml
 |-- parameters.json
-|-- prompt.md          # optional
 `-- run                # optional; name is chosen by tool.toml
 ```
 
@@ -76,7 +75,7 @@ configuration. It does not recursively scan a project, download tools, compile
 source, or run an installer. Installed copies live under `tools/` in the Gears
 directory, `/user/cfg/gears/tools/` on Motor OS and `~/.gears/tools/` on
 Linux, and one directory serves both systems: its manifest names a program
-path per system and may give a description and argument schema per system,
+path per system and may give a description and argument mapping per system,
 and a tool that exists on one system only is simply absent on the other.
 
 ## Manifest
@@ -89,7 +88,6 @@ kind = "process"
 name = "example"
 description = "Describe exactly what the tool does for the model."
 parameters = "parameters.json"
-prompt = "prompt.md"                 # optional
 display = "{path}"                   # optional permission/UI detail
 read_only = false                    # optional; true only for read-only tools
 
@@ -105,9 +103,8 @@ common = ["./run"]
 # linux = ["./run-linux"]            # optional platform override
 # motor = ["./run-motor"]            # optional platform override
 
-# [motor]                            # optional per-system overrides of
-# description = "..."                # description, parameters, prompt
-# parameters = "parameters-motor.json"   # and display; [linux] likewise
+# [motor]                            # optional per-system description;
+# description = "..."                # [linux] likewise
 ```
 
 The fields mean:
@@ -123,20 +120,18 @@ The fields mean:
   object-valued JSON Schema. The schema is sent to the provider. Version 1
   checks the top-level shape and mapped property types, but does not implement
   a complete JSON Schema validator; the tool must still validate its input.
-- `prompt`, when present, names a UTF-8 Markdown file in the same directory.
-  Its non-empty contents become a system-prompt fragment only while the tool is
-  enabled. Most tools should need only their description and schema.
 - `display` is an optional template used for the permission prompt and generic
   TUI rendering. Without it, Gears displays the tool name and compact argument
   JSON.
-- `[linux]` and `[motor]` may each give their own `description`, `parameters`,
-  `prompt` and `display`, replacing the top-level value on that system. A
+- `[linux]` and `[motor]` may each give their own `description`, replacing
+  the top-level one on that system. A
   program whose arguments differ between systems, as sysbox's `find` differs
   from GNU `find`, describes each version to the model exactly; a program
   that is the same on both, such as `rg`, needs only the top-level fields.
   `[linux.process.arguments]` and `[motor.process.arguments]` may replace the
-  whole common argument mapping table on that system. Gears checks both tables
-  against their effective parameter schemas when the directory loads.
+  whole common argument mapping table on that system; both map the same
+  schema. Gears checks both tables against it when the directory loads.
+  Unknown manifest fields are refused.
 - `read_only`, when true, declares that the tool only reads. The batteries
   use this mark when recording evidence. Tools still run in request order.
   A tool that writes, publishes or runs arbitrary commands leaves it false.
@@ -230,9 +225,8 @@ placeholder makes that tool call fail visibly; it never falls back to
 executing an ambiguous command.
 
 A model string value beginning with `-` is refused unless it is placed after
-the inserted `--` or is exactly listed in the manifest's `allowed_flags`
-(such as `--release` for `lorry`). Allowed values from either group go before
-`--`. The shipped manifests
+the inserted `--`; fixed flags come from boolean, option and enumerated
+mappings instead. The shipped manifests
 put `--` before free-form paths and patterns; in a prototype, a search path
 of `--pre=sh` made `rg` run arbitrary commands. Each shipped common command's
 typed parameters are specified before its tool directory is built. GNU
@@ -554,7 +548,7 @@ allowing `lorry` for a session does not allow arbitrary shell commands, and
 lets a policy hook allow the read-only ones without asking. Where the two
 systems' programs take different arguments, sysbox's `ls`, `find`, `head`,
 `tail`, `diff`, `wc` and `cat` against their GNU counterparts, the manifest
-gives a description and schema per system. Sysbox-backed Motor OS tools call
+gives a description and argument mapping per system. Sysbox-backed Motor OS tools call
 `/system/bin/sysbox COMMAND` directly, preserving spaces and literal glob
 characters in arguments. `gix` and `lorry` have a command
 for Motor OS only and `cargo` for Linux only; on the other system each is
@@ -572,12 +566,10 @@ shell's approval rather than an identity of its own.
 3. Add an executable only if a standard system program is insufficient. Make
    it accept argument JSON on stdin and return useful stdout, stderr, and exit
    status.
-4. Add `prompt.md` only when the tool genuinely needs instructions beyond its
-   description and schema.
-5. Add one `[[tools]]` entry to the Gears configuration with `enabled = false`.
-6. Start Gears and inspect `/tools`, then enable the tool for a disposable or
+4. Add one `[[tools]]` entry to the Gears configuration with `enabled = false`.
+5. Start Gears and inspect `/tools`, then enable the tool for a disposable or
    ephemeral session.
-7. Exercise valid input, malformed input, denial, non-zero exit, timeout,
+6. Exercise valid input, malformed input, denial, non-zero exit, timeout,
    cancellation, and output truncation on Linux and Motor OS before enabling it
    globally.
 

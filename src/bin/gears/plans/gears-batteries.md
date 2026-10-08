@@ -270,9 +270,8 @@ them in line with this document. Requirements on tool definitions:
   string parameter fills one whole argument, a boolean adds a fixed flag or
   nothing, an integer fills a flag's value, an enumerated parameter selects a
   subcommand (`gix`, `lorry`, `cargo`), and a list parameter expands after
-  `--`. A value that starts with `-` is refused unless it stands after `--`
-  or is listed exactly in the manifest's `allowed_flags` (for example
-  `--release` for `lorry`), in which case it is placed before `--`. Each
+  `--`. A value that starts with `-` is refused unless it stands after `--`;
+  fixed flags come from boolean, option and enumerated parameters. Each
   common command's parameters are written down before its directory is
   built (phase 3.2). The schema, the expansion and the program's real
   behavior must agree. A tool's name does not establish its effects: GNU
@@ -281,8 +280,8 @@ them in line with this document. Requirements on tool definitions:
   A tool that only reads is marked `read_only` in its manifest; "Evidence"
   uses the mark.
 - **Platforms.** Differences belong in the tool definition: a manifest may
-  give the description, parameters and command per system under `[linux]`
-  and `[motor]`, and a tool with no command for the running system is
+  give the description, argument mapping and command per system under
+  `[linux]` and `[motor]`, over one parameter schema, and a tool with no command for the running system is
   listed as not available, never sent. A materially changed definition gets
   a new approval identity.
   On Motor OS, sysbox-backed tools invoke `/system/bin/sysbox COMMAND`

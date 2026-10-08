@@ -1974,9 +1974,7 @@ fn effective_prompt(workspace: &std::path::Path, tools: &Registry, hooks: &Hooks
         "directory_tools": tools.enabled_tools().collect::<Vec<_>>(),
         "hooks": hooks.manifest(),
     });
-    let mut fragments = hooks.initialized().prompt_fragments;
-    fragments.extend(tools.enabled_tools().filter_map(|tool| tool.prompt.clone()));
-    Effective::new(workspace, fragments, &manifest)
+    Effective::new(workspace, hooks.initialized().prompt_fragments, &manifest)
 }
 
 fn estimate_request_tokens(prompt: &[String], messages: &[Message], tools: &[ToolSpec]) -> u64 {

@@ -45,9 +45,9 @@ entries.
   `[[tools]]` entries containing a directory, absolute or relative to the
   Gears directory, and a default `enabled` boolean.
 - Load `tool.toml`,
-  `parameters.json`, and optional `prompt.md` without running the tool, applying
-  the `[linux]` or `[motor]` overrides of description, parameters, prompt and
-  display for the running system. Reject missing/special resource files,
+  `parameters.json` without running the tool, applying the `[linux]` or
+  `[motor]` overrides of description and argument mapping for the running
+  system. Reject missing/special resource files,
   escaping relative paths, invalid names/schemas/templates, duplicate tool
   names, unsupported versions, unknown kinds and invalid process limits. A tool
   with no command for the running system is kept as "not available here":
@@ -82,8 +82,7 @@ entries.
 - Execute an enabled directory tool through the shared bounded process
   runner. Expand typed string, boolean, integer, enum and list parameters into
   fixed arguments; the model never supplies a flag vector. Reject a value
-  beginning with `-` unless it is after a literal `--` or exactly matches a
-  manifest `allowed_flags` entry, which is placed before `--`; optionally
+  beginning with `-` unless it is after a literal `--`; optionally
   write the exact argument JSON to stdin; set the documented non-secret
   environment, including `GEARS_SESSION_PATH` for a saved session; and remove
   the provider credential. Map the child's streams to the model-facing result
@@ -202,8 +201,8 @@ entries.
   returning a redirect without following it. Each directory serves both
   systems: where the programs take different arguments, sysbox's `ls`,
   `find`, `head`, `tail`, `diff`,
-  `wc` and `cat` against GNU's, the manifest gives a description and schema
-  per system under `[motor]` and `[linux]`. Sysbox-backed commands invoke
+  `wc` and `cat` against GNU's, the manifest gives a description and argument
+  mapping per system under `[motor]` and `[linux]`. Sysbox-backed commands invoke
   `/system/bin/sysbox COMMAND` directly; VM tests cover spaces and literal
   glob characters. Linux `find` exposes only name, type and path parameters,
   since GNU `find -exec` runs programs. `gix` and `lorry` have a Motor OS

@@ -1589,7 +1589,6 @@ fn configured_directory_tool_is_advertised_and_executed() {
         r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#,
     )
     .unwrap();
-    std::fs::write(directory.join("prompt.md"), "Use print to emit text.").unwrap();
     std::fs::write(
         directory.join("tool.toml"),
         r#"
@@ -1598,7 +1597,6 @@ kind = "process"
 name = "print"
 description = "Print one string"
 parameters = "parameters.json"
-prompt = "prompt.md"
 display = "{text}"
 read_only = true
 [process]
@@ -1648,12 +1646,6 @@ type = "string"
     let requests = provider.requests.lock().unwrap();
     assert!(requests[0].tools.iter().any(|spec| spec.name == "print"));
     assert!(
-        requests[0]
-            .system
-            .iter()
-            .any(|text| text.contains("Use print to emit text."))
-    );
-    assert!(
         requests[1]
             .messages
             .iter()
@@ -1690,12 +1682,6 @@ type = "string"
         .unwrap();
     let requests = provider.requests.lock().unwrap();
     assert!(!requests[0].tools.iter().any(|spec| spec.name == "print"));
-    assert!(
-        !requests[0]
-            .system
-            .iter()
-            .any(|text| text.contains("Use print to emit text."))
-    );
     assert!(
         requests[1]
             .messages
