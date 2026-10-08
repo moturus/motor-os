@@ -121,6 +121,16 @@ pub fn sh(
     )
 }
 
+/// Manifests and hooks name `gears-batteries` bare; it is installed beside Gears.
+pub fn program_path(program: &str) -> Result<PathBuf, String> {
+    if program != "gears-batteries" {
+        return Ok(PathBuf::from(program));
+    }
+    std::env::current_exe()
+        .map(|gears| gears.with_file_name(program))
+        .map_err(|error| format!("cannot locate Gears executable: {error}"))
+}
+
 pub fn run(
     request: &Request,
     cancellation: &Cancellation,
@@ -130,16 +140,10 @@ pub fn run(
         detail,
         started: false,
     })?;
-    let program = if request.program == "gears-batteries" {
-        std::env::current_exe()
-            .map_err(|error| RunError {
-                detail: format!("cannot locate Gears executable: {error}"),
-                started: false,
-            })?
-            .with_file_name("gears-batteries")
-    } else {
-        PathBuf::from(&request.program)
-    };
+    let program = program_path(&request.program).map_err(|detail| RunError {
+        detail,
+        started: false,
+    })?;
     let mut command = Command::new(program);
     command
         .args(&request.args)

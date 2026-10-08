@@ -712,16 +712,11 @@ impl Runtime {
             ));
         };
         let result = (|| {
-            let program = config.command.first().ok_or("command must not be empty")?;
-            let program = if program == "gears-batteries" {
-                std::env::current_exe()
-                    .map_err(|error| format!("cannot locate gears-batteries: {error}"))?
-                    .with_file_name("gears-batteries")
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                program.clone()
-            };
+            let program = config
+                .command
+                .first()
+                .ok_or("command must not be empty")?
+                .clone();
             let mut env = vec![
                 (
                     "GEARS_WORKSPACE".into(),

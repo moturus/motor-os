@@ -163,9 +163,7 @@ impl Tool {
                 ))
             }
             Some(program) if program == "gears-batteries" => {
-                let path = std::env::current_exe()
-                    .map_err(|error| format!("cannot locate Gears executable: {error}"))?
-                    .with_file_name(program);
+                let path = process::program_path(program)?;
                 Some(hash_bytes(
                     &std::fs::read(&path)
                         .map_err(|error| format!("{}: {error}", path.display()))?,
@@ -245,12 +243,6 @@ impl Tool {
         let program = command.remove(0);
         let program = if let Some(relative) = program.strip_prefix("./") {
             self.directory.join(relative)
-        } else if program == "gears-batteries" {
-            let executable = std::env::current_exe().map_err(|error| process::RunError {
-                detail: format!("cannot locate Gears executable: {error}"),
-                started: false,
-            })?;
-            executable.with_file_name("gears-batteries")
         } else {
             PathBuf::from(program)
         };
