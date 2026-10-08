@@ -1658,6 +1658,7 @@ fn build_inner(
             compiled.messages = message_reporter.messages();
             write_fresh_profile(
                 &destination,
+                build.target_root,
                 &build.manifest.workspace_root,
                 &fresh_owner,
                 base,
@@ -1872,6 +1873,7 @@ fn build_inner(
     if let Some(base) = completed_freshness_base {
         write_fresh_profile(
             &destination,
+            build.target_root,
             &build.manifest.workspace_root,
             &fresh_owner,
             base,
@@ -2411,6 +2413,7 @@ fn restore_fresh_profile(
 #[allow(clippy::too_many_arguments)]
 fn write_fresh_profile(
     profile: &Path,
+    artifact_root: &Path,
     package_root: &Path,
     owner: &str,
     base: [u8; 32],
@@ -2438,7 +2441,7 @@ fn write_fresh_profile(
     dep_info.sort();
     // A source saved while the build ran may be missing from its outputs, so
     // the next build must not reuse them.
-    if newest_source(profile, package_root, &dep_info)? >= started {
+    if newest_source(profile, artifact_root, package_root, &dep_info)? >= started {
         return Ok(());
     }
     let inputs = if validation.is_strict() {
@@ -2688,8 +2691,11 @@ fn script_input_digest(inputs: &[PathBuf]) -> Result<[u8; 32]> {
 }
 
 /// The newest modification time among the sources the dep-info files list.
+/// The newest modification time of the sources a build read. Build-script
+/// outputs below the artifact root are written by the build itself.
 fn newest_source(
     profile: &Path,
+    artifact_root: &Path,
     package_root: &Path,
     dep_info: &[PathBuf],
 ) -> Result<std::time::Duration> {
@@ -2699,6 +2705,10 @@ fn newest_source(
             package_root.display()
         ))
     })?;
+    let outputs = [
+        artifact_root.to_owned(),
+        fs::canonicalize(artifact_root).unwrap_or_else(|_| artifact_root.to_owned()),
+    ];
     let mut newest = std::time::Duration::ZERO;
     for relative in dep_info {
         let parsed =
@@ -2706,6 +2716,9 @@ fn newest_source(
                 root.join(source)
             })?;
         for (_, source) in parsed.inputs {
+            if outputs.iter().any(|output| source.starts_with(output)) {
+                continue;
+            }
             let metadata = fs::metadata(&source).map_err(|error| {
                 Error::failure(format!(
                     "failed to inspect root source input `{}`: {error}",
@@ -4109,6 +4122,7 @@ mod tests {
             let base = [7; 32];
             write_fresh_profile(
                 &profile,
+                &fixture.0.join("target/lorry"),
                 &fixture.0,
                 &owner(&fixture.0),
                 base,
@@ -4182,6 +4196,7 @@ mod tests {
         let base = [7; 32];
         write_fresh_profile(
             &profile,
+            &fixture.0.join("target/lorry"),
             &fixture.0,
             &owner,
             base,
@@ -4225,6 +4240,7 @@ mod tests {
 
         write_fresh_profile(
             &profile,
+            &fixture.0.join("target/lorry"),
             &fixture.0,
             &owner(&fixture.0),
             base,
@@ -4282,6 +4298,7 @@ mod tests {
 
         write_fresh_profile(
             &profile,
+            &fixture.0.join("target/lorry"),
             &fixture.0,
             &owner(&fixture.0),
             base,
@@ -4354,6 +4371,7 @@ mod tests {
 
         write_fresh_profile(
             &profile,
+            &fixture.0.join("target/lorry"),
             &fixture.0,
             &owner(&fixture.0),
             base,
@@ -4377,6 +4395,7 @@ mod tests {
 
         write_fresh_profile(
             &profile,
+            &fixture.0.join("target/lorry"),
             &fixture.0,
             &owner(&fixture.0),
             base,

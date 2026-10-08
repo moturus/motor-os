@@ -33,13 +33,20 @@ edition = "2024"
 [dependencies]
 util = { path = "../util" }
 EOF
+# The script's generated source is newer than the build start, but it is a
+# build output, so it must not keep the build from recording its profile.
 cat >app/build.rs <<'EOF'
 fn main() {
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("generated.rs"), "const _: () = ();\n").unwrap();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rustc-env=APP_SCRIPT=one");
 }
 EOF
-printf 'fn main() { println!("{} {}", env!("APP_SCRIPT"), util::describe()); }\n' >app/src/main.rs
+cat >app/src/main.rs <<'EOF'
+include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+fn main() { println!("{} {}", env!("APP_SCRIPT"), util::describe()); }
+EOF
 printf '[package]\nname = "util"\nversion = "0.1.0"\nedition = "2024"\n[features]\nextra = []\n' \
     >util/Cargo.toml
 cat >util/src/lib.rs <<'EOF'
