@@ -39,6 +39,7 @@ impl Toolchain {
             }
             env::var_os("RUSTC")
                 .map(PathBuf::from)
+                .map(|rustc| program_path(&rustc).unwrap_or(rustc))
                 .or_else(|| config.rustc.clone())
                 .unwrap_or_else(|| PathBuf::from("/devtools/bin/rustc"))
         } else if let Some(selector) = selector {
@@ -65,6 +66,7 @@ impl Toolchain {
         } else {
             env::var_os("RUSTC")
                 .map(PathBuf::from)
+                .map(|rustc| program_path(&rustc).unwrap_or(rustc))
                 .or_else(|| config.rustc.clone())
                 .or_else(|| find_program("rustc"))
                 .ok_or_else(|| {
@@ -221,6 +223,15 @@ fn infer_compatibility(release: &str) -> Option<CargoCompat> {
         Some(CargoCompat::V1_99)
     } else {
         None
+    }
+}
+
+/// Where a program runs from: like `Command`, a bare name is looked up on
+/// PATH, and any other path is used as given.
+pub(crate) fn program_path(program: &Path) -> Option<PathBuf> {
+    match program.to_str() {
+        Some(name) if !name.contains('/') => find_program(name),
+        _ => Some(program.to_owned()),
     }
 }
 
@@ -495,6 +506,17 @@ impl CfgParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_program_names_run_from_path() {
+        let shell = program_path(Path::new("sh")).unwrap();
+        assert!(shell.is_absolute() && shell.is_file());
+        assert_eq!(
+            program_path(Path::new("relative/tool")),
+            Some(PathBuf::from("relative/tool"))
+        );
+        assert_eq!(program_path(Path::new("lorry-no-such-program")), None);
+    }
 
     #[test]
     fn canonical_target_cfgs_preserve_values_and_remove_trailing_commas() {

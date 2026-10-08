@@ -976,10 +976,14 @@ fn optional_tool_digest(
         Some(path) => {
             digest.string(role, "present");
             digest.os(&format!("{role}-path"), path.as_os_str(), &[]);
+            // A bare tool name runs from PATH, as under Cargo.
+            let Some(path) = crate::toolchain::program_path(path) else {
+                return Ok(());
+            };
             if validation.is_strict() {
-                digest.file(&format!("{role}-contents"), path)
+                digest.file(&format!("{role}-contents"), &path)
             } else {
-                digest.metadata(&format!("{role}-contents"), path)
+                digest.metadata(&format!("{role}-contents"), &path)
             }
         }
         None => {

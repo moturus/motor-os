@@ -2171,7 +2171,11 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
     .into_iter()
     .flatten()
     {
-        digest.metadata("linker", path)?;
+        // A bare linker name runs from PATH, as under Cargo.
+        match crate::toolchain::program_path(path) {
+            Some(resolved) => digest.metadata("linker", &resolved)?,
+            None => digest.os("linker-name", path.as_os_str()),
+        }
     }
     for tool in inputs.config.native_tools.values() {
         if let Some(path) = tool.program.as_deref() {
