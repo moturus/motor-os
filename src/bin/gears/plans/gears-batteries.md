@@ -225,37 +225,38 @@ September 2026 (notes §4.4).
 
 ### Process ownership and cancellation
 
-Each direct child that the top-level Gears starts owns one process tree.
-The same runner owns its timeout, cancellation and cleanup; it stops the
-tree and waits for its direct child before returning or letting a new turn
-write anything. A normally completed child must not leave descendants
-running either. Commands that detach or deliberately escape this ownership
+Each runner, in the top-level Gears or in a nested one, owns the process
+tree of each child it starts. The same runner owns its timeout, cancellation
+and cleanup; it stops the tree and waits for its direct child before
+returning or letting a new turn write anything. A normally completed child
+must not leave descendants running either. Commands that detach or
+deliberately escape this ownership (a new session that is also orphaned)
 are unsupported while confinement is deferred.
 
-- On Linux, the runner starts the child in a new process group. Nested
-  Gears instances and their runners inherit that group instead of creating
-  new groups. The owning group is passed through the child environment and
-  checked against the actual process group before it is reused. Killing
-  the group therefore stops the wrapper, nested Gears and all their tools.
-  Only the outer owner cleans up the whole group on normal completion;
-  a successful nested tool does not trigger group cleanup.
+- On Linux, every runner starts each child in a new process group. After a
+  normal exit it kills that group, which stops background jobs the child
+  left behind. To stop a running child it first freezes the child's
+  descendant tree with `SIGSTOP`, so nothing can fork or be re-parented
+  while the tree is walked, then kills every process and every process
+  group in it. This reaches a nested Gears' own tool groups.
 - On Motor OS, use the existing native descendant-tree cleanup, which
-  retains parent relationships after a parent stops. For a nested timeout,
-  first stop the nested runner's child tree, then end the nested Gears run;
-  the outer owner cleans up any remaining descendants before returning.
-  A process must not attempt to walk and kill a tree containing itself.
-- Cancellation or a timeout inside a worker or review stops that whole
-  owned tree, even if this also ends the nested Gears instance. Its caller
-  records the interrupted worker or review; it does not wait for a final
-  JSONL record that the killed process cannot send. This deliberately avoids
-  a separate cancellation protocol between Gears instances.
+  retains parent relationships after a parent stops.
+- No environment variables pass ownership between Gears instances, and no
+  library code exits the process. A nested timeout stops only that tool; the
+  nested run reports it to its model like any other timeout. Cancelling a
+  worker or review from its caller stops the whole tree below it, nested
+  Gears included; the caller records the interrupted worker or review and
+  does not wait for a final JSONL record that the killed process cannot
+  send. A process never walks or kills a tree containing itself.
 - Cleanup failure is reported and blocks starting another turn or writer;
   it is never treated as successful cancellation. No automatic restart is
   part of cleanup.
 
-Test both systems with a worker or review running a tool that has its own
-child. Cancel from the parent and trigger a nested timeout; in both cases
-the entire owned tree must stop before the caller continues.
+Test both systems with a nested Gears running a tool that has its own
+child: cancel from the parent, trigger a nested timeout, and leave a
+background job behind a normally finished nested tool. The owned tree, or
+only the timed-out tool's tree, must stop before the caller continues, and
+the nested run's next tool call must still run.
 
 ## Tools
 

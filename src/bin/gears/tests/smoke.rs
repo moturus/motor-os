@@ -549,26 +549,47 @@ fn jsonl_failed_turn_ends_with_a_final_error_and_nonzero_status() {
 }
 
 #[test]
-fn owned_nested_gears_keeps_normal_tools_alive_and_stops_all_children_on_interrupt() {
+fn owned_nested_gears_stops_only_its_tool_and_parents_stop_everything() {
     use gears::process::{Cancellation, Request, run};
+    fn stopped(pid: &str) -> bool {
+        std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).map_or(true, |stat| {
+            matches!(
+                stat.rsplit_once(") ").unwrap().1.split_whitespace().next(),
+                Some("Z" | "X" | "x")
+            )
+        })
+    }
+    fn call(id: &str, command: &str, timeout: u64) -> String {
+        let arguments = serde_json::json!({"command": command, "timeout": timeout}).to_string();
+        serde_json::json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
+            "index": 0, "id": id, "function": {"name": "sh", "arguments": arguments}
+        }]}, "finish_reason": "tool_calls"}]})
+        .to_string()
+    }
+    let tree = "printf '%s' $$ > child.pid; sleep 30 & printf '%s' $! > grandchild.pid; printf nested-ready; wait";
+    let done =
+        r#"{"choices":[{"index":0,"delta":{"content":"nested done"},"finish_reason":"stop"}]}"#;
     for mode in ["normal", "cancel", "timeout"] {
         let root = fixture(&format!("nested-{mode}"));
         let workspace = root.join("workspace");
         std::fs::create_dir(&workspace).unwrap();
-        let command = if mode == "normal" {
-            "printf nested-normal"
-        } else {
-            "printf '%s' $$ > child.pid; sleep 30 & printf '%s' $! > grandchild.pid; printf nested-ready; wait"
+        let scripts = match mode {
+            // A background job must not outlive its tool or block the next call.
+            "normal" => vec![
+                sse_response(&[&call(
+                    "first",
+                    "sleep 30 & printf '%s' $! > leftover.pid; printf nested-normal",
+                    30,
+                )]),
+                sse_response(&[&call("second", "printf second-ran", 30)]),
+                sse_response(&[done]),
+            ],
+            "cancel" => vec![sse_response(&[&call("tree", tree, 30)])],
+            _ => vec![
+                sse_response(&[&call("tree", tree, 1)]),
+                sse_response(&[done]),
+            ],
         };
-        let arguments = serde_json::json!({"command": command, "timeout": if mode == "timeout" { 1 } else { 30 }}).to_string();
-        let call = serde_json::json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
-            "index": 0, "id": "nested-call", "function": {"name": "sh", "arguments": arguments}
-        }]}, "finish_reason": "tool_calls"}]})
-        .to_string();
-        let mut scripts = vec![sse_response(&[&call])];
-        if mode == "normal" {
-            scripts.push(sse_response(&[r#"{"choices":[{"index":0,"delta":{"content":"nested done"},"finish_reason":"stop"}]}"#]));
-        }
         let server = MockServer::start(scripts).unwrap();
         let cfg = config(&root, &server);
         let mut text = std::fs::read_to_string(&cfg).unwrap();
@@ -587,7 +608,7 @@ fn owned_nested_gears_keeps_normal_tools_alive_and_stops_all_children_on_interru
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "exec \"$1\" --config \"$2\" --workspace \"$3\" --ephemeral --output jsonl -p nested".into(),
                 "wrapper".into(), env!("CARGO_BIN_EXE_gears").into(), cfg.display().to_string(), workspace.display().to_string()],
-            cwd: workspace.clone(), stdin: None, timeout: Duration::from_secs(5), max_output_bytes: 65536,
+            cwd: workspace.clone(), stdin: None, timeout: Duration::from_secs(10), max_output_bytes: 65536,
             env: vec![("HOME".into(), root.display().to_string()), ("OPENROUTER_API_KEY".into(), "test-key".into())],
             remove_env: Vec::new(),
         }, &cancellation, &mut |stream, text| {
@@ -602,31 +623,28 @@ fn owned_nested_gears_keeps_normal_tools_alive_and_stops_all_children_on_interru
             }
         }).unwrap();
         assert!(!output.timed_out, "{mode}: {output:?}");
-        if mode == "normal" {
-            assert_eq!(output.code, Some(0), "{output:?}");
-            assert!(output.stdout.contains("nested done"), "{output:?}");
-        } else {
-            assert!(streamed.contains("nested-ready"), "{mode}: {output:?}");
-            assert_eq!(output.cancelled, mode == "cancel");
+        if mode == "cancel" {
+            assert!(output.cancelled, "{output:?}");
             assert!(
                 output.code.is_none(),
-                "{mode}: nested run was not killed: {output:?}"
+                "nested run was not killed: {output:?}"
             );
+        } else {
+            assert_eq!(output.code, Some(0), "{mode}: {output:?}");
+            assert!(output.stdout.contains("nested done"), "{mode}: {output:?}");
+        }
+        if mode == "normal" {
+            assert!(output.stdout.contains("second-ran"), "{output:?}");
+            let pid = std::fs::read_to_string(workspace.join("leftover.pid")).unwrap();
+            assert!(stopped(&pid), "background job {pid} still running");
+        } else {
+            assert!(streamed.contains("nested-ready"), "{mode}: {output:?}");
+            if mode == "timeout" {
+                assert!(output.stdout.contains("timed out"), "{output:?}");
+            }
             for name in ["child.pid", "grandchild.pid"] {
                 let pid = std::fs::read_to_string(workspace.join(name)).unwrap();
-                if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-                    let state = stat
-                        .rsplit_once(") ")
-                        .unwrap()
-                        .1
-                        .split_whitespace()
-                        .next()
-                        .unwrap();
-                    assert!(
-                        matches!(state, "Z" | "X" | "x"),
-                        "{mode}: {name} still running: {stat}"
-                    );
-                }
+                assert!(stopped(&pid), "{mode}: {name} {pid} still running");
             }
         }
         std::fs::remove_dir_all(root).unwrap();

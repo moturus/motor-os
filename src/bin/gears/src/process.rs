@@ -246,9 +246,14 @@ pub fn run(
         }
     };
 
+    // A surviving descendant can hold a pipe open; the stdin writer then
+    // blocks too. Neither may keep this runner waiting past the grace.
+    let unfinished = |input: &Option<std::thread::JoinHandle<std::io::Result<()>>>| {
+        readers.iter().flatten().any(|reader| !reader.is_finished())
+            || input.as_ref().is_some_and(|input| !input.is_finished())
+    };
     let deadline = Instant::now() + DRAIN_GRACE;
-    while readers.iter().flatten().any(|reader| !reader.is_finished()) && Instant::now() < deadline
-    {
+    while unfinished(&input) && Instant::now() < deadline {
         if let Ok((stream, bytes)) = receiver.recv_timeout(Duration::from_millis(5)) {
             receive(stream, &bytes, &mut stdout, &mut stderr, observer);
         }
@@ -256,11 +261,18 @@ pub fn run(
     while let Ok((stream, bytes)) = receiver.try_recv() {
         receive(stream, &bytes, &mut stdout, &mut stderr, observer);
     }
-    if readers.iter().flatten().any(|reader| !reader.is_finished()) {
+    if unfinished(&input) {
         cleanup_complete = false;
     }
     if !cleanup_complete {
         CLEANUP_FAILED.store(true, Ordering::SeqCst);
+        return Err(RunError {
+            detail: format!(
+                "{}: process-tree cleanup could not be confirmed",
+                request.program
+            ),
+            started: true,
+        });
     }
     if let Some(input) = input {
         let result = input.join().map_err(|_| RunError {
@@ -276,22 +288,7 @@ pub fn run(
             });
         }
     }
-    if !cleanup_complete {
-        return Err(RunError {
-            detail: format!(
-                "{}: process-tree cleanup could not be confirmed",
-                request.program
-            ),
-            started: true,
-        });
-    }
     let (stdout_text, stdout_dropped) = stdout.finish();
-    if was_cancelled || timed_out {
-        crate::platform::finish_interrupted_run().map_err(|error| RunError {
-            detail: format!("cannot end the interrupted owned run: {error}"),
-            started: true,
-        })?;
-    }
     let (stderr_text, stderr_dropped) = stderr.finish();
     let status_text = if was_cancelled {
         crate::platform::cancellation_text(cleanup_complete).to_string()

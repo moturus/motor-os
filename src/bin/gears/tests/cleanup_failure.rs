@@ -35,8 +35,9 @@ fn unconfirmed_cleanup_blocks_another_turn_and_session_mutation() {
     let base = std::env::temp_dir().join(format!("gears-cleanup-failure-{}", std::process::id()));
     std::fs::create_dir(&base).unwrap();
     let escaped = Escaped(base.join("escaped.pid"));
-    let command =
-        "/usr/bin/setsid /bin/sh -c 'echo $$ > escaped.pid; printf escaped-ready; sleep 30' & wait";
+    // A new session alone is still found through its parent; the subshell
+    // also orphans it, so neither its group nor its ancestry leads back.
+    let command = "(/usr/bin/setsid /bin/sh -c 'echo $$ > escaped.pid; printf escaped-ready; sleep 30' &); sleep 30";
     let arguments = serde_json::json!({"command": command}).to_string();
     let call = serde_json::json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
         "index": 0, "id": "escaped-call", "function": {"name": "sh", "arguments": arguments}

@@ -263,7 +263,7 @@ fn shipped_tools_follow_their_manifests() {
 }
 
 #[test]
-fn nested_work_stops_on_cancellation_and_nested_timeouts() {
+fn nested_work_stops_its_own_tools_and_parents_stop_everything() {
     owned_work::smoke(
         Path::new(env!("CARGO_BIN_EXE_gears")),
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),

@@ -1,5 +1,6 @@
 //! Unix host backend: real signals, used for development and testing.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::time::Duration;
 
@@ -65,83 +66,86 @@ pub fn install_interrupt_handler() -> bool {
     }
 }
 
-const GROUP_ENV: &str = "GEARS_PROCESS_GROUP";
-
-/// The first child discovers its new group's id after exec. Nested runners
-/// pass the numeric id onward, checking membership and the owning ancestor.
-fn inherited_group() -> io::Result<Option<libc::pid_t>> {
-    let value = match std::env::var(GROUP_ENV) {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => return Ok(None),
-        Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
-    };
-    let actual = unsafe { libc::getpgrp() };
-    let selected = if value == "new" {
-        actual
-    } else {
-        value.parse().unwrap_or(0)
-    };
-    if selected <= 1
-        || selected != actual
-        || (selected as u32 != std::process::id() && !process_is_descendant_of(selected as u32))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "inherited Gears process group does not match its owning ancestor",
-        ));
-    }
-    Ok(Some(selected))
-}
-
-/// Only the outer runner creates a group. Its nested Gears and tools remain
-/// in that group so parent cancellation cannot leave a worker's tool behind.
+/// Every runner, nested or not, gives each child a new process group, so a
+/// tool's background jobs can be stopped without touching the runner itself.
 pub fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
-    match inherited_group()? {
-        Some(group) => {
-            command.env(GROUP_ENV, group.to_string());
-        }
-        None => {
-            command.env(GROUP_ENV, "new").process_group(0);
-        }
-    }
-    command.spawn()
+    command.process_group(0).spawn()
 }
 
-/// Nested normal completion does not stop the shared group. Its outer owner
-/// cleans up when the wrapper finishes; a nested timeout stops the whole run.
+/// After a normal exit the child's descendants have lost their parent link;
+/// its process group still identifies the jobs it left behind.
 pub fn cleanup_after_exit(child: &std::process::Child) -> bool {
-    match inherited_group() {
-        Ok(Some(_)) => true,
-        Ok(None) => kill_tree(child),
-        Err(_) => false,
+    match libc::pid_t::try_from(child.id()) {
+        Ok(group @ 1..) => kill_groups(&[group]),
+        _ => false,
     }
 }
 
-pub fn finish_interrupted_run() -> io::Result<()> {
-    // A nested interruption already killed this process with its owned group.
-    Ok(())
+/// Stop a running child and everything below it, nested Gears runs included.
+///
+/// The tree is frozen first: a stopped process cannot fork, and killing a
+/// parent first would re-parent its children before they were found. Every
+/// group seen in the frozen tree is then killed, which also reaches jobs
+/// already orphaned from those groups.
+pub fn kill_tree(child: &std::process::Child) -> bool {
+    let Ok(root @ 1..) = libc::pid_t::try_from(child.id()) else {
+        return false;
+    };
+    let own_group = unsafe { libc::getpgrp() };
+    let mut frozen = BTreeMap::new();
+    let mut complete = false;
+    for _ in 0..64 {
+        let Ok(table) = process_table() else {
+            break;
+        };
+        let mut added = false;
+        for process in descendants(root, &table) {
+            if frozen.insert(process.pid, process.group).is_none() {
+                unsafe { libc::kill(process.pid, libc::SIGSTOP) };
+                added = true;
+            }
+        }
+        if !added {
+            complete = true;
+            break;
+        }
+    }
+    for pid in frozen.keys() {
+        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    }
+    let mut groups: Vec<_> = frozen
+        .into_values()
+        .chain([root])
+        .filter(|group| *group > 1 && *group != own_group)
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    kill_groups(&groups) && complete
 }
 
-pub fn kill_tree(child: &std::process::Child) -> bool {
-    let group = match inherited_group() {
-        Ok(Some(group)) => group,
-        Ok(None) => match libc::pid_t::try_from(child.id()) {
-            Ok(group @ 1..) => group,
-            _ => return false,
-        },
-        Err(_) => return false,
-    };
-    if unsafe { libc::killpg(group, libc::SIGKILL) } != 0 {
-        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+fn kill_groups(groups: &[libc::pid_t]) -> bool {
+    let mut complete = true;
+    for group in groups {
+        if unsafe { libc::killpg(*group, libc::SIGKILL) } != 0
+            && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        {
+            complete = false;
+        }
     }
     // Signal delivery is asynchronous. A successful killpg does not yet
     // mean a grandchild has stopped before the next tool starts.
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        match process_group_has_live_members(group) {
-            Ok(false) => return true,
-            Ok(true) if std::time::Instant::now() < deadline => {
+        match process_table() {
+            Ok(table)
+                if !table
+                    .iter()
+                    .any(|process| process.live && groups.contains(&process.group)) =>
+            {
+                return complete;
+            }
+            Ok(_) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(1));
             }
             _ => return false,
@@ -149,31 +153,57 @@ pub fn kill_tree(child: &std::process::Child) -> bool {
     }
 }
 
-fn process_group_has_live_members(group: libc::pid_t) -> Result<bool, ()> {
+struct Process {
+    pid: libc::pid_t,
+    parent: libc::pid_t,
+    group: libc::pid_t,
+    live: bool,
+}
+
+/// `root` and every process whose parent chain reaches it, zombies included.
+fn descendants(root: libc::pid_t, table: &[Process]) -> Vec<&Process> {
+    let mut found: Vec<&Process> = table.iter().filter(|p| p.pid == root).collect();
+    let mut next = 0;
+    while next < found.len() {
+        let parent = found[next].pid;
+        found.extend(table.iter().filter(|p| p.parent == parent && p.pid != root));
+        next += 1;
+    }
+    found
+}
+
+fn process_table() -> Result<Vec<Process>, ()> {
+    let mut table = Vec::new();
     for entry in std::fs::read_dir("/proc").map_err(|_| ())? {
         let entry = entry.map_err(|_| ())?;
-        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<libc::pid_t>() else {
             continue;
-        }
+        };
         let stat = match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
             Err(error) if vanished_process(&error) => continue,
             Err(_) => return Err(()),
         };
+        // The command field is parenthesized and may itself contain spaces.
         let Some((_, fields)) = stat.rsplit_once(") ") else {
             return Err(());
         };
         let mut fields = fields.split_whitespace();
-        let (Some(state), Some(_parent), Some(process_group)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
+        let (Some(state), Some(Ok(parent)), Some(Ok(group))) = (
+            fields.next(),
+            fields.next().map(str::parse),
+            fields.next().map(str::parse),
+        ) else {
             return Err(());
         };
-        if process_group.parse::<libc::pid_t>() == Ok(group) && !matches!(state, "Z" | "X" | "x") {
-            return Ok(true);
-        }
+        table.push(Process {
+            pid,
+            parent,
+            group,
+            live: !matches!(state, "Z" | "X" | "x"),
+        });
     }
-    Ok(false)
+    Ok(table)
 }
 
 fn vanished_process(error: &io::Error) -> bool {

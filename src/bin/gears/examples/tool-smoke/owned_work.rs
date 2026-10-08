@@ -39,19 +39,25 @@ fn check(gears: &Path, sh_directory: &Path, root: &Path) -> Result<(), String> {
             )
             .map_err(|error| error.to_string())?;
         }
-        let command = if mode == "normal" {
-            "printf nested-normal"
-        } else {
-            "printf '%s' $$ > child.pid; sleep 30 & printf '%s' $! > grandchild.pid; printf nested-ready; wait"
+        let tree = "printf '%s' $$ > child.pid; sleep 30 & printf '%s' $! > grandchild.pid; printf nested-ready; wait";
+        let done = sse_response(&[
+            r#"{"choices":[{"index":0,"delta":{"content":"nested done"},"finish_reason":"stop"}]}"#,
+        ]);
+        // A normal run's background job must not outlive its tool or block the
+        // next call; a nested timeout stops only its tool and the run goes on.
+        let scripts = match mode {
+            "normal" => vec![
+                sse_response(&[&call(
+                    "first",
+                    "sleep 30 & printf '%s' $! > leftover.pid; printf nested-normal",
+                    30,
+                )]),
+                sse_response(&[&call("second", "printf second-ran", 30)]),
+                done,
+            ],
+            "cancel" => vec![sse_response(&[&call("tree", tree, 30)])],
+            _ => vec![sse_response(&[&call("tree", tree, 1)]), done],
         };
-        let call = json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
-            "index": 0, "id": "owned-call", "function": {"name": "owned_tree",
-            "arguments": json!({"command": command, "timeout": if mode == "timeout" { 1 } else { 30 }}).to_string()}
-        }]}, "finish_reason": "tool_calls"}]}).to_string();
-        let mut scripts = vec![sse_response(&[&call])];
-        if mode != "cancel" {
-            scripts.push(sse_response(&[r#"{"choices":[{"index":0,"delta":{"content":"nested done"},"finish_reason":"stop"}]}"#]));
-        }
         let server = MockServer::start(scripts).map_err(|error| error.to_string())?;
         let key = workspace.join("key");
         std::fs::write(&key, "fixture-owned-key").map_err(|error| error.to_string())?;
@@ -89,7 +95,7 @@ fn check(gears: &Path, sh_directory: &Path, root: &Path) -> Result<(), String> {
                 ],
                 cwd: workspace.clone(),
                 stdin: None,
-                timeout: Duration::from_secs(5),
+                timeout: Duration::from_secs(10),
                 max_output_bytes: 65536,
                 env: vec![("HOME".into(), workspace.display().to_string())],
                 remove_env: vec![gears::provider::KEY_ENV.into()],
@@ -118,46 +124,56 @@ fn check(gears: &Path, sh_directory: &Path, root: &Path) -> Result<(), String> {
         if output.timed_out {
             return Err(format!("{mode}: owning runner timed out: {output:?}"));
         }
-        if mode == "normal" {
-            if !output.success() || !output.stdout.contains("nested done") {
-                return Err(format!("normal nested run failed: {output:?}"));
+        if mode == "cancel" {
+            // A killed child has no exit code on Linux and -1 on Motor OS.
+            if !output.cancelled || output.stdout.contains("\"type\":\"final\"") {
+                return Err(format!("cancel: nested run was not killed: {output:?}"));
             }
-        } else {
-            if !streamed.contains("nested-ready") || output.cancelled != (mode == "cancel") {
+        } else if !output.success() || !output.stdout.contains("nested done") {
+            return Err(format!("{mode}: nested run did not finish: {output:?}"));
+        }
+        let pids: &[&str] = if mode == "normal" {
+            if !output.stdout.contains("second-ran") {
                 return Err(format!(
-                    "{mode}: missing progress or wrong cancellation: {output:?}"
+                    "normal: the next tool call did not run: {output:?}"
                 ));
             }
-            if mode == "timeout"
-                && (output.success()
-                    || output
-                        .stdout
-                        .lines()
-                        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                        .any(|record| record["type"] == "final"))
+            &["leftover.pid"]
+        } else {
+            if !streamed.contains("nested-ready")
+                || (mode == "timeout" && !output.stdout.contains("timed out"))
             {
-                return Err(format!("nested timeout continued its run: {output:?}"));
+                return Err(format!("{mode}: missing progress: {output:?}"));
             }
-            for name in ["child.pid", "grandchild.pid"] {
-                let pid = std::fs::read_to_string(workspace.join(name))
-                    .map_err(|error| error.to_string())?
-                    .parse::<u32>()
-                    .map_err(|error| error.to_string())?;
-                #[cfg(unix)]
-                let stopped =
-                    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
-                        matches!(
-                            stat.rsplit_once(") ").unwrap().1.split_whitespace().next(),
-                            Some("Z" | "X" | "x")
-                        )
-                    });
-                #[cfg(not(unix))]
-                let stopped = !gears::platform::process_alive(pid);
-                if !stopped {
-                    return Err(format!("{mode}: descendant {pid} still running"));
-                }
+            &["child.pid", "grandchild.pid"]
+        };
+        for name in pids {
+            let pid = std::fs::read_to_string(workspace.join(name))
+                .map_err(|error| error.to_string())?
+                .parse::<u32>()
+                .map_err(|error| error.to_string())?;
+            #[cfg(unix)]
+            let stopped =
+                std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+                    matches!(
+                        stat.rsplit_once(") ").unwrap().1.split_whitespace().next(),
+                        Some("Z" | "X" | "x")
+                    )
+                });
+            #[cfg(not(unix))]
+            let stopped = !gears::platform::process_alive(pid);
+            if !stopped {
+                return Err(format!("{mode}: descendant {pid} still running"));
             }
         }
     }
     Ok(())
+}
+
+fn call(id: &str, command: &str, timeout: u64) -> String {
+    json!({"choices": [{"index": 0, "delta": {"tool_calls": [{
+        "index": 0, "id": id, "function": {"name": "owned_tree",
+        "arguments": json!({"command": command, "timeout": timeout}).to_string()}
+    }]}, "finish_reason": "tool_calls"}]})
+    .to_string()
 }

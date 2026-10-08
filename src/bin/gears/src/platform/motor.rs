@@ -171,41 +171,9 @@ fn process_active(pid: u64) -> bool {
     }
 }
 
-const OWNER_ENV: &str = "GEARS_PROCESS_OWNER";
-
-fn inherited_owner() -> io::Result<Option<u32>> {
-    let value = match std::env::var(OWNER_ENV) {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => return Ok(None),
-        Err(_) => return Err(io::Error::other("invalid inherited Gears process owner")),
-    };
-    let owner = value
-        .parse::<u32>()
-        .ok()
-        .filter(|owner| {
-            *owner != 0
-                && *owner != std::process::id()
-                && process_alive(*owner)
-                && process_is_descendant_of(*owner)
-        })
-        .ok_or_else(|| io::Error::other("inherited Gears process owner is not a live ancestor"))?;
-    Ok(Some(owner))
-}
-
-/// Keep one checked ancestor for the whole owned tree, including SDK callers.
+/// Descendants keep their parent links here, so no grouping is needed.
 pub fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
-    let owner = inherited_owner()?.unwrap_or_else(std::process::id);
-    command.env(OWNER_ENV, owner.to_string());
     command.spawn()
-}
-
-/// The child tree has already stopped and its direct child has been reaped.
-/// A nested timeout ends this run; the outer owner cleans remaining descendants.
-pub fn finish_interrupted_run() -> io::Result<()> {
-    if inherited_owner()?.is_some() {
-        std::process::exit(1);
-    }
-    Ok(())
 }
 
 /// Kill `child`, then its children, grandchildren, and so on.
