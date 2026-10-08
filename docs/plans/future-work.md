@@ -115,6 +115,20 @@ image with 8 GiB and 4 vCPUs:
 Next time, a step watchdog in the test would name where it stops. That is a
 test change under `src/sys`, so it needs the full debug and release gates.
 
+## A directory listing ends when another process removes an entry (2026-10-08)
+
+`readdir` in rt.vdso (`src/sys/lib/rt.vdso/src/rt_fs.rs`) remembers the next
+entry before it returns the current one. If another process removes that next
+entry first, the listing reports one error and ends, so later entries are
+never returned. POSIX lets a listing skip or repeat only the entries that
+change during it.
+
+This keeps Lorry from pipelining builds on Motor. A dependent's rustc lists
+each dependency directory while a library's rustc still removes temporary
+files there, so the listing could miss a library and the build would fail
+with "can't find crate". Lorry pipelines on Linux only, until `readdir` keeps
+going past a removed entry.
+
 ## A process can take an rmux server's name first (2026-09-27)
 
 rmux on Motor finds its server by a service name made of the server's mask

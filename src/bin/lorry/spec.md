@@ -1451,7 +1451,10 @@ metadata, while code generation continues. A unit
 that links waits for every library below it to finish. Lorry removes the
 library's success record before rustc starts and writes it last, so an
 interrupted compile is not reused. Strict validation does not pipeline,
-because strict keys hash dependency libraries.
+because strict keys hash dependency libraries. Motor does not pipeline yet:
+its directory listing ends early when an entry it has not returned is
+removed, and a pipelined library's compiler removes temporary files while a
+dependent's rustc lists that directory.
 Every other compiler unit writes into a private sibling directory, then
 replaces its planned unit directory only after rustc succeeds and its outputs
 and dep-info are validated. A few background threads then copy libraries into

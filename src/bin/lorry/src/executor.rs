@@ -344,7 +344,7 @@ pub fn execute(
     }
     let mut dependents = Dependents::new();
     // Strict keys hash dependency libraries, so dependents wait for them.
-    let pipelining = !options.cache.is_strict();
+    let pipelining = PIPELINING && !options.cache.is_strict();
     let mut state = Scheduler {
         ready: std::collections::BTreeSet::new(),
         remaining: BTreeMap::new(),
@@ -539,6 +539,11 @@ pub fn execute(
     }
     Ok(state.outputs)
 }
+
+/// Motor's directory listing ends early when an entry it has not returned yet
+/// is removed. A pipelined library's compiler removes temporary files while
+/// dependents' rustc lists its directory, so Motor builds do not pipeline.
+const PIPELINING: bool = cfg!(not(target_os = "motor"));
 
 /// Copying a library into its cache is I/O bound, so a few threads keep up
 /// with the compiler workers.
@@ -995,7 +1000,8 @@ fn execute_unit<'a>(
                 // Like Cargo, a library compiles in place, so a dependent that
                 // reads only its metadata can start during code generation.
                 // Removing its record first keeps an interrupted compile stale.
-                let pipelined = key.kind == UnitKind::Library
+                let pipelined = PIPELINING
+                    && key.kind == UnitKind::Library
                     && key.mode == UnitMode::Build
                     && matches!(planned_invocation.output, RustcOutput::Library { .. })
                     && !cache.is_strict();
