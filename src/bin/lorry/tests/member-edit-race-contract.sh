@@ -26,7 +26,7 @@ printf 'pub fn value() -> u32 { 1 }\n' >base/src/lib.rs
 printf '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2024"\n[dependencies]\nbase = { path = "../base" }\n' \
     >app/Cargo.toml
 printf 'fn main() { println!("{}", base::value()); }\n' >app/src/main.rs
-"$LORRY_TEST_CARGO" generate-lockfile --offline
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" generate-lockfile --offline
 
 # While $EDIT exists, the next compile of base saves its new contents after
 # rustc has read the old ones, and logs every compile.

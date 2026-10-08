@@ -15,6 +15,7 @@ WORK="$(mktemp -d /tmp/lorry-script-scope-XXXXXX)"
 trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained failed fixture: $WORK" >&2; fi' EXIT
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
+export RUSTC="$LORRY_TEST_RUSTC"
 mkdir -p "$WORK/home/.config/lorry" "$WORK/app/src" "$WORK/dep/src"
 printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"

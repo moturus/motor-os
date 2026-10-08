@@ -29,7 +29,7 @@ printf 'pub fn value() -> u32 { base::value() + 1 }\n' >middle/src/lib.rs
 printf '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2024"\n[dependencies]\nmiddle = { path = "../middle" }\n' \
     >app/Cargo.toml
 printf 'fn main() { println!("{}", middle::value()); }\n' >app/src/main.rs
-"$LORRY_TEST_CARGO" generate-lockfile --offline
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" generate-lockfile --offline
 
 # Logs when each compile starts and ends. While $LINGER exists, base's compile
 # lingers after rustc exits, as a long code generation would: until middle has
