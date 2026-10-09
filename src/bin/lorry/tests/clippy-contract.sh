@@ -34,9 +34,9 @@ for package in app shared; do
 done
 printf '[dependencies]\nshared = { path = "../shared" }\nexternal = { path = "../../external" }\n' \
     >>"$PROJECT/app/Cargo.toml"
-printf '%s\n' 'config-version = 1' 'use-cargo-registry = false' '[policy.rules.shared]' \
+printf '%s\n' "[workspaces.\"$PROJECT\".policy.rules.shared]" \
     'action = "allow"' 'name = "shared"' 'version = "=0.1.0"' \
-    'source = "path"' 'allow-build-script = true' >"$PROJECT/lorry.toml"
+    'source = "path"' 'allow-build-script = true' >>"$HOME/.config/lorry/lorry.toml"
 cat >"$PROJECT/shared/build.rs" <<'RS'
 fn main() {
     let out = std::env::var_os("OUT_DIR").unwrap();

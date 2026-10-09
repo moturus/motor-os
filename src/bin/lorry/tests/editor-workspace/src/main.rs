@@ -72,11 +72,16 @@ fn run(
     fs::create_dir_all(home.join(".cargo"))?;
     fs::create_dir_all(wrappers.join("invocations"))?;
     fixture(&root)?;
+    // Motor reads the guest's user configuration instead; test-native.sh
+    // grants the same rule there.
     fs::write(
         home.join(".config/lorry/lorry.toml"),
         format!(
-            "config-version = 1\n[cache]\ndirectory = {:?}\n",
-            case_root.join("cache")
+            "config-version = 1\n[cache]\ndirectory = {:?}\n\
+             [workspaces.{:?}.policy.rules.generated]\naction = 'allow'\n\
+             source = 'path'\nname = 'generated'\nallow-build-script = true\n",
+            case_root.join("cache"),
+            root.canonicalize()?
         ),
     )?;
     let cargo = wrappers.join("cargo");
@@ -237,10 +242,7 @@ fn fixture(root: &Path) -> io::Result<()> {
 }
 "#,
     )?;
-    fs::write(
-        root.join("lorry.toml"),
-        "config-version = 1\n[policy.rules.generated]\naction = 'allow'\nsource = 'path'\nname = 'generated'\nallow-build-script = true\n",
-    )
+    Ok(())
 }
 
 fn validate_calls(

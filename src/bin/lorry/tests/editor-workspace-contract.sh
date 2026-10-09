@@ -16,8 +16,6 @@ config = shipped['language-server']['rust-analyzer']['config']
 assert 'workspace' not in config['check']
 project = tomllib.loads((root / '.helix/languages.toml').read_text())
 assert project['language-server']['rust-analyzer']['config']['check'] == {'workspace': False}
-grant = tomllib.loads((root / 'src/sys/lorry.toml').read_text())['policy']['rules']['moto-io']
-assert grant == {'action': 'allow', 'source': 'path', 'name': 'moto-io', 'allow-build-script': True}
 pathlib.Path(sys.argv[2]).write_text(json.dumps(config))
 PY
 RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" run --quiet --locked --offline \

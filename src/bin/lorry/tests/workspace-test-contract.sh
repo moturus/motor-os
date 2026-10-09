@@ -15,21 +15,19 @@ cat >"$WORK/project/Cargo.toml" <<'EOF'
 members = ["zeta", "alpha"]
 resolver = "2"
 EOF
-cat >"$WORK/project/lorry.toml" <<'EOF'
-config-version = 1
-use-cargo-registry = false
-[policy.rules.alpha]
+cat >>"$WORK/home/.config/lorry/lorry.toml" <<EOF
+[workspaces."$WORK/project".policy.rules.alpha]
 action = "allow"
 name = "alpha"
 source = "path"
 allow-build-script = true
-[policy.rules.zeta]
+[workspaces."$WORK/project".policy.rules.zeta]
 action = "allow"
 name = "zeta"
 source = "path"
 allow-build-script = true
 EOF
-printf '\n[test]\nextraction-root = "%s"\n' "$WORK/extracted" >>"$WORK/project/lorry.toml"
+printf '\n[test]\nextraction-root = "%s"\n' "$WORK/extracted" >>"$WORK/home/.config/lorry/lorry.toml"
 for member in alpha zeta; do
     mkdir -p "$WORK/project/$member/src" "$WORK/project/$member/tests"
     cat >"$WORK/project/$member/Cargo.toml" <<EOF

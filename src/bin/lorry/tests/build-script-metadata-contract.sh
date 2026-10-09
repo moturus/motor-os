@@ -51,15 +51,13 @@ fn main() {
 }
 EOF
 printf 'fn main() { println!("{} {}", env!("DEMO"), demo_sys::value()); }\n' >app/src/main.rs
-cat >lorry.toml <<'EOF'
-config-version = 1
-use-cargo-registry = false
-[policy.rules.app]
+cat >>"$WORK/home/.config/lorry/lorry.toml" <<EOF
+[workspaces."$WORK/project".policy.rules.app]
 action = "allow"
 name = "app"
 source = "path"
 allow-build-script = true
-[policy.rules.demo-sys]
+[workspaces."$WORK/project".policy.rules.demo-sys]
 action = "allow"
 name = "demo-sys"
 source = "path"

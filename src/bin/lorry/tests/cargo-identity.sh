@@ -264,8 +264,8 @@ echo "== Comparing a custom build-script path with Cargo =="
 mkdir -p "$WORK/scripted/build" "$WORK/scripted/src"
 printf '[package]\nname = "scripted"\nversion = "0.1.0"\nedition = "2024"\nbuild = "build/main.rs"\n' \
     >"$WORK/scripted/Cargo.toml"
-printf 'config-version = 1\nuse-cargo-registry = false\n[policy.rules.scripted]\naction = "allow"\nname = "scripted"\nsource = "path"\nallow-build-script = true\n' \
-    >"$WORK/scripted/lorry.toml"
+printf '[workspaces."%s".policy.rules.scripted]\naction = "allow"\nname = "scripted"\nsource = "path"\nallow-build-script = true\n' \
+    "$WORK/scripted" >>"$LORRY_HOME/.config/lorry/lorry.toml"
 printf 'fn main() { println!("cargo:rustc-env=FROM=script"); }\n' >"$WORK/scripted/build/main.rs"
 printf 'fn main() { println!("{}", env!("FROM")); }\n' >"$WORK/scripted/src/main.rs"
 (

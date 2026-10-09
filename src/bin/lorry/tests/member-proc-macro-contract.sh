@@ -54,10 +54,9 @@ fn main() { println!("{}", derive::answer!() + helper::value()); }
 EOF
 printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
     "$LORRY_MOTOR_LINKER" "$LORRY_MOTOR_SYSROOT" >"$WORK/project/.cargo/config.toml"
-cat >"$WORK/project/lorry.toml" <<'EOF'
-config-version = 1
-use-cargo-registry = false
-[policy.rules.member-macro]
+USER_CONFIG="$WORK/home/.config/lorry/lorry.toml"
+cat >>"$USER_CONFIG" <<EOF
+[workspaces."$WORK/project".policy.rules.member-macro]
 action = "allow"
 name = "derive"
 source = "path"
@@ -65,12 +64,12 @@ allow-proc-macro = true
 EOF
 cd "$WORK/project"
 "$LORRY_TEST_CARGO" generate-lockfile --offline
-cp lorry.toml "$WORK/grant.toml"
-sed -i 's/name = "derive"/name = "ungranted"/' lorry.toml
+cp "$USER_CONFIG" "$WORK/grant.toml"
+sed -i 's/name = "derive"/name = "ungranted"/' "$USER_CONFIG"
 if env HOME="$WORK/home" "$LORRY" build -p derive >"$WORK/denied.out" 2>"$WORK/denied.err"; then exit 1; fi
 grep -F 'procedural macro without an explicit matching policy grant' "$WORK/denied.err" >/dev/null
 [ ! -d target/lorry/debug/deps ]
-cp "$WORK/grant.toml" lorry.toml
+cp "$WORK/grant.toml" "$USER_CONFIG"
 for platform in native motor native-release motor-release; do
     target=()
     release=()
@@ -115,7 +114,7 @@ default = ["checked"]
 checked = []
 EOF
 sed -i '/proc-macro = true/a doctest = false' derive/Cargo.toml
-printf '\nallow-build-script = true\n' >>lorry.toml
+printf '\nallow-build-script = true\n' >>"$USER_CONFIG"
 cat >derive/build.rs <<'EOF'
 fn main() {
     assert!(cfg!(feature = "checked"));
@@ -198,7 +197,7 @@ printf '\nrunner = ["bash", "%s"]\n' "$WORK/target-runner.sh" >>.cargo/config.to
 host_libdir="$("$RUSTC" --print target-libdir)"
 env EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY_TEST_CARGO" test -p derive --target x86_64-unknown-motor --offline
 env HOME="$WORK/home" EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY" test -p derive --target x86_64-unknown-motor
-printf '\n[test]\nextraction-root = "%s"\n' "$WORK/extraction" >>lorry.toml
+printf '\n[test]\nextraction-root = "%s"\n' "$WORK/extraction" >>"$USER_CONFIG"
 for target in native motor; do
     args=()
     if [ "$target" = motor ]; then args=(--target x86_64-unknown-motor); fi
@@ -297,8 +296,8 @@ cat >../helper/src/lib.rs <<'EOF'
 compile_error!("macro helper must activate its host feature");
 pub fn expansion() -> &'static str { "41" }
 EOF
-printf 'config-version = 1\nuse-cargo-registry = false\n[policy]\npath-roots = ["%s"]\n[policy.rules.dev-macro]\naction = "allow"\nname = "derive"\nversion = "=1.0.0"\nsource = "path"\nallow-proc-macro = true\n' \
-    "$WORK/dev-only" >../lorry.toml
+printf '[policy]\npath-roots = ["%s"]\n[workspaces."%s".policy.rules.dev-macro]\naction = "allow"\nname = "derive"\nversion = "=1.0.0"\nsource = "path"\nallow-proc-macro = true\n' \
+    "$WORK/dev-only" "$WORK/dev-only" >>"$USER_CONFIG"
 "$LORRY_TEST_CARGO" generate-lockfile --offline
 cp ../Cargo.lock "$WORK/dev-only.lock"
 for platform in native motor; do

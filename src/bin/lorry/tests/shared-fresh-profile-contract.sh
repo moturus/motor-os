@@ -61,10 +61,9 @@ edition = "2024"
 util = { path = "../util", features = ["extra"] }
 EOF
 printf 'pub fn value() -> &%sstatic str { util::describe() }\n' "'" >other/src/lib.rs
-cat >lorry.toml <<'EOF'
-config-version = 1
-use-cargo-registry = false
-[policy.rules.app]
+USER_CONFIG="$WORK/home/.config/lorry/lorry.toml"
+cat >>"$USER_CONFIG" <<EOF
+[workspaces."$WORK/project".policy.rules.app]
 action = "allow"
 name = "app"
 source = "path"
@@ -227,11 +226,12 @@ if lorry build; then fail "reused a profile with a changed admission commitment"
 grep -F 'workspace admission commitment does not match' "$WORK/$step.err" >/dev/null ||
     fail "a changed commitment had the wrong diagnostic"
 cp "$WORK/admission.before" .lorry/dependencies-v2.toml
-cp lorry.toml "$WORK/policy.before"
-printf '[policy.rules.deny-app]\naction = "deny"\nname = "app"\nsource = "path"\n' >>lorry.toml
+cp "$USER_CONFIG" "$WORK/policy.before"
+printf '[workspaces."%s".policy.rules.deny-app]\naction = "deny"\nname = "app"\nsource = "path"\n' \
+    "$WORK/project" >>"$USER_CONFIG"
 if lorry build; then fail "reused a profile that policy now denies"; fi
 grep -F 'deny-app' "$WORK/$step.err" >/dev/null || fail "a new denial had the wrong diagnostic"
-cp "$WORK/policy.before" lorry.toml
+cp "$WORK/policy.before" "$USER_CONFIG"
 lorry build
 expect_fresh
 # Admission reads every member's manifest, so an edit to one that is not

@@ -1107,18 +1107,35 @@ Motor merges:
 
 1. `/devtools/cfg/lorry.toml`;
 2. `/user/cfg/lorry.toml`;
-3. the nearest ancestor repository `lorry.toml`.
+3. the workspace root's own `lorry.toml`.
 
 Linux merges:
 
 1. `$HOME/.config/lorry/lorry.toml`;
-2. the nearest ancestor repository `lorry.toml`.
+2. the workspace root's own `lorry.toml`.
 
+A `lorry.toml` in a directory above the workspace root is not read.
 Linux must not read or write `/etc` or redirect its control root through
 `XDG_CONFIG_HOME`. Tables merge recursively; later scalars/arrays replace
 earlier values. Policy rule IDs accumulate and cannot erase earlier denies.
 System constraints may lock keys or table prefixes against weaker later
 configuration.
+
+A workspace's own `lorry.toml` cannot grant trust, name a program Lorry
+runs, or choose where Lorry writes, because a cloned repository controls
+it. It may set only `config-version`, `cargo-compat-version`, the `vendor`
+table, and `repositories.keep-artifacts` and `keep-sources`; any other key
+is an error that names the user configuration file. Policy, toolchain,
+network, test, native-tool, and `use-cargo-registry` settings come from
+system and user configuration.
+
+User and system configuration may hold per-workspace settings in
+`[workspaces."<absolute workspace root>"]` tables. Such a table may contain
+`policy.rules` and `repositories.local`. Lorry checks every table but
+applies only the one whose canonical path is the current workspace root.
+Its rules join the same rule-ID namespace, and system constraints that lock
+`policy.rules` or `repositories` also lock the matching keys in workspace
+tables.
 
 Configuration version 1 defines compiler selection, the three repository
 roles, retention flags, the global cache directory, vendor targets/host
@@ -1126,7 +1143,7 @@ inclusion, curl and CA paths, test extraction root, target-specific native
 tools, admission rules/limits, and system constraints.
 
 `cache.directory` is an absolute normalized path owned by system or user
-configuration; repository-local configuration cannot set it. It defaults to
+configuration. It defaults to
 `$HOME/.cache/lorry` on Linux and `/devtools/lorry/cache` on Motor. It must not
 be a filesystem root or overlap a dependency repository. Lorry creates it on
 the first build that needs cache storage.
@@ -1135,7 +1152,7 @@ Repository roles are layer-owned:
 
 - `repositories.system` is trusted/base-owned and read-only to Lorry;
 - `repositories.user` is user/base-owned and writable;
-- `repositories.local` is repository-config-owned and writable.
+- `repositories.local` belongs to one workspace's table and is writable.
 
 Canonical repository paths must be distinct and non-nesting. Lookup order is
 local, user, then system. Vendoring writes local when configured, otherwise
@@ -1275,7 +1292,8 @@ Editable workspace members require a named `source = "path"` rule for each
 build-script or procedural-macro capability. Their native-tool grants may omit
 `source-tree-sha256`; a same-named nonmember path package still requires that pin
 before receiving native tools. Missing-grant diagnostics suggest the member's
-name, and do not suggest pinning mutable member source trees.
+name, and do not suggest pinning mutable member source trees. They place the
+suggested rule in the current workspace's table of the user configuration.
 Named build-script rules may grant `caller-env = ["NAME"]`. Only matching
 script grants expose those variables, with an empty allowlist by default.
 Unset and empty values remain distinct script/cache inputs. Compiler, Cargo,

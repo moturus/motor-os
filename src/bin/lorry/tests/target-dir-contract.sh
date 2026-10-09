@@ -91,7 +91,7 @@ printf '[build]\ntarget-dir = "member-configured"\n[alias]\nagent-build = ["buil
         exit 1
     fi
 )
-printf 'config-version = 1\nuse-cargo-registry = false\n' >"$WORK/project/app/lorry.toml"
+printf 'config-version = 1\n[repositories]\nkeep-sources = true\n' >"$WORK/project/app/lorry.toml"
 if (cd "$WORK/project" && "$LORRY" build -p app) 2>"$WORK/member-config.err"; then
     echo "target-dir-contract: accepted member-local project configuration" >&2
     exit 1
@@ -100,4 +100,11 @@ grep -F "$WORK/project/app/lorry.toml" "$WORK/member-config.err" >/dev/null
 grep -F "move project settings to \`$WORK/project/lorry.toml\`" "$WORK/member-config.err" >/dev/null
 mv "$WORK/project/app/lorry.toml" "$WORK/project/lorry.toml"
 (cd "$WORK/project" && "$LORRY" build -p app)
+# A project cannot choose the compiler; only the user's configuration can.
+printf '[toolchain]\nrustc = "/bin/false"\n' >>"$WORK/project/lorry.toml"
+if (cd "$WORK/project" && "$LORRY" build -p app) 2>"$WORK/project-trust.err"; then
+    echo "target-dir-contract: accepted a compiler from project configuration" >&2
+    exit 1
+fi
+grep -F 'project configuration cannot set `toolchain`' "$WORK/project-trust.err" >/dev/null
 echo "PASS: CLI, environment, and Cargo config choose target directories like Cargo"

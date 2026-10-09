@@ -12,6 +12,22 @@ use crate::semantic::{Toolchain, file_uri};
 
 const TIMEOUT: Duration = Duration::from_secs(90);
 
+/// The fixture's build-script grant for each workspace root, in the form
+/// a user's Lorry configuration takes it.
+pub fn fixture_grants(roots: &[&Path]) -> String {
+    roots
+        .iter()
+        .map(|root| {
+            format!(
+                "\n[workspaces.{:?}.policy.rules.generated-dependency]\naction = \"allow\"\n\
+                 name = \"generated-dependency\"\nversion = \"=0.1.0\"\nsource = \"path\"\n\
+                 license = \"MIT\"\nallow-build-script = true\n",
+                root
+            )
+        })
+        .collect()
+}
+
 pub fn run(lorry: &Path) -> io::Result<()> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -35,8 +51,9 @@ pub fn run(lorry: &Path) -> io::Result<()> {
     fs::write(
         home.join(".config/lorry/lorry.toml"),
         format!(
-            "config-version = 1\n[cache]\ndirectory = {:?}\n",
-            temporary.path.join("cache")
+            "config-version = 1\n[cache]\ndirectory = {:?}\n{}",
+            temporary.path.join("cache"),
+            fixture_grants(&[&root.canonicalize()?])
         ),
     )?;
 

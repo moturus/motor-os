@@ -67,16 +67,15 @@ cat >"$WORK/project/a/src/lib.rs" <<'EOF'
 compile_error!("missing member script library cfg");
 pub const VALUE: &str = include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 EOF
-cat >"$WORK/project/lorry.toml" <<'EOF'
-config-version = 1
-use-cargo-registry = false
-[policy.rules.a]
+USER_CONFIG="$WORK/home/.config/lorry/lorry.toml"
+cat >>"$USER_CONFIG" <<EOF
+[workspaces."$WORK/project".policy.rules.a]
 action = "allow"
 name = "a"
 source = "path"
 allow-build-script = true
 caller-env = ["SCRIPT_INPUT"]
-[policy.rules.b]
+[workspaces."$WORK/project".policy.rules.b]
 action = "allow"
 name = "b"
 source = "path"
@@ -85,8 +84,8 @@ caller-env = ["SCRIPT_INPUT"]
 EOF
 cd "$WORK/project"
 "$LORRY_TEST_CARGO" generate-lockfile --offline
-cp lorry.toml "$WORK/grants.toml"
-sed -i 's/name = "a"/name = "ungranted-a"/' lorry.toml
+cp "$USER_CONFIG" "$WORK/grants.toml"
+sed -i 's/name = "a"/name = "ungranted-a"/' "$USER_CONFIG"
 if env HOME="$WORK/home" "$LORRY" build --message-format=json >"$WORK/denied.json" 2>"$WORK/denied.err"; then exit 1; fi
 grep -F 'build script without an explicit matching policy grant' "$WORK/denied.err" >/dev/null
 [ ! -d target/lorry/debug/build/a ]
@@ -94,7 +93,7 @@ python3 - "$WORK/denied.json" <<'PY'
 import json, sys
 assert [json.loads(line) for line in open(sys.argv[1])] == [{'reason': 'build-finished', 'success': False}]
 PY
-cp "$WORK/grants.toml" lorry.toml
+cp "$WORK/grants.toml" "$USER_CONFIG"
 for command in build check; do
     for selection in defaults all single; do
         arguments=()
@@ -129,14 +128,14 @@ SCRIPT_INPUT=visible "$LORRY_TEST_CARGO" clippy -p a -j1 --offline --message-for
 }
 rm a/build.log
 # A grant for a does not expose its caller variable to b.
-sed -i '/\[policy.rules.b\]/,$ {/caller-env/d;}' lorry.toml
+sed -i '/policy\.rules\.b\]/,$ {/caller-env/d;}' "$USER_CONFIG"
 env HOME="$WORK/home" SCRIPT_INPUT=private-marker "$LORRY" build -j1 2>"$WORK/hidden.err"
 [ "$(target/lorry/debug/a)" = private-marker ]
 [ "$(target/lorry/debug/b)" = absent ]
 grep -F 'hidden caller variable `SCRIPT_INPUT`' "$WORK/hidden.err" >/dev/null
 if grep -F private-marker "$WORK/hidden.err"; then exit 1; fi
 # Run shares member feature resolution and script output, including fresh units.
-cp "$WORK/grants.toml" lorry.toml
+cp "$WORK/grants.toml" "$USER_CONFIG"
 cat >a/src/main.rs <<'EOF'
 fn main() {
     assert_eq!(std::env::var("FROM_SCRIPT").unwrap(), "present");

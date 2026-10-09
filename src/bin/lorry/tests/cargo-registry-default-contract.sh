@@ -140,17 +140,23 @@ PYEOF
 [ ! -e "$WORK/cache/sources" ] || fail "the default mode copied Cargo's sources into Lorry's cache"
 
 # Explicit deny rules still apply.
-printf 'config-version = 1\n[policy.rules.no-scripted]\naction = "deny"\nname = "scripted"\n' \
-    >"$APP/lorry.toml"
+USER_CONFIG="$WORK/home/.config/lorry/lorry.toml"
+cp "$USER_CONFIG" "$WORK/user-config.toml"
+printf '[workspaces."%s".policy.rules.no-scripted]\naction = "deny"\nname = "scripted"\n' \
+    "$APP" >>"$USER_CONFIG"
 expect_failure deny 'no-scripted' build
-rm "$APP/lorry.toml"
+cp "$WORK/user-config.toml" "$USER_CONFIG"
 
 # Turned off on the command line or in configuration, Lorry needs its own
 # repositories and admission.
 lorry_mode='workspace admission|Lorry repositories'
 expect_failure flag-off "$lorry_mode" --no-use-cargo-registry build
-printf 'config-version = 1\nuse-cargo-registry = false\n' >"$APP/lorry.toml"
+printf 'use-cargo-registry = false\n' | cat - "$WORK/user-config.toml" >"$USER_CONFIG"
 expect_failure config-off "$lorry_mode" build
+cp "$WORK/user-config.toml" "$USER_CONFIG"
+# A project cannot turn the mode on or off for itself.
+printf 'config-version = 1\nuse-cargo-registry = false\n' >"$APP/lorry.toml"
+expect_failure project-off 'project configuration cannot set `use-cargo-registry`' build
 rm "$APP/lorry.toml"
 
 # A package missing from Cargo's cache sends the default mode to Lorry

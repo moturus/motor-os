@@ -161,6 +161,8 @@ pub struct Policy {
     /// Set for builds from Cargo's cache: like Cargo, they need no allow
     /// rules or capability grants. Deny rules and configured limits apply.
     pub trust_cargo_cache: bool,
+    /// The canonical workspace root whose `[workspaces]` table applies.
+    pub workspace: Option<PathBuf>,
 }
 
 impl Default for Policy {
@@ -171,6 +173,7 @@ impl Default for Policy {
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
+            workspace: None,
         }
     }
 }
@@ -518,16 +521,19 @@ fn reject_environment(environment: &BTreeMap<String, String>) -> Result<()> {
 }
 
 fn load_lorry_layers(
-    package_root: &Path,
+    workspace_root: &Path,
     environment: &BTreeMap<String, String>,
     config: &mut Config,
 ) -> Result<()> {
+    let workspace =
+        fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     let layers = global_lorry_layers(environment);
-    load_lorry_files(&layers, config)?;
-    if let Some(local) = nearest_file(package_root, "lorry.toml")
-        && !layers.iter().any(|(path, _)| path == &local)
-    {
-        merge_lorry_file(&local, LayerKind::Local, config)?;
+    load_lorry_files(&layers, Some(&workspace), config)?;
+    config.policy.workspace = Some(workspace);
+    // Only the workspace root's own file is project configuration.
+    let local = workspace_root.join("lorry.toml");
+    if local.is_file() && !layers.iter().any(|(path, _)| path == &local) {
+        merge_lorry_file(&local, LayerKind::Local, None, config)?;
     }
     Ok(())
 }
@@ -536,7 +542,23 @@ fn load_global_lorry_layers(
     environment: &BTreeMap<String, String>,
     config: &mut Config,
 ) -> Result<()> {
-    load_lorry_files(&global_lorry_layers(environment), config)
+    load_lorry_files(&global_lorry_layers(environment), None, config)
+}
+
+/// The user's Lorry configuration file, as help text names it.
+pub(crate) fn user_config_hint() -> &'static str {
+    if cfg!(target_os = "motor") {
+        "/user/cfg/lorry.toml"
+    } else {
+        "~/.config/lorry/lorry.toml"
+    }
+}
+
+/// The TOML table key that holds one workspace's settings.
+pub(crate) fn workspace_table_key(root: &Path) -> String {
+    let mut key = "workspaces.".to_owned();
+    crate::lockfile::write_toml_string(&mut key, &root.to_string_lossy());
+    key
 }
 
 fn global_lorry_layers(environment: &BTreeMap<String, String>) -> Vec<(PathBuf, LayerKind)> {
@@ -556,19 +578,31 @@ fn global_lorry_layers(environment: &BTreeMap<String, String>) -> Vec<(PathBuf, 
     layers
 }
 
-fn load_lorry_files(layers: &[(PathBuf, LayerKind)], config: &mut Config) -> Result<()> {
+fn load_lorry_files(
+    layers: &[(PathBuf, LayerKind)],
+    workspace: Option<&Path>,
+    config: &mut Config,
+) -> Result<()> {
     for (path, kind) in layers {
         if path.is_file() {
-            merge_lorry_file(path, *kind, config)?;
+            merge_lorry_file(path, *kind, workspace, config)?;
         }
     }
     Ok(())
 }
 
-fn merge_lorry_file(path: &Path, kind: LayerKind, config: &mut Config) -> Result<()> {
+fn merge_lorry_file(
+    path: &Path,
+    kind: LayerKind,
+    workspace: Option<&Path>,
+    config: &mut Config,
+) -> Result<()> {
     let document = Document::load(path, "Lorry configuration")?;
-    reject_locked_overrides(path, kind, &document, &config.constraints)?;
     validate_lorry_root(path, &document)?;
+    if kind == LayerKind::Local {
+        reject_project_settings(path, &document)?;
+    }
+    reject_locked_overrides(path, kind, &document, &config.constraints)?;
 
     let version = document.root().get("config-version").ok_or_else(|| {
         Error::failure(format!(
@@ -613,13 +647,14 @@ fn merge_lorry_file(path: &Path, kind: LayerKind, config: &mut Config) -> Result
             })?);
     }
     merge_toolchain(path, &document, config)?;
-    merge_cache(path, kind, &document, config)?;
+    merge_cache(path, &document, config)?;
     merge_repositories(path, kind, &document, config)?;
     merge_vendor(path, &document, config)?;
     merge_network(path, &document, config)?;
     merge_test(path, &document, config)?;
     merge_native_tools(path, &document, config)?;
     merge_policy(path, &document, config)?;
+    merge_workspaces(path, kind, &document, workspace, config)?;
     merge_constraints(path, kind, &document, config)?;
     Ok(())
 }
@@ -637,6 +672,7 @@ fn validate_lorry_root(path: &Path, document: &Document) -> Result<()> {
         "test",
         "native-tools",
         "policy",
+        "workspaces",
         "system-constraints",
     ];
     for (key, item) in document.root().iter() {
@@ -652,26 +688,115 @@ fn validate_lorry_root(path: &Path, document: &Document) -> Result<()> {
     Ok(())
 }
 
-fn merge_cache(
+/// A project's own `lorry.toml` may only shape what is vendored and kept.
+/// Settings that grant trust, name a program, or choose where Lorry writes
+/// belong to the user's configuration, which a cloned repo cannot change.
+fn reject_project_settings(path: &Path, document: &Document) -> Result<()> {
+    for (key, item) in document.root().iter() {
+        let (setting, item) = match key {
+            "config-version" | "cargo-compat-version" | "vendor" => continue,
+            "repositories" => {
+                let Some((inner, item)) = item.as_table().and_then(|table| {
+                    table
+                        .iter()
+                        .find(|(key, _)| !matches!(*key, "keep-artifacts" | "keep-sources"))
+                }) else {
+                    continue;
+                };
+                (format!("repositories.{inner}"), item)
+            }
+            _ => (key.to_owned(), item),
+        };
+        let user = user_config_hint();
+        let help = if matches!(setting.as_str(), "policy" | "repositories.local") {
+            let root = path.parent().unwrap_or(Path::new("/"));
+            let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            format!(
+                "put workspace rules in `{user}` under `[{}]`",
+                workspace_table_key(&root)
+            )
+        } else {
+            format!("set `{setting}` in `{user}`")
+        };
+        return Err(Error::at(
+            path,
+            document.line_of_item(item),
+            format!(
+                "project configuration cannot set `{setting}`: \
+                 only your own configuration grants trust or chooses what Lorry runs"
+            ),
+            help,
+        ));
+    }
+    Ok(())
+}
+
+/// Per-workspace settings in user configuration. Every table is checked,
+/// but only the one naming this workspace applies.
+fn merge_workspaces(
     path: &Path,
     kind: LayerKind,
     document: &Document,
+    workspace: Option<&Path>,
     config: &mut Config,
 ) -> Result<()> {
+    let Some(item) = document.root().get("workspaces") else {
+        return Ok(());
+    };
+    let workspaces = require_table(path, document, item, "workspaces")?;
+    for (key, item) in workspaces.iter() {
+        let name = format!("workspaces.{key}");
+        let root = canonical_config_path(path, document.line_of_item(item), &name, key)?;
+        let table = require_table(path, document, item, &name)?;
+        reject_unknown_keys(path, document, table, &name, &["policy", "repositories"])?;
+        if !matches!(kind, LayerKind::LinuxBase | LayerKind::MotorSystem) {
+            let mut leaves = Vec::new();
+            collect_leaf_paths(table, "", &mut leaves);
+            reject_locked_leaves(path, leaves, &config.constraints)?;
+        }
+        let applies = workspace == Some(root.as_path());
+        let mut other_rules = BTreeMap::new();
+        if let Some(item) = table.get("policy") {
+            let policy = require_table(path, document, item, &format!("{name}.policy"))?;
+            reject_unknown_keys(
+                path,
+                document,
+                policy,
+                &format!("{name}.policy"),
+                &["rules"],
+            )?;
+            if let Some(item) = policy.get("rules") {
+                let rules = require_table(path, document, item, &format!("{name}.policy.rules"))?;
+                let output = if applies {
+                    &mut config.policy.rules
+                } else {
+                    &mut other_rules
+                };
+                merge_policy_rules(path, document, rules, output)?;
+            }
+        }
+        if let Some(item) = table.get("repositories") {
+            let name = format!("{name}.repositories");
+            let repositories = require_table(path, document, item, &name)?;
+            reject_unknown_keys(path, document, repositories, &name, &["local"])?;
+            if let Some(item) = repositories.get("local") {
+                let local = absolute_path(path, document, item, "repositories.local")?;
+                if applies {
+                    config.repositories.local = Some(local);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_cache(path: &Path, document: &Document, config: &mut Config) -> Result<()> {
     let Some(item) = document.root().get("cache") else {
         return Ok(());
     };
     let table = require_table(path, document, item, "cache")?;
     reject_unknown_keys(path, document, table, "cache", &["directory"])?;
     if let Some(item) = table.get("directory") {
-        if kind == LayerKind::Local {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                "`cache.directory` is not owned by project configuration",
-                "configure the global cache in user or system Lorry configuration",
-            ));
-        }
         config.cache.directory = Some(absolute_path(path, document, item, "cache.directory")?);
     }
     Ok(())
@@ -717,11 +842,6 @@ fn merge_repositories(
             &mut config.repositories.user,
             matches!(kind, LayerKind::LinuxBase | LayerKind::MotorUser),
         ),
-        (
-            "local",
-            &mut config.repositories.local,
-            kind == LayerKind::Local,
-        ),
     ] {
         if let Some(item) = table.get(key) {
             if !allowed {
@@ -729,7 +849,7 @@ fn merge_repositories(
                     path,
                     document.line_of_item(item),
                     format!("`repositories.{key}` is not owned by this configuration layer"),
-                    "define system/user/local only in its designated layer",
+                    "define system and user repositories only in their designated layers",
                 ));
             }
             *destination = Some(absolute_path(
@@ -739,6 +859,14 @@ fn merge_repositories(
                 &format!("repositories.{key}"),
             )?);
         }
+    }
+    if let Some(item) = table.get("local") {
+        return Err(Error::at(
+            path,
+            document.line_of_item(item),
+            "`repositories.local` belongs to one workspace",
+            "set it under `[workspaces.\"<workspace root>\".repositories]`",
+        ));
     }
     if let Some(item) = table.get("keep-artifacts") {
         config.repositories.keep_artifacts =
@@ -1255,6 +1383,14 @@ fn reject_locked_overrides(
     }
     let mut leaves = Vec::new();
     collect_leaf_paths(document.root(), "", &mut leaves);
+    reject_locked_leaves(path, leaves, constraints)
+}
+
+fn reject_locked_leaves(
+    path: &Path,
+    leaves: Vec<String>,
+    constraints: &[Constraint],
+) -> Result<()> {
     for leaf in leaves {
         if let Some(constraint) = constraints.iter().find(|constraint| {
             leaf == constraint.key
@@ -2176,13 +2312,6 @@ fn decode_target_environment(encoded: &str) -> String {
     }
 }
 
-fn nearest_file(start: &Path, name: &str) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .map(|directory| directory.join(name))
-        .find(|path| path.is_file())
-}
-
 fn same_path(left: &Path, right: &Path) -> bool {
     fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf())
         == fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf())
@@ -2272,27 +2401,35 @@ mod tests {
             "config-version = 1\ncargo-compat-version = \"1.98\"\n",
         )
         .unwrap();
-        let error =
-            merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap_err();
+        let error = merge_lorry_file(&path, LayerKind::LinuxBase, None, &mut Config::default())
+            .unwrap_err();
         assert!(error.render().contains("current Motor Cargo"));
     }
 
     #[test]
-    fn later_layers_choose_whether_to_use_cargo_registry() {
+    fn later_user_layers_choose_whether_to_use_cargo_registry() {
         let temp = TempDir::new();
-        let base = temp.0.join("base.toml");
-        let local = temp.0.join("local.toml");
-        fs::write(&base, "config-version = 1\nuse-cargo-registry = true\n").unwrap();
-        fs::write(&local, "config-version = 1\nuse-cargo-registry = false\n").unwrap();
+        let system = temp.0.join("system.toml");
+        let user = temp.0.join("user.toml");
+        fs::write(&system, "config-version = 1\nuse-cargo-registry = true\n").unwrap();
+        fs::write(&user, "config-version = 1\nuse-cargo-registry = false\n").unwrap();
         let mut config = Config::default();
         assert_eq!(config.use_cargo_registry, None);
-        merge_lorry_file(&base, LayerKind::LinuxBase, &mut config).unwrap();
+        merge_lorry_file(&system, LayerKind::MotorSystem, None, &mut config).unwrap();
         assert_eq!(config.use_cargo_registry, Some(true));
-        merge_lorry_file(&local, LayerKind::Local, &mut config).unwrap();
+        merge_lorry_file(&user, LayerKind::MotorUser, None, &mut config).unwrap();
         assert_eq!(config.use_cargo_registry, Some(false));
-        fs::write(&local, "config-version = 1\nuse-cargo-registry = \"no\"\n").unwrap();
-        let error = merge_lorry_file(&local, LayerKind::Local, &mut config).unwrap_err();
+        fs::write(&user, "config-version = 1\nuse-cargo-registry = \"no\"\n").unwrap();
+        let error = merge_lorry_file(&user, LayerKind::MotorUser, None, &mut config).unwrap_err();
         assert!(error.render().contains("use-cargo-registry"));
+        // A project cannot switch to Cargo-like trust.
+        fs::write(&user, "config-version = 1\nuse-cargo-registry = true\n").unwrap();
+        let error = merge_lorry_file(&user, LayerKind::Local, None, &mut config).unwrap_err();
+        assert!(
+            error
+                .render()
+                .contains("project configuration cannot set `use-cargo-registry`")
+        );
     }
 
     #[test]
@@ -2330,8 +2467,8 @@ mod tests {
         .unwrap();
 
         let mut config = Config::default();
-        merge_lorry_file(&system, LayerKind::MotorSystem, &mut config).unwrap();
-        merge_lorry_file(&user, LayerKind::MotorUser, &mut config).unwrap();
+        merge_lorry_file(&system, LayerKind::MotorSystem, None, &mut config).unwrap();
+        merge_lorry_file(&user, LayerKind::MotorUser, None, &mut config).unwrap();
         assert_eq!(config.repositories.user, Some(repository));
     }
 
@@ -2368,22 +2505,22 @@ mod tests {
                  [toolchain]\nrustc = \"/base/rustc\"\n\
                  [cache]\ndirectory = \"{}\"\n\
                  [repositories]\nsystem = \"{}\"\nuser = \"{}\"\n\
-                 [network]\ncurl = \"{}\"\nca-bundle = \"{}\"\n",
+                 [network]\ncurl = \"{}\"\nca-bundle = \"{}\"\n\
+                 [workspaces.\"{}\".repositories]\nlocal = \"{}\"\n",
                 temp.0.join("cache").display(),
                 temp.0.join("system").display(),
                 temp.0.join("user").display(),
                 temp.0.join("curl").display(),
                 temp.0.join("ca.crt").display(),
+                package.display(),
+                temp.0.join("local").display(),
             ),
         )
         .unwrap();
         fs::write(
             package.join("lorry.toml"),
-            format!(
-                "config-version = 1\ncargo-compat-version = \"1.99\"\n\
-                 [repositories]\nlocal = \"{}\"\n",
-                temp.0.join("local").display()
-            ),
+            "config-version = 1\ncargo-compat-version = \"1.99\"\n\
+             [repositories]\nkeep-sources = false\n",
         )
         .unwrap();
         fs::write(
@@ -2422,6 +2559,8 @@ mod tests {
         assert!(config.repositories.system.is_some());
         assert!(config.repositories.user.is_some());
         assert!(config.repositories.local.is_some());
+        assert!(!config.repositories.keep_sources);
+        assert!(global.repositories.local.is_none());
         assert_eq!(config.cache.directory, Some(temp.0.join("cache")));
         assert_eq!(config.network.curl, Some(temp.0.join("curl")));
         assert_eq!(config.network.ca_bundle, Some(temp.0.join("ca.crt")));
@@ -2444,15 +2583,16 @@ mod tests {
             ),
         )
         .unwrap();
-        let error = merge_lorry_file(&path, LayerKind::Local, &mut Config::default()).unwrap_err();
+        let error =
+            merge_lorry_file(&path, LayerKind::Local, None, &mut Config::default()).unwrap_err();
         assert!(
             error
                 .render()
-                .contains("not owned by project configuration")
+                .contains("project configuration cannot set `cache`")
         );
 
         let mut config = Config::default();
-        merge_lorry_file(&path, LayerKind::LinuxBase, &mut config).unwrap();
+        merge_lorry_file(&path, LayerKind::LinuxBase, None, &mut config).unwrap();
         config.repositories.user = Some(temp.0.join("cache/repository"));
         let environment = BTreeMap::from([("HOME".to_owned(), temp.0.display().to_string())]);
         assert!(validate_storage_layout(&config, &environment).is_err());
@@ -2525,7 +2665,7 @@ locked = [
         );
         fs::write(&config_path, source).unwrap();
         let mut config = Config::default();
-        merge_lorry_file(&config_path, LayerKind::LinuxBase, &mut config).unwrap();
+        merge_lorry_file(&config_path, LayerKind::LinuxBase, None, &mut config).unwrap();
         assert_eq!(config.vendor.targets.len(), 2);
         assert_eq!(config.policy.limits.max_depth, Some(16));
         assert_eq!(config.policy.rules.len(), 1);
@@ -2569,7 +2709,7 @@ native-tools = ["cxx-compiler"]
         )
         .unwrap();
         let mut config = Config::default();
-        merge_lorry_file(&path, LayerKind::Local, &mut config).unwrap();
+        merge_lorry_file(&path, LayerKind::MotorUser, None, &mut config).unwrap();
         let tool =
             &config.native_tools[&("x86_64-unknown-motor".into(), NativeToolRole::CxxCompiler)];
         assert_eq!(tool.program.as_deref(), Some(compiler.as_path()));
@@ -2596,7 +2736,7 @@ native-tools = ["cxx-compiler"]
             ] {
                 fs::write(&path, format!("config-version = 1\n[native-tools.\"x86_64-unknown-motor\".{role}]\nstdlib = {value}\n")).unwrap();
                 let mut config = Config::default();
-                let parsed = merge_lorry_file(&path, LayerKind::Local, &mut config);
+                let parsed = merge_lorry_file(&path, LayerKind::MotorUser, None, &mut config);
                 if role == "cxx-compiler" && ["\"\"", "\"c++\"", "\"stdc++\""].contains(&value) {
                     parsed.unwrap();
                     assert_eq!(
@@ -2616,44 +2756,153 @@ native-tools = ["cxx-compiler"]
     #[test]
     fn enforces_layer_ownership_constraints_and_repository_separation() {
         let temp = TempDir::new();
-        let base = temp.0.join("base.toml");
-        let local = temp.0.join("local.toml");
+        let system = temp.0.join("system.toml");
+        let user = temp.0.join("user.toml");
         fs::write(
-            &base,
+            &system,
             format!(
                 "config-version = 1\n[repositories]\nsystem = \"{}\"\n\
                  [policy]\ndefault = \"deny\"\n\
-                 [system-constraints]\nlocked = [\"policy.default\"]\n",
+                 [system-constraints]\nlocked = [\"policy.default\", \"policy.rules\"]\n",
                 temp.0.join("repo").display()
             ),
         )
         .unwrap();
+        fs::write(&user, "config-version = 1\n[policy]\ndefault = \"allow\"\n").unwrap();
+        let mut config = Config::default();
+        merge_lorry_file(&system, LayerKind::MotorSystem, None, &mut config).unwrap();
+        let error = merge_lorry_file(&user, LayerKind::MotorUser, None, &mut config).unwrap_err();
+        assert!(error.to_string().contains("locked"));
+
+        // A workspace table cannot add rules that the system locked.
         fs::write(
-            &local,
+            &user,
             format!(
-                "config-version = 1\n[repositories]\nlocal = \"{}\"\n\
-                 [policy]\ndefault = \"allow\"\n",
-                temp.0.join("repo/child").display()
+                "config-version = 1\n[workspaces.\"{}\".policy.rules.member]\n\
+                 action = \"allow\"\nname = \"member\"\nsource = \"path\"\n",
+                temp.0.display()
             ),
         )
         .unwrap();
-        let mut config = Config::default();
-        merge_lorry_file(&base, LayerKind::LinuxBase, &mut config).unwrap();
-        let error = merge_lorry_file(&local, LayerKind::Local, &mut config).unwrap_err();
-        assert!(error.to_string().contains("locked"));
+        let error = merge_lorry_file(&user, LayerKind::MotorUser, None, &mut config).unwrap_err();
+        assert!(error.to_string().contains("locked `policy.rules`"));
 
         fs::write(
-            &local,
+            &user,
             format!(
                 "config-version = 1\n[repositories]\nsystem = \"{}\"\n",
                 temp.0.join("other").display()
             ),
         )
         .unwrap();
-        assert!(merge_lorry_file(&local, LayerKind::Local, &mut config).is_err());
+        assert!(merge_lorry_file(&user, LayerKind::MotorUser, None, &mut config).is_err());
 
         config.repositories.local = Some(temp.0.join("repo/child"));
         assert!(validate_repository_layout(&config.repositories).is_err());
+    }
+
+    #[test]
+    fn project_configuration_keeps_only_harmless_settings() {
+        let temp = TempDir::new();
+        let path = temp.0.join("lorry.toml");
+        fs::write(
+            &path,
+            "config-version = 1\ncargo-compat-version = \"1.99\"\n\
+             [vendor]\ntargets = [\"x86_64-unknown-motor\"]\ninclude-host = false\n\
+             [repositories]\nkeep-artifacts = false\n",
+        )
+        .unwrap();
+        let mut config = Config::default();
+        merge_lorry_file(&path, LayerKind::Local, None, &mut config).unwrap();
+        assert_eq!(config.vendor.targets, ["x86_64-unknown-motor"]);
+        assert!(!config.repositories.keep_artifacts);
+
+        for (body, setting) in [
+            ("[policy]\ndefault = \"allow\"\n", "policy"),
+            ("[policy.rules.x]\naction = \"allow\"\n", "policy"),
+            ("[toolchain]\nrustc = \"/bin/true\"\n", "toolchain"),
+            ("[network]\ncurl = \"/bin/true\"\n", "network"),
+            ("[test]\nextraction-root = \"/tmp/x\"\n", "test"),
+            (
+                "[native-tools.\"x86_64-unknown-motor\".c-compiler]\nflags = []\n",
+                "native-tools",
+            ),
+            ("[repositories]\nlocal = \"/tmp/x\"\n", "repositories.local"),
+            (
+                "[workspaces.\"/tmp\".policy.rules.x]\naction = \"allow\"\n",
+                "workspaces",
+            ),
+            ("use-cargo-registry = false\n", "use-cargo-registry"),
+        ] {
+            fs::write(&path, format!("config-version = 1\n{body}")).unwrap();
+            let error = merge_lorry_file(&path, LayerKind::Local, None, &mut Config::default())
+                .unwrap_err()
+                .render();
+            assert!(
+                error.contains(&format!("project configuration cannot set `{setting}`")),
+                "{setting}: {error}"
+            );
+            assert!(error.contains(user_config_hint()), "{error}");
+        }
+    }
+
+    #[test]
+    fn workspace_tables_apply_only_to_their_workspace() {
+        let temp = TempDir::new();
+        let path = temp.0.join("lorry.toml");
+        let here = temp.0.join("here");
+        let there = temp.0.join("there");
+        fs::create_dir_all(&here).unwrap();
+        let rule = "action = \"allow\"\nname = \"member\"\nsource = \"path\"\n\
+                    allow-build-script = true\n";
+        fs::write(
+            &path,
+            format!(
+                "config-version = 1\n\
+                 [workspaces.\"{}\".policy.rules.here-member]\n{rule}\
+                 [workspaces.\"{}\".repositories]\nlocal = \"{}\"\n\
+                 [workspaces.\"{}\".policy.rules.there-member]\n{rule}",
+                here.display(),
+                here.display(),
+                temp.0.join("local").display(),
+                there.display(),
+            ),
+        )
+        .unwrap();
+        let canonical = fs::canonicalize(&here).unwrap();
+        let mut config = Config::default();
+        merge_lorry_file(&path, LayerKind::MotorUser, Some(&canonical), &mut config).unwrap();
+        assert_eq!(
+            config.policy.rules.keys().collect::<Vec<_>>(),
+            ["here-member"]
+        );
+        assert!(config.repositories.local.is_some());
+
+        let mut global = Config::default();
+        merge_lorry_file(&path, LayerKind::MotorUser, None, &mut global).unwrap();
+        assert!(global.policy.rules.is_empty());
+        assert!(global.repositories.local.is_none());
+
+        // Tables for other workspaces are still checked.
+        fs::write(
+            &path,
+            format!(
+                "config-version = 1\n[workspaces.\"{}\".policy.rules.bad]\naction = \"maybe\"\n",
+                there.display()
+            ),
+        )
+        .unwrap();
+        let error = merge_lorry_file(
+            &path,
+            LayerKind::MotorUser,
+            Some(&canonical),
+            &mut Config::default(),
+        );
+        assert!(error.is_err());
+        fs::write(&path, "config-version = 1\n[workspaces.\"relative\"]\n").unwrap();
+        let error = merge_lorry_file(&path, LayerKind::MotorUser, None, &mut Config::default())
+            .unwrap_err();
+        assert!(error.render().contains("absolute normalized path"));
     }
 
     #[test]
@@ -2994,8 +3243,8 @@ native-tools = ["cxx-compiler"]
              name = \"demo\"\n",
         )
         .unwrap();
-        let error =
-            merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap_err();
+        let error = merge_lorry_file(&path, LayerKind::LinuxBase, None, &mut Config::default())
+            .unwrap_err();
         assert!(error.to_string().contains("unsupported"));
         assert!(error.to_string().contains("required-patches"));
     }
@@ -3013,8 +3262,8 @@ native-tools = ["cxx-compiler"]
              native-tools = [\"c-compiler\"]\n",
         )
         .unwrap();
-        let error =
-            merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap_err();
+        let error = merge_lorry_file(&path, LayerKind::LinuxBase, None, &mut Config::default())
+            .unwrap_err();
         assert!(error.to_string().contains("source-tree digest"));
 
         fs::write(
@@ -3027,7 +3276,7 @@ native-tools = ["cxx-compiler"]
              native-tools = [\"c-compiler\"]\n",
         )
         .unwrap();
-        merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap();
+        merge_lorry_file(&path, LayerKind::LinuxBase, None, &mut Config::default()).unwrap();
     }
 
     #[test]
@@ -3059,7 +3308,7 @@ native-tools = ["cxx-compiler"]
         ] {
             fs::write(&path, format!("config-version = 1\n[policy.rules.caller]\naction = \"allow\"\n{identity}\ncaller-env = [{variables}]\n")).unwrap();
             assert_eq!(
-                merge_lorry_file(&path, LayerKind::Local, &mut Config::default()).is_ok(),
+                merge_lorry_file(&path, LayerKind::MotorUser, None, &mut Config::default()).is_ok(),
                 accepted
             );
         }
@@ -3078,8 +3327,8 @@ native-tools = ["cxx-compiler"]
             "INVALID-NAME",
         ] {
             fs::write(&path, format!("config-version = 1\n[policy.rules.caller]\naction = \"allow\"\nname = \"member\"\nsource = \"path\"\nallow-build-script = true\ncaller-env = [\"{variable}\"]\n")).unwrap();
-            let error =
-                merge_lorry_file(&path, LayerKind::Local, &mut Config::default()).unwrap_err();
+            let error = merge_lorry_file(&path, LayerKind::MotorUser, None, &mut Config::default())
+                .unwrap_err();
             assert!(error.render().contains(variable));
         }
     }
@@ -3102,7 +3351,8 @@ native-tools = ["cxx-compiler"]
                 ),
             )
             .unwrap();
-            let result = merge_lorry_file(&path, LayerKind::Local, &mut Config::default());
+            let result =
+                merge_lorry_file(&path, LayerKind::MotorUser, None, &mut Config::default());
             assert_eq!(result.is_ok(), accepted, "{identity}: {result:?}");
         }
     }

@@ -68,19 +68,15 @@ impl PackageLimit {
             LimitSource::CommandLine => "set by --max-packages".to_owned(),
             LimitSource::Default => "Lorry's default".to_owned(),
         };
-        let user = if cfg!(target_os = "motor") {
-            "/user/cfg/lorry.toml"
-        } else {
-            "~/.config/lorry/lorry.toml"
-        };
+        let user = crate::config::user_config_hint();
         Error::failure(format!(
             "the dependency graph has more packages from outside the workspace than \
              the limit of {} ({origin})",
             self.max
         ))
         .with_help(format!(
-            "raise `max-packages` in the `[policy.limits]` table of `{user}` \
-             or of the project's `lorry.toml`, or pass `--max-packages N` for this run"
+            "raise `max-packages` in the `[policy.limits]` table of `{user}`, \
+             or pass `--max-packages N` for this run"
         ))
     }
 }
@@ -194,7 +190,7 @@ pub(crate) fn preflight_workspace(policy: &Policy, resolution: &Resolution) -> R
                 .iter()
                 .any(|id| policy.rules[id].action == PolicyAction::Allow)
         {
-            return Err(not_admitted(package, &facts, None));
+            return Err(not_admitted(policy, package, &facts, None));
         }
         if known_build_script
             && !policy.trust_cargo_cache
@@ -202,7 +198,7 @@ pub(crate) fn preflight_workspace(policy: &Policy, resolution: &Resolution) -> R
                 .iter()
                 .any(|id| script_rule_authorizes(&policy.rules[id], package))
         {
-            return Err(build_script_not_admitted(package, &facts, None));
+            return Err(build_script_not_admitted(policy, package, &facts, None));
         }
         let known_proc_macro = package.local_manifest.as_ref().is_some_and(|manifest| {
             manifest
@@ -216,7 +212,7 @@ pub(crate) fn preflight_workspace(policy: &Policy, resolution: &Resolution) -> R
                 .iter()
                 .any(|id| proc_macro_rule_authorizes(&policy.rules[id], package))
         {
-            return Err(proc_macro_not_admitted(package, &facts, None));
+            return Err(proc_macro_not_admitted(policy, package, &facts, None));
         }
 
         packages.insert(package.key.clone(), PreliminaryPackage { potential_rules });
@@ -272,7 +268,12 @@ pub fn inspect(
             .copied()
             .collect::<Vec<_>>();
         if base_requires_allow(&preflight.policy, source) && allows.is_empty() {
-            return Err(not_admitted(package, &facts, Some(evidence)));
+            return Err(not_admitted(
+                &preflight.policy,
+                package,
+                &facts,
+                Some(evidence),
+            ));
         }
 
         let script_allows = allows
@@ -282,7 +283,12 @@ pub fn inspect(
             .collect::<Vec<_>>();
         let trusted = preflight.policy.trust_cargo_cache;
         if evidence.build_script && script_allows.is_empty() && !trusted {
-            return Err(build_script_not_admitted(package, &facts, Some(evidence)));
+            return Err(build_script_not_admitted(
+                &preflight.policy,
+                package,
+                &facts,
+                Some(evidence),
+            ));
         }
         let proc_macro_allows = allows
             .iter()
@@ -290,7 +296,12 @@ pub fn inspect(
             .copied()
             .collect::<Vec<_>>();
         if evidence.proc_macro && proc_macro_allows.is_empty() && !trusted {
-            return Err(proc_macro_not_admitted(package, &facts, Some(evidence)));
+            return Err(proc_macro_not_admitted(
+                &preflight.policy,
+                package,
+                &facts,
+                Some(evidence),
+            ));
         }
         let native_tools = script_allows
             .iter()
@@ -1011,6 +1022,7 @@ fn denied_by_rule(package: &PackageKey, id: &str, rule: &PolicyRule) -> Error {
 }
 
 fn not_admitted(
+    policy: &Policy,
     package: &ResolvedPackage,
     facts: &Facts<'_>,
     evidence: Option<&PackageEvidence>,
@@ -1019,10 +1031,13 @@ fn not_admitted(
         "package `{} {}` is not admitted by the effective dependency policy",
         package.key.name, package.key.version
     ))
-    .with_help(exact_allow_example(package, facts, evidence, false, false))
+    .with_help(exact_allow_example(
+        policy, package, facts, evidence, false, false,
+    ))
 }
 
 fn build_script_not_admitted(
+    policy: &Policy,
     package: &ResolvedPackage,
     facts: &Facts<'_>,
     evidence: Option<&PackageEvidence>,
@@ -1031,10 +1046,13 @@ fn build_script_not_admitted(
         "package `{} {}` contains a build script without an explicit matching policy grant",
         package.key.name, package.key.version
     ))
-    .with_help(exact_allow_example(package, facts, evidence, true, false))
+    .with_help(exact_allow_example(
+        policy, package, facts, evidence, true, false,
+    ))
 }
 
 fn proc_macro_not_admitted(
+    policy: &Policy,
     package: &ResolvedPackage,
     facts: &Facts<'_>,
     evidence: Option<&PackageEvidence>,
@@ -1043,10 +1061,13 @@ fn proc_macro_not_admitted(
         "package `{} {}` contains a procedural macro without an explicit matching policy grant",
         package.key.name, package.key.version
     ))
-    .with_help(exact_allow_example(package, facts, evidence, false, true))
+    .with_help(exact_allow_example(
+        policy, package, facts, evidence, false, true,
+    ))
 }
 
 fn exact_allow_example(
+    policy: &Policy,
     package: &ResolvedPackage,
     facts: &Facts<'_>,
     evidence: Option<&PackageEvidence>,
@@ -1055,13 +1076,19 @@ fn exact_allow_example(
 ) -> String {
     let id_name = rule_id_component(&package.key.name);
     let id_version = rule_id_component(&package.key.version.to_string());
+    // A rule scoped to this workspace grants nothing to other checkouts.
+    let rules = match &policy.workspace {
+        Some(root) => format!("{}.policy.rules", crate::config::workspace_table_key(root)),
+        None => "policy.rules".to_owned(),
+    };
     let mut example = format!(
-        "review the package, then add an exact rule such as:\n\
-         [policy.rules.allow-{id_name}-{id_version}]\n\
+        "review the package, then add an exact rule to `{}` such as:\n\
+         [{rules}.allow-{id_name}-{id_version}]\n\
          action = \"allow\"\n\
          name = \"{}\"\n\
          version = \"={}\"\n\
          source = \"{}\"\n",
+        crate::config::user_config_hint(),
         package.key.name,
         package.key.version,
         facts.source.policy_name()
@@ -1198,6 +1225,7 @@ mod tests {
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
+            workspace: None,
         };
         let resolution = make_resolution(vec![member.clone(), outside]);
         preflight_sources(&policy, &resolution).unwrap();
@@ -1350,6 +1378,7 @@ mod tests {
             limits: PolicyLimits::default(),
             rules: BTreeMap::from([("veto".into(), veto)]),
             trust_cargo_cache: false,
+            workspace: None,
         };
         assert!(
             preflight_locked_sources(&policy, &lock)
@@ -1374,6 +1403,7 @@ mod tests {
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
+            workspace: None,
         };
         let mut inspected = evidence(&package, true);
         inspected.proc_macro = true;
@@ -1447,6 +1477,7 @@ mod tests {
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
+            workspace: None,
         };
         policy.limits.max_depth = Some(1);
         policy.limits.max_packages = 1;
@@ -1517,6 +1548,7 @@ mod tests {
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
+            workspace: None,
         };
         let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
@@ -1793,6 +1825,7 @@ mod tests {
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
+            workspace: None,
         };
         // The root edge points at a member, so `second` is at depth 1.
         policy.limits.max_depth = Some(0);

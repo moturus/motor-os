@@ -87,11 +87,7 @@ curl = "$WORK/crates-io/curl"
 directory = "$WORK/cache"
 [policy]
 default = "allow"
-EOF
-cat >lorry.toml <<EOF
-config-version = 1
-use-cargo-registry = false
-[policy.rules.grammar]
+[workspaces."$WORK/project".policy.rules.grammar]
 action = "allow"
 name = "grammar"
 source = "path"
@@ -111,11 +107,12 @@ stdlib = ""
 program = "$MOTOR_AR"
 EOF
 env HOME="$WORK/home" "$LORRY" vendor --locked --accept-all
-cp lorry.toml "$WORK/grants.toml"
-sed -i 's/native-tools = \["cxx-compiler", "archiver"\]/native-tools = ["archiver"]/' lorry.toml
+USER_CONFIG="$WORK/home/.config/lorry/lorry.toml"
+cp "$USER_CONFIG" "$WORK/grants.toml"
+sed -i 's/native-tools = \["cxx-compiler", "archiver"\]/native-tools = ["archiver"]/' "$USER_CONFIG"
 if env HOME="$WORK/home" PROBE_UNGRANTED=1 "$LORRY" check >"$WORK/denied.out" 2>"$WORK/denied.err"; then exit 1; fi
 grep -F 'C++ capability correctly denied' "$WORK/denied.err" >/dev/null
-cp "$WORK/grants.toml" lorry.toml
+cp "$WORK/grants.toml" "$USER_CONFIG"
 for target in x86_64-unknown-linux-gnu x86_64-unknown-motor; do
     compiler="$HOST_CXX"; archiver="$HOST_AR"; flags=()
     if [ "$target" = x86_64-unknown-motor ]; then

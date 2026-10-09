@@ -107,9 +107,13 @@ The normal metadata and save-check commands use the configured settings.
 The Motor OS checkout's `.helix/languages.toml` sets `check.workspace = false`
 because `src/sys` has member-specific compiler requirements. This exception
 belongs to that checkout. Saving a file outside its members, including files
-under `src/third_party`, starts no member check. Its workspace-root
-`src/sys/lorry.toml` grants the editable `moto-io` member's build script.
-Commands started at `src/sys` do not read member-local Cargo configuration;
+under `src/third_party`, starts no member check. The editable `moto-io`
+member has a build script. Without Cargo's cache, Lorry runs it only with a
+rule in your own configuration, under the checkout's `src/sys` workspace
+table, for example
+`[workspaces."/home/me/motor-os/src/sys".policy.rules.moto-io]` with
+`action = "allow"`, `source = "path"`, `name = "moto-io"`, and
+`allow-build-script = true`. Commands started at `src/sys` do not read member-local Cargo configuration;
 the `tokio_unstable` settings in `motor-fs` and `tokio-tests` therefore do not
 apply to those root-started editor checks. Run their real builds from their
 normal directories.

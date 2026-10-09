@@ -48,7 +48,8 @@ EOF
 for member in app normal; do
     printf 'compile_error!("ordinary source must be skipped");\n' >"$WORK/project/$member/src/lib.rs"
 done
-printf 'config-version = 1\nuse-cargo-registry = false\n' >"$WORK/project/lorry.toml"
+USER_CONFIG="$WORK/home/.config/lorry/lorry.toml"
+cp "$USER_CONFIG" "$WORK/ungranted.toml"
 for member in app normal derive; do
     cat >"$WORK/project/$member/build.rs" <<'EOF'
 fn main() {
@@ -57,14 +58,14 @@ fn main() {
     println!("cargo::rustc-env=SCRIPT_OWNER={}", std::env::var("CARGO_PKG_NAME").unwrap());
 }
 EOF
-    cat >>"$WORK/project/lorry.toml" <<EOF
-[policy.rules.$member]
+    cat >>"$USER_CONFIG" <<EOF
+[workspaces."$WORK/project".policy.rules.$member]
 action = "allow"
 source = "path"
 name = "$member"
 allow-build-script = true
 EOF
-    if [ "$member" = derive ]; then echo 'allow-proc-macro = true' >>"$WORK/project/lorry.toml"; fi
+    if [ "$member" = derive ]; then echo 'allow-proc-macro = true' >>"$USER_CONFIG"; fi
 done
 printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
     "$LORRY_MOTOR_LINKER" "$LORRY_MOTOR_SYSROOT" >"$WORK/project/.cargo/config.toml"
@@ -133,7 +134,7 @@ for platform in native motor; do
         --locked --offline -- differential-script-clean-check-messages \
         "$WORK/generated-lorry.json" "$WORK/generated-cargo.json"
 done
-mv lorry.toml "$WORK/grants.toml"
+cp "$WORK/ungranted.toml" "$USER_CONFIG"
 if env HOME="$WORK/home" "$LORRY" check --workspace --compile-time-deps \
     --message-format=json >"$WORK/denied.json" 2>"$WORK/denied.err"; then exit 1; fi
 grep -F 'build script' "$WORK/denied.err" >/dev/null

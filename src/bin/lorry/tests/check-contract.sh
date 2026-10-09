@@ -26,15 +26,14 @@ mkdir -p "$HOME_DIR/.config/lorry" "$PROJECT/src/bin" "$PROJECT/tests" \
 printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$HOME_DIR/.config/lorry/lorry.toml"
 printf '%s\n' \
-    'config-version = 1' 'use-cargo-registry = false' \
-    '[policy.rules.allow-fixture-dependency]' \
+    "[workspaces.\"$PROJECT\".policy.rules.allow-fixture-dependency]" \
     'action = "allow"' \
     'name = "fixture-dependency"' \
     'version = "=1.0.0"' \
     'source = "path"' \
     'license = "MIT"' \
     'allow-build-script = true' \
-    >"$PROJECT/lorry.toml"
+    >>"$HOME_DIR/.config/lorry/lorry.toml"
 
 printf '%s\n' \
     '[package]' \
@@ -605,8 +604,8 @@ printf 'fn main() { println!("{}", shared::value()); }\n' >"$TWIN/app/src/main.r
 printf '%s\n' 'version = 4' '[[package]]' 'name = "app"' 'version = "0.1.0"' \
     'dependencies = [' ' "shared",' ']' '[[package]]' 'name = "shared"' 'version = "0.1.0"' \
     >"$TWIN/app/Cargo.lock"
-printf '%s\n' 'config-version = 1' 'use-cargo-registry = false' '[policy.rules.app]' 'action = "allow"' 'name = "app"' \
-    'source = "path"' 'allow-build-script = true' >"$TWIN/app/lorry.toml"
+printf '%s\n' "[workspaces.\"$TWIN/app\".policy.rules.app]" 'action = "allow"' 'name = "app"' \
+    'source = "path"' 'allow-build-script = true' >>"$HOME_DIR/.config/lorry/lorry.toml"
 (
     cd "$TWIN/app"
     "$LORRY" vendor --accept-all >/dev/null 2>&1

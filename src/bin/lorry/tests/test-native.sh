@@ -121,8 +121,7 @@ copy_native_fixture() {
     local source="$SCRIPT_DIR/native-fixture"
     rm -rf "$destination"
     mkdir -p "$destination"
-    cp "$source/Cargo.toml" "$source/Cargo.lock" "$source/lorry.toml" \
-        "$destination/"
+    cp "$source/Cargo.toml" "$source/Cargo.lock" "$destination/"
     cp -R "$source/.lorry" "$source/src" "$source/tests" \
         "$source/fixture-generated-dependency" \
         "$source/fixture-motor-target-dependency" "$destination/"
@@ -212,6 +211,39 @@ run_workspace_identity() {
         fail "native workspace dependency feature union is incorrect"
 }
 
+# Lorry takes path grants only from the user's configuration, keyed by
+# workspace. The marker lets a later run drop grants a crashed run left.
+FIXTURE_POLICY_MARKER='# test-native fixture grants'
+fixture_policy() {
+    local root="$1"
+    local case
+    printf '%s\n' "$FIXTURE_POLICY_MARKER" \
+        "[workspaces.\"$root/native-fixture\".policy.rules.allow-fixture-generated-dependency]" \
+        'action = "allow"' 'name = "fixture-generated-dependency"' 'version = "=0.1.0"' \
+        'source = "path"' 'license = "MIT"' 'allow-build-script = true' \
+        "[workspaces.\"$root/proc-macro-fixture\".policy.rules.allow-derive-answer]" \
+        'action = "allow"' 'name = "derive-answer"' 'version = "=0.1.0"' \
+        'source = "path"' 'allow-proc-macro = true'
+    for case in default custom member; do
+        printf '%s\n' \
+            "[workspaces.\"$root/editor-evidence/$case/project\".policy.rules.generated]" \
+            'action = "allow"' 'source = "path"' 'name = "generated"' 'allow-build-script = true'
+    done
+}
+
+# Motor has no per-run HOME configuration: the grants go into the guest's
+# user configuration for this run, and cleanup restores the original.
+install_remote_policy() {
+    download_file /user/cfg/lorry.toml "$WORK/user-config.remote" ||
+        fail "cannot read the guest's /user/cfg/lorry.toml"
+    sed "/^$FIXTURE_POLICY_MARKER\$/,\$d" "$WORK/user-config.remote" >"$WORK/user-config.orig"
+    { cat "$WORK/user-config.orig"; fixture_policy "$REMOTE_ROOT"; } >"$WORK/user-config.test"
+    upload_file "$WORK/user-config.orig" "$REMOTE_ROOT/user-config.orig"
+    upload_file "$WORK/user-config.test" "$REMOTE_ROOT/user-config.test"
+    REMOTE_POLICY=1
+    remote_command "/system/bin/cat $REMOTE_ROOT/user-config.test > /user/cfg/lorry.toml"
+}
+
 write_host_config() {
     local host_home="$1"
     local host_curl="$2"
@@ -253,6 +285,7 @@ write_host_config() {
     awk '/^\[policy\.rules\./ { rules = 1 } rules { print }' \
         "$ROOT_DIR/img_files/motor-os-dev/devtools/cfg/lorry.toml" \
         >>"$host_home/.config/lorry/lorry.toml"
+    fixture_policy "$WORK" >>"$host_home/.config/lorry/lorry.toml"
 }
 
 remote_command() {
@@ -509,6 +542,7 @@ run_native() {
     remote_command "[ -d $REMOTE_BASE ] || /system/bin/mkdir $REMOTE_BASE"
     remote_command "[ -d $REMOTE_ROOT ] || /system/bin/mkdir $REMOTE_ROOT"
     REMOTE_CREATED=1
+    install_remote_policy
     if [ "$WARM" -eq 1 ]; then
         for executable in lorry-cross lorry-native cancel-probe recovery-probe; do
             remote_command "[ ! -f $REMOTE_ROOT/$executable ] || /system/bin/rm $REMOTE_ROOT/$executable"
@@ -662,6 +696,10 @@ cleanup() {
     trap - EXIT
     set +e
     timing_finish "$status"
+    if [ "$REMOTE_POLICY" -eq 1 ]; then
+        timeout 5 "${SSH[@]}" "/system/bin/cat $REMOTE_ROOT/user-config.orig > /user/cfg/lorry.toml" \
+            >/dev/null 2>&1 || echo "test-native: could not restore the guest's /user/cfg/lorry.toml" >&2
+    fi
     if [ "$REMOTE_CREATED" -eq 1 ] && [ "$WARM" -eq 0 ]; then
         case "$REMOTE_ROOT" in
             "$REMOTE_BASE"/*) timeout 5 "${SSH[@]}" "/system/bin/rm -r $REMOTE_ROOT" >/dev/null 2>&1 ;;
@@ -708,6 +746,7 @@ cleanup() {
 VM_PID=""
 VM_STARTED=0
 REMOTE_CREATED=0
+REMOTE_POLICY=0
 PHASE_BUDGET="${LORRY_NATIVE_SELF_TIMEOUT:-1200}"
 PHASE_DEADLINE_MS=0
 case "$PHASE_BUDGET" in

@@ -50,10 +50,8 @@ fn main() {
     println!("cargo::rustc-env=BUILD_PROFILE={}", std::env::var("PROFILE").unwrap());
 }
 EOF
-cat >"$WORK/project/lorry.toml" <<'EOF'
-config-version = 1
-use-cargo-registry = false
-[policy.rules.shared-script]
+cat >>"$WORK/home/.config/lorry/lorry.toml" <<EOF
+[workspaces."$WORK/project".policy.rules.shared-script]
 action = "allow"
 source = "path"
 name = "shared"

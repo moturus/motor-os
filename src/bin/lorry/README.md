@@ -279,8 +279,8 @@ selecting a package or supplying `--manifest-path` does not move that search.
 Cargo alias tables are accepted, but aliases are not executed. Tables that
 cannot change a build, such as `term`, `net`, and `http`, are ignored with a
 note; the spec lists the rest. Project
-`lorry.toml` belongs at the workspace root or above it. A member-local file
-is rejected with the location to which its settings should move.
+`lorry.toml` belongs at the workspace root. A member-local file is rejected
+with the location to which its settings should move.
 
 `locate-project` emits `{"root":"/absolute/path/Cargo.toml"}`, or the path
 alone with `--message-format plain`. The manifest is discovered in the
@@ -562,6 +562,22 @@ test extraction roots, the global cache location, and approved native tools.
 Linux reads the user Lorry configuration below `$HOME/.config/lorry`; Motor OS
 layers system and user configuration below `/devtools/cfg` and
 `/user/cfg`.
+
+A project's own `lorry.toml` cannot grant anything, because a cloned
+repository controls it. It may set only `cargo-compat-version`, the `vendor`
+table, and the `keep-artifacts` and `keep-sources` retention flags. Grants
+for one workspace go in your configuration, under that workspace's table:
+
+```toml
+[workspaces."/user/helix".policy.rules.allow-helix-loader]
+action = "allow"
+name = "helix-loader"
+source = "path"
+allow-build-script = true
+```
+
+Lorry checks every `[workspaces]` table but applies only the one naming the
+current workspace root. Such a table may also set `repositories.local`.
 
 Repository lookup order is local, user, then system. System repositories are
 read-only. Vendoring writes the configured local repository, or the user

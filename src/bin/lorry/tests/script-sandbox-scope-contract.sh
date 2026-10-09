@@ -32,10 +32,8 @@ fn main() {
     println!("cargo:rustc-env=ROOT_READ={read}");
 }
 EOF
-cat >"$WORK/app/lorry.toml" <<'EOF'
-config-version = 1
-use-cargo-registry = false
-[policy.rules.dep]
+cat >>"$WORK/home/.config/lorry/lorry.toml" <<EOF
+[workspaces."$WORK/app".policy.rules.dep]
 action = "allow"
 name = "dep"
 source = "path"
