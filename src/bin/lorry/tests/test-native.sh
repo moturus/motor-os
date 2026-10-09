@@ -307,7 +307,7 @@ write_host_config() {
     # Cross and native self-builds use the same exact execution grants.
     # Default allow admits ordinary sources, not build-time capabilities.
     awk '/^\[policy\.rules\./ { rules = 1 } rules { print }' \
-        "$ROOT_DIR/img_files/motor-os-dev/devtools/cfg/lorry.toml" \
+        "$ROOT_DIR/img_files/motor-os-dev/user/cfg/lorry.toml" \
         >>"$host_home/.config/lorry/lorry.toml"
     fixture_policy "$WORK" >>"$host_home/.config/lorry/lorry.toml"
 }

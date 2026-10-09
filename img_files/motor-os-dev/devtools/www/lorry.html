@@ -500,7 +500,7 @@ model</a>. Anything outside it is rejected with a clear error, not approximated.
   <code>Cargo.lock</code>. Lorry never fetches into or repairs Cargo's cache. If the
   cache lacks a package, Lorry falls back to its own repositories.
   <code>--no-use-cargo-registry</code>, or <code>use-cargo-registry = false</code> in
-  <code>lorry.toml</code>, turns this mode off.</li>
+  your <code>lorry.toml</code>, turns this mode off.</li>
 </ul>
 <p>Git dependencies always come from Lorry's own verified snapshots.</p>
 
@@ -587,8 +587,8 @@ operational failures exit 101; an interrupted run exits 130.</p>
 <div class="table-wrap">
 <table>
   <tr><th>On Motor OS</th><th>Purpose</th></tr>
-  <tr><td><code>/devtools/cfg/lorry.toml</code></td><td>System configuration: the Cargo compatibility version (1.99), the curl program and CA bundle, vendor targets, policy limits, native C tools, and the reviewed grants for build scripts and procedural macros.</td></tr>
-  <tr><td><code>/user/cfg/lorry.toml</code></td><td>User configuration; on the image it names the user repository.</td></tr>
+  <tr><td><code>/user/cfg/lorry.toml</code></td><td>Your Lorry configuration: the Cargo compatibility version (1.99), the user repository, policy limits, and the reviewed grants for build scripts and procedural macros. Rules for one workspace go in its <code>[workspaces."/path"]</code> table. The curl program, CA bundle, and native C and C++ tools are built in.</td></tr>
+  <tr><td><code>/user/cfg/lorry-workspaces/</code></td><td>Lorry's record of your decisions for each workspace: <code>vendor --accept-all</code>, the review you approved, and the build-time code and repository Cargo files you approved. Delete a file to forget them.</td></tr>
   <tr><td><code>/devtools/lorry/vendor</code></td><td>The user repository: content-addressed, immutable objects under <code>objects/crates-io/sha256/</code>, a <code>.staging</code> area, and a <code>repository.toml</code>. Ships empty.</td></tr>
   <tr><td><code>/devtools/lorry/cache</code></td><td>Compiled dependency units shared between projects, read-only views of dependency sources, and saved answers from rustc.</td></tr>
   <tr><td><code>/user/cfg/lorry-redirect-sites.toml</code></td><td>The list of sites whose HTTP redirects have been allowed or denied.</td></tr>
@@ -597,13 +597,16 @@ operational failures exit 101; an interrupted run exits 130.</p>
   <tr><td><code>PROJECT/target/lorry/</code></td><td>Build output, in Cargo-shaped <code>debug</code> and <code>release</code> directories, plus incremental state for workspace members and path dependencies.</td></tr>
 </table>
 </div>
-<p>Configuration files are merged in order: the system file, the user file, and the
-nearest <code>lorry.toml</code> at or above the workspace root. Every file declares
-<code>config-version = 1</code>, and an unknown key is an error. On Linux the user file is
-<code>$HOME/.config/lorry/lorry.toml</code> and the cache is <code>$HOME/.cache/lorry</code>.
-Repositories come in three roles, <code>system</code> (read-only), <code>user</code>, and
-<code>local</code>. Lookup goes local, then user, then system. Vendoring writes to the
-local repository if one is configured, otherwise to the user's.</p>
+<p>Configuration files are merged in order: your file, then the workspace root's own
+<code>lorry.toml</code>. Every file declares <code>config-version = 1</code>, and an unknown
+key is an error. A project's own file grants nothing, because a cloned repository
+controls it: it may set only the Cargo compatibility version, vendor targets, and which
+dependency forms to keep. Policy, tools, and paths come from your file. On Linux your file
+is <code>$HOME/.config/lorry/lorry.toml</code> and the cache is <code>$HOME/.cache/lorry</code>.
+Repositories come in three roles, <code>system</code> (read-only, Linux only),
+<code>user</code>, and <code>local</code>, set in a workspace's table. Lookup goes local,
+then user, then system. Vendoring writes to the local repository if one is configured,
+otherwise to the user's.</p>
 
 <h2>Vendoring and admission</h2>
 <p><code>lorry vendor</code> resolves the whole workspace from <code>Cargo.toml</code> and
@@ -611,8 +614,13 @@ local repository if one is configured, otherwise to the user's.</p>
 HTTPS, checks the checksum and the archive structure, and applies the policy. Then it asks
 for one approval, showing each new package's exact version, checksum, license, size,
 whether it has a build script or is a procedural macro, and the dependency edges it adds.
-<code>--accept-all</code> approves after all checks have passed. It cannot bypass an
-integrity failure, a policy denial, the redirect list, or a native-tool restriction.
+The review also lists build scripts and procedural macros that no rule grants, and
+repository <code>.cargo</code> files that set a linker, a runner, or other risky options;
+one "yes" approves exactly what it shows, and Lorry records it for this workspace.
+<code>--accept-all</code> approves after all checks have passed, and Lorry remembers it:
+the workspace's build-time code then runs as it does with Cargo. It cannot bypass an
+integrity failure, a policy denial, or the redirect list. A fresh clone's committed
+admission record counts only after you approve its review with one <code>lorry vendor</code>.
 Approved objects are written with fsync and published atomically, and an object is never
 replaced. <code>Cargo.lock</code> is replaced next, and the admission record is written
 last.</p>
@@ -642,13 +650,14 @@ an editor; building needs a review.</p>
 </ul>
 
 <h3>Policy</h3>
-<p>The policy in <code>lorry.toml</code> decides what may be admitted. It has a default
+<p>The policy in your <code>lorry.toml</code> decides what may be admitted. It has a default
 action, optional path roots, limits, and per-package rules. On the developer image the
 limits are: at most 384 packages from outside the workspace, 16 MiB per package archive
 and 128 MiB or 20,000 files extracted, 256 MiB per transaction and 1 GiB extracted, and
 300 seconds and 8 MiB of output per build script. Dependency depth is not limited unless
-configured. A rule names the package, its exact version, its source, and its checksum,
-and it is the only way to grant the two things that run code at build time:</p>
+configured. A rule names the package, its exact version, its source, and its checksum.
+Rules, an approved review, or <code>--accept-all</code> are the only ways to grant the two
+things that run code at build time:</p>
 <pre><code>[policy.rules.serde_derive-1_0_229]
 action = "allow"
 name = "serde_derive"

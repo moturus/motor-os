@@ -1157,9 +1157,16 @@ errors. Paths are absolute and are canonicalized before use.
 
 Motor merges:
 
-1. `/devtools/cfg/lorry.toml`;
-2. `/user/cfg/lorry.toml`;
-3. the workspace root's own `lorry.toml`.
+1. `/user/cfg/lorry.toml`;
+2. the workspace root's own `lorry.toml`.
+
+On Motor, Lorry's paths and native tools are built in: curl
+`/system/bin/curl` with CA bundle `/system/cfg/ssl/ca-certificates.crt`, and
+for `x86_64-unknown-motor` the C compiler `/devtools/bin/cc` and C++ compiler
+`/devtools/bin/c++` (both with `--target=x86_64-unknown-motor`; the C++
+standard library is `c++`) and the archiver `/devtools/llvm/bin/llvm ar`.
+Configuration replaces any of them. Motor has no system layer, so
+`repositories.system` and `system-constraints` are Linux-only.
 
 Linux merges:
 

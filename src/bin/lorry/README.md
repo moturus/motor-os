@@ -578,8 +578,8 @@ Normal package authors do not need a project `lorry.toml`. Installation
 configuration supplies repository locations, compiler policy, network tools,
 test extraction roots, the global cache location, and approved native tools.
 Linux reads the user Lorry configuration below `$HOME/.config/lorry`; Motor OS
-layers system and user configuration below `/devtools/cfg` and
-`/user/cfg`.
+reads `/user/cfg/lorry.toml`, and its curl, CA bundle, C and C++ compilers,
+and archiver are built in.
 
 A project's own `lorry.toml` cannot grant anything, because a cloned
 repository controls it. It may set only `cargo-compat-version`, the `vendor`

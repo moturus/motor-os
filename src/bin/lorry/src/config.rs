@@ -287,10 +287,11 @@ struct Constraint {
     provenance: PathBuf,
 }
 
+/// Linux has one layer that is both system and user configuration. Motor has
+/// only the user's: Lorry's paths and tools there are built in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LayerKind {
     LinuxBase,
-    MotorSystem,
     MotorUser,
     Local,
 }
@@ -605,6 +606,9 @@ fn load_lorry_layers(
         fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     let layers = global_lorry_layers(environment);
     load_lorry_files(&layers, Some(&workspace), config)?;
+    if cfg!(target_os = "motor") {
+        add_motor_native_tools(config);
+    }
     if let Some(store) = crate::workspace_trust::Store::for_workspace(&workspace, environment) {
         store.load()?.apply(&mut config.policy, store.path())?;
     }
@@ -615,6 +619,47 @@ fn load_lorry_layers(
         merge_lorry_file(&local, LayerKind::Local, None, config)?;
     }
     Ok(())
+}
+
+/// Motor's development image installs these tools; configuration may replace
+/// any of them.
+fn add_motor_native_tools(config: &mut Config) {
+    let target = "x86_64-unknown-motor".to_owned();
+    let flags = vec![format!("--target={target}")];
+    for (role, tool) in [
+        (
+            NativeToolRole::CCompiler,
+            NativeTool {
+                cpp_stdlib: None,
+                program: Some(PathBuf::from("/devtools/bin/cc")),
+                prefix_args: Vec::new(),
+                flags: flags.clone(),
+            },
+        ),
+        (
+            NativeToolRole::CxxCompiler,
+            NativeTool {
+                cpp_stdlib: Some("c++".to_owned()),
+                program: Some(PathBuf::from("/devtools/bin/c++")),
+                prefix_args: Vec::new(),
+                flags,
+            },
+        ),
+        (
+            NativeToolRole::Archiver,
+            NativeTool {
+                cpp_stdlib: None,
+                program: Some(PathBuf::from("/devtools/llvm/bin/llvm")),
+                prefix_args: vec!["ar".to_owned()],
+                flags: Vec::new(),
+            },
+        ),
+    ] {
+        config
+            .native_tools
+            .entry((target.clone(), role))
+            .or_insert(tool);
+    }
 }
 
 fn load_global_lorry_layers(
@@ -643,10 +688,6 @@ pub(crate) fn workspace_table_key(root: &Path) -> String {
 fn global_lorry_layers(environment: &BTreeMap<String, String>) -> Vec<(PathBuf, LayerKind)> {
     let mut layers = Vec::new();
     if cfg!(target_os = "motor") {
-        layers.push((
-            PathBuf::from("/devtools/cfg/lorry.toml"),
-            LayerKind::MotorSystem,
-        ));
         layers.push((PathBuf::from("/user/cfg/lorry.toml"), LayerKind::MotorUser));
     } else if let Some(home) = environment.get("HOME") {
         layers.push((
@@ -828,7 +869,7 @@ fn merge_workspaces(
         let root = canonical_config_path(path, document.line_of_item(item), &name, key)?;
         let table = require_table(path, document, item, &name)?;
         reject_unknown_keys(path, document, table, &name, &["policy", "repositories"])?;
-        if !matches!(kind, LayerKind::LinuxBase | LayerKind::MotorSystem) {
+        if kind != LayerKind::LinuxBase {
             let mut leaves = Vec::new();
             collect_leaf_paths(table, "", &mut leaves);
             reject_locked_leaves(path, leaves, &config.constraints)?;
@@ -914,7 +955,7 @@ fn merge_repositories(
         (
             "system",
             &mut config.repositories.system,
-            matches!(kind, LayerKind::LinuxBase | LayerKind::MotorSystem),
+            kind == LayerKind::LinuxBase,
         ),
         (
             "user",
@@ -1412,7 +1453,7 @@ fn merge_constraints(
     let Some(item) = document.root().get("system-constraints") else {
         return Ok(());
     };
-    if !matches!(kind, LayerKind::LinuxBase | LayerKind::MotorSystem) {
+    if kind != LayerKind::LinuxBase {
         return Err(Error::at(
             path,
             document.line_of_item(item),
@@ -1458,7 +1499,7 @@ fn reject_locked_overrides(
     document: &Document,
     constraints: &[Constraint],
 ) -> Result<()> {
-    if matches!(kind, LayerKind::LinuxBase | LayerKind::MotorSystem) {
+    if kind == LayerKind::LinuxBase {
         return Ok(());
     }
     let mut leaves = Vec::new();
@@ -2605,7 +2646,7 @@ mod tests {
         fs::write(&user, "config-version = 1\nuse-cargo-registry = false\n").unwrap();
         let mut config = Config::default();
         assert_eq!(config.use_cargo_registry, None);
-        merge_lorry_file(&system, LayerKind::MotorSystem, None, &mut config).unwrap();
+        merge_lorry_file(&system, LayerKind::LinuxBase, None, &mut config).unwrap();
         assert_eq!(config.use_cargo_registry, Some(true));
         merge_lorry_file(&user, LayerKind::MotorUser, None, &mut config).unwrap();
         assert_eq!(config.use_cargo_registry, Some(false));
@@ -2657,7 +2698,7 @@ mod tests {
         .unwrap();
 
         let mut config = Config::default();
-        merge_lorry_file(&system, LayerKind::MotorSystem, None, &mut config).unwrap();
+        merge_lorry_file(&system, LayerKind::LinuxBase, None, &mut config).unwrap();
         merge_lorry_file(&user, LayerKind::MotorUser, None, &mut config).unwrap();
         assert_eq!(config.repositories.user, Some(repository));
     }
@@ -2819,6 +2860,33 @@ mod tests {
         ]);
         let config = Config::load_with_environment(&package, &environment).unwrap();
         assert_eq!(config.build_rustflags, ["--cfg", "from_home"]);
+    }
+
+    #[test]
+    fn motor_tools_are_built_in_but_configuration_wins() {
+        let mut config = Config::default();
+        let target = "x86_64-unknown-motor".to_owned();
+        config.native_tools.insert(
+            (target.clone(), NativeToolRole::CCompiler),
+            NativeTool {
+                cpp_stdlib: None,
+                program: Some(PathBuf::from("/user/bin/my-cc")),
+                prefix_args: Vec::new(),
+                flags: Vec::new(),
+            },
+        );
+        add_motor_native_tools(&mut config);
+        assert_eq!(config.native_tools.len(), 3);
+        let tool = |role| &config.native_tools[&(target.clone(), role)];
+        assert_eq!(
+            tool(NativeToolRole::CCompiler).program.as_deref(),
+            Some(Path::new("/user/bin/my-cc"))
+        );
+        assert_eq!(
+            tool(NativeToolRole::CxxCompiler).cpp_stdlib.as_deref(),
+            Some("c++")
+        );
+        assert_eq!(tool(NativeToolRole::Archiver).prefix_args, ["ar"]);
     }
 
     #[test]
@@ -3071,7 +3139,7 @@ native-tools = ["cxx-compiler"]
         .unwrap();
         fs::write(&user, "config-version = 1\n[policy]\ndefault = \"allow\"\n").unwrap();
         let mut config = Config::default();
-        merge_lorry_file(&system, LayerKind::MotorSystem, None, &mut config).unwrap();
+        merge_lorry_file(&system, LayerKind::LinuxBase, None, &mut config).unwrap();
         let error = merge_lorry_file(&user, LayerKind::MotorUser, None, &mut config).unwrap_err();
         assert!(error.to_string().contains("locked"));
 
