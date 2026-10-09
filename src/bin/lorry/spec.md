@@ -65,6 +65,10 @@ the remaining gaps exposed by the repository `Makefile`.
   absolute configured override may be allowed unless system policy locks the
   compiler.
 - Missing rustup/toolchain/compiler selections must produce actionable errors.
+- Like Cargo's `target/.rustc_info.json`, Lorry records the output of its
+  rustc version and cfg queries in `rustc-queries/` below the global cache
+  directory. A record is reused while the rustc path, size, and modification
+  time are unchanged.
 - `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` use Cargo-compatible precedence and
   are compilation-identity and cache inputs.
 - `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` are unsupported and must be

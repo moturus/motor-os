@@ -1,10 +1,14 @@
+use crate::atomic::AtomicFile;
 use crate::config::{CargoCompat, Config};
 use crate::diagnostic::{Error, Result};
+use crate::hash::{FieldDigest, hex};
 use crate::process;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 #[derive(Clone, Debug)]
 pub struct Toolchain {
@@ -14,6 +18,8 @@ pub struct Toolchain {
     pub release: String,
     pub host: String,
     pub compatibility: CargoCompat,
+    /// Where rustc query results are recorded, if anywhere.
+    pub query_cache: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -79,9 +85,17 @@ impl Toolchain {
         }
 
         validate_program(&rustc, "rustc")?;
-        let output =
-            process::query_rustc(&rustc, &["--version", "--verbose"], "rustc version query")?;
-        let verbose_version = String::from_utf8(output.stdout)
+        let query_cache = config
+            .cache_directory()
+            .ok()
+            .map(|cache| cache.join("rustc-queries"));
+        let output = cached_query(
+            query_cache.as_deref(),
+            &rustc,
+            &["--version", "--verbose"],
+            "rustc version query",
+        )?;
+        let verbose_version = String::from_utf8(output)
             .map_err(|_| Error::failure("rustc version output is not Unicode"))?;
         let fields = parse_verbose_version(&verbose_version)?;
         let release = fields["release"].clone();
@@ -106,6 +120,7 @@ impl Toolchain {
             release,
             host,
             compatibility,
+            query_cache,
         })
     }
 
@@ -114,24 +129,79 @@ impl Toolchain {
         if let Some(target) = explicit_target {
             arguments.extend(["--target", target]);
         }
-        let output = process::query_rustc(&self.rustc, &arguments, "rustc target cfg query")
-            .map_err(|error| {
-                if error.exit_code() == 130 {
-                    return error;
-                }
-                Error::failure(format!(
-                    "rustc does not support target `{}`: {error}",
-                    explicit_target.unwrap_or(&self.host)
-                ))
-                .with_help("install the target's standard library or choose another target")
-            })?;
-        let text = String::from_utf8(output.stdout)
+        let output = cached_query(
+            self.query_cache.as_deref(),
+            &self.rustc,
+            &arguments,
+            "rustc target cfg query",
+        )
+        .map_err(|error| {
+            if error.exit_code() == 130 {
+                return error;
+            }
+            Error::failure(format!(
+                "rustc does not support target `{}`: {error}",
+                explicit_target.unwrap_or(&self.host)
+            ))
+            .with_help("install the target's standard library or choose another target")
+        })?;
+        let text = String::from_utf8(output)
             .map_err(|_| Error::failure("rustc target cfg output is not Unicode"))?;
         Ok(TargetInfo {
             triple: explicit_target.unwrap_or(&self.host).to_owned(),
             cfg: CfgSet::parse(&text)?,
         })
     }
+}
+
+/// Runs a rustc query, or reuses its recorded output while the rustc file is
+/// unchanged. Like Cargo's `target/.rustc_info.json`, a record is keyed on the
+/// rustc path, size, and modification time. Cache failures only cost a query.
+fn cached_query(
+    cache: Option<&Path>,
+    rustc: &Path,
+    arguments: &[&str],
+    description: &str,
+) -> Result<Vec<u8>> {
+    const MAX_RECORD_BYTES: u64 = 1024 * 1024;
+    let record = cache.and_then(|cache| {
+        let metadata = fs::metadata(rustc).ok()?;
+        let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+        let mut key = FieldDigest::tagged(b"lorry-rustc-query-v1\0");
+        key.field(rustc.as_os_str().as_encoded_bytes());
+        key.field(&metadata.len().to_le_bytes());
+        key.field(&modified.as_nanos().to_le_bytes());
+        for argument in arguments {
+            key.field(argument.as_bytes());
+        }
+        Some(cache.join(hex(&key.finish())))
+    });
+    if let Some(path) = &record
+        && let Ok(file) = fs::File::open(path)
+    {
+        let mut bytes = Vec::new();
+        if file
+            .take(MAX_RECORD_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_ok_and(|read| read as u64 <= MAX_RECORD_BYTES)
+        {
+            return Ok(bytes);
+        }
+    }
+    let output = process::query_rustc(rustc, arguments, description)?.stdout;
+    if let Some(path) = &record {
+        let _ = write_record(path, &output);
+    }
+    Ok(output)
+}
+
+fn write_record(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| Error::failure(error.to_string()))?;
+    }
+    let mut record = AtomicFile::new(path)?;
+    record.write_all(bytes)?;
+    record.commit()
 }
 
 fn discover_clippy_driver(rustc: &Path, rustc_version: &str) -> Result<ClippyDriver> {
@@ -603,6 +673,59 @@ mod tests {
             discover_clippy_driver(&rustc, version).unwrap().sha256
         );
         assert!(discover_clippy_driver(&rustc, &version.replace("selected", "other")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rustc_queries_are_reused_until_rustc_changes() {
+        let root = std::env::temp_dir().join(format!("lorry-rustc-queries-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let rustc = root.join("rustc");
+        let log = root.join("log");
+        let cache = root.join("cache");
+        // A child process installs the script, so no forked child holds it
+        // open for writing (ETXTBSY).
+        let install = |output: &str| {
+            let staged = root.join("staged");
+            fs::write(
+                &staged,
+                format!(
+                    "#!/bin/sh\necho \"$*\" >>'{}'\nprintf '{output}'\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            assert!(
+                std::process::Command::new("cp")
+                    .arg(&staged)
+                    .arg(&rustc)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&rustc, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let runs = || fs::read_to_string(&log).unwrap_or_default().lines().count();
+        let query = |arguments: &[&str]| {
+            cached_query(Some(&cache), &rustc, arguments, "test query").unwrap()
+        };
+        install("first");
+        assert_eq!(query(&["--print", "cfg"]), b"first");
+        assert_eq!(query(&["--print", "cfg"]), b"first");
+        assert_eq!(runs(), 1);
+        assert_eq!(query(&["--print", "cfg", "--target", "other"]), b"first");
+        assert_eq!(runs(), 2);
+        install("second, longer");
+        assert_eq!(query(&["--print", "cfg"]), b"second, longer");
+        assert_eq!(runs(), 3);
+        assert_eq!(
+            cached_query(None, &rustc, &["--print", "cfg"], "test query").unwrap(),
+            b"second, longer"
+        );
+        assert_eq!(runs(), 4);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(not(target_os = "motor"))]

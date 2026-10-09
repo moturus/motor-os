@@ -334,6 +334,7 @@ mod tests {
             release: "1.98.0-nightly".to_owned(),
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
+            query_cache: None,
         }
     }
 
@@ -352,6 +353,7 @@ mod tests {
             release: "1.98.0-dev".to_owned(),
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
+            query_cache: None,
         }
     }
 
