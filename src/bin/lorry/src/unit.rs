@@ -111,6 +111,8 @@ pub enum UnitEdgeKind {
     ArtifactDependency,
     BuildScriptExecutable,
     BuildScriptOutput,
+    /// A build-script run reads the metadata of a dependency's script run.
+    BuildScriptMetadata,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1103,6 +1105,54 @@ fn dependency_units_with_selected(
                 }
                 // Development edges belong to harness/example units, never ordinary libraries.
                 DependencyKind::Dev => {}
+            }
+        }
+    }
+    // As in Cargo, a build script runs after the scripts of its package's
+    // direct normal dependencies that have `links`, and reads their metadata.
+    for package in &resolution.packages {
+        if manifests[&package.key].build_script.is_none() {
+            continue;
+        }
+        for edge in package
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == DependencyKind::Normal)
+        {
+            let dependency = &manifests[&edge.package];
+            if dependency.links.is_none()
+                || dependency.build_script.is_none()
+                || dependency
+                    .library
+                    .as_ref()
+                    .is_none_or(|library| library.proc_macro)
+            {
+                continue;
+            }
+            let Some(parent_kind) = edge.parent_compile_kind else {
+                continue;
+            };
+            let run = unit_key(
+                package,
+                UnitKind::BuildScriptRun,
+                parent_kind,
+                &features_for(package, parent_kind),
+            );
+            let dependency_package = packages[&edge.package];
+            let child = unit_key(
+                dependency_package,
+                UnitKind::BuildScriptRun,
+                edge.compile_kind,
+                &features_for(dependency_package, edge.compile_kind),
+            );
+            if units.contains_key(&run) && units.contains_key(&child) {
+                add_edge(
+                    &mut units,
+                    &run,
+                    child,
+                    UnitEdgeKind::BuildScriptMetadata,
+                    None,
+                )?;
             }
         }
     }

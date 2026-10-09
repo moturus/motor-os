@@ -690,6 +690,24 @@ fn execute_unit<'a>(
                         primary_package: false,
                     },
                 )?;
+                for edge in planned
+                    .unit
+                    .dependencies
+                    .iter()
+                    .filter(|edge| edge.kind == UnitEdgeKind::BuildScriptMetadata)
+                {
+                    let script = outputs.build_scripts.get(&edge.unit).ok_or_else(|| {
+                        Error::failure(format!(
+                            "build-script metadata of `{} {}` was not produced first",
+                            edge.unit.package.name, edge.unit.package.version
+                        ))
+                    })?;
+                    let links = manifests
+                        .get(&edge.unit.package)
+                        .and_then(|manifest| manifest.links.as_deref())
+                        .ok_or_else(|| Error::failure("build-script metadata has no `links`"))?;
+                    build_script::add_dependency_metadata(&mut environment, links, &script.output);
+                }
                 let admission = options
                     .admission
                     .packages

@@ -1214,6 +1214,11 @@ fn directive_digest(
                 digest.string("directive", "warning");
                 digest.os("value", OsStr::new(value), replacements);
             }
+            Directive::Metadata { key, value } => {
+                digest.string("directive", "metadata");
+                digest.string("key", key);
+                digest.os("value", OsStr::new(value), replacements);
+            }
         }
     }
 }
@@ -1526,6 +1531,13 @@ fn build_script_manifest(build: &BuildScriptInput<'_>) -> Vec<u8> {
                 Directive::Warning(value) => (
                     "warning",
                     vec![("value-encoded", encoded(OsStr::new(value), &replacements))],
+                ),
+                Directive::Metadata { key, value } => (
+                    "metadata",
+                    vec![
+                        ("key", Value::String(key.clone())),
+                        ("value-encoded", encoded(OsStr::new(value), &replacements)),
+                    ],
                 ),
             };
             let mut object = BTreeMap::from([("kind".to_owned(), Value::String(kind.to_owned()))]);

@@ -1655,7 +1655,12 @@ The supported directive protocol accepts both `cargo:` and `cargo::` forms of
 `rustc-cfg`, `rustc-check-cfg`, `rustc-env`, `rustc-link-lib`, `rustc-link-arg`,
 `rustc-link-search`, `rerun-if-changed`, `rerun-if-env-changed`, `warning`,
 and `error`. As in Cargo, `rustc-flags` may carry only `-l` and `-L` flags;
-they act as `rustc-link-lib` and `rustc-link-search`. Unknown directives, unsafe paths, malformed/oversized output,
+they act as `rustc-link-lib` and `rustc-link-search`. Also as in Cargo, any
+other `cargo:KEY=VALUE` line, and `cargo::metadata=KEY=VALUE`, is metadata;
+`cargo:error=` is metadata too, and only `cargo::error=` is an error. Metadata
+keys are limited to ASCII letters, digits, `_`, and `-`. A script runs after
+the scripts of its package's direct normal dependencies that have `links`,
+and receives their metadata as `DEP_<LINKS>_<KEY>`. Other unknown directives, unsafe paths, malformed/oversized output,
 timeout, sandbox violation, or nonzero exit are hard failures. An
 `rerun-if-env-changed` name absent from the cleared safe environment is tracked
 as explicitly absent; ambient values remain inaccessible.

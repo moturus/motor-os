@@ -52,7 +52,35 @@ pub enum Directive {
         value: Option<OsString>,
     },
     Warning(String),
+    /// `KEY=VALUE` metadata, passed to the build scripts of dependents as
+    /// `DEP_<LINKS>_<KEY>` when this package has `links`.
+    Metadata {
+        key: String,
+        value: String,
+    },
 }
+
+/// The directive names that the old `cargo:` syntax reserves. Any other name
+/// there is metadata, as in Cargo.
+const RESERVED_DIRECTIVES: &[&str] = &[
+    "rustc-flags",
+    "rustc-link-lib",
+    "rustc-link-search",
+    "rustc-link-arg-cdylib",
+    "rustc-cdylib-link-arg",
+    "rustc-link-arg-bins",
+    "rustc-link-arg-bin",
+    "rustc-link-arg-tests",
+    "rustc-link-arg-benches",
+    "rustc-link-arg-examples",
+    "rustc-link-arg",
+    "rustc-cfg",
+    "rustc-check-cfg",
+    "rustc-env",
+    "warning",
+    "rerun-if-changed",
+    "rerun-if-env-changed",
+];
 
 /// The targets a `rustc-link-arg-*` directive names, as in Cargo.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -333,6 +361,22 @@ pub(crate) fn add_caller_environment(
         }
     }
     Ok(())
+}
+
+/// Passes a `links` dependency's script metadata as `DEP_<LINKS>_<KEY>`.
+pub(crate) fn add_dependency_metadata(
+    environment: &mut BTreeMap<String, OsString>,
+    links: &str,
+    output: &Output,
+) {
+    for directive in &output.directives {
+        if let Directive::Metadata { key, value } = directive {
+            environment.insert(
+                format!("DEP_{}_{}", envify(links), envify(key)),
+                value.into(),
+            );
+        }
+    }
 }
 
 fn envify(value: &str) -> String {
@@ -664,14 +708,17 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
     };
     for (index, raw_line) in stdout.split('\n').enumerate() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        let directive = line
-            .strip_prefix("cargo::")
-            .or_else(|| line.strip_prefix("cargo:"));
-        let Some(directive) = directive else {
-            if !line.is_empty() {
-                output.diagnostics.push(line.to_owned());
-            }
-            continue;
+        let (directive, old_syntax) = match line.strip_prefix("cargo::") {
+            Some(directive) => (directive, false),
+            None => match line.strip_prefix("cargo:") {
+                Some(directive) => (directive, true),
+                None => {
+                    if !line.is_empty() {
+                        output.diagnostics.push(line.to_owned());
+                    }
+                    continue;
+                }
+            },
         };
         let (name, value) = directive.split_once('=').ok_or_else(|| {
             Error::failure(format!(
@@ -679,6 +726,24 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                 index + 1
             ))
         })?;
+        if old_syntax && !RESERVED_DIRECTIVES.contains(&name) || !old_syntax && name == "metadata" {
+            let (key, value) = if old_syntax {
+                (name, value)
+            } else {
+                value.split_once('=').ok_or_else(|| {
+                    Error::failure(format!(
+                        "build-script metadata directive on line {} must be KEY=VALUE",
+                        index + 1
+                    ))
+                })?
+            };
+            validate_metadata(key, value, index + 1)?;
+            output.directives.push(Directive::Metadata {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            });
+            continue;
+        }
         validate_directive_value(name, value, index + 1)?;
         let parsed = match name {
             "rustc-cfg" => Directive::RustcCfg(value.to_owned()),
@@ -969,6 +1034,24 @@ fn validate_directive_value(name: &str, value: &str, line: usize) -> Result<()> 
     Ok(())
 }
 
+/// Metadata keys become parts of environment names, so they are limited to
+/// ASCII letters, digits, `_`, and `-`.
+fn validate_metadata(key: &str, value: &str, line: usize) -> Result<()> {
+    if key.is_empty()
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || value
+            .chars()
+            .any(|character| character == '\0' || character.is_control())
+    {
+        return Err(Error::failure(format!(
+            "build-script metadata on line {line} has an invalid key or value"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_environment_name(name: &str, directive: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name
@@ -1114,6 +1197,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_metadata_in_both_syntaxes_as_cargo_does() {
+        let fixture = Fixture::new();
+        let output = parse(
+            b"cargo:root=/opt/demo\n\
+              cargo::metadata=include=/opt/demo/include\n\
+              cargo:version_number=30000\n\
+              cargo:error=not an error in the old syntax\n\
+              cargo:empty=\n",
+            &fixture.options(),
+        )
+        .unwrap();
+        let metadata = |key: &str, value: &str| Directive::Metadata {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        };
+        assert_eq!(
+            output.directives,
+            [
+                metadata("root", "/opt/demo"),
+                metadata("include", "/opt/demo/include"),
+                metadata("version_number", "30000"),
+                metadata("error", "not an error in the old syntax"),
+                metadata("empty", ""),
+            ]
+        );
+        let mut environment = BTreeMap::new();
+        add_dependency_metadata(&mut environment, "demo-sys", &output);
+        assert_eq!(environment["DEP_DEMO_SYS_ROOT"], "/opt/demo");
+        assert_eq!(environment["DEP_DEMO_SYS_VERSION_NUMBER"], "30000");
+        assert_eq!(environment.len(), 5);
+    }
+
+    #[test]
     fn parses_rustc_flags_as_link_libraries_and_searches() {
         let fixture = Fixture::new();
         let out = fs::canonicalize(&fixture.out).unwrap();
@@ -1199,7 +1315,9 @@ mod tests {
     fn rejects_unknown_errors_limits_and_invalid_environment_names() {
         let fixture = Fixture::new();
         for (source, expected) in [
-            ("cargo:metadata=value\n", "unsupported"),
+            ("cargo::root=value\n", "unsupported"),
+            ("cargo:include.dir=value\n", "invalid key"),
+            ("cargo::metadata=value\n", "KEY=VALUE"),
             ("cargo:rustc-link-arg-bins=-s\n", "no bin target"),
             ("cargo::error=bad input\n", "reported an error"),
             ("cargo:rerun-if-env-changed=9BAD\n", "invalid environment"),
