@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::diagnostic::{Error, Result};
 use crate::hash::{FieldDigest, modified_time, sha256_file};
 use crate::identity::CargoDebugInfo;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, Target, TargetKind};
 use crate::sandbox::{Executable, NetworkAccess, Policy, Sandbox};
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::TargetInfo;
@@ -37,6 +37,11 @@ pub enum Directive {
     },
     RustcLinkLib(String),
     RustcLinkArg(String),
+    /// A `rustc-link-arg-*` argument for some targets of the package.
+    RustcLinkArgFor {
+        target: LinkArgTarget,
+        value: String,
+    },
     RustcLinkSearch {
         kind: Option<String>,
         path: PathBuf,
@@ -49,8 +54,34 @@ pub enum Directive {
     Warning(String),
 }
 
+/// The targets a `rustc-link-arg-*` directive names, as in Cargo.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkArgTarget {
+    Cdylib,
+    Bins,
+    Bin(String),
+    Tests,
+    Benches,
+    Examples,
+}
+
+impl LinkArgTarget {
+    pub(crate) fn name(&self) -> String {
+        match self {
+            Self::Cdylib => "cdylib".to_owned(),
+            Self::Bins => "bins".to_owned(),
+            Self::Bin(name) => format!("bin={name}"),
+            Self::Tests => "tests".to_owned(),
+            Self::Benches => "benches".to_owned(),
+            Self::Examples => "examples".to_owned(),
+        }
+    }
+}
+
 pub struct ParseOptions<'a> {
     pub package_root: &'a Path,
+    /// The package's non-library targets, which `rustc-link-arg-*` must name.
+    pub targets: &'a [Target],
     pub workspace_root: Option<&'a Path>,
     pub workspace_lock: Option<&'a Path>,
     pub out_dir: &'a Path,
@@ -63,6 +94,7 @@ pub struct ParseOptions<'a> {
 
 pub struct RunOptions<'a> {
     pub child_lease_fd: Option<i32>,
+    pub targets: &'a [Target],
     pub executable: &'a Path,
     pub arguments: &'a [OsString],
     pub environment: &'a BTreeMap<String, OsString>,
@@ -425,6 +457,7 @@ pub fn replay(options: &RunOptions<'_>, stdout: &[u8], stderr: String) -> Result
         stdout,
         &ParseOptions {
             package_root: options.package_root,
+            targets: options.targets,
             workspace_root: workspace_root.as_deref(),
             workspace_lock: workspace_lock.as_deref(),
             out_dir: options.out_dir,
@@ -684,6 +717,54 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                 continue;
             }
             "rustc-link-arg" => Directive::RustcLinkArg(value.to_owned()),
+            "rustc-link-arg-cdylib" | "rustc-cdylib-link-arg" => Directive::RustcLinkArgFor {
+                target: LinkArgTarget::Cdylib,
+                value: value.to_owned(),
+            },
+            "rustc-link-arg-bins"
+            | "rustc-link-arg-tests"
+            | "rustc-link-arg-benches"
+            | "rustc-link-arg-examples" => {
+                let (target, kind) = match name {
+                    "rustc-link-arg-bins" => (LinkArgTarget::Bins, TargetKind::Bin),
+                    "rustc-link-arg-tests" => (LinkArgTarget::Tests, TargetKind::Test),
+                    "rustc-link-arg-benches" => (LinkArgTarget::Benches, TargetKind::Bench),
+                    _ => (LinkArgTarget::Examples, TargetKind::Example),
+                };
+                if !options.targets.iter().any(|target| target.kind == kind) {
+                    return Err(Error::failure(format!(
+                        "build-script directive `{name}` on line {} names no {} target of this package",
+                        index + 1,
+                        kind.as_str()
+                    )));
+                }
+                Directive::RustcLinkArgFor {
+                    target,
+                    value: value.to_owned(),
+                }
+            }
+            "rustc-link-arg-bin" => {
+                let (binary, value) = value.split_once('=').ok_or_else(|| {
+                    Error::failure(format!(
+                        "build-script rustc-link-arg-bin directive on line {} must be BIN=ARG",
+                        index + 1
+                    ))
+                })?;
+                if !options
+                    .targets
+                    .iter()
+                    .any(|target| target.kind == TargetKind::Bin && target.name == binary)
+                {
+                    return Err(Error::failure(format!(
+                        "build-script directive `rustc-link-arg-bin` on line {} names no bin target `{binary}`",
+                        index + 1
+                    )));
+                }
+                Directive::RustcLinkArgFor {
+                    target: LinkArgTarget::Bin(binary.to_owned()),
+                    value: value.to_owned(),
+                }
+            }
             "rustc-link-search" => {
                 let (kind, path) = split_link_search(value)?;
                 Directive::RustcLinkSearch {
@@ -960,6 +1041,7 @@ mod tests {
 
         fn options(&self) -> ParseOptions<'_> {
             ParseOptions {
+                targets: &[],
                 package_root: &self.root,
                 workspace_root: None,
                 workspace_lock: None,
@@ -974,6 +1056,60 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn parses_target_specific_link_arguments_for_existing_targets() {
+        let fixture = Fixture::new();
+        let target = |kind, name: &str| Target {
+            kind,
+            name: name.to_owned(),
+            path: fixture.root.join("src/main.rs"),
+            crate_types: vec!["bin".to_owned()],
+            required_features: None,
+            edition: crate::manifest::Edition::E2021,
+            test: true,
+            bench: true,
+            doc: true,
+            harness: true,
+        };
+        let targets = [
+            target(TargetKind::Bin, "tool"),
+            target(TargetKind::Test, "it"),
+        ];
+        let options = ParseOptions {
+            targets: &targets,
+            ..fixture.options()
+        };
+        let output = parse(
+            b"cargo:rustc-link-arg-bins=-Wl,-a\n\
+              cargo::rustc-link-arg-bin=tool=-Wl,-b\n\
+              cargo:rustc-link-arg-tests=-Wl,-c\n\
+              cargo:rustc-cdylib-link-arg=-Wl,-d\n",
+            &options,
+        )
+        .unwrap();
+        let link = |target, value: &str| Directive::RustcLinkArgFor {
+            target,
+            value: value.to_owned(),
+        };
+        assert_eq!(
+            output.directives,
+            [
+                link(LinkArgTarget::Bins, "-Wl,-a"),
+                link(LinkArgTarget::Bin("tool".to_owned()), "-Wl,-b"),
+                link(LinkArgTarget::Tests, "-Wl,-c"),
+                link(LinkArgTarget::Cdylib, "-Wl,-d"),
+            ]
+        );
+        for invalid in [
+            b"cargo:rustc-link-arg-benches=-Wl,-e\n".as_slice(),
+            b"cargo:rustc-link-arg-examples=-Wl,-e\n",
+            b"cargo:rustc-link-arg-bin=other=-Wl,-e\n",
+            b"cargo:rustc-link-arg-bin=-Wl,-e\n",
+        ] {
+            assert!(parse(invalid, &options).is_err(), "{invalid:?}");
         }
     }
 
@@ -1064,12 +1200,7 @@ mod tests {
         let fixture = Fixture::new();
         for (source, expected) in [
             ("cargo:metadata=value\n", "unsupported"),
-            ("cargo:rustc-link-arg-bins=-s\n", "unsupported"),
-            ("cargo:rustc-link-arg-bin=program=-s\n", "unsupported"),
-            ("cargo:rustc-link-arg-tests=-s\n", "unsupported"),
-            ("cargo:rustc-link-arg-benches=-s\n", "unsupported"),
-            ("cargo:rustc-link-arg-examples=-s\n", "unsupported"),
-            ("cargo:rustc-link-arg-cdylib=-s\n", "unsupported"),
+            ("cargo:rustc-link-arg-bins=-s\n", "no bin target"),
             ("cargo::error=bad input\n", "reported an error"),
             ("cargo:rerun-if-env-changed=9BAD\n", "invalid environment"),
             ("cargo:rustc-env=9BAD=value\n", "invalid environment"),
@@ -1369,6 +1500,7 @@ mod tests {
 
         fn options(&self, timeout: Duration, max_output_bytes: u64) -> RunOptions<'_> {
             RunOptions {
+                targets: &[],
                 child_lease_fd: None,
                 executable: &self.executable,
                 arguments: &self.arguments,
@@ -1446,6 +1578,7 @@ mod tests {
         );
 
         let parse_options = ParseOptions {
+            targets: &[],
             package_root: &fixture.package,
             workspace_root: None,
             workspace_lock: Some(&lock),
@@ -1508,6 +1641,7 @@ mod tests {
         )
         .unwrap();
         let mut options = ParseOptions {
+            targets: &[],
             package_root: &fixture.package,
             workspace_root: Some(&fixture.root),
             workspace_lock: None,

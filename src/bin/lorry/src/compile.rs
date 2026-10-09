@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use crate::build_script::{Directive, Output as BuildScriptOutput};
+use crate::build_script::{Directive, LinkArgTarget, Output as BuildScriptOutput};
 use crate::diagnostic::{Error, Result};
 use crate::identity::{CargoDebugInfo, CargoPanicStrategy, CargoStrip, CargoUnitLto, Identity};
 use crate::manifest::{Edition, LibraryTarget, Manifest, TargetKind};
@@ -484,6 +484,7 @@ pub fn dependency_rustc_invocation_with_build_output(
                     key.kind,
                     UnitKind::Library | UnitKind::ProcMacro | UnitKind::LibraryHarness
                 ),
+            |target| link_arg_applies(target, key, manifest),
         );
     }
     if options.verbose {
@@ -499,11 +500,39 @@ pub fn dependency_rustc_invocation_with_build_output(
     }))
 }
 
+/// Which units a `rustc-link-arg-*` argument reaches, as in Cargo.
+fn link_arg_applies(target: &LinkArgTarget, key: &UnitKey, manifest: &Manifest) -> bool {
+    let binary = matches!(key.kind, UnitKind::Binary | UnitKind::BinaryHarness);
+    match target {
+        LinkArgTarget::Cdylib => {
+            key.kind == UnitKind::Library
+                && manifest
+                    .library
+                    .as_ref()
+                    .is_some_and(|library| library.crate_types.iter().any(|kind| kind == "cdylib"))
+        }
+        LinkArgTarget::Bins => binary,
+        LinkArgTarget::Bin(name) => binary && key.target.as_deref() == Some(name.as_str()),
+        LinkArgTarget::Tests => key.kind == UnitKind::IntegrationHarness,
+        LinkArgTarget::Benches => key.kind == UnitKind::Bench,
+        LinkArgTarget::Examples => {
+            key.kind == UnitKind::Example
+                && manifest
+                    .target(
+                        TargetKind::Example,
+                        key.target.as_deref().unwrap_or_default(),
+                    )
+                    .is_some_and(|example| example.crate_types.iter().any(|kind| kind == "bin"))
+        }
+    }
+}
+
 fn apply_build_output(
     arguments: &mut Vec<OsString>,
     environment: &mut BTreeMap<String, OsString>,
     build: BuildOutput<'_>,
     link_libs: bool,
+    link_arg_applies: impl Fn(&LinkArgTarget) -> bool,
 ) {
     value(environment, "OUT_DIR", build.out_dir);
     for directive in &build.output.directives {
@@ -521,11 +550,15 @@ fn apply_build_output(
             push(arguments, library);
         }
     }
-    // Cargo's common link-arg instruction reaches every target of this package.
+    // Cargo's common link-arg instruction reaches every target of this
+    // package; the `rustc-link-arg-*` forms reach only the targets they name.
     for directive in &build.output.directives {
-        if let Directive::RustcLinkArg(argument) = directive {
-            codegen(arguments, &format!("link-arg={argument}"));
-        }
+        let argument = match directive {
+            Directive::RustcLinkArg(argument) => argument,
+            Directive::RustcLinkArgFor { target, value } if link_arg_applies(target) => value,
+            _ => continue,
+        };
+        codegen(arguments, &format!("link-arg={argument}"));
     }
     for directive in &build.output.directives {
         if let Directive::RustcCfg(cfg) = directive {
@@ -1622,6 +1655,10 @@ mod tests {
                 },
                 Directive::RustcLinkLib("static=fixture".to_owned()),
                 Directive::RustcLinkArg("-Wl,--gc-sections".to_owned()),
+                Directive::RustcLinkArgFor {
+                    target: LinkArgTarget::Bins,
+                    value: "-Wl,--bins-only".to_owned(),
+                },
                 Directive::RustcLinkArg("-Wl,--as-needed".to_owned()),
                 Directive::RustcCfg("generated_cfg".to_owned()),
                 Directive::RustcLinkSearch {
@@ -1671,6 +1708,45 @@ mod tests {
         ]));
         assert_eq!(invocation.environment["OUT_DIR"], script_out);
         assert_eq!(invocation.environment["GENERATED"], "yes");
+
+        // `rustc-link-arg-*` arguments reach only the targets they name.
+        let manifest = &manifests[&generic_array];
+        let unit = |kind, target: Option<&str>| UnitKey {
+            kind,
+            target: target.map(str::to_owned),
+            ..library_key.clone()
+        };
+        let applies = |target, key: &UnitKey| link_arg_applies(&target, key, manifest);
+        let binary = unit(UnitKind::Binary, Some("tool"));
+        assert!(applies(LinkArgTarget::Bins, &binary));
+        assert!(applies(LinkArgTarget::Bin("tool".to_owned()), &binary));
+        assert!(!applies(LinkArgTarget::Bin("other".to_owned()), &binary));
+        assert!(applies(
+            LinkArgTarget::Bins,
+            &unit(UnitKind::BinaryHarness, Some("tool"))
+        ));
+        assert!(!applies(LinkArgTarget::Tests, &binary));
+        assert!(applies(
+            LinkArgTarget::Tests,
+            &unit(UnitKind::IntegrationHarness, Some("it"))
+        ));
+        assert!(applies(
+            LinkArgTarget::Benches,
+            &unit(UnitKind::Bench, Some("speed"))
+        ));
+        assert!(!applies(LinkArgTarget::Cdylib, library_key));
+        let mut cdylib = manifest.clone();
+        cdylib.library.as_mut().unwrap().crate_types = vec!["cdylib".to_owned()];
+        assert!(link_arg_applies(
+            &LinkArgTarget::Cdylib,
+            library_key,
+            &cdylib
+        ));
+        assert!(!link_arg_applies(
+            &LinkArgTarget::Cdylib,
+            &unit(UnitKind::LibraryHarness, None),
+            &cdylib
+        ));
 
         let mut transitive_plan = plan.clone();
         let typenum_key = transitive_plan

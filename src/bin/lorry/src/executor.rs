@@ -746,6 +746,7 @@ fn execute_unit<'a>(
                 let workspace_lock = options.workspace_root.join("Cargo.lock");
                 let run_options = RunOptions {
                     child_lease_fd: options.child_lease_fd,
+                    targets: &manifest.targets,
                     executable,
                     arguments: &[],
                     environment: &environment,

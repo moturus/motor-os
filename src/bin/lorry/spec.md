@@ -1660,8 +1660,11 @@ timeout, sandbox violation, or nonzero exit are hard failures. An
 `rerun-if-env-changed` name absent from the cleared safe environment is tracked
 as explicitly absent; ambient values remain inaccessible.
 Common link arguments reach every target of the emitting package, preserving
-their order after link libraries. Target-specific `rustc-link-arg-*` forms
-remain unsupported.
+their order after link libraries. As in Cargo, `rustc-link-arg-bins`,
+`rustc-link-arg-bin=BIN=ARG`, `rustc-link-arg-tests`,
+`rustc-link-arg-benches`, `rustc-link-arg-examples`, and
+`rustc-link-arg-cdylib` (or `rustc-cdylib-link-arg`) reach only those targets
+of the package, in the same order, and each needs a matching target.
 
 Lorry supports `c-compiler`, `cxx-compiler`, and `archiver` native-tool roles. They are
 configured per target as absolute executable, fixed prefix-argument array, and

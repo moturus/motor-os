@@ -1188,6 +1188,11 @@ fn directive_digest(
                 digest.string("directive", "rustc-link-arg");
                 digest.os("value", OsStr::new(value), replacements);
             }
+            Directive::RustcLinkArgFor { target, value } => {
+                digest.string("directive", "rustc-link-arg-for");
+                digest.string("target", &target.name());
+                digest.os("value", OsStr::new(value), replacements);
+            }
             Directive::RustcLinkSearch { kind, path } => {
                 digest.string("directive", "rustc-link-search");
                 digest.string("kind", kind.as_deref().unwrap_or(""));
@@ -1483,6 +1488,13 @@ fn build_script_manifest(build: &BuildScriptInput<'_>) -> Vec<u8> {
                 Directive::RustcLinkArg(value) => (
                     "rustc-link-arg",
                     vec![("value-encoded", encoded(OsStr::new(value), &replacements))],
+                ),
+                Directive::RustcLinkArgFor { target, value } => (
+                    "rustc-link-arg-for",
+                    vec![
+                        ("target", Value::String(target.name())),
+                        ("value-encoded", encoded(OsStr::new(value), &replacements)),
+                    ],
                 ),
                 Directive::RustcLinkSearch { kind, path } => (
                     "rustc-link-search",
