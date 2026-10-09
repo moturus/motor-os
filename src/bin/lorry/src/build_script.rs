@@ -664,6 +664,25 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                 }
             }
             "rustc-link-lib" => Directive::RustcLinkLib(value.to_owned()),
+            "rustc-flags" => {
+                for (flag, value) in rustc_flags(value)? {
+                    output.directives.push(if flag == "-l" {
+                        Directive::RustcLinkLib(value.to_owned())
+                    } else {
+                        let (kind, path) = split_link_search(value)?;
+                        Directive::RustcLinkSearch {
+                            kind: kind.map(str::to_owned),
+                            path: resolve_existing(
+                                path,
+                                &package_root,
+                                &[&out_dir],
+                                "rustc-flags",
+                            )?,
+                        }
+                    });
+                }
+                continue;
+            }
             "rustc-link-arg" => Directive::RustcLinkArg(value.to_owned()),
             "rustc-link-search" => {
                 let (kind, path) = split_link_search(value)?;
@@ -805,6 +824,30 @@ fn resolve_input(value: &str, package_root: &Path, allowed_roots: &[&Path]) -> R
     Err(escapes())
 }
 
+/// Splits `rustc-flags` as Cargo does: only `-l` and `-L`, each with its
+/// value attached or as the next word.
+fn rustc_flags(value: &str) -> Result<Vec<(&str, &str)>> {
+    let mut words = value.split_whitespace();
+    let mut flags = Vec::new();
+    while let Some(word) = words.next() {
+        let (flag, attached) = word.split_at_checked(2).unwrap_or((word, ""));
+        if !matches!(flag, "-l" | "-L") {
+            return Err(Error::failure(format!(
+                "only `-l` and `-L` flags are allowed in rustc-flags: `{value}`"
+            )));
+        }
+        let value = if attached.is_empty() {
+            words
+                .next()
+                .ok_or_else(|| Error::failure(format!("rustc-flags `{flag}` has no value")))?
+        } else {
+            attached
+        };
+        flags.push((flag, value));
+    }
+    Ok(flags)
+}
+
 fn split_link_search(value: &str) -> Result<(Option<&str>, &str)> {
     let Some((kind, path)) = value.split_once('=') else {
         return Ok((None, value));
@@ -931,6 +974,43 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn parses_rustc_flags_as_link_libraries_and_searches() {
+        let fixture = Fixture::new();
+        let out = fs::canonicalize(&fixture.out).unwrap();
+        let source = format!(
+            "cargo:rustc-flags=-lz -L native={} -l static=native -L{}\n",
+            out.display(),
+            out.display()
+        );
+        let output = parse(source.as_bytes(), &fixture.options()).unwrap();
+        assert_eq!(
+            output.directives,
+            [
+                Directive::RustcLinkLib("z".to_owned()),
+                Directive::RustcLinkSearch {
+                    kind: Some("native".to_owned()),
+                    path: out.clone(),
+                },
+                Directive::RustcLinkLib("static=native".to_owned()),
+                Directive::RustcLinkSearch {
+                    kind: None,
+                    path: out,
+                },
+            ]
+        );
+        for invalid in [
+            "cargo:rustc-flags=-Wl,--as-needed\n".to_owned(),
+            "cargo:rustc-flags=-lz -l\n".to_owned(),
+            format!("cargo:rustc-flags=-L {}\n", fixture.root.display()),
+        ] {
+            assert!(
+                parse(invalid.as_bytes(), &fixture.options()).is_err(),
+                "{invalid}"
+            );
         }
     }
 

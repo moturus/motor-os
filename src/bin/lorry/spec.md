@@ -1654,7 +1654,8 @@ permitted roots. A reused run replays only its warnings.
 The supported directive protocol accepts both `cargo:` and `cargo::` forms of
 `rustc-cfg`, `rustc-check-cfg`, `rustc-env`, `rustc-link-lib`, `rustc-link-arg`,
 `rustc-link-search`, `rerun-if-changed`, `rerun-if-env-changed`, `warning`,
-and `error`. Unknown directives, unsafe paths, malformed/oversized output,
+and `error`. As in Cargo, `rustc-flags` may carry only `-l` and `-L` flags;
+they act as `rustc-link-lib` and `rustc-link-search`. Unknown directives, unsafe paths, malformed/oversized output,
 timeout, sandbox violation, or nonzero exit are hard failures. An
 `rerun-if-env-changed` name absent from the cleared safe environment is tracked
 as explicitly absent; ambient values remain inaccessible.
