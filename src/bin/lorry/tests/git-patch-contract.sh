@@ -24,6 +24,12 @@ GIT_URL="https://fixture.invalid/repository.git"
 mkdir -p "$WORK/bin" "$WORK/git" "$WORK/source" \
     "$PROJECT/app/src" "$HOME_DIR/.config/lorry" "$REPOSITORY"
 
+# Keep each approved review but not the standing `--accept-all`, as an
+# interactive approval would, so later Git movement still needs a review.
+forget_accept_all() {
+    sed -i '/^accept-all = true$/d' "$HOME_DIR"/.config/lorry/workspaces/*.toml
+}
+
 fail() {
     echo "git-patch-contract: $*" >&2
     exit 1
@@ -191,6 +197,7 @@ grep -F 'no interactive terminal is available' \
 
 echo "== Vendoring a Git patch without rewriting manifests =="
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor -p app --accept-all)
+forget_accept_all
 [ "$(manifest_hashes)" = "$MANIFEST_HASHES" ] || fail "vendor changed an input manifest"
 [ ! -e "$PROJECT/.lorry/vendor/renamed" ] || fail "vendor created the legacy patch path"
 OBJECT="$(printf %s "$CARGO_SOURCE" | sha256sum | cut -d' ' -f1)"
@@ -252,6 +259,7 @@ grep -F 'no interactive terminal is available' "$WORK/unapproved.out" >/dev/null
 
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor -p app --accept-all \
     </dev/null >"$WORK/accepted.out" 2>&1)
+forget_accept_all
 [ "$(grep -c '^Git patch candidate:' "$WORK/accepted.out")" -eq 2 ] ||
     fail "moved branch and default HEAD were not both shown"
 if grep -F '[y/N]' "$WORK/accepted.out" >/dev/null; then
@@ -302,6 +310,7 @@ grep -F '[WARNING: RETARGETED TAG]' "$WORK/declined.typescript" >/dev/null ||
 
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor -p app --accept-all \
     </dev/null >"$WORK/batch-accepted.out" 2>&1)
+forget_accept_all
 [ "$(grep -c '^Git patch candidate:' "$WORK/batch-accepted.out")" -eq 4 ] ||
     fail "automated multi-selector review did not show all candidates"
 grep -F "source = \"git+$GIT_URL#$BATCH_COMMIT\"" \

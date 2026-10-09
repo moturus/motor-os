@@ -239,6 +239,7 @@ mod tests {
                             configured_native_tools: false,
                         },
                     )]),
+                    proposed: Default::default(),
                 },
             )
             .unwrap(),

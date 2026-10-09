@@ -175,7 +175,14 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                 .with_help("run workspace-root `lorry vendor --locked` to review the workspace"));
             }
         }
-        CompactState::load(&manifest.workspace_root)?
+        let state = CompactState::load(&manifest.workspace_root)?;
+        // Checked before any reuse, so revoking an approval takes effect.
+        if let Some(state) = &state
+            && !config.policy.approves(&state.review_sha256)
+        {
+            return Err(crate::workspace_trust::unapproved_review());
+        }
+        state
     };
     let target_directory = config.target_directory(
         &current,
@@ -4754,6 +4761,7 @@ mod tests {
                 allow_build_script: true,
                 allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
+                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: fixture.0.join("lorry.toml"),
             },
@@ -4921,6 +4929,7 @@ mod tests {
                 allow_build_script: true,
                 allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
+                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: fixture.0.join("lorry.toml"),
             },

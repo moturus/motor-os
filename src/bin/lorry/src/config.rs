@@ -163,6 +163,26 @@ pub struct Policy {
     pub trust_cargo_cache: bool,
     /// The canonical workspace root whose `[workspaces]` table applies.
     pub workspace: Option<PathBuf>,
+    /// The user ran `vendor --accept-all` in this workspace: like Cargo, its
+    /// build-time code needs no grants. Deny rules and limits still apply.
+    pub accept_all: bool,
+    /// The admission review the user last approved for this workspace.
+    pub approved_review: Option<String>,
+    /// Set by an interactive `vendor`: missing build-time grants become
+    /// proposals in its review instead of errors.
+    pub propose_missing: bool,
+}
+
+impl Policy {
+    /// Build scripts and procedural macros need no grants.
+    pub fn trusts_build_code(&self) -> bool {
+        self.trust_cargo_cache || self.accept_all
+    }
+
+    /// Whether the user approved this admission review.
+    pub fn approves(&self, review_sha256: &str) -> bool {
+        self.accept_all || self.approved_review.as_deref() == Some(review_sha256)
+    }
 }
 
 impl Default for Policy {
@@ -174,6 +194,9 @@ impl Default for Policy {
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
             workspace: None,
+            accept_all: false,
+            approved_review: None,
+            propose_missing: false,
         }
     }
 }
@@ -234,6 +257,9 @@ pub struct PolicyRule {
     pub allow_build_script: bool,
     pub allow_proc_macro: bool,
     pub native_tools: BTreeSet<NativeToolRole>,
+    /// Gives a granted build script whatever native tools are configured,
+    /// as an approved review does; hand-written rules name their roles.
+    pub configured_native_tools: bool,
     pub caller_env: BTreeSet<String>,
     pub provenance: PathBuf,
 }
@@ -529,6 +555,9 @@ fn load_lorry_layers(
         fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     let layers = global_lorry_layers(environment);
     load_lorry_files(&layers, Some(&workspace), config)?;
+    if let Some(store) = crate::workspace_trust::Store::for_workspace(&workspace, environment) {
+        store.load()?.apply(&mut config.policy, store.path())?;
+    }
     config.policy.workspace = Some(workspace);
     // Only the workspace root's own file is project configuration.
     let local = workspace_root.join("lorry.toml");
@@ -1315,6 +1344,7 @@ fn merge_policy_rules(
                 allow_build_script,
                 allow_proc_macro,
                 native_tools,
+                configured_native_tools: false,
                 caller_env,
                 provenance: path.to_path_buf(),
             },

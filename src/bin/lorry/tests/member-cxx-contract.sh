@@ -107,6 +107,9 @@ stdlib = ""
 program = "$MOTOR_AR"
 EOF
 env HOME="$WORK/home" "$LORRY" vendor --locked --accept-all
+# Keep the approved review but not the standing `--accept-all`, which would
+# give the script every configured tool; the role grants are under test.
+sed -i '/^accept-all = true$/d' "$WORK"/home/.config/lorry/workspaces/*.toml
 USER_CONFIG="$WORK/home/.config/lorry/lorry.toml"
 cp "$USER_CONFIG" "$WORK/grants.toml"
 sed -i 's/native-tools = \["cxx-compiler", "archiver"\]/native-tools = ["archiver"]/' "$USER_CONFIG"

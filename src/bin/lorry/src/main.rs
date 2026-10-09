@@ -58,6 +58,7 @@ mod upgrade;
 mod validation;
 mod vendor;
 mod vendor_lock;
+mod workspace_trust;
 
 use cli::{Cli, Command};
 use diagnostic::Result;

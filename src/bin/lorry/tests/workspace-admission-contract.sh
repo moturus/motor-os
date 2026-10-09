@@ -130,6 +130,9 @@ for package in app shared outside; do
 done
 echo 'unrelated state' >app/.lorry/sentinel
 cp .lorry/dependencies-v2.toml "$WORK/before-migration.admission"
+# Keep the approved review but not the standing `--accept-all`, so the
+# migration below needs a confirmation.
+sed -i '/^accept-all = true$/d' "$HOME"/.config/lorry/workspaces/*.toml
 if "$LORRY" -q --max-packages 2 --lorry-messages vendor --locked --offline -p app \
     >"$WORK/declined-migration.out" 2>"$WORK/declined-migration.err"; then
     echo 'migration removed member approval without confirmation' >&2

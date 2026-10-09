@@ -211,4 +211,63 @@ CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" tree --locked --offline \
     >"$WORK/cargo.tree"
 cmp "$WORK/lorry.tree" "$WORK/cargo.tree"
 
+echo "== --accept-all covers a crates.io build script that no rule grants =="
+SCRIPTED="$WORK/scripted"
+SCRIPTED_HOME="$WORK/scripted-home"
+mkdir -p "$SCRIPTED/src" "$SCRIPTED_HOME/.config/lorry"
+# libc is in Lorry's own lock, so the host cache has it.
+cat >"$SCRIPTED/Cargo.toml" <<'EOF'
+[package]
+name = "scripted-fixture"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libc = { version = "=0.2.186", default-features = false }
+EOF
+cat >"$SCRIPTED/Cargo.lock" <<'EOF'
+version = 4
+
+[[package]]
+name = "libc"
+version = "0.2.186"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "scripted-fixture"
+version = "0.1.0"
+dependencies = ["libc"]
+EOF
+printf 'fn main() { let _: libc::c_int = 0; }\n' >"$SCRIPTED/src/main.rs"
+"$WORK/cache-curl" prepare "$HOST_CARGO_HOME" "$WORK/crates-io-scripted" "$SCRIPTED/Cargo.lock"
+cat >"$SCRIPTED_HOME/.config/lorry/lorry.toml" <<EOF
+config-version = 1
+use-cargo-registry = false
+
+[repositories]
+user = "$REPOSITORY"
+
+[network]
+curl = "$WORK/crates-io-scripted/curl"
+
+[cache]
+directory = "$WORK/cache"
+
+[policy]
+default = "allow"
+EOF
+if (cd "$SCRIPTED" && HOME="$SCRIPTED_HOME" RUSTC="$RUSTC" "$LORRY" -q vendor </dev/null) \
+    >"$WORK/scripted-denied.out" 2>"$WORK/scripted-denied.err"; then
+    fail "vendor admitted an ungranted crates.io build script without a terminal"
+fi
+grep -F 'package `libc 0.2.186` contains a build script' "$WORK/scripted-denied.err" >/dev/null ||
+    fail "ungranted crates.io build script had the wrong error: $(cat "$WORK/scripted-denied.err")"
+(cd "$SCRIPTED" && HOME="$SCRIPTED_HOME" RUSTC="$RUSTC" "$LORRY" -q vendor --accept-all </dev/null) ||
+    fail "--accept-all did not admit the crates.io build script"
+grep -Fx 'accept-all = true' "$SCRIPTED_HOME"/.config/lorry/workspaces/*.toml >/dev/null ||
+    fail "--accept-all was not recorded"
+(cd "$SCRIPTED" && HOME="$SCRIPTED_HOME" RUSTC="$RUSTC" "$LORRY" -q build) ||
+    fail "the accepted workspace did not build with the crates.io build script"
+
 echo "PASS: cached crates.io acquisition, metadata views, and tree output are stable and need no temp dir"

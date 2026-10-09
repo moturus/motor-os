@@ -2059,6 +2059,7 @@ mod tests {
                     caller_env: Default::default(),
                 },
             )]),
+            proposed: Default::default(),
         };
         let graph = dependency_units(&resolution, &manifests).unwrap();
         let (toolchain, target) = actual_toolchain();
@@ -2195,6 +2196,7 @@ mod tests {
                     caller_env: Default::default(),
                 },
             )]),
+            proposed: Default::default(),
         };
         let graph = dependency_units(&resolution, &manifests).unwrap();
         let (toolchain, target) = actual_toolchain();

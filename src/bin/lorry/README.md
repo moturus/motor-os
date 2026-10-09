@@ -410,8 +410,19 @@ outside the scoped closure are labeled explicitly. One interactive approval
 is required whenever the complete candidate differs from committed admission,
 even if its immutable objects already exist.
 `--accept-all` approves every policy-compliant dependency and capability
-change, but it cannot bypass integrity checks, policy denials, redirect trust,
-or native-tool restrictions.
+change, but it cannot bypass integrity checks, policy denials, or redirect
+trust.
+
+Lorry remembers your decisions for each workspace in your own configuration
+(`/user/cfg/lorry-workspaces/` on Motor OS, `~/.config/lorry/workspaces/` on
+Linux); a cloned repository cannot write them. After `vendor --accept-all`,
+the workspace's build scripts and procedural macros run as they do with Cargo,
+build scripts get every configured native tool, and later reviews there are
+approved without asking. Without it, an interactive review also lists build
+scripts and procedural macros that no rule grants, with the native tools each
+build script would get; one "yes" approves exactly those. Builds use a
+committed `.lorry/` record only after you approve its review, so a fresh clone
+needs one `lorry vendor`. Delete the workspace's file to forget the decisions.
 
 Commit Cargo.lock and the generated `.lorry/` dependency state with the
 project. Do not edit files below `.lorry/`; Lorry writes them deterministically.

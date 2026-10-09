@@ -107,12 +107,14 @@ pub struct PackageEvidence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Admission {
     pub packages: BTreeMap<PackageKey, PackageAdmission>,
+    /// Packages whose build-time code an interactive review must approve.
+    pub proposed: BTreeSet<PackageKey>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageAdmission {
     pub native_tools: BTreeSet<NativeToolRole>,
-    /// A trusted build script from Cargo's cache also gets every native tool
+    /// A trusted or approved build script also gets every native tool
     /// configured for its target.
     pub configured_native_tools: bool,
     pub caller_env: BTreeSet<String>,
@@ -193,7 +195,8 @@ pub(crate) fn preflight_workspace(policy: &Policy, resolution: &Resolution) -> R
             return Err(not_admitted(policy, package, &facts, None));
         }
         if known_build_script
-            && !policy.trust_cargo_cache
+            && !policy.trusts_build_code()
+            && !policy.propose_missing
             && !potential_rules
                 .iter()
                 .any(|id| script_rule_authorizes(&policy.rules[id], package))
@@ -207,7 +210,8 @@ pub(crate) fn preflight_workspace(policy: &Policy, resolution: &Resolution) -> R
                 .is_some_and(|library| library.proc_macro)
         });
         if known_proc_macro
-            && !policy.trust_cargo_cache
+            && !policy.trusts_build_code()
+            && !policy.propose_missing
             && !potential_rules
                 .iter()
                 .any(|id| proc_macro_rule_authorizes(&policy.rules[id], package))
@@ -242,6 +246,7 @@ pub fn inspect(
     }
     inspect_evidence(&preflight.policy, resolution, evidence)?;
     let mut admitted = BTreeMap::new();
+    let mut proposals = BTreeSet::new();
     for package in &resolution.packages {
         let evidence = &evidence[&package.key];
         let source = source_kind(package);
@@ -281,14 +286,19 @@ pub fn inspect(
             .filter(|id| script_rule_authorizes(&preflight.policy.rules[id.as_str()], package))
             .copied()
             .collect::<Vec<_>>();
-        let trusted = preflight.policy.trust_cargo_cache;
+        let trusted = preflight.policy.trusts_build_code();
+        let propose = preflight.policy.propose_missing;
+        let mut proposed = false;
         if evidence.build_script && script_allows.is_empty() && !trusted {
-            return Err(build_script_not_admitted(
-                &preflight.policy,
-                package,
-                &facts,
-                Some(evidence),
-            ));
+            if !propose {
+                return Err(build_script_not_admitted(
+                    &preflight.policy,
+                    package,
+                    &facts,
+                    Some(evidence),
+                ));
+            }
+            proposed = true;
         }
         let proc_macro_allows = allows
             .iter()
@@ -296,13 +306,24 @@ pub fn inspect(
             .copied()
             .collect::<Vec<_>>();
         if evidence.proc_macro && proc_macro_allows.is_empty() && !trusted {
-            return Err(proc_macro_not_admitted(
-                &preflight.policy,
-                package,
-                &facts,
-                Some(evidence),
-            ));
+            if !propose {
+                return Err(proc_macro_not_admitted(
+                    &preflight.policy,
+                    package,
+                    &facts,
+                    Some(evidence),
+                ));
+            }
+            proposed = true;
         }
+        if proposed {
+            proposals.insert(package.key.clone());
+        }
+        let configured = trusted
+            || proposed
+            || script_allows
+                .iter()
+                .any(|id| preflight.policy.rules[id.as_str()].configured_native_tools);
         let native_tools = script_allows
             .iter()
             .flat_map(|id| {
@@ -325,13 +346,16 @@ pub fn inspect(
             package.key.clone(),
             PackageAdmission {
                 native_tools,
-                configured_native_tools: trusted && evidence.build_script,
+                configured_native_tools: configured && evidence.build_script,
                 caller_env,
             },
         );
     }
 
-    Ok(Admission { packages: admitted })
+    Ok(Admission {
+        packages: admitted,
+        proposed: proposals,
+    })
 }
 
 /// Veto known locked identities before any index or Git acquisition. Tree and
@@ -1113,7 +1137,10 @@ fn exact_allow_example(
     if allow_proc_macro {
         example.push_str("allow-proc-macro = true\n");
     }
-    example.push_str("`--accept-all` cannot bypass this policy");
+    example.push_str(
+        "or approve it in an interactive `lorry vendor` review, \
+         or trust this workspace's build-time code with `lorry vendor --accept-all`",
+    );
     example
 }
 
@@ -1226,6 +1253,9 @@ mod tests {
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
             workspace: None,
+            accept_all: false,
+            approved_review: None,
+            propose_missing: false,
         };
         let resolution = make_resolution(vec![member.clone(), outside]);
         preflight_sources(&policy, &resolution).unwrap();
@@ -1326,6 +1356,7 @@ mod tests {
             allow_build_script: false,
             allow_proc_macro: false,
             native_tools: BTreeSet::new(),
+            configured_native_tools: false,
             caller_env: Default::default(),
             provenance: Path::new("/system/lorry.toml").to_owned(),
         }
@@ -1379,6 +1410,9 @@ mod tests {
             rules: BTreeMap::from([("veto".into(), veto)]),
             trust_cargo_cache: false,
             workspace: None,
+            accept_all: false,
+            approved_review: None,
+            propose_missing: false,
         };
         assert!(
             preflight_locked_sources(&policy, &lock)
@@ -1404,6 +1438,9 @@ mod tests {
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
             workspace: None,
+            accept_all: false,
+            approved_review: None,
+            propose_missing: false,
         };
         let mut inspected = evidence(&package, true);
         inspected.proc_macro = true;
@@ -1478,6 +1515,9 @@ mod tests {
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
             workspace: None,
+            accept_all: false,
+            approved_review: None,
+            propose_missing: false,
         };
         policy.limits.max_depth = Some(1);
         policy.limits.max_packages = 1;
@@ -1549,6 +1589,9 @@ mod tests {
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
             workspace: None,
+            accept_all: false,
+            approved_review: None,
+            propose_missing: false,
         };
         let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
@@ -1590,6 +1633,57 @@ mod tests {
     }
 
     #[test]
+    fn accepted_and_reviewed_workspaces_grant_build_code_but_keep_admission() {
+        let package = registry_package("demo", "1.2.3", 4);
+        let resolution = make_resolution(vec![package.clone()]);
+        let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
+
+        // `--accept-all` covers build-time code, not default-deny admission.
+        let mut accepted = Policy {
+            accept_all: true,
+            ..Policy::default()
+        };
+        assert!(
+            preflight_workspace(&accepted, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("not admitted")
+        );
+        accepted.default = PolicyDefault::Allow;
+        let pass = preflight_workspace(&accepted, &resolution).unwrap();
+        let admission = inspect(&pass, &resolution, &evidence).unwrap();
+        assert!(admission.packages[&package.key].configured_native_tools);
+        assert!(admission.proposed.is_empty());
+
+        // An interactive review proposes the missing grant instead of failing.
+        let proposing = Policy {
+            default: PolicyDefault::Allow,
+            propose_missing: true,
+            ..Policy::default()
+        };
+        let pass = preflight_workspace(&proposing, &resolution).unwrap();
+        let admission = inspect(&pass, &resolution, &evidence).unwrap();
+        assert_eq!(admission.proposed, BTreeSet::from([package.key.clone()]));
+        assert!(admission.packages[&package.key].configured_native_tools);
+        let member = path_package(Path::new("/project/local-demo"), true, true);
+        preflight_workspace(&proposing, &make_resolution(vec![member])).unwrap();
+
+        // A recorded grant gives its script the configured tools.
+        let mut granted = Policy {
+            default: PolicyDefault::Allow,
+            ..Policy::default()
+        };
+        let mut allow = rule(PolicyAction::Allow, None, None);
+        allow.allow_build_script = true;
+        allow.configured_native_tools = true;
+        granted.rules.insert("lorry-grant-00000".to_owned(), allow);
+        let pass = preflight_workspace(&granted, &resolution).unwrap();
+        let admission = inspect(&pass, &resolution, &evidence).unwrap();
+        assert!(admission.packages[&package.key].configured_native_tools);
+        assert!(admission.proposed.is_empty());
+    }
+
+    #[test]
     fn procedural_macros_need_an_explicit_grant() {
         let package = path_package(Path::new("/allowed/local-demo"), false, true);
         let resolution = make_resolution(vec![package.clone()]);
@@ -1615,6 +1709,7 @@ mod tests {
                 allow_build_script: false,
                 allow_proc_macro: true,
                 native_tools: BTreeSet::new(),
+                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
@@ -1689,6 +1784,7 @@ mod tests {
                 allow_build_script: true,
                 allow_proc_macro: false,
                 native_tools: BTreeSet::from([NativeToolRole::CCompiler]),
+                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
@@ -1826,6 +1922,9 @@ mod tests {
             rules: BTreeMap::new(),
             trust_cargo_cache: false,
             workspace: None,
+            accept_all: false,
+            approved_review: None,
+            propose_missing: false,
         };
         // The root edge points at a member, so `second` is at depth 1.
         policy.limits.max_depth = Some(0);

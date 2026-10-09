@@ -231,6 +231,30 @@ fixture_policy() {
     done
 }
 
+# Lorry's decisions file name for a workspace root (see workspace_trust.rs).
+decisions_name() {
+    printf '%s' "$1" | sha256sum | cut -c1-32
+}
+
+# Approves the native fixture's committed admission record without recording
+# `--accept-all`, so its grant rules stay under test.
+fixture_approval() {
+    local root="$1"
+    local review
+    review="$(sed -n 's/^review-sha256 = "\([0-9a-f]*\)"$/\1/p' \
+        "$SCRIPT_DIR/native-fixture/.lorry/dependencies-v2.toml")"
+    printf '%s\n' 'format-version = 1' "workspace = \"$root\"" \
+        "approved-review-sha256 = \"$review\""
+}
+
+# Workspaces whose decisions this run leaves in the guest's configuration.
+remote_decision_roots() {
+    printf '%s\n' "$REMOTE_ROOT/lorry-first/src/bin/lorry" "$REMOTE_ROOT/native-fixture" \
+        "$REMOTE_ROOT/proc-macro-fixture" "$REMOTE_ROOT/clippy-native-fixture" \
+        "$REMOTE_ROOT/workspace-fixture" "$REMOTE_ROOT/editor-evidence/default/project" \
+        "$REMOTE_ROOT/editor-evidence/custom/project" "$REMOTE_ROOT/editor-evidence/member/project"
+}
+
 # Motor has no per-run HOME configuration: the grants go into the guest's
 # user configuration for this run, and cleanup restores the original.
 install_remote_policy() {
@@ -445,6 +469,10 @@ PY
             "$tree/src/sys/lib/moto-rt/src"
     done
     copy_native_fixture "$WORK/native-fixture"
+    mkdir -p "$host_home/.config/lorry/workspaces"
+    fixture_approval "$(realpath "$WORK/native-fixture")" >"$host_home/.config/lorry/workspaces/$(
+        decisions_name "$(realpath "$WORK/native-fixture")"
+    ).toml"
     rm -rf "$WORK/proc-macro-fixture"
     cp -R "$SCRIPT_DIR/proc-macro-fixture" "$WORK/proc-macro-fixture"
     rm -rf "$WORK/clippy-native-fixture"
@@ -570,6 +598,10 @@ run_native() {
         done
     fi
     upload_tree "$WORK/native-fixture" "$fixture"
+    fixture_approval "$fixture" >"$WORK/fixture-approval.toml"
+    upload_file "$WORK/fixture-approval.toml" "$REMOTE_ROOT/fixture-approval.toml"
+    remote_command "[ -d /user/cfg/lorry-workspaces ] || /system/bin/mkdir /user/cfg/lorry-workspaces"
+    remote_command "/system/bin/cat $REMOTE_ROOT/fixture-approval.toml > /user/cfg/lorry-workspaces/$(decisions_name "$fixture").toml"
     if [ "$WARM" -eq 1 ]; then
         remote_command "[ ! -d $REMOTE_ROOT/workspace-fixture ] || /system/bin/rm -r $REMOTE_ROOT/workspace-fixture"
     fi
@@ -699,6 +731,13 @@ cleanup() {
     if [ "$REMOTE_POLICY" -eq 1 ]; then
         timeout 5 "${SSH[@]}" "/system/bin/cat $REMOTE_ROOT/user-config.orig > /user/cfg/lorry.toml" \
             >/dev/null 2>&1 || echo "test-native: could not restore the guest's /user/cfg/lorry.toml" >&2
+        local root file removals=""
+        while read -r root; do
+            file="/user/cfg/lorry-workspaces/$(decisions_name "$root").toml"
+            removals="$removals[ ! -f $file ] || /system/bin/rm $file; "
+        done < <(remote_decision_roots)
+        timeout 10 "${SSH[@]}" "$removals" >/dev/null 2>&1 ||
+            echo "test-native: could not remove this run's guest workspace decisions" >&2
     fi
     if [ "$REMOTE_CREATED" -eq 1 ] && [ "$WARM" -eq 0 ]; then
         case "$REMOTE_ROOT" in

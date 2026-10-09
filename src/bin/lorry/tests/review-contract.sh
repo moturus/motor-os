@@ -104,6 +104,9 @@ echo "== Creating deterministic local dependency state =="
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all) \
     >/dev/null 2>"$WORK/initial.stderr"
 expect_no_warning initial
+# Keep the approved review but not the standing `--accept-all`, as an
+# interactive approval would, so later changes still need a review.
+sed -i '/^accept-all = true$/d' "$HOME_DIR"/.config/lorry/workspaces/*.toml
 
 echo "== Preserving admission for unused member declarations =="
 cat >>"$PROJECT/Cargo.toml" <<'EOF'

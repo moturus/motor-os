@@ -211,7 +211,10 @@ the complete candidate canonical review as a TOML string. Source items include
 exact identities, checksums where applicable, tree hashes, licenses, and
 build-time code flags; capability items include native-tool roles. Roles use
 the canonical alphabetical order. Human and JSON modes use the same approval
-rules, including nonterminal rejection and explicit `--accept-all`.
+rules, including nonterminal rejection and explicit `--accept-all`. When the
+review proposes build-time code, a `reason: "lorry-vendor-grants"` line
+before it names each package, its source kind, whether it has a build script
+or procedural macro, and the configured native-tool roles.
 
 `build`, `check`, `run`, `test`, `clean`, `metadata`, and `tree` accept
 `--locked`, `--offline`, and `--frozen`. Those commands already prohibit
@@ -1086,10 +1089,40 @@ licenses, source digests, build scripts, and native-tool roles.
 
 An existing package's previous capability set may be proposed but is never
 silently carried to a new identity. Interactive approval covers the displayed
-package and capability changes. A new native-tool role requires an existing
-administrator grant. `--accept-all` approves all displayed package and
-capability changes that survive explicit policy, integrity, and resource-limit
-checks; it grants no capability that those checks reject.
+package and capability changes. `--accept-all` approves all displayed package
+and capability changes that survive explicit denies, integrity, and
+resource-limit checks.
+
+### Workspace decisions
+
+A repository's own files never grant trust. Lorry records the user's
+decisions for one workspace in the user's configuration directory:
+`/user/cfg/lorry-workspaces/` on Motor and `$HOME/.config/lorry/workspaces/`
+on Linux. The file is named by the first 32 hex digits of the SHA-256 of the
+canonical workspace root and names that root; a file that names another root
+is an error. It is written under a lock and replaced atomically, and deleting
+it forgets the decisions. It holds:
+
+- `accept-all = true`, after `vendor --accept-all`. From then on, every
+  command treats that workspace's build scripts and procedural macros as
+  Cargo does: they need no grants, and build scripts receive every configured
+  native tool. Default-deny admission, deny rules, integrity checks, and
+  limits still apply, and later reviews in the workspace are approved without
+  asking.
+- `approved-review-sha256`, the admission review the user last approved,
+  interactively or with `--accept-all`. Build, check, Clippy, run, and test
+  refuse an admission record whose review is not approved, before any reuse of
+  earlier output. `vendor` reviews an unapproved record in full, as if it were
+  new, and asks once.
+- `[[grant]]` entries for build-time code approved in an interactive review.
+  With a terminal and without `accept-all`, a missing build-script or
+  procedural-macro grant joins the review instead of failing, listed with the
+  native tools each build script will receive. One approval covers what the
+  review shows. Crates.io and Git grants pin the exact version and checksum or
+  source tree; a workspace member is named only, and another path package
+  keeps its source-tree pin. Such grants become exact allow rules whose build
+  scripts receive every configured native tool. Without a terminal, a missing
+  grant is an error whose help names the review and `--accept-all`.
 
 Verified immutable repository objects may be published before project files.
 Vendoring atomically replaces Cargo.lock when needed and writes portable state
@@ -1282,9 +1315,9 @@ with default deny, at least one allow must match. Integrity checks cannot be
 disabled. Policy may constrain package identity, version/source/checksum,
 exact license expression, build-script presence, source digest, path roots,
 procedural-macro presence, sizes, file counts, dependency depth, package
-count, and native-tool roles. Outside Cargo cache mode, build scripts and
-procedural macros always require their respective explicit allows, even
-under default allow.
+count, and native-tool roles. Outside Cargo cache mode and accepted
+workspaces, build scripts and procedural macros always require their
+respective explicit allows or recorded grants, even under default allow.
 Policy rules express those grants with `allow-build-script = true` and
 `allow-proc-macro = true`; neither grant implies the other. Native-tool roles
 additionally require the build-script grant.

@@ -124,7 +124,7 @@ impl TrustStore {
 
     pub fn save(&mut self, site: Site, decision: Decision) -> Result<()> {
         ensure_store_parent(&self.path)?;
-        let _lock = TrustLock::acquire(&self.path)?;
+        let _lock = TrustLock::acquire(&self.path.with_file_name(".redirect-sites.lock"))?;
         let mut latest = Self::load(&self.path)?;
         let (selected, opposite) = match decision {
             Decision::Allow => (&mut latest.allow, &latest.deny),
@@ -227,13 +227,13 @@ fn render_sites(output: &mut String, sites: &BTreeSet<Site>) {
     }
 }
 
-struct TrustLock {
+/// An exclusive lock on a file of user decisions, held while it is rewritten.
+pub(crate) struct TrustLock {
     _file: File,
 }
 
 impl TrustLock {
-    fn acquire(store: &Path) -> Result<Self> {
-        let path = store.with_file_name(".redirect-sites.lock");
+    pub(crate) fn acquire(path: &Path) -> Result<Self> {
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true);
         #[cfg(unix)]
@@ -243,17 +243,14 @@ impl TrustLock {
             #[cfg(target_os = "linux")]
             options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
-        let file = options.open(&path).map_err(|error| {
+        let file = options.open(path).map_err(|error| {
             Error::failure(format!(
-                "failed to open redirect trust lock `{}`: {error}",
+                "failed to open trust lock `{}`: {error}",
                 path.display()
             ))
         })?;
         file.lock().map_err(|error| {
-            Error::failure(format!(
-                "failed to lock redirect trust file `{}`: {error}",
-                store.display()
-            ))
+            Error::failure(format!("failed to lock `{}`: {error}", path.display()))
         })?;
         Ok(Self { _file: file })
     }

@@ -5,6 +5,7 @@ use crate::manifest::SourceWorkspace;
 use crate::resolver::workspace::{
     features::member_requests, resolve_complete_workspace, resolve_selected_workspace,
 };
+use crate::workspace_trust;
 
 pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
     if cli.use_cargo_registry == Some(true) {
@@ -147,10 +148,14 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     let mut workspace =
         SourceWorkspace::load(&current, cli.manifest_path.as_deref().map(Path::new))?;
     workspace.load_context(options.locked)?;
-    let config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
+    let mut config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
     if workspace.packages.is_empty() {
         return Ok(0);
     }
+    let accept_all = options.accept_all || config.policy.accept_all;
+    config.policy.accept_all = accept_all;
+    // With a terminal, missing build-time grants join the review below.
+    config.policy.propose_missing = !accept_all && io::stdin().is_terminal();
     if options.locked {
         policy::preflight_locked_sources(
             &config.policy,
@@ -336,12 +341,19 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     let capabilities = admission_state::capabilities_from(&selected, &evidence, &admission)?;
     candidate.complete(capabilities.clone())?;
     let commitment = candidate.commitment()?;
-    let unchanged = previous.as_ref().is_some_and(|previous| {
-        previous.scope == scope
-            && previous.review_sha256 == commitment
-            && previous.contexts == recorded
-            && previous.capabilities == capabilities
-    });
+    // A record the user never approved, such as one committed to a cloned
+    // repository, is reviewed in full like a new one.
+    let approved = previous
+        .as_ref()
+        .is_some_and(|previous| config.policy.approves(&previous.review_sha256));
+    let unchanged = approved
+        && admission.proposed.is_empty()
+        && previous.as_ref().is_some_and(|previous| {
+            previous.scope == scope
+                && previous.review_sha256 == commitment
+                && previous.contexts == recorded
+                && previous.capabilities == capabilities
+        });
     if !unchanged || !migration.is_empty() || direct.materialized_sources().next().is_some() {
         migration.report(cli.lorry_messages, false)?;
         let stdin = io::stdin();
@@ -367,6 +379,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         // so the report shows the complete candidate without a warning.
         let baseline = previous
             .as_ref()
+            .filter(|_| approved)
             .and_then(|previous| {
                 dependency::workspace::admission::reconstruct(
                     &dependency::ReviewInputs {
@@ -385,7 +398,9 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
                 .ok()
             })
             .map(|reconstructed| reconstructed.review);
-        let mode = if options.accept_all {
+        let proposals = proposed_grants(&selected, &evidence, &admission)?;
+        write_proposals(&proposals, &config, cli.lorry_messages, &mut output)?;
+        let mode = if accept_all {
             change_review::Mode::AcceptAll
         } else if options.locked
             || !migration.is_empty()
@@ -429,15 +444,163 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     }
     CompactState {
         scope,
-        review_sha256: commitment,
+        review_sha256: commitment.clone(),
         contexts: recorded,
         capabilities,
     }
     .write(&workspace.root)?;
+    record_decisions(
+        &config,
+        options.accept_all,
+        &commitment,
+        proposed_grants(&selected, &evidence, &admission)?,
+        &selected,
+    )?;
     migration.remove()?;
     migration.report(cli.lorry_messages, true)?;
     progress.report("Verified Cargo.lock and workspace admission")?;
     Ok(0)
+}
+
+/// The build-time code that the user approves in this review.
+fn proposed_grants(
+    selected: &Resolution,
+    evidence: &BTreeMap<PackageKey, policy::PackageEvidence>,
+    admission: &policy::Admission,
+) -> Result<Vec<workspace_trust::Grant>> {
+    let mut grants = Vec::new();
+    for package in &selected.packages {
+        if !admission.proposed.contains(&package.key) {
+            continue;
+        }
+        let evidence = &evidence[&package.key];
+        let source = match &package.source {
+            ResolvedSource::CratesIo { checksum } => workspace_trust::GrantSource::CratesIo {
+                version: package.key.version.clone(),
+                checksum: crate::hash::hex(checksum),
+            },
+            ResolvedSource::Git { .. } => workspace_trust::GrantSource::Git {
+                version: package.key.version.clone(),
+                source_tree_sha256: crate::hash::hex(&evidence.source_tree_sha256),
+            },
+            ResolvedSource::Path { .. } => workspace_trust::GrantSource::Path {
+                source_tree_sha256: (!package
+                    .local_manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.editable))
+                .then(|| crate::hash::hex(&evidence.source_tree_sha256)),
+            },
+        };
+        grants.push(workspace_trust::Grant {
+            name: package.key.name.clone(),
+            source,
+            build_script: evidence.build_script,
+            proc_macro: evidence.proc_macro,
+        });
+    }
+    Ok(grants)
+}
+
+/// Lists the proposed build-time code and the native tools each build
+/// script will receive, so one approval covers what it names.
+fn write_proposals(
+    grants: &[workspace_trust::Grant],
+    config: &Config,
+    json: bool,
+    output: &mut impl Write,
+) -> Result<()> {
+    if grants.is_empty() {
+        return Ok(());
+    }
+    let tools = config
+        .native_tools
+        .keys()
+        .map(|(_, role)| *role)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(crate::admission_state::native_tool_name)
+        .collect::<Vec<_>>();
+    let write_error =
+        |error: io::Error| Error::failure(format!("failed to write build-time grants: {error}"));
+    if json {
+        let message = serde_json::json!({
+            "reason": "lorry-vendor-grants",
+            "native_tools": tools,
+            "grants": grants.iter().map(|grant| serde_json::json!({
+                "name": grant.name,
+                "source": match &grant.source {
+                    workspace_trust::GrantSource::CratesIo { .. } => "crates.io",
+                    workspace_trust::GrantSource::Git { .. } => "git",
+                    workspace_trust::GrantSource::Path { .. } => "path",
+                },
+                "build_script": grant.build_script,
+                "proc_macro": grant.proc_macro,
+            })).collect::<Vec<_>>(),
+        });
+        return writeln!(output, "{message}").map_err(write_error);
+    }
+    let tools = if tools.is_empty() {
+        "none configured".to_owned()
+    } else {
+        tools.join(", ")
+    };
+    writeln!(output, "Build-time code to approve ({}):", grants.len()).map_err(write_error)?;
+    for grant in grants {
+        let version = match &grant.source {
+            workspace_trust::GrantSource::CratesIo { version, .. }
+            | workspace_trust::GrantSource::Git { version, .. } => format!(" {version}"),
+            workspace_trust::GrantSource::Path { .. } => " (path)".to_owned(),
+        };
+        let mut kinds = Vec::new();
+        if grant.build_script {
+            kinds.push(format!("build script (native tools: {tools})"));
+        }
+        if grant.proc_macro {
+            kinds.push("procedural macro".to_owned());
+        }
+        writeln!(output, "  + {}{version}: {}", grant.name, kinds.join("; "))
+            .map_err(write_error)?;
+    }
+    Ok(())
+}
+
+/// Records `--accept-all`, the approved review, and the approved grants in
+/// the user's configuration. Grants for packages no longer selected go.
+fn record_decisions(
+    config: &Config,
+    accept_all: bool,
+    commitment: &str,
+    proposed: Vec<workspace_trust::Grant>,
+    selected: &Resolution,
+) -> Result<()> {
+    let unchanged = (!accept_all || config.policy.accept_all)
+        && config.policy.approved_review.as_deref() == Some(commitment)
+        && proposed.is_empty();
+    if unchanged {
+        return Ok(());
+    }
+    let workspace = config
+        .policy
+        .workspace
+        .as_deref()
+        .ok_or_else(|| Error::failure("workspace decisions need the workspace root"))?;
+    let store = workspace_trust::Store::for_process(workspace).ok_or_else(|| {
+        Error::failure("cannot record workspace decisions without an absolute HOME")
+            .with_help("set HOME to the absolute path of the current user's home directory")
+    })?;
+    store.update(|decisions| {
+        decisions.accept_all |= accept_all;
+        decisions.approved_review = Some(commitment.to_owned());
+        decisions.grants.retain(|grant| match &grant.source {
+            workspace_trust::GrantSource::Path { .. } => true,
+            workspace_trust::GrantSource::CratesIo { version, .. }
+            | workspace_trust::GrantSource::Git { version, .. } => selected
+                .packages
+                .iter()
+                .any(|package| package.key.name == grant.name && package.key.version == *version),
+        });
+        decisions.grants.extend(proposed);
+    })
 }
 
 fn review_scope(

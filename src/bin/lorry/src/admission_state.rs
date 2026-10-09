@@ -793,6 +793,7 @@ mod review {
                             native_tools: capability
                                 .map(|capability| capability.native_tools.iter().copied().collect())
                                 .unwrap_or_default(),
+                            configured_native_tools: false,
                             caller_env: capability
                                 .map(|value| value.caller_env.iter().cloned().collect())
                                 .unwrap_or_default(),
@@ -3012,6 +3013,7 @@ mod tests {
                 allow_build_script: false,
                 allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
+                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: fixture.0.join("policy.toml"),
             },
