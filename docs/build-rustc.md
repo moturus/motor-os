@@ -380,7 +380,7 @@ packages:
   `/user` and `/user/cfg` behind `cfg(target_os = "motor")` and compiles
   `dirs` only off Motor.
 - rustc LLVM retains its exact `cc = "=1.2.16"` dependency.
-- Rust std uses published crates.io `moto-rt` 0.17.6, never a path into the
+- Rust std uses published crates.io `moto-rt` 0.17.7, never a path into the
   Motor OS checkout.
 
 The `+motor.1` versions give the forked `libloading` and `libc` distinct Cargo

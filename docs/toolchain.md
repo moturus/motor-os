@@ -46,7 +46,7 @@ The declaration is data only. The values that matter most:
 - `MOTOR_MLIBC_REV`: the libc commit.
 - No runtime crate version is declared. Rust std links the `moto-rt` that the
   Rust fork's library lock selects, which the lock hash above covers. The
-  local `moto-rt` only has to share its major version (`0.17` for `0.17.6`);
+  local `moto-rt` only has to share its major version (`0.17` for `0.17.7`);
   its content and lower version parts are never compared, and `moto-sys` is
   not checked at all.
 - `MOTOR_TOOLCHAIN_ID` and `MOTOR_RUSTUP_TOOLCHAIN_BASE`: the human-readable
