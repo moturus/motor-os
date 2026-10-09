@@ -8,6 +8,22 @@ WASMTIME_GUEST_PROGRAMS=(p2_tcp_bind p2_tcp_bind_listen_order p2_tcp_connect
 	p2_tcp_sample_application p2_tcp_sockopts p2_tcp_states p2_tcp_streams p2_udp_bind
 	p2_udp_connect p2_udp_sample_application p2_udp_send_to_closed_receiver
 	p2_udp_sockopts p2_udp_states)
+# Upstream filesystem and stdio programs within Motor's semantics: no symlinks,
+# hard links or settable times, no read-only preopens through the CLI, and no
+# EPIPE for a writer whose reader is gone.
+WASMTIME_FILESYSTEM_PROGRAMS=(p1_close_preopen p1_dangling_fd p1_dir_fd_op_failures
+	p1_directory_seek p1_fd_advise p1_fd_filestat_get p1_fd_flags_set p1_fd_readdir
+	p1_file_allocate p1_file_pread_pwrite p1_file_read_write p1_file_rename_across_perms
+	p1_file_seek_tell p1_file_truncation p1_file_truncation_readonly
+	p1_file_unbuffered_write p1_file_write p1_interesting_paths p1_overwrite_preopen
+	p1_path_open_create_existing p1_path_open_dirfd_not_dir p1_path_open_lots
+	p1_path_open_missing p1_path_open_nonblock p1_path_open_preopen p1_path_open_read_write
+	p1_path_rename p1_path_rename_dir_trailing_slashes p1_poll_oneoff_files
+	p1_regular_file_isatty p1_remove_directory p1_remove_nonempty_directory p1_renumber
+	p1_unlink_file_trailing_slashes p2_cli_file_read p2_cli_file_append p2_cli_file_dir_sync
+	p2_cli_directory_list p2_cli_multiple_preopens p2_cli_initial_cwd p2_cli_stdin
+	p2_cli_stdin_empty p2_cli_splice_stdin p2_cli_much_stdout p2_file_read_write
+	p2_file_truncation_readonly p2_file_rename_across_perms p2_adapter_badfd)
 # Core-module fixtures in the fork's motor-runtime/fixtures.
 WASMTIME_CORE_FIXTURES=(lifecycle limits-elements limits-memories limits-tables memory-grow
 	memory-too-large)
@@ -33,7 +49,9 @@ build_wasmtime_fixtures() {
 		export RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"
 		cargo fetch --locked --target wasm32-wasip2
 		local bins=() program
-		for program in "${WASMTIME_GUEST_PROGRAMS[@]}"; do bins+=(--bin "$program"); done
+		for program in "${WASMTIME_GUEST_PROGRAMS[@]}" "${WASMTIME_FILESYSTEM_PROGRAMS[@]}"; do
+			bins+=(--bin "$program")
+		done
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build/guests" cargo build --locked --release \
 			--target wasm32-wasip2 -p test-programs --features motor "${bins[@]}"
 	)
@@ -47,7 +65,7 @@ build_wasmtime_fixtures() {
 	# Native code for a Pulley runtime: the runtime must refuse it.
 	"$compile" x86_64-unknown-motor core "$root/motor-runtime/fixtures/lifecycle.wat" \
 		"$out/lifecycle-native.cwasm"
-	for name in "${WASMTIME_GUEST_PROGRAMS[@]}"; do
+	for name in "${WASMTIME_GUEST_PROGRAMS[@]}" "${WASMTIME_FILESYSTEM_PROGRAMS[@]}"; do
 		"$compile" pulley64 component "$build/guests/wasm32-wasip2/release/$name.wasm" \
 			"$out/$name.cwasm"
 	done

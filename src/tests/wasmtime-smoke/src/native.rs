@@ -4,6 +4,8 @@ use std::fs;
 
 use wasm_smoke_suite::{Result, Suite};
 
+mod filesystem;
+
 const RUNTIME: &str = "/devtools/bin/wasmtime-rt";
 const FIXTURES: &str = "/devtools/cfg/wasmtime/fixtures";
 /// Upstream p2 socket programs carrying Motor's accepted socket semantics.
@@ -180,7 +182,9 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
     if !stderr.contains("access-denied") {
         return Err(format!("network-denied: missing access-denied: {stderr}").into());
     }
-    Ok(())
+
+    // WASI p2 filesystem and stdio.
+    filesystem::run(suite)
 }
 
 pub fn run() -> Result<()> {

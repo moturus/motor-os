@@ -27,15 +27,7 @@ impl Suite {
     /// directory writable by role None.
     pub fn new(name: &'static str, sources: &str) -> Result<Self> {
         let root = PathBuf::from(format!("/user/tmp/{name}-{}", std::process::id()));
-        fs::create_dir(&root)?;
-        if !Command::new("/system/bin/chmod")
-            .arg("rwxrwxrwx")
-            .arg(&root)
-            .status()?
-            .success()
-        {
-            return Err("could not make scratch directory writable to role None".into());
-        }
+        create_writable_dir(&root)?;
         println!("{name}: installed-tool checks; scratch={}", root.display());
         println!("{}", fs::read_to_string(sources)?);
         let available = MemoryStats::get().map_err(|e| format!("{e:?}"))?.available;
@@ -46,6 +38,13 @@ impl Suite {
             cases: 0,
             refusals: admission_refusals()?,
         })
+    }
+
+    /// A new directory under the scratch root that role None can write.
+    pub fn writable_dir(&self, name: &str) -> Result<PathBuf> {
+        let dir = self.root.join(name);
+        create_writable_dir(&dir)?;
+        Ok(dir)
     }
 
     pub fn command(&mut self, label: &str, command: &str, code: i32) -> Result<(String, String)> {
@@ -168,6 +167,20 @@ impl Suite {
         );
         Ok(())
     }
+}
+
+/// Directories are created readable but not writable for lower roles.
+fn create_writable_dir(dir: &Path) -> Result<()> {
+    fs::create_dir(dir)?;
+    if !Command::new("/system/bin/chmod")
+        .arg("rwxrwxrwx")
+        .arg(dir)
+        .status()?
+        .success()
+    {
+        return Err(format!("could not make {dir:?} writable to role None").into());
+    }
+    Ok(())
 }
 
 fn admission_refusals() -> Result<u64> {
