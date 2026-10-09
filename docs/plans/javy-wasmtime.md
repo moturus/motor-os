@@ -916,26 +916,26 @@ but are never delivered; without `CAP_NET`, native socket calls fail with
 256 MiB and only grow; UDP has no buffer options; a closed UDP receiver reports
 nothing to the sender.
 
-**2f filesystem and stdio, 2026-10-09.** 48 more upstream programs (34 p1,
-14 p2) run through the installed `wasmtime-rt` as None with `CAP_FS_WRITE`,
-with the preopens and arguments upstream's own tests give them: per-program
-scratch preopens, a driver-owned `readonly` preopen whose file must survive,
-CLI root and multiple preopens, `-S cwd`, stdin from a file, an append to a
-guest-owned file and 256 KiB of stdout; one write is refused without
-`CAP_FS_WRITE`. `wasmtime-smoke` runs 93 commands, about 3 s more per boot;
-the fixtures grow by 14.4 MB to 26.3 MB (70 artifacts). The programs found six
-adapter defects, fixed in fork commits `44bb21055..46465a092`: the lookup
-misread sys-io error responses as protocol errors, paths ending in `/` or `/.`
-did not have to name a directory, directories opened for writing, a read-only
-handle could be truncated, a non-empty directory surfaced as `EFBIG` (sys-io
-encodes it as `FileTooLarge`), and rename replaced a destination of the other
-kind. Seventeen programs are excluded for missing Motor features: symlinks
-(9), hard links (2), settable times (2), a host-set extreme mtime (1),
-read-only preopens, which the CLI cannot grant (2), and `EPIPE` for a writer
-whose reader is gone (1). The native behaviors behind these are in
-`future-work.md`. With a locally built overlay the QEMU and Cloud Hypervisor
-matrices passed (four boots each, 57 + 93 commands, zero admission refusals,
-291 and 295 s).
+**2f filesystem and stdio, 2026-10-09.** 48 more upstream programs (34 p1, 14
+p2) run through the installed `wasmtime-rt` as None with `CAP_FS_WRITE`, with
+the preopens and arguments upstream's own tests give them: per-program scratch
+preopens, a driver-owned `readonly` preopen whose file must survive, CLI root
+and multiple preopens, `-S cwd`, stdin from a file, an append to a guest-owned
+file and 256 KiB of stdout; one write is refused without `CAP_FS_WRITE`.
+`wasmtime-smoke` runs 93 commands, about 3 s more per boot; the fixtures grow
+by 14.4 MB to 26.3 MB (70 artifacts). The programs found six adapter defects,
+fixed in published fork commits `44bb21055..46465a092`: the lookup misread
+sys-io error responses as protocol errors, paths ending in `/` or `/.` did not
+have to name a directory, directories opened for writing, a read-only handle
+could be truncated, a non-empty directory surfaced as `EFBIG` (sys-io encodes
+it as `FileTooLarge`), and rename replaced a destination of the other kind.
+Seventeen programs are excluded for missing Motor features: symlinks (9), hard
+links (2), settable times (2), a host-set extreme mtime (1), read-only
+preopens, which the CLI cannot grant (2), and `EPIPE` for a writer whose reader
+is gone (1). The native behaviors behind these are in `future-work.md`. The
+add-on built from the published fork passes the QEMU and Cloud Hypervisor
+matrices (four boots each, 57 + 93 commands, zero admission refusals, 290 and
+295 s).
 
 Still open in 2f: the Pulley disposition below.
 
