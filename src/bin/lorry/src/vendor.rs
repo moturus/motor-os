@@ -172,6 +172,8 @@ struct Acquisition<'a> {
     inspections: Vec<ExtractedArchive>,
     state: Option<AcquisitionState>,
     progress: Progress,
+    /// Prints warnings about index entries Cargo skips or reads leniently.
+    verbose: bool,
 }
 
 struct AcquisitionState {
@@ -181,7 +183,12 @@ struct AcquisitionState {
 }
 
 impl<'a> Acquisition<'a> {
-    fn new(config: &'a Config, manifest: &Manifest, progress: Progress) -> Result<Self> {
+    fn new(
+        config: &'a Config,
+        manifest: &Manifest,
+        progress: Progress,
+        verbose: bool,
+    ) -> Result<Self> {
         let repositories = RepositorySet::open(
             &config.repositories,
             repository_tree_limits(&config.policy.limits)?,
@@ -241,6 +248,7 @@ impl<'a> Acquisition<'a> {
             inspections: Vec::new(),
             state: None,
             progress,
+            verbose,
         })
     }
 
@@ -293,6 +301,7 @@ impl<'a> Acquisition<'a> {
                 Error::failure(format!(
                     "crates.io index has no locked package `{name} {version}`"
                 ))
+                .with_help("`lorry -v vendor` names index entries that Lorry skipped")
             })?;
             if package.checksum.as_deref() != Some(hex(&record.checksum).as_str()) {
                 return Err(Error::failure(format!(
@@ -343,7 +352,13 @@ impl<'a> Acquisition<'a> {
             state.transaction.path(),
             sparse::MAX_RESPONSE_BYTES,
         )?;
-        for record in sparse::load_response(download.path(), &expected)? {
+        let response = sparse::load_response(download.path(), &expected)?;
+        if self.verbose {
+            for warning in &response.warnings {
+                eprintln!("warning: {warning}");
+            }
+        }
+        for record in response.records {
             let key = (record.name.clone(), record.version.clone());
             if let Some(existing) = self.records.get(&key) {
                 if existing != &record {

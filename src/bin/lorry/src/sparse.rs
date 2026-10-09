@@ -55,7 +55,7 @@ pub struct Record {
 impl Record {
     /// Parses one retained record. An entry that Cargo skips is an error.
     pub fn parse(path: &Path, bytes: &[u8]) -> Result<Self> {
-        Self::parse_entry(path, bytes)?.ok_or_else(|| {
+        Self::parse_entry(path, bytes, &mut Vec::new())?.ok_or_else(|| {
             invalid(
                 path,
                 "sparse index entry has a schema version above 2 or a `pubtime` that Cargo skips",
@@ -65,8 +65,8 @@ impl Record {
 
     /// Parses one index line as Cargo does. Unknown keys are ignored. `None`
     /// is an entry that Cargo skips: a newer schema version or a publish time
-    /// it cannot read.
-    fn parse_entry(path: &Path, bytes: &[u8]) -> Result<Option<Self>> {
+    /// it cannot read. `notes` receives the malformed fields Cargo tolerates.
+    fn parse_entry(path: &Path, bytes: &[u8], notes: &mut Vec<String>) -> Result<Option<Self>> {
         if !bytes.ends_with(b"\n") || bytes[..bytes.len().saturating_sub(1)].contains(&b'\n') {
             return Err(Error::failure(format!(
                 "sparse index record `{}` is not exactly one newline-terminated record",
@@ -108,12 +108,13 @@ impl Record {
             return Ok(None);
         }
         let dependencies =
-            parse_dependencies(path, require_array(path, object, "deps", "record")?)?;
+            parse_dependencies(path, require_array(path, object, "deps", "record")?, notes)?;
         let mut features = match object.get("features") {
             Some(value) => parse_feature_map(
                 path,
                 require_object(path, value, "record.features")?,
                 "features",
+                notes,
             )?,
             None => BTreeMap::new(),
         };
@@ -128,18 +129,18 @@ impl Record {
                 path,
                 require_object(path, value, "record.features2")?,
                 "features2",
+                notes,
             )?,
             None => BTreeMap::new(),
         };
+        // Cargo appends `features2` to `features`, keeping any repeats.
         for (name, references) in &features2 {
             let merged = features.entry(name.clone()).or_default();
+            let original = merged.len();
             for reference in references {
-                if merged.contains(reference) {
-                    return Err(invalid(
-                        path,
-                        format!(
-                            "sparse index feature `{name}` repeats `{reference}` across `features` and `features2`"
-                        ),
+                if merged[..original].contains(reference) {
+                    notes.push(format!(
+                        "feature `{name}` lists `{reference}` in both `features` and `features2`"
                     ));
                 }
                 merged.push(reference.clone());
@@ -173,7 +174,15 @@ impl Record {
     }
 }
 
-pub fn parse_response(path: &Path, expected_name: &str, bytes: &[u8]) -> Result<Vec<Record>> {
+/// The records Cargo reads from one index response, with warnings about the
+/// entries it skips or reads despite malformed fields.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct Response {
+    pub records: Vec<Record>,
+    pub warnings: Vec<String>,
+}
+
+pub fn parse_response(path: &Path, expected_name: &str, bytes: &[u8]) -> Result<Response> {
     validate_package_name(path, expected_name)?;
     if bytes.is_empty() {
         return Err(invalid(path, "sparse index response is empty"));
@@ -193,10 +202,32 @@ pub fn parse_response(path: &Path, expected_name: &str, bytes: &[u8]) -> Result<
             "sparse index response is not newline-terminated",
         ));
     }
-    let mut records = Vec::new();
-    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        let Some(record) = Record::parse_entry(path, line)? else {
-            continue;
+    let mut response = Response::default();
+    let mut noted = BTreeMap::<String, Vec<Version>>::new();
+    for (index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        let mut notes = Vec::new();
+        let record = match Record::parse_entry(path, line, &mut notes) {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
+            // Like Cargo, an unreadable entry costs only its own version.
+            Err(error) => {
+                let message = error
+                    .message()
+                    .chars()
+                    .map(|character| {
+                        if character.is_control() {
+                            '?'
+                        } else {
+                            character
+                        }
+                    })
+                    .collect::<String>();
+                response.warnings.push(format!(
+                    "crates.io index for `{expected_name}`: skipped {}: {message}",
+                    entry_label(path, line, index + 1)
+                ));
+                continue;
+            }
         };
         if record.name != expected_name {
             return Err(invalid(
@@ -207,12 +238,38 @@ pub fn parse_response(path: &Path, expected_name: &str, bytes: &[u8]) -> Result<
                 ),
             ));
         }
-        records.push(record);
+        for note in notes {
+            noted.entry(note).or_default().push(record.version.clone());
+        }
+        response.records.push(record);
     }
-    Ok(records)
+    // One warning per distinct note keeps a crate's repeated quirk to a line.
+    for (note, mut versions) in noted {
+        versions.sort();
+        versions.dedup();
+        let label = match versions.as_slice() {
+            [first, .., last] => format!("{} versions from {first} to {last}", versions.len()),
+            _ => format!("version {}", versions[0]),
+        };
+        response.warnings.push(format!(
+            "crates.io index for `{expected_name}`: {note} in {label}"
+        ));
+    }
+    Ok(response)
 }
 
-pub fn load_response(path: &Path, expected_name: &str) -> Result<Vec<Record>> {
+/// Names a skipped entry by its version when that is still readable.
+fn entry_label(path: &Path, line: &[u8], number: usize) -> String {
+    Value::parse(path, "sparse index record", line.trim_ascii_end())
+        .ok()
+        .and_then(|value| Version::parse(value.as_object()?.get("vers")?.as_str()?).ok())
+        .map_or_else(
+            || format!("line {number}"),
+            |version| format!("version {version}"),
+        )
+}
+
+pub fn load_response(path: &Path, expected_name: &str) -> Result<Response> {
     let mut file = File::open(path).map_err(|error| {
         Error::failure(format!(
             "failed to open sparse index response `{}`: {error}",
@@ -232,7 +289,11 @@ pub fn load_response(path: &Path, expected_name: &str) -> Result<Vec<Record>> {
     parse_response(path, expected_name, &bytes)
 }
 
-fn parse_dependencies(path: &Path, values: &[Value]) -> Result<Vec<Dependency>> {
+fn parse_dependencies(
+    path: &Path,
+    values: &[Value],
+    notes: &mut Vec<String>,
+) -> Result<Vec<Dependency>> {
     let mut dependencies = Vec::with_capacity(values.len());
     let mut exact = BTreeSet::new();
     for (index, value) in values.iter().enumerate() {
@@ -262,7 +323,7 @@ fn parse_dependencies(path: &Path, values: &[Value]) -> Result<Vec<Dependency>> 
                 ),
             )
         })?;
-        let features = match object.get("features") {
+        let mut features = match object.get("features") {
             Some(value) => parse_string_array(
                 path,
                 value.as_array().ok_or_else(|| {
@@ -272,10 +333,18 @@ fn parse_dependencies(path: &Path, values: &[Value]) -> Result<Vec<Dependency>> 
                     )
                 })?,
                 &format!("{context}.features"),
-                validate_feature_name,
+                validate_requested_feature,
             )?,
             None => Vec::new(),
         };
+        // Older registries published the empty feature, which Cargo drops.
+        if features.iter().any(String::is_empty) {
+            notes.push(format!("dependency `{alias}` requests the empty feature"));
+            features.retain(|feature| !feature.is_empty());
+        }
+        for feature in repeated(&features) {
+            notes.push(format!("dependency `{alias}` repeats feature `{feature}`"));
+        }
         let optional = optional_bool(path, object, "optional", &context)?.unwrap_or(false);
         let default_features =
             optional_bool(path, object, "default_features", &context)?.unwrap_or(true);
@@ -347,6 +416,7 @@ fn parse_feature_map(
     path: &Path,
     object: &BTreeMap<String, Value>,
     field: &str,
+    notes: &mut Vec<String>,
 ) -> Result<BTreeMap<String, Vec<String>>> {
     let mut features = BTreeMap::new();
     for (name, value) in object {
@@ -363,6 +433,9 @@ fn parse_feature_map(
             &format!("record.{field}.{name}"),
             validate_feature_reference,
         )?;
+        for reference in repeated(&references) {
+            notes.push(format!("feature `{name}` repeats `{reference}`"));
+        }
         features.insert(name.clone(), references);
     }
     Ok(features)
@@ -375,21 +448,24 @@ fn parse_string_array(
     validate: fn(&Path, &str) -> Result<()>,
 ) -> Result<Vec<String>> {
     let mut output = Vec::with_capacity(values.len());
-    let mut seen = BTreeSet::new();
     for (index, value) in values.iter().enumerate() {
         let value = value
             .as_str()
             .ok_or_else(|| invalid(path, format!("{context}[{index}] must be a string")))?;
         validate(path, value)?;
-        if !seen.insert(value) {
-            return Err(invalid(
-                path,
-                format!("{context} contains duplicate value `{value}`"),
-            ));
-        }
         output.push(value.to_owned());
     }
     Ok(output)
+}
+
+/// Values listed more than once. Cargo keeps repeats; they change nothing.
+fn repeated(values: &[String]) -> BTreeSet<&str> {
+    let mut seen = BTreeSet::new();
+    values
+        .iter()
+        .map(String::as_str)
+        .filter(|value| !seen.insert(*value))
+        .collect()
 }
 
 fn parse_rust_version(path: &Path, value: &str) -> Result<RustVersion> {
@@ -473,6 +549,15 @@ fn validate_feature_name(path: &Path, value: &str) -> Result<()> {
             path,
             format!("unsupported sparse index feature name `{value}`"),
         ))
+    }
+}
+
+/// A dependency may request the empty feature, which Cargo drops.
+fn validate_requested_feature(path: &Path, value: &str) -> Result<()> {
+    if value.is_empty() {
+        Ok(())
+    } else {
+        validate_feature_name(path, value)
     }
 }
 
@@ -675,21 +760,23 @@ mod tests {
     fn parses_a_complete_sparse_response_for_one_package() {
         let first = basic("");
         let second = first.replace("\"1.2.3\"", "\"2.0.0\"");
-        let records = parse_response(
+        let response = parse_response(
             Path::new("/fixture/de/mo/demo"),
             "demo",
             format!("{first}{second}").as_bytes(),
         )
         .unwrap();
+        let records = &response.records;
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].version, Version::parse("1.2.3").unwrap());
         assert_eq!(records[1].version, Version::parse("2.0.0").unwrap());
+        assert!(response.warnings.is_empty());
         assert_eq!(MAX_RESPONSE_BYTES, 16 * 1024 * 1024);
 
         let path =
             std::env::temp_dir().join(format!("lorry-sparse-response-{}.json", std::process::id()));
         fs::write(&path, format!("{first}{second}")).unwrap();
-        assert_eq!(load_response(&path, "demo").unwrap(), records);
+        assert_eq!(load_response(&path, "demo").unwrap(), response);
         fs::remove_file(path).unwrap();
     }
 
@@ -817,7 +904,8 @@ mod tests {
             "demo",
             format!("{}{newer}{unreadable_time}", basic("")).as_bytes(),
         )
-        .unwrap();
+        .unwrap()
+        .records;
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].version, Version::parse("1.2.3").unwrap());
         let error = parse(&newer).unwrap_err().to_string();
@@ -887,15 +975,6 @@ mod tests {
                 ),
                 "feature name",
             ),
-            (
-                format!(
-                    "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\"deps\":[],\
-                     \"cksum\":\"{CHECKSUM}\",\
-                     \"features\":{{\"feature\":[\"same\",\"same\"]}},\
-                     \"yanked\":false}}\n"
-                ),
-                "duplicate value",
-            ),
         ];
         for (source, expected) in cases {
             let error = parse(&source).unwrap_err().to_string();
@@ -904,6 +983,111 @@ mod tests {
                 "{error:?} did not contain {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn reads_repeated_dependency_features_as_cargo_does() {
+        // Cargo's workspace inheritance publishes `wit-component`'s
+        // `wasmparser` features with `simd` twice.
+        let record = |version: &str| {
+            format!(
+                "{{\"name\":\"wit-component\",\"vers\":\"{version}\",\"deps\":[\
+                 {{\"name\":\"wasmparser\",\"req\":\"^0.244.0\",\
+                 \"features\":[\"simd\",\"std\",\"component-model\",\"simd\"],\
+                 \"optional\":false,\"default_features\":false,\"target\":null,\
+                 \"kind\":\"normal\"}}],\
+                 \"cksum\":\"{CHECKSUM}\",\"features\":{{}},\"yanked\":false,\"v\":2}}\n"
+            )
+        };
+        let source = record("0.244.0") + &record("0.221.0");
+        let response = parse_response(
+            Path::new("/fixture/wi/t-/wit-component"),
+            "wit-component",
+            source.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(response.records.len(), 2);
+        assert_eq!(
+            response.records[0].dependencies[0].features,
+            ["simd", "std", "component-model", "simd"]
+        );
+        assert_eq!(
+            response.warnings,
+            [
+                "crates.io index for `wit-component`: dependency `wasmparser` repeats \
+                 feature `simd` in 2 versions from 0.221.0 to 0.244.0"
+            ]
+        );
+        assert!(parse(&record("0.244.0")).is_ok());
+    }
+
+    #[test]
+    fn reads_empty_and_repeated_feature_entries_as_cargo_does() {
+        let source = format!(
+            "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\
+             \"deps\":[{{\"name\":\"dependency\",\"req\":\"1\",\
+             \"features\":[\"\",\"fast\",\"\"],\"optional\":true}}],\
+             \"cksum\":\"{CHECKSUM}\",\
+             \"features\":{{\"extra\":[\"dependency\",\"dependency\"]}},\
+             \"features2\":{{\"extra\":[\"dep:dependency\",\"dependency\"]}},\
+             \"yanked\":false,\"v\":2}}\n"
+        );
+        let response =
+            parse_response(Path::new("/fixture/de/mo/demo"), "demo", source.as_bytes()).unwrap();
+        let record = &response.records[0];
+        assert_eq!(record.dependencies[0].features, ["fast"]);
+        assert_eq!(
+            record.features["extra"],
+            ["dependency", "dependency", "dep:dependency", "dependency"]
+        );
+        assert_eq!(
+            response.warnings,
+            [
+                "crates.io index for `demo`: dependency `dependency` requests the empty \
+                 feature in version 1.2.3",
+                "crates.io index for `demo`: feature `extra` lists `dependency` in both \
+                 `features` and `features2` in version 1.2.3",
+                "crates.io index for `demo`: feature `extra` repeats `dependency` in \
+                 version 1.2.3",
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_unreadable_entries_as_cargo_does() {
+        let bad_requirement = |version: &str, requirement: &str| {
+            format!(
+                "{{\"name\":\"demo\",\"vers\":\"{version}\",\
+                 \"deps\":[{{\"name\":\"dependency\",\"req\":\"{requirement}\"}}],\
+                 \"cksum\":\"{CHECKSUM}\",\"yanked\":false}}\n"
+            )
+        };
+        let source = format!(
+            "{}{}{}not json\n",
+            basic(""),
+            bad_requirement("2.0.0", "not a requirement"),
+            bad_requirement("3.0.0", "\\u001b[2J"),
+        );
+        let response =
+            parse_response(Path::new("/fixture/de/mo/demo"), "demo", source.as_bytes()).unwrap();
+        assert_eq!(response.records.len(), 1);
+        assert_eq!(
+            response.records[0].version,
+            Version::parse("1.2.3").unwrap()
+        );
+        let expected = [
+            "crates.io index for `demo`: skipped version 2.0.0: \
+             invalid sparse dependency requirement `not a requirement`",
+            "crates.io index for `demo`: skipped version 3.0.0: \
+             invalid sparse dependency requirement `?[2J`",
+            "crates.io index for `demo`: skipped line 4: ",
+        ];
+        assert_eq!(response.warnings.len(), expected.len());
+        for (warning, expected) in response.warnings.iter().zip(expected) {
+            assert!(warning.starts_with(expected), "{warning:?}");
+        }
+        // A retained record is still parsed strictly.
+        assert!(parse(&bad_requirement("2.0.0", "not a requirement")).is_err());
     }
 
     #[test]

@@ -77,6 +77,11 @@ impl Error {
         self
     }
 
+    /// The message without its location or help.
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     pub(crate) fn is_cargo_cache_miss(&self) -> bool {
         self.cargo_cache_miss
     }

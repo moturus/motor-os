@@ -65,6 +65,14 @@ echo "== Preparing the fail-closed Cargo-cache crates.io fixture =="
     -o "$WORK/cache-curl"
 "$WORK/cache-curl" prepare "$HOST_CARGO_HOME" \
     "$WORK/crates-io" "$PROJECT/Cargo.lock"
+# Like Cargo, Lorry reads repeated features and skips an unreadable entry.
+INDEX="$WORK/crates-io/index/cf/g-/cfg-if"
+[ -f "$INDEX" ] || fail "fixture has no cfg-if index response"
+UNUSED_CHECKSUM="$(printf '0%.0s' $(seq 64))"
+cat >>"$INDEX" <<EOF
+{"name":"cfg-if","vers":"0.0.1","deps":[{"name":"core","req":"^1","features":["a","a"]}],"cksum":"$UNUSED_CHECKSUM","features":{},"yanked":false}
+{"name":"cfg-if","vers":"0.0.2","deps":"unreadable","cksum":"$UNUSED_CHECKSUM","features":{},"yanked":false}
+EOF
 cat >"$CONFIG" <<EOF
 config-version = 1
 use-cargo-registry = false
@@ -139,9 +147,28 @@ grep -F 'Checking dependency repository state' "$WORK/fresh.log" >/dev/null ||
     fail "fresh acquisition did not report repository verification"
 grep -F 'Verifying selected dependency sources' "$WORK/fresh.log" >/dev/null ||
     fail "fresh acquisition did not report source verification"
+if grep -F 'warning: crates.io index' "$WORK/fresh.log" >/dev/null; then
+    fail "ordinary acquisition printed sparse-index warnings"
+fi
 OBJECT_ROOT="$REPOSITORY/objects/crates-io/sha256"
 [ "$(find "$OBJECT_ROOT" -mindepth 2 -maxdepth 2 -type d | wc -l)" -eq 1 ] ||
     fail "fresh acquisition published an unexpected object count"
+
+echo "== Naming lenient sparse-index entries with --verbose =="
+rm -rf "$PROJECT/.lorry" "$REPOSITORY/objects/crates-io/sha256" "$REPOSITORY/resolution"
+mkdir "$REPOSITORY/objects/crates-io/sha256"
+(cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
+    "$LORRY" -v vendor --accept-all) >"$WORK/verbose.log" 2>&1
+grep -F 'warning: crates.io index for `cfg-if`: dependency `core` repeats feature `a` in version 0.0.1' \
+    "$WORK/verbose.log" >/dev/null || {
+    cat "$WORK/verbose.log" >&2
+    fail "verbose acquisition did not name the repeated dependency feature"
+}
+grep -F 'warning: crates.io index for `cfg-if`: skipped version 0.0.2: ' \
+    "$WORK/verbose.log" >/dev/null || {
+    cat "$WORK/verbose.log" >&2
+    fail "verbose acquisition did not name the skipped index entry"
+}
 
 echo "== Proving warm reuse performs no archive download =="
 ARGS="$WORK/warm-curl-arguments"

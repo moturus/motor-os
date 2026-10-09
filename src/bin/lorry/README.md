@@ -394,7 +394,9 @@ fail before replacing existing approval.
 
 Normal vendoring reports graph resolution and source verification phases, plus
 each Git source, sparse-index entry, and crate archive when its acquisition
-starts. `--quiet` suppresses this progress.
+starts. `--quiet` suppresses this progress. `--verbose` also warns about
+index entries that Lorry skips or reads despite malformed fields, as Cargo
+does silently.
 
 Curl diagnostics spill from memory to a private temporary file and are limited
 to 2 MiB by default. `LORRY_CURL_STDERR_SPILL_LIMIT_BYTES` may raise that limit

@@ -729,6 +729,10 @@ location to which its settings should move. System constraints still apply.
 - Like Cargo, Lorry ignores unknown index keys and reads an unknown dependency
   kind as normal. It skips an index entry with a schema version above 2 or a
   `pubtime` that Cargo cannot read.
+- Like Cargo, Lorry keeps repeated feature names, appends `features2` to
+  `features`, and drops empty dependency features. An index entry that Lorry
+  cannot read removes only that version, not the whole crate. With
+  `--verbose`, `vendor` and `fetch` print a warning for each such quirk.
 - A locked checksum that conflicts with the index or archive is an integrity
   failure and must never be repaired silently.
 - Locked resolution constrains every dependency to its parent package's lock

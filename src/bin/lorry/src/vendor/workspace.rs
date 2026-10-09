@@ -57,7 +57,12 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
             progress,
         )?
     };
-    let mut acquisition = Acquisition::new(&config, manifest, progress)?;
+    let mut acquisition = Acquisition::new(
+        &config,
+        manifest,
+        progress,
+        cli.verbosity == Verbosity::Verbose,
+    )?;
     let resolver_options = dependency::resolver_options(manifest, &config, &toolchain)?;
     let (complete, mut catalog) = resolve_locked(
         &workspace,
@@ -209,7 +214,12 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         )?
     };
     progress.report("Checking dependency repository state")?;
-    let mut acquisition = Acquisition::new(&config, &manifest, progress)?;
+    let mut acquisition = Acquisition::new(
+        &config,
+        &manifest,
+        progress,
+        cli.verbosity == Verbosity::Verbose,
+    )?;
     let resolver_options = dependency::resolver_options(&manifest, &config, &toolchain)?;
     progress.report("Resolving dependency graph")?;
     let (complete, mut catalog, staged_lock) = if options.locked {
