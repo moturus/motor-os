@@ -21,8 +21,11 @@ pub(crate) fn reconstruct(
     let scope = &compact.scope;
     let mut workspace = SourceWorkspace::load(&inputs.manifest.root, Some(&inputs.manifest.path))?;
     workspace.load_locked_context()?;
-    let direct =
-        crate::git::load_locked_sources(&workspace.packages[0], &inputs.config.policy.limits)?;
+    let direct = crate::git::load_locked_sources(
+        &workspace.packages[0],
+        &inputs.config.policy.limits,
+        inputs.validation,
+    )?;
     let (complete, mut catalog) = resolve_locked(
         &workspace,
         inputs.config,
@@ -410,6 +413,7 @@ mod tests {
             staging_parent: &fixture.0,
             direct: Some(&direct),
             prepare_context: Some(contexts[0].clone()),
+            validation: ValidationMode::Trusted,
         };
         let roots = [fixture.0.join("a"), fixture.0.join("b")].into();
         let members =
@@ -587,6 +591,7 @@ mod tests {
             staging_parent: &fixture.0,
             direct: None,
             prepare_context: None,
+            validation: ValidationMode::Trusted,
         };
         assert_eq!(reconstruct(&inputs, &compact).unwrap().review, candidate);
         assert!(!fixture.0.join("target").exists());

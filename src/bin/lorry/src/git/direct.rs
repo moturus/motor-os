@@ -25,6 +25,7 @@ use crate::source_tree::{EntryKind, Exclusions, Tree};
 use super::LockedSource;
 use super::http::Remote;
 use super::materialize::{extract_tree, gix_error, tree_limits};
+use crate::validation::ValidationMode;
 
 #[derive(Clone)]
 struct Object {
@@ -129,7 +130,12 @@ fn materialize_locked_catalog(
     for locked in locked_sources(manifest)? {
         let destination = object_root(&manifest.workspace_root, &locked.cargo_source);
         let object = if destination.exists() {
-            load_object(&manifest.workspace_root, &locked, policy)?
+            load_object(
+                &manifest.workspace_root,
+                &locked,
+                policy,
+                ValidationMode::Strict,
+            )?
         } else {
             progress.report(format_args!("Fetching Git source `{}`", locked.url))?;
             materialized.insert(locked.cargo_source.clone());
@@ -143,6 +149,7 @@ fn materialize_locked_catalog(
 pub(crate) fn load_locked_sources(
     manifest: &Manifest,
     policy: &PolicyLimits,
+    validation: ValidationMode,
 ) -> Result<DirectCatalog> {
     let locked_git = manifest
         .lock
@@ -173,7 +180,7 @@ pub(crate) fn load_locked_sources(
         if !objects.contains_key(source) {
             objects.insert(
                 source.to_owned(),
-                load_object(&manifest.workspace_root, &locked, policy)?,
+                load_object(&manifest.workspace_root, &locked, policy, validation)?,
             );
         }
     }
@@ -415,7 +422,12 @@ fn materialize_one(
     })
 }
 
-fn load_object(workspace: &Path, locked: &LockedSource, policy: &PolicyLimits) -> Result<Object> {
+fn load_object(
+    workspace: &Path,
+    locked: &LockedSource,
+    policy: &PolicyLimits,
+    validation: ValidationMode,
+) -> Result<Object> {
     let root = object_root(workspace, &locked.cargo_source);
     let metadata = fs::symlink_metadata(&root).map_err(|error| {
         Error::failure(format!(
@@ -467,7 +479,18 @@ fn load_object(workspace: &Path, locked: &LockedSource, policy: &PolicyLimits) -
     }
     let expected = decode_hex::<32>(&string(&document, "source-tree-sha256")?)?;
     let source = root.join("source");
-    let source_tree = Tree::scan(&source, tree_limits(policy)?, Exclusions::None)?;
+    // Ordinary validation rehashes the source only when its file metadata
+    // differs from the record its last hash left.
+    let source_tree = if validation.is_strict() {
+        Tree::scan(&source, tree_limits(policy)?, Exclusions::None)?
+    } else {
+        Tree::scan_recorded(
+            &source,
+            tree_limits(policy)?,
+            Exclusions::None,
+            &root.join("source-record"),
+        )?
+    };
     if source_tree.sha256 != expected {
         return Err(Error::failure(format!(
             "materialized Git source `{}` changed after approval",
@@ -786,19 +809,27 @@ mod tests {
         )
         .expect("provenance is written");
 
-        let object = load_object(&workspace, &locked, &limits).unwrap();
-        assert_eq!(object.source_tree.sha256, tree.sha256);
-        assert_eq!(object.git_tree, "a".repeat(40));
+        for validation in [ValidationMode::Strict, ValidationMode::Trusted] {
+            let object = load_object(&workspace, &locked, &limits, validation).unwrap();
+            assert_eq!(object.source_tree.sha256, tree.sha256);
+            assert_eq!(object.git_tree, "a".repeat(40));
+        }
+        // Ordinary loads reuse the recorded tree until the files change.
+        assert!(root.join("source-record").is_file());
+        let object = load_object(&workspace, &locked, &limits, ValidationMode::Trusted).unwrap();
+        assert_eq!(object.source_tree, tree);
 
         fs::write(
             source.join("Cargo.toml"),
             "[package]\nname = \"changed\"\nversion = \"1.0.0\"\n",
         )
         .expect("manifest is changed");
-        let error = load_object(&workspace, &locked, &limits)
-            .err()
-            .expect("tampered object must fail");
-        assert!(error.to_string().contains("changed after approval"));
+        for validation in [ValidationMode::Trusted, ValidationMode::Strict] {
+            let error = load_object(&workspace, &locked, &limits, validation)
+                .err()
+                .expect("tampered object must fail");
+            assert!(error.to_string().contains("changed after approval"));
+        }
         fs::remove_dir_all(workspace).expect("test root is removed");
     }
 
@@ -819,9 +850,10 @@ mod tests {
             ))
             .unwrap();
         assert!(manifest.dependencies.is_empty());
-        let error = load_locked_sources(&manifest, &PolicyLimits::default())
-            .err()
-            .expect("the shared lock requires the other member's Git source");
+        let error =
+            load_locked_sources(&manifest, &PolicyLimits::default(), ValidationMode::Strict)
+                .err()
+                .expect("the shared lock requires the other member's Git source");
         assert!(error.to_string().contains("Git source is not materialized"));
         fs::remove_dir_all(workspace).unwrap();
     }
@@ -831,10 +863,15 @@ mod tests {
         let workspace = root("missing-object");
         let locked = locked();
 
-        let error = load_object(&workspace, &locked, &PolicyLimits::default())
-            .err()
-            .expect("missing object must fail")
-            .render();
+        let error = load_object(
+            &workspace,
+            &locked,
+            &PolicyLimits::default(),
+            ValidationMode::Strict,
+        )
+        .err()
+        .expect("missing object must fail")
+        .render();
 
         assert!(error.starts_with("error: Git source is not materialized\n"));
         assert!(error.contains(&format!("  source: `{}`\n", locked.cargo_source)));
@@ -889,7 +926,7 @@ mod tests {
         fs::set_permissions(workspace.join("Cargo.toml"), permissions).unwrap();
 
         let manifest = Manifest::load_for_build(&workspace).unwrap();
-        let described = load_locked_sources(&manifest, &limits).unwrap();
+        let described = load_locked_sources(&manifest, &limits, ValidationMode::Strict).unwrap();
         let description = &described.packages[0].0;
         assert_eq!(
             description

@@ -43,7 +43,11 @@ pub(crate) fn fetch(cli: &Cli, options: &FetchOptions) -> Result<i32> {
         Some(toolchain.target_info(None)?)
     };
     let direct = if options.offline {
-        crate::git::load_locked_sources(manifest, &config.policy.limits)?
+        crate::git::load_locked_sources(
+            manifest,
+            &config.policy.limits,
+            crate::validation::ValidationMode::Strict,
+        )?
     } else {
         crate::git::materialize_locked_sources(
             manifest,
@@ -190,7 +194,11 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         .filter(|context| context.recorded)
         .collect::<Vec<_>>();
     let direct = if options.offline {
-        crate::git::load_locked_sources(&manifest, &config.policy.limits)?
+        crate::git::load_locked_sources(
+            &manifest,
+            &config.policy.limits,
+            crate::validation::ValidationMode::Strict,
+        )?
     } else {
         crate::git::materialize_locked_sources(
             &manifest,
@@ -360,6 +368,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
                         staging_parent: &env::temp_dir(),
                         direct: Some(&direct),
                         prepare_context: None,
+                        validation: crate::validation::ValidationMode::Strict,
                     },
                     previous,
                 )

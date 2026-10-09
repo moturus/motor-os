@@ -6,10 +6,10 @@ workspace work.
 
 ## Simplifications
 
-- **Admission verifies Git sources twice.** `reconstruct` in
-  `src/dependency/workspace/admission.rs` loads and hashes every locked Git
-  source again, although the engine already did. Every build now loads the
-  whole lock's Git sources, so admission could take the engine's catalog.
+- **Admission loads Git sources twice.** `reconstruct` in
+  `src/dependency/workspace/admission.rs` loads every locked Git source
+  again, although the engine already did. Ordinary validation no longer
+  rehashes them, but admission could still take the engine's catalog.
 - **Vendor extracts some archives more than once.** `Acquisition::evidence`
   in `src/vendor.rs` unpacks every archive-only object on each call, and
   `fetch --target` calls it once per proc-macro discovery round.

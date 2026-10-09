@@ -288,7 +288,11 @@ impl LockedContext {
         };
         Ok(Self {
             registry,
-            direct: crate::git::load_locked_sources(manifest, &config.policy.limits)?,
+            direct: crate::git::load_locked_sources(
+                manifest,
+                &config.policy.limits,
+                access.validation,
+            )?,
             options: resolver_options(manifest, config, toolchain)?,
         })
     }
@@ -442,6 +446,7 @@ pub struct ReviewInputs<'a> {
     pub staging_parent: &'a Path,
     pub direct: Option<&'a crate::git::DirectCatalog>,
     pub prepare_context: Option<Context>,
+    pub validation: ValidationMode,
 }
 
 fn prepare_resolution_packages(

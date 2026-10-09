@@ -410,6 +410,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
             host: host_info.triple.clone(),
             target: target_info.triple.clone(),
         }),
+        validation,
     };
     let resolution = if let Some(compact) = &compact_state {
         let (review, resolution) =
@@ -3560,6 +3561,7 @@ mod tests {
                 staging_parent: root,
                 direct: Some(direct),
                 prepare_context: None,
+                validation: ValidationMode::Trusted,
             },
             &workspace,
             &requests,
@@ -3657,6 +3659,7 @@ mod tests {
                 staging_parent: &fixture.0,
                 direct: Some(&direct),
                 prepare_context: None,
+                validation: ValidationMode::Trusted,
             },
             &workspace,
             &requests,

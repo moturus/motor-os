@@ -1242,7 +1242,10 @@ URL, request, exact commit, Git tree, canonical source SHA-256, file count,
 and bytes. Extraction accepts bounded portable UTF-8 paths and regular blobs
 and directories only. Symbolic links, submodules, special modes, and traversal
 are rejected. Build, run, and test remain offline and verify the published
-source tree and provenance before resolving or compiling it.
+source tree and provenance before resolving or compiling it. Ordinary
+validation rehashes the tree only when its file metadata differs from the
+`source-record` its last hash left beside it; strict validation, vendor,
+fetch, and review always rehash it.
 
 A decline or failure may leave an unreferenced, completely verified immutable
 Git object, but exposes no changed manifest, lock, or admission state.

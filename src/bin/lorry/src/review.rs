@@ -51,6 +51,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             staging_parent: &scratch,
             direct: None,
             prepare_context: None,
+            validation: crate::validation::ValidationMode::Strict,
         },
         &compact,
     )?;
