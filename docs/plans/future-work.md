@@ -128,6 +128,22 @@ cause. The same tree had just passed `full-test.sh` three times in debug and
 three times in release. Logs:
 `/tmp/claude-1000/-home-posk-motor-dev-motor-os/8e448414-375a-41fc-8871-292a39ae0700/scratchpad/devbranch-stall/`.
 
+Seen a fourth time on 2026-10-09, on the lorry branch at `b57d14d0` plus
+uncommitted Lorry configuration changes (release `full-test-dev.sh`, 8 GiB,
+4 vCPUs). The step watchdog named the step: "waiting for the server to retry"
+(step 6). The server never printed `retrying`, so no `wait()` returned
+without a request while the hoarder held memory. The console shows no sys-io
+failure. Logs: `/tmp/claude-1000/-home-posk-motor-dev-motor-os/c73e7c97-f286-45f2-ab9d-03782d6b4132/scratchpad/refill-stall-2026-10-09/`.
+
+A likely cause, by code reading, not verified: the test assumes every refill
+stays refused during step 6, but the hoarder takes freed memory back only
+once per millisecond (`fill()` then a 1 ms sleep). If the server's
+`add_listener()` wins a freed page first, the refill succeeds, `wait()` gets
+no timeout (`refused` stays false), and it waits for a client. The late
+client connects only after the test reads `retrying`, so both sides wait
+forever. A fix belongs in the test (for example, let `retry` also report a
+successful refill) and touches `src/sys/tests`, so it needs the full gates.
+
 ## A directory listing ends when another process removes an entry (2026-10-08)
 
 `readdir` in rt.vdso (`src/sys/lib/rt.vdso/src/rt_fs.rs`) remembers the next
