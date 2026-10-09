@@ -122,6 +122,7 @@ fn execute_with(cli: &Cli, notes: Verbosity, options: &MetadataOptions) -> Resul
         &config,
         &prepared.resolution,
         &prepared.packages,
+        ValidationMode::Trusted,
     )?;
     let mut document =
         graph::workspace::resolved(&workspace, &prepared, &roots, platform.as_ref())?;
@@ -141,8 +142,15 @@ pub(crate) fn publish_sources(
     cache_root: &std::path::Path,
     config: &Config,
     prepared: &PreparedGraph,
+    validation: ValidationMode,
 ) -> Result<BTreeMap<PackageKey, PathBuf>> {
-    publish_source_parts(cache_root, config, &prepared.resolution, &prepared.packages)
+    publish_source_parts(
+        cache_root,
+        config,
+        &prepared.resolution,
+        &prepared.packages,
+        validation,
+    )
 }
 
 fn publish_source_parts(
@@ -150,6 +158,7 @@ fn publish_source_parts(
     config: &Config,
     resolution: &Resolution,
     packages: &BTreeMap<PackageKey, PreparedPackage>,
+    validation: ValidationMode,
 ) -> Result<BTreeMap<PackageKey, PathBuf>> {
     let limits = crate::engine::repository_tree_limits(&config.policy.limits)?;
     resolution
@@ -178,6 +187,7 @@ fn publish_source_parts(
                         } else {
                             Exclusions::None
                         },
+                        validation,
                     )?
                 }
             };

@@ -1185,7 +1185,12 @@ fn build_inner(
     let selectors = build
         .target_selection
         .filter(|targets| targets.has_target_selector());
-    let roots = crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
+    let roots = crate::metadata::publish_sources(
+        build.global_cache_root,
+        build.config,
+        &prepared,
+        build.validation,
+    )?;
     let message_reporter = crate::check_message::Reporter::new(
         build.manifest,
         &prepared,

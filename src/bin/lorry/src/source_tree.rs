@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use crate::diagnostic::{Error, Result};
 use crate::fs_check::{file_identity, path_identity};
-use crate::hash::{Sha256, hex};
+use crate::hash::{FieldDigest, Sha256, decode_hex, hex};
 use crate::json::Value;
 
 const FORMAT_TAG: &[u8] = b"lorry-source-tree-v1\0";
@@ -76,6 +76,36 @@ pub enum Exclusions {
 
 impl Tree {
     pub fn scan(root: &Path, limits: Limits, exclusions: Exclusions) -> Result<Self> {
+        Ok(Self::scan_with(root, limits, exclusions, true)?.0)
+    }
+
+    /// Scans like `scan`, but reuses the tree recorded at `record` while every
+    /// entry keeps the kind, size, mode, and times recorded with it, so no
+    /// file is read. Ordinary validation trusts such a record, as it trusts
+    /// immutable repository objects; strict validation scans instead.
+    pub fn scan_recorded(
+        root: &Path,
+        limits: Limits,
+        exclusions: Exclusions,
+        record: &Path,
+    ) -> Result<Self> {
+        let (_, stats) = Self::scan_with(root, limits, exclusions, false)?;
+        if let Some(tree) = read_record(record, &stats, limits) {
+            return Ok(tree);
+        }
+        let (tree, stats) = Self::scan_with(root, limits, exclusions, true)?;
+        let _ = write_record(record, &stats, &tree);
+        Ok(tree)
+    }
+
+    /// Without `hash`, files are not read and their entries carry no digest.
+    /// The second result digests every entry's file-system metadata.
+    fn scan_with(
+        root: &Path,
+        limits: Limits,
+        exclusions: Exclusions,
+        hash: bool,
+    ) -> Result<(Self, [u8; 32])> {
         let root_metadata = fs::symlink_metadata(root).map_err(|error| {
             Error::failure(format!(
                 "failed to inspect source root `{}`: {error}",
@@ -93,6 +123,8 @@ impl Tree {
             root,
             limits,
             exclusions,
+            hash,
+            stats: FieldDigest::tagged(b"lorry-tree-stats-v1\0"),
             entries: Vec::new(),
             file_count: 0,
             directory_count: 0,
@@ -103,11 +135,62 @@ impl Tree {
             .entries
             .sort_unstable_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
         let sha256 = digest_entries(&scanner.entries, limits)?;
+        Ok((
+            Self {
+                entries: scanner.entries,
+                file_count: scanner.file_count,
+                directory_count: scanner.directory_count,
+                total_bytes: scanner.total_bytes,
+                sha256,
+            },
+            scanner.stats.finish(),
+        ))
+    }
+
+    /// Parses `manifest_bytes` output and checks that it is consistent.
+    fn from_manifest(path: &Path, bytes: &[u8], limits: Limits) -> Result<Self> {
+        let invalid = || Error::failure(format!("source manifest `{}` is invalid", path.display()));
+        let value = Value::parse(path, "source manifest", bytes)?;
+        let object = value.as_object().ok_or_else(invalid)?;
+        if value.canonical_bytes() != bytes
+            || object.get("format-version").and_then(Value::as_u64) != Some(1)
+        {
+            return Err(invalid());
+        }
+        let entries = object
+            .get("entries")
+            .and_then(Value::as_array)
+            .ok_or_else(invalid)?
+            .iter()
+            .map(|entry| {
+                let field = |name: &str| entry.as_object().and_then(|entry| entry.get(name));
+                Some(Entry {
+                    path: field("path")?.as_str()?.to_owned(),
+                    kind: match field("kind")?.as_str()? {
+                        "directory" => EntryKind::Directory,
+                        "file" => EntryKind::File,
+                        _ => return None,
+                    },
+                    executable: field("executable")?.as_bool()?,
+                    length: field("length")?.as_u64()?,
+                    sha256: decode_hex(field("sha256")?.as_str()?).ok()?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(invalid)?;
+        let sha256 = digest_entries(&entries, limits)?;
+        if object.get("source-tree-sha256").and_then(Value::as_str) != Some(&hex(&sha256)) {
+            return Err(invalid());
+        }
+        let file_count = entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::File)
+            .count();
         Ok(Self {
-            entries: scanner.entries,
-            file_count: scanner.file_count,
-            directory_count: scanner.directory_count,
-            total_bytes: scanner.total_bytes,
+            file_count,
+            directory_count: entries.len() - file_count,
+            total_bytes: entries.iter().map(|entry| entry.length).sum(),
+            entries,
             sha256,
         })
     }
@@ -193,6 +276,8 @@ struct Scanner<'a> {
     root: &'a Path,
     limits: Limits,
     exclusions: Exclusions,
+    hash: bool,
+    stats: FieldDigest,
     entries: Vec<Entry>,
     file_count: usize,
     directory_count: usize,
@@ -244,6 +329,7 @@ impl Scanner<'_> {
             if metadata.file_type().is_symlink() {
                 return Err(unsupported_entry(&path, "symbolic link"));
             }
+            self.record_stats(&path, &relative, &metadata)?;
             if metadata.is_dir() {
                 self.push(Entry {
                     path: relative,
@@ -255,8 +341,11 @@ impl Scanner<'_> {
                 self.directory_count += 1;
                 self.scan_directory(&path)?;
             } else if metadata.is_file() {
-                let (length, sha256, executable) =
-                    hash_file(&path, &metadata, self.limits.max_file_bytes)?;
+                let (length, sha256, executable) = if self.hash {
+                    hash_file(&path, &metadata, self.limits.max_file_bytes)?
+                } else {
+                    (metadata.len(), ZERO_SHA256, false)
+                };
                 self.total_bytes = self.total_bytes.checked_add(length).ok_or_else(|| {
                     Error::failure("source tree byte count overflowed its representation")
                 })?;
@@ -278,6 +367,30 @@ impl Scanner<'_> {
             } else {
                 return Err(unsupported_entry(&path, "special file"));
             }
+        }
+        Ok(())
+    }
+
+    fn record_stats(&mut self, path: &Path, relative: &str, metadata: &Metadata) -> Result<()> {
+        self.stats.field(relative.as_bytes());
+        self.stats.field(&[u8::from(metadata.is_dir())]);
+        if metadata.is_dir() {
+            return Ok(());
+        }
+        self.stats.field(&metadata.len().to_le_bytes());
+        self.stats
+            .field(&[u8::from(path_executable(path, metadata)?)]);
+        let modified = modified(path, metadata)?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        self.stats.field(&modified.as_nanos().to_le_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            self.stats.field(&metadata.ctime().to_le_bytes());
+            self.stats.field(&metadata.ctime_nsec().to_le_bytes());
+            self.stats.field(&metadata.dev().to_le_bytes());
+            self.stats.field(&metadata.ino().to_le_bytes());
         }
         Ok(())
     }
@@ -561,6 +674,26 @@ fn file_executable(_file: &File, _metadata: &Metadata) -> Result<bool> {
     ))
 }
 
+const RECORD_HEADER: &str = "lorry-tree-record-v1\n";
+
+fn read_record(record: &Path, stats: &[u8; 32], limits: Limits) -> Option<Tree> {
+    let bytes = fs::read(record).ok()?;
+    let rest = bytes.strip_prefix(RECORD_HEADER.as_bytes())?;
+    let (line, manifest) = rest.split_at(rest.iter().position(|byte| *byte == b'\n')? + 1);
+    (line == format!("stats={}\n", hex(stats)).as_bytes()).then_some(())?;
+    Tree::from_manifest(record, manifest, limits).ok()
+}
+
+fn write_record(record: &Path, stats: &[u8; 32], tree: &Tree) -> Result<()> {
+    if let Some(parent) = record.parent() {
+        fs::create_dir_all(parent).map_err(|error| Error::failure(error.to_string()))?;
+    }
+    let mut file = crate::atomic::AtomicFile::new(record)?;
+    file.write_all(format!("{RECORD_HEADER}stats={}\n", hex(stats)).as_bytes())?;
+    file.write_all(&tree.manifest_bytes())?;
+    file.commit()
+}
+
 pub fn digest_entries(entries: &[Entry], limits: Limits) -> Result<[u8; 32]> {
     validate_entries(entries, limits)?;
     let mut hasher = Sha256::new();
@@ -662,6 +795,48 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn recorded_scans_reuse_a_tree_until_file_metadata_changes() {
+        let root = TempDir::new("recorded");
+        let tree_root = root.0.join("tree");
+        let other = root.0.join("other");
+        fs::create_dir_all(tree_root.join("src")).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::write(tree_root.join("src/lib.rs"), "pub fn one() {}\n").unwrap();
+        fs::write(other.join("decoy"), "not the scanned tree\n").unwrap();
+        let record = root.0.join("records/tree");
+        let scan = || Tree::scan_recorded(&tree_root, DEFAULT_LIMITS, Exclusions::None, &record);
+        let first = scan().unwrap();
+        assert_eq!(
+            first,
+            Tree::scan(&tree_root, DEFAULT_LIMITS, Exclusions::None).unwrap()
+        );
+        // A record whose metadata still matches is trusted without reading
+        // any file: here it holds another tree.
+        let stats = fs::read_to_string(&record)
+            .unwrap()
+            .lines()
+            .nth(1)
+            .unwrap()
+            .to_owned();
+        let decoy = Tree::scan(&other, DEFAULT_LIMITS, Exclusions::None).unwrap();
+        let mut forged = format!("{RECORD_HEADER}{stats}\n").into_bytes();
+        forged.extend(decoy.manifest_bytes());
+        fs::write(&record, &forged).unwrap();
+        assert_eq!(scan().unwrap(), decoy);
+        // Any metadata change rescans and rewrites the record.
+        fs::write(tree_root.join("src/lib.rs"), "pub fn two() {}\n").unwrap();
+        let edited = scan().unwrap();
+        assert_ne!(edited, first);
+        assert_eq!(
+            edited,
+            Tree::scan(&tree_root, DEFAULT_LIMITS, Exclusions::None).unwrap()
+        );
+        assert_ne!(fs::read(&record).unwrap(), forged);
+        fs::write(&record, b"lorry-tree-record-v1\ngarbage").unwrap();
+        assert_eq!(scan().unwrap(), edited);
     }
 
     #[test]

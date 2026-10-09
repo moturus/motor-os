@@ -8,7 +8,9 @@ use crate::atomic::AtomicDirectory;
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
 use crate::source_tree::{EntryKind, Exclusions, Limits, Tree};
+use crate::validation::ValidationMode;
 
+#[allow(clippy::too_many_arguments)]
 pub fn publish_package(
     cache_root: &Path,
     name: &str,
@@ -17,13 +19,18 @@ pub fn publish_package(
     expected_sha256: [u8; 32],
     limits: Limits,
     exclusions: Exclusions,
+    validation: ValidationMode,
 ) -> Result<PathBuf> {
     let sources = cache_root.join("sources");
-    let destination = sources.join(format!("{name}-{version}-{}", hex(&expected_sha256)));
+    let view = format!("{name}-{version}-{}", hex(&expected_sha256));
+    let destination = sources.join(&view);
+    // Views are not flushed, so a crash can leave a torn one. Strict use
+    // hashes the view. Ordinary use rehashes it only when its file metadata
+    // differs from the record its last hash left. An invalid view is
+    // quarantined and republished.
+    let record = (!validation.is_strict()).then(|| cache_root.join("source-records").join(&view));
     match fs::symlink_metadata(&destination) {
-        // Views are not flushed, so a crash can leave a torn one. Every use
-        // hashes the view, and an invalid one is quarantined and republished.
-        Ok(_) => match verify(&destination, expected_sha256, limits) {
+        Ok(_) => match verify(&destination, expected_sha256, limits, record.as_deref()) {
             Ok(path) => return Ok(path),
             Err(error) => {
                 eprintln!("warning: quarantining invalid Lorry source view: {error}");
@@ -47,15 +54,24 @@ pub fn publish_package(
     }
     let staging = AtomicDirectory::new(&sources, name)?;
     copy_tree(source, staging.path(), &tree)?;
-    verify(staging.path(), expected_sha256, limits)?;
+    verify(staging.path(), expected_sha256, limits, None)?;
     if !staging.commit_no_replace(&destination)? {
-        verify(&destination, expected_sha256, limits)?;
+        verify(&destination, expected_sha256, limits, record.as_deref())?;
     }
     Ok(destination)
 }
 
-fn verify(path: &Path, expected_sha256: [u8; 32], limits: Limits) -> Result<PathBuf> {
-    let tree = Tree::scan(path, limits, Exclusions::None).map_err(|error| {
+fn verify(
+    path: &Path,
+    expected_sha256: [u8; 32],
+    limits: Limits,
+    record: Option<&Path>,
+) -> Result<PathBuf> {
+    let tree = match record {
+        Some(record) => Tree::scan_recorded(path, limits, Exclusions::None, record),
+        None => Tree::scan(path, limits, Exclusions::None),
+    }
+    .map_err(|error| {
         Error::failure(format!(
             "cached source view `{}` is invalid: {error}",
             path.display()
@@ -189,6 +205,7 @@ mod tests {
                             tree.sha256,
                             DEFAULT_LIMITS,
                             Exclusions::CargoRegistryMarker,
+                            ValidationMode::Trusted,
                         )
                         .unwrap()
                     })
@@ -217,6 +234,7 @@ mod tests {
             tree.sha256,
             DEFAULT_LIMITS,
             Exclusions::CargoRegistryMarker,
+            ValidationMode::Trusted,
         )
         .unwrap();
         assert_eq!(republished, paths[0]);
@@ -242,6 +260,7 @@ mod tests {
             [7; 32],
             DEFAULT_LIMITS,
             Exclusions::CargoRegistryMarker,
+            ValidationMode::Strict,
         )
         .unwrap_err();
         assert!(error.render().contains("changed before publication"));
