@@ -669,13 +669,13 @@ Retain/review the Javy-local C++ TLS shim (ABI/alignment, destructor order,
 reentrancy, allocation/unwind failure and Binaryen/CXX coverage), its
 128-destructor regression, allocator-backed loading and Wasmtime Rust TLS hooks.
 Preserve non-Motor/no-std behavior and broaden determinism fixtures. The
-recorded `f32::log2` differences come from Rust's bundled libm versus Linux
-glibc: running the bundled implementation on Linux reproduces all 4,744
-recorded Motor values, including 53 one-ULP differences from Linux std. This is
-permitted by Rust's unspecified transcendental precision, not evidence of an OS
-arithmetic defect. Upstream Brotli may therefore emit different compressed
-source bytes; the prototype's f64-then-round workaround is not a universal
-determinism fix. Preserve C++ TLS teardown and QuickJS/WIT diagnostics. The
+recorded `f32::log2` differences came from Rust's bundled libm (FreeBSD msun's
+`log2f`) versus glibc's (Arm optimized-routines, also in musl), which differ on
+11,575,817 of the 2^32 inputs; upstream Brotli's compressed source bytes
+followed them. Since toolchain `dev.2-abb676f7` (motor-os `3d98cd10`) both
+Motor's Rust libm and mlibc use glibc's algorithm, bit-identical to glibc 2.43
+on all inputs, and `javy-smoke` checks Motor Javy's output against Linux
+Javy's. The prototype's f64-then-round workaround stays retired. Preserve C++ TLS teardown and QuickJS/WIT diagnostics. The
 unresolved Pulley invalid-opcode event requires an explicit disposition in 2f;
 later passing matrices alone do not explain the original failure.
 
@@ -744,14 +744,15 @@ confirms or refines them. No latency target is inferred from one run.
 
 ### Milestone 1 close-out: Javy/Wasmi remainder
 
-Status 2026-10-08: 1h–1l are implemented. The Javy fork commits
-`4c2c4c6..bd7a2b1` and the Wasmtime build-script commit `e0e9548fb` await
-publication; until then the published add-on fails the new `javy-smoke`
-runner cases. Before publication, a temporary overlay of the locally built
-binaries passed the QEMU matrix (four boots, 57 commands each, zero
-admission refusals), and the new runner cases failed against the published
-binaries. After publication, rebuild with `--javy-only` and run the matrix
-under both VMMs.
+Status 2026-10-09: 1g–1l are done; 1f remains. All fork commits are
+published (Javy `3a04d39`, Wasmtime `a6b85b1cb`, each ending with the
+moto-rt 0.17.7 lock). The add-ons built from them with toolchain
+`dev.2-abb676f7` passed the matrix under QEMU and Cloud Hypervisor: four
+boots per VMM, 61 `javy-smoke` and 43 `wasmtime-smoke` commands each, zero
+admission refusals, about 405 s per VMM against `test-wasm.sh`'s 600 s bound.
+Before publication, a temporary overlay of locally built binaries had passed
+the QEMU matrix, and the new runner cases failed against the then-published
+binaries.
 
 - **1h:** streaming validation passed the matrix and cut sampled peaks where
   validation dominates: dynamic hello 168.5 to 81.4 MiB and `init-plugin`
@@ -784,20 +785,18 @@ no new dependency.
    deterministic output use digest-pinned plugins under `/devtools/cfg/javy`.
    Expected refusals are recorded separately from the zero-delta rule. Output:
    tree tests, evidence at 256/224 on both images.
-2. **1g — compressed byte identity.** Recommendation 2026-10-08, awaiting
-   owner confirmation: Motor output equals upstream Linux Javy 9.1.0
-   (digest-pinned release, same explicit plugin, `-C deterministic`) in every
-   section except `javy_source`, which must decompress to the exact input; with
-   source omitted or uncompressed the whole file is identical. Measured: hello in
-   all three source modes and TypeScript omitted/uncompressed are identical;
-   compressed TypeScript differs only in `javy_source` (1,151,218 against
-   1,151,115 bytes), and both decompress to the 9,112,951-byte workload. Settle the Linux/Motor equality rule for
-   compressed-source artifacts under the deterministic reference recipe. The
-   two candidates are an identity requirement on uncompressed-source output
-   plus decompressed-equivalence for compressed output, or a Linux reference
-   build that uses Rust's bundled libm. Record the decision in this document,
-   then add the chosen comparison to `javy-smoke` with the pinned Linux
-   artifacts. Output: tree (recipe, fixtures, test) and evidence.
+2. **1g — byte identity (done 2026-10-09).** Rule, set by the owner's choice
+   of a toolchain fix: Motor output equals upstream Linux Javy 9.1.0
+   (digest-pinned release, same explicit plugin, `-C deterministic`) byte for
+   byte in every source mode. The only earlier difference, compressed
+   TypeScript's `javy_source` (1,151,218 against 1,151,115 bytes), came from
+   `log2f` in Brotli and disappeared with the toolchain fix above.
+   `src/build-javy.sh` runs the pinned Linux Javy at add-on build time on
+   `javy-smoke/fixtures/hello.js` (compressed, uncompressed, omitted) and the
+   TypeScript workload (compressed) and stages the four digests as
+   `/devtools/cfg/javy/linux-reference.txt`; `javy-smoke` compiles the same
+   four on Motor and requires equal digests. The four compiles add about 32 s
+   per boot.
 3. **1h — streaming plugin validation.** Implement validation that does not
    retain the whole plugin through the compiler phase, preserving complete
    validation and the malformed-input checks. Measure the phase budget before
@@ -853,10 +852,10 @@ Deliver `wasmtime-rt` in both images with precompiled Pulley command execution
 under WASI p2, using the native adapters already on `motor-48.0.1`.
 
 Status 2026-10-08: 2a is delivered; 2b, 2c, 2e and 2g are implemented as
-`moturus/wasmtime` commits `e0e9548fb..146853f2f`, which await publication
-together with the Javy commits, and were qualified with locally built binaries
-on both images at 224 MiB (evidence in `build/wasm-milestone2/`). 2d and 2f
-wait for the guest-fixture decision below.
+`moturus/wasmtime` commits `e0e9548fb..146853f2f`, published, and were
+qualified with locally built binaries on both images at 224 MiB (evidence in
+`build/wasm-milestone2/`). 2d is done and 2f is partly done (below); since
+2026-10-09 the delivered add-on passes the matrix under both VMMs.
 
 - **2b:** owned lazy reservations (96 MiB per memory, 128 MiB and four per
   process) back every memory; `memory-check` grew a memory to the limit in
@@ -896,7 +895,7 @@ Cloud Hypervisor matrices passed (four boots, 57 + 43 commands, zero admission
 refusals, about 4.6 minutes per VMM). TypeScript through `wasmtime-rt` peaks at
 89.6/99.9 MiB at 224/256 MiB.
 
-The fork commits `62a4ed98a..113ca953f` await publication. Running upstream's
+The fork commits `62a4ed98a..113ca953f` are published. Running upstream's
 socket programs on Motor found four adapter defects, now fixed: every WASI UDP
 socket was bound at creation (upstream's writability wait reached the lazy
 bind), native in-use and non-local binds surfaced as `unknown`/
