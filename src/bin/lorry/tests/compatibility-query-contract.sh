@@ -199,6 +199,7 @@ EOF
 chmod +x "$WORK/proxy/rustup"
 ln -s rustup "$WORK/proxy/rustc"
 : >"$WORK/rustup.log"
+before="$(wc -l <"$RUSTC_LOG")"
 (cd "$PROJECT" && env -u RUSTC HOME="$HOME_DIR" PATH="$WORK/proxy:$PATH" \
     DIRECT_RUSTC="$WORK/direct-rustc" RUSTC_LOG="$RUSTC_LOG" \
     RUSTUP_LOG="$WORK/rustup.log" RUSTUP_TOOLCHAIN=proxy-toolchain \
@@ -206,7 +207,10 @@ ln -s rustup "$WORK/proxy/rustc"
     --target x86_64-unknown-motor -- -O) >/dev/null
 grep -Fx 'which rustc|proxy-toolchain' "$WORK/rustup.log" >/dev/null || \
     fail "rustup proxy resolution did not receive RUSTUP_TOOLCHAIN"
-tail -n 3 "$RUSTC_LOG" | grep -v 'ENV:<unset>:<unset>:<unset>:<unset>$' >/dev/null && \
+# Version and cfg answers may come from Lorry's rustc query cache, so only
+# this command's own compiler runs are checked.
+[ "$(wc -l <"$RUSTC_LOG")" -gt "$before" ] || fail "the proxy query ran no compiler"
+tail -n "+$((before + 1))" "$RUSTC_LOG" | grep -v 'ENV:<unset>:<unset>:<unset>:<unset>$' >/dev/null && \
     fail "resolved direct compiler received rustup proxy environment"
 
 cmp "$WORK/Cargo.toml.before" "$PROJECT/Cargo.toml" || fail "query changed Cargo.toml"
