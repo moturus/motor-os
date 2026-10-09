@@ -165,6 +165,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
         config.trust_cargo_cache();
         None
     } else {
+        config.require_approved_cargo_configs()?;
         for manifest in &selected {
             if manifest.root != manifest.workspace_root
                 && CompactState::path(&manifest.root).exists()

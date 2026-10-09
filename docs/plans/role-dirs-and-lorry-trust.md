@@ -218,8 +218,10 @@ workspace:
   optimization flags (the full list is in the details file);
 - `build.target-dir` outside the workspace root.
 
-`lorry vendor` asks once for each dangerous setting. It records what you
-allow, including the value. A changed value asks again. Other commands stop
+`lorry vendor` lists each repository file with dangerous settings and asks
+once. It records the approved file by path and SHA-256, so any edit to that
+file asks again. (Implemented per file rather than per setting: simpler, and
+stricter.) Other commands stop
 with a hint to run `lorry vendor`, because rust-analyzer runs them without a
 terminal. A denied setting stops the command. Environment variables such as
 `CARGO_TARGET_<T>_LINKER` are yours and need no approval.

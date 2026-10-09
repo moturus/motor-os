@@ -43,7 +43,12 @@ pub struct Package {
 /// crates.io sources from Cargo's cache. The command line wins over
 /// configuration. By default the mode is on whenever Cargo's cache exists.
 pub(crate) fn selected(cli: &Cli, config: &Config) -> bool {
-    match cli.use_cargo_registry {
+    selected_by(cli.use_cargo_registry, config)
+}
+
+/// The same choice, from the command line's explicit setting, if any.
+pub(crate) fn selected_by(explicit: Option<bool>, config: &Config) -> bool {
+    match explicit {
         Some(explicit) => explicit,
         None => config.use_cargo_registry.unwrap_or(true) && cache_exists(),
     }

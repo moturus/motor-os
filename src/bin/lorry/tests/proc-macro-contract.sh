@@ -33,6 +33,7 @@ printf 'config-version = 1\nuse-cargo-registry = false\ncargo-compat-version = "
 printf '[target.%s]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
     "$MOTOR_TARGET" "$MOTOR_LINKER" "$MOTOR_SYSROOT" \
     >"$WORK/project/.cargo/config.toml"
+"$SCRIPT_DIR/approve-cargo-config.sh" "$HOME" "$WORK/project" "$WORK/project/.cargo/config.toml"
 
 printf '%s\n' \
     '[package]' \

@@ -188,6 +188,7 @@ mkdir "$PROJECT/.cargo"
 printf '[target.%s]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
     "$MOTOR_TARGET" "$MOTOR_LINKER" "$MOTOR_SYSROOT" \
     >"$PROJECT/.cargo/config.toml"
+"$SCRIPT_DIR/approve-cargo-config.sh" "$LORRY_HOME" "$PROJECT" "$PROJECT/.cargo/config.toml"
 (
     cd "$PROJECT"
     HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
@@ -230,6 +231,7 @@ cmp "$LORRY_MOTOR_HELPER_TEST" "$CARGO_MOTOR_HELPER_TEST" ||
 
 mkdir "$WORKSPACE/.cargo"
 cp "$PROJECT/.cargo/config.toml" "$WORKSPACE/.cargo/config.toml"
+"$SCRIPT_DIR/approve-cargo-config.sh" "$LORRY_HOME" "$WORKSPACE" "$WORKSPACE/.cargo/config.toml"
 (
     cd "$WORKSPACE"
     HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \

@@ -11,6 +11,7 @@ pub fn execute(
     selection: &crate::manifest::PackageSelection,
     manifest_path: Option<&str>,
     verbosity: Verbosity,
+    use_cargo_registry: Option<bool>,
 ) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
@@ -51,6 +52,10 @@ pub fn execute(
             .iter()
             .map(|member| member.root.as_path()),
     )?;
+    // A repository's target directory decides what clean removes.
+    if !crate::cargo_registry::selected_by(use_cargo_registry, &config) {
+        config.require_approved_cargo_configs()?;
+    }
     let target_directory = config.target_directory(
         &current,
         &workspace.root,

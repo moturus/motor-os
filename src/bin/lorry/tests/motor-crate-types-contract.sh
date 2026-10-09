@@ -12,6 +12,7 @@ mkdir -p "$WORK/home" "$WORK/project/src" "$WORK/project/.cargo"
 printf 'pub fn answer() -> u32 { 42 }\n' >"$WORK/project/src/lib.rs"
 printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
     "$LORRY_MOTOR_LINKER" "$LORRY_MOTOR_SYSROOT" >"$WORK/project/.cargo/config.toml"
+"$SCRIPT_DIR/approve-cargo-config.sh" "$WORK/home" "$WORK/project" "$WORK/project/.cargo/config.toml"
 cd "$WORK/project"
 for types in '"rlib","cdylib"' '"rlib","dylib"' '"staticlib","cdylib"' '"cdylib"' '"dylib"'; do
     printf '[package]\nname = "probe"\nversion = "1.0.0"\nedition = "2024"\n[lib]\ncrate-type = [%s]\n' "$types" >Cargo.toml

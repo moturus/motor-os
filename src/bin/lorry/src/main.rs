@@ -166,6 +166,7 @@ fn run(cli: Cli) -> Result<i32> {
             &cli.selection,
             cli.manifest_path.as_deref(),
             cli.verbosity,
+            cli.use_cargo_registry,
         ),
         Command::LocateProject { workspace, plain } => {
             compatibility::locate_project(cli.manifest_path.as_deref(), *workspace, *plain)

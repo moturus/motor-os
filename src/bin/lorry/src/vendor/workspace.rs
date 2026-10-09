@@ -346,8 +346,15 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     let approved = previous
         .as_ref()
         .is_some_and(|previous| config.policy.approves(&previous.review_sha256));
+    // Repository Cargo settings that can run a program also need approval.
+    let cargo_configs = config
+        .unapproved_cargo_configs()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
     let unchanged = approved
         && admission.proposed.is_empty()
+        && cargo_configs.is_empty()
         && previous.as_ref().is_some_and(|previous| {
             previous.scope == scope
                 && previous.review_sha256 == commitment
@@ -400,11 +407,16 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
             .map(|reconstructed| reconstructed.review);
         let proposals = proposed_grants(&selected, &evidence, &admission)?;
         write_proposals(&proposals, &config, cli.lorry_messages, &mut output)?;
+        write_cargo_configs(&cargo_configs, cli.lorry_messages, &mut output)?;
         let mode = if accept_all {
             change_review::Mode::AcceptAll
         } else if options.locked
             || !migration.is_empty()
             || direct.materialized_sources().next().is_some()
+            // Proposed grants and Cargo files need a "yes" even when the
+            // dependency review itself is unchanged.
+            || !proposals.is_empty()
+            || !cargo_configs.is_empty()
         {
             change_review::Mode::Forced
         } else {
@@ -454,6 +466,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         options.accept_all,
         &commitment,
         proposed_grants(&selected, &evidence, &admission)?,
+        &cargo_configs,
         &selected,
     )?;
     migration.remove()?;
@@ -564,18 +577,62 @@ fn write_proposals(
     Ok(())
 }
 
-/// Records `--accept-all`, the approved review, and the approved grants in
-/// the user's configuration. Grants for packages no longer selected go.
+/// Lists the repository Cargo configuration files that this review approves,
+/// with the settings that need it.
+fn write_cargo_configs(
+    configs: &[crate::config::CargoTrust],
+    json: bool,
+    output: &mut impl Write,
+) -> Result<()> {
+    if configs.is_empty() {
+        return Ok(());
+    }
+    let write_error = |error: io::Error| {
+        Error::failure(format!(
+            "failed to write Cargo configuration review: {error}"
+        ))
+    };
+    if json {
+        let message = serde_json::json!({
+            "reason": "lorry-vendor-cargo-config",
+            "files": configs.iter().map(|trust| serde_json::json!({
+                "file": trust.file,
+                "sha256": trust.sha256,
+                "settings": trust.settings,
+            })).collect::<Vec<_>>(),
+        });
+        return writeln!(output, "{message}").map_err(write_error);
+    }
+    writeln!(
+        output,
+        "Repository Cargo configuration to approve ({}):",
+        configs.len()
+    )
+    .map_err(write_error)?;
+    for trust in configs {
+        writeln!(output, "  + {}", trust.file.display()).map_err(write_error)?;
+        for setting in &trust.settings {
+            writeln!(output, "      {setting}").map_err(write_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Records `--accept-all`, the approved review, the approved grants, and the
+/// approved Cargo configuration in the user's configuration. Grants for
+/// packages no longer selected go.
 fn record_decisions(
     config: &Config,
     accept_all: bool,
     commitment: &str,
     proposed: Vec<workspace_trust::Grant>,
+    cargo_configs: &[crate::config::CargoTrust],
     selected: &Resolution,
 ) -> Result<()> {
     let unchanged = (!accept_all || config.policy.accept_all)
         && config.policy.approved_review.as_deref() == Some(commitment)
-        && proposed.is_empty();
+        && proposed.is_empty()
+        && cargo_configs.is_empty();
     if unchanged {
         return Ok(());
     }
@@ -600,6 +657,11 @@ fn record_decisions(
                 .any(|package| package.key.name == grant.name && package.key.version == *version),
         });
         decisions.grants.extend(proposed);
+        decisions.cargo_configs.extend(
+            cargo_configs
+                .iter()
+                .map(|trust| (trust.file.clone(), trust.sha256.clone())),
+        );
     })
 }
 

@@ -72,6 +72,7 @@ cat >"$WORK/project/.cargo/config.toml" <<EOF
 linker = "$LORRY_MOTOR_LINKER"
 rustflags = ["--sysroot", "$LORRY_MOTOR_SYSROOT"]
 EOF
+"$SCRIPT_DIR/approve-cargo-config.sh" "$WORK/home" "$WORK/project" "$WORK/project/.cargo/config.toml"
 cd "$WORK/project"
 "$LORRY_TEST_CARGO" generate-lockfile --offline
 "$RUSTC" --edition=2024 -D warnings -O "$SCRIPT_DIR/helpers/cache-curl.rs" -o "$WORK/cache-curl"

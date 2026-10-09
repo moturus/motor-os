@@ -282,6 +282,13 @@ note; the spec lists the rest. Project
 `lorry.toml` belongs at the workspace root. A member-local file is rejected
 with the location to which its settings should move.
 
+Only your `$CARGO_HOME/config.toml` and environment variables are your own
+Cargo settings; any other `.cargo/config.toml` belongs to the repository. When
+such a file sets a linker, a runner, rustflags beyond a short harmless list,
+or a target directory outside the workspace, Lorry needs your approval of that
+exact file: `lorry vendor` shows the settings and asks, and builds stop with a
+hint until you approve. `vendor --accept-all` approves them all.
+
 `locate-project` emits `{"root":"/absolute/path/Cargo.toml"}`, or the path
 alone with `--message-format plain`. The manifest is discovered in the
 working directory or its parents, or supplied with `--manifest-path`.

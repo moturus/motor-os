@@ -131,6 +131,11 @@ impl Document {
         Ok(Self { source, parsed })
     }
 
+    /// The exact text that was parsed.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
     pub fn root(&self) -> &Table {
         self.parsed.as_table()
     }

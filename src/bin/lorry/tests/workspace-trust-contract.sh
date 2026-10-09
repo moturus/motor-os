@@ -112,11 +112,52 @@ fi
 grep -F 'package `app 0.1.0` contains a build script' "$WORK/new-script.err" >/dev/null ||
     fail "a new script had the wrong error: $(cat "$WORK/new-script.err")"
 interactive_vendor "$CLONE" y "$WORK/again.typescript" || fail "the second approval failed"
+grep -F 'Approve this dependency and capability change?' "$WORK/again.typescript" >/dev/null ||
+    fail "the second review did not ask"
 grep -F 'Build-time code to approve (1):' "$WORK/again.typescript" >/dev/null ||
     fail "the second review did not list only the new script"
 grep -F '+ app (path): build script' "$WORK/again.typescript" >/dev/null ||
     fail "the second review did not name the new script"
 lorry "$CLONE" build -q
+
+echo "== A repository's risky Cargo setting needs approval of that file =="
+mkdir -p "$CLONE/.cargo"
+printf '[target.x86_64-unknown-motor]\nlinker = "/bin/false"\n' >"$CLONE/.cargo/config.toml"
+if lorry "$CLONE" build 2>"$WORK/cargo.err"; then
+    fail "built with an unapproved repository linker"
+fi
+grep -F "you have not approved the repository's Cargo configuration \`$CLONE/.cargo/config.toml\`" \
+    "$WORK/cargo.err" >/dev/null || fail "unapproved Cargo setting had the wrong error: $(cat "$WORK/cargo.err")"
+grep -F 'target.x86_64-unknown-motor.linker = "/bin/false"' "$WORK/cargo.err" >/dev/null ||
+    fail "the error did not name the setting"
+if interactive_vendor "$CLONE" n "$WORK/cargo-declined.typescript"; then
+    fail "a declined Cargo review succeeded"
+fi
+grep -F 'Repository Cargo configuration to approve (1):' "$WORK/cargo-declined.typescript" >/dev/null ||
+    fail "the review did not list the Cargo configuration"
+if grep -F 'cargo-config' "$(decisions_for "$CLONE")" >/dev/null; then
+    fail "a declined review recorded the Cargo configuration"
+fi
+interactive_vendor "$CLONE" y "$WORK/cargo-approved.typescript" || fail "the Cargo approval failed"
+grep -F 'Approve this dependency and capability change?' "$WORK/cargo-approved.typescript" >/dev/null ||
+    fail "the Cargo review did not ask"
+grep -F '[[cargo-config]]' "$(decisions_for "$CLONE")" >/dev/null || fail "the Cargo approval was not recorded"
+lorry "$CLONE" build -q
+printf '[target.x86_64-unknown-motor]\nlinker = "/bin/true"\n' >"$CLONE/.cargo/config.toml"
+if lorry "$CLONE" build 2>/dev/null; then
+    fail "an edited repository Cargo file kept its approval"
+fi
+printf '[build]\nrustflags = ["--cfg", "harmless"]\n' >"$CLONE/.cargo/config.toml"
+lorry "$CLONE" build -q || fail "harmless repository rustflags needed approval"
+rm "$CLONE/.cargo/config.toml"
+mkdir -p "$WORK/cargo-home"
+printf '[target.x86_64-unknown-motor]\nlinker = "/bin/false"\n' >"$WORK/cargo-home/config.toml"
+(cd "$CLONE" && env HOME="$HOME_DIR" CARGO_HOME="$WORK/cargo-home" "$LORRY" build -q) ||
+    fail "the user's own CARGO_HOME linker needed approval"
+mkdir -p "$PROJECT/.cargo"
+printf '[target.x86_64-unknown-motor]\nlinker = "/bin/false"\n' >"$PROJECT/.cargo/config.toml"
+lorry "$PROJECT" build -q || fail "an accepted workspace did not honor its Cargo configuration"
+rm "$PROJECT/.cargo/config.toml"
 
 echo "== Deleting the decisions revokes them =="
 rm "$(decisions_for "$PROJECT")"

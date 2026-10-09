@@ -54,6 +54,7 @@ fn main() { println!("{}", derive::answer!() + helper::value()); }
 EOF
 printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
     "$LORRY_MOTOR_LINKER" "$LORRY_MOTOR_SYSROOT" >"$WORK/project/.cargo/config.toml"
+"$SCRIPT_DIR/approve-cargo-config.sh" "$WORK/home" "$WORK/project" "$WORK/project/.cargo/config.toml"
 USER_CONFIG="$WORK/home/.config/lorry/lorry.toml"
 cat >>"$USER_CONFIG" <<EOF
 [workspaces."$WORK/project".policy.rules.member-macro]
@@ -194,6 +195,7 @@ cat >"$WORK/target-runner.sh" <<'EOF'
 exit 73
 EOF
 printf '\nrunner = ["bash", "%s"]\n' "$WORK/target-runner.sh" >>.cargo/config.toml
+"$SCRIPT_DIR/approve-cargo-config.sh" "$WORK/home" "$WORK/project" "$WORK/project/.cargo/config.toml"
 host_libdir="$("$RUSTC" --print target-libdir)"
 env EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY_TEST_CARGO" test -p derive --target x86_64-unknown-motor --offline
 env HOME="$WORK/home" EXPECTED_HOST_LIBDIR="$host_libdir" "$LORRY" test -p derive --target x86_64-unknown-motor
@@ -245,6 +247,7 @@ done
 # A binary-only consumer must also put a dev-only, unselected macro on the host.
 mkdir -p "$WORK/dev-only"/{app,derive,helper}/src "$WORK/dev-only/app/.cargo"
 cp .cargo/config.toml "$WORK/dev-only/app/.cargo/config.toml"
+"$SCRIPT_DIR/approve-cargo-config.sh" "$WORK/home" "$WORK/dev-only" "$WORK/dev-only/app/.cargo/config.toml"
 cd "$WORK/dev-only/app"
 cat >../Cargo.toml <<'EOF'
 [workspace]

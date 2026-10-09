@@ -26,6 +26,7 @@ EOF
 printf 'compile_error!("unavailable feature target compiled");\n' >"$WORK/project/tests/needs.rs"
 printf '[target.x86_64-unknown-motor]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
     "$LORRY_MOTOR_LINKER" "$LORRY_MOTOR_SYSROOT" >"$WORK/project/.cargo/config.toml"
+"$SCRIPT_DIR/approve-cargo-config.sh" "$WORK/home" "$WORK/project" "$WORK/project/.cargo/config.toml"
 cd "$WORK/project"
 for discovery in disabled automatic legacy; do
     edition=2024

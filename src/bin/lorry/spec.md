@@ -671,12 +671,31 @@ subset. Settings that cannot change a build are ignored with a note; the
 command-line section lists them. Every other setting, such as source
 replacement, unstable features, or a compiler wrapper, is an error rather
 than adopted or silently ignored.
-Cargo configuration is discovered from the invocation directory and its
-parents, then CARGO_HOME. Package selection and --manifest-path do not move
-that search. An alias table may exist; Lorry does not execute aliases.
-Project lorry.toml is found at or above the workspace root, layered over
-user/system settings. A member-local lorry.toml fails with the workspace
-location to which its settings should move. System constraints still apply.
+Lorry reads `$CARGO_HOME/config.toml` first, then the `.cargo` directory
+of each ancestor of the invocation directory from `/` down; later files take
+precedence. An empty `CARGO_HOME` is unset, as in Cargo. Package selection and
+--manifest-path do not move that search. An alias table may exist; Lorry does
+not execute aliases. Project lorry.toml is the workspace root's own file,
+layered over user/system settings. A member-local lorry.toml fails with the
+workspace location to which its settings should move. System constraints
+still apply.
+
+Only the `CARGO_HOME` file and environment variables belong to the user.
+Every other Cargo configuration file is the repository's. In one, these
+settings can run a program or write outside the workspace and need the user's
+approval: a target `linker` or `runner`; rustflags outside a short safe list
+(`--cfg`, `--check-cfg`, lint levels, `--cap-lints`, `--remap-path-prefix`,
+and the `-C` options `codegen-units`, `debug-assertions`, `debuginfo`,
+`default-linker-libraries`, `force-frame-pointers`, `link-self-contained`,
+`opt-level`, `overflow-checks`, `panic`, `target-cpu`, and `target-feature`);
+and a `build.target-dir` outside the workspace root. Approval covers one file
+by its path and the SHA-256 of its text, so any edit needs a new approval.
+`vendor` lists such files with their settings in its review and records an
+approval in the workspace decisions; `--accept-all` honors them all. Build,
+check, Clippy, run, test, clean, and the `rustc --print` query stop on an
+unapproved file with a hint to run `lorry vendor`. In Cargo cache mode, which
+already trusts the repository's build-time code as Cargo does, Lorry does not
+ask.
 
 ## Locking, resolution, and source selection
 

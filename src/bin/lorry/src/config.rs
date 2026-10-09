@@ -38,7 +38,20 @@ pub struct Config {
     pub test: TestConfig,
     pub native_tools: BTreeMap<(String, NativeToolRole), NativeTool>,
     pub policy: Policy,
+    /// Repository Cargo configuration files whose settings can run a
+    /// program or write outside the workspace; each needs approval.
+    pub cargo_trust: Vec<CargoTrust>,
     constraints: Vec<Constraint>,
+}
+
+/// One repository Cargo configuration file that needs the user's approval.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CargoTrust {
+    pub file: PathBuf,
+    /// SHA-256 of the exact text Lorry read; any edit needs a new approval.
+    pub sha256: String,
+    /// The settings that need approval, as `key = value`.
+    pub settings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -168,6 +181,9 @@ pub struct Policy {
     pub accept_all: bool,
     /// The admission review the user last approved for this workspace.
     pub approved_review: Option<String>,
+    /// Repository Cargo configuration files the user approved, by path and
+    /// SHA-256.
+    pub approved_cargo_configs: BTreeSet<(PathBuf, String)>,
     /// Set by an interactive `vendor`: missing build-time grants become
     /// proposals in its review instead of errors.
     pub propose_missing: bool,
@@ -196,6 +212,7 @@ impl Default for Policy {
             workspace: None,
             accept_all: false,
             approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
             propose_missing: false,
         }
     }
@@ -286,6 +303,39 @@ impl Config {
         if self.policy.limits.max_packages_source == LimitSource::Default {
             self.policy.limits.max_packages = u64::MAX;
         }
+    }
+
+    /// Risky repository Cargo configuration files the user has not
+    /// approved. `--accept-all` honors them all.
+    pub(crate) fn unapproved_cargo_configs(&self) -> Vec<&CargoTrust> {
+        if self.policy.accept_all {
+            return Vec::new();
+        }
+        self.cargo_trust
+            .iter()
+            .filter(|trust| {
+                !self
+                    .policy
+                    .approved_cargo_configs
+                    .contains(&(trust.file.clone(), trust.sha256.clone()))
+            })
+            .collect()
+    }
+
+    /// Commands that use Cargo settings stop on an unapproved risky file.
+    pub(crate) fn require_approved_cargo_configs(&self) -> Result<()> {
+        let Some(trust) = self.unapproved_cargo_configs().into_iter().next() else {
+            return Ok(());
+        };
+        Err(Error::failure(format!(
+            "you have not approved the repository's Cargo configuration `{}`, which sets {}",
+            trust.file.display(),
+            trust.settings.join("; ")
+        ))
+        .with_help(
+            "run `lorry vendor` in a terminal to review it, \
+             or `lorry vendor --accept-all` to trust this workspace",
+        ))
     }
 
     pub(crate) fn apply_max_packages(&mut self, requested: Option<u64>) -> Result<()> {
@@ -386,7 +436,7 @@ impl Config {
         let mut config = Config::default();
         load_lorry_layers(workspace_root, environment, &mut config)?;
         validate_storage_layout(&config, environment)?;
-        load_cargo_layers(current, environment, &mut config)?;
+        load_cargo_layers(current, workspace_root, environment, &mut config)?;
         apply_cargo_environment(environment, &mut config)?;
         Ok(config)
     }
@@ -1515,22 +1565,26 @@ fn validate_storage_layout(config: &Config, environment: &BTreeMap<String, Strin
 
 fn load_cargo_layers(
     package_root: &Path,
+    workspace_root: &Path,
     environment: &BTreeMap<String, String>,
     config: &mut Config,
 ) -> Result<()> {
+    // Like Cargo, an empty CARGO_HOME is unset.
     let cargo_home = environment
         .get("CARGO_HOME")
+        .filter(|home| !home.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             environment
                 .get("HOME")
                 .map(|home| Path::new(home).join(".cargo"))
         });
+    // The CARGO_HOME file is the user's; every other file is the repository's.
     let mut layers = Vec::new();
     if let Some(home) = cargo_home.as_deref()
         && let Some(path) = cargo_config_in(home)
     {
-        layers.push(path);
+        layers.push((path, None));
     }
     let mut ancestors: Vec<_> = package_root.ancestors().collect();
     ancestors.reverse();
@@ -1543,11 +1597,11 @@ fn load_cargo_layers(
             continue;
         }
         if let Some(path) = cargo_config_in(&directory) {
-            layers.push(path);
+            layers.push((path, Some(workspace_root)));
         }
     }
-    for path in layers {
-        merge_cargo_file(&path, config)?;
+    for (path, repository) in layers {
+        merge_cargo_file(&path, repository, config)?;
     }
     Ok(())
 }
@@ -1577,8 +1631,12 @@ const IGNORED_CARGO_TABLES: &[&str] = &[
     "term",
 ];
 
-fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
+/// Merges one Cargo configuration file. For a repository's file, given the
+/// workspace root, settings that can run a program or write outside the
+/// workspace are recorded for approval.
+fn merge_cargo_file(path: &Path, repository: Option<&Path>, config: &mut Config) -> Result<()> {
     let document = Document::load(path, "Cargo configuration")?;
+    let mut risky = Vec::new();
     for (key, item) in document.root().iter() {
         if IGNORED_CARGO_TABLES.contains(&key) {
             config.ignored.push(format!(
@@ -1649,12 +1707,11 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
                     config.default_target = Some(value);
                 }
                 "rustflags" => {
-                    config.build_rustflags.extend(rustflags_words(
-                        path,
-                        &document,
-                        item,
-                        "build.rustflags",
-                    )?);
+                    let flags = rustflags_words(path, &document, item, "build.rustflags")?;
+                    if repository.is_some() && first_unsafe_rustflag(&flags).is_some() {
+                        risky.push(format!("build.rustflags = {flags:?}"));
+                    }
+                    config.build_rustflags.extend(flags);
                 }
                 "target-dir" => {
                     let value = require_string(path, &document, item, "build.target-dir")?;
@@ -1667,11 +1724,17 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
                         ));
                     }
                     let directory = PathBuf::from(value);
-                    config.build_target_dir = Some(if directory.is_absolute() {
+                    let directory = if directory.is_absolute() {
                         directory
                     } else {
                         definition_root.join(directory)
-                    });
+                    };
+                    if let Some(root) = repository
+                        && !inside_directory(root, &directory)
+                    {
+                        risky.push(format!("build.target-dir = {:?}", directory));
+                    }
+                    config.build_target_dir = Some(directory);
                 }
                 "rustc-wrapper" | "rustc-workspace-wrapper" => {
                     return Err(Error::at(
@@ -1687,8 +1750,8 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
     }
     if let Some(item) = document.root().get("target") {
         let targets = require_table(path, &document, item, "target")?;
-        for (selector, item) in targets.iter() {
-            let selector = parse_target_selector(path, document.line_of_item(item), selector)?;
+        for (written, item) in targets.iter() {
+            let selector = parse_target_selector(path, document.line_of_item(item), written)?;
             let options = config.targets.entry(selector).or_default();
             let table = require_table(path, &document, item, "target selector")?;
             reject_unknown_keys(
@@ -1702,7 +1765,11 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
                 match key {
                     "linker" => {
                         let value = require_string(path, &document, item, "target.linker")?;
-                        options.linker = Some(resolve_program_path(definition_root, &value));
+                        let linker = resolve_program_path(definition_root, &value);
+                        if repository.is_some() {
+                            risky.push(format!("target.{written}.linker = {linker:?}"));
+                        }
+                        options.linker = Some(linker);
                     }
                     "runner" => {
                         let mut value = argument_words(path, &document, item, "target.runner")?;
@@ -1717,14 +1784,18 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
                         value[0] = resolve_program_path(definition_root, &value[0])
                             .to_string_lossy()
                             .into_owned();
+                        if repository.is_some() {
+                            risky.push(format!("target.{written}.runner = {value:?}"));
+                        }
                         options.runner = Some(value);
                     }
-                    "rustflags" => options.rustflags.extend(rustflags_words(
-                        path,
-                        &document,
-                        item,
-                        "target.rustflags",
-                    )?),
+                    "rustflags" => {
+                        let flags = rustflags_words(path, &document, item, "target.rustflags")?;
+                        if repository.is_some() && first_unsafe_rustflag(&flags).is_some() {
+                            risky.push(format!("target.{written}.rustflags = {flags:?}"));
+                        }
+                        options.rustflags.extend(flags);
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -1748,7 +1819,96 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
             )?);
         }
     }
+    if !risky.is_empty() {
+        let mut digest = crate::hash::Sha256::new();
+        digest.update(document.source().as_bytes());
+        config.cargo_trust.push(CargoTrust {
+            file: path.to_path_buf(),
+            sha256: crate::hash::hex(&digest.finish()),
+            settings: risky,
+        });
+    }
     Ok(())
+}
+
+/// Codegen options that cannot run a program, load code, or link files.
+const SAFE_CODEGEN_OPTIONS: &[&str] = &[
+    "codegen-units",
+    "debug-assertions",
+    "debuginfo",
+    "default-linker-libraries",
+    "force-frame-pointers",
+    "link-self-contained",
+    "opt-level",
+    "overflow-checks",
+    "panic",
+    "target-cpu",
+    "target-feature",
+];
+
+/// The first rustflag outside the short safe list: `--cfg`, lint levels,
+/// path remapping, and harmless codegen options. Anything else, such as
+/// `-C linker`, `-C link-arg`, `-L`, `-Z`, or `@file`, needs approval.
+fn first_unsafe_rustflag(flags: &[String]) -> Option<&str> {
+    let safe_codegen =
+        |option: &str| SAFE_CODEGEN_OPTIONS.contains(&option.split('=').next().unwrap_or(option));
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        let safe = match flag.as_str() {
+            "--cfg"
+            | "--check-cfg"
+            | "--cap-lints"
+            | "--remap-path-prefix"
+            | "-A"
+            | "-W"
+            | "-D"
+            | "-F" => flags.next().is_some(),
+            "-C" => flags.next().is_some_and(|option| safe_codegen(option)),
+            other => {
+                [
+                    "--cfg=",
+                    "--check-cfg=",
+                    "--cap-lints=",
+                    "--remap-path-prefix=",
+                ]
+                .iter()
+                .any(|prefix| other.starts_with(prefix))
+                    || ["-A", "-W", "-D", "-F"]
+                        .iter()
+                        .any(|prefix| other.len() > 2 && other.starts_with(prefix))
+                    || other.strip_prefix("-C").is_some_and(safe_codegen)
+            }
+        };
+        if !safe {
+            return Some(flag);
+        }
+    }
+    None
+}
+
+/// Whether a path stays inside a directory. The existing part of the path
+/// is canonicalized, so a link inside the directory cannot lead out of it.
+fn inside_directory(root: &Path, path: &Path) -> bool {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return false;
+    }
+    let mut existing = path;
+    let mut tail = Vec::new();
+    while !existing.exists() {
+        let (Some(name), Some(parent)) = (existing.file_name(), existing.parent()) else {
+            return false;
+        };
+        tail.push(name);
+        existing = parent;
+    }
+    let (Ok(mut resolved), Ok(root)) = (fs::canonicalize(existing), fs::canonicalize(root)) else {
+        return false;
+    };
+    resolved.extend(tail.into_iter().rev());
+    resolved.starts_with(root)
 }
 
 fn apply_cargo_environment(
@@ -2599,6 +2759,117 @@ mod tests {
             .unwrap();
         assert_eq!(target.linker, Some(package.join("tools/ld")));
         assert_eq!(target.runner.unwrap(), ["runner", "--flag"]);
+
+        // Only the repository's file needs approval; `--cfg` is harmless.
+        assert_eq!(config.cargo_trust.len(), 1);
+        let trust = &config.cargo_trust[0];
+        assert_eq!(trust.file, package.join(".cargo/config.toml"));
+        assert_eq!(trust.settings.len(), 2);
+        assert!(trust.settings[0].starts_with("target.x86_64-unknown-linux-musl.linker = "));
+        assert!(config.require_approved_cargo_configs().is_err());
+        let mut approved = config.clone();
+        approved
+            .policy
+            .approved_cargo_configs
+            .insert((trust.file.clone(), trust.sha256.clone()));
+        approved.require_approved_cargo_configs().unwrap();
+        let mut stale = config.clone();
+        stale
+            .policy
+            .approved_cargo_configs
+            .insert((trust.file.clone(), "0".repeat(64)));
+        assert!(stale.require_approved_cargo_configs().is_err());
+        let mut accepted = config;
+        accepted.policy.accept_all = true;
+        accepted.require_approved_cargo_configs().unwrap();
+    }
+
+    #[test]
+    fn repository_target_directories_outside_the_workspace_need_approval() {
+        let temp = TempDir::new();
+        let package = temp.0.join("work/pkg");
+        fs::create_dir_all(package.join(".cargo")).unwrap();
+        let environment =
+            BTreeMap::from([("HOME".to_owned(), temp.0.join("home").display().to_string())]);
+        for (target_dir, risky) in [
+            ("target/custom", false),
+            ("../outside", true),
+            ("/elsewhere", true),
+        ] {
+            fs::write(
+                package.join(".cargo/config.toml"),
+                format!("[build]\ntarget-dir = \"{target_dir}\"\n"),
+            )
+            .unwrap();
+            let config = Config::load_with_environment(&package, &environment).unwrap();
+            assert_eq!(config.cargo_trust.len(), usize::from(risky), "{target_dir}");
+        }
+
+        // Like Cargo, an empty CARGO_HOME is unset: `$HOME/.cargo` is read.
+        fs::remove_file(package.join(".cargo/config.toml")).unwrap();
+        fs::create_dir_all(temp.0.join("home/.cargo")).unwrap();
+        fs::write(
+            temp.0.join("home/.cargo/config.toml"),
+            "[build]\nrustflags = [\"--cfg\", \"from_home\"]\n",
+        )
+        .unwrap();
+        let environment = BTreeMap::from([
+            ("HOME".to_owned(), temp.0.join("home").display().to_string()),
+            ("CARGO_HOME".to_owned(), String::new()),
+        ]);
+        let config = Config::load_with_environment(&package, &environment).unwrap();
+        assert_eq!(config.build_rustflags, ["--cfg", "from_home"]);
+    }
+
+    #[test]
+    fn only_harmless_rustflags_skip_approval() {
+        let flags = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        for safe in [
+            &["--cfg", "tokio_unstable"][..],
+            &[
+                "--cfg=x",
+                "-Awarnings",
+                "-D",
+                "unused",
+                "--cap-lints",
+                "warn",
+            ],
+            &[
+                "-C",
+                "opt-level=3",
+                "-Ctarget-cpu=native",
+                "-Clink-self-contained=no",
+            ],
+            &[
+                "-Cdefault-linker-libraries=yes",
+                "--remap-path-prefix",
+                "/a=/b",
+            ],
+        ] {
+            assert_eq!(first_unsafe_rustflag(&flags(safe)), None, "{safe:?}");
+        }
+        for (unsafe_flags, first) in [
+            (&["-C", "linker=/tmp/ld"][..], "-C"),
+            (
+                &["-Clink-arg=-fuse-ld=/tmp/ld"],
+                "-Clink-arg=-fuse-ld=/tmp/ld",
+            ),
+            (&["--cfg", "x", "-L", "/tmp"], "-L"),
+            (
+                &["-Zcodegen-backend=/tmp/x.so"],
+                "-Zcodegen-backend=/tmp/x.so",
+            ),
+            (&["--sysroot=/tmp/std"], "--sysroot=/tmp/std"),
+            (&["@/tmp/args"], "@/tmp/args"),
+            (&["--cfg"], "--cfg"),
+        ] {
+            assert_eq!(first_unsafe_rustflag(&flags(unsafe_flags)), Some(first));
+        }
     }
 
     #[test]

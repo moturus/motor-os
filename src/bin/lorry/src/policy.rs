@@ -1255,6 +1255,7 @@ mod tests {
             workspace: None,
             accept_all: false,
             approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
             propose_missing: false,
         };
         let resolution = make_resolution(vec![member.clone(), outside]);
@@ -1412,6 +1413,7 @@ mod tests {
             workspace: None,
             accept_all: false,
             approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
             propose_missing: false,
         };
         assert!(
@@ -1440,6 +1442,7 @@ mod tests {
             workspace: None,
             accept_all: false,
             approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
             propose_missing: false,
         };
         let mut inspected = evidence(&package, true);
@@ -1517,6 +1520,7 @@ mod tests {
             workspace: None,
             accept_all: false,
             approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
             propose_missing: false,
         };
         policy.limits.max_depth = Some(1);
@@ -1591,6 +1595,7 @@ mod tests {
             workspace: None,
             accept_all: false,
             approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
             propose_missing: false,
         };
         let pass = preflight_workspace(&policy, &resolution).unwrap();
@@ -1924,6 +1929,7 @@ mod tests {
             workspace: None,
             accept_all: false,
             approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
             propose_missing: false,
         };
         // The root edge points at a member, so `second` is at depth 1.

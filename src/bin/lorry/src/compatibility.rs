@@ -40,6 +40,10 @@ pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
             .iter()
             .map(|package| package.root.as_path()),
     )?;
+    // The query runs rustc with the repository's rustflags.
+    if !crate::cargo_registry::selected(cli, &config) {
+        config.require_approved_cargo_configs()?;
+    }
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let target = toolchain.target_info(Some(&options.target))?;
     let selectors = config.targets.keys().filter_map(|selector| match selector {

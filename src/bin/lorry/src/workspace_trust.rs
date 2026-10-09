@@ -1,6 +1,6 @@
 //! Decisions Lorry records for one workspace in the user's own configuration:
 //! `vendor --accept-all`, the review the user approved, and the build-time
-//! code approved in an interactive review. A cloned repository cannot write
+//! code and repository Cargo configuration approved in an interactive review. A cloned repository cannot write
 //! them, unlike its own files.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +24,8 @@ pub(crate) struct Decisions {
     pub accept_all: bool,
     pub approved_review: Option<String>,
     pub grants: BTreeSet<Grant>,
+    /// Repository Cargo configuration files, by path and SHA-256.
+    pub cargo_configs: BTreeSet<(PathBuf, String)>,
 }
 
 /// Build-time code the user approved in a review.
@@ -117,7 +119,12 @@ impl Store {
         for (key, _) in root.iter() {
             if !matches!(
                 key,
-                "format-version" | "workspace" | "accept-all" | "approved-review-sha256" | "grant"
+                "format-version"
+                    | "workspace"
+                    | "accept-all"
+                    | "approved-review-sha256"
+                    | "grant"
+                    | "cargo-config"
             ) {
                 return Err(self.invalid(&format!("has unknown key `{key}`")));
             }
@@ -159,10 +166,23 @@ impl Store {
                 grants.insert(self.grant(table)?);
             }
         }
+        let mut cargo_configs = BTreeSet::new();
+        if let Some(item) = root.get("cargo-config") {
+            let tables = item
+                .as_array_of_tables()
+                .ok_or_else(|| self.invalid("needs `[[cargo-config]]` tables"))?;
+            if tables.len() > MAX_GRANTS {
+                return Err(self.invalid(&format!("exceeds {MAX_GRANTS} Cargo approvals")));
+            }
+            for table in tables.iter() {
+                cargo_configs.insert(self.cargo_config(table)?);
+            }
+        }
         Ok(Decisions {
             accept_all,
             approved_review,
             grants,
+            cargo_configs,
         })
     }
 
@@ -189,7 +209,7 @@ impl Store {
         let _lock = TrustLock::acquire(&parent.join(".lock"))?;
         let mut decisions = self.load()?;
         change(&mut decisions);
-        if decisions.grants.len() > MAX_GRANTS {
+        if decisions.grants.len() > MAX_GRANTS || decisions.cargo_configs.len() > MAX_GRANTS {
             return Err(self.invalid(&format!("would exceed {MAX_GRANTS} grants")));
         }
         let mut staged = AtomicFile::new(&self.path)?;
@@ -243,7 +263,31 @@ impl Store {
                 grant.build_script, grant.proc_macro
             ));
         }
+        for (file, sha256) in &decisions.cargo_configs {
+            output.push_str("\n[[cargo-config]]\nfile = ");
+            write_toml_string(&mut output, &file.to_string_lossy());
+            output.push_str(&format!("\nsha256 = \"{sha256}\"\n"));
+        }
         output
+    }
+
+    fn cargo_config(&self, table: &Table) -> Result<(PathBuf, String)> {
+        for (key, _) in table.iter() {
+            if !matches!(key, "file" | "sha256") {
+                return Err(self.invalid(&format!("has a Cargo approval with unknown key `{key}`")));
+            }
+        }
+        let file = table
+            .get("file")
+            .and_then(Item::as_str)
+            .filter(|file| Path::new(file).is_absolute())
+            .ok_or_else(|| self.invalid("has a Cargo approval without an absolute `file`"))?;
+        let sha256 = table
+            .get("sha256")
+            .and_then(Item::as_str)
+            .filter(|value| is_digest(value))
+            .ok_or_else(|| self.invalid("has a Cargo approval without a SHA-256 `sha256`"))?;
+        Ok((PathBuf::from(file), sha256.to_owned()))
     }
 
     fn grant(&self, table: &Table) -> Result<Grant> {
@@ -328,6 +372,7 @@ impl Decisions {
     pub fn apply(self, policy: &mut Policy, provenance: &Path) -> Result<()> {
         policy.accept_all = self.accept_all;
         policy.approved_review = self.approved_review;
+        policy.approved_cargo_configs = self.cargo_configs;
         for (index, grant) in self.grants.into_iter().enumerate() {
             let id = format!("lorry-grant-{index:05}");
             if policy.rules.contains_key(&id) {
@@ -443,6 +488,10 @@ mod tests {
                     build_script: true,
                     proc_macro: false,
                 });
+                decisions.cargo_configs.insert((
+                    PathBuf::from("/user/helix/.cargo/config.toml"),
+                    "c".repeat(64),
+                ));
                 decisions.grants.insert(Grant {
                     name: "helix-loader".into(),
                     source: GrantSource::Path {
@@ -457,9 +506,14 @@ mod tests {
         assert!(loaded.accept_all);
         assert_eq!(loaded.grants.len(), 2);
 
+        assert_eq!(loaded.cargo_configs.len(), 1);
         let mut policy = Policy::default();
         loaded.apply(&mut policy, helix.path()).unwrap();
         assert!(policy.accept_all);
+        assert!(policy.approved_cargo_configs.contains(&(
+            PathBuf::from("/user/helix/.cargo/config.toml"),
+            "c".repeat(64)
+        )));
         let libc = policy
             .rules
             .values()
