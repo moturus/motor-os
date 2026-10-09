@@ -37,7 +37,7 @@ impl JavyTools for Suite {
     }
 }
 
-pub fn run() -> Result<()> {
+pub fn run(linux_identity: bool) -> Result<()> {
     let mut suite = Suite::new("javy-smoke", &format!("{SUPPORT_DIR}/sources.txt"))?;
     let (version, _) = suite.command(
         "javy-version",
@@ -122,7 +122,9 @@ pub fn run() -> Result<()> {
         "",
     )?;
     suite.execute("typescript-execute", "typescript.wasm", "", "{\"version\":\"5.9.3\",\"output\":\";\\nconst item = { value: 42 };\\nconsole.log(item.value);\\n\",\"diagnostics\":0}\n")?;
-    identity::run(&mut suite)?;
+    if linux_identity {
+        identity::run(&mut suite)?;
+    }
     fs::write(
         suite.root.join("runner.wasm"),
         include_bytes!(concat!(env!("OUT_DIR"), "/runner.wasm")),

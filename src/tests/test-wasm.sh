@@ -7,6 +7,7 @@ image=both
 memory=both
 vmm=qemu
 prepare=false
+linux_identity=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --release) shift ;;
@@ -15,7 +16,8 @@ while [ "$#" -gt 0 ]; do
     --vmm) vmm="${2:?missing vmm}"; shift 2 ;;
     --vmm=*) vmm="${1#--vmm=}"; shift ;;
     --prepare) prepare=true; shift ;;
-    *) echo "usage: $0 [--release] [--prepare] [--image wasm|dev|both] [--memory 224|256|both] [--vmm qemu|chv]" >&2; exit 2 ;;
+    --linux-identity) linux_identity=(--linux-identity); shift ;;
+    *) echo "usage: $0 [--release] [--prepare] [--image wasm|dev|both] [--memory 224|256|both] [--vmm qemu|chv] [--linux-identity]" >&2; exit 2 ;;
   esac
 done
 case "$image" in wasm) images=(wasm);; dev) images=(dev);; both) images=(wasm dev);; *) exit 2;; esac
@@ -41,7 +43,8 @@ for suite in "${suites[@]}"; do
   [ -x "$(binary "$suite")" ] || { echo "run $0 --prepare first" >&2; exit 1; }
 done
 if [ "${WASM_TEST_TIMED:-0}" != 1 ]; then
-  exec timeout 600s env WASM_TEST_TIMED=1 "$0" --image "$image" --memory "$memory" --vmm "$vmm"
+  exec timeout 600s env WASM_TEST_TIMED=1 "$0" --image "$image" --memory "$memory" --vmm "$vmm" \
+    "${linux_identity[@]}"
 fi
 . "$WD/vm-console-filter.sh"
 . "$WD/vm-test-boot.sh"
@@ -93,7 +96,10 @@ for variant in "${images[@]}"; do
     } | sftp "${sftp_options[@]}" -b - motor@192.168.4.2
     for tool in "${installed[@]}"; do cmp "$assembly/$tool" "$evidence/installed-${tool##*/}"; done
     for suite in "${suites[@]}"; do
-      vm_ssh "/user/tmp/$suite" 2>&1 | tee -a "$evidence/$label.log"
+      args=()
+      # Linux byte identity depends on neither image nor memory: the first boot checks it.
+      if [ "$suite" = javy-smoke ]; then args=("${linux_identity[@]}"); linux_identity=(); fi
+      vm_ssh "/user/tmp/$suite" "${args[@]}" 2>&1 | tee -a "$evidence/$label.log"
     done
     vm_ssh shutdown
     status=0

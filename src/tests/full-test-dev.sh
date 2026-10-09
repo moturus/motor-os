@@ -5,7 +5,8 @@
 # The dev-image full test includes the repository suite, httpd-axum regressions,
 # native source builds, and Lorry's bounded product suite. Lorry validation is
 # profile-independent and does not multiply coverage by the OS image profile.
-# Release runs also check Javy/Wasmi on both wasm and developer images.
+# Release runs also check Javy/Wasmi on both wasm and developer images, and once
+# that Javy's output equals upstream Linux Javy's byte for byte.
 #
 # Work that is not explicitly scoped to Lorry runs this suite only with
 # --release. If such work necessarily changes src/bin/lorry, ask before adding
@@ -105,7 +106,7 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
 # The wasm tools have their own 256/224 MiB release-image matrix.
 if [ "$SEEN_RELEASE" = 1 ]; then
   "$WD/test-wasm.sh" --prepare --image both "${FORWARDED_ARGS[@]}"
-  "$WD/test-wasm.sh" --image both "${FORWARDED_ARGS[@]}"
+  "$WD/test-wasm.sh" --image both --linux-identity "${FORWARDED_ARGS[@]}"
 fi
 
 echo "full-test-dev.sh ALL PASS"
