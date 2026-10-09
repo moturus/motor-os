@@ -230,6 +230,11 @@ impl PreparedPackage {
     pub fn source_root(&self) -> &Path {
         &self.manifest.root
     }
+
+    /// Whether the source is Cargo's own extraction in its registry cache.
+    pub(crate) fn in_cargo_registry(&self) -> bool {
+        self.cargo_registry
+    }
 }
 
 #[derive(Clone, Copy)]

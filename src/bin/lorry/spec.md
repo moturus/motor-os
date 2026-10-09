@@ -1712,8 +1712,9 @@ selects another root. Mutable path-package units, including selected package
 libraries, are stored in the project below `target/lorry/.cache/v1/units/sha256/`.
 Selected binaries, tests, and incremental state are not unit-cache entries.
 
-Messages and resolved metadata name dependency sources in content-addressed
-views below `sources/` in the same cache root. Strict validation hashes a view
+Messages and resolved metadata name Lorry-repository and Git dependency
+sources in content-addressed views below `sources/` in the same cache root.
+Sources from Cargo's cache are named in place, as Cargo names them. Strict validation hashes a view
 on every use. Ordinary validation records each view's file metadata (paths,
 sizes, modes, and times) with its last hash, and hashes it again only when
 that metadata changes. An invalid view is quarantined and published again.

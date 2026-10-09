@@ -33,9 +33,6 @@ workspace work.
   `--use-cargo-registry`, and `--no-use-cargo-registry` are accepted by some
   commands that do not use them, such as `locate-project` and `help`. The
   spec says such options are usage errors.
-- **Metadata paths in Cargo cache mode.** `metadata` reports a registry
-  package's manifest in Lorry's global source cache. Cargo reports its own
-  registry source directory.
 - **Metadata `dep_kinds` order.** Lorry sorts platform selectors as strings.
   Cargo puts a target triple before any `cfg(...)`, and `cfg(unix)` before
   `cfg(target_os = ...)`.

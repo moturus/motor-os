@@ -174,6 +174,11 @@ fn publish_source_parts(
                             physical_root.display()
                         ))
                     })?,
+                // Builds compile Cargo's own extraction, so messages and
+                // metadata name it, as Cargo does, instead of a copy.
+                ResolvedSource::CratesIo { .. } if prepared_package.in_cargo_registry() => {
+                    prepared_package.source_root().to_owned()
+                }
                 ResolvedSource::CratesIo { .. } | ResolvedSource::Git { .. } => {
                     crate::source_view::publish_package(
                         cache_root,

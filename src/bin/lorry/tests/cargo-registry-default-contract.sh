@@ -127,11 +127,17 @@ lorry build -v >"$WORK/again.out" 2>"$WORK/again.err"
 grep -F "accepted fresh root profile before dependency admission" "$WORK/again.err" >/dev/null ||
     fail "an unchanged build did not reuse its completed profile"
 lorry metadata --format-version 1 >"$WORK/metadata.json"
-python3 -I - "$WORK/metadata.json" <<'PYEOF'
+python3 -I - "$WORK/metadata.json" "$CACHE/registry/src/index.crates.io-fixture" <<'PYEOF'
 import json, sys
-names = {package["name"] for package in json.load(open(sys.argv[1]))["packages"]}
+packages = json.load(open(sys.argv[1]))["packages"]
+names = {package["name"] for package in packages}
 assert names == {"app", "derive-answer", "scripted"}, names
+# Like Cargo, metadata names Cargo's own extraction of a registry package.
+for package in packages:
+    if package["name"] != "app":
+        assert package["manifest_path"].startswith(sys.argv[2] + "/"), package["manifest_path"]
 PYEOF
+[ ! -e "$WORK/cache/sources" ] || fail "the default mode copied Cargo's sources into Lorry's cache"
 
 # Explicit deny rules still apply.
 printf 'config-version = 1\n[policy.rules.no-scripted]\naction = "deny"\nname = "scripted"\n' \
