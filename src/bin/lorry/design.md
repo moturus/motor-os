@@ -21,8 +21,9 @@ Three boundaries organize the implementation:
 3. Execution prepares verified sources, runs approved build scripts and native
    tools, invokes `rustc`, verifies outputs, and publishes cache entries.
 
-The build path is offline. Network access exists only in `vendor`, and source
-objects do not become usable merely because they were downloaded.
+The build path is offline. Network access exists only in `vendor` and
+`fetch`, and source objects do not become usable merely because they were
+downloaded.
 
 ## Main control flow
 
@@ -80,7 +81,9 @@ per command. `toml.rs` wraps TOML parsing with byte, nesting, and node limits
 and retains source locations for diagnostics. `config.rs` merges the supported
 Lorry and Cargo configuration layers while enforcing which layer may control
 security-sensitive settings. `toolchain.rs` discovers `rustc`, identifies the
-Cargo-compatibility family, and evaluates target `cfg` expressions.
+Cargo-compatibility family, and evaluates target `cfg` expressions. Like
+Cargo's `.rustc_info.json`, it keeps the answers to rustc's version and cfg
+queries in the global cache, keyed by the rustc path, size, and mtime.
 
 Compilation selects members and targets from one workspace model. Each package
 has at most one library and bounded sets of binaries, integrations, examples,
@@ -281,7 +284,11 @@ authority and neither metadata nor fetch grants execution capabilities.
 
 `RepositorySet` separates bounded object/schema/path parsing from content
 verification. Ordinary reads trust digests recorded by immutable publication;
-strict reads rehash retained archives and source trees. The explicit Cargo
+strict reads rehash retained archives and source trees. Source views in the
+cache and locked Git sources follow one rule: `source_tree.rs` records a
+tree's file metadata with its last hash, and ordinary use hashes the tree
+again only when that metadata changes. Sources from Cargo's cache are used
+in place, as Cargo uses them. The explicit Cargo
 cache bridge similarly stores Lorry evidence below `target/lorry` after its
 first archive/source comparison and trusts Cargo's completion marker plus that
 evidence ordinarily. Strict mode always repeats the comparison.
@@ -335,8 +342,11 @@ of the same active artifact uses a temporary child so a macro waiting for a
 bridge response cannot deadlock itself. The private frames are versioned and
 bounded; malformed frames, premature EOF, spawn failure, and abnormal exit are
 compiler diagnostics rather than Lorry panics.
-`build_script.rs` accepts a bounded subset of Cargo
-directives and constructs a cleared, explicit environment.
+`build_script.rs` parses Cargo's directives with bounded output and checked
+paths, and constructs a cleared, explicit environment. A unit edge from the
+script run of each direct `links` dependency to the dependent script run
+carries metadata as `DEP_<LINKS>_<KEY>`. As in Cargo, that edge orders the
+runs and enters the dependent's `OUT_DIR` hash.
 `native_tool.rs` exposes only configured compiler/archiver roles and includes
 their identities and arguments in build/cache identity. Linux applies the
 filesystem/network/process sandbox in `sandbox.rs`. Motor warns and runs the
@@ -462,6 +472,7 @@ Cargo and is intentionally outside the Motor-native source snapshot set.
   `source_tree.rs`.
 - compiler behavior or cache identity: `unit.rs`, `compile.rs`, `identity.rs`,
   `executor.rs`, `cache.rs`.
+- build-script directives and environment: `build_script.rs`.
 - test execution/bundling: `engine.rs`, `bundle.rs`.
 
 Behavioral changes must update the user README when workflow changes, the

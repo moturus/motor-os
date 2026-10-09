@@ -49,8 +49,7 @@ tree, and scoped root admission are implemented. Build, check, Clippy, run,
 and test share one workspace graph with CLI feature resolution. Outside
 Cargo cache mode, they run selected member build scripts under named path
 grants. Custom and build-std
-targets are unsupported. `full-native-build.md` is a non-normative audit of
-the remaining gaps exposed by the repository `Makefile`.
+targets are unsupported.
 
 ## Platforms, toolchains, and compatibility
 
@@ -411,6 +410,8 @@ compiler failure, retain successful per-unit artifacts, and still return failure
 Run and test reject `--keep-going`, matching Cargo's command option boundaries.
 Editable members use Cargo's package file discovery: Git ignores and tracked
 files, include/exclude rules, symbolic links, and nested package boundaries.
+The files that receive Lorry's own stdout and stderr are left out, so
+`lorry build >build.log 2>&1` works inside a member.
 A member's source walk fails above 20,000 files or 128 MiB, the default
 path-package limits.
 Git file discovery calls Cargo's `gix-dir` walker directly with gix's index,
@@ -655,17 +656,18 @@ harnesses; custom profiles inheriting test retain ordinary check target modes.
 
 ## Cargo configuration
 
-Lorry reads only Cargo's compilation-related configuration for:
+Lorry reads only these parts of Cargo's configuration:
 
-- default build target;
-- exact-triple and `cfg(...)` target linker;
-- rustflags;
-- target runner.
+- the default build target, rustflags, target directory, and job count;
+- exact-triple and `cfg(...)` target linker, rustflags, and runner;
+- the `resolver` table, and the `alias` table, whose aliases are not run.
 
-It follows Cargo's discovery/merge behavior and supported
-`CARGO_TARGET_<TRIPLE>_*` environment forms for that subset. Registry,
-credential, network, unstable, and other output-affecting unsupported
-settings must be rejected rather than adopted or ignored.
+It follows Cargo's discovery and merge behavior and the supported
+`CARGO_BUILD_*` and `CARGO_TARGET_<TRIPLE>_*` environment forms for that
+subset. Settings that cannot change a build are ignored with a note; the
+command-line section lists them. Every other setting, such as source
+replacement, unstable features, or a compiler wrapper, is an error rather
+than adopted or silently ignored.
 Cargo configuration is discovered from the invocation directory and its
 parents, then CARGO_HOME. Package selection and --manifest-path do not move
 that search. An alias table may exist; Lorry does not execute aliases.
@@ -1655,7 +1657,8 @@ The supported directive protocol accepts both `cargo:` and `cargo::` forms of
 `rustc-cfg`, `rustc-check-cfg`, `rustc-env`, `rustc-link-lib`, `rustc-link-arg`,
 `rustc-link-search`, `rerun-if-changed`, `rerun-if-env-changed`, `warning`,
 and `error`. As in Cargo, `rustc-flags` may carry only `-l` and `-L` flags;
-they act as `rustc-link-lib` and `rustc-link-search`. Also as in Cargo, any
+they act as `rustc-link-lib` and `rustc-link-search`. Unlike Cargo, a link
+search path must exist inside the script's `OUT_DIR`. As in Cargo, any
 other `cargo:KEY=VALUE` line, and `cargo::metadata=KEY=VALUE`, is metadata;
 `cargo:error=` is metadata too, and only `cargo::error=` is an error. Metadata
 keys are limited to ASCII letters, digits, `_`, and `-`. A script runs after
@@ -1854,9 +1857,9 @@ corruption. Cache contents remain writable per-user performance state and are
 never an integrity authority for immutable dependency sources.
 
 Source views of immutable dependencies are copied into the global cache
-without flushing each file. Every use hashes a view against its content
-address. A view that a crash left torn, or that changed later, is warned
-about, quarantined, and published again.
+without flushing each file. A view that a crash left torn, or that changed
+later, fails the check described above. It is warned about, quarantined, and
+published again.
 
 The first shared-cache miss in a non-quiet build prints `Rebuilding global
 dependency cache` exactly once for that command. Project-local cache misses do
@@ -1964,11 +1967,11 @@ generations, and separate Motor registry campaigns are not part of normal
 Lorry validation. Their Lorry semantics are already covered by focused tests;
 their application, image-layout, and OS behavior belongs to those components.
 
-## Deferred capabilities
+## Unsupported capabilities
 
-Deferred capabilities include building the complete `httpd-axum` and
-`russhd` graphs, alternative-registry sources, custom targets and build-std,
-dynamic and procedural-macro example types, general C/C++/native-tool
-discovery, arbitrary build-script processes, Cargo wrappers, and
-linked-artifact cache reuse. `full-native-build.md` records the
-repository-specific gap analysis; its findings are not product commitments.
+Lorry does not support alternative-registry sources, custom targets and
+build-std, dynamic and procedural-macro example types, general
+C/C++/native-tool discovery, arbitrary build-script processes, Cargo
+wrappers, or linked-artifact cache reuse. `future-work.md` lists potential
+future work, including other differences from Cargo; it makes no product
+commitments.

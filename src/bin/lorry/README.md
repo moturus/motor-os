@@ -12,10 +12,9 @@ absent, or incomplete, builds use only verified sources in configured Lorry
 repositories, with admission.
 
 This README is the short user guide. `spec.md` defines the supported behavior,
-`design.md` explains the implementation, and `full-native-build.md` lists the
-remaining work needed to replace the Cargo builds reached from the repository
-`Makefile`. `cargo-performance.md` compares build times with Cargo, and
-`future-work.md` lists known gaps that are not scheduled.
+`design.md` explains the implementation, and `future-work.md` lists potential
+future work: differences from Cargo that could change, the remaining work to
+build the repository natively, and performance gaps.
 
 ## Operational and validation boundaries
 
@@ -626,6 +625,11 @@ rejected.
 Motor OS prints an explicit warning and runs build scripts without that
 isolation. Do not interpret the warning mode as sandboxed.
 
+Build scripts may print Cargo's directives. As under Cargo, metadata reaches
+the build scripts of dependent packages as `DEP_<LINKS>_<KEY>`. Unlike Cargo,
+a link search path must lie inside the script's `OUT_DIR`, so a crate that
+finds a system library through pkg-config fails.
+
 ## Procedural macros
 
 A dependency crate may declare `[lib] proc-macro = true`. Lorry compiles that
@@ -668,8 +672,8 @@ For `build`, `run`, and `test`, verbose timing records use a monotonic clock.
 The timestamp is elapsed time since command dispatch; the parenthesized value
 is the duration of the preceding phase.
 
-Global options precede the command. Long value options accept `--name value`
-and `--name=value`.
+Global options precede the command; `-q`, `-v`, and `--color` may also follow
+it. Long value options accept `--name value` and `--name=value`.
 
 Command-line usage errors return 1. Build, vendoring, policy, and operational
 failures return 101, including a failed write to stdout or stderr. Help and
