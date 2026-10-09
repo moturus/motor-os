@@ -149,21 +149,26 @@ pub(crate) struct DependencyDirectory {
     pub path: PathBuf,
 }
 
+#[cfg(test)]
 pub fn dependency_rustc_invocation(
     plan: &CompilationPlan,
     manifests: &BTreeMap<PackageKey, Manifest>,
     key: &UnitKey,
     options: &CommandOptions<'_>,
 ) -> Result<Option<RustcInvocation>> {
-    dependency_rustc_invocation_with_build_output(plan, manifests, key, options, None)
+    dependency_rustc_invocation_with_build_output(plan, manifests, key, options, None, &[])
 }
 
+/// `build_output` is the unit's own build-script output. `linked` holds the
+/// outputs of its linkable dependencies' scripts, whose link search paths
+/// also reach it, as in Cargo.
 pub fn dependency_rustc_invocation_with_build_output(
     plan: &CompilationPlan,
     manifests: &BTreeMap<PackageKey, Manifest>,
     key: &UnitKey,
     options: &CommandOptions<'_>,
     build_output: Option<BuildOutput<'_>>,
+    linked: &[BuildOutput<'_>],
 ) -> Result<Option<RustcInvocation>> {
     let planned = plan.units.get(key).ok_or_else(|| {
         Error::failure(format!(
@@ -474,19 +479,18 @@ pub fn dependency_rustc_invocation_with_build_output(
     if options.selected_packages.contains(&key.package) {
         value(&mut environment, "CARGO_PRIMARY_PACKAGE", "1");
     }
-    if let Some(build_output) = build_output {
-        apply_build_output(
-            &mut arguments,
-            &mut environment,
-            build_output,
-            manifest.library.is_none()
-                || matches!(
-                    key.kind,
-                    UnitKind::Library | UnitKind::ProcMacro | UnitKind::LibraryHarness
-                ),
-            |target| link_arg_applies(target, key, manifest),
-        );
-    }
+    apply_build_outputs(
+        &mut arguments,
+        &mut environment,
+        build_output.as_ref(),
+        linked,
+        manifest.library.is_none()
+            || matches!(
+                key.kind,
+                UnitKind::Library | UnitKind::ProcMacro | UnitKind::LibraryHarness
+            ),
+        |target| link_arg_applies(target, key, manifest),
+    );
     if options.verbose {
         push(&mut arguments, "--verbose");
     }
@@ -527,23 +531,33 @@ fn link_arg_applies(target: &LinkArgTarget, key: &UnitKey, manifest: &Manifest) 
     }
 }
 
-fn apply_build_output(
+/// Applies build-script outputs in Cargo's order: every link search path,
+/// then the unit's own libraries and link arguments, then `cdylib` link
+/// arguments from dependencies, then its own cfgs and environment.
+fn apply_build_outputs(
     arguments: &mut Vec<OsString>,
     environment: &mut BTreeMap<String, OsString>,
-    build: BuildOutput<'_>,
+    own: Option<&BuildOutput<'_>>,
+    linked: &[BuildOutput<'_>],
     link_libs: bool,
     link_arg_applies: impl Fn(&LinkArgTarget) -> bool,
 ) {
-    value(environment, "OUT_DIR", build.out_dir);
-    for directive in &build.output.directives {
-        if let Directive::RustcLinkSearch { kind, path } = directive {
-            push(arguments, "-L");
-            arguments.push(match kind {
-                Some(kind) => format!("{kind}={}", path.display()).into(),
-                None => path.as_os_str().to_owned(),
-            });
+    for build in own.into_iter().chain(linked) {
+        for directive in &build.output.directives {
+            if let Directive::RustcLinkSearch { kind, path } = directive {
+                push(arguments, "-L");
+                arguments.push(match kind {
+                    Some(kind) => format!("{kind}={}", path.display()).into(),
+                    None => path.as_os_str().to_owned(),
+                });
+            }
         }
     }
+    let Some(build) = own else {
+        add_cdylib_link_arguments(arguments, linked, &link_arg_applies);
+        return;
+    };
+    value(environment, "OUT_DIR", build.out_dir);
     for directive in &build.output.directives {
         if link_libs && let Directive::RustcLinkLib(library) = directive {
             push(arguments, "-l");
@@ -560,6 +574,7 @@ fn apply_build_output(
         };
         codegen(arguments, &format!("link-arg={argument}"));
     }
+    add_cdylib_link_arguments(arguments, linked, &link_arg_applies);
     for directive in &build.output.directives {
         if let Directive::RustcCfg(cfg) = directive {
             push(arguments, "--cfg");
@@ -579,6 +594,26 @@ fn apply_build_output(
         } = directive
         {
             value(environment, name, setting);
+        }
+    }
+}
+
+/// Cargo still lets a dependency's `rustc-link-arg-cdylib` reach a cdylib.
+fn add_cdylib_link_arguments(
+    arguments: &mut Vec<OsString>,
+    linked: &[BuildOutput<'_>],
+    link_arg_applies: &impl Fn(&LinkArgTarget) -> bool,
+) {
+    for build in linked {
+        for directive in &build.output.directives {
+            if let Directive::RustcLinkArgFor {
+                target: target @ LinkArgTarget::Cdylib,
+                value,
+            } = directive
+                && link_arg_applies(target)
+            {
+                codegen(arguments, &format!("link-arg={value}"));
+            }
         }
     }
 }
@@ -1687,6 +1722,7 @@ mod tests {
                 output: &output,
                 out_dir: &script_out,
             }),
+            &[],
         )
         .unwrap()
         .unwrap();
@@ -1708,6 +1744,58 @@ mod tests {
         ]));
         assert_eq!(invocation.environment["OUT_DIR"], script_out);
         assert_eq!(invocation.environment["GENERATED"], "yes");
+
+        // Linkable dependencies' link search paths follow the unit's own; their
+        // libraries and other link arguments stay with them.
+        let dependency_out = fixture.0.join("dependency-out");
+        fs::create_dir(&dependency_out).unwrap();
+        let dependency_output = crate::build_script::Output {
+            directives: vec![
+                Directive::RustcLinkSearch {
+                    kind: Some("native".to_owned()),
+                    path: dependency_out.clone(),
+                },
+                Directive::RustcLinkLib("static:-bundle=dependency".to_owned()),
+                Directive::RustcLinkArg("-Wl,--dependency-only".to_owned()),
+            ],
+            ..output.clone()
+        };
+        let invocation = dependency_rustc_invocation_with_build_output(
+            &plan,
+            &manifests,
+            library_key,
+            &command_options,
+            Some(BuildOutput {
+                output: &output,
+                out_dir: &script_out,
+            }),
+            &[BuildOutput {
+                output: &dependency_output,
+                out_dir: &dependency_out,
+            }],
+        )
+        .unwrap()
+        .unwrap();
+        let linked_arguments = string_arguments(&invocation);
+        let own = format!("native={}", script_out.display());
+        let start = linked_arguments
+            .iter()
+            .position(|argument| *argument == own)
+            .unwrap();
+        assert_eq!(
+            linked_arguments[start + 1..start + 3],
+            [
+                "-L".to_owned(),
+                format!("native={}", dependency_out.display())
+            ]
+        );
+        assert_eq!(linked_arguments.len(), arguments.len() + 2);
+        assert!(
+            !linked_arguments
+                .iter()
+                .any(|argument| argument.contains("dependency-only")
+                    || argument.contains("static:-bundle=dependency"))
+        );
 
         // `rustc-link-arg-*` arguments reach only the targets they name.
         let manifest = &manifests[&generic_array];
@@ -1775,6 +1863,7 @@ mod tests {
                 output: &output,
                 out_dir: &script_out,
             }),
+            &[],
         )
         .unwrap()
         .unwrap();

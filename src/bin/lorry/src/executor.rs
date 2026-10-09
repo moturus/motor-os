@@ -10,8 +10,7 @@ use crate::cache::{
 };
 use crate::compile::{
     BuildOutput, CommandOptions, RustcInvocation, RustcOutput, dependency_directories,
-    dependency_rustc_invocation, dependency_rustc_invocation_with_build_output,
-    unit_output_directory,
+    dependency_rustc_invocation_with_build_output, unit_output_directory,
 };
 use crate::diagnostic::{Error, Result};
 use crate::hash::sha256_file;
@@ -294,10 +293,56 @@ fn dispatch_ranks(
         .collect()
 }
 
-/// Clones the direct-dependency outputs one unit needs, so it can execute
-/// outside the scheduler lock.
-fn snapshot_inputs(planned: &crate::unit::PlannedUnit, outputs: &Outputs) -> Outputs {
+/// The build-script runs whose link search paths reach each unit, in Cargo's
+/// order: the unit's own script, then those of its library dependencies in
+/// package order. Procedural macros and build scripts are host tools, so
+/// their scripts' paths stop there.
+fn linked_scripts(plan: &CompilationPlan) -> BTreeMap<UnitKey, Vec<UnitKey>> {
+    let mut linked = BTreeMap::<UnitKey, Vec<UnitKey>>::new();
+    for key in &plan.order {
+        let unit = &plan.units[key].unit;
+        let mut scripts = unit
+            .dependencies
+            .iter()
+            .filter(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
+            .map(|edge| edge.unit.clone())
+            .collect::<Vec<_>>();
+        let mut libraries = unit
+            .dependencies
+            .iter()
+            .filter(|edge| {
+                edge.kind == UnitEdgeKind::RustDependency && edge.unit.kind == UnitKind::Library
+            })
+            .map(|edge| &edge.unit)
+            .collect::<Vec<_>>();
+        libraries.sort_by_key(|library| &library.package);
+        for library in libraries {
+            for script in linked.get(library).into_iter().flatten() {
+                if !scripts.contains(script) {
+                    scripts.push(script.clone());
+                }
+            }
+        }
+        linked.insert(key.clone(), scripts);
+    }
+    linked
+}
+
+/// Clones the outputs one unit needs, those of its direct dependencies and of
+/// its `linked` scripts, so it can execute outside the scheduler lock.
+fn snapshot_inputs(
+    planned: &crate::unit::PlannedUnit,
+    linked: &[UnitKey],
+    outputs: &Outputs,
+) -> Outputs {
     let mut snapshot = Outputs::default();
+    for script in linked {
+        if let Some(output) = outputs.build_scripts.get(script) {
+            snapshot
+                .build_scripts
+                .insert(script.clone(), output.clone());
+        }
+    }
     for edge in &planned.unit.dependencies {
         if let Some(artifact) = outputs.artifacts.get(&edge.unit) {
             snapshot
@@ -337,6 +382,7 @@ pub fn execute(
         verbose: options.verbose,
     };
 
+    let linked = linked_scripts(plan);
     let total = plan.order.len();
     let mut index_of = BTreeMap::new();
     for (index, key) in plan.order.iter().enumerate() {
@@ -474,7 +520,8 @@ pub fn execute(
                             wakeup.notify_all();
                             return;
                         };
-                        let inputs = snapshot_inputs(planned, &guard.outputs);
+                        let linked_runs = &linked[&key];
+                        let inputs = snapshot_inputs(planned, linked_runs, &guard.outputs);
                         drop(guard);
                         let on_metadata = |executed| {
                             let mut guard = state
@@ -494,6 +541,7 @@ pub fn execute(
                             &commands,
                             &key,
                             planned,
+                            linked_runs,
                             &inputs,
                             &print,
                             &stores,
@@ -610,6 +658,7 @@ fn execute_unit<'a>(
     commands: &CommandOptions<'_>,
     key: &UnitKey,
     planned: &'a crate::unit::PlannedUnit,
+    linked: &[UnitKey],
     outputs: &Outputs,
     print: &std::sync::Mutex<()>,
     stores: &std::sync::mpsc::Sender<CacheStore<'a>>,
@@ -870,16 +919,36 @@ fn execute_unit<'a>(
                     output: &output.output,
                     out_dir: &output.out_dir,
                 });
-                let mut planned_invocation = match build_output {
-                    Some(output) => dependency_rustc_invocation_with_build_output(
-                        plan,
-                        manifests,
-                        key,
-                        commands,
-                        Some(output),
-                    )?,
-                    None => dependency_rustc_invocation(plan, manifests, key, commands)?,
-                }
+                let own = planned
+                    .unit
+                    .dependencies
+                    .iter()
+                    .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
+                    .map(|edge| &edge.unit);
+                let linked = linked
+                    .iter()
+                    .filter(|run| Some(*run) != own)
+                    .map(|run| {
+                        let script = outputs.build_scripts.get(run).ok_or_else(|| {
+                            Error::failure(format!(
+                                "linked build-script output for `{} {}` was not produced first",
+                                run.package.name, run.package.version
+                            ))
+                        })?;
+                        Ok(BuildOutput {
+                            output: &script.output,
+                            out_dir: &script.out_dir,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let mut planned_invocation = dependency_rustc_invocation_with_build_output(
+                    plan,
+                    manifests,
+                    key,
+                    commands,
+                    build_output,
+                    &linked,
+                )?
                 .ok_or_else(|| Error::failure("rustc invocation unexpectedly missing"))?;
                 let driver = options.toolchain.clippy.as_ref().filter(|_| {
                     options

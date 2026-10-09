@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build-script metadata reaches dependents as DEP_<LINKS>_<KEY>, and
-# rustc-flags and rustc-link-arg-bins apply, all as under Cargo.
+# Build-script metadata reaches dependents as DEP_<LINKS>_<KEY>; rustc-flags
+# and rustc-link-arg-bins apply; and a dependency's link search path reaches
+# the final link of its dependents, all as under Cargo.
 set -euo pipefail
 export CARGO_NET_OFFLINE=true
 
@@ -30,6 +31,11 @@ cat >sys/build.rs <<'EOF'
 fn main() {
     println!("cargo:root=/opt/demo-root");
     println!("cargo::metadata=include=include-dir");
+    // An empty archive that only a dependent's final link looks for.
+    let out = std::env::var("OUT_DIR").unwrap();
+    std::fs::write(std::path::Path::new(&out).join("libdemo.a"), b"!<arch>\n").unwrap();
+    println!("cargo:rustc-link-search=native={out}");
+    println!("cargo:rustc-link-lib=static:-bundle=demo");
 }
 EOF
 printf 'pub fn value() -> u32 { 7 }\n' >sys/src/lib.rs
@@ -89,4 +95,4 @@ sed -i 's|/opt/demo-root|/opt/other-root|' sys/build.rs
 lorry build -p app -q
 [ "$(target/lorry/debug/app)" = "/opt/other-root:include-dir 7" ] ||
     fail "changed metadata did not reach the dependent script"
-echo "PASS: build-script metadata, rustc-flags, and bin link arguments match Cargo"
+echo "PASS: build-script metadata, rustc-flags, bin link arguments, and dependency link paths match Cargo"

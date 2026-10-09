@@ -1665,7 +1665,11 @@ timeout, sandbox violation, or nonzero exit are hard failures. An
 `rerun-if-env-changed` name absent from the cleared safe environment is tracked
 as explicitly absent; ambient values remain inaccessible.
 Common link arguments reach every target of the emitting package, preserving
-their order after link libraries. As in Cargo, `rustc-link-arg-bins`,
+their order after link libraries. As in Cargo, a script's link search paths
+also reach every unit that links its package through library dependencies,
+after the unit's own paths; procedural macros and build scripts end that
+chain. Link libraries and other link arguments stay with their package,
+except that `rustc-link-arg-cdylib` also reaches a dependent cdylib. As in Cargo, `rustc-link-arg-bins`,
 `rustc-link-arg-bin=BIN=ARG`, `rustc-link-arg-tests`,
 `rustc-link-arg-benches`, `rustc-link-arg-examples`, and
 `rustc-link-arg-cdylib` (or `rustc-cdylib-link-arg`) reach only those targets
