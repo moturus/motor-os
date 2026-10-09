@@ -484,11 +484,12 @@ rustfmt reads <code>/user/rustfmt.toml</code> and then
 <code>/user/cfg/rustfmt/rustfmt.toml</code>. If the source
 has a parser error, rustfmt leaves the buffer unchanged; repair the source and
 use <code>:format</code> or save again.</p>
-<p>Existing projects must be admitted and prepared for <a href="lorry.html">Lorry</a>;
-run <code>lorry vendor</code> explicitly when their dependencies need acquiring.
-Select a package containing <code>Cargo.toml</code>, rather than a virtual workspace
-root. Native analyzer procedural-macro expansion is disabled; compiler checks
-still use Lorry's supported build-script and procedural-macro policies.</p>
+<p>Existing projects need their dependencies prepared for <a href="lorry.html">Lorry</a>.
+<code>lorry fetch</code> is enough for navigation into dependencies. Generated sources
+and checks on save also need a review with <code>lorry vendor</code>. Neither editor nor
+analyzer downloads anything. A virtual workspace root works as well as a package.
+Native analyzer procedural-macro expansion is disabled; compiler checks still use
+Lorry's build-script and procedural-macro policies.</p>
 <p>The default server settings are in
 <code>/user/.config/helix/languages.toml</code>. Project settings in
 <code>.helix/languages.toml</code> can override them. If you choose another

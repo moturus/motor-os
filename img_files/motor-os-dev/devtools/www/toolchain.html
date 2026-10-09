@@ -457,7 +457,7 @@ mlibc.</p>
 <table>
   <tr><th>Component</th><th>Source</th><th>What Motor OS adds</th></tr>
   <tr><td>Rust</td><td><a href="https://github.com/moturus/rust">moturus/rust</a>, based on the upcoming Rust release (1.99 at the time of writing) with LLVM 23</td><td>The <code>x86_64-unknown-motor</code> target, a Tier-3 target upstream; the standard library's Motor OS layer, which calls the <code>moto-rt</code> crate (0.17.x); a few compiler patches, all on one development branch per upstream baseline (<code>motor-os-1.99.0-beta-f47d5bb</code> today), from which both the cross and the native toolchain are built.</td></tr>
-  <tr><td>Cargo, Clippy, rustfmt</td><td>Upstream, at the revisions the Rust fork specifies</td><td>Nothing; they run on Linux only.</td></tr>
+  <tr><td>Cargo, Clippy, rustfmt</td><td>Upstream, at the revisions the Rust fork specifies</td><td>Nothing. Cargo runs on Linux only. Clippy's driver and rustfmt are also built natively for the developer image, where <code>lorry clippy</code> and Helix use them.</td></tr>
   <tr><td>LLVM</td><td><a href="https://github.com/moturus/llvm-project">moturus/llvm-project</a>, LLVM 23</td><td>A Motor OS target in Clang: the driver knows the link line, the defaults (emulated TLS, static PIE, lld, compiler-rt, libc++), and the sysroot layout. Built twice: for the Linux host, and natively for Motor OS.</td></tr>
   <tr><td>mlibc</td><td><a href="https://github.com/moturus/mlibc">moturus/mlibc</a></td><td>The Motor OS sysdeps and a build configuration that reads its runtime files from <code>/system/cfg/libc</code>. It sits on <code>moto-rt-cabi</code>, a C ABI over the Motor runtime (see <a href="c-cpp.html">C/C++ on Motor OS</a>).</td></tr>
   <tr><td>Small crate forks</td><td><code>moturus/libc</code>, <code>moturus/stacker</code>, <code>moturus/rust_libloading</code>, <code>moturus/rust-ctrlc</code></td><td>Patched into the Rust fork's own dependency graph; Cargo fetches them, nothing is cloned by hand.</td></tr>
@@ -559,9 +559,10 @@ script that sets <code>TMPDIR=/devtools/tmp</code> and runs it.</p>
 <pre><code>rustc -O /devtools/src/hello-world/hello.rs -o /devtools/tmp/hello &amp;&amp; /devtools/tmp/hello</code></pre>
 <p>No linker option is needed: rustc's default linker driver is <code>cc</code>, which on
 the image is <code>/devtools/bin/cc</code>, the native Clang, which links with lld. There is
-no Cargo, Clippy, rustfmt, or rustdoc on the image; packages with dependencies are built
-with Lorry, below, which also runs procedural macros as separate static executables
-because Motor OS has no dynamic loading.</p>
+no Cargo or rustdoc on the image. Packages with dependencies are built with Lorry,
+below. Lorry runs Clippy through the image's <code>clippy-driver</code>, and runs
+procedural macros as separate static executables because Motor OS has no dynamic
+loading.</p>
 
 <h3>Clang/LLVM</h3>
 <p><code>/devtools/llvm/bin/llvm</code> is one static executable of about 107 MB that
@@ -592,7 +593,7 @@ for security-sensitive environments: it takes the same <code>Cargo.toml</code> a
 dependencies once and explicitly with <code>lorry vendor</code>, and then builds, runs, and
 tests packages offline using
 <code>/devtools/bin/rustc</code> and, for crates with C parts, <code>/devtools/bin/cc</code>
-and <code>llvm ar</code>. It builds red and itself natively in the developer-image test.
+and <code>llvm ar</code>. It builds red, gears, and itself natively in the developer-image test.
 It has its own page: <a href="lorry.html">Lorry: the package manager</a>.</p>
 <pre><code>lorry new hello && cd hello
 lorry vendor --accept-all      # once, with network access

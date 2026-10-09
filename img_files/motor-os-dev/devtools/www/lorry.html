@@ -446,39 +446,63 @@ a.card h3 { color: var(--accent); }
 <div class="eyebrow">Developing</div>
 <h1>Lorry: the package manager</h1>
 <p class="lead">Lorry is Motor OS's Rust package manager: a smaller, stricter Cargo
-replacement for security-sensitive environments. It is Cargo-compatible: it takes a
-package's <code>Cargo.toml</code> and <code>Cargo.lock</code> as they are and aims to produce
-byte-identical binaries. What it changes is how dependencies get in: builds are offline,
-from dependencies that were fetched once, checked, shown to a person, and recorded, and
-Lorry never invokes Cargo. It runs on Linux and on Motor OS, where it is the Rust build
-driver because the developer image has no Cargo.</p>
+replacement for security-sensitive environments. It is Cargo-compatible. It takes a
+package's <code>Cargo.toml</code> and <code>Cargo.lock</code> as they are, and aims to produce
+byte-identical binaries. Builds are always offline, and Lorry never invokes Cargo. On
+Motor OS, dependencies come only from Lorry's own repositories: each one was fetched once,
+checked, shown to a person, and recorded. Lorry runs on Linux and on Motor OS. On Motor
+OS it is the Rust build driver, because the developer image has no Cargo.</p>
 
 <h2>Cargo compatibility</h2>
 <p>A Lorry project is a Cargo project. Nothing about the package changes, and Cargo can
 still build it:</p>
 <ul>
   <li>The inputs are the package's own <code>Cargo.toml</code> and <code>Cargo.lock</code>
-  (lock versions 3 and 4), read as Cargo reads them: dependencies from crates.io, Git,
-  and local paths, renamed and optional dependencies, features, target-conditioned
-  dependencies, patches, profiles, editions 2015 through 2024, and resolvers 1 through 3.
-  <code>lorry vendor</code> resolves versions the way Cargo does and writes the same lock
-  file.</li>
-  <li>The commands mirror Cargo's: <code>lorry new</code>, <code>build</code>, <code>run</code>,
-  <code>test</code>, <code>clean</code>, with <code>--release</code>, <code>--target</code>,
-  <code>-p</code>, <code>--bin</code>, and arguments after <code>--</code> meaning what they
-  mean in Cargo. Output goes to Cargo-shaped <code>debug</code> and <code>release</code>
-  directories under <code>target/lorry</code>.</li>
+  (lock versions 1 through 4), read as Cargo reads them. That covers workspaces, with
+  member globs and inherited settings; crates.io, Git, and path dependencies; renamed and
+  optional dependencies; features; target-conditioned dependencies; patches; profiles;
+  editions 2015 through 2024; and resolvers 1 through 3. <code>lorry vendor</code>
+  resolves versions the way Cargo does and writes the same lock file.</li>
+  <li>The commands mirror Cargo's: <code>new</code>, <code>build</code>, <code>check</code>,
+  <code>clippy</code>, <code>run</code>, <code>test</code>, <code>clean</code>,
+  <code>metadata</code>, <code>tree</code>, and <code>locate-project</code>. Package,
+  target, feature, and profile options mean what they mean in Cargo. Output goes to
+  Cargo-shaped <code>debug</code> and <code>release</code> directories under
+  <code>target/lorry</code>.</li>
+  <li><code>--message-format json</code> writes Cargo's JSON messages, and
+  <code>lorry metadata</code> writes Cargo's metadata format, so tools such as
+  rust-analyzer work with Lorry. Helix on the developer image uses this.</li>
   <li>A clean release build is required to be byte-identical whichever tool builds it:
   Cargo on Linux, Lorry on Linux, or Lorry natively on Motor OS. Lorry's test suite
   checks this, and compares Lorry's dependency resolution against Cargo's.</li>
   <li>A configured <code>cargo-compat-version</code> (1.99 on the developer image) says
-  which Cargo's behavior Lorry follows, and <code>--use-cargo-registry</code> can build
-  from an already populated Cargo cache after verifying it.</li>
+  which Cargo's behavior Lorry follows.</li>
+  <li>Lorry reads the parts of Cargo's configuration that shape a build: the default
+  target, rustflags, the target directory, the job count, and per-target linkers and
+  runners. It ignores, with a note, settings that cannot change a build. It rejects the
+  rest.</li>
 </ul>
 <p>The compatibility is with the package model Lorry supports, which is deliberately
-smaller than Cargo's; what is left out is listed under <a href="#model">The package
-model</a>, and anything outside it is rejected with a clear error rather than
-approximated.</p>
+smaller than Cargo's. What is left out is listed under <a href="#model">The package
+model</a>. Anything outside it is rejected with a clear error, not approximated.</p>
+
+<h2>Where dependencies come from</h2>
+<p>Lorry has two sources for crates.io packages:</p>
+<ul>
+  <li><strong>Lorry repositories, with admission.</strong> <code>lorry vendor</code> fetches
+  and checks each package, asks for approval, and records the result. Builds then use
+  only those verified sources. This is the only mode on Motor OS, and the rest of this
+  page describes it.</li>
+  <li><strong>Cargo's cache.</strong> On Linux, by default, Lorry reads the sources that
+  Cargo has already downloaded below <code>~/.cargo/registry</code>, and trusts them as
+  Cargo does: there is no admission, and build scripts and procedural macros need no
+  grants. On first use, Lorry checks each archive against its extracted source and
+  <code>Cargo.lock</code>. Lorry never fetches into or repairs Cargo's cache. If the
+  cache lacks a package, Lorry falls back to its own repositories.
+  <code>--no-use-cargo-registry</code>, or <code>use-cargo-registry = false</code> in
+  <code>lorry.toml</code>, turns this mode off.</li>
+</ul>
+<p>Git dependencies always come from Lorry's own verified snapshots.</p>
 
 <h2>Why a smaller, stricter Cargo replacement</h2>
 <p>In many corporate environments a build tool that goes out to the Internet on its own
@@ -488,8 +512,9 @@ Cargo fetches them, runs their build scripts, and loads their procedural macros 
 compiler, and nothing in that sequence asks anyone anything. Lorry is designed for the
 environments where that is not acceptable:</p>
 <ul>
-  <li><strong>Network access is one explicit step.</strong> Only <code>lorry vendor</code>
-  talks to the network. Every other command is offline and fails rather than fetching.</li>
+  <li><strong>Network access is an explicit step.</strong> Only <code>lorry vendor</code>
+  and <code>lorry fetch</code> talk to the network. Every other command is offline and
+  fails rather than fetching.</li>
   <li><strong>Every package is admitted individually.</strong> Vendoring shows each new
   package with its exact version, checksum, license, size, whether it has a build script
   or is a procedural macro, and the dependency edges it adds, and asks before accepting
@@ -503,8 +528,8 @@ environments where that is not acceptable:</p>
   client run without a shell, with proxies and credentials stripped, no redirects unless
   the site is on your list, and Git served by an embedded client rather than a
   <code>git</code> executable.</li>
-  <li><strong>Limits are explicit</strong>: how many packages, how deep, how large, and how
-  long a build script may run.</li>
+  <li><strong>Limits are explicit</strong>: how many packages, how large, and how long a
+  build script may run.</li>
   <li><strong>Unsupported means rejected.</strong> Cargo behavior that Lorry does not
   implement is refused explicitly, never approximated, so a build cannot quietly do
   something the reviewer did not see.</li>
@@ -520,33 +545,43 @@ been allowed.</p>
 <pre><code>lorry new hello                  # a package with an edition-2024 binary and a lock file
 cd hello
 lorry build [--release]          # build, offline
-lorry run [-- args...]           # build and run the binary, forwarding arguments
+lorry check                      # type-check without linking
+lorry clippy [-- LINT OPTIONS]   # lint with the clippy-driver next to rustc
+lorry run [-- args...]           # build and run a binary, forwarding arguments
 lorry test [--no-run] [-- args]  # build and run the library, binary, and integration tests
 lorry clean
-lorry vendor [--accept-all]      # fetch, check, and record dependencies (the only networked command)
+lorry vendor [--accept-all]      # fetch, check, review, and record dependencies
 lorry vendor upgrade PKG[@OLD] --to VERSION
+lorry fetch                      # fetch the locked sources, for browsing; grants nothing
 lorry review                     # print the canonical review of the dependency set
+lorry metadata, tree, locate-project   # Cargo-compatible project queries
 lorry cache clean</code></pre>
 <div class="table-wrap">
 <table>
   <tr><th>Option</th><th>Meaning</th></tr>
   <tr><td><code>+toolchain</code></td><td>On Linux, a rustup toolchain selector, as with Cargo. On Motor OS the compiler is <code>/devtools/bin/rustc</code>.</td></tr>
-  <tr><td><code>-p NAME</code></td><td>Select a member of an explicit workspace.</td></tr>
-  <tr><td><code>--bin NAME</code>, <code>--test NAME</code></td><td>Choose a binary or an integration test. <code>run</code> otherwise takes <code>package.default-run</code> or the sole binary.</td></tr>
-  <tr><td><code>--release</code></td><td>The release profile: <code>lto</code>, <code>strip</code>, and <code>codegen-units</code> are honored in addition to the dev profile's settings.</td></tr>
+  <tr><td><code>-p NAME</code>, <code>--workspace</code>, <code>--exclude NAME</code></td><td>Select workspace members, as in Cargo. A member's directory selects that member.</td></tr>
+  <tr><td><code>--lib</code>, <code>--bin NAME</code>, <code>--test NAME</code>, <code>--example NAME</code>, <code>--all-targets</code>, ...</td><td>Choose targets, as in Cargo. <code>run</code> otherwise takes <code>package.default-run</code> or the sole binary.</td></tr>
+  <tr><td><code>--features</code>, <code>--all-features</code>, <code>--no-default-features</code></td><td>Select features, as in Cargo.</td></tr>
+  <tr><td><code>--release</code>, <code>--profile NAME</code></td><td>Choose a profile. Named profiles inherit as in Cargo.</td></tr>
   <tr><td><code>--target TRIPLE</code></td><td>An installed target; custom JSON targets are rejected.</td></tr>
+  <tr><td><code>--target-dir DIR</code></td><td>Where build output goes; <code>CARGO_TARGET_DIR</code> and Cargo's <code>build.target-dir</code> work too. Lorry writes only below its <code>lorry/</code> subdirectory.</td></tr>
+  <tr><td><code>-j N</code></td><td>How many compilers run at once. <code>LORRY_JOBS</code> and Cargo's <code>build.jobs</code> work too.</td></tr>
+  <tr><td><code>--message-format json</code></td><td>Cargo's JSON messages on stdout, for tools.</td></tr>
+  <tr><td><code>--lorry-messages</code></td><td>Lorry's own errors as JSON lines on stderr, for tools and agents.</td></tr>
+  <tr><td><code>--keep-going</code>, <code>--no-fail-fast</code></td><td>Keep building after a compile error; keep testing after a failed test.</td></tr>
   <tr><td><code>--bundle</code></td><td>Package the test harnesses and the binary into one self-extracting executable for the target, to run on another machine.</td></tr>
-  <tr><td><code>--strict-validation</code></td><td>Stricter checks for build, run, and test.</td></tr>
-  <tr><td><code>--use-cargo-registry</code></td><td>Build from an already populated local Cargo cache instead of a Lorry repository, after verifying it (Linux).</td></tr>
+  <tr><td><code>--strict-validation</code></td><td>Rehash every source, tool, cache entry, and artifact before reusing it.</td></tr>
+  <tr><td><code>--use-cargo-registry</code>, <code>--no-use-cargo-registry</code></td><td>Require Cargo's cache, or use only Lorry repositories (Linux).</td></tr>
   <tr><td><code>-q</code>, <code>-v</code>, <code>--color</code></td><td>Output control.</td></tr>
 </table>
 </div>
 <p><code>lorry run</code> executes the program directly, without a shell, and returns its
-exit status. <code>lorry test</code> builds separate harnesses for the library, the binary,
-and each <code>tests/*.rs</code> file and runs them in Cargo's order, stopping at the first
-failure; arguments after <code>--</code> go to every harness. Usage errors exit 1; build,
-vendoring, policy, and operational failures exit 101; an interrupted run exits 130. There
-is no <code>lorry clippy</code>.</p>
+exit status. <code>lorry test</code> builds separate harnesses for the library, the binaries,
+and each integration test, then runs them in Cargo's order and stops at the first
+failure. Arguments after <code>--</code> go to every harness. Documentation tests are not
+run, because Motor OS has no rustdoc. Usage errors exit 1; build, vendoring, policy, and
+operational failures exit 101; an interrupted run exits 130.</p>
 
 <h2>Where things live</h2>
 <div class="table-wrap">
@@ -555,31 +590,36 @@ is no <code>lorry clippy</code>.</p>
   <tr><td><code>/devtools/cfg/lorry.toml</code></td><td>System configuration: the Cargo compatibility version (1.99), the curl program and CA bundle, vendor targets, policy limits, native C tools, and the reviewed grants for build scripts and procedural macros.</td></tr>
   <tr><td><code>/user/cfg/lorry.toml</code></td><td>User configuration; on the image it names the user repository.</td></tr>
   <tr><td><code>/devtools/lorry/vendor</code></td><td>The user repository: content-addressed, immutable objects under <code>objects/crates-io/sha256/</code>, a <code>.staging</code> area, and a <code>repository.toml</code>. Ships empty.</td></tr>
-  <tr><td><code>/devtools/lorry/cache</code></td><td>The cache of compiled dependency units, shared between projects.</td></tr>
+  <tr><td><code>/devtools/lorry/cache</code></td><td>Compiled dependency units shared between projects, read-only views of dependency sources, and saved answers from rustc.</td></tr>
   <tr><td><code>/user/cfg/lorry-redirect-sites.toml</code></td><td>The list of sites whose HTTP redirects have been allowed or denied.</td></tr>
   <tr><td><code>PROJECT/.lorry/dependencies-v2.toml</code></td><td>The project's admission record: which packages, at which checksums, were reviewed for which host and target pairs. Committed with the project, never edited by hand.</td></tr>
-  <tr><td><code>PROJECT/target/lorry/</code></td><td>Build output, in Cargo-shaped <code>debug</code> and <code>release</code> directories, plus incremental state for the root package.</td></tr>
+  <tr><td><code>PROJECT/.lorry/vendor/git/</code></td><td>Verified snapshots of the project's Git dependencies.</td></tr>
+  <tr><td><code>PROJECT/target/lorry/</code></td><td>Build output, in Cargo-shaped <code>debug</code> and <code>release</code> directories, plus incremental state for workspace members and path dependencies.</td></tr>
 </table>
 </div>
 <p>Configuration files are merged in order: the system file, the user file, and the
-nearest <code>lorry.toml</code> above the project. Every file declares
+nearest <code>lorry.toml</code> at or above the workspace root. Every file declares
 <code>config-version = 1</code>, and an unknown key is an error. On Linux the user file is
 <code>$HOME/.config/lorry/lorry.toml</code> and the cache is <code>$HOME/.cache/lorry</code>.
 Repositories come in three roles, <code>system</code> (read-only), <code>user</code>, and
-<code>local</code>; lookup goes local, then user, then system, and vendoring writes to the
+<code>local</code>. Lookup goes local, then user, then system. Vendoring writes to the
 local repository if one is configured, otherwise to the user's.</p>
 
 <h2>Vendoring and admission</h2>
-<p><code>lorry vendor</code> is the only command that touches the network. It reads the
-package's <code>Cargo.toml</code> and <code>Cargo.lock</code>, resolves what is missing from
-the repositories, and for each new package fetches it over HTTPS, checks the checksum
-and the archive structure, applies the policy, and asks for approval, showing the exact
-version, checksum, license, whether the package has a build script or is a procedural
-macro, its size, and the dependency edges it adds. <code>--accept-all</code> answers yes
-to those questions after all checks have passed; it cannot bypass an integrity failure,
-a policy denial, the redirect list, or a native-tool restriction, and it cannot change an
-existing admission record. Approved objects are written with fsync and published
-atomically; an object is never replaced. <code>Cargo.lock</code> is committed last.</p>
+<p><code>lorry vendor</code> resolves the whole workspace from <code>Cargo.toml</code> and
+<code>Cargo.lock</code>. For each package missing from the repositories, it fetches it over
+HTTPS, checks the checksum and the archive structure, and applies the policy. Then it asks
+for one approval, showing each new package's exact version, checksum, license, size,
+whether it has a build script or is a procedural macro, and the dependency edges it adds.
+<code>--accept-all</code> approves after all checks have passed. It cannot bypass an
+integrity failure, a policy denial, the redirect list, or a native-tool restriction.
+Approved objects are written with fsync and published atomically, and an object is never
+replaced. <code>Cargo.lock</code> is replaced next, and the admission record is written
+last.</p>
+<p><code>lorry fetch</code> also uses the network, but only to fetch the exact sources
+that <code>Cargo.lock</code> names. It shows no review, runs no package code, and grants
+nothing. It is enough for <code>metadata</code>, <code>tree</code>, and browsing sources in
+an editor; building needs a review.</p>
 <ul>
   <li>Sources are the crates.io sparse index, the only supported registry, and Git over
   smart HTTP. Git is handled by an embedded client, never a <code>git</code> executable:
@@ -594,20 +634,21 @@ atomically; an object is never replaced. <code>Cargo.lock</code> is committed la
   so that one review covers cross-compiling on Linux and building natively.</li>
   <li>The result is recorded in <code>.lorry/dependencies-v2.toml</code> with a checksum
   of the canonical review and one entry per reviewed host-and-target pair. A later
-  <code>build</code>, <code>run</code>, or <code>test</code> requires its own pair to be
-  present and re-verifies every recorded pair, which is why a Motor-capable rustc is
-  needed even for a host-only build. <code>lorry review</code> regenerates the canonical
-  review offline so that it can be read, diffed, and checked into version control.</li>
+  build requires its own pair to be present and re-verifies every recorded pair, which
+  is why a Motor-capable rustc is needed even for a host-only build. An unchanged build
+  reuses its finished result before this check. <code>lorry review</code> regenerates the
+  canonical review offline so that it can be read, diffed, and checked into version
+  control.</li>
 </ul>
 
 <h3>Policy</h3>
 <p>The policy in <code>lorry.toml</code> decides what may be admitted. It has a default
-action, optional path roots, limits (on the developer image: at most 192 packages, a
-dependency depth of 16, 16 MiB per package archive and 128 MiB extracted, 256 MiB per
-transaction and 1 GiB extracted, a build script limited to 300 seconds and 8 MiB of
-output), and per-package rules. A rule names the package, its exact version, its source,
-and its checksum, and it is the only way to grant the two things that run code at build
-time:</p>
+action, optional path roots, limits, and per-package rules. On the developer image the
+limits are: at most 384 packages from outside the workspace, 16 MiB per package archive
+and 128 MiB or 20,000 files extracted, 256 MiB per transaction and 1 GiB extracted, and
+300 seconds and 8 MiB of output per build script. Dependency depth is not limited unless
+configured. A rule names the package, its exact version, its source, and its checksum,
+and it is the only way to grant the two things that run code at build time:</p>
 <pre><code>[policy.rules.serde_derive-1_0_229]
 action = "allow"
 name = "serde_derive"
@@ -624,8 +665,9 @@ source = "crates.io"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 allow-build-script = true</code></pre>
 <p><code>allow-build-script</code> and <code>allow-proc-macro</code> are independent grants,
-required even when the default action is <code>allow</code>. A build script that needs a C
-compiler or an archiver uses the tools declared under
+required even when the default action is <code>allow</code>. A workspace member's own build
+script needs a rule with <code>source = "path"</code> that names the member. A build script
+that needs a C compiler or an archiver uses the tools declared under
 <code>[native-tools."x86_64-unknown-motor"]</code>, which on the image are
 <code>/devtools/bin/cc</code> and <code>/devtools/llvm/bin/llvm ar</code>, and only with the
 build-script grant. The developer image ships grants for the common crates that the
@@ -634,23 +676,36 @@ thiserror, and others).</p>
 
 <h2>Building</h2>
 <ul>
-  <li><strong>Profiles</strong> are Cargo's dev and release, honoring <code>panic</code>,
-  <code>lto</code>, <code>strip</code>, and <code>codegen-units</code>. Output goes under
-  <code>target/lorry</code>; <code>CARGO_TARGET_DIR</code> is an error.</li>
-  <li><strong>Caching.</strong> Immutable dependency units are compiled once into the shared
-  cache and reused across projects; the root package and path dependencies are built
-  incrementally under <code>target/lorry/.incremental/</code>. The first miss on the shared
-  cache prints <code>Rebuilding global dependency cache</code> once. Dependency units are
-  compiled in parallel.</li>
+  <li><strong>Profiles</strong> are Cargo's dev, release, and test, plus named profiles
+  with Cargo's inheritance. They honor <code>panic</code>, <code>debug</code>,
+  <code>opt-level</code>, <code>lto</code>, <code>strip</code>, <code>codegen-units</code>,
+  <code>debug-assertions</code>, <code>overflow-checks</code>, and
+  <code>incremental</code>.</li>
+  <li><strong>Caching.</strong> Dependency units from crates.io and Git are compiled once
+  into the shared cache and reused across projects. Debug builds of workspace members
+  and path dependencies are incremental, under <code>target/lorry/.incremental/</code>. An
+  unchanged <code>build</code>, <code>run</code>, or <code>check</code> reuses its finished
+  result without starting a compiler. The first miss on the shared cache prints
+  <code>Rebuilding global dependency cache</code> once.</li>
+  <li><strong>Parallel builds.</strong> Units compile in parallel, and the unit that most
+  others wait for goes first. On Linux, as in Cargo, a library's dependents start as soon
+  as its metadata is ready.</li>
   <li><strong>Procedural macros</strong> are compiled for the machine that runs the
   compiler. On Linux they load as ordinary dynamic libraries. Motor OS has no dynamic
   loading, so on Motor a procedural macro is a static executable, and rustc talks to it
   over the compiler's own proc-macro bridge protocol, carried in bounded, versioned frames
   on the child's stdin and stdout. This gives process separation, not a sandbox.</li>
-  <li><strong>Build scripts</strong> of dependencies run on Linux in a mandatory sandbox: no
-  network, read-only inputs, writes only to <code>OUT_DIR</code> and a private temporary
-  directory, a cleared environment, and only approved child tools. On Motor OS they run
-  without isolation, and Lorry prints a warning every time it applies one.</li>
+  <li><strong>Build scripts</strong> of members and dependencies run on Linux in a
+  mandatory sandbox: no network, read-only inputs, writes only to <code>OUT_DIR</code> and a
+  private temporary directory, a cleared environment, and only approved child tools. On
+  Motor OS they run without isolation, and Lorry prints a warning every time it applies
+  one. Scripts may use Cargo's directives, and metadata reaches dependent scripts as
+  <code>DEP_&lt;LINKS&gt;_&lt;KEY&gt;</code>. Unlike Cargo, a link search path must be
+  inside the script's <code>OUT_DIR</code>.</li>
+  <li><strong>Check and Clippy.</strong> <code>lorry check</code> compiles to metadata
+  without linking. <code>lorry clippy</code> uses the <code>clippy-driver</code> next to
+  rustc, which the developer image ships. <code>check --compile-time-deps</code> runs only
+  the build scripts and procedural macros that an editor needs.</li>
   <li><strong>Bundles.</strong> <code>--bundle</code> produces one self-extracting executable
   for the target that carries the test harnesses and the binary, verifies its payload
   table, extracts under a private root (<code>/user/tmp/lorry/test-extraction</code> on Motor
@@ -658,44 +713,42 @@ thiserror, and others).</p>
 </ul>
 
 <h2 id="model">The package model</h2>
-<p>Supported: one root package, optionally a member of an explicit workspace chosen
-with <code>-p</code>; at most one library and 64 binaries; top-level
-<code>tests/*.rs</code>; a current <code>Cargo.lock</code> (version 3 or 4); crates.io, Git,
-and path dependencies, including renamed and optional ones, default and forwarded
-features, target-conditioned dependencies, dependency build scripts, procedural-macro
-dependencies, and required local patches; editions 2015 through 2024; resolvers 1
-through 3; <code>rust-version</code>, <code>autobins</code>, <code>default-run</code>, and
-<code>[lints.rust]</code>.</p>
-<p>Not supported, by decision: root build scripts and root build-dependencies, root
-dev-dependencies selected for the build target, workspace-wide commands and workspace
-inheritance, <code>--manifest-path</code> and parent-directory discovery, alternative
-registries, a procedural-macro package as the root, examples, benches, explicit
-<code>[[test]]</code> targets, feature selection on the command line, custom JSON targets
-and build-std, and rustc wrappers. One known defect is stated in Lorry's own
-documentation: a dependency-free root <code>build.rs</code> is accepted by the parser but
-never run, so such a package should not be built with Lorry until that is fixed.</p>
+<p>Supported: workspaces as in Cargo, with members, globs, exclusions, default members,
+and inherited package fields, dependencies, and lints; per package, one library and up
+to 1,024 each of binaries, examples, integration tests, and benches, found as Cargo
+finds them or declared explicitly; build scripts of members and dependencies;
+procedural macros; crates.io, Git, and path dependencies, including renamed and optional
+ones, default and forwarded features, and target-conditioned dependencies; crates.io
+patches by path or Git; lock versions 1 through 4; editions 2015 through 2024; resolvers
+1 through 3; <code>rust-version</code>; and Rust and Clippy lints.</p>
+<p>Not supported, by decision: alternative registries, artifact dependencies, custom
+JSON targets and build-std, rustc wrappers, dynamic and procedural-macro example types,
+<code>clippy --fix</code>, and running Cargo aliases. Builds never create or update
+<code>Cargo.lock</code>; <code>lorry vendor</code> does that, after a review. Lorry's
+<code>spec.md</code> gives the details, and its <code>future-work.md</code> lists the
+remaining differences from Cargo that may change.</p>
 
 <h2>Self-hosting</h2>
 <p>Lorry builds Motor OS programs on Motor OS. The developer-image test vendors and
-builds red and then Lorry itself natively in a VM, from the source snapshots under
-<code>/devtools/src</code>, and checks that the freshly linked build-script and program
-files carry the expected permissions. Replacing the repository's Cargo-driven build of
-every component with Lorry is not there yet; Lorry's <code>full-native-build.md</code>
-records what remains: the root <code>build.rs</code> defect above, a few Cargo features the
-in-tree packages use (lock version 3, a profile override through the environment, root
-feature flags), the kernel's custom target and its build-std needs, the imager's Linux-only
-dependencies, and the absence of a native Clippy.</p>
+builds red, gears, and then Lorry itself natively in a VM, from the source snapshots
+under <code>/devtools/src</code>, and checks that the freshly linked build scripts carry
+the expected permissions. Lorry's own suite checks that Lorry built natively on Motor OS
+is byte-identical to Lorry cross-built on Linux. Replacing the repository's Cargo-driven
+build of every component with Lorry is not there yet. Lorry's
+<code>future-work.md</code> lists what remains: the kernel's custom target and its
+build-std needs, the imager's Linux-only dependencies, admission records for the other
+projects, and switching the <code>Makefile</code> from Cargo to Lorry.</p>
 
 <h2>Tests</h2>
 <p><code>src/bin/lorry/tests/test-all.sh</code> runs Lorry's whole suite within a fixed
 time budget: the unit and integration tests offline, a dependency-resolution oracle
 that compares Lorry's resolution with Cargo's, contract scripts for the review format,
-Cargo identity, workspaces, procedural macros, the registry protocol, and curl, and a
-native leg that boots a Motor OS VM and proves that the cross-built Lorry rebuilds itself
-there byte-identically and reuses its incremental state across two builds. The
-developer-image test run (<code>src/tests/full-test-dev.sh</code>) includes it; the main
-<code>full-test.sh</code> does not. Lorry's own README, specification, and design
-document are under <code>src/bin/lorry/</code> in the repository.</p>
+Cargo identity, workspaces, build scripts, procedural macros, the registry protocol, and
+curl, and a native leg that boots a Motor OS VM and proves that the cross-built Lorry
+rebuilds itself there byte-identically and reuses its incremental state across two
+builds. The developer-image test run (<code>src/tests/full-test-dev.sh</code>) includes it;
+the main <code>full-test.sh</code> does not. Lorry's README, specification, design, and
+future-work list are under <code>src/bin/lorry/</code> in the repository.</p>
 <nav class="pager">
 <a class="pager-prev" href="c-cpp.html"><span>Previous</span>C/C++ on Motor OS</a>
 <a class="pager-next" href="gix.html"><span>Next</span>gix: the Git client</a>
