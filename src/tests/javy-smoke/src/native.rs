@@ -3,6 +3,7 @@ use std::fs;
 pub(super) use wasm_smoke_suite::{Result, Suite};
 
 mod behavior;
+mod identity;
 mod runner;
 
 const SUPPORT_DIR: &str = "/devtools/cfg/javy";
@@ -72,7 +73,7 @@ pub fn run() -> Result<()> {
     )?;
     fs::write(
         suite.root.join("hello.js"),
-        "console.log('hello from Motor', 6 * 7);\n",
+        include_str!("../fixtures/hello.js"),
     )?;
     suite.compile("hello-static", "hello.js", "hello.wasm", "-C deterministic")?;
     suite.execute("hello-execute", "hello.wasm", "", "hello from Motor 42\n")?;
@@ -121,6 +122,7 @@ pub fn run() -> Result<()> {
         "",
     )?;
     suite.execute("typescript-execute", "typescript.wasm", "", "{\"version\":\"5.9.3\",\"output\":\";\\nconst item = { value: 42 };\\nconsole.log(item.value);\\n\",\"diagnostics\":0}\n")?;
+    identity::run(&mut suite)?;
     fs::write(
         suite.root.join("runner.wasm"),
         include_bytes!(concat!(env!("OUT_DIR"), "/runner.wasm")),

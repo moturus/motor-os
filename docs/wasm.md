@@ -17,6 +17,7 @@ yet.
 | `/devtools/cfg/javy/plugin.wasm` | Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy. |
 | `/devtools/cfg/javy/typescript-workload.js` | TypeScript 5.9.3 plus a transpilation test workload. |
 | `/devtools/cfg/javy/typescript-LICENSE.txt`, `typescript-NOTICES.txt` | License and third-party notices for the bundled TypeScript code. |
+| `/devtools/cfg/javy/linux-reference.txt` | SHA-256 of upstream Linux Javy 9.1.0's output for the identity test inputs; Motor Javy must produce the same bytes. |
 | `/devtools/cfg/javy/sources.txt`, `SHA256SUMS` | Build provenance, source revisions, and staged-file checksums. |
 | `/devtools/bin/wasmtime-rt` | Runtime-only Wasmtime: precompiled Pulley execution with WASI. |
 | `/devtools/cfg/wasmtime/sources.txt`, `SHA256SUMS` | Wasmtime build provenance and checksums. |

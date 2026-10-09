@@ -191,6 +191,7 @@ for selection in managed-probe authoring-probe; do
 		install() { :; }
 		sha256sum() { cat > /dev/null; }
 		build_wasmtime_fixtures() { printf 'fixtures %s\n' "$RUSTUP_TOOLCHAIN" >> "$JAVY_TOOLCHAIN_LOG"; }
+		javy_linux_reference() { :; }
 		build_javy
 		build_wasmtime
 	) < /dev/null > /dev/null 2>&1 || fail "a wasm add-on stage failed with selection $selection"
@@ -230,5 +231,11 @@ case "$authoring_manifest" in
 esac
 [ "$managed_manifest" != "$authoring_manifest" ] ||
 	fail "a changed toolchain selection would reuse the Javy add-on"
+# The Linux reference digests come from the pinned Linux Javy and the fixtures
+# javy-smoke compiles, so each is part of the Javy add-on's source identity.
+case "$managed_manifest" in
+	*'fixtures/hello.js'*"javy-linux=$JAVY_LINUX_SHA"*) ;;
+	*) fail "the Javy manifest does not name the Linux reference inputs" ;;
+esac
 
 echo "test-build-addons PASS"

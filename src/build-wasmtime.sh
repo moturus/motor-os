@@ -11,27 +11,20 @@ WASMTIME_GUEST_PROGRAMS=(p2_tcp_bind p2_tcp_bind_listen_order p2_tcp_connect
 # Core-module fixtures in the fork's motor-runtime/fixtures.
 WASMTIME_CORE_FIXTURES=(lifecycle limits-elements limits-memories limits-tables memory-grow
 	memory-too-large)
-# Upstream Javy 9.1.0 for Linux compiles the TypeScript fixture; with the same
-# plugin its output equals Motor Javy's apart from the compressed source.
-WASMTIME_JAVY_LINUX_GZ_SHA=a68b122d48eb3dfc1b801d4e14c39271fde3638243d3272d206e376ac9189e39
-WASMTIME_JAVY_LINUX_SHA=f6f12dc42ffcaa1c19244b1a332893d636d0d56d26e02089d94dc296b22fa719
 
 # Fixtures are precompiled by a host compiler built from the runtime's own
 # sources, so their engine version and configuration always match it.
 build_wasmtime_fixtures() {
 	local root="$MOTORH/wasmtime" build="$ASSEMBLY_BUILD_ROOT/wasmtime"
-	local inputs="$ASSEMBLY_BUILD_ROOT/wasmtime-inputs"
 	local out="$WASMTIME_IMG/devtools/cfg/wasmtime/fixtures"
 	local plugin="$ASSEMBLY_BUILD_ROOT/javy-inputs/plugin.wasm"
+	local javy_linux="$ASSEMBLY_BUILD_ROOT/javy-inputs/javy-linux"
 	local typescript="$ASSEMBLY_IMAGE_ROOT/javy/devtools/cfg/javy/typescript-workload.js"
-	printf '%s  %s\n%s  %s\n' "$JAVY_PLUGIN_SHA" "$plugin" "$JAVY_TYPESCRIPT_SHA" "$typescript" |
+	# Upstream Javy 9.1.0 for Linux compiles the TypeScript fixture.
+	printf '%s  %s\n%s  %s\n%s  %s\n' "$JAVY_PLUGIN_SHA" "$plugin" "$JAVY_LINUX_SHA" "$javy_linux" \
+		"$JAVY_TYPESCRIPT_SHA" "$typescript" |
 		sha256sum --quiet -c - || die "the Wasmtime fixtures need the Javy add-on's inputs"
-	mkdir -p "$inputs" "$out"
-	javy_download https://github.com/bytecodealliance/javy/releases/download/v9.1.0/javy-x86_64-linux-v9.1.0.gz \
-		"$WASMTIME_JAVY_LINUX_GZ_SHA" "$inputs/javy-linux.gz"
-	gzip -dc "$inputs/javy-linux.gz" > "$inputs/javy-linux"
-	printf '%s  %s\n' "$WASMTIME_JAVY_LINUX_SHA" "$inputs/javy-linux" | sha256sum -c -
-	chmod 755 "$inputs/javy-linux"
+	mkdir -p "$out"
 	(
 		cd "$root"
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build/host" cargo build --locked --release \
@@ -58,7 +51,7 @@ build_wasmtime_fixtures() {
 		"$compile" pulley64 component "$build/guests/wasm32-wasip2/release/$name.wasm" \
 			"$out/$name.cwasm"
 	done
-	"$inputs/javy-linux" build "$typescript" -C plugin="$plugin" -C deterministic \
+	"$javy_linux" build "$typescript" -C plugin="$plugin" -C deterministic \
 		-o "$build/typescript.wasm"
 	"$compile" pulley64 core "$build/typescript.wasm" "$out/typescript.cwasm"
 }
@@ -99,7 +92,7 @@ build_wasmtime_addon() {
 		wasm_source_manifest "${WASMTIME_SOURCES[*]}" src/build-wasmtime.sh
 		printf 'guest-toolchain=%s\n' "$(RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" rustc --version)"
 		printf 'plugin=%s\ntypescript=%s\njavy-linux=%s\n' "$JAVY_PLUGIN_SHA" \
-			"$JAVY_TYPESCRIPT_SHA" "$WASMTIME_JAVY_LINUX_SHA"
+			"$JAVY_TYPESCRIPT_SHA" "$JAVY_LINUX_SHA"
 	)"
 	source="$(printf '%s\n' "$WASMTIME_SOURCE_MANIFEST" | sha256sum | cut -d' ' -f1)"
 	# All outputs must still match, not just the executable used by ensure_addon.

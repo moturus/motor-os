@@ -6,6 +6,10 @@
 # compiles the same inputs into its fixtures.
 JAVY_PLUGIN_SHA=180230f9346dc4b7d7139791280c9f4da09b2292eef751a3d35ae80154d88350
 JAVY_TYPESCRIPT_SHA=4969f6546b830e751b6797be028accd242fd24e6e506661c51ddcd16b2646d68
+# Upstream Javy 9.1.0 for Linux. With the same plugin and flags its output
+# equals Motor Javy's byte for byte, which javy-smoke checks.
+JAVY_LINUX_GZ_SHA=a68b122d48eb3dfc1b801d4e14c39271fde3638243d3272d206e376ac9189e39
+JAVY_LINUX_SHA=f6f12dc42ffcaa1c19244b1a332893d636d0d56d26e02089d94dc296b22fa719
 
 javy_download() {
 	local url="$1" digest="$2" output="$3"
@@ -41,8 +45,9 @@ wasm_source_manifest() (
 
 javy_source_manifest() {
 	wasm_source_manifest "${JAVY_SOURCES[*]}" src/build-javy.sh \
-		src/tests/javy-smoke/fixtures/typescript-workload.js
-	printf 'plugin=%s\ntypescript=%s\n' "$JAVY_PLUGIN_SHA" "$JAVY_TYPESCRIPT_SHA"
+		src/tests/javy-smoke/fixtures/typescript-workload.js src/tests/javy-smoke/fixtures/hello.js
+	printf 'plugin=%s\ntypescript=%s\njavy-linux=%s\n' "$JAVY_PLUGIN_SHA" "$JAVY_TYPESCRIPT_SHA" \
+		"$JAVY_LINUX_SHA"
 }
 
 # Binaryen's C++ units and fat-LTO links are memory-hungry: allow 1.5 GiB per
@@ -53,6 +58,26 @@ wasm_addon_jobs() {
 	memory="$(awk '/^MemAvailable:/ { print int($2 / 1572864) }' /proc/meminfo)"
 	[ "${memory:-0}" -ge 2 ] || memory=2
 	[ "$memory" -le "$cpus" ] && echo "$memory" || echo "$cpus"
+}
+
+# Digests of what Linux Javy builds from javy-smoke's identity inputs, which
+# that suite compiles on Motor with the same flags.
+javy_linux_reference() {
+	local inputs="$1" cfg="$2" out="$ASSEMBLY_BUILD_ROOT/javy-linux-reference" mode
+	javy_download https://github.com/bytecodealliance/javy/releases/download/v9.1.0/javy-x86_64-linux-v9.1.0.gz \
+		"$JAVY_LINUX_GZ_SHA" "$inputs/javy-linux.gz"
+	gzip -dc "$inputs/javy-linux.gz" > "$inputs/javy-linux"
+	printf '%s  %s\n' "$JAVY_LINUX_SHA" "$inputs/javy-linux" | sha256sum -c -
+	chmod 755 "$inputs/javy-linux"
+	rm -rf "$out"
+	mkdir -p "$out"
+	for mode in compressed uncompressed omitted; do
+		"$inputs/javy-linux" build "$MOTOR/src/tests/javy-smoke/fixtures/hello.js" \
+			-C plugin="$inputs/plugin.wasm" -C deterministic -C source=$mode -o "$out/hello-$mode.wasm"
+	done
+	"$inputs/javy-linux" build "$cfg/typescript-workload.js" -C plugin="$inputs/plugin.wasm" \
+		-C deterministic -C source=compressed -o "$out/typescript-compressed.wasm"
+	(cd "$out" && sha256sum hello-*.wasm typescript-compressed.wasm) > "$cfg/linux-reference.txt"
 }
 
 build_javy() {
@@ -85,6 +110,7 @@ build_javy() {
 	printf '%s  %s\n' "$JAVY_TYPESCRIPT_SHA" "$cfg/typescript-workload.js" | sha256sum -c -
 	tar -xOf "$inputs/typescript.tgz" package/LICENSE.txt > "$cfg/typescript-LICENSE.txt"
 	tar -xOf "$inputs/typescript.tgz" package/ThirdPartyNoticeText.txt > "$cfg/typescript-NOTICES.txt"
+	javy_linux_reference "$inputs" "$cfg"
 	printf '%s\n' "$JAVY_SOURCE_MANIFEST" > "$cfg/sources.txt"
 	(cd "$JAVY_IMG" && sha256sum devtools/bin/{javy,wasmi} devtools/cfg/javy/* > "$cfg/SHA256SUMS")
 }
