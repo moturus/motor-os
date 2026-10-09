@@ -50,6 +50,9 @@ REMOTE_PHASE0_ROOT="${RUSSHD_PHASE0_ROOT:-$REMOTE_PHASE0_PARENT/sftp-prerequisit
 
 WORK="$(mktemp -d)"
 ABANDONED_PID=""
+PROTECTED_PARENT="$TEST_TMP/sftp-protected-$$"
+PUBLIC_FILE="$TEST_TMP/sftp-public-$$"
+MODE_ROOT="$TEST_TMP/sftp-modes-$$"
 
 run_ssh() {
     ssh \
@@ -64,12 +67,27 @@ run_ssh() {
         "$@"
 }
 
+# A None-role child must fail on cat's own read error (exit 1); a failed ssh
+# session or shell would pass a plain "did not succeed" check.
+none_read_denied() {
+    local output status=0
+    output="$(run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $1" 2>&1)" || status=$?
+    [ "$status" -eq 1 ] && printf '%s\n' "$output" | grep -q "cat: error reading file"
+}
+
 cleanup() {
     if [ -n "$ABANDONED_PID" ]; then
         kill "$ABANDONED_PID" 2>/dev/null || true
         wait "$ABANDONED_PID" 2>/dev/null || true
     fi
     remove_permission_fixtures
+    for mode_parent in "$MODE_ROOT/mode-9" "$MODE_ROOT/mode-10"; do
+        run_ssh /system/bin/sysbox chmod rwxrwxr-x "$mode_parent" >/dev/null 2>&1 || true
+    done
+    run_ssh /system/bin/rm -r "$MODE_ROOT" >/dev/null 2>&1 || true
+    run_ssh /system/bin/sysbox chmod rwxrwxr-x "$PROTECTED_PARENT" >/dev/null 2>&1 || true
+    run_ssh /system/bin/rm -r "$PROTECTED_PARENT" >/dev/null 2>&1 || true
+    run_ssh /system/bin/rm "$PUBLIC_FILE" >/dev/null 2>&1 || true
     run_ssh /system/bin/rm -r "$REMOTE_PHASE0_ROOT" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
@@ -106,6 +124,14 @@ EOF
 }
 
 echo "== russhd SFTP test against $USER@$HOST:$PORT =="
+
+# Raw protocol requests cover clients that set the mode after OPEN, as well as
+# the usual OpenSSH creation hints exercised below. This uses only Rust std.
+(cd "$WD" && rustc --edition=2024 sftp-permissions.rs -o "$WORK/sftp-permissions") ||
+    fail "SFTP permission probe compilation failed"
+run_ssh /system/bin/mkdir "$MODE_ROOT" || fail "SFTP mode fixture creation failed"
+"$WORK/sftp-permissions" "$KEY" "$USER" "$HOST" "$PORT" "$MODE_ROOT" ||
+    fail "SFTP permission requests failed"
 
 # ---------------------------------------------------------------------------
 # 1. Directory listing: `ls -1` makes the client call realpath, opendir and
@@ -219,9 +245,8 @@ readonly_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(base
     fail "executable upload has Motor mode $exec_motor_mode"
 [ "$readonly_motor_mode" = -rwxr----- ] ||
     fail "read-only upload has Motor mode $readonly_motor_mode"
-if run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $remote_plain_permission_file" >/dev/null 2>&1; then
+none_read_denied "$remote_plain_permission_file" ||
     fail "None-role child read a private SFTP upload"
-fi
 echo "  ok: SFTP permission updates preserved owner/public role distinctions"
 
 # A throttled upload keeps its handle open long enough to inspect the staging
@@ -250,7 +275,7 @@ if [ "$abandoned_created" != 1 ]; then
     cat "$WORK/abandoned.err" >&2
     fail "throttled SFTP upload did not create its destination"
 fi
-if run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $remote_abandoned_file" >/dev/null 2>&1; then
+if ! none_read_denied "$remote_abandoned_file"; then
     kill "$abandoned_pid" 2>/dev/null || true
     wait "$abandoned_pid" 2>/dev/null || true
     fail "None-role child read an in-progress SFTP upload"
@@ -261,9 +286,8 @@ ABANDONED_PID=""
 abandoned_motor_mode="$(run_ssh /system/bin/ls -l "$TEST_TMP" | awk -v name="$(basename "$remote_abandoned_file")" '$NF == name { print $1; exit }')"
 [ "$abandoned_motor_mode" = -rwxrw---- ] ||
     fail "abandoned upload has Motor mode $abandoned_motor_mode"
-if run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $remote_abandoned_file" >/dev/null 2>&1; then
+none_read_denied "$remote_abandoned_file" ||
     fail "None-role child read an abandoned SFTP upload"
-fi
 echo "  ok: in-progress and abandoned uploads stayed private"
 
 # ---------------------------------------------------------------------------
@@ -273,6 +297,9 @@ echo "  ok: in-progress and abandoned uploads stayed private"
 overwrite_source="$WORK/overwrite-source.bin"
 overwrite_roundtrip="$WORK/overwrite-roundtrip.bin"
 printf 'russhd SFTP overwrite test\nshort payload\n' >"$overwrite_source"
+# The upload sends the local mode; a private one (umask 077) would make the
+# protected-parent overwrite below a refused private-data upload.
+chmod 644 "$overwrite_source"
 
 echo "-- overwriting $REMOTE_UPLOAD_FILE with a shorter file --"
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "SFTP overwrite upload failed"; }
@@ -283,6 +310,96 @@ EOF
 cmp -s "$overwrite_source" "$overwrite_roundtrip" ||
     fail "short overwrite differs after downloading it again"
 echo "  ok: upload truncated and replaced the existing remote file"
+
+# Existing content can be overwritten even when its parent forbids chmod.
+# OPEN's mode is a creation hint: the existing file keeps its installed mode.
+protected_file="$PROTECTED_PARENT/existing"
+protected_roundtrip="$WORK/protected-roundtrip.bin"
+echo "-- overwriting an executable under a protected parent --"
+run_ssh /system/bin/mkdir "$PROTECTED_PARENT" || fail "protected SFTP directory creation failed"
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "protected SFTP fixture upload failed"; }
+put $upload_source $protected_file
+EOF
+run_ssh /system/bin/sysbox chmod rwxr-xr-x "$protected_file" ||
+    fail "protected SFTP fixture executable setup failed"
+run_ssh /system/bin/sysbox chmod rwxrwxr-x "$protected_file" ||
+    fail "protected SFTP fixture mode setup failed"
+run_ssh /system/bin/sysbox chmod rwxr-xr-x "$PROTECTED_PARENT" ||
+    fail "protected SFTP parent mode setup failed"
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "protected-parent SFTP overwrite failed"; }
+put $overwrite_source $protected_file
+get $protected_file $protected_roundtrip
+EOF
+cmp -s "$overwrite_source" "$protected_roundtrip" ||
+    fail "protected-parent SFTP overwrite differed"
+protected_mode="$(run_ssh /system/bin/ls -l "$PROTECTED_PARENT" | awk '$NF == "existing" { print $1; exit }')"
+[ "$protected_mode" = -rwxrwxr-x ] ||
+    fail "protected-parent SFTP overwrite changed mode to $protected_mode"
+private_source="$WORK/private-source.bin"
+printf 'private payload must not replace the public file\n' >"$private_source"
+chmod 600 "$private_source"
+if run_sftp <<EOF
+put $private_source $protected_file
+EOF
+then
+    fail "private-mode upload over a public protected file unexpectedly succeeded"
+fi
+grep -qi 'permission denied' "$WORK/err" ||
+    fail "private-mode upload did not report permission denied"
+if run_sftp <<EOF
+put -p $overwrite_source $protected_file
+EOF
+then
+    fail "put -p over a protected file unexpectedly succeeded"
+fi
+grep -qi 'permission denied' "$WORK/err" ||
+    fail "put -p did not report permission denied"
+if run_scp -p "$overwrite_source" "$USER@$HOST:$protected_file"; then
+    fail "scp -p over a protected file unexpectedly succeeded"
+fi
+grep -qi 'permission denied' "$WORK/err" ||
+    fail "scp -p did not report permission denied"
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "protected file verification failed"; }
+get $protected_file $protected_roundtrip.after
+EOF
+cmp -s "$overwrite_source" "$protected_roundtrip.after" ||
+    fail "rejected private or preserve-mode upload changed the protected file"
+run_ssh /system/bin/sysbox chmod rwxrwxr-x "$PROTECTED_PARENT" ||
+    fail "protected SFTP parent mode restoration failed"
+run_ssh /system/bin/rm -r "$PROTECTED_PARENT" || fail "protected SFTP fixture cleanup failed"
+echo "  ok: protected-parent upload preserved the executable mode"
+
+# A private executable uploaded over a public file in a writable directory:
+# lower roles lose access before the contents change, while the uploader's own
+# byte keeps its installed mode, so the in-place write still succeeds.
+exec_source="$WORK/exec-source.bin"
+exec_roundtrip="$WORK/exec-roundtrip.bin"
+printf '#!/system/bin/rush\nexit 0\n' >"$exec_source"
+chmod 700 "$exec_source"
+echo "-- uploading a private executable over a public file --"
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "public fixture upload failed"; }
+put $overwrite_source $PUBLIC_FILE
+EOF
+run_ssh /system/bin/sysbox chmod rwxrw-r-- "$PUBLIC_FILE" ||
+    fail "public fixture mode setup failed"
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "private upload over a public file failed"; }
+put $exec_source $PUBLIC_FILE
+get $PUBLIC_FILE $exec_roundtrip
+EOF
+cmp -s "$exec_source" "$exec_roundtrip" ||
+    fail "private upload over a public file differed"
+public_mode="$(run_ssh /system/bin/ls -l "$TEST_TMP" | awk -v name="$(basename "$PUBLIC_FILE")" '$NF == name { print $1; exit }')"
+[ "$public_mode" = -rwxrw---- ] ||
+    fail "private upload over a public file left mode $public_mode"
+# put -p installs the local mode at close, after the contents.
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "put -p over the hidden file failed"; }
+put -p $exec_source $PUBLIC_FILE
+EOF
+public_mode="$(run_ssh /system/bin/ls -l "$TEST_TMP" | awk -v name="$(basename "$PUBLIC_FILE")" '$NF == name { print $1; exit }')"
+[ "$public_mode" = -rwxr-x--- ] ||
+    fail "put -p over the hidden file left mode $public_mode"
+run_ssh "$PUBLIC_FILE" || fail "the uploaded executable did not run"
+echo "  ok: private executable replaced a public file; put -p set its mode at close"
 
 # ---------------------------------------------------------------------------
 # 6. OpenSSH scp uses SFTP in-place uploads and finishes every file with a

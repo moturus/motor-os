@@ -44,10 +44,11 @@ fn assert_mode(root: &Path, name: &str, mode: &str) {
 }
 
 pub fn run_all_tests() {
-    let root = crate::temp_path(&format!(
-        "systest-sysbox-chmod-{}",
-        moto_sys::ProcessStaticPage::get().pid
-    ));
+    // A panic aborts systest without cleanup: unseal and remove what an
+    // earlier run left behind before starting over.
+    let root = crate::temp_path("systest-sysbox-chmod");
+    let _ = crate::set_directory_access(&root.join("protected"), AccessPermissions::Rwx);
+    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir(&root).unwrap();
 
     // Exercise the IPC operation directly, including trusted Interactive
@@ -179,6 +180,29 @@ pub fn run_all_tests() {
     assert!(!stderr.contains("invalid mode"), "{stderr}");
     assert!(!stderr.contains("usage:"), "{stderr}");
     assert_mode(&root, "invalid", "rwxrw-r--");
+
+    let protected = root.join("protected");
+    std::fs::create_dir(&protected).unwrap();
+    let protected_file = write_file(&protected, "entry");
+    crate::set_directory_access(&protected, AccessPermissions::Rx).unwrap();
+    let output = run_sysbox(&["rwxr-xr--", protected_file.to_str().unwrap()]);
+    assert!(
+        !output.status.success(),
+        "protected chmod succeeded: {output:?}"
+    );
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("NotAllowed"),
+        "protected chmod did not report PermissionDenied"
+    );
+    assert_mode(&protected, "entry", "rwxrw-r--");
+    std::fs::write(&protected_file, b"ordinary write").unwrap();
+    assert_eq!(
+        b"ordinary write",
+        std::fs::read(&protected_file).unwrap().as_slice()
+    );
+    crate::set_directory_access(&protected, AccessPermissions::Rwx).unwrap();
 
     let help = run_sysbox(&["--help"]);
     assert!(help.status.success());

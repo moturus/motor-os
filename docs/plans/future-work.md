@@ -1,5 +1,84 @@
 # Future work -- recorded, deliberately not scheduled
 
+## sys-io aborts when a TCP connection is established at the memory floor (2026-10-04)
+
+A release `full-test.sh` run on 2026-10-04 timed out after 900 s with
+systest's last line `test_listener_pool_growth PASS`. The guest had not hung:
+sys-io had aborted and the VM had exited, so the host's ssh client never saw
+the connection close and waited out the suite's timeout. On the console the
+kernel's `fatal: sys-io exited with status 0xffffffff` was garbled together
+with its matching WARN line.
+
+Cause, from a symbolized backtrace of the aborting thread. systest's
+`ipc_service::test_listener_pool_growth` and
+`ipc_service::test_refused_refill_retries`
+(`src/sys/tests/systest/src/ipc_service.rs`) hold free memory at the user
+floor. sys-io's memory-pressure mode
+(`src/sys/sys-io/src/runtime/net/pressure.rs`) refuses new clients and
+sockets and parks listening-pool replenishment, but a socket already in the
+listening pool can still complete a handshake. On the ESTABLISHED edge,
+`tcp::Socket::set_state` calls `apply_pending_rx_growth` and
+`apply_pending_tx_growth`, which grow the rings with `RingBuffer::grow_to`, a
+`Vec::resize` that cannot fail gracefully
+(`src/sys/sys-io/netstack/src/socket/tcp.rs` and
+`src/sys/sys-io/netstack/src/storage/ring_buffer.rs`, added in `2d9f8d26`).
+`growth_deferred()` looks only at the TCP state, never at memory pressure,
+although `pressure.rs` states that sys-io must stop growing before the kernel
+refuses it. The allocation is refused, `rust_oom` aborts sys-io, and Motor's
+std implements abort as `exit(-1)`, hence the status. The frames:
+`process_ethernet` → `process_ipv4` → `process_tcp` → `Socket::set_state` →
+`RingBuffer::grow_to` → `handle_alloc_error` → `rust_oom`. sys-io's panic hook
+exits with 0xbadc0de, so this status from sys-io means an abort, not a panic.
+
+Reproduction, one to ten minutes per hit: boot a fresh release image, run
+`systest fs-bench` in a loop over ssh as background load, and loop
+`systest test-ipc-service-ownership`. With the copy-policy change, 2 of 9
+attempts ended with sys-io dying and 7 with russhd dying (next entry); on the
+tree of `f301678c`, without that change, 3 of 4 ended with sys-io and 1 with
+russhd. Without the background load, 400 iterations after a full systest run
+passed. Scripts `repro-ipc.sh` and `repro-outer.sh` and the console logs
+`round2-mine/outer-7/console.log` and `outer-1/console.log` are under
+`/tmp/claude-1000/-home-posk-motor-dev-motor-os/0ddd88f0-50e4-41c1-8206-8ab305bedcba/scratchpad/gate/`.
+The backtraces came from a temporary kernel print of every abnormal thread
+exit in pids 1 to 8, written straight to the serial port and since removed.
+Symbolizing needs an image built with `CARGO_PROFILE_RELEASE_STRIP=false`:
+the `src/sys` release profile strips, and an unstripped rebuild links
+differently, so it does not match a stripped binary that is already running.
+
+Fix options, to decide: make the ring growth fallible (`try_reserve_exact`,
+keeping the small rings and the latched request when it is refused), or skip
+growth while `pressure::active()` and apply it once pressure clears. Either
+is a core sys-io change and needs the full debug and release test runs. Two
+older entries below probably share this cause; neither was checked. The
+2026-09-27 stall under "IPC listener is published before its missed-wake
+snapshot" ends at the same systest line and the suite's timeout, and
+"Unresolved sys-io abort during listener exhaustion (2026-09-10)" ends with
+the same sys-io status during a connection flood.
+
+## russhd aborts when its heap has to grow at the memory floor (2026-10-04)
+
+russhd runs in the user memory class. While the two tests above hold free
+memory at the user floor, any growth of its heap is refused and Rust aborts
+it, ending every ssh session at once; clients print `Connection to ... closed
+by remote host`. Symbolized frames from its exiting main thread:
+`local_session::pump_output::<ChildStderr>` → `send_output` → tokio
+`mpsc::Sender::send` → `list::Tx::push` → `alloc::raw_vec::handle_error` →
+`rust_oom` → `std::process::abort` → `moto_rt::process::exit(-1)`. russhd's
+object binary keeps its symbols, so no special build is needed.
+
+Seen with the reproduction above: 7 of 9 attempts with the copy-policy change
+and 1 of 4 on the tree of `f301678c` (`head-russhd-3/console.log` in the same
+directory). It has not been seen in a plain `full-test.sh` run, where little
+output crosses russhd while memory is at the floor; systest's own output and
+any second ssh session still go through the same queue.
+
+Needs a decision. Options: keep russhd's relay path from allocating once a
+session runs, with bounded queues reserved when the session starts; give
+russhd the privileged memory class, which also lets a compromised russhd take
+the reserve; or have the floor tests stop short of the user floor wherever
+they do not measure the refusal itself. The same window can abort any other
+user-class process that allocates during these tests.
+
 ## Memory usage optimizations
 
 1. double-copy during process spawn

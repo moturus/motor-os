@@ -78,6 +78,20 @@ pub(crate) fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(name)
 }
 
+pub(crate) fn set_directory_access(
+    path: &std::path::Path,
+    access: moto_io::fs::AccessPermissions,
+) -> moto_rt::Result<()> {
+    ::moto_async::LocalRuntime::new().block_on(async {
+        let client = moto_io::fs::FsClient::connect()?;
+        let (id, moto_io::fs::EntryKind::Directory) = client.stat(path.to_str().unwrap()).await?
+        else {
+            return Err(moto_rt::Error::NotADirectory);
+        };
+        client.set_permissions(id, access).await
+    })
+}
+
 /// A kernel metric by its `stats get 1` name, for one scope: a pid, or
 /// `moto_stats::provider::KERNEL` for the kernel's own counters.
 pub(crate) fn kernel_metric(name: &str, scope: u64) -> u64 {

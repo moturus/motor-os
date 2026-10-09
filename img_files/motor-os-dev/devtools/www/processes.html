@@ -466,6 +466,10 @@ and filesystem-write access, and how rush and rmux use them.</p>
 <strong>Interactive</strong>; otherwise the role is <strong>None</strong>. The roles are
 ordered, System above Interactive above None, and they are the only identity the
 filesystem knows about: every file and directory stores one permission byte per role.</p>
+<p>Changing an entry's permissions also requires the caller's write permission on
+its current parent directory; only System may change the root directory. A file's
+own write permission still allows editing its contents in place when its parent
+does not allow permission changes. See <a href="filesystem.html">Filesystem</a>.</p>
 <div class="table-wrap">
 <table>
   <tr><th>Role</th><th>Meaning</th><th>Typical holders</th></tr>
@@ -531,6 +535,12 @@ in-process SFTP implementation. This is an explicit interim choice: a non-System
 cannot pass on a capability it does not hold, and SFTP needs filesystem authority. The
 authentication boundary protects that authority; a future change may keep the network
 front end at None and hand each authenticated session to an Interactive worker.</p>
+<p>An SFTP upload can edit an existing writable file under a protected parent,
+such as <code>/devtools/bin/www</code>, while keeping its installed mode. Two
+uploads are refused there instead: one whose mode would take read access away
+from a lower role that can currently read the file, and a <code>put -p</code>
+or <code>scp -p</code> that asks for its mode to be installed. A separate SFTP
+chmod request still requires write access to the parent.</p>
 
 <h2>What roles mean day to day</h2>
 <ul>

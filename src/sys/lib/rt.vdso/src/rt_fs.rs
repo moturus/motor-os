@@ -297,6 +297,11 @@ impl AsyncFsClient {
     }
 
     fn file_open(&self, path: &str, opts: u32) -> Result<File> {
+        self.file_open_inner(path, opts).map(|(file, _)| file)
+    }
+
+    /// `file_open`, also reporting whether the call created the entry.
+    fn file_open_inner(&self, path: &str, opts: u32) -> Result<(File, bool)> {
         log::debug!("file_open('{path}', {opts:x})");
 
         if (opts & moto_rt::fs::O_NONBLOCK) != 0 {
@@ -329,7 +334,7 @@ impl AsyncFsClient {
             Err(err) => return Err(err),
         };
 
-        let entry_id = match maybe_entry_id {
+        let (entry_id, created) = match maybe_entry_id {
             Some((entry_id, entry_kind)) => {
                 if (opts & moto_rt::fs::O_CREATE_NEW) != 0 {
                     return Err(moto_rt::Error::AlreadyInUse);
@@ -342,13 +347,16 @@ impl AsyncFsClient {
                 if (opts & moto_rt::fs::O_TRUNCATE) != 0 {
                     self.resize(entry_id, 0)?;
                 }
-                entry_id
+                (entry_id, false)
             }
             None => {
                 if (opts & (moto_rt::fs::O_CREATE_NEW | moto_rt::fs::O_CREATE)) == 0 {
                     return Err(moto_rt::Error::NotFound);
                 }
-                self.create_internal(&path, moto_io::fs::EntryKind::File)?
+                (
+                    self.create_internal(&path, moto_io::fs::EntryKind::File)?,
+                    true,
+                )
             }
         };
 
@@ -359,7 +367,7 @@ impl AsyncFsClient {
         };
 
         log::debug!("file_open('{}', {opts:x}) -> {entry_id:x}", path.abs_path);
-        Ok(File {
+        let file = File {
             entry_id,
             open_id: NEXT_OPEN_ID.fetch_add(1, Ordering::Relaxed),
             pos: moto_rt::mutex::Mutex::new(PosState {
@@ -376,7 +384,8 @@ impl AsyncFsClient {
             // the open succeeded, then each write failed with `E_NOT_ALLOWED`.
             writable: (opts & (moto_rt::fs::O_WRITE | moto_rt::fs::O_APPEND)) != 0,
             lock_state: AtomicU8::new(FILE_LOCK_UNLOCKED),
-        })
+        };
+        Ok((file, created))
     }
 
     /// Run `io_task` on the runtime thread.
@@ -542,29 +551,67 @@ impl AsyncFsClient {
         })
     }
 
-    fn set_copy_permissions(&self, entry_id: EntryId, source: RolePermissions) -> Result<()> {
+    fn set_all_permissions(&self, entry_id: EntryId, permissions: RolePermissions) -> Result<()> {
         self.blocking_run(move |fs_client| async move {
-            let mut permissions = fs_client.metadata(entry_id).await?.permissions()?;
-            match current_fs_role() {
-                Role::System => {
-                    let system = copied_access(source.system);
-                    let interactive = source.interactive.meet(system);
-                    permissions =
-                        RolePermissions::new(system, interactive, source.none.meet(interactive));
-                }
-                Role::Interactive => {
-                    let interactive = copied_access(source.interactive);
-                    permissions.interactive = interactive;
-                    permissions.none = source.none.meet(interactive);
-                }
-                Role::None => permissions.none = copied_access(source.none),
-            }
             fs_client.set_all_permissions(entry_id, permissions).await
         })
     }
 
     fn resize(&self, file_id: EntryId, new_size: u64) -> Result<()> {
         self.blocking_run(move |fs_client| async move { fs_client.resize(file_id, new_size).await })
+    }
+
+    /// A copy installs the source's mode, so it needs the caller's chmod
+    /// authority over the destination even when only the contents change.
+    /// Authorize that, hide the source from the lower roles that may not read
+    /// it, then truncate. Returns the mode the finished copy installs.
+    fn prepare_copy(
+        &self,
+        entry_id: EntryId,
+        source: RolePermissions,
+        created: bool,
+    ) -> Result<RolePermissions> {
+        self.blocking_run(move |fs_client| async move {
+            let destination = fs_client.metadata(entry_id).await?.permissions()?;
+            let caller = current_fs_role();
+            if !destination.get(caller).can_write() {
+                return Err(moto_rt::Error::NotAllowed);
+            }
+            // A finished mode the higher roles' bytes cannot hold is refused
+            // before any data moves, not after the copy.
+            let completed = copied_permissions(destination, source);
+            if !moto_io::fs::perms_monotonic(completed) {
+                return Err(moto_rt::Error::NotAllowed);
+            }
+            let mut staging = destination;
+            let lower = |role| {
+                destination
+                    .get(role)
+                    .meet(source.get(role))
+                    .meet(AccessPermissions::Rw)
+            };
+            match caller {
+                Role::System => {
+                    staging.system = AccessPermissions::Rw;
+                    staging.interactive = lower(Role::Interactive);
+                    staging.none = lower(Role::None);
+                }
+                Role::Interactive => {
+                    staging.interactive = AccessPermissions::Rw;
+                    staging.none = lower(Role::None);
+                }
+                Role::None => staging.none = AccessPermissions::Rw,
+            }
+            // Motor FS refuses this when the parent denies the caller `w`: the
+            // copy fails here, with the destination untouched.
+            fs_client.set_all_permissions(entry_id, staging).await?;
+            if !created && let Err(error) = fs_client.resize(entry_id, 0).await {
+                // Nothing was copied: the destination gets its mode back.
+                restore_permissions(&fs_client, entry_id, destination).await;
+                return Err(error);
+            }
+            Ok(completed)
+        })
     }
 
     fn copy_file_range(&self, from: EntryId, to: EntryId, offset: u64, size: u64) -> Result<u64> {
@@ -579,15 +626,16 @@ impl AsyncFsClient {
         // Open the source: it must exist and be a regular file.
         let src = self.file_open(from, moto_rt::fs::O_READ)?;
         let source_permissions = self.role_permissions(src.entry_id)?;
+        if !source_permissions.get(current_fs_role()).can_read() {
+            return Err(moto_rt::Error::NotAllowed);
+        }
 
-        // Create the destination, truncating it if it already exists.
-        let dst = self.file_open(
-            to,
-            moto_rt::fs::O_CREATE | moto_rt::fs::O_WRITE | moto_rt::fs::O_TRUNCATE,
-        )?;
-        // Copy through a writable, non-executable staging file. Under the
-        // legacy default this also removes execute before any contents move.
-        self.set_permissions(dst.entry_id, AccessPermissions::Rw)?;
+        // Open without truncating, so that the truncation and the permission
+        // changes address the entry this open found, whatever the path names
+        // by then.
+        let (dst, created) =
+            self.file_open_inner(to, moto_rt::fs::O_CREATE | moto_rt::fs::O_WRITE)?;
+        let completed = self.prepare_copy(dst.entry_id, source_permissions, created)?;
 
         const CHUNK_SIZE: u64 = 64 * 1024;
 
@@ -602,7 +650,7 @@ impl AsyncFsClient {
             offset += copied;
         }
 
-        self.set_copy_permissions(dst.entry_id, source_permissions)?;
+        self.set_all_permissions(dst.entry_id, completed)?;
         Ok(offset)
     }
 
@@ -1689,6 +1737,61 @@ fn copied_access(access: AccessPermissions) -> AccessPermissions {
         AccessPermissions::Rwx => AccessPermissions::Rx,
         access => access,
     }
+}
+
+/// The mode a finished copy gives `destination`: the source's, for the
+/// caller's role and below.
+fn copied_permissions(destination: RolePermissions, source: RolePermissions) -> RolePermissions {
+    let mut permissions = destination;
+    match current_fs_role() {
+        Role::System => {
+            let system = copied_access(source.system);
+            let interactive = source.interactive.meet(system);
+            permissions = RolePermissions::new(system, interactive, source.none.meet(interactive));
+        }
+        Role::Interactive => {
+            let interactive = copied_access(source.interactive);
+            permissions.interactive = interactive;
+            permissions.none = source.none.meet(interactive);
+        }
+        Role::None => permissions.none = copied_access(source.none),
+    }
+    permissions
+}
+
+/// Best effort: a staged destination whose truncation failed gets `installed`
+/// back. `Rw` cannot widen to `Rwx` directly, so an executable own byte returns
+/// through `Rx`, with the lower roles narrowed into it on the way.
+async fn restore_permissions(
+    fs_client: &Rc<FsClient>,
+    entry_id: EntryId,
+    installed: RolePermissions,
+) {
+    let caller = current_fs_role();
+    if installed.get(caller) == AccessPermissions::Rwx {
+        let within = |access: AccessPermissions| access.meet(AccessPermissions::Rx);
+        let step = match caller {
+            Role::System => RolePermissions::new(
+                AccessPermissions::Rx,
+                within(installed.interactive),
+                within(installed.none),
+            ),
+            Role::Interactive => RolePermissions::new(
+                installed.system,
+                AccessPermissions::Rx,
+                within(installed.none),
+            ),
+            Role::None => RolePermissions::new(
+                installed.system,
+                installed.interactive,
+                AccessPermissions::Rx,
+            ),
+        };
+        if fs_client.set_all_permissions(entry_id, step).await.is_err() {
+            return;
+        }
+    }
+    let _ = fs_client.set_all_permissions(entry_id, installed).await;
 }
 
 fn perm_to_access(perm: u64) -> Result<AccessPermissions> {
