@@ -748,8 +748,9 @@ Status 2026-10-09: 1g–1l are done; 1f remains. All fork commits are
 published (Javy `3a04d39`, Wasmtime `a6b85b1cb`, each ending with the
 moto-rt 0.17.7 lock). The add-ons built from them with toolchain
 `dev.2-abb676f7` passed the matrix under QEMU and Cloud Hypervisor: four
-boots per VMM, 61 `javy-smoke` and 43 `wasmtime-smoke` commands each, zero
-admission refusals, about 405 s per VMM against `test-wasm.sh`'s 600 s bound.
+boots per VMM, 57 `javy-smoke` (61 with the identity checks) and 43
+`wasmtime-smoke` commands each, zero admission refusals, about 280 s per VMM
+(310 s with the identity checks) against `test-wasm.sh`'s 600 s bound.
 Before publication, a temporary overlay of locally built binaries had passed
 the QEMU matrix, and the new runner cases failed against the then-published
 binaries.
@@ -794,9 +795,11 @@ no new dependency.
    `src/build-javy.sh` runs the pinned Linux Javy at add-on build time on
    `javy-smoke/fixtures/hello.js` (compressed, uncompressed, omitted) and the
    TypeScript workload (compressed) and stages the four digests as
-   `/devtools/cfg/javy/linux-reference.txt`; `javy-smoke` compiles the same
-   four on Motor and requires equal digests. The four compiles add about 32 s
-   per boot.
+   `/devtools/cfg/javy/linux-reference.txt`; `javy-smoke --linux-identity`
+   compiles the same four on Motor and requires equal digests. The four
+   compiles take about 32 s, so they run once per `full-test-dev.sh`, which
+   passes `test-wasm.sh --linux-identity` to the first boot; `full-test.sh`
+   and standalone `test-wasm.sh` runs skip them.
 3. **1h — streaming plugin validation.** Implement validation that does not
    retain the whole plugin through the compiler phase, preserving complete
    validation and the malformed-input checks. Measure the phase budget before
