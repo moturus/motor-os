@@ -53,8 +53,9 @@ make dev.img wasm.img BUILD=release -j"$(nproc)"
 ```
 
 Both images install `/devtools/bin/javy`, `/devtools/bin/wasmi` and the
-runtime-only `/devtools/bin/wasmtime-rt`, with support files under
-`/devtools/cfg/javy` and `/devtools/cfg/wasmtime`. See
+runtime-only `/devtools/bin/wasmtime-rt`, with Javy's default plugin at
+`/devtools/javy/plugins/default.wasm` and build provenance under
+`/devtools/javy` and `/devtools/wasmtime`. See
 [WebAssembly on Motor OS](wasm.md) for the installed files and the developer
 image's example under `/devtools/src/wasm`.
 
@@ -70,10 +71,11 @@ MOTOR_OS_CAPS=0 /devtools/bin/wasmi /user/tmp/hello.wasm
 
 The add-ons follow published `moturus` branches and record resolved revisions,
 the selected assembly, native library content, and input digests in
-`/devtools/cfg/javy/sources.txt` and `/devtools/cfg/wasmtime/sources.txt`. The
-Wasmtime add-on also installs precompiled test fixtures under
-`/devtools/cfg/wasmtime/fixtures`, built with a pinned upstream Rust that has
-the `wasm32-wasip1`/`wasm32-wasip2` targets. Build-time downloads are
+`/devtools/javy/sources.txt` and `/devtools/wasmtime/sources.txt`. Their test
+inputs are staged outside the images, in the assembly's `tests/javy` and
+`tests/wasmtime`, and uploaded by the tests; the Wasmtime fixtures are built
+with a pinned upstream Rust that has the `wasm32-wasip1`/`wasm32-wasip2`
+targets. Build-time downloads are
 digest-checked; the installed-tool tests require no Internet access:
 
 ```sh

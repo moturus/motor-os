@@ -457,17 +457,15 @@ interprets that module using the Motor port's WASI Preview 1 support.</p>
   <tr><th>Path</th><th>Contents</th></tr>
   <tr><td><code>/devtools/bin/javy</code></td><td>JavaScript-to-WebAssembly compiler.</td></tr>
   <tr><td><code>/devtools/bin/wasmi</code></td><td>WebAssembly interpreter and command runner.</td></tr>
-  <tr><td><code>/devtools/cfg/javy/plugin.wasm</code></td><td>Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy.</td></tr>
-  <tr><td><code>/devtools/cfg/javy/typescript-workload.js</code></td><td>TypeScript 5.9.3 plus a transpilation test workload.</td></tr>
-  <tr><td><code>/devtools/cfg/javy/typescript-LICENSE.txt</code>, <code>typescript-NOTICES.txt</code></td><td>License and third-party notices for the bundled TypeScript code.</td></tr>
-  <tr><td><code>/devtools/cfg/javy/sources.txt</code>, <code>SHA256SUMS</code></td><td>Build provenance, source revisions, and staged-file checksums.</td></tr>
+  <tr><td><code>/devtools/javy/plugins/default.wasm</code></td><td>Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy.</td></tr>
+  <tr><td><code>/devtools/javy/sources.txt</code>, <code>SHA256SUMS</code></td><td>Build provenance, source revisions, and staged-file checksums.</td></tr>
   <tr><td><code>/devtools/src/wasm/</code></td><td><code>hello.js</code> and a README with compile/run instructions.</td></tr>
   <tr><td><code>/devtools/www/wasm.html</code></td><td>This guide.</td></tr>
 </table>
 </div>
 <p><code>make dev.img BUILD=release</code> produces <code>motor-os-dev.qcow2</code>.
-The smaller <code>wasm.img</code> also includes the tools and their configuration
-directory. The example and HTML documentation are part of <code>dev.img</code>.</p>
+The smaller <code>wasm.img</code> also includes the tools and their data
+directories. The example and HTML documentation are part of <code>dev.img</code>.</p>
 
 <h2>Run the example</h2>
 <p>In the developer VM's shell:</p>

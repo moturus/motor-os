@@ -14,19 +14,17 @@ yet.
 | --- | --- |
 | `/devtools/bin/javy` | JavaScript-to-WebAssembly compiler. |
 | `/devtools/bin/wasmi` | WebAssembly interpreter and command runner. |
-| `/devtools/cfg/javy/plugin.wasm` | Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy. |
-| `/devtools/cfg/javy/typescript-workload.js` | TypeScript 5.9.3 plus a transpilation test workload. |
-| `/devtools/cfg/javy/typescript-LICENSE.txt`, `typescript-NOTICES.txt` | License and third-party notices for the bundled TypeScript code. |
-| `/devtools/cfg/javy/linux-reference.txt` | SHA-256 of upstream Linux Javy 9.1.0's output for the identity test inputs; Motor Javy must produce the same bytes. |
-| `/devtools/cfg/javy/sources.txt`, `SHA256SUMS` | Build provenance, source revisions, and staged-file checksums. |
+| `/devtools/javy/plugins/default.wasm` | Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy. |
+| `/devtools/javy/sources.txt`, `SHA256SUMS` | Build provenance, source revisions, and staged-file checksums. |
 | `/devtools/bin/wasmtime-rt` | Runtime-only Wasmtime: precompiled Pulley execution with WASI. |
-| `/devtools/cfg/wasmtime/sources.txt`, `SHA256SUMS` | Wasmtime build provenance and checksums. |
-| `/devtools/cfg/wasmtime/fixtures/` | Test modules and components precompiled for this runtime, including the TypeScript workload. |
+| `/devtools/wasmtime/sources.txt`, `SHA256SUMS` | Wasmtime build provenance and checksums. |
 | `/devtools/src/wasm/` | `hello.js` and a README with compile/run instructions. |
 | `/devtools/www/wasm.html` | This guide in the image's HTML documentation. |
 
-The smaller `wasm.img` also includes the three tools and their configuration
-directories.
+The smaller `wasm.img` also includes the three tools and their data
+directories. The test inputs (the TypeScript workload, the Linux identity
+digests and the precompiled Wasmtime fixtures) are not installed;
+`src/tests/test-wasm.sh` uploads them to `/user/tmp` for each test boot.
 
 `wasmtime-rt` runs as role None (`MOTOR_OS_CAPS=0`, `0x100`, `0x200` or
 `0x300`) and needs `--allow-precompiled`. Each linear memory is limited to

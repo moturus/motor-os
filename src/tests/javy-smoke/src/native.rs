@@ -6,7 +6,9 @@ mod behavior;
 mod identity;
 mod runner;
 
-const SUPPORT_DIR: &str = "/devtools/cfg/javy";
+const PLUGIN: &str = "/devtools/javy/plugins/default.wasm";
+/// Test inputs that test-wasm.sh uploads; they are not part of the images.
+const TEST_INPUTS: &str = "/user/tmp/javy-tests";
 
 /// Javy compilation and Wasmi execution through the installed tools.
 trait JavyTools {
@@ -38,7 +40,7 @@ impl JavyTools for Suite {
 }
 
 pub fn run(linux_identity: bool) -> Result<()> {
-    let mut suite = Suite::new("javy-smoke", &format!("{SUPPORT_DIR}/sources.txt"))?;
+    let mut suite = Suite::new("javy-smoke", "/devtools/javy/sources.txt")?;
     let (version, _) = suite.command(
         "javy-version",
         "MOTOR_OS_CAPS=0 /devtools/bin/javy --version",
@@ -81,7 +83,7 @@ pub fn run(linux_identity: bool) -> Result<()> {
         "hello-explicit-plugin",
         "hello.js",
         "explicit.wasm",
-        &format!("-C deterministic -C plugin={SUPPORT_DIR}/plugin.wasm"),
+        &format!("-C deterministic -C plugin={PLUGIN}"),
     )?;
     suite.same_bytes("hello.wasm", "explicit.wasm")?;
     suite.compile(
@@ -96,7 +98,7 @@ pub fn run(linux_identity: bool) -> Result<()> {
         "MOTOR_OS_CAPS=0x200 /devtools/bin/javy emit-plugin -o emitted.wasm",
         0,
     )?;
-    suite.same_bytes("emitted.wasm", &format!("{SUPPORT_DIR}/plugin.wasm"))?;
+    suite.same_bytes("emitted.wasm", PLUGIN)?;
     suite.compile(
         "hello-dynamic",
         "hello.js",
@@ -117,7 +119,7 @@ pub fn run(linux_identity: bool) -> Result<()> {
     behavior::run(&mut suite)?;
     suite.compile(
         "typescript",
-        &format!("{SUPPORT_DIR}/typescript-workload.js"),
+        &format!("{TEST_INPUTS}/typescript-workload.js"),
         "typescript.wasm",
         "",
     )?;

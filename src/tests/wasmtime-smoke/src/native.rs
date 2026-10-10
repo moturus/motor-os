@@ -7,7 +7,8 @@ use wasm_smoke_suite::{Result, Suite};
 mod filesystem;
 
 const RUNTIME: &str = "/devtools/bin/wasmtime-rt";
-const FIXTURES: &str = "/devtools/cfg/wasmtime/fixtures";
+/// Precompiled fixtures that test-wasm.sh uploads; they are not part of the images.
+const FIXTURES: &str = "/user/tmp/wasmtime-tests";
 /// Upstream p2 socket programs carrying Motor's accepted socket semantics.
 const SOCKET_PROGRAMS: [&str; 13] = [
     "p2_tcp_bind",
@@ -188,7 +189,7 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
 }
 
 pub fn run() -> Result<()> {
-    let mut suite = Suite::new("wasmtime-smoke", "/devtools/cfg/wasmtime/sources.txt")?;
+    let mut suite = Suite::new("wasmtime-smoke", "/devtools/wasmtime/sources.txt")?;
     run_suite(&mut suite)?;
     suite.finish()
 }

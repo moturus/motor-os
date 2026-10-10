@@ -1088,9 +1088,18 @@ mod tests {
                 "wasmtime/devtools/bin/wasmtime-rt"
             ]
         );
-        for path in ["/devtools/cfg/javy", "/devtools/cfg/wasmtime", "/user/tmp"] {
+        for path in [
+            "/devtools/javy",
+            "/devtools/javy/plugins",
+            "/devtools/wasmtime",
+            "/user/tmp",
+        ] {
             assert!(config.directories.iter().any(|candidate| candidate == path));
         }
+        assert!(config
+            .directories
+            .iter()
+            .all(|path| !path.starts_with("/devtools/cfg")));
         assert!(config.directories.iter().all(|path| {
             !path.starts_with("/devtools/llvm") && !path.starts_with("/devtools/rust")
         }));

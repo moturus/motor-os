@@ -63,7 +63,7 @@ wasm_addon_jobs() {
 # Digests of what Linux Javy builds from javy-smoke's identity inputs, which
 # that suite compiles on Motor with the same flags.
 javy_linux_reference() {
-	local inputs="$1" cfg="$2" out="$ASSEMBLY_BUILD_ROOT/javy-linux-reference" mode
+	local inputs="$1" tests="$2" out="$ASSEMBLY_BUILD_ROOT/javy-linux-reference" mode
 	javy_download https://github.com/bytecodealliance/javy/releases/download/v9.1.0/javy-x86_64-linux-v9.1.0.gz \
 		"$JAVY_LINUX_GZ_SHA" "$inputs/javy-linux.gz"
 	gzip -dc "$inputs/javy-linux.gz" > "$inputs/javy-linux"
@@ -75,13 +75,13 @@ javy_linux_reference() {
 		"$inputs/javy-linux" build "$MOTOR/src/tests/javy-smoke/fixtures/hello.js" \
 			-C plugin="$inputs/plugin.wasm" -C deterministic -C source=$mode -o "$out/hello-$mode.wasm"
 	done
-	"$inputs/javy-linux" build "$cfg/typescript-workload.js" -C plugin="$inputs/plugin.wasm" \
+	"$inputs/javy-linux" build "$tests/typescript-workload.js" -C plugin="$inputs/plugin.wasm" \
 		-C deterministic -C source=compressed -o "$out/typescript-compressed.wasm"
-	(cd "$out" && sha256sum hello-*.wasm typescript-compressed.wasm) > "$cfg/linux-reference.txt"
+	(cd "$out" && sha256sum hello-*.wasm typescript-compressed.wasm) > "$tests/linux-reference.txt"
 }
 
 build_javy() {
-	local inputs="$ASSEMBLY_BUILD_ROOT/javy-inputs" cfg="$JAVY_IMG/devtools/cfg/javy"
+	local inputs="$ASSEMBLY_BUILD_ROOT/javy-inputs" data="$JAVY_IMG/devtools/javy"
 	mkdir -p "$inputs"
 	javy_download https://github.com/bytecodealliance/javy/releases/download/v9.1.0/plugin.wasm.gz \
 		dc237a6fb9c7e58423456a12fc3c4e7a97d9d1eeb91b89ca73db76b78ae95e83 "$inputs/plugin.wasm.gz"
@@ -98,26 +98,34 @@ build_javy() {
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" JOBS="$(wasm_addon_jobs)" \
 			JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" ./motor-build.sh
 	)
-	mkdir -p "$JAVY_IMG/devtools/bin" "$cfg"
+	rm -rf "$JAVY_TESTS"
+	mkdir -p "$JAVY_IMG/devtools/bin" "$data/plugins" "$JAVY_TESTS"
 	local tool
 	for tool in javy wasmi; do
 		install -m 755 "$ASSEMBLY_BUILD_ROOT/javy/x86_64-unknown-motor/release/$tool" \
 			"$JAVY_IMG/devtools/bin/$tool"
 	done
-	install -m 644 "$inputs/plugin.wasm" "$cfg/plugin.wasm"
-	tar -xOf "$inputs/typescript.tgz" package/lib/typescript.js > "$cfg/typescript-workload.js"
-	cat "$MOTOR/src/tests/javy-smoke/fixtures/typescript-workload.js" >> "$cfg/typescript-workload.js"
-	printf '%s  %s\n' "$JAVY_TYPESCRIPT_SHA" "$cfg/typescript-workload.js" | sha256sum -c -
-	tar -xOf "$inputs/typescript.tgz" package/LICENSE.txt > "$cfg/typescript-LICENSE.txt"
-	tar -xOf "$inputs/typescript.tgz" package/ThirdPartyNoticeText.txt > "$cfg/typescript-NOTICES.txt"
-	javy_linux_reference "$inputs" "$cfg"
-	printf '%s\n' "$JAVY_SOURCE_MANIFEST" > "$cfg/sources.txt"
-	(cd "$JAVY_IMG" && sha256sum devtools/bin/{javy,wasmi} devtools/cfg/javy/* > "$cfg/SHA256SUMS")
+	install -m 644 "$inputs/plugin.wasm" "$data/plugins/default.wasm"
+	printf '%s\n' "$JAVY_SOURCE_MANIFEST" > "$data/sources.txt"
+	(cd "$JAVY_IMG" && sha256sum devtools/bin/{javy,wasmi} devtools/javy/plugins/default.wasm \
+		devtools/javy/sources.txt > "$data/SHA256SUMS")
+	# Test inputs stay out of the images; test-wasm.sh uploads them.
+	local ts="$JAVY_TESTS/typescript-workload.js"
+	tar -xOf "$inputs/typescript.tgz" package/lib/typescript.js > "$ts"
+	cat "$MOTOR/src/tests/javy-smoke/fixtures/typescript-workload.js" >> "$ts"
+	printf '%s  %s\n' "$JAVY_TYPESCRIPT_SHA" "$ts" | sha256sum -c -
+	tar -xOf "$inputs/typescript.tgz" package/LICENSE.txt > "$JAVY_TESTS/typescript-LICENSE.txt"
+	tar -xOf "$inputs/typescript.tgz" package/ThirdPartyNoticeText.txt \
+		> "$JAVY_TESTS/typescript-NOTICES.txt"
+	javy_linux_reference "$inputs" "$JAVY_TESTS"
+	(cd "$JAVY_TESTS" && sha256sum typescript-workload.js typescript-LICENSE.txt \
+		typescript-NOTICES.txt linux-reference.txt > SHA256SUMS)
 }
 
 build_javy_addon() {
 	JAVY_SOURCES=(javy:motor-9.1.0 wasmi:motor-1.1.0 wasmtime:motor-48.0.1)
 	JAVY_IMG="$ASSEMBLY_IMAGE_ROOT/javy"
+	JAVY_TESTS="$ASSEMBLY_ROOT/tests/javy"
 	[ "$(readlink -f "$MOTORH/motor-os")" = "$MOTOR" ] ||
 		die "Javy's sibling motor-os path must resolve to this checkout: $MOTORH/motor-os"
 	local spec repo branch source
@@ -128,7 +136,8 @@ build_javy_addon() {
 	JAVY_SOURCE_MANIFEST="$(javy_source_manifest)"
 	source="$(printf '%s\n' "$JAVY_SOURCE_MANIFEST" | sha256sum | cut -d' ' -f1)"
 	# All outputs must still match, not just the executable used by ensure_addon.
-	if ! (cd "$JAVY_IMG" && sha256sum --status -c devtools/cfg/javy/SHA256SUMS) 2>/dev/null; then
+	if ! (cd "$JAVY_IMG" && sha256sum --status -c devtools/javy/SHA256SUMS) 2>/dev/null ||
+		! (cd "$JAVY_TESTS" && sha256sum --status -c SHA256SUMS) 2>/dev/null; then
 		rm -f "$ASSEMBLY_ROOT/ADDON-javy"
 	fi
 	ensure_addon javy "$source" "$JAVY_IMG" devtools/bin/javy build_javy

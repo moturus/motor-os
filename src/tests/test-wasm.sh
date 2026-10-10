@@ -64,6 +64,12 @@ evidence="$ROOT_DIR/build/wasm-images"
 rm -rf "$evidence"
 mkdir -p "$evidence"
 assembly="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
+# Test inputs are staged beside the add-ons, outside the images, and uploaded per boot.
+test_inputs="${assembly%/images}/tests"
+for addon in javy wasmtime; do
+  (cd "$test_inputs/$addon" && sha256sum --quiet -c SHA256SUMS) ||
+    fail "no current $addon test inputs; run src/build-motor-os.sh --javy-only --wasmtime-only"
+done
 export MOTO_SMP=2
 export MOTO_CHV_RUNTIME_DIR="$evidence/chv"
 for variant in "${images[@]}"; do
@@ -90,6 +96,12 @@ for variant in "${images[@]}"; do
     installed=(javy/devtools/bin/javy javy/devtools/bin/wasmi wasmtime/devtools/bin/wasmtime-rt)
     {
       for suite in "${suites[@]}"; do printf 'put "%s" /user/tmp/%s\n' "$(binary "$suite")" "$suite"; done
+      for addon in javy wasmtime; do
+        printf 'mkdir /user/tmp/%s-tests\n' "$addon"
+        for file in "$test_inputs/$addon"/*; do
+          printf 'put "%s" /user/tmp/%s-tests/%s\n' "$file" "$addon" "${file##*/}"
+        done
+      done
       for tool in "${installed[@]}"; do
         printf 'get /%s "%s"\n' "${tool#*/}" "$evidence/installed-${tool##*/}"
       done

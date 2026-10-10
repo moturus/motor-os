@@ -1,11 +1,11 @@
 use sha2::{Digest, Sha256};
 
-use super::{JavyTools, Result, SUPPORT_DIR, Suite, fs};
+use super::{JavyTools, PLUGIN, Result, Suite, TEST_INPUTS, fs};
 
 /// Each output must equal what Linux Javy 9.1.0 builds from the same inputs
 /// and flags; src/build-javy.sh records those digests.
 pub(super) fn run(suite: &mut Suite) -> Result<()> {
-    let flags = format!("-C deterministic -C plugin={SUPPORT_DIR}/plugin.wasm");
+    let flags = format!("-C deterministic -C plugin={PLUGIN}");
     let mut outputs = Vec::new();
     for mode in ["compressed", "uncompressed", "omitted"] {
         let output = format!("hello-{mode}.wasm");
@@ -16,13 +16,13 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
     // Brotli's f32 log2 shapes the compressed source of a large input.
     suite.compile(
         "typescript-compressed",
-        &format!("{SUPPORT_DIR}/typescript-workload.js"),
+        &format!("{TEST_INPUTS}/typescript-workload.js"),
         "typescript-compressed.wasm",
         &format!("{flags} -C source=compressed"),
     )?;
     outputs.push("typescript-compressed.wasm".into());
 
-    let reference = fs::read_to_string(format!("{SUPPORT_DIR}/linux-reference.txt"))?;
+    let reference = fs::read_to_string(format!("{TEST_INPUTS}/linux-reference.txt"))?;
     let mut listed = Vec::new();
     for line in reference.lines() {
         let (linux, name) = line.split_once("  ").ok_or("malformed Linux reference")?;

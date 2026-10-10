@@ -32,15 +32,14 @@ WASMTIME_CORE_FIXTURES=(lifecycle limits-elements limits-memories limits-tables 
 # sources, so their engine version and configuration always match it.
 build_wasmtime_fixtures() {
 	local root="$MOTORH/wasmtime" build="$ASSEMBLY_BUILD_ROOT/wasmtime"
-	local out="$WASMTIME_IMG/devtools/cfg/wasmtime/fixtures"
+	local out="$WASMTIME_TESTS"
 	local plugin="$ASSEMBLY_BUILD_ROOT/javy-inputs/plugin.wasm"
 	local javy_linux="$ASSEMBLY_BUILD_ROOT/javy-inputs/javy-linux"
-	local typescript="$ASSEMBLY_IMAGE_ROOT/javy/devtools/cfg/javy/typescript-workload.js"
+	local typescript="$ASSEMBLY_ROOT/tests/javy/typescript-workload.js"
 	# Upstream Javy 9.1.0 for Linux compiles the TypeScript fixture.
 	printf '%s  %s\n%s  %s\n%s  %s\n' "$JAVY_PLUGIN_SHA" "$plugin" "$JAVY_LINUX_SHA" "$javy_linux" \
 		"$JAVY_TYPESCRIPT_SHA" "$typescript" |
 		sha256sum --quiet -c - || die "the Wasmtime fixtures need the Javy add-on's inputs"
-	mkdir -p "$out"
 	(
 		cd "$root"
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build/host" cargo build --locked --release \
@@ -86,19 +85,24 @@ build_wasmtime() {
 		CARGO_NET_OFFLINE=true MOTOR_BUILD_DIR="$ASSEMBLY_BUILD_ROOT/wasmtime" \
 			JOBS="$(wasm_addon_jobs)" ./motor-build.sh runtime
 	)
-	local cfg="$WASMTIME_IMG/devtools/cfg/wasmtime"
-	mkdir -p "$WASMTIME_IMG/devtools/bin" "$cfg"
+	local data="$WASMTIME_IMG/devtools/wasmtime"
+	mkdir -p "$WASMTIME_IMG/devtools/bin" "$data"
 	install -m 755 "$ASSEMBLY_BUILD_ROOT/wasmtime/runtime/x86_64-unknown-motor/release/wasmtime-rt" \
 		"$WASMTIME_IMG/devtools/bin/wasmtime-rt"
+	printf '%s\n' "$WASMTIME_SOURCE_MANIFEST" > "$data/sources.txt"
+	(cd "$WASMTIME_IMG" && sha256sum devtools/bin/wasmtime-rt devtools/wasmtime/sources.txt \
+		> "$data/SHA256SUMS")
+	# Test fixtures stay out of the images; test-wasm.sh uploads them.
+	rm -rf "$WASMTIME_TESTS"
+	mkdir -p "$WASMTIME_TESTS"
 	build_wasmtime_fixtures
-	printf '%s\n' "$WASMTIME_SOURCE_MANIFEST" > "$cfg/sources.txt"
-	(cd "$WASMTIME_IMG" && sha256sum devtools/bin/wasmtime-rt devtools/cfg/wasmtime/sources.txt \
-		devtools/cfg/wasmtime/fixtures/* > "$cfg/SHA256SUMS")
+	(cd "$WASMTIME_TESTS" && sha256sum *.cwasm > SHA256SUMS)
 }
 
 build_wasmtime_addon() {
 	WASMTIME_SOURCES=(wasmtime:motor-48.0.1 target-lexicon:motor-0.13.5 tokio:motor-1.51.1 mio:motor-1.2.0)
 	WASMTIME_IMG="$ASSEMBLY_IMAGE_ROOT/wasmtime"
+	WASMTIME_TESTS="$ASSEMBLY_ROOT/tests/wasmtime"
 	[ "$(readlink -f "$MOTORH/motor-os")" = "$MOTOR" ] ||
 		die "Wasmtime's sibling motor-os path must resolve to this checkout: $MOTORH/motor-os"
 	local spec repo branch source
@@ -114,7 +118,8 @@ build_wasmtime_addon() {
 	)"
 	source="$(printf '%s\n' "$WASMTIME_SOURCE_MANIFEST" | sha256sum | cut -d' ' -f1)"
 	# All outputs must still match, not just the executable used by ensure_addon.
-	if ! (cd "$WASMTIME_IMG" && sha256sum --status -c devtools/cfg/wasmtime/SHA256SUMS) 2>/dev/null; then
+	if ! (cd "$WASMTIME_IMG" && sha256sum --status -c devtools/wasmtime/SHA256SUMS) 2>/dev/null ||
+		! (cd "$WASMTIME_TESTS" && sha256sum --status -c SHA256SUMS) 2>/dev/null; then
 		rm -f "$ASSEMBLY_ROOT/ADDON-wasmtime"
 	fi
 	ensure_addon wasmtime "$source" "$WASMTIME_IMG" devtools/bin/wasmtime-rt build_wasmtime

@@ -180,8 +180,8 @@ for selection in managed-probe authoring-probe; do
 		export RUSTUP_TOOLCHAIN="$selection" JAVY_TOOLCHAIN_LOG="$javy_log"
 		MOTORH="$javy_root/motorh"
 		ASSEMBLY_BUILD_ROOT="$javy_root/build"
-		JAVY_IMG="$javy_root/images/javy"
-		WASMTIME_IMG="$javy_root/images/wasmtime"
+		JAVY_IMG="$javy_root/images/javy" JAVY_TESTS="$javy_root/tests/javy"
+		WASMTIME_IMG="$javy_root/images/wasmtime" WASMTIME_TESTS="$javy_root/tests/wasmtime"
 		JAVY_PLUGIN_SHA=plugin JAVY_TYPESCRIPT_SHA=typescript JAVY_SOURCE_MANIFEST=manifest
 		WASMTIME_SOURCE_MANIFEST=manifest
 		javy_download() { : > "$3"; }

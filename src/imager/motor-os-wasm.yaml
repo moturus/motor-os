@@ -29,9 +29,9 @@ directories:
   - "/user/tmp"
   - "/devtools"
   - "/devtools/bin"
-  - "/devtools/cfg"
-  - "/devtools/cfg/javy"
-  - "/devtools/cfg/wasmtime"
+  - "/devtools/javy"
+  - "/devtools/javy/plugins"
+  - "/devtools/wasmtime"
 static_dirs:
   - "img_files/motor-os-base"
   - "img_files/motor-os"

@@ -1,4 +1,4 @@
-use super::{JavyTools, Result, SUPPORT_DIR, Suite, fs};
+use super::{JavyTools, PLUGIN, Result, Suite, fs};
 
 pub(super) fn run(suite: &mut Suite) -> Result<()> {
     fs::write(
@@ -54,7 +54,7 @@ console.log(JSON.stringify({answer: values.get('answer'), text: new TextDecoder(
         "MOTOR_OS_CAPS=0 /devtools/bin/javy build hello.js -J help",
         0,
     )?;
-    suite.command("plugin-initialize", &format!("MOTOR_OS_CAPS=0x200 /devtools/bin/javy init-plugin {SUPPORT_DIR}/plugin.wasm --deterministic -o initialized.wasm"), 0)?;
+    suite.command("plugin-initialize", &format!("MOTOR_OS_CAPS=0x200 /devtools/bin/javy init-plugin {PLUGIN} --deterministic -o initialized.wasm"), 0)?;
     suite.compile(
         "initialized-plugin",
         "hello.js",
@@ -69,7 +69,7 @@ console.log(JSON.stringify({answer: values.get('answer'), text: new TextDecoder(
     )?;
     // Malformed plugins are refused before compilation and leave no output.
     fs::write(suite.root.join("not-wasm.wasm"), "not a plugin")?;
-    let plugin = fs::read(format!("{SUPPORT_DIR}/plugin.wasm"))?;
+    let plugin = fs::read(PLUGIN)?;
     fs::write(
         suite.root.join("truncated.wasm"),
         &plugin[..plugin.len() / 2],
