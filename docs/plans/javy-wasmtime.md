@@ -194,10 +194,13 @@ Build and images:
   and `wasmtime` branches with the add-on checkout helper, fetches under the
   Motor toolchain named by `rust-toolchain.toml`, sizes `JOBS` by available
   memory, downloads the plugin and TypeScript inputs by digest, and records the
-  resolved source graph in `/devtools/cfg/javy/sources.txt`. Reuse is keyed on
+  resolved source graph in `/devtools/javy/sources.txt`. Reuse is keyed on
   that manifest, so a new fork head rebuilds the add-on.
-- Binaries install at `/devtools/bin/javy` and `/devtools/bin/wasmi` with
-  configuration under `/devtools/cfg/javy`; the developer image adds the
+- Binaries install at `/devtools/bin/javy` and `/devtools/bin/wasmi`, the
+  default plugin at `/devtools/javy/plugins/default.wasm` and provenance under
+  `/devtools/javy`. Test inputs (the TypeScript workload and the Linux identity
+  digests) are staged in the assembly's `tests/javy`, outside the images, and
+  `test-wasm.sh` uploads them to `/user/tmp`; the developer image adds the
   `/devtools/src/wasm` example and `/devtools/www/wasm.html`. The 1 GiB wasm
   image (`src/imager/motor-os-wasm.yaml`) installs the same overlay. The
   user-facing guide is `docs/wasm.md`; the build steps are in `docs/build.md`
@@ -633,14 +636,16 @@ add-on per tool family built by a script under `src/`, following the published
 branches with the add-on checkout helper, recording the resolved source graph
 with the installed files, and invalidating reuse on changes to sources,
 lockfiles, build settings, pinned inputs or native library content. Binaries go
-to `/devtools/bin` and pinned inputs to `/devtools/cfg/<tool>`; both images
-consume the same release overlay. Integration tests live in a Rust crate under
-`src/tests`, run only the installed tools, and are called by a focused shell
-entry point registered with `full-test-dev.sh --release` that boots both images
-at 256 and 224 MiB under either VMM. No full OS gate is needed for wasm-only
-validation. Retain `motor_fs as cap_primitives` and `motor_sockets as rustix`;
-wholesale cap-std/io-lifetimes/io-extras/system-interface/socket2/rustix ports
-are unnecessary.
+to `/devtools/bin`, tool data and provenance to `/devtools/<tool>` (never
+`/devtools/cfg`), and test inputs stay outside the images in the assembly's
+`tests/<tool>`; both images consume the same release overlay. Integration tests
+live in a Rust crate under `src/tests`, run only the installed tools, and are
+called by a focused shell entry point registered with `full-test-dev.sh
+--release` that boots both images at 256 and 224 MiB under either VMM. No full
+OS gate is needed for wasm-only validation. Retain `motor_fs as cap_primitives`
+and `motor_sockets as rustix`; wholesale
+cap-std/io-lifetimes/io-extras/system-interface/socket2/rustix ports are
+unnecessary.
 
 Build release add-ons with `panic="abort"`, `lto="fat"`, `codegen-units=1` and
 `strip=true` at each owning workspace root; record C/C++ settings and verify
@@ -774,16 +779,19 @@ into `src/tests/javy-smoke`; its build script already assembles WAT fixtures
 from `fixtures/` with the `wat` build dependency, so hand-written modules need
 no new dependency.
 
-1. **1f — retained plugin and exhaustion matrix.** Decision needed: the
-   custom GC/p2 plugin source survives only in the prototype source archive;
-   choose its maintained home (this tree under `javy-smoke` or the fork) and
-   accept the wasi-sdk download its QuickJS build needs. Run the retained custom
-   GC/p2 plugin cases and the four deliberate fault-exhaustion cases on the
-   delivered pipeline, all through the installed tools in `javy-smoke`.
-   Backing cases (reservation growth to the limit, failed `memory.grow`,
-   refused fault, cleanup) use WAT fixtures run by `wasmi` with
+1. **1f — retained plugin and exhaustion matrix.** Owner rulings 2026-10-09:
+   real plugins install under `/devtools/javy/plugins/` (only the default
+   today); test plugins are part of no image and live under `/user/tmp` during
+   tests, uploaded by `test-wasm.sh` like the other test inputs. Decision still
+   needed: the custom GC/p2 plugin source survives only in the prototype source
+   archive; choose its maintained home (this tree under `javy-smoke` or the
+   fork) and accept the wasi-sdk download its QuickJS build needs. Run the
+   retained custom GC/p2 plugin cases and the four deliberate fault-exhaustion
+   cases on the delivered pipeline, all through the installed tools in
+   `javy-smoke`. Backing cases (reservation growth to the limit, failed
+   `memory.grow`, refused fault, cleanup) use WAT fixtures run by `wasmi` with
    `MOTOR_OS_CAPS=0`; custom plugin initialization, schema, compile and
-   deterministic output use digest-pinned plugins under `/devtools/cfg/javy`.
+   deterministic output use digest-pinned test plugins uploaded to `/user/tmp`.
    Expected refusals are recorded separately from the zero-delta rule. Output:
    tree tests, evidence at 256/224 on both images.
 2. **1g — byte identity (done 2026-10-09).** Rule, set by the owner's choice
@@ -795,7 +803,7 @@ no new dependency.
    `src/build-javy.sh` runs the pinned Linux Javy at add-on build time on
    `javy-smoke/fixtures/hello.js` (compressed, uncompressed, omitted) and the
    TypeScript workload (compressed) and stages the four digests as
-   `/devtools/cfg/javy/linux-reference.txt`; `javy-smoke --linux-identity`
+   `linux-reference.txt` with the test inputs; `javy-smoke --linux-identity`
    compiles the same four on Motor and requires equal digests. The four
    compiles take about 32 s, so they run once per `full-test-dev.sh`, which
    passes `test-wasm.sh --linux-identity` to the first boot; `full-test.sh`
@@ -888,9 +896,9 @@ qualified with locally built binaries on both images at 224 MiB (evidence in
 Rust (`WASM_GUEST_TOOLCHAIN`, 1.99.0) with `wasm32-wasip1`/`wasm32-wasip2` for
 guest programs; the Motor toolchain still has no wasm32 targets. The Wasmtime
 add-on builds a host Pulley `compile` tool from its own sources and precompiles
-22 fixtures (about 12 MiB) into `/devtools/cfg/wasmtime/fixtures`: the fork's
-lifecycle, limit and memory WAT modules, a native-target artifact for refusal,
-13 p2 socket programs, and the TypeScript workload compiled by the
+22 fixtures (about 12 MiB, staged outside the images since 2026-10-09): the
+fork's lifecycle, limit and memory WAT modules, a native-target artifact for
+refusal, 13 p2 socket programs, and the TypeScript workload compiled by the
 digest-pinned upstream Linux Javy 9.1.0 with the pinned plugin.
 `src/tests/wasmtime-smoke` (43 commands) and `javy-smoke` share
 `src/tests/wasm-smoke-suite`; `src/tests/test-wasm.sh` replaces `test-javy.sh`
@@ -923,7 +931,9 @@ preopens, a driver-owned `readonly` preopen whose file must survive, CLI root
 and multiple preopens, `-S cwd`, stdin from a file, an append to a guest-owned
 file and 256 KiB of stdout; one write is refused without `CAP_FS_WRITE`.
 `wasmtime-smoke` runs 93 commands, about 3 s more per boot; the fixtures grow
-by 14.4 MB to 26.3 MB (70 artifacts). The programs found six adapter defects,
+by 14.4 MB to 26.3 MB (70 artifacts). Since the same day they and Javy's test
+inputs (8.8 MB) are staged outside the images and uploaded per boot, which left
+the Cloud Hypervisor matrix at 296 s. The programs found six adapter defects,
 fixed in published fork commits `44bb21055..46465a092`: the lookup misread
 sys-io error responses as protocol errors, paths ending in `/` or `/.` did not
 have to name a directory, directories opened for writing, a read-only handle
@@ -946,7 +956,7 @@ Still open in 2f: the Pulley disposition below.
    `build-javy.sh` pattern: follow `moturus/wasmtime`, `target-lexicon`, `tokio`
    and `mio`, build the runtime-only graph with the release profile in its own output
    directory, stage `/devtools/bin/wasmtime-rt`, record the source graph in
-   `/devtools/cfg/wasmtime/sources.txt`, and key reuse on it. Install in both
+   `/devtools/wasmtime/sources.txt`, and key reuse on it. Install in both
    images and extend the imager policy test and build docs. Pass the selected
    toolchain/assembly through `motor-build.sh`; its current managed-selector
    override must receive the same correction as 1j. Output: tree, fork build script.
@@ -988,8 +998,8 @@ Still open in 2f: the Pulley disposition below.
    tests. The driver reuse requires 1l. Qualification depends on 2b–2e and the
    command defaults in 2g.
    Fixtures are digest-pinned prebuilt Pulley artifacts (hello, echo and the
-   TypeScript workload) with external-host recipes under
-   `/devtools/cfg/wasmtime`. Cover precompiled p2 rights and preopens,
+   TypeScript workload) built on the host and uploaded to `/user/tmp` with the
+   tests. Cover precompiled p2 rights and preopens,
    EOF/partial I/O, descriptors/directories, network denial under mask `0`,
    cancellation, finite limits, repeated invocations, malformed/mismatched
    artifacts and the refusal cases. Investigate the retained unexplained
