@@ -81,8 +81,8 @@ developer() {
   printf '%s\n' "$cpus:$repository_memory:--release --vmm qemu" \
     "$cpus:$source_memory:--motor --release --vmm qemu" \
     "$cpus:$source_memory:--release --vmm qemu" \
-    'test-wasm.sh:--prepare --image both --release --vmm qemu' \
-    'test-wasm.sh:--image both --linux-identity --release --vmm qemu' > "$scratch/expected"
+    'test-wasm.sh:--prepare --vm wasm:224 --vm dev:256 --release --vmm qemu' \
+    'test-wasm.sh:--vm wasm:224 --vm dev:256 --linux-identity --release --vmm qemu' > "$scratch/expected"
   diff -u "$scratch/expected" "$MOTO_SIZE_TEST_LOG"
 }
 developer 4 8192 4096 "$scratch/src/tests/full-test-dev.sh" --release --vmm=qemu

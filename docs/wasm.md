@@ -25,7 +25,7 @@ The smaller `wasm.img` also includes the three tools and their data
 directories. The test inputs (the TypeScript workload, the Linux identity
 digests, two custom Javy plugins and the precompiled Wasmtime fixtures) are
 not installed;
-`src/tests/test-wasm.sh` uploads them to `/user/tmp` for each test boot.
+`src/tests/test-wasm.sh` uploads them to `/user/tmp` on every VM boot during tests.
 
 `wasmtime-rt` runs as role None (`MOTOR_OS_CAPS=0`, `0x100`, `0x200` or
 `0x300`) and needs `--allow-precompiled`. Each linear memory is limited to

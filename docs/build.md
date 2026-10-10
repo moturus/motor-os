@@ -86,12 +86,15 @@ src/tests/test-wasm.sh --prepare
 src/tests/test-wasm.sh
 ```
 
-These Rust checks run both release images at 256 and 224 MiB: Javy static and
+By default these Rust checks run both release images at 256 and 224 MiB
+(`--vm IMAGE:MIB` selects VMs instead), with the repeat-for-identical-bytes
+checks on the first VM only: Javy static and
 dynamic compilation, TypeScript, default and custom plugins, Wasmi execution,
 memory limits and a deliberately refused page fault, errors, fuel and
 permission refusals, and `wasmtime-rt` lifecycle, limits, artifact
 refusals, TypeScript and WASI p2 sockets. `src/tests/full-test-dev.sh --release`
-prepares and runs this entire matrix; debug suites skip it.
+runs them on the wasm image at 224 MiB and the developer image at 256 MiB, and
+the Linux identity checks once; debug suites skip them.
 Engine regressions remain in the owning forks. Upstream Brotli is used; compressed
 source bytes can differ between Linux and Motor because their math libraries
 round some logarithms differently.

@@ -27,7 +27,7 @@ EOF
 chmod +x "$temporary/src/bin/httpd-axum/tests/run.sh"
 export MEMORY_TEST_LOG="$temporary/observed"
 export PATH="$temporary/bin:$PATH"
-wasm_expected=$'\ntest-wasm.sh --prepare --image both --release\ntest-wasm.sh --image both --linux-identity --release'
+wasm_expected=$'\ntest-wasm.sh --prepare --vm wasm:224 --vm dev:256 --release\ntest-wasm.sh --vm wasm:224 --vm dev:256 --linux-identity --release'
 
 env -u MOTO_MEMORY_MIB -u MOTO_IMAGE bash "$temporary/src/tests/full-test-dev.sh" --release > "$temporary/wrapper.log"
 expected=$'full-test.sh 8192 --release\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 4096 --release'

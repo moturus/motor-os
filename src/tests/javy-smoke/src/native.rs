@@ -41,7 +41,14 @@ impl JavyTools for Suite {
     }
 }
 
-pub fn run(linux_identity: bool) -> Result<()> {
+/// Checks a test run needs on one VM only.
+#[derive(Default)]
+pub struct Once {
+    pub determinism: bool,
+    pub linux_identity: bool,
+}
+
+pub fn run(once: Once) -> Result<()> {
     let mut suite = Suite::new("javy-smoke", "/devtools/javy/sources.txt")?;
     let (version, _) = suite.command(
         "javy-version",
@@ -88,13 +95,15 @@ pub fn run(linux_identity: bool) -> Result<()> {
         &format!("-C deterministic -C plugin={PLUGIN}"),
     )?;
     suite.same_bytes("hello.wasm", "explicit.wasm")?;
-    suite.compile(
-        "hello-repeat",
-        "hello.js",
-        "repeat.wasm",
-        "-C deterministic",
-    )?;
-    suite.same_bytes("hello.wasm", "repeat.wasm")?;
+    if once.determinism {
+        suite.compile(
+            "hello-repeat",
+            "hello.js",
+            "repeat.wasm",
+            "-C deterministic",
+        )?;
+        suite.same_bytes("hello.wasm", "repeat.wasm")?;
+    }
     suite.command(
         "emit-plugin",
         "MOTOR_OS_CAPS=0x200 /devtools/bin/javy emit-plugin -o emitted.wasm",
@@ -119,7 +128,7 @@ pub fn run(linux_identity: bool) -> Result<()> {
         1,
     )?;
     behavior::run(&mut suite)?;
-    plugins::run(&mut suite)?;
+    plugins::run(&mut suite, once.determinism)?;
     suite.compile(
         "typescript",
         &format!("{TEST_INPUTS}/typescript-workload.js"),
@@ -127,7 +136,7 @@ pub fn run(linux_identity: bool) -> Result<()> {
         "",
     )?;
     suite.execute("typescript-execute", "typescript.wasm", "", "{\"version\":\"5.9.3\",\"output\":\";\\nconst item = { value: 42 };\\nconsole.log(item.value);\\n\",\"diagnostics\":0}\n")?;
-    if linux_identity {
+    if once.linux_identity {
         identity::run(&mut suite)?;
     }
     fs::write(

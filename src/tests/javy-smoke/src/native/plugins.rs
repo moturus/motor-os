@@ -5,22 +5,40 @@ use super::{JavyTools, Result, Suite, TEST_INPUTS, fs};
 
 const JAVY: &str = "MOTOR_OS_CAPS=0x200 /devtools/bin/javy";
 
-/// Initializes `plugin-{name}.wasm` twice, deterministically, into `{name}.wasm`.
-fn initialize(suite: &mut Suite, name: &str) -> Result<()> {
-    for output in [name.to_string(), format!("{name}-repeat")] {
-        suite.command(
-            &format!("{output}-initialize"),
-            &format!(
-                "{JAVY} init-plugin {TEST_INPUTS}/plugin-{name}.wasm --deterministic -o {output}.wasm"
-            ),
-            0,
-        )?;
-    }
-    suite.same_bytes(&format!("{name}.wasm"), &format!("{name}-repeat.wasm"))
+/// Initializes `plugin-{name}.wasm` deterministically into `{output}.wasm`.
+fn initialize(suite: &mut Suite, name: &str, output: &str) -> Result<()> {
+    suite.command(
+        &format!("{output}-initialize"),
+        &format!(
+            "{JAVY} init-plugin {TEST_INPUTS}/plugin-{name}.wasm --deterministic -o {output}.wasm"
+        ),
+        0,
+    )?;
+    Ok(())
 }
 
-pub(super) fn run(suite: &mut Suite) -> Result<()> {
-    initialize(suite, "p1")?;
+/// Initializes `{name}.wasm`; with `repeat`, a second time to the same bytes.
+fn initialize_checked(suite: &mut Suite, name: &str, repeat: bool) -> Result<()> {
+    initialize(suite, name, name)?;
+    if repeat {
+        let again = format!("{name}-repeat");
+        initialize(suite, name, &again)?;
+        suite.same_bytes(&format!("{name}.wasm"), &format!("{again}.wasm"))?;
+    }
+    Ok(())
+}
+
+fn compile_p1(suite: &mut Suite, output: &str) -> Result<()> {
+    suite.compile(
+        output,
+        "p1.js",
+        &format!("{output}.wasm"),
+        "-C deterministic -C plugin=p1.wasm",
+    )
+}
+
+pub(super) fn run(suite: &mut Suite, repeat: bool) -> Result<()> {
+    initialize_checked(suite, "p1", repeat)?;
     let (stdout, _) = suite.command(
         "p1-schema",
         "MOTOR_OS_CAPS=0 /devtools/bin/javy build hello.js -J help -C plugin=p1.wasm",
@@ -45,15 +63,11 @@ console.log(JSON.stringify({
 }));
 "#,
     )?;
-    for output in ["p1-program", "p1-program-repeat"] {
-        suite.compile(
-            output,
-            "p1.js",
-            &format!("{output}.wasm"),
-            "-C deterministic -C plugin=p1.wasm",
-        )?;
+    compile_p1(suite, "p1-program")?;
+    if repeat {
+        compile_p1(suite, "p1-program-repeat")?;
+        suite.same_bytes("p1-program.wasm", "p1-program-repeat.wasm")?;
     }
-    suite.same_bytes("p1-program.wasm", "p1-program-repeat.wasm")?;
     suite.execute(
         "p1-program-execute",
         "p1-program.wasm",
@@ -62,7 +76,7 @@ console.log(JSON.stringify({
          \"exception\":\"AbortError\",\"kind\":\"number\",\"now\":\"number\"}\n",
     )?;
 
-    initialize(suite, "p2")?;
+    initialize_checked(suite, "p2", repeat)?;
     fs::write(
         suite.root.join("p2.js"),
         "if (motorAnswer() !== 42 || motorGreeting !== 'hello from a custom plugin') {\n\

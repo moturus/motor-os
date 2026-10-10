@@ -3,14 +3,22 @@ mod native;
 
 #[cfg(target_os = "motor")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // The Linux identity checks run once per full-test-dev.sh, not on every boot.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let linux_identity = match args.as_slice() {
-        [] => false,
-        [flag] if flag == "--linux-identity" => true,
-        _ => return Err(format!("usage: javy-smoke [--linux-identity], not {args:?}").into()),
-    };
-    native::run(linux_identity)
+    // Repeat-for-identical-bytes and Linux identity checks depend on neither
+    // image nor memory, so test-wasm.sh asks for them on its first VM only.
+    let mut once = native::Once::default();
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--determinism" => once.determinism = true,
+            "--linux-identity" => once.linux_identity = true,
+            _ => {
+                return Err(format!(
+                    "usage: javy-smoke [--determinism] [--linux-identity], not {arg:?}"
+                )
+                .into());
+            }
+        }
+    }
+    native::run(once)
 }
 
 #[cfg(not(target_os = "motor"))]
