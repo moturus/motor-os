@@ -782,10 +782,13 @@ no new dependency.
 1. **1f — retained plugin and exhaustion matrix.** Owner rulings 2026-10-09:
    real plugins install under `/devtools/javy/plugins/` (only the default
    today); test plugins are part of no image and live under `/user/tmp` during
-   tests, uploaded by `test-wasm.sh` like the other test inputs. Decision still
-   needed: the custom GC/p2 plugin source survives only in the prototype source
-   archive; choose its maintained home (this tree under `javy-smoke` or the
-   fork) and accept the wasi-sdk download its QuickJS build needs. Run the
+   tests, uploaded by `test-wasm.sh` like the other test inputs. The custom
+   GC (p1) and p2 plugin sources move from the prototype archive to
+   `src/tests/javy-smoke/plugins`, a test-only workspace outside the fork.
+   QuickJS needs wasi-sdk to build them: `src/build-motor-os.sh` fetches the
+   pinned, digest-checked wasi-sdk 24.0 (the release rquickjs-sys would
+   otherwise download unchecked), and the Javy add-on builds the raw plugins
+   with the pinned guest Rust into the assembly's `tests/javy`. Run the
    retained custom GC/p2 plugin cases and the four deliberate fault-exhaustion
    cases on the delivered pipeline, all through the installed tools in
    `javy-smoke`. Backing cases (reservation growth to the limit, failed
@@ -947,7 +950,8 @@ add-on built from the published fork passes the QEMU and Cloud Hypervisor
 matrices (four boots each, 57 + 93 commands, zero admission refusals, 290 and
 295 s).
 
-Still open in 2f: the Pulley disposition below.
+The Pulley disposition was accepted on 2026-10-09 (see the item below), which
+completes 2f.
 
 1. **2a — add-on delivery (delivered 2026-10-08, `--wasmtime-only`).** A
    host-precompiled Pulley hello ran on the wasm image as None, with role and
@@ -991,7 +995,7 @@ Still open in 2f: the Pulley disposition below.
    cost recorded; fall back to canaries only if the probe fails. Verify `run`
    stdio, exits/traps, parent exit and interruptibility. Output: fork,
    evidence.
-6. **2f — integration tests and Pulley disposition.** Add
+6. **2f — integration tests and Pulley disposition (done 2026-10-09).** Add
    `src/tests/wasmtime-smoke` and reuse the corrected Javy image-matrix driver
    through a shared wasm driver or a thin `test-wasmtime.sh` entry point.
    Register it in `full-test-dev.sh --release` and update the host contract
@@ -1015,8 +1019,9 @@ Still open in 2f: the Pulley disposition below.
    in this milestone raised one. The likely sources are native code: wasm
    traps compiled as `ud2` under signal-based traps, which
    `Config::motor_runtime()` now disables, or CPU features missing in the VM.
-   Proposed disposition, awaiting owner acceptance: close it for Pulley and
-   carry a native trap check (no `#UD`, trap reported) into 4d. Record sizes and the disk budget. Output: tree, fork
+   Disposition, accepted by the owner 2026-10-09: closed for Pulley, as not
+   reproduced on the maintained runtime; 4d carries a native trap check (the
+   trap is reported, no `#UD`). Record sizes and the disk budget. Output: tree, fork
    regression/fix as indicated, evidence on both images at 256/224 under both VMMs.
 7. **2g — command resource defaults.** Before 2f acceptance, set finite
    StoreLimits and limits for tables/resources, instances and command stack
@@ -1104,7 +1109,9 @@ complete matrix.
    None-writable scratch directory, then execute the populated ELF under `0` or
    `0x100` in a separate invocation, including from an Interactive shell;
    verify stdio, exits/traps, parent-exit behavior and refusal of mismatched or
-   stale artifacts. Output: tree tests, evidence.
+   stale artifacts. A guest trap in native code must be reported as a trap and
+   raise no `#UD` in the kernel log, which closes the 2f Pulley disposition for
+   native code. Output: tree tests, evidence.
 5. **4e — disk and scratch budget.** Record file and loadable bytes for all
    four tools, the template, populated ELFs and fixtures, plus simultaneous
    scratch/output use, within the 1 GiB small image; record spawn and compiler
