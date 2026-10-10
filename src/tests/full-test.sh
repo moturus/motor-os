@@ -661,6 +661,19 @@ if vm_ssh /system/bin/rmdir /system/tmp; then
 fi
 vm_ssh "[ -d /system/tmp ]" ||
   fail "Interactive session removed /system/tmp"
+# NONE's own tree: a NONE-role process writes /none/cfg and /none/tmp but
+# cannot add entries to /none itself. 0x204 is CAP_SPAWN and CAP_FS_WRITE
+# without CAP_INTERACTIVE, so only the directory modes decide.
+for none_dir in /none/cfg /none/tmp; do
+  vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/rush -c 'echo none >$none_dir/fs-permissions-none-probe'" ||
+    fail "a NONE-role process could not write $none_dir"
+  vm_ssh /system/bin/rm "$none_dir/fs-permissions-none-probe"
+done
+if vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/mkdir /none/fs-permissions-none-probe"; then
+  fail "mkdir returned success after a denied /none creation"
+fi
+vm_ssh "[ ! -e /none/fs-permissions-none-probe ]" ||
+  fail "a NONE-role process created an entry directly in /none"
 vm_ssh /system/bin/mkdir "$TEST_TMP/fs-permissions-write-probe"
 vm_ssh /system/bin/rm -r "$TEST_TMP/fs-permissions-write-probe"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then

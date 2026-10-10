@@ -17,6 +17,9 @@ directories:
   - "/user/bin"
   - "/user/cfg"
   - "/user/tmp"
+  - "/none"
+  - "/none/cfg"
+  - "/none/tmp"
 static_dirs:
   - "img_files/motor-os-base"
   - "img_files/test-system-tty"

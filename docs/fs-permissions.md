@@ -45,7 +45,7 @@ The initial image policy follows these principles:
   Interactive. Compiled programs in those directories remain non-writable.
 - `/devtools/src` is the Interactive-writable development workspace.
 - None may read and execute public installed content, but may write only the
-  explicitly shared scratch trees. Lower-role services submit logs over IPC;
+  explicitly shared scratch trees and its own `/none/cfg` and `/none/tmp`. Lower-role services submit logs over IPC;
   None cannot traverse `/user/cfg` or `/system/logs`.
 - Host owner/group/other read and write bits do not map to Motor roles. Host
   execute bits select which files require script or ELF classification; the
@@ -72,6 +72,9 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | `/user/bin` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editable user scripts and W^X compiled programs |
 | `/user/cfg` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive configuration and credentials hidden from None |
 | `/user/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Scratch for every role and the default `TMPDIR` |
+| `/none` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | The None role's home; None cannot add entries here |
+| `/none/cfg` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role configuration, which None may write |
+| `/none/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role scratch |
 | `/devtools/bin` | `rwxr-xr-x` | `rw-r--r--` | `rwxrwxr-x` | `r-xr-xr-x` | Fixed installed tools and Interactive-editable launcher scripts |
 | `/devtools/lorry` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive-owned Lorry repository and cache, hidden from None |
 | `/devtools/src` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editable sources and project-local Lorry state |

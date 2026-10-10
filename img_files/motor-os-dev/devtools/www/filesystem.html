@@ -487,6 +487,7 @@ with the permission model below showing through <code>Permissions</code>.</p>
   <tr><td><code>/user/bin</code></td><td>User programs: red, rmux, kibim, httpd, httpd-axum. Interactive may install programs here.</td></tr>
   <tr><td><code>/user/cfg</code></td><td>Interactive configuration and credentials (red, rmux, kibim, gears, lorry). Hidden from None.</td></tr>
   <tr><td><code>/user/tmp</code></td><td>Scratch for every role and the default <code>TMPDIR</code>.</td></tr>
+  <tr><td><code>/none</code></td><td>The None role's home: <code>cfg</code> for its configuration and <code>tmp</code> for its scratch, both writable by None.</td></tr>
   <tr><td><code>/devtools</code></td><td>Developer image only: <code>bin</code>, <code>llvm</code>, <code>rust</code>, <code>lorry</code>, <code>tests</code>, <code>www</code>, and the writable <code>src</code> and <code>tmp</code> trees.</td></tr>
 </table>
 </div>
@@ -528,7 +529,8 @@ for two secrets. Smaller images omit trees; they never relax a mode. The main ru
   <tr><td>default</td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>rwxr-xr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/system/bin</code></td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>r-xr-xr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/system/logs</code></td><td><code>rwxr-x---</code></td><td><code>rw-r-----</code></td><td><code>r-xr-----</code></td><td><code>r-xr-----</code></td></tr>
-  <tr><td><code>/system/tmp</code>, <code>/user/tmp</code>, <code>/devtools/tmp</code></td><td><code>rwxrwxrwx</code></td><td><code>rw-rw-rw-</code></td><td><code>rwxrwxrwx</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/system/tmp</code>, <code>/user/tmp</code>, <code>/devtools/tmp</code>, <code>/none/cfg</code>, <code>/none/tmp</code></td><td><code>rwxrwxrwx</code></td><td><code>rw-rw-rw-</code></td><td><code>rwxrwxrwx</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/none</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/user</code>, <code>/user/bin</code>, <code>/devtools/src</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/user/cfg</code>, <code>/devtools/lorry</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>
   <tr><td><code>/devtools/bin</code></td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
