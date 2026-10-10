@@ -560,8 +560,9 @@ server survived the kill (any other session still open). Killing the *last*
 session hid it: the server exits, and the socket closing looked like an answer.
 `ToClient::Done` is that answer now.
 
-The port file needs a writable path. Motor defaults to its `/user/tmp`
-convention and, like the Linux host, honors `$TMPDIR` when a test needs a
+The port file needs a writable path. Motor gives each process its role's
+`TMPDIR` (`/user/tmp` for Interactive) and, like the Linux host, honors
+`$TMPDIR` when a test needs a
 private server — one `sys::` function. **Correction, measured in M4:**
 `/user/tmp` is an explicit image-manifest directory, so it exists even when it
 contains no tracked files. Rmux only chooses the port-file path; image

@@ -164,15 +164,16 @@ run_console /user/tmp/system-tty-script-done \
 
 # The System console can grant both reserve capabilities and can launch
 # unprivileged children. The ordinary SSH shell cannot grant System authority.
+# The binary goes in /none/tmp so that its None-role children can run it.
 make -C "$ROOT_DIR" systest BUILD="$BUILD" -j"$(nproc)"
 scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
   -i "$WD/test.key" "$ROOT_DIR/build/bin/$BUILD/systest" \
-  motor@192.168.4.2:/user/tmp/admission-systest
+  motor@192.168.4.2:/none/tmp/admission-systest
 run_console /user/tmp/admission-mode-done \
-  'chmod r-xr-xr-x /user/tmp/admission-systest'
+  'chmod r-xr-xr-x /none/tmp/admission-systest'
 run_console /user/tmp/admission-class-done \
-  'MOTOR_OS_CAPS=0x20d /user/tmp/admission-systest admission-class-tests > /user/tmp/admission-class.log 2>&1; echo $? > /user/tmp/admission-class.status'
+  'MOTOR_OS_CAPS=0x20d /none/tmp/admission-systest admission-class-tests > /user/tmp/admission-class.log 2>&1; echo $? > /user/tmp/admission-class.status'
 admission_status="$(vm_ssh /system/bin/cat /user/tmp/admission-class.status)"
 admission_output="$(vm_ssh /system/bin/cat /user/tmp/admission-class.log)"
 [ "$admission_status" = "0" ] || fail "admission classes exited $admission_status: '$admission_output'"
@@ -184,7 +185,7 @@ printf '%s\n' "$admission_output"
 # CAP_NET cannot grant it, a System child without CAP_FS_WRITE is refused
 # writes, and the System process itself is refused network access.
 run_console /user/tmp/system-caps-done \
-  'MOTOR_OS_CAPS=0x20d /user/tmp/admission-systest system-caps-tests > /user/tmp/system-caps.log 2> /user/tmp/system-caps.err; echo $? > /user/tmp/system-caps.status'
+  'MOTOR_OS_CAPS=0x20d /none/tmp/admission-systest system-caps-tests > /user/tmp/system-caps.log 2> /user/tmp/system-caps.err; echo $? > /user/tmp/system-caps.status'
 system_caps_status="$(vm_ssh /system/bin/cat /user/tmp/system-caps.status)"
 system_caps_output="$(vm_ssh /system/bin/cat /user/tmp/system-caps.log)"
 # Debug runtimes log to stderr, so it is kept apart from the verdict.
@@ -197,7 +198,7 @@ printf '%s\n' "$system_caps_output"
 # An exported mask wins over Rush's ordinary System grant, even when it omits
 # CAP_NET; without one, the grant keeps the console's own bits.
 run_console /user/tmp/rush-caps-done \
-  '/system/bin/rush -c "export MOTOR_OS_CAPS=0x205; /user/tmp/admission-systest print-caps exported > /user/tmp/rush-caps.log"; /user/tmp/admission-systest print-caps ordinary >> /user/tmp/rush-caps.log'
+  '/system/bin/rush -c "export MOTOR_OS_CAPS=0x205; /none/tmp/admission-systest print-caps exported > /user/tmp/rush-caps.log"; /none/tmp/admission-systest print-caps ordinary >> /user/tmp/rush-caps.log'
 rush_caps="$(vm_ssh /system/bin/cat /user/tmp/rush-caps.log)"
 [ "$rush_caps" = $'exported=0x205\nordinary=0x38d' ] ||
   fail "System Rush capability precedence: '$rush_caps'"
@@ -226,7 +227,7 @@ for burst in $(seq 1 11); do
   [ "$burst" -ne 11 ] || lines=512 # Exceeds the old 16 KiB backlog.
   offset="$(wc -c < "$CONSOLE_LOG")"
   # Adjacent quoted words keep the full prompt token out of the command echo.
-  printf "PS1='[TTY-BURST-''%s] '; /user/tmp/admission-systest stderr-burst %s %s\r" \
+  printf "PS1='[TTY-BURST-''%s] '; /none/tmp/admission-systest stderr-burst %s %s\r" \
     "$burst" "$burst" "$lines" >&3
   wait_console_burst "$offset" "$burst" ready
   printf '!' >&3
@@ -249,12 +250,12 @@ printf '%s\n' "$ps_output" | has_system_process /system/bin/sysbox ||
 scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
   -i "$WD/test.key" "$ROOT_DIR/build/bin/$BUILD/systest" \
-  motor@192.168.4.2:/user/tmp/mmio-systest
+  motor@192.168.4.2:/none/tmp/mmio-systest
 # The child is Interactive, so its redirected output must be writable by
 # that role, not just by the System shell creating the redirection.
 vm_ssh 'echo -n > /user/tmp/mmio-validation.log'
 run_console /user/tmp/mmio-validation-done \
-  'MOTOR_OS_CAPS=0x24e /user/tmp/mmio-systest mmio-validation-tests > /user/tmp/mmio-validation.log 2>&1; echo $? > /user/tmp/mmio-validation.status'
+  'MOTOR_OS_CAPS=0x24e /none/tmp/mmio-systest mmio-validation-tests > /user/tmp/mmio-validation.log 2>&1; echo $? > /user/tmp/mmio-validation.status'
 mmio_status="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.status)"
 mmio_output="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.log)"
 [ "$mmio_status" = "0" ] || fail "MMIO validation exited $mmio_status: '$mmio_output'"
@@ -265,7 +266,7 @@ printf '%s\n' "$mmio_output"
 for mmio_case in mmio-unmap-suite mmio-unmap-fault; do
   vm_ssh "echo -n > /user/tmp/$mmio_case.log"
   run_console "/user/tmp/$mmio_case-done" \
-    "MOTOR_OS_CAPS=0x24e /user/tmp/mmio-systest $mmio_case > /user/tmp/$mmio_case.log 2>&1; echo \$? > /user/tmp/$mmio_case.status"
+    "MOTOR_OS_CAPS=0x24e /none/tmp/mmio-systest $mmio_case > /user/tmp/$mmio_case.log 2>&1; echo \$? > /user/tmp/$mmio_case.status"
   mmio_status="$(vm_ssh /system/bin/cat /user/tmp/$mmio_case.status)"
   mmio_output="$(vm_ssh /system/bin/cat /user/tmp/$mmio_case.log)"
   if [ "$mmio_case" = mmio-unmap-suite ]; then

@@ -2,7 +2,8 @@
 
 test_rush_script_caps() {
   local interpreter="$1"
-  local dir="$TEST_TMP/rush-script-caps-$interpreter"
+  # A None-role script must be able to read itself.
+  local dir="$NONE_TEST_TMP/rush-script-caps-$interpreter"
   local test_case prefix suffix out status expected body parent_pid script_pid
   vm_ssh "/system/bin/mkdir $dir"
   {

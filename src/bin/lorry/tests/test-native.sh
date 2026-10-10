@@ -14,7 +14,7 @@ fi
 MOTOR_TOOLCHAIN="$LORRY_MOTOR_TOOLCHAIN"
 MOTOR_LINKER="$LORRY_MOTOR_LINKER"
 MOTOR_SYSROOT="$LORRY_MOTOR_SYSROOT"
-REMOTE_BASE="/devtools/tmp/lorry-self"
+REMOTE_BASE="/user/tmp/lorry-self"
 
 IMAGE_NAME="motor-os-dev.qcow2"
 # Native rustc builds need enough parallel memory for the VM's vCPU count.
@@ -316,7 +316,7 @@ remote_command() {
     local remaining=$((PHASE_DEADLINE_MS - $(timing_now_ms)))
     [ "$remaining" -gt 0 ] || fail "native self phase exceeded ${PHASE_BUDGET}s"
     timeout "$(awk -v ms="$remaining" 'BEGIN { printf "%.3f", ms / 1000 }')" \
-        "${SSH[@]}" "TMPDIR=/devtools/tmp $*" 2>&1 | tee -a "$NATIVE_LOG"
+        "${SSH[@]}" "$*" 2>&1 | tee -a "$NATIVE_LOG"
 }
 
 remote_command_expect_failure() {

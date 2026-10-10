@@ -84,7 +84,7 @@ CONSOLE_IN="$OUT/console.in"
 RNET_PORT=40000
 HTTP_STD_PORT=8080
 HTTP_AXUM_PORT=8081
-SERVE_DIR=/devtools/tmp/www    # writable over sftp; created before the servers start
+SERVE_DIR=/user/tmp/www    # writable over sftp; created before the servers start
 
 MON_INTERVAL=20          # monitor tick, seconds
 PROGRESS_INTERVAL=300    # healthy-progress message interval, seconds
@@ -389,7 +389,7 @@ gate_udp_socket_count
 
 log "VM gate: systest"
 run_timeout 900 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-  "TMPDIR=/devtools/tmp MOTOR_OS_CAPS=0x3cc /devtools/tests/systest --vsock" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
+  "MOTOR_OS_CAPS=0x3cc /devtools/tests/systest --vsock" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
 gate_rc=${PIPESTATUS[0]}
 [ "$gate_rc" -eq 0 ] || gate_fail "systest (rc=$gate_rc)"
 [ "$(tail -n 1 "$OUT/gate-systest.log")" = "systest: ALL PASS" ] ||
@@ -404,7 +404,7 @@ out="$(vssh_n "/system/bin/rush -c 'echo tail-smoke'")"
 # Only stdout is the screen: debug builds log to stderr, and a log line can
 # land inside an escape sequence (see a8772f70).
 out="$(printf 'echo $((21+21))\nexit\n' | vssh \
-  "TMPDIR=/devtools/tmp /user/bin/rmux" 2>>"$GATE_LOG")"
+  "/user/bin/rmux" 2>>"$GATE_LOG")"
 case "$out" in *42*) ;; *) gate_fail "rmux command output missing" ;; esac
 # The interactive marker is the pane shell's prompt; rush's Motor prompt
 # has been "motor-os:$PWD$" since 3c19505b (it was "rush:..." before).
@@ -412,7 +412,7 @@ case "$out" in *motor-os*) ;; *) gate_fail "rmux shell was not interactive" ;; e
 case "$out" in *$'\033'"[?1049h"*) ;; *) gate_fail "rmux did not take alternate screen" ;; esac
 case "$out" in *$'\033'"[?1049l"*) ;; *) gate_fail "rmux did not restore screen" ;; esac
 
-out="$(gate_rmux_copy_keys | vssh "TMPDIR=/devtools/tmp /user/bin/rmux" 2>>"$GATE_LOG")"
+out="$(gate_rmux_copy_keys | vssh "/user/bin/rmux" 2>>"$GATE_LOG")"
 # rmux repaints only the changed cells, so a later indicator need not appear
 # whole in the byte stream; read it from the rendered screen, as full-test does.
 indicator="$(printf '%s' "$out" | bash "$SCRIPT_DIR/test-rmux-copy-status.sh")"
@@ -428,8 +428,8 @@ RUSSHD_HOST="$VM_IP" RUSSHD_PORT="$SSH_PORT" RUSSHD_KEY="$KEY" \
   run_timeout 300 "$SCRIPT_DIR/test-sftp.sh" 2>&1 | tee -a "$GATE_LOG"
 gate_rc=${PIPESTATUS[0]}
 [ "$gate_rc" -eq 0 ] || gate_fail "SFTP integration (rc=$gate_rc)"
-gate_ssh 300 "mio-test" "TMPDIR=/devtools/tmp /devtools/tests/mio-test"
-gate_ssh 300 "tokio-tests" "TMPDIR=/devtools/tmp /devtools/tests/tokio-tests"
+gate_ssh 300 "mio-test" "/devtools/tests/mio-test"
+gate_ssh 300 "tokio-tests" "/devtools/tests/tokio-tests"
 log "mandatory VM-side full-test gate passed"
 
 # ------------------------------------------------------------------ binaries + fetch target (from src/imager/motor-os.yaml)
@@ -583,10 +583,10 @@ w_fs_sftp() {
   done
 }
 # In-VM fs write/read churn + process spawn in the development scratch tree.
-# Its own directory: fs-sftp lists /devtools/tmp, and a listing that races a
+# Its own directory: fs-sftp lists /user/tmp, and a listing that races a
 # create/remove in the same directory can fail (motor-fs rejects it).
 w_fs_write() {
-  local n=0 f=0 rc a b dir=/devtools/tmp/strw
+  local n=0 f=0 rc a b dir=/user/tmp/strw
   vssh_n "/system/bin/rush -c '[ -d $dir ] || /system/bin/mkdir $dir'" >>"$OUT/fs-write.log" 2>&1
   while :; do
     n=$((n+1)); a="$dir/strw-a.$((n%6)).bin"; b="$dir/strw-b.$((n%6)).bin"
@@ -615,7 +615,7 @@ w_tui_console() {
   local n=0 f=0 rc before
   while :; do
     n=$((n+1)); rc=0; before=$(wc -c < "$CONSOLE")
-    printf 'TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys\n' >&3 || rc=$?
+    printf '/devtools/tests/crossterm-smoke keys\n' >&3 || rc=$?
     if [ "$rc" -eq 0 ] &&
        ! wait_console_since "$before" $'\033[?2048h'; then
       rc=96
@@ -644,7 +644,7 @@ tui_pty_once() {
   TUI_PTY_RC=1
   coproc TUI_SSH {
     run_timeout 90 ssh "${SSH_OPTS[@]}" -tt \
-      motor@"$VM_IP" "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys" 2>&1
+      motor@"$VM_IP" "/devtools/tests/crossterm-smoke keys" 2>&1
   }
   # Bash owns the descriptors in the coproc array and may close them as soon as
   # it reaps the child. Keep independent descriptors until all output is read.
@@ -750,7 +750,7 @@ tui_rmux_once() { # tmpdir
   exec {in_fd}>"$fifo"
 
   # A subshell per write: if ssh is gone, SIGPIPE ends it, not this workload.
-  ( printf 'TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys\n' >&"$in_fd" ) 2>/dev/null
+  ( printf '/devtools/tests/crossterm-smoke keys\n' >&"$in_fd" ) 2>/dev/null
   wait_file_for "$cur" 'crossterm-smoke\*' 240 && ( printf 'q' >&"$in_fd" ) 2>/dev/null
   wait_file_for "$cur" 'end=(quit|timeout|[A-Z])' 40
   ( printf 'exit\n' >&"$in_fd" ) 2>/dev/null
@@ -764,7 +764,7 @@ tui_rmux_once() { # tmpdir
 # rmux creates and removes rmux.port and rmux.lock in $TMPDIR every session, so
 # it gets its own directory for the same reason fs-write does.
 w_tui_rmux() {
-  local n=0 f=0 rc out dir=/devtools/tmp/strm
+  local n=0 f=0 rc out dir=/user/tmp/strm
   vssh_n "/system/bin/rush -c '[ -d $dir ] || /system/bin/mkdir $dir'" >>"$OUT/tui-rmux.log" 2>&1
   while :; do
     n=$((n+1))

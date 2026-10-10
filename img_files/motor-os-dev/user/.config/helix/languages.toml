@@ -7,7 +7,6 @@ command = "/devtools/rust/bin/rust-analyzer"
 CARGO = "/devtools/bin/lorry"
 RUSTFMT = "/devtools/rust/bin/rustfmt"
 PATH = "/devtools/bin:/system/bin:/user/bin"
-TMPDIR = "/devtools/tmp"
 # The background server must not take the editor's session terminal stream.
 MOTURUS_STDIO_NO_TERMINAL = "true"
 

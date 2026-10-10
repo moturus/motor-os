@@ -38,7 +38,7 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = PathBuf::from(format!("/devtools/tmp/ra-{}-{nonce:x}", std::process::id()));
+    let root = PathBuf::from(format!("/user/tmp/ra-{}-{nonce:x}", std::process::id()));
     let second = root.with_file_name(format!("ra-{}-{nonce:x}-second", std::process::id()));
     let manifest = remote.run("/system/bin/cat /devtools/toolchain/manifest")?;
     fs::write(evidence.join("manifest"), &manifest.stdout)?;
@@ -109,7 +109,7 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         "check": {"targets": ["x86_64-unknown-motor"]}, "procMacro": {"enable": false},
         "files": {"watcher": "client"}
     });
-    let command = remote.ssh(&format!("CARGO=/devtools/bin/lorry PATH=/devtools/bin:/system/bin TMPDIR=/devtools/tmp RA_LOG=project_model=debug,rust_analyzer::flycheck=debug {SERVER}"))?;
+    let command = remote.ssh(&format!("CARGO=/devtools/bin/lorry PATH=/devtools/bin:/system/bin RA_LOG=project_model=debug,rust_analyzer::flycheck=debug {SERVER}"))?;
     let start = Instant::now();
     let mut case = SemanticCase::start_command(
         command,

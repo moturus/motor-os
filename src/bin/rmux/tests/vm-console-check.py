@@ -280,11 +280,9 @@ if __name__ == "__main__":
 
     # ---- rmux runs on the real console at all ----
     # On Motor a client finds its server by a service name, not a port file
-    # (§4.2), so a killed qemu leaves no stale rendezvous behind. The scratch
-    # directory is still where the pane's shell stages its pipelines.
-    vm.send("mkdir /devtools\r", settle=1.0)
-    vm.send("mkdir /devtools/tmp\r", settle=1.0)
-    vm.send("PS1='$ ' TMPDIR=/devtools/tmp /user/bin/rmux\r", settle=3.0)
+    # (§4.2), so a killed qemu leaves no stale rendezvous behind. The pane's
+    # shell stages its pipelines in the role's TMPDIR, which Motor provides.
+    vm.send("PS1='$ ' /user/bin/rmux\r", settle=3.0)
     check("rmux-starts", painted(vm, "[0] "), repr(vm.rows()[-1]))
     check("status-line-is-the-last-row", painted(vm, "[0] ") and "[0] " in vm.rows()[ROWS - 1],
           repr(vm.rows()[ROWS - 1]))
@@ -375,7 +373,7 @@ if __name__ == "__main__":
     vm.send("\x01d", settle=2.0)
     check("detach-gives-the-console-back", painted(vm, "rush:"),
           repr([row for row in vm.rows() if row][-2:]))
-    vm.send("TMPDIR=/devtools/tmp /user/bin/rmux\r", settle=3.0)
+    vm.send("/user/bin/rmux\r", settle=3.0)
     check("attach-finds-the-session-as-it-was",
           painted(vm, "aaa") and painted(vm, "[39]"),
           repr(vm.rows()[:4]))
@@ -437,7 +435,7 @@ if __name__ == "__main__":
     # the only place the command surface (§7.3) is exercised on the console.
     vm.send("\x01d", settle=2.0)
     m = vm.mark()
-    vm.send("TMPDIR=/devtools/tmp /user/bin/rmux kill-session -t 0\r", settle=2.0)
+    vm.send("/user/bin/rmux kill-session -t 0\r", settle=2.0)
     check("kill-session-answers-and-the-server-goes",
           "did not answer" not in vm.since(m) and painted(vm, "rush:"),
           repr([row for row in vm.rows() if row][-2:]))

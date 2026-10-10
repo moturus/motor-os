@@ -539,8 +539,12 @@ front end at None and hand each authenticated session to an Interactive worker.<
   and edit sources under <code>/devtools/src</code> on the developer image, but cannot
   replace anything in <code>/system</code>.</li>
   <li>None can read and run public installed content and write only to
-  <code>/system/tmp</code>, <code>/user/tmp</code>, and <code>/devtools/tmp</code>; it
-  cannot even list <code>/user/cfg</code> or <code>/system/logs</code>.</li>
+  <code>/none/cfg</code> and <code>/none/tmp</code>; it cannot even list
+  <code>/user/cfg</code>, <code>/user/tmp</code>, <code>/system/tmp</code>, or
+  <code>/system/logs</code>.</li>
+  <li>Each process gets its role's temporary directory as <code>TMPDIR</code>:
+  <code>/system/tmp</code>, <code>/user/tmp</code>, or <code>/none/tmp</code>. A
+  <code>TMPDIR</code> that the parent sets explicitly is kept.</li>
   <li>A runtime diagnostic (a panic message, a backtrace) goes to the process's stderr,
   so an ordinary command sees it even though it has no <code>CAP_LOG</code>.</li>
 </ul>

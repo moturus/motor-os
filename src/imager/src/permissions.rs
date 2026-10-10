@@ -488,6 +488,17 @@ trees:
             mode_string(policy.directory_permissions(Path::new("/user/cfg/private"))),
             "rwxrwx---"
         );
+        // Each role's temporary directory is closed to lower roles.
+        for (path, mode) in [
+            ("/system/tmp", "rwx------"),
+            ("/user/tmp", "rwxrwx---"),
+            ("/none/tmp", "rwxrwxrwx"),
+        ] {
+            assert_eq!(
+                mode_string(policy.directory_permissions(Path::new(path))),
+                mode
+            );
+        }
         assert_eq!(
             mode_string(policy.directory_permissions(Path::new("/devtools/lorry/cache"))),
             "rwxrwx---"

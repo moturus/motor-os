@@ -49,7 +49,7 @@ actual_version="$(remote /devtools/bin/rustfmt --version)"
 [ "$actual_version" = "$expected_version" ] ||
   fail "native version is '$actual_version', expected '$expected_version'"
 
-guest_root="/devtools/tmp/rustfmt-native-$$"
+guest_root="/user/tmp/rustfmt-native-$$"
 in_place_dir="$guest_root/in place"
 project_dir="$guest_root/project config"
 user_case_dir="$guest_root/user config"
@@ -100,7 +100,7 @@ download "$in_place_dir/input.rs" "$temporary/in-place-second.rs"
 cmp "$temporary/in-place-first.rs" "$temporary/in-place-second.rs" ||
   fail 'a second in-place run changed the file'
 
-remote "TMPDIR=/devtools/tmp /devtools/rust/bin/rustfmt --edition 2024 '$project_dir/input.rs'"
+remote "/devtools/rust/bin/rustfmt --edition 2024 '$project_dir/input.rs'"
 download "$project_dir/input.rs" "$temporary/project-width.rs"
 cmp "$FIXTURES/width.expected.rs" "$temporary/project-width.rs" ||
   fail 'project rustfmt.toml was not honored'
@@ -126,7 +126,7 @@ cmp "$FIXTURES/width.expected.rs" "$temporary/home-width.rs" ||
 remote "/system/bin/rm '$user_home_toml'"
 guest_user_paths=()
 
-remote "TMPDIR=/devtools/tmp HOME='$env_case_dir/home' XDG_CONFIG_HOME='$env_case_dir/xdg' /devtools/rust/bin/rustfmt --edition 2024 '$env_case_dir/input.rs'"
+remote "HOME='$env_case_dir/home' XDG_CONFIG_HOME='$env_case_dir/xdg' /devtools/rust/bin/rustfmt --edition 2024 '$env_case_dir/input.rs'"
 download "$env_case_dir/input.rs" "$temporary/env-width.rs"
 cmp "$FIXTURES/width.default.expected.rs" "$temporary/env-width.rs" ||
   fail 'HOME or XDG_CONFIG_HOME changed configuration discovery'

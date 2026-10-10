@@ -76,10 +76,7 @@ SSH_OPTIONS=(
   -i "$WD/test.key"
 )
 SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
-MOTOR_TEST_ROOT=/user/tmp/motor-tests
-export MOTOR_TEST_ROOT
-TEST_BIN="$MOTOR_TEST_ROOT/tests"
-TEST_TMP="$MOTOR_TEST_ROOT/tmp"
+. "$WD/test-roots.sh"
 
 vm_ssh() {
   "${SSH[@]}" "$@"
@@ -249,21 +246,16 @@ if ! kill -0 "$VMM_PID" 2>/dev/null; then
 fi
 
 vm_ssh "[ ! -e /devtools ]" || fail "standard image unexpectedly packages /devtools"
-# An earlier run's leftover test root would fail the mkdir below.
-if vm_ssh "[ -e $MOTOR_TEST_ROOT ]"; then
-  echo "removing the leftover $MOTOR_TEST_ROOT"
-  vm_ssh "/system/bin/rm -r $MOTOR_TEST_ROOT" ||
-    fail "cannot remove the leftover $MOTOR_TEST_ROOT"
-fi
-printf '%s\n' \
-  "mkdir $MOTOR_TEST_ROOT" \
-  "mkdir $TEST_BIN" \
-  "mkdir $TEST_TMP" \
-  "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
-  "put $ROOT_DIR/build/bin/$BUILD/mio-test $TEST_BIN/mio-test" \
-  "put $ROOT_DIR/build/bin/$BUILD/tokio-tests $TEST_BIN/tokio-tests" \
-  "put $ROOT_DIR/build/bin/$BUILD/rnetbench $TEST_BIN/rnetbench" |
-  sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+# An earlier run's leftover test directories would fail the mkdirs below.
+remove_test_roots vm_ssh
+{
+  test_root_mkdirs
+  printf '%s\n' \
+    "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
+    "put $ROOT_DIR/build/bin/$BUILD/mio-test $TEST_BIN/mio-test" \
+    "put $ROOT_DIR/build/bin/$BUILD/tokio-tests $TEST_BIN/tokio-tests" \
+    "put $ROOT_DIR/build/bin/$BUILD/rnetbench $TEST_BIN/rnetbench"
+} | sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
     -i "$WD/test.key" motor@192.168.4.2
 

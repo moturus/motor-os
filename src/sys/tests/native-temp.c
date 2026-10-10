@@ -33,8 +33,8 @@ int main(void) {
 
 	assert(unsetenv("TMPDIR") == 0);
 	check_tmp("/user/tmp/");
-	assert(setenv("TMPDIR", "/devtools/tmp", 1) == 0);
-	check_tmp("/devtools/tmp/");
+	assert(setenv("TMPDIR", "/none/tmp", 1) == 0);
+	check_tmp("/none/tmp/");
 
 	setusershell();
 	assert(strcmp(getusershell(), "/system/bin/sh") == 0);

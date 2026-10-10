@@ -44,9 +44,10 @@ The initial image policy follows these principles:
 - Scripts directly under `/user/bin` and `/devtools/bin` are writable by
   Interactive. Compiled programs in those directories remain non-writable.
 - `/devtools/src` is the Interactive-writable development workspace.
-- None may read and execute public installed content, but may write only the
-  explicitly shared scratch trees and its own `/none/cfg` and `/none/tmp`. Lower-role services submit logs over IPC;
-  None cannot traverse `/user/cfg` or `/system/logs`.
+- None may read and execute public installed content, but may write only its
+  own `/none/cfg` and `/none/tmp`. Lower-role services submit logs over IPC;
+  None cannot traverse `/user/cfg`, `/user/tmp`, `/system/tmp`, or
+  `/system/logs`.
 - Host owner/group/other read and write bits do not map to Motor roles. Host
   execute bits select which files require script or ELF classification; the
   image policy supplies all three complete Motor permission triplets.
@@ -67,18 +68,17 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | `/` and otherwise unmatched paths | `rwxr-xr-x` | `rw-r--r--` | `rwxr-xr-x` | `r-xr-xr-x` | System-owned installed content with public read/execute access |
 | `/system/bin` | `rwxr-xr-x` | `rw-r--r--` | `r-xr-xr-x` | `r-xr-xr-x` | Non-writable system commands executable by every role |
 | `/system/logs` | `rwxr-x---` | `rw-r-----` | `r-xr-----` | `r-xr-----` | System strobe writes and rotates logs; Interactive may read them and None has no access |
-| `/system/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Shared system scratch |
+| `/system/tmp` | `rwx------` | `rw-------` | `rwx------` | `r-x------` | System scratch |
 | `/user` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Interactive-owned programs and work, readable by None by default |
 | `/user/bin` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editable user scripts and W^X compiled programs |
 | `/user/cfg` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive configuration and credentials hidden from None |
-| `/user/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Scratch for every role and the default `TMPDIR` |
+| `/user/tmp` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive scratch, closed to None |
 | `/none` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | The None role's home; None cannot add entries here |
 | `/none/cfg` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role configuration, which None may write |
 | `/none/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role scratch |
 | `/devtools/bin` | `rwxr-xr-x` | `rw-r--r--` | `rwxrwxr-x` | `r-xr-xr-x` | Fixed installed tools and Interactive-editable launcher scripts |
 | `/devtools/lorry` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive-owned Lorry repository and cache, hidden from None |
 | `/devtools/src` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editable sources and project-local Lorry state |
-| `/devtools/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Native build and test scratch |
 
 Before any runtime permission changes, the directory modes have these effects:
 
@@ -87,8 +87,9 @@ Before any runtime permission changes, the directory modes have these effects:
   a longer tree rule restricts access.
 - Interactive can edit a script in `/devtools/bin` in place, but cannot add,
   delete, or rename entries there because the directory is `rwxr-xr-x`.
-- Every role can create and replace entries in `/system/tmp`, `/user/tmp`, and
-  `/devtools/tmp` when that tree exists.
+- Each role can create and replace entries in its own temporary directory
+  and in those of lower roles. None can use only `/none/tmp`, and Interactive
+  cannot reach `/system/tmp`.
 - Only System can create, delete, or rename entries in `/system/logs`.
   Interactive can traverse and read regular logs but cannot alter them; None
   cannot traverse the directory. An image containing a script or ELF under
@@ -104,15 +105,16 @@ Several installed trees deliberately use the default rule:
 - Most of `/system/cfg`, including the implicit `/system/cfg/ssl` directory,
   is System-writable and publicly readable. None-role services have not yet
   been audited for configuration reads.
-- `/devtools/cfg`, `/devtools/llvm`, `/devtools/rust`, `/devtools/tests`, and
-  `/devtools/www` are installed content. `/devtools/lorry` is the private,
+- `/devtools/llvm`, `/devtools/rust`, `/devtools/tests`, and `/devtools/www`
+  are installed content. Clang reads its target configuration from
+  `/devtools/llvm/cfg`. `/devtools/lorry` is the private,
   Interactive-writable repository and cache for the installed Lorry tool.
-  Other guest build and test writes belong under `/devtools/src` or
-  `/devtools/tmp`.
+  Other guest build and test writes belong under `/devtools/src` or the
+  role's temporary directory.
 - Development source trees staged in `/devtools/src` are consumed in place;
-  project build output belongs under `/devtools/src` and scratch output under
-  `/devtools/tmp`. Git dependencies are fetched by the build tool rather than
-  staged as separate source trees.
+  project build output belongs under `/devtools/src` and scratch output in
+  the role's temporary directory. Git dependencies are fetched by the build
+  tool rather than staged as separate source trees.
 
 ### Exact entries
 
@@ -243,11 +245,15 @@ prove that Interactive cannot create a root-level directory and can write the
 appropriate scratch and source trees. Tests do not walk and assert the modes of
 every other image file.
 
-The full-test harnesses use a shared `MOTOR_TEST_ROOT` convention. Development
-images use their shipped `/devtools`, while standard-image uploads use
-`/user/tmp/motor-tests`. Standard tests continue to assert that `/devtools` is
-absent. The standard root is reachable by None-role test children because
-every component grants None traversal; `/user/cfg` would not be suitable.
+The VM harnesses share their guest directories (`src/tests/test-roots.sh`).
+Test binaries are the development image's shipped `/devtools/tests`, or, on
+the standard image, uploads to `/none/tmp/motor-tests/tests`, which None-role
+test children can run. Interactive scratch is `/user/tmp/motor-tests` on both
+images, and fixtures that a None-role child must open go in
+`/none/tmp/motor-tests/tmp`. The harness creates these directories itself and
+fails if one already exists, because a directory that None created would be
+writable by None. Standard tests continue to assert that `/devtools` is
+absent.
 
 ## Runtime behavior and remaining limits
 
@@ -320,13 +326,12 @@ after they are accepted.
    unmatched.
 6. **Git dependency source trees are not staged separately.** Development
    projects fetch their reviewed Git dependencies through the build tool.
-   Cargo writes project targets below `/devtools/src` and uses `/devtools/tmp`
-   for scratch.
-7. **Standard test artifacts live under `/user/tmp`, not a newly created
+   Cargo writes project targets below `/devtools/src` and uses the role's
+   temporary directory for scratch.
+7. **Standard test binaries live under `/none/tmp`, not a newly created
    `/devtools`.** Making `/` Interactive-writable solely to preserve the old
-   upload path would also permit replacement of `/system`. The shared
-   `MOTOR_TEST_ROOT` convention keeps the image boundary intact and lets helper
-   scripts retain `/devtools` as their standalone development-image default.
+   upload path would also permit replacement of `/system`. The binaries must
+   be reachable by None-role children, and `/user/tmp` is closed to None.
 8. **Guest mode enumeration is restricted to `/*/bin/*`.** Policy unit tests
    validate all configured modes and image construction validates every
    resolved entry. Guest tests concentrate on executable installation
@@ -351,7 +356,7 @@ after they are accepted.
     direct verification of the filesystem authority boundary.
 11. **The PID-kill systest identifies its child by PID.** Process debug names
     are limited to 32 bytes, and the standard-image test path
-    `/user/tmp/motor-tests/tests/systest` is longer than that limit. The old
+    `/none/tmp/motor-tests/tests/systest` is longer than that limit. The old
     search for a process whose truncated display name contained `systest`
     therefore missed the child and waited indefinitely. Looking up the PID
     returned by `std::process::Child` in `ProcessInfoV1` still verifies process
@@ -367,22 +372,22 @@ after they are accepted.
     edges preserves the documented fork and the `--locked --offline` image
     build instead of weakening reproducibility or selecting a different
     dependency checkout.
-13. **Systest creates its temporary directory only when it is absent.** The
-    development image ships `/devtools/tmp` writable by every role while its
-    `/devtools` parent remains System-owned. Unconditionally calling
+13. **Systest creates its temporary directory only when it is absent.** A
+    role's temporary directory can be writable while its parent is not, as
+    with `/none/tmp` for None. Unconditionally calling
     `create_dir_all` for that existing directory asks Motor FS for create
-    permission on the non-writable parent before it observes the child, so an
-    Interactive systest receives `PermissionDenied`. Making `/devtools`
-    writable initially would broaden the image policy, and changing
+    permission on the non-writable parent before it observes the child, so
+    the systest receives `PermissionDenied`. Making the parent writable
+    would broaden the image policy, and changing
     `create_dir_all` semantics is outside image-policy scope. A shared systest
     helper therefore skips creation when `TMPDIR` is already a directory and
     retains creation for standalone runs that select an absent path.
 14. **Lorry likewise preserves a non-writable parent of an existing staging
     directory.** Lorry's atomic-output helper used `create_dir_all` on every
-    staging parent, including the existing `/devtools/tmp` used for admission,
-    review, and vendoring scratch. Motor FS consequently required Interactive
-    create permission on `/devtools` before Lorry could create a private child
-    inside the writable scratch directory. The helper now creates the parent
-    only when it is not already a directory. This preserves absent custom
-    staging paths, Lorry's private-child and atomic-publication behavior, and
-    the initial System-owned `/devtools` permissions.
+    staging parent, including an existing temporary directory used for
+    admission, review, and vendoring scratch. Motor FS consequently required
+    create permission on that directory's parent before Lorry could create a
+    private child inside it. The helper now creates the parent only when it is
+    not already a directory. This preserves absent custom staging paths,
+    Lorry's private-child and atomic-publication behavior, and the image's
+    parent-directory permissions.

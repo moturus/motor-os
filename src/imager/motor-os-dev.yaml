@@ -45,7 +45,6 @@ directories:
   - "/none/tmp"
   - "/devtools"
   - "/devtools/bin"
-  - "/devtools/cfg"
   - "/devtools/llvm"
   - "/devtools/llvm/bin"
   - "/devtools/llvm/cfg"
@@ -64,7 +63,6 @@ directories:
   - "/devtools/src"
   - "/devtools/tests"
   - "/devtools/tests/gears"
-  - "/devtools/tmp"
   - "/devtools/www"
 static_dirs:
   - "img_files/motor-os-base"

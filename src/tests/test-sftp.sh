@@ -25,14 +25,17 @@ fi
 HOST="${RUSSHD_HOST:-192.168.4.2}"
 PORT="${RUSSHD_PORT:-2222}"
 USER="${RUSSHD_USER:-motor}"
-MOTOR_TEST_ROOT="${MOTOR_TEST_ROOT:-/devtools}"
-TEST_TMP="$MOTOR_TEST_ROOT/tmp"
+# Interactive scratch, and scratch that None-role children can reach.
+TEST_TMP="${MOTOR_TEST_TMP:-/user/tmp}"
+NONE_TEST_TMP="${MOTOR_NONE_TEST_TMP:-/none/tmp}"
 # Default the key to the one next to this script so it works from src/tests/
 # regardless of the current working directory.
 KEY="${RUSSHD_KEY:-$WD/test.key}"
 REMOTE_DIR="${RUSSHD_REMOTE_DIR:-/system/bin}"
 REMOTE_FILE="${RUSSHD_REMOTE_FILE:-/system/logs/sys-init.log}"
 REMOTE_UPLOAD_FILE="${RUSSHD_REMOTE_UPLOAD_FILE:-$TEST_TMP/russhd-sftp-upload-test.bin}"
+# Permission fixtures sit where None could read them but for their own modes.
+REMOTE_PRIVATE_FILE="$NONE_TEST_TMP/russhd-sftp-private-test.bin"
 EXPECTED_FILES=(rush sysbox)
 
 SSH_OPTS=(
@@ -98,10 +101,11 @@ run_scp() {
 # leftovers. Remove them before step 4 and on exit; `-rm` ignores a missing file.
 remove_permission_fixtures() {
     run_sftp <<EOF || true
--rm $REMOTE_UPLOAD_FILE.plain
--rm $REMOTE_UPLOAD_FILE.exec
--rm $REMOTE_UPLOAD_FILE.readonly
--rm $REMOTE_UPLOAD_FILE.abandoned
+-rm $REMOTE_PRIVATE_FILE.plain
+-rm $REMOTE_PRIVATE_FILE.exec
+-rm $REMOTE_PRIVATE_FILE.readonly
+-rm $REMOTE_PRIVATE_FILE.abandoned
+-rm $REMOTE_PRIVATE_FILE.public
 EOF
 }
 
@@ -168,9 +172,9 @@ permission_source="$WORK/permission-source.bin"
 plain_permission_roundtrip="$WORK/plain-permission-roundtrip.bin"
 exec_permission_roundtrip="$WORK/exec-permission-roundtrip.bin"
 readonly_permission_roundtrip="$WORK/readonly-permission-roundtrip.bin"
-remote_plain_permission_file="$REMOTE_UPLOAD_FILE.plain"
-remote_exec_permission_file="$REMOTE_UPLOAD_FILE.exec"
-remote_readonly_permission_file="$REMOTE_UPLOAD_FILE.readonly"
+remote_plain_permission_file="$REMOTE_PRIVATE_FILE.plain"
+remote_exec_permission_file="$REMOTE_PRIVATE_FILE.exec"
+remote_readonly_permission_file="$REMOTE_PRIVATE_FILE.readonly"
 printf '#!/system/bin/rush\nexit 0\n' >"$permission_source"
 chmod 600 "$permission_source"
 
@@ -209,7 +213,7 @@ readonly_mode="$(stat -c %a "$readonly_permission_roundtrip")"
 [ "$readonly_mode" = 400 ] ||
     fail "read-only permission round-trip returned mode $readonly_mode"
 
-permission_listing="$(run_ssh /system/bin/ls -l "$TEST_TMP")"
+permission_listing="$(run_ssh /system/bin/ls -l "$NONE_TEST_TMP")"
 plain_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(basename "$remote_plain_permission_file")" '$NF == name { print $1; exit }')"
 exec_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(basename "$remote_exec_permission_file")" '$NF == name { print $1; exit }')"
 readonly_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(basename "$remote_readonly_permission_file")" '$NF == name { print $1; exit }')"
@@ -219,6 +223,10 @@ readonly_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(base
     fail "executable upload has Motor mode $exec_motor_mode"
 [ "$readonly_motor_mode" = -rwxr----- ] ||
     fail "read-only upload has Motor mode $readonly_motor_mode"
+# Positive control: a None-role child reads a public file beside the uploads.
+run_ssh "/system/bin/rush -c 'echo public > $REMOTE_PRIVATE_FILE.public'"
+[ "$(run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $REMOTE_PRIVATE_FILE.public")" = public ] ||
+    fail "None-role child could not read a public file beside the SFTP uploads"
 if run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $remote_plain_permission_file" >/dev/null 2>&1; then
     fail "None-role child read a private SFTP upload"
 fi
@@ -229,7 +237,7 @@ echo "  ok: SFTP permission updates preserved owner/public role distinctions"
 # cleanup. The file must never become readable by the None role.
 abandoned_source="$WORK/abandoned-source.bin"
 abandoned_batch="$WORK/abandoned.batch"
-remote_abandoned_file="$REMOTE_UPLOAD_FILE.abandoned"
+remote_abandoned_file="$REMOTE_PRIVATE_FILE.abandoned"
 dd if=/dev/urandom of="$abandoned_source" bs=1024 count=256 status=none
 printf 'put %s %s\n' "$abandoned_source" "$remote_abandoned_file" >"$abandoned_batch"
 sftp "${SSH_OPTS[@]}" -l 64 -b "$abandoned_batch" "$USER@$HOST" \
@@ -258,7 +266,7 @@ fi
 kill "$abandoned_pid"
 wait "$abandoned_pid" 2>/dev/null || true
 ABANDONED_PID=""
-abandoned_motor_mode="$(run_ssh /system/bin/ls -l "$TEST_TMP" | awk -v name="$(basename "$remote_abandoned_file")" '$NF == name { print $1; exit }')"
+abandoned_motor_mode="$(run_ssh /system/bin/ls -l "$NONE_TEST_TMP" | awk -v name="$(basename "$remote_abandoned_file")" '$NF == name { print $1; exit }')"
 [ "$abandoned_motor_mode" = -rwxrw---- ] ||
     fail "abandoned upload has Motor mode $abandoned_motor_mode"
 if run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $remote_abandoned_file" >/dev/null 2>&1; then

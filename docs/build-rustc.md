@@ -144,7 +144,6 @@ directory and this environment:
 CARGO=/devtools/bin/lorry
 PATH=/devtools/bin:/system/bin
 RUSTFMT=/devtools/rust/bin/rustfmt
-TMPDIR=/devtools/tmp
 ```
 
 An editor that owns a session terminal must additionally pass

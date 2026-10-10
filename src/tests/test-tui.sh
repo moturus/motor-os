@@ -70,14 +70,7 @@ TEST_VM_PHASE=standard
 [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != 1 ] || TEST_VM_PHASE=developer
 select_test_vm "$ROOT_DIR" "$BUILD" "$TEST_VM_PHASE" "$VMM"
 
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  MOTOR_TEST_ROOT=/devtools
-else
-  MOTOR_TEST_ROOT=/user/tmp/motor-tests
-fi
-export MOTOR_TEST_ROOT
-TEST_BIN="$MOTOR_TEST_ROOT/tests"
-TEST_TMP="$MOTOR_TEST_ROOT/tmp"
+. "$WD/test-roots.sh"
 RMUX_TMPDIR="$TEST_TMP/test-tui-rmux"
 GUEST_KEY="$TEST_TMP/test-tui.key"
 GUEST_KNOWN="$TEST_TMP/test-tui-known-hosts"
@@ -156,8 +149,11 @@ remove_ssh_fixtures() {
 remove_test_root() {
   if [ "$TEST_ROOT_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
     serial_test_vm_alive; then
-    ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
-      motor@192.168.4.2 /system/bin/rm -r "$MOTOR_TEST_ROOT" >/dev/null 2>&1
+    local dir
+    for dir in "$TEST_TMP" "$NONE_TEST_ROOT"; do
+      ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
+        motor@192.168.4.2 /system/bin/rm -r "$dir" >/dev/null 2>&1 || true
+    done
     TEST_ROOT_CREATED=0
   fi
 }
@@ -218,23 +214,20 @@ done
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   vm_ssh "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
-  # An earlier run's leftover test root would fail the mkdir below.
-  if vm_ssh "[ -e $MOTOR_TEST_ROOT ]"; then
-    echo "removing the leftover $MOTOR_TEST_ROOT"
-    vm_ssh "/system/bin/rm -r $MOTOR_TEST_ROOT" ||
-      fail "cannot remove the leftover $MOTOR_TEST_ROOT"
-  fi
-  TEST_ROOT_CREATED=1
-  printf '%s\n' \
-    "mkdir $MOTOR_TEST_ROOT" \
-    "mkdir $TEST_BIN" \
-    "mkdir $TEST_TMP" \
-    "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
-    "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke" |
-    sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
-      -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
-      -i "$WD/test.key" motor@192.168.4.2
 fi
+# An earlier run's leftover test directories would fail the mkdirs below.
+remove_test_roots vm_ssh
+TEST_ROOT_CREATED=1
+{
+  test_root_mkdirs
+  if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
+    printf '%s\n' \
+      "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
+      "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke"
+  fi
+} | sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+  -i "$WD/test.key" motor@192.168.4.2
 
 remove_ssh_fixtures
 printf 'put %s %s\nchmod 600 %s\nput %s %s\n' \

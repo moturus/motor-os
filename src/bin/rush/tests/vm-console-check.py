@@ -235,9 +235,7 @@ if __name__ == "__main__":
     # A nested interactive rush with a known prompt: the login shell's own is
     # "rush:<cwd>$ ", which would make these checks about $PWD rather than about
     # the editor. It is the same editor on the same console either way.
-    vm.send("mkdir /devtools\r", settle=0.2)
-    vm.send("mkdir /devtools/tmp\r", settle=0.2)
-    vm.send("PS1='$ ' TMPDIR=/devtools/tmp /system/bin/rush -i\r", settle=0.2)
+    vm.send("PS1='$ ' /system/bin/rush -i\r", settle=0.2)
     if not vm.wait_for("\r\x1b[0K$ \x1b[?25h", 30):
         print("FAIL: the nested rush never prompted")
         vm.kill()

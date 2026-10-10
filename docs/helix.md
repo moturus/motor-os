@@ -60,9 +60,9 @@ needs the native settings copied into its own `helix/languages.toml`.
 
 Helix starts `/devtools/rust/bin/rust-analyzer` directly over stdio. Its
 environment selects `/devtools/bin/lorry` through `CARGO` and
-`/devtools/rust/bin/rustfmt` through `RUSTFMT`, includes `/devtools/bin` in
-`PATH`, and sets `TMPDIR=/devtools/tmp`. These belong in the server's own
-environment: `cargo.extraEnv` only affects its children and cannot select
+`/devtools/rust/bin/rustfmt` through `RUSTFMT`, and includes `/devtools/bin`
+in `PATH`. Motor gives it the role's `TMPDIR`. These belong in the server's
+own environment: `cargo.extraEnv` only affects its children and cannot select
 the metadata/check executable.
 
 `MOTURUS_STDIO_NO_TERMINAL=true` in the server's launch environment is

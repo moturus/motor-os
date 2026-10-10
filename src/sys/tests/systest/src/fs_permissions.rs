@@ -56,6 +56,12 @@ pub fn run_none_child(args: &[String]) -> ! {
         expect_denied(client.delete_entry(rx_child).await);
 
         expect_denied(client.get_first_entry(r_dir).await);
+        // Positive control: None can look up below the root, so the next
+        // denial comes from `r` itself.
+        assert_eq!(
+            rx_child,
+            client.stat(&format!("{root}/rx/child")).await.unwrap().0
+        );
         expect_denied(client.stat(&format!("{root}/r/child")).await);
 
         // Write on a directory is sufficient for mutation; execute is only
@@ -136,7 +142,7 @@ pub fn run_all_tests() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = crate::temp_path(&format!(
+    let root = crate::none_temp_path(&format!(
         "systest-process-role-fs-{}-{started}",
         moto_sys::ProcessStaticPage::get().pid
     ));

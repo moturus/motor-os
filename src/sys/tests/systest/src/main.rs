@@ -81,6 +81,12 @@ pub(crate) fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(name)
 }
 
+/// A path for fixtures that a None-role child must reach. `TMPDIR` may be
+/// closed to None, so these go in None's own temporary directory.
+pub(crate) fn none_temp_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new("/none/tmp").join(name)
+}
+
 /// A kernel metric by its `stats get 1` name, for one scope: a pid, or
 /// `moto_stats::provider::KERNEL` for the kernel's own counters.
 pub(crate) fn kernel_metric(name: &str, scope: u64) -> u64 {

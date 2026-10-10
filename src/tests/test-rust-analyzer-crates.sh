@@ -11,7 +11,7 @@ SSH_OPTIONS=(-F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes
 if [ "${1:-}" = --run-motor ]; then
 	binary="$2"
 	shift 2
-	guest=/devtools/tmp/rust-analyzer-crate-tests
+	guest=/user/tmp/rust-analyzer-crate-tests
 	printf 'put "%s" "%s"\nchmod 755 "%s"\n' "$binary" "$guest" "$guest" |
 		sftp "${SSH_OPTIONS[@]}" -P 2222 -b - motor@192.168.4.2
 	status=0

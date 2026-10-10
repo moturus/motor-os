@@ -483,12 +483,12 @@ with the permission model below showing through <code>Permissions</code>.</p>
   <tr><td><code>/system/services</code></td><td>sys-init, sys-tty, strobe, russhd, dns-resolver.</td></tr>
   <tr><td><code>/system/cfg</code></td><td>Configuration: <code>sys-init.cfg</code>, <code>sys-net.toml</code>, <code>sshd.toml</code>, <code>rush.cfg</code>, <code>libc/</code> (hosts, resolv.conf), <code>ssl/</code>.</td></tr>
   <tr><td><code>/system/logs</code></td><td>Service logs written by strobe. Interactive may read them; None cannot enter the directory.</td></tr>
-  <tr><td><code>/system/tmp</code></td><td>Scratch space for every role.</td></tr>
+  <tr><td><code>/system/tmp</code></td><td>System scratch, closed to other roles.</td></tr>
   <tr><td><code>/user/bin</code></td><td>User programs: red, rmux, kibim, httpd, httpd-axum. Interactive may install programs here.</td></tr>
   <tr><td><code>/user/cfg</code></td><td>Interactive configuration and credentials (red, rmux, kibim, gears, lorry). Hidden from None.</td></tr>
-  <tr><td><code>/user/tmp</code></td><td>Scratch for every role and the default <code>TMPDIR</code>.</td></tr>
+  <tr><td><code>/user/tmp</code></td><td>Interactive scratch, closed to None.</td></tr>
   <tr><td><code>/none</code></td><td>The None role's home: <code>cfg</code> for its configuration and <code>tmp</code> for its scratch, both writable by None.</td></tr>
-  <tr><td><code>/devtools</code></td><td>Developer image only: <code>bin</code>, <code>llvm</code>, <code>rust</code>, <code>lorry</code>, <code>tests</code>, <code>www</code>, and the writable <code>src</code> and <code>tmp</code> trees.</td></tr>
+  <tr><td><code>/devtools</code></td><td>Developer image only: <code>bin</code>, <code>llvm</code>, <code>rust</code>, <code>lorry</code>, <code>tests</code>, <code>www</code>, and the writable <code>src</code> tree.</td></tr>
 </table>
 </div>
 
@@ -529,7 +529,9 @@ for two secrets. Smaller images omit trees; they never relax a mode. The main ru
   <tr><td>default</td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>rwxr-xr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/system/bin</code></td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>r-xr-xr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/system/logs</code></td><td><code>rwxr-x---</code></td><td><code>rw-r-----</code></td><td><code>r-xr-----</code></td><td><code>r-xr-----</code></td></tr>
-  <tr><td><code>/system/tmp</code>, <code>/user/tmp</code>, <code>/devtools/tmp</code>, <code>/none/cfg</code>, <code>/none/tmp</code></td><td><code>rwxrwxrwx</code></td><td><code>rw-rw-rw-</code></td><td><code>rwxrwxrwx</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/system/tmp</code></td><td><code>rwx------</code></td><td><code>rw-------</code></td><td><code>rwx------</code></td><td><code>r-x------</code></td></tr>
+  <tr><td><code>/user/tmp</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>
+  <tr><td><code>/none/cfg</code>, <code>/none/tmp</code></td><td><code>rwxrwxrwx</code></td><td><code>rw-rw-rw-</code></td><td><code>rwxrwxrwx</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/none</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/user</code>, <code>/user/bin</code>, <code>/devtools/src</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/user/cfg</code>, <code>/devtools/lorry</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>

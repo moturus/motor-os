@@ -1011,10 +1011,13 @@ mod tests {
             .assembly_required_executables
             .iter()
             .any(|path| path == "sed/devtools/bin/sed"));
-        assert!(config
-            .directories
-            .iter()
-            .any(|path| path == "/devtools/tmp"));
+        // Scratch and configuration belong to the roles, not to /devtools.
+        for path in ["/devtools/tmp", "/devtools/cfg"] {
+            assert!(!config.directories.iter().any(|candidate| candidate == path));
+        }
+        for path in ["/none/tmp", "/devtools/llvm/cfg"] {
+            assert!(config.directories.iter().any(|candidate| candidate == path));
+        }
         for path in [
             "/devtools/lorry/cache",
             "/devtools/lorry/vendor",

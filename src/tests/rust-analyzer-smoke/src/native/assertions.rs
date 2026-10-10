@@ -44,16 +44,14 @@ mod tests {
 
     #[test]
     fn generated_definition_belongs_to_the_selected_project() {
-        let root = Path::new("/devtools/tmp/first");
+        let root = Path::new("/user/tmp/first");
         let path = root.join("target/rust-analyzer/build/out/generated.rs");
         for result in [
             json!([{"uri": file_uri(&path)}]),
             json!([{"targetUri": file_uri(&path)}]),
         ] {
             require_generated_definition(&result, root).unwrap();
-            assert!(
-                require_generated_definition(&result, Path::new("/devtools/tmp/second")).is_err()
-            );
+            assert!(require_generated_definition(&result, Path::new("/user/tmp/second")).is_err());
         }
         for result in [
             Value::Null,
