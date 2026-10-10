@@ -640,8 +640,11 @@ to `/devtools/bin`, tool data and provenance to `/devtools/<tool>` (never
 `/devtools/cfg`), and test inputs stay outside the images in the assembly's
 `tests/<tool>`; both images consume the same release overlay. Integration tests
 live in a Rust crate under `src/tests`, run only the installed tools, and are
-called by a focused shell entry point registered with `full-test-dev.sh
---release` that boots both images at 256 and 224 MiB under either VMM. No full
+called by a focused shell entry point that boots both images at 256 and
+224 MiB under either VMM. Owner ruling 2026-10-10: `full-test-dev.sh
+--release` runs every wasm test on the wasm image at 224 MiB and the developer
+image at 256 MiB, and checks independent of the VM (determinism repeats, Linux
+identity) once, on the first. No full
 OS gate is needed for wasm-only validation. Retain `motor_fs as cap_primitives`
 and `motor_sockets as rustix`; wholesale
 cap-std/io-lifetimes/io-extras/system-interface/socket2/rustix ports are
@@ -811,8 +814,9 @@ no new dependency.
    Sampled plugin peaks are 193/183 MiB at 256/224 MiB. Both matrices pass
    (four boots each, 71 + 93 commands, four expected refusals, 458 s under
    QEMU and 461 s under Cloud Hypervisor, up from about 295 s), and so does
-   `full-test-dev.sh --release`, whose matrix with the identity checks now
-   takes about 490 s of `test-wasm.sh`'s 600 s bound.
+   `full-test-dev.sh --release`, whose matrix with the identity checks then
+   took about 490 s of `test-wasm.sh`'s 600 s bound; its two VMs now take
+   238 s.
 2. **1g — byte identity (done 2026-10-09).** Rule, set by the owner's choice
    of a toolchain fix: Motor output equals upstream Linux Javy 9.1.0
    (digest-pinned release, same explicit plugin, `-C deterministic`) byte for
@@ -825,7 +829,7 @@ no new dependency.
    `linux-reference.txt` with the test inputs; `javy-smoke --linux-identity`
    compiles the same four on Motor and requires equal digests. The four
    compiles take about 32 s, so they run once per `full-test-dev.sh`, which
-   passes `test-wasm.sh --linux-identity` to the first boot; `full-test.sh`
+   passes `test-wasm.sh --linux-identity` to the first VM; `full-test.sh`
    and standalone `test-wasm.sh` runs skip them.
 3. **1h — streaming plugin validation.** Implement validation that does not
    retain the whole plugin through the compiler phase, preserving complete
