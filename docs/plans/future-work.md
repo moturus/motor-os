@@ -1,5 +1,17 @@
 # Future work -- recorded, deliberately not scheduled
 
+## Frusa work
+
+(a) Investigate moving Rust heap from Frusa4k to Frusa16k or Frusa32k
+
+The problem is that 16k allocs must often be aligned on 16k, but
+Frusa will only serve 4k-aligned buffers. Also how to make frusa
+deduce layout from address so that it can replace mlibc's alloc
+(so that C/C++ binaries on Motor OS have a single heap, not two).
+
+(b) Investigate using RCU and a background memory reclaim task:
+current reclaim stalls allocs/frees.
+
 ## A pipe writer is never told that its reader is gone (2026-10-09)
 
 When a parent drops the read end of a child's piped stdout, the child's
