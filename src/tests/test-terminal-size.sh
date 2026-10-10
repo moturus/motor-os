@@ -29,6 +29,10 @@
 # matches: a key would repaint too, so every assertion is made against the bytes
 # that arrived before the next one was sent. Behind rmux that is a screen rather
 # than a span of bytes, for the reason `settled_bar` is about.
+#
+# Since the console VM is here anyway, it also checks what rush's and rmux's
+# host pty tests cannot: their line editing, byte costs, and panes on the
+# serial console itself, where Enter arrives as CR and LF.
 
 if [ "${TEST_TERMINAL_SIZE_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   export TEST_TERMINAL_SIZE_TIMEOUT_ACTIVE=1
@@ -381,6 +385,78 @@ wait_bar() {
   fail "red never painted anything (log: $1)"
 }
 
+# The screen a terminal would show after the recording on stdin, one line per
+# row: $1 rows (0 for as many as the recording reaches) of $2 columns. Enough of
+# a terminal to follow rush's relative repaints and rmux's absolute ones: the
+# cursor moves, the erases, the alternate screen, and DECSC/DECRC. Styles are
+# dropped; the checks are about the picture.
+screen_rows() {
+  LC_ALL=C.UTF-8 awk -v rows="$1" -v cols="$2" '
+    function down() { r++; if (rows && r >= rows) r = rows - 1 }
+    function erase(y, from, to,   x) { for (x = from; x < to; x++) delete g[y, x] }
+    function clear_all() { delete g; r = 0; c = 0 }
+    NR > 1 { s = s "\n" }
+    { s = s $0 }
+    END {
+      n = split(s, ch, "")
+      for (i = 1; i <= n; i++) {
+        x = ch[i]
+        if (x == "\r") c = 0
+        else if (x == "\n") down()
+        else if (x == "\b") { if (c > 0) c-- }
+        else if (x == "\033" && ch[i + 1] == "[") {
+          p = ""
+          for (i += 2; i <= n && ch[i] !~ /[@-~]/; i++) p = p ch[i]
+          f = ch[i]
+          priv = sub(/^\?/, "", p)
+          split(p, a, ";")
+          k = a[1] + 0; m = k ? k : 1
+          if (f == "H" || f == "f") { r = m - 1; c = (a[2] + 0 ? a[2] - 1 : 0) }
+          else if (f == "A") r = r > m ? r - m : 0
+          else if (f == "B") r += m
+          else if (f == "C") c += m
+          else if (f == "D") c = c > m ? c - m : 0
+          else if (f == "G") c = m - 1
+          else if (f == "K") erase(r, k == 0 ? c : 0, k == 1 ? c + 1 : cols)
+          else if (f == "J" && k >= 2) clear_all()
+          else if (f == "J") {
+            erase(r, k == 0 ? c : 0, k == 0 ? cols : c + 1)
+            for (y = k == 0 ? r + 1 : 0; y < (k == 0 ? maxr + 1 : r); y++) erase(y, 0, cols)
+          } else if ((f == "h" || f == "l") && priv && (k == 1049 || k == 1047 || k == 47))
+            clear_all()
+          if (rows && r >= rows) r = rows - 1
+          if (c >= cols) c = cols - 1
+        } else if (x == "\033" && ch[i + 1] == "]") {
+          for (i += 2; i <= n && ch[i] != "\007" && ch[i] != "\033"; i++) ;
+          if (ch[i] == "\033") i++
+        } else if (x == "\033") {
+          x = ch[++i]
+          if (x == "7") { sr = r; sc = c }
+          else if (x == "8") { r = sr; c = sc }
+        } else if (x >= " " && x != "\177") {
+          if (c >= cols) { c = 0; down() }
+          g[r, c++] = x
+          if (r > maxr) maxr = r
+        }
+      }
+      last = rows ? rows - 1 : maxr
+      for (y = 0; y <= last; y++) {
+        line = ""
+        for (x = 0; x < cols; x++) line = line ((y, x) in g ? g[y, x] : " ")
+        sub(/ +$/, "", line)
+        out[y] = line
+      }
+      if (!rows) while (last >= 0 && out[last] == "") last--
+      for (y = 0; y <= last; y++) print out[y]
+    }'
+}
+
+# Type $1 (printf %b escapes) at the console and give it $2 seconds to paint.
+console_keys() {
+  printf '%b' "$1" >&3
+  sleep "${2:-1}"
+}
+
 # Wait until red has painted $2 frames on the console since byte $1, its ground
 # spelled $3.
 #
@@ -509,6 +585,114 @@ bars="$(console_since "$resize_at" | red_bars "$RED_GROUND")"
 printf ':q\r' >&3
 sleep 3
 
+# ---- rush's editor on the serial console ------------------------------------
+#
+# rush's host tests (tests/phase8.rs) make these claims through a Linux pty.
+# Here they are made on the console: keys arrive through sys-tty, which turns
+# one press of Enter into CR and LF, and every byte the editor writes goes down
+# a serial line slow enough to show a flicker. A nested rush with a plain
+# prompt keeps the checks about the editor rather than the login prompt, and
+# the replay starts with it, on a fresh line.
+echo "-- rush's editor on the serial console --"
+edit_at="$(wc -c < "$CONSOLE_LOG")"
+printf "PS1='\$ ' /system/bin/rush -i\r" >&3
+wait_console_since "$edit_at" $'\\$ \033\\[?25h'
+printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
+sleep 2
+
+rush_rows() { console_since "$edit_at" | screen_rows 0 100; }
+prompt_line() { rush_rows | awk '/^\$( |$)/ { line = $0 } END { print line }'; }
+# A fresh prompt on a row of its own: ^U abandons the line, Enter runs nothing.
+rush_settle() { console_keys '\025' 0.3; console_keys '\r'; }
+
+rush_settle
+# rush paints exactly one prompt per line it reads, so the prompts are the count.
+m="$(wc -c < "$CONSOLE_LOG")"
+console_keys '\r' 1.5
+prompts="$(console_since "$m" | LC_ALL=C grep -ao $'\\$ \033\\[?25h' | wc -l)"
+[ "$prompts" = 1 ] || fail "one Enter on the console gave $prompts prompts"
+
+# What a key costs: only what changed is painted.
+console_keys 'echo'
+m="$(wc -c < "$CONSOLE_LOG")"
+console_keys 'x'
+out="$(console_since "$m")"
+[ "$out" = x ] || fail "typing at the end of the line wrote $(printf '%q' "$out")"
+m="$(wc -c < "$CONSOLE_LOG")"
+console_keys '\033[D'
+out="$(console_since "$m")"
+case "$out" in *echo*) fail "moving the cursor repainted the line: $(printf '%q' "$out")" ;; esac
+[ "${#out}" -lt 8 ] || fail "moving the cursor wrote ${#out} bytes: $(printf '%q' "$out")"
+m="$(wc -c < "$CONSOLE_LOG")"
+console_keys '\177'
+out="$(console_since "$m")"
+case "$out" in *echo*) fail "a backspace repainted the line: $(printf '%q' "$out")" ;; esac
+console_keys '\033[H'    # Home: ^A would be qemu's
+m="$(wc -c < "$CONSOLE_LOG")"
+console_keys 'X'
+out="$(console_since "$m")"
+case "$out" in
+  *'$'*) fail "an edit in the middle repainted the prompt: $(printf '%q' "$out")" ;;
+  *Xech*) ;;
+  *) fail "an edit in the middle did not redraw the tail: $(printf '%q' "$out")" ;;
+esac
+[ "$(prompt_line)" = '$ Xechx' ] ||
+  fail "the edits left '$(prompt_line)' on the screen, want '\$ Xechx'"
+
+# And the picture all those differences add up to, then the line it runs.
+rush_settle
+console_keys 'echo abc'
+console_keys '\033[H'
+console_keys '\033[C\033[C\033[C\033[C\033[C'
+console_keys 'Z'
+console_keys '\005'      # ^E: to the end
+console_keys '\177'
+[ "$(prompt_line)" = '$ echo Zab' ] ||
+  fail "the edits left '$(prompt_line)' on the screen, want '\$ echo Zab'"
+console_keys '\r' 1.5
+rush_rows | tail -n 4 | grep -qx Zab || fail "the edited line did not run"
+
+# A line that wraps, painted a character at a time; then ^K from Home has to
+# erase the row the wrapped tail was on.
+rush_settle
+long="echo $(printf 'a%.0s' $(seq 1 110))"
+m="$(wc -c < "$CONSOLE_LOG")"
+console_keys "$long" 2
+mapfile -t rows < <(rush_rows)
+full="\$ $long"
+[ "${rows[-2]}" = "${full:0:100}" ] && [ "${rows[-1]}" = "${full:100}" ] ||
+  fail "the wrapped line was painted as '${rows[-2]}' / '${rows[-1]}'"
+cost="$(console_since "$m" | wc -c)"
+[ "$cost" -lt $((3 * ${#long})) ] ||
+  fail "typing ${#long} characters wrote $cost bytes"
+console_keys '\033[H\013'
+[ "$(rush_rows | tail -n 1)" = '$' ] ||
+  fail "^K left '$(rush_rows | tail -n 1)' on the wrapped row"
+
+# History replaces the whole line at once.
+console_keys 'echo one\r' 1.5
+console_keys 'echo two\r' 1.5
+console_keys '\033[A'
+[ "$(prompt_line)" = '$ echo two' ] || fail "history Up showed '$(prompt_line)'"
+console_keys '\033[A'
+[ "$(prompt_line)" = '$ echo one' ] || fail "history Up again showed '$(prompt_line)'"
+console_keys '\033[B\033[B'
+[ "$(prompt_line)" = '$' ] || fail "history Down to the end showed '$(prompt_line)'"
+
+# Output without a trailing newline keeps its row: the prompt follows it.
+rush_settle
+console_keys "printf h''i\r" 1.5
+rush_rows | tail -n 4 | grep -q hi || fail "the next prompt painted over partial output"
+
+# Last, because on a debug image completion's stats are logged to this console.
+# So the completed command's output is checked rather than the screen around it.
+rush_settle
+console_keys 'ec\t' 1.5
+console_keys 'RUSHTAB\r' 1.5
+rush_rows | tail -n 4 | grep -qx RUSHTAB || fail "Tab did not complete 'ec' to echo"
+console_keys '\003'
+console_keys 'exit\r' 2
+
 # ---- rmux on the serial console ---------------------------------------------
 #
 # The whole design in one measurement, from the outside in: the terminal
@@ -573,6 +757,55 @@ bars="$first $(settled_bar "$CONSOLE_LOG" "$first")"
 
 printf ':q\r' >&3
 sleep 3
+
+# The rest is what rmux's host tests (tests/host.rs) cannot see, because there
+# both the console and a pane are ptys. Here Enter arrives as CR and LF, a pane
+# is a pipe with no line discipline, and every byte rmux paints goes down the
+# serial line. First the console grows back: the status line must leave the
+# row it had at 20 rows for the last row of 30.
+console_rows() { console_since "$rmux_at" | screen_rows 30 100; }
+back_at="$(wc -c < "$CONSOLE_LOG")"
+printf '\033[48;30;100;0;0t' >&3
+wait_console_since "$back_at" $'\033\\[2J'
+sleep 2
+mapfile -t rows < <(console_rows)
+case "${rows[29]}" in *'[0] '*) ;; *) fail "rmux's status line is not on the last row: '${rows[29]}'" ;; esac
+case "${rows[19]}" in *'[0] '*) fail "rmux left its status line on row 20 after the console grew" ;; esac
+
+console_keys '\014' 1.5    # ^L: the pane's shell clears its screen
+before="$(console_rows | grep -c '\$')"
+console_keys "echo o''ne\r" 2
+mapfile -t rows < <(console_rows)
+printf '%s\n' "${rows[@]}" | grep -qx one || fail "the pane did not run its command"
+after="$(printf '%s\n' "${rows[@]}" | grep -c '\$')"
+[ "$after" = $((before + 1)) ] ||
+  fail "one Enter in a pane gave $((after - before)) prompts"
+
+# A pane turns `\n` into a new line itself; without that, the second line
+# starts where the first ended.
+console_keys "echo a''aa; echo b''bb\r" 2
+starts="$(console_rows | grep -c -E '^(aaa|bbb)')"
+[ "$starts" = 2 ] || fail "a pane's output lines did not each start at column one"
+
+# The key before it leaves the console's style where the pane's text needs it.
+console_keys 'e'
+m="$(wc -c < "$CONSOLE_LOG")"
+console_keys 'x'
+out="$(console_since "$m")"
+[ "$out" = x ] || fail "a keystroke in a pane wrote $(printf '%q' "$out")"
+console_keys '\025'
+
+# A program that never subscribed to resizes is not sent one: top reads an ESC
+# as "quit". A live top repaints every second; a dead one leaves a quiet shell.
+m="$(wc -c < "$CONSOLE_LOG")"
+console_keys '/system/bin/top\r' 3
+console_since "$m" | LC_ALL=C grep -aq 'uptime:' || fail "top did not paint in a pane"
+printf '\033[48;20;60;0;0t' >&3
+sleep 3
+m="$(wc -c < "$CONSOLE_LOG")"
+sleep 3
+[ -n "$(console_since "$m")" ] || fail "a console resize ended top in a pane"
+console_keys 'q' 1.5
 printf 'exit\r' >&3    # the pane, and with it rmux
 sleep 4
 
