@@ -19,7 +19,7 @@
 # the LLVM, rustc, Helix, Lua, sed, and rust-analyzer/rust-src roots.
 #
 # On-image layout (see docs/libc.md): C/C++ headers + libraries
-# live under /devtools/llvm, the clang driver config under /devtools/cfg/llvm,
+# live under /devtools/llvm, the clang driver config under /devtools/llvm/cfg,
 # mlibc's config files under /system/cfg/libc, and the Rust toolchain at
 # /devtools/rust — not the classic /usr and /etc.
 #
@@ -252,7 +252,7 @@ EOF
 # On-image directory prefixes (mirrored inside the cross sysroot). Keep these in
 # sync with clang/lib/Driver/ToolChains/Motor.cpp and mlibc's MLIBC_SYSCONFDIR.
 TOOLS="devtools/llvm"              # headers + libraries
-CFG_LLVM="devtools/cfg/llvm"       # clang <triple>.cfg
+CFG_LLVM="devtools/llvm/cfg"       # clang <triple>.cfg
 CFG_LIBC="system/cfg/libc"         # mlibc config files (resolv.conf, ...)
 
 # ============================================================================
@@ -606,7 +606,7 @@ llvm_stage_image() {
 
 	# The on-image LLVM multicall lives under /devtools/llvm/bin, mirroring the
 	# Rust toolchain at /devtools/rust/bin (build-rustc.md). Its clang config and
-	# resource dir are pinned by absolute path (the /devtools/cfg/llvm .cfg + the baked
+	# resource dir are pinned by absolute path (the /devtools/llvm/cfg .cfg + the baked
 	# CLANG_CONFIG_FILE_SYSTEM_DIR), and its ld.lld self-dispatch uses the running
 	# exe's own path, so the binary works wherever it is placed.
 	"$B/llvm-strip" -o "$img/$TOOLS/bin/llvm" "$NATIVE_LLVM_BUILD/bin/llvm"
@@ -628,7 +628,6 @@ llvm_stage_image() {
 # cc — Motor OS's system C compiler / linker driver. See docs/build-llvm.md.
 # A pass-through: clang's Motor ToolChain owns the link recipe and honors
 # -nostartfiles/-nodefaultlibs (rustc's pure-Rust links stay mlibc-free).
-export TMPDIR=/devtools/tmp
 exec /devtools/llvm/bin/llvm clang "$@"
 EOF
 
@@ -638,14 +637,13 @@ EOF
 	cat > "$img/devtools/bin/c++" << 'EOF'
 #!/system/bin/rush
 # c++ — Motor OS's system C++ compiler / linker driver. See docs/build-llvm.md.
-export TMPDIR=/devtools/tmp
 exec /devtools/llvm/bin/llvm clang --driver-mode=g++ "$@"
 EOF
 	chmod +x "$img/devtools/bin/cc" "$img/devtools/bin/c++"
 
 	# The image driver config: only the resource dir needs pinning (the full
 	# link/include recipe lives in the Motor ToolChain now). Clang auto-loads it
-	# from /devtools/cfg/llvm (CLANG_CONFIG_FILE_SYSTEM_DIR, stage 6).
+	# from /devtools/llvm/cfg (CLANG_CONFIG_FILE_SYSTEM_DIR, stage 6).
 	cat > "$img/$CFG_LLVM/x86_64-unknown-motor.cfg" << EOF
 -resource-dir /$TOOLS/lib/clang/$CLANG_MAJOR
 EOF
@@ -716,7 +714,6 @@ rustc_stage_image() {
 		die "staged rustc ELF validation failed"
 	cat > "$RUSTC_IMG/devtools/bin/rustc" << 'EOF'
 #!/system/bin/rush
-export TMPDIR=/devtools/tmp
 exec /devtools/rust/bin/rustc "$@"
 EOF
 	chmod +x "$RUSTC_IMG/devtools/bin/rustc"
@@ -725,7 +722,6 @@ EOF
 		die "staged rustfmt ELF validation failed"
 	cat > "$RUSTC_IMG/devtools/bin/rustfmt" << 'EOF'
 #!/system/bin/rush
-export TMPDIR=/devtools/tmp
 exec /devtools/rust/bin/rustfmt "$@"
 EOF
 	chmod +x "$RUSTC_IMG/devtools/bin/rustfmt"
@@ -734,7 +730,6 @@ EOF
 		die "staged clippy-driver validation failed"
 	cat > "$RUSTC_IMG/devtools/bin/clippy-driver" << 'EOF'
 #!/system/bin/rush
-export TMPDIR=/devtools/tmp
 exec /devtools/rust/bin/clippy-driver "$@"
 EOF
 	chmod +x "$RUSTC_IMG/devtools/bin/clippy-driver"

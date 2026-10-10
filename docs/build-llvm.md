@@ -77,7 +77,7 @@ The development image contains:
 /devtools/llvm/bin/llvm       native LLVM/Clang/LLD multicall binary
 /devtools/llvm/include/       C and C++ headers
 /devtools/llvm/lib/           mlibc, compiler-rt, and C++ libraries
-/devtools/cfg/llvm/           clang target configuration
+/devtools/llvm/cfg/           clang target configuration
 /devtools/bin/cc              C compiler/linker launcher
 /devtools/bin/c++             C++ launcher
 /system/cfg/libc/             mlibc runtime configuration

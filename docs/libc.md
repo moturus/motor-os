@@ -106,7 +106,7 @@ trees and uses the ownership-based `/devtools` and `/system` trees:
 | --- | --- |
 | clang/LLVM headers + libraries | `/devtools/llvm/{include,lib}` |
 | clang resource directory | `/devtools/llvm/lib/clang/<N>` |
-| clang `<triple>.cfg` | `/devtools/cfg/llvm` |
+| clang `<triple>.cfg` | `/devtools/llvm/cfg` |
 | C/C++ launchers | `/devtools/bin/{cc,c++}` |
 | mlibc runtime configuration | `/system/cfg/libc` |
 
@@ -120,7 +120,7 @@ anything:
    `/devtools/llvm` prefix) — baked into both the host cross clang and the
    native multicall;
 2. the native driver's config-file directory
-   (`-DCLANG_CONFIG_FILE_SYSTEM_DIR=/devtools/cfg/llvm`, a cmake cache
+   (`-DCLANG_CONFIG_FILE_SYSTEM_DIR=/devtools/llvm/cfg`, a cmake cache
    entry); and
 3. mlibc's `MLIBC_SYSCONFDIR`, injected as `"/system/cfg/libc"` through the
    Motor meson cross-file. Every functional config reader in mlibc —

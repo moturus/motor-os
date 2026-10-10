@@ -59,12 +59,13 @@ toolchain_content_tree_digest() (
 )
 
 toolchain_native_configuration_digest() {
-	toolchain_hash_pairs schema motor-native-config-v6 target x86_64-unknown-motor \
+	toolchain_hash_pairs schema motor-native-config-v7 target x86_64-unknown-motor \
 		rust_analyzer_recipe motor-native-rust-analyzer-v3-std \
 		rustfmt_recipe motor-native-rustfmt-v1 \
 		clippy_recipe motor-native-clippy-v1 \
 		build_type Release llvm_projects 'clang;lld' llvm_targets X86 \
 		llvm_assertions true libc_subdir devtools/llvm libc_config system/cfg/libc \
+		clang_config devtools/llvm/cfg \
 		llvm_config_adapter motor-native-llvm-config-v2 \
 		cc /MOTOR_SYSROOT/bin/motor-clang \
 		cxx /MOTOR_SYSROOT/bin/motor-clang++ \

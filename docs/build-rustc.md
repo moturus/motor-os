@@ -312,7 +312,7 @@ The native Clippy driver is built by the same bootstrap invocation as rustc.
 The assembly validates its compiler identity and native ELF properties and
 records its content hash. `lorry clippy` checks that
 `clippy-driver --rustc -vV` matches the selected rustc, and binds cached member
-units to the driver's contents. Its PATH launcher sets `TMPDIR=/devtools/tmp`.
+units to the driver's contents.
 Run `lorry clippy` in an admitted package to get human diagnostics, or add
 `--message-format=json` for Cargo-compatible messages.
 

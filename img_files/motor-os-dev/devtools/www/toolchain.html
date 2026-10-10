@@ -555,7 +555,7 @@ prebuilt crates: <code>std</code>, <code>core</code>, <code>alloc</code>,
 <code>proc_macro</code>, <code>test</code>, <code>panic_abort</code>, the compiler builtins,
 <code>moto_rt</code>, and their dependencies, each as an <code>.rlib</code> with its
 metadata. <code>/devtools/bin/rustc</code>, the command on <code>PATH</code>, is a two-line
-script that sets <code>TMPDIR=/devtools/tmp</code> and runs it.</p>
+script that runs it.</p>
 <pre><code>rustc -O /devtools/src/hello-world/hello.rs -o /devtools/tmp/hello &amp;&amp; /devtools/tmp/hello</code></pre>
 <p>No linker option is needed: rustc's default linker driver is <code>cc</code>, which on
 the image is <code>/devtools/bin/cc</code>, the native Clang, which links with lld. There is
@@ -573,7 +573,7 @@ contains the whole LLVM toolchain as subcommands: <code>clang</code>, <code>clan
 <code>dwp</code>, and more, invoked as <code>llvm clang ...</code> or <code>llvm ar ...</code>.
 It was configured with Motor OS as its host and default target, lld as the default linker,
 compiler-rt as the runtime library, libc++ as the C++ standard library, and
-<code>/devtools/cfg/llvm</code> as its configuration directory, where
+<code>/devtools/llvm/cfg</code> as its configuration directory, where
 <code>x86_64-unknown-motor.cfg</code> points it at its resource directory,
 <code>/devtools/llvm/lib/clang/23</code>. <code>/devtools/bin/cc</code> and
 <code>/devtools/bin/c++</code> are two-line scripts over it.</p>
