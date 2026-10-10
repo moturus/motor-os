@@ -155,7 +155,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     let accept_all = options.accept_all || config.policy.accept_all;
     config.policy.accept_all = accept_all;
     // With a terminal, missing build-time grants join the review below.
-    config.policy.propose_missing = !accept_all && io::stdin().is_terminal();
+    config.policy.propose_missing = !accept_all && crate::prompt::interactive();
     if options.locked {
         policy::preflight_locked_sources(
             &config.policy,
@@ -428,7 +428,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
                 previous.as_ref().map(|state| state.review_sha256.as_str()),
                 &candidate,
                 mode,
-                stdin.is_terminal(),
+                crate::prompt::interactive(),
                 &mut stdin.lock(),
                 &mut output,
             )?;
@@ -444,7 +444,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
                 &candidate,
                 &report,
                 mode,
-                stdin.is_terminal(),
+                crate::prompt::interactive(),
                 &mut stdin.lock(),
                 &mut output,
             )?;

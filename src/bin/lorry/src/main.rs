@@ -116,6 +116,7 @@ fn command_main() -> i32 {
     let (result, messages) = match Cli::parse(arguments) {
         Ok(cli) => {
             let messages = cli.lorry_messages;
+            prompt::set_machine_messages(messages);
             (role::refuse_system().and_then(|()| run(cli)), messages)
         }
         Err(error) => (Err(error), requested),

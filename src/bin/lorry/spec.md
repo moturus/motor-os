@@ -204,6 +204,8 @@ or interrupted), `text`, nullable `file`, `line`, and `help`, and `exit_code`
 Cargo JSON and command output remain on stdout. The option also applies to
 parse errors, stops at child arguments after `--`, and does not suppress
 progress; pair it with `-q` when only machine-readable errors are wanted.
+With it, Lorry never prompts, even when stdin is a terminal: a decision that
+needs an answer fails as it does without a terminal.
 For vendor, the option suppresses human progress and emits
 `reason: "lorry-vendor-change"` with the previous commitment and its
 availability, added/removed source evidence, added/removed capabilities, and

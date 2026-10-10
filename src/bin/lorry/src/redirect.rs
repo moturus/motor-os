@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -282,7 +282,7 @@ impl TrustPolicy {
         self.authorize_with_io(
             source,
             destination,
-            stdin.is_terminal(),
+            crate::prompt::interactive(),
             &mut input,
             &mut output,
         )

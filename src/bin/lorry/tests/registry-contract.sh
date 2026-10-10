@@ -103,6 +103,19 @@ if (cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
 fi
 cmp "$PROJECT/Cargo.lock" "$WORK/original.lock"
 [ ! -e "$PROJECT/.lorry/dependencies-v2.toml" ] || fail "declined machine review wrote admission"
+# A program reading machine messages cannot answer a prompt, so a terminal on
+# stdin changes nothing: no text prompt joins the JSON, and nothing is read.
+if script -qec "cd '$PROJECT' && HOME='$HOME_DIR' RUSTC='$RUSTC' '$LORRY' -q --lorry-messages vendor 2>'$WORK/terminal.jsonl'" \
+    /dev/null </dev/null >/dev/null; then
+    fail "machine review on a terminal approved without confirmation"
+fi
+if grep -v '^{' "$WORK/terminal.jsonl"; then
+    fail "machine review on a terminal wrote text among its JSON messages"
+fi
+grep -F 'no interactive terminal' "$WORK/terminal.jsonl" >/dev/null ||
+    fail "machine review on a terminal did not refuse for lack of an interactive terminal"
+cmp "$PROJECT/Cargo.lock" "$WORK/original.lock"
+[ ! -e "$PROJECT/.lorry/dependencies-v2.toml" ] || fail "machine review on a terminal wrote admission"
 (cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
     "$LORRY" -q --lorry-messages vendor --accept-all) >"$WORK/machine.out" 2>"$WORK/machine.jsonl"
 [ ! -s "$WORK/machine.out" ] || fail "vendor wrote machine messages to stdout"

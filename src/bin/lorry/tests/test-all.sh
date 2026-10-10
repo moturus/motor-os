@@ -43,8 +43,10 @@ esac
 if [ "${LORRY_TEST_BUDGET_ACTIVE:-0}" -eq 0 ]; then
     start="$SECONDS"
     set +e
+    # Nothing in the suite answers a prompt, so no command gets a terminal:
+    # each behaves the same however the suite was started.
     LORRY_TEST_BUDGET_ACTIVE=1 timeout --foreground "$BUDGET_SECONDS" \
-        "$0" "${NATIVE_ARGUMENTS[@]}"
+        "$0" "${NATIVE_ARGUMENTS[@]}" </dev/null
     status="$?"
     set -e
     elapsed=$((SECONDS - start))
