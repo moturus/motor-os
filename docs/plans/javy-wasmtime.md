@@ -749,7 +749,7 @@ confirms or refines them. No latency target is inferred from one run.
 
 ### Milestone 1 close-out: Javy/Wasmi remainder
 
-Status 2026-10-09: 1g–1l are done; 1f remains. All fork commits are
+Status 2026-10-09: 1f–1l are done, which closes milestone 1. All fork commits are
 published (Javy `3a04d39`, Wasmtime `a6b85b1cb`, each ending with the
 moto-rt 0.17.7 lock). The add-ons built from them with toolchain
 `dev.2-abb676f7` passed the matrix under QEMU and Cloud Hypervisor: four
@@ -779,7 +779,7 @@ into `src/tests/javy-smoke`; its build script already assembles WAT fixtures
 from `fixtures/` with the `wat` build dependency, so hand-written modules need
 no new dependency.
 
-1. **1f — retained plugin and exhaustion matrix.** Owner rulings 2026-10-09:
+1. **1f — retained plugin and exhaustion matrix (done 2026-10-09).** Owner rulings 2026-10-09:
    real plugins install under `/devtools/javy/plugins/` (only the default
    today); test plugins are part of no image and live under `/user/tmp` during
    tests, uploaded by `test-wasm.sh` like the other test inputs. The custom
@@ -797,6 +797,22 @@ no new dependency.
    deterministic output use digest-pinned test plugins uploaded to `/user/tmp`.
    Expected refusals are recorded separately from the zero-delta rule. Output:
    tree tests, evidence at 256/224 on both images.
+   Result: `javy-smoke` runs 71 commands per boot (75 with the identity
+   checks). One memory grows to the 96 MiB limit with zeroed pages and a
+   refused further `memory.grow`, and a 1,537-page memory is refused at
+   instantiation. With the driver holding all usable memory but 48 MiB, the
+   runner faulting in its 96 MiB is killed (status -1) with exactly one user
+   admission refusal, recorded as expected; afterwards the full 96 MiB faults
+   in again, and used memory is back within 1.2 MiB of before (the suite
+   allows 8 MiB). The two plugins each initialize twice to identical bytes
+   (7.3 and 7.6 s); p1 reports its option schema and compiles deterministically
+   a program that uses `gc()`, `WeakRef`, `atob`, `DOMException`, the
+   string-kind hook and `performance`, and the p2 program checks its globals.
+   Sampled plugin peaks are 193/183 MiB at 256/224 MiB. Both matrices pass
+   (four boots each, 71 + 93 commands, four expected refusals, 458 s under
+   QEMU and 461 s under Cloud Hypervisor, up from about 295 s), and so does
+   `full-test-dev.sh --release`, whose matrix with the identity checks now
+   takes about 490 s of `test-wasm.sh`'s 600 s bound.
 2. **1g — byte identity (done 2026-10-09).** Rule, set by the owner's choice
    of a toolchain fix: Motor output equals upstream Linux Javy 9.1.0
    (digest-pinned release, same explicit plugin, `-C deterministic`) byte for
