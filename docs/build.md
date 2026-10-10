@@ -40,6 +40,8 @@ ripgrep/ helix/ sed/ lua-<version>/
                  sources of the userspace add-ons, built last
 javy/ wasmi/ wasmtime/ target-lexicon/ tokio/ mio/
                  published Motor branches for the Javy/Wasmi and Wasmtime add-ons
+wasi-sdk-24.0-x86_64-linux/
+                 pinned wasi-sdk for the QuickJS code of the Javy test plugins
 ```
 
 Re-running `src/build-motor-os.sh` validates and reuses a complete matching
@@ -73,9 +75,10 @@ The add-ons follow published `moturus` branches and record resolved revisions,
 the selected assembly, native library content, and input digests in
 `/devtools/javy/sources.txt` and `/devtools/wasmtime/sources.txt`. Their test
 inputs are staged outside the images, in the assembly's `tests/javy` and
-`tests/wasmtime`, and uploaded by the tests; the Wasmtime fixtures are built
-with a pinned upstream Rust that has the `wasm32-wasip1`/`wasm32-wasip2`
-targets. Build-time downloads are
+`tests/wasmtime`, and uploaded by the tests; the Wasmtime fixtures and two
+custom Javy plugins are built with a pinned upstream Rust that has the
+`wasm32-wasip1`/`wasm32-wasip2` targets, the plugins' QuickJS code with the
+pinned wasi-sdk. Build-time downloads are
 digest-checked; the installed-tool tests require no Internet access:
 
 ```sh
@@ -84,8 +87,9 @@ src/tests/test-wasm.sh
 ```
 
 These Rust checks run both release images at 256 and 224 MiB: Javy static and
-dynamic compilation, TypeScript, plugin configuration, Wasmi execution, errors,
-fuel and permission refusals, and `wasmtime-rt` lifecycle, limits, artifact
+dynamic compilation, TypeScript, default and custom plugins, Wasmi execution,
+memory limits and a deliberately refused page fault, errors, fuel and
+permission refusals, and `wasmtime-rt` lifecycle, limits, artifact
 refusals, TypeScript and WASI p2 sockets. `src/tests/full-test-dev.sh --release`
 prepares and runs this entire matrix; debug suites skip it.
 Engine regressions remain in the owning forks. Upstream Brotli is used; compressed

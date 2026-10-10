@@ -44,10 +44,15 @@ wasm_source_manifest() (
 )
 
 javy_source_manifest() {
+	local plugins
+	mapfile -t plugins < <(cd "$MOTOR" && git ls-files --cached --others --exclude-standard \
+		src/tests/javy-smoke/plugins | LC_ALL=C sort)
 	wasm_source_manifest "${JAVY_SOURCES[*]}" src/build-javy.sh \
-		src/tests/javy-smoke/fixtures/typescript-workload.js src/tests/javy-smoke/fixtures/hello.js
-	printf 'plugin=%s\ntypescript=%s\njavy-linux=%s\n' "$JAVY_PLUGIN_SHA" "$JAVY_TYPESCRIPT_SHA" \
-		"$JAVY_LINUX_SHA"
+		src/tests/javy-smoke/fixtures/typescript-workload.js src/tests/javy-smoke/fixtures/hello.js \
+		"${plugins[@]}"
+	printf 'guest-toolchain=%s\n' "$(RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" rustc --version)"
+	printf 'plugin=%s\ntypescript=%s\njavy-linux=%s\nwasi-sdk=%s\n' "$JAVY_PLUGIN_SHA" \
+		"$JAVY_TYPESCRIPT_SHA" "$JAVY_LINUX_SHA" "$WASI_SDK_SHA"
 }
 
 # Binaryen's C++ units and fat-LTO links are memory-hungry: allow 1.5 GiB per
@@ -78,6 +83,23 @@ javy_linux_reference() {
 	"$inputs/javy-linux" build "$tests/typescript-workload.js" -C plugin="$inputs/plugin.wasm" \
 		-C deterministic -C source=compressed -o "$out/typescript-compressed.wasm"
 	(cd "$out" && sha256sum hello-*.wasm typescript-compressed.wasm) > "$tests/linux-reference.txt"
+}
+
+# javy-smoke's custom plugins, raw: the suite initializes them on Motor.
+build_javy_test_plugins() {
+	local tests="$1" build="$ASSEMBLY_BUILD_ROOT/javy-plugins"
+	[ -d "${WASI_SDK:-}" ] || die "the Javy test plugins need wasi-sdk"
+	(
+		cd "$MOTOR/src/tests/javy-smoke/plugins"
+		export RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" WASI_SDK
+		cargo fetch --locked
+		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build" cargo build --locked --release \
+			-p javy-smoke-plugin-p1 --target wasm32-wasip1
+		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build" cargo build --locked --release \
+			-p javy-smoke-plugin-p2 --target wasm32-wasip2
+	)
+	install -m 644 "$build/wasm32-wasip1/release/javy_smoke_plugin_p1.wasm" "$tests/plugin-p1.wasm"
+	install -m 644 "$build/wasm32-wasip2/release/javy_smoke_plugin_p2.wasm" "$tests/plugin-p2.wasm"
 }
 
 build_javy() {
@@ -118,8 +140,9 @@ build_javy() {
 	tar -xOf "$inputs/typescript.tgz" package/ThirdPartyNoticeText.txt \
 		> "$JAVY_TESTS/typescript-NOTICES.txt"
 	javy_linux_reference "$inputs" "$JAVY_TESTS"
+	build_javy_test_plugins "$JAVY_TESTS"
 	(cd "$JAVY_TESTS" && sha256sum typescript-workload.js typescript-LICENSE.txt \
-		typescript-NOTICES.txt linux-reference.txt > SHA256SUMS)
+		typescript-NOTICES.txt linux-reference.txt plugin-p1.wasm plugin-p2.wasm > SHA256SUMS)
 }
 
 build_javy_addon() {

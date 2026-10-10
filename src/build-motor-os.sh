@@ -155,9 +155,13 @@ SED_BRANCH=main
 CLANG_MAJOR=""                      # detected after the host toolchain is built
 
 HOST=x86_64-unknown-linux-gnu
-# Guest WebAssembly fixtures of the wasm add-ons are built with this pinned
+# Guest WebAssembly test inputs of the wasm add-ons are built with this pinned
 # upstream Rust; the Motor toolchain itself carries no wasm32 targets.
 WASM_GUEST_TOOLCHAIN=1.99.0
+# The QuickJS C code of javy-smoke's test plugins needs wasi-sdk: the release
+# rquickjs-sys would otherwise download unchecked.
+WASI_SDK_VERSION=24.0
+WASI_SDK_SHA=c6c38aab56e5de88adf6c1ebc9c3ae8da72f88ec2b656fb024eda8d4167a0bc5
 TARGET=x86_64-unknown-motor
 MAKE_LOG="$MOTORH/build-motor-os-make.log"
 
@@ -873,9 +877,25 @@ ensure_addon() {
 }
 
 ensure_wasm_guest_toolchain() {
-	log "providing Rust $WASM_GUEST_TOOLCHAIN with wasm32-wasip1 and wasm32-wasip2 for wasm fixtures"
+	log "providing Rust $WASM_GUEST_TOOLCHAIN with wasm32-wasip1 and wasm32-wasip2 for wasm test inputs"
 	rustup toolchain install "$WASM_GUEST_TOOLCHAIN" --profile minimal --no-self-update \
 		--target wasm32-wasip1 --target wasm32-wasip2
+}
+
+ensure_wasi_sdk() {
+	local name="wasi-sdk-$WASI_SDK_VERSION-x86_64-linux"
+	WASI_SDK="$MOTORH/$name"
+	[ ! -d "$WASI_SDK" ] || return 0
+	log "fetching wasi-sdk $WASI_SDK_VERSION for javy-smoke's test plugins"
+	local archive="$MOTORH/$name.tar.gz.part"
+	curl --fail --location -o "$archive" \
+		"https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%.*}/$name.tar.gz"
+	printf '%s  %s\n' "$WASI_SDK_SHA" "$archive" | sha256sum -c -
+	rm -rf "$WASI_SDK.part"
+	mkdir "$WASI_SDK.part"
+	tar -xzf "$archive" -C "$WASI_SDK.part" --strip-components=1
+	rm "$archive"
+	mv "$WASI_SDK.part" "$WASI_SDK"
 }
 
 build_addons() {
@@ -890,8 +910,9 @@ build_addons() {
 	update_addon_source sed "$SED" "$SED_REPOSITORY" "$SED_BRANCH"
 	ensure_addon sed "$(git -C "$SED" rev-parse HEAD)" \
 		"$SED_IMG" devtools/bin/sed build_sed
-	build_javy_addon
 	ensure_wasm_guest_toolchain
+	ensure_wasi_sdk
+	build_javy_addon
 	build_wasmtime_addon
 }
 
@@ -953,11 +974,12 @@ main() {
 		ASSEMBLY_IMAGE_ROOT="$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)"
 		ASSEMBLY_ROOT="${ASSEMBLY_IMAGE_ROOT%/images}"
 		ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
-		[ "$JAVY_ONLY" = false ] || build_javy_addon
-		if [ "$WASMTIME_ONLY" = true ]; then
-			ensure_wasm_guest_toolchain
-			build_wasmtime_addon
+		ensure_wasm_guest_toolchain
+		if [ "$JAVY_ONLY" = true ]; then
+			ensure_wasi_sdk
+			build_javy_addon
 		fi
+		[ "$WASMTIME_ONLY" = false ] || build_wasmtime_addon
 		return
 	fi
 	log "complete Motor OS build starting"

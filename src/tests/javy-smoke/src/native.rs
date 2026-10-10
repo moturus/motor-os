@@ -5,6 +5,7 @@ pub(super) use wasm_smoke_suite::{Result, Suite};
 mod backing;
 mod behavior;
 mod identity;
+mod plugins;
 mod runner;
 
 const PLUGIN: &str = "/devtools/javy/plugins/default.wasm";
@@ -118,6 +119,7 @@ pub fn run(linux_identity: bool) -> Result<()> {
         1,
     )?;
     behavior::run(&mut suite)?;
+    plugins::run(&mut suite)?;
     suite.compile(
         "typescript",
         &format!("{TEST_INPUTS}/typescript-workload.js"),

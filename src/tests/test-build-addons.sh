@@ -192,6 +192,7 @@ for selection in managed-probe authoring-probe; do
 		sha256sum() { cat > /dev/null; }
 		build_wasmtime_fixtures() { printf 'fixtures %s\n' "$RUSTUP_TOOLCHAIN" >> "$JAVY_TOOLCHAIN_LOG"; }
 		javy_linux_reference() { :; }
+		build_javy_test_plugins() { :; }
 		build_javy
 		build_wasmtime
 	) < /dev/null > /dev/null 2>&1 || fail "a wasm add-on stage failed with selection $selection"
@@ -212,8 +213,19 @@ case "$(declare -f build_wasmtime_fixtures)" in
 	*) fail "the Wasmtime fixtures are not built with the expected toolchains" ;;
 esac
 case "$(declare -f build_addons)" in
-	*'ensure_wasm_guest_toolchain'*'build_wasmtime_addon'*) ;;
-	*) fail "the guest toolchain is not provided before the Wasmtime add-on" ;;
+	*'ensure_wasm_guest_toolchain'*'ensure_wasi_sdk'*'build_javy_addon'*'build_wasmtime_addon'*) ;;
+	*) fail "the guest toolchain and wasi-sdk are not provided before the wasm add-ons" ;;
+esac
+# javy-smoke's test plugins are guests too, and their QuickJS C code is built
+# with the pinned wasi-sdk, checked before it is unpacked.
+case "$(declare -f build_javy_test_plugins)" in
+	*'RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" WASI_SDK'*'--target wasm32-wasip1'*\
+*'--target wasm32-wasip2'*) ;;
+	*) fail "the Javy test plugins are not built with the guest toolchain and wasi-sdk" ;;
+esac
+case "$(declare -f ensure_wasi_sdk)" in
+	*'"$WASI_SDK_SHA"'*'sha256sum -c'*'tar -xzf'*) ;;
+	*) fail "wasi-sdk is not checked before it is unpacked" ;;
 esac
 javy_manifest() (
 	RUSTUP_TOOLCHAIN="$1"
@@ -236,6 +248,11 @@ esac
 case "$managed_manifest" in
 	*'fixtures/hello.js'*"javy-linux=$JAVY_LINUX_SHA"*) ;;
 	*) fail "the Javy manifest does not name the Linux reference inputs" ;;
+esac
+case "$managed_manifest" in
+	*'plugins/p1/src/lib.rs'*'guest-toolchain=rustc for '"$WASM_GUEST_TOOLCHAIN"*\
+*"wasi-sdk=$WASI_SDK_SHA"*) ;;
+	*) fail "the Javy manifest does not name the test plugin inputs" ;;
 esac
 
 echo "test-build-addons PASS"

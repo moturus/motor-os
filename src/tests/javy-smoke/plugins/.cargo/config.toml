@@ -1,0 +1,6 @@
+# Javy's JSON support needs SIMD, as in upstream Javy's own configuration.
+[target.wasm32-wasip1]
+rustflags = ["-C", "target-feature=+simd128"]
+
+[target.wasm32-wasip2]
+rustflags = ["-C", "target-feature=+simd128"]

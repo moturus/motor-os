@@ -1,0 +1,12 @@
+[package]
+name = "javy-smoke-plugin-p1"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+
+[dependencies]
+javy-plugin-api.workspace = true
