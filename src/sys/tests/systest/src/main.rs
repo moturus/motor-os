@@ -58,6 +58,7 @@ mod sysbox_tail;
 mod sysbox_wc;
 mod sysbox_which;
 mod tcp;
+mod temp_dir;
 mod threads;
 mod tls;
 mod udp;
@@ -1214,6 +1215,9 @@ fn main() {
     if rush_caps::is_print_caps_child(&args) {
         rush_caps::run_print_caps_child(&args);
     }
+    if temp_dir::is_print_tmpdir_child(&args) {
+        temp_dir::run_print_tmpdir_child();
+    }
     if args.len() == 2 && args[1] == "rush-caps-precedence" {
         rush_caps::test_detach_grant_precedence();
         return;
@@ -1707,6 +1711,7 @@ fn main() {
     tls::test_tls_set_no_dtor();
     tls::test_tls_current_on_drop();
     test_caps();
+    temp_dir::test_child_temp_dir();
     test_liveness();
 
     spawn_wait_kill::test_pid_invariants();

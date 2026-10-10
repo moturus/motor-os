@@ -744,7 +744,7 @@ rush_path="$(printf 'printenv PATH\nexit\n' |
 printf '%s\n' "$rush_path" | grep -q "PATH=$EXPECTED_PATH$" ||
   fail "interactive Rush PATH does not match $EXPECTED_PATH: '$rush_path'"
 [ "$(vm_ssh_stdout "/system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/user/tmp" ] ||
-  fail "Rush did not supply the user TMPDIR fallback"
+  fail "an Interactive shell did not get /user/tmp as its TMPDIR"
 [ "$(vm_ssh_stdout "TMPDIR=/chosen/tmp /system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/chosen/tmp" ] ||
   fail "Rush replaced an explicit TMPDIR"
 for service in russhd strobe sys-init sys-tty dns-resolver; do

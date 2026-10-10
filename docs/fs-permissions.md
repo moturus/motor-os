@@ -251,6 +251,12 @@ every component grants None traversal; `/user/cfg` would not be suitable.
 
 ## Runtime behavior and remaining limits
 
+- Each role has its own temporary directory: `/system/tmp`, `/user/tmp`, and
+  `/none/tmp`. When rt.vdso starts a process, a child without `TMPDIR` gets
+  its role's directory. A `TMPDIR` the parent set is kept, even for a
+  lower-role child. Because std hands rt.vdso the merged environment, a value
+  equal to the parent's own counts as inherited, and a lower-role child gets
+  its own directory instead.
 - Runtime-created regular files start `rw-` for their creator, `rwx` for
   higher roles, and `r--` for lower roles. Directories start `rwx` for the
   creator and higher roles and `r-x` for lower roles. Producers finalize

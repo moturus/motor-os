@@ -546,6 +546,36 @@ unsafe fn create_remote_args(
     Ok(remote)
 }
 
+/// Each role's own temporary directory (docs/fs-permissions.md).
+fn role_temp_dir(role: moto_sys::caps::ProcessRole) -> &'static str {
+    match role {
+        moto_sys::caps::ProcessRole::System => "/system/tmp",
+        moto_sys::caps::ProcessRole::Interactive => "/user/tmp",
+        moto_sys::caps::ProcessRole::None => "/none/tmp",
+    }
+}
+
+/// A child's `TMPDIR` follows its role. A child without one gets its role's
+/// directory. A `TMPDIR` the parent set is kept, even for a lower role; std
+/// merges inherited and explicit values, so a value equal to the parent's own
+/// counts as inherited and, for a lower-role child, becomes the child's
+/// directory.
+fn set_child_temp_dir(env: &mut Vec<(&[u8], &[u8])>, child_caps: u64) {
+    let child = moto_sys::caps::ProcessRole::from_caps(child_caps);
+    let parent =
+        moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities);
+    let directory = role_temp_dir(child).as_bytes();
+    match env.iter_mut().find(|(key, _)| *key == b"TMPDIR") {
+        None => env.push((b"TMPDIR", directory)),
+        Some((_, value)) => {
+            if child < parent && EnvRt::get("TMPDIR").as_deref().map(str::as_bytes) == Some(*value)
+            {
+                *value = directory;
+            }
+        }
+    }
+}
+
 unsafe fn create_remote_env(
     address_space: moto_sys::SysHandle,
     env: Vec<(&[u8], &[u8])>,
@@ -705,6 +735,8 @@ fn run_elf(
             }
         }
     }
+
+    set_child_temp_dir(&mut env, caps);
 
     // Create the process from the address space.
     let proc_url = alloc::format!(
