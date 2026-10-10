@@ -229,7 +229,9 @@ pub fn parse_response(path: &Path, expected_name: &str, bytes: &[u8]) -> Result<
                 continue;
             }
         };
-        if record.name != expected_name {
+        // One index file serves every spelling of a name; matching the
+        // requested spelling is the caller's, as in Cargo.
+        if !record.name.eq_ignore_ascii_case(expected_name) {
             return Err(invalid(
                 path,
                 format!(
@@ -791,6 +793,11 @@ mod tests {
                 .to_string()
                 .contains("contains package `demo`")
         );
+        // The file of `demo` also answers `Demo`; its records keep their case.
+        let records = parse_response(path, "Demo", basic("").as_bytes())
+            .unwrap()
+            .records;
+        assert_eq!(records[0].name, "demo");
         let oversized = vec![b' '; DOCUMENT_LIMITS.max_bytes + 1];
         assert!(
             parse_response(path, "demo", &oversized)

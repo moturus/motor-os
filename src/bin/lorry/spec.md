@@ -748,6 +748,9 @@ ask.
   disabled.
 - Crates.io's sparse HTTPS index is the only supported registry. Its SHA-256 is
   authoritative, and Lorry preserves Cargo's canonical crates.io lock source.
+- Like Cargo, Lorry finds a package's index file by its lowercase name, but
+  matches, downloads, and locks it by its name as the index spells it, such as
+  `Inflector`. A dependency spelled in another case does not match.
 - Like Cargo, Lorry ignores unknown index keys and reads an unknown dependency
   kind as normal. It skips an index entry with a schema version above 2 or a
   `pubtime` that Cargo cannot read.

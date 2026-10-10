@@ -325,11 +325,13 @@ impl<'a> Acquisition<'a> {
         requirement: &semver::VersionReq,
         catalog: &mut Catalog,
     ) -> Result<()> {
-        let expected = name.to_ascii_lowercase();
+        // As in Cargo, the index file is found by the lowercase name, but a
+        // package matches only as spelled: `Inflector`, not `inflector`.
+        let index_name = name.to_ascii_lowercase();
         for record in self
             .records
             .iter()
-            .filter(|((name, _), _)| name == &expected)
+            .filter(|((record_name, _), _)| record_name == name)
             .map(|(_, record)| record.clone())
             .collect::<Vec<_>>()
         {
@@ -337,14 +339,14 @@ impl<'a> Acquisition<'a> {
                 catalog.insert(record)?;
             }
         }
-        if self.fetched.contains(&expected)
-            || catalog.contains_crates_io_candidate(&expected, requirement)
+        if self.fetched.contains(&index_name)
+            || catalog.contains_crates_io_candidate(name, requirement)
         {
             return Ok(());
         }
-        let url = sparse_url(&expected)?;
+        let url = sparse_url(name)?;
         self.progress
-            .report(format_args!("Updating crates.io index for `{expected}`"))?;
+            .report(format_args!("Updating crates.io index for `{name}`"))?;
         let state = self.state()?;
         let download = state.client.download(
             &url,
@@ -352,7 +354,7 @@ impl<'a> Acquisition<'a> {
             state.transaction.path(),
             sparse::MAX_RESPONSE_BYTES,
         )?;
-        let response = sparse::load_response(download.path(), &expected)?;
+        let response = sparse::load_response(download.path(), name)?;
         if self.verbose {
             for warning in &response.warnings {
                 eprintln!("warning: {warning}");
@@ -372,7 +374,7 @@ impl<'a> Acquisition<'a> {
                 self.records.insert(key, record);
             }
         }
-        self.fetched.insert(expected);
+        self.fetched.insert(index_name);
         Ok(())
     }
 

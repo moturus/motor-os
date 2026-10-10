@@ -72,8 +72,10 @@ impl Client {
     }
 }
 
+/// The index file of `name`. Its path is lowercase; the records in it keep the
+/// name's case.
 pub fn sparse_url(name: &str) -> Result<String> {
-    let name = canonical_name(name)?;
+    let name = valid_name(name)?.to_ascii_lowercase();
     let path = match name.len() {
         1 => format!("1/{name}"),
         2 => format!("2/{name}"),
@@ -83,20 +85,22 @@ pub fn sparse_url(name: &str) -> Result<String> {
     Ok(format!("https://index.crates.io/{path}"))
 }
 
+/// The download of one package version. Downloads are case-sensitive, so the
+/// name is spelled as the index spells it, as Cargo does.
 pub fn archive_url(name: &str, version: &Version) -> Result<String> {
-    let name = canonical_name(name)?;
+    let name = valid_name(name)?;
     Ok(format!(
         "https://static.crates.io/crates/{name}/{name}-{version}.crate"
     ))
 }
 
-fn canonical_name(name: &str) -> Result<String> {
+fn valid_name(name: &str) -> Result<&str> {
     if !crate::manifest::valid_package_name(name) {
         return Err(Error::failure(format!(
             "cannot construct a crates.io URL for invalid package name `{name}`"
         )));
     }
-    Ok(name.to_ascii_lowercase())
+    Ok(name)
 }
 
 #[cfg(target_os = "motor")]
@@ -1171,7 +1175,7 @@ mod tests {
         );
         assert_eq!(
             archive_url("Serde", &Version::parse("1.2.3-alpha.1").unwrap()).unwrap(),
-            "https://static.crates.io/crates/serde/serde-1.2.3-alpha.1.crate"
+            "https://static.crates.io/crates/Serde/Serde-1.2.3-alpha.1.crate"
         );
         assert!(sparse_url("../bad").is_err());
         assert!(sparse_url("123").is_err());
