@@ -2,6 +2,7 @@ use std::fs;
 
 pub(super) use wasm_smoke_suite::{Result, Suite};
 
+mod backing;
 mod behavior;
 mod identity;
 mod runner;
@@ -146,6 +147,7 @@ pub fn run(linux_identity: bool) -> Result<()> {
         )?;
     }
     runner::run(&mut suite)?;
+    backing::run(&mut suite)?;
     fs::write(suite.root.join("invalid.js"), "function { invalid")?;
     suite.command(
         "syntax-error",

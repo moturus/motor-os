@@ -1,6 +1,7 @@
 //! Harness shared by the installed wasm tool checks on Motor: each case runs one
 //! rush command with a deadline and an expected exit status while sampling
-//! whole-VM memory, and a suite fails if any memory admission was refused.
+//! whole-VM memory, and a suite fails if any memory admission was refused
+//! outside its deliberate exhaustion cases.
 #![cfg(target_os = "motor")]
 
 use std::fs;
@@ -14,12 +15,15 @@ use moto_sys::stats::MemoryStats;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const DEADLINE: Duration = Duration::from_secs(120);
+/// The status of a process the kernel killed.
+const KILLED: i32 = -1;
 
 pub struct Suite {
     name: &'static str,
     pub root: PathBuf,
     cases: usize,
     refusals: u64,
+    expected_refusals: u64,
 }
 
 impl Suite {
@@ -37,6 +41,7 @@ impl Suite {
             root,
             cases: 0,
             refusals: admission_refusals()?,
+            expected_refusals: 0,
         })
     }
 
@@ -134,6 +139,29 @@ impl Suite {
         Ok(())
     }
 
+    /// Runs `command`, which the kernel must kill when one of its page faults
+    /// is refused, while this driver holds all usable memory but `free` bytes.
+    /// That single refusal is expected; any other still fails the suite.
+    pub fn refused_fault(&mut self, label: &str, command: &str, free: u64) -> Result<()> {
+        let stats = MemoryStats::get().map_err(|e| format!("memory stats: {e:?}"))?;
+        let hold = (stats.available - stats.used()).saturating_sub(free) as usize;
+        let mut held = Vec::new();
+        held.try_reserve_exact(hold)?;
+        held.resize(hold, 1_u8);
+        let before = admission_refusals()?;
+        let result = self.command(label, command, KILLED);
+        drop(held);
+        result?;
+        let refused = admission_refusals()? - before;
+        if refused != 1 {
+            return Err(format!("{label}: {refused} admission refusals, not one").into());
+        }
+        println!("{label}: held={hold} expected_admission_refusals=1");
+        self.refusals += 1;
+        self.expected_refusals += 1;
+        Ok(())
+    }
+
     pub fn same_bytes(&self, first: &str, second: &str) -> Result<()> {
         let mut first = fs::File::open(self.root.join(first))?;
         let mut second = fs::File::open(self.root.join(second))?;
@@ -162,11 +190,18 @@ impl Suite {
         }
         fs::remove_dir_all(&self.root)?;
         println!(
-            "{}: {} commands PASS; admission_refusal_delta=0",
-            self.name, self.cases
+            "{}: {} commands PASS; admission_refusal_delta=0 expected_refusals={}",
+            self.name, self.cases, self.expected_refusals
         );
         Ok(())
     }
+}
+
+/// Whole-VM used memory, as the cases sample it.
+pub fn used_memory() -> Result<u64> {
+    Ok(MemoryStats::get()
+        .map_err(|e| format!("memory stats: {e:?}"))?
+        .used())
 }
 
 /// Directories are created readable but not writable for lower roles.
