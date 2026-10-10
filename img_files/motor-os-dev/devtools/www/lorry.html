@@ -587,11 +587,12 @@ operational failures exit 101; an interrupted run exits 130.</p>
 <div class="table-wrap">
 <table>
   <tr><th>On Motor OS</th><th>Purpose</th></tr>
-  <tr><td><code>/user/cfg/lorry.toml</code></td><td>Your Lorry configuration: the Cargo compatibility version (1.99), the user repository, policy limits, and the reviewed grants for build scripts and procedural macros. Rules for one workspace go in its <code>[workspaces."/path"]</code> table. The curl program, CA bundle, and native C and C++ tools are built in.</td></tr>
+  <tr><td><code>/user/cfg/lorry.toml</code></td><td>Your Lorry configuration: the Cargo compatibility version (1.99), policy limits, and the reviewed grants for build scripts and procedural macros. Rules for one workspace go in its <code>[workspaces."/path"]</code> table. The curl program, CA bundle, and native C and C++ tools are built in.</td></tr>
   <tr><td><code>/user/cfg/lorry-workspaces/</code></td><td>Lorry's record of your decisions for each workspace: <code>vendor --accept-all</code>, the review you approved, and the build-time code and repository Cargo files you approved. Delete a file to forget them.</td></tr>
-  <tr><td><code>/devtools/lorry/vendor</code></td><td>The user repository: content-addressed, immutable objects under <code>objects/crates-io/sha256/</code>, a <code>.staging</code> area, and a <code>repository.toml</code>. Ships empty.</td></tr>
-  <tr><td><code>/devtools/lorry/cache</code></td><td>Compiled dependency units shared between projects, read-only views of dependency sources, and saved answers from rustc.</td></tr>
+  <tr><td><code>/devtools/lorry/user/vendor</code></td><td>The user repository: content-addressed, immutable objects under <code>objects/crates-io/sha256/</code>, a <code>.staging</code> area, and a <code>repository.toml</code>. Ships empty.</td></tr>
+  <tr><td><code>/devtools/lorry/user/cache</code></td><td>Compiled dependency units shared between projects, read-only views of dependency sources, and saved answers from rustc.</td></tr>
   <tr><td><code>/user/cfg/lorry-redirect-sites.toml</code></td><td>The list of sites whose HTTP redirects have been allowed or denied.</td></tr>
+  <tr><td><code>/none/cfg</code>, <code>/devtools/lorry/none</code></td><td>The same files for Lorry running as None, which cannot read Interactive's. Lorry refuses to run as System.</td></tr>
   <tr><td><code>PROJECT/.lorry/dependencies-v2.toml</code></td><td>The project's admission record: which packages, at which checksums, were reviewed for which host and target pairs. Committed with the project, never edited by hand.</td></tr>
   <tr><td><code>PROJECT/.lorry/vendor/git/</code></td><td>Verified snapshots of the project's Git dependencies.</td></tr>
   <tr><td><code>PROJECT/target/lorry/</code></td><td>Build output, in Cargo-shaped <code>debug</code> and <code>release</code> directories, plus incremental state for workspace members and path dependencies.</td></tr>

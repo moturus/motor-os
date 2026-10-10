@@ -286,7 +286,7 @@ root compilation, freshness validation, and artifact publication.
   the next command waits for surviving children before changing the tree.
 - `cache clean` requires no current package and removes exactly
   the configured global cache directory. Its default is `$HOME/.cache/lorry`
-  on Linux and `/devtools/lorry/cache` on Motor. An absent cache is success. A
+  on Linux and `/devtools/lorry/<role>/cache` on Motor. An absent cache is success. A
   cache root that is a file or symbolic link is rejected rather than traversed
   or removed.
 - `new PATH` creates Cargo's default edition-2024 binary package template.
@@ -1116,7 +1116,7 @@ resource-limit checks.
 
 A repository's own files never grant trust. Lorry records the user's
 decisions for one workspace in the user's configuration directory:
-`/user/cfg/lorry-workspaces/` on Motor and `$HOME/.config/lorry/workspaces/`
+`<role cfg>/lorry-workspaces/` on Motor and `$HOME/.config/lorry/workspaces/`
 on Linux. The file is named by the first 32 hex digits of the SHA-256 of the
 canonical workspace root and names that root; a file that names another root
 is an error. It is written under a lock and replaced atomically, and deleting
@@ -1155,9 +1155,12 @@ commits the visible graph.
 Every present `lorry.toml` declares `config-version = 1`; unknown keys are
 errors. Paths are absolute and are canonicalized before use.
 
-Motor merges:
+Motor has one configuration directory per process role: `/user/cfg` for
+Interactive and `/none/cfg` for None, written `<role cfg>` below. Each role also
+has its own state directory, `/devtools/lorry/user` or `/devtools/lorry/none`,
+written `/devtools/lorry/<role>`. Lorry refuses to run as System. Motor merges:
 
-1. `/user/cfg/lorry.toml`;
+1. `<role cfg>/lorry.toml`;
 2. the workspace root's own `lorry.toml`.
 
 On Motor, Lorry's paths and native tools are built in: curl
@@ -1203,14 +1206,15 @@ tools, admission rules/limits, and system constraints.
 
 `cache.directory` is an absolute normalized path owned by system or user
 configuration. It defaults to
-`$HOME/.cache/lorry` on Linux and `/devtools/lorry/cache` on Motor. It must not
+`$HOME/.cache/lorry` on Linux and `/devtools/lorry/<role>/cache` on Motor. It must not
 be a filesystem root or overlap a dependency repository. Lorry creates it on
 the first build that needs cache storage.
 
 Repository roles are layer-owned:
 
 - `repositories.system` is trusted/base-owned and read-only to Lorry;
-- `repositories.user` is user/base-owned and writable;
+- `repositories.user` is user/base-owned and writable; on Motor it defaults to
+  `/devtools/lorry/<role>/vendor`;
 - `repositories.local` belongs to one workspace's table and is writable.
 
 Canonical repository paths must be distinct and non-nesting. Lookup order is
@@ -1481,7 +1485,7 @@ destinations, not redirect approvals. Redirect sites are lowercase hosts plus
 a non-default port; port 443 is omitted. Persistent sorted allow/deny lists
 start empty and are stored outside repository-controlled configuration at
 `$HOME/.config/lorry/redirect-sites.toml` on Linux and
-`/user/cfg/lorry-redirect-sites.toml` on Motor. Conflicting or malformed state
+`<role cfg>/lorry-redirect-sites.toml` on Motor. Conflicting or malformed state
 is an error, and updates lock, merge, and atomically replace the file.
 
 An unknown site requires one of four terminal decisions: allow for this
@@ -1807,7 +1811,7 @@ Lorry stores verified library and procedural-macro outputs plus build-script
 Immutable crates.io and Git units are stored in the
 per-user cache below
 `$HOME/.cache/lorry/v1/units/sha256/` on Linux and
-`/devtools/lorry/cache/v1/units/sha256/` on Motor, unless `cache.directory`
+`/devtools/lorry/<role>/cache/v1/units/sha256/` on Motor, unless `cache.directory`
 selects another root. Mutable path-package units, including selected package
 libraries, are stored in the project below `target/lorry/.cache/v1/units/sha256/`.
 Selected binaries, tests, and incremental state are not unit-cache entries.
@@ -1978,10 +1982,10 @@ Generated launchers require no libc permission entry point.
 ## Image, dependency, and licensing boundary
 
 Lorry's executable does not bootstrap an OS image. Motor's development image
-installs a user configuration for its writable repository and a system
-configuration for network and native-tool paths, limits, and exact
-executable-code grants. It installs an empty writable repository under
-`/devtools/lorry/vendor`, but no dependency objects: a fresh project must run
+installs both roles' configurations with the default policy and limits, and
+exact executable-code grants for Lorry's own dependencies in the Interactive
+one. It installs an empty writable repository per role under
+`/devtools/lorry/<role>/vendor`, but no dependency objects: a fresh project must run
 networked `vendor` before its offline build. Imager inputs, debug/release image
 selection, VM launch, and layout validation remain outside this product
 boundary.

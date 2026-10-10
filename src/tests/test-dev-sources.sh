@@ -191,23 +191,28 @@ for source in "${NATIVE_FIXTURES[@]}"; do
   vm_ssh "[ ! -e /devtools/src/$source ]" ||
     fail "developer image contains test-only source /devtools/src/$source"
 done
-vm_ssh "[ -f /devtools/lorry/vendor/repository.toml ]" ||
-  fail "developer image is missing the writable Lorry repository"
-vm_ssh "[ -d /devtools/lorry/cache ]" ||
-  fail "developer image is missing the Lorry cache directory"
+for role in user none; do
+  vm_ssh "[ -f /devtools/lorry/$role/vendor/repository.toml ]" ||
+    fail "developer image is missing the writable $role Lorry repository"
+  vm_ssh "[ -d /devtools/lorry/$role/cache ]" ||
+    fail "developer image is missing the $role Lorry cache directory"
+  vm_ssh "[ -z \"\$(/system/bin/find /devtools/lorry/$role/vendor/objects -type f)\" ]" ||
+    fail "developer image contains preinstalled $role Lorry dependency objects"
+done
 vm_ssh "[ ! -e /user/cfg/lorry ]" ||
   fail "developer image still contains the old Lorry state directory"
-vm_ssh "[ -z \"\$(/system/bin/find /devtools/lorry/vendor/objects -type f)\" ]" ||
-  fail "developer image contains preinstalled Lorry dependency objects"
 vm_ssh "[ -f /devtools/lorry/readme.txt ]" ||
   fail "developer image is missing /devtools/lorry/readme.txt"
-expect_guest_mode /devtools lorry drwxrwx--- "Lorry state directory"
-expect_guest_mode /devtools/lorry vendor drwxrwx--- "Lorry repository directory"
-expect_guest_mode /devtools/lorry cache drwxrwx--- "Lorry cache directory"
+expect_guest_mode /devtools lorry drwxr-xr-x "Lorry state directory"
+expect_guest_mode /devtools/lorry user drwxrwx--- "Interactive Lorry state"
+expect_guest_mode /devtools/lorry none drwxrwxrwx "None Lorry state"
+expect_guest_mode /devtools/lorry/user vendor drwxrwx--- "Interactive Lorry repository"
+expect_guest_mode /devtools/lorry/user cache drwxrwx--- "Interactive Lorry cache"
 vm_ssh "[ -r /system/cfg/ssl/ca-certificates.crt ]" ||
   fail "developer image is missing the public CA trust bundle"
-vm_ssh "[ -f /user/cfg/lorry.toml ]" ||
-  fail "developer image is missing the writable-repository configuration"
+for config in /user/cfg/lorry.toml /none/cfg/lorry.toml; do
+  vm_ssh "[ -f $config ]" || fail "developer image is missing $config"
+done
 
 cc_version="$(vm_ssh /devtools/bin/cc --version 2>&1)" ||
   fail "native cc --version failed: $cc_version"
@@ -278,10 +283,10 @@ for package in red gears; do
     build-script-build -rwxr-xr-- "Cargo-uplifted $package build scripts"
   vm_ssh "/system/bin/rm -r /devtools/src/motor-os/bin/$package/target"
 done
-vm_ssh "[ -n \"\$(/system/bin/find /devtools/lorry/vendor/objects -type f)\" ]" ||
-  fail "Lorry did not populate /devtools/lorry/vendor"
-vm_ssh "[ -n \"\$(/system/bin/find /devtools/lorry/cache -type f)\" ]" ||
-  fail "Lorry did not populate /devtools/lorry/cache"
+vm_ssh "[ -n \"\$(/system/bin/find /devtools/lorry/user/vendor/objects -type f)\" ]" ||
+  fail "Lorry did not populate /devtools/lorry/user/vendor"
+vm_ssh "[ -n \"\$(/system/bin/find /devtools/lorry/user/cache -type f)\" ]" ||
+  fail "Lorry did not populate /devtools/lorry/user/cache"
 vm_ssh "[ ! -e /user/cfg/lorry ]" ||
   fail "Lorry recreated its old state directory"
 vm_ssh "cd /devtools/src/motor-os/bin/lorry && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||

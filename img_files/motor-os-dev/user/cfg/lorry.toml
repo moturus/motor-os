@@ -4,9 +4,6 @@ cargo-compat-version = "1.99"
 # Lorry's paths and native tools on Motor are built in; settings here
 # replace them. Per-workspace rules go in [workspaces."<root>"] tables.
 
-[repositories]
-user = "/devtools/lorry/vendor"
-
 [policy]
 default = "allow"
 path-roots = []

@@ -1293,7 +1293,7 @@ fn build_inner(
             CompileKind::Target => build.target,
         };
         bundle::Layout::new(&bundle::LayoutOptions {
-            extraction_root: build.config.test.extraction_root(&target.triple),
+            extraction_root: &build.config.test.extraction_root(&target.triple),
             package_name: &member.name,
             package_root: &member.root,
             compiler_identity: bundle_compiler

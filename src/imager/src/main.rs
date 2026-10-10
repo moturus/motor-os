@@ -1018,12 +1018,18 @@ mod tests {
         for path in ["/none/tmp", "/devtools/llvm/cfg"] {
             assert!(config.directories.iter().any(|candidate| candidate == path));
         }
-        for path in [
-            "/devtools/lorry/cache",
-            "/devtools/lorry/vendor",
-            "/devtools/lorry/vendor/.staging",
-        ] {
-            assert!(config.directories.iter().any(|candidate| candidate == path));
+        // Each role has its own Lorry repository and cache.
+        for role in ["user", "none"] {
+            for path in ["cache", "vendor", "vendor/.staging"] {
+                let path = format!("/devtools/lorry/{role}/{path}");
+                assert!(config
+                    .directories
+                    .iter()
+                    .any(|candidate| *candidate == path));
+            }
+        }
+        for path in ["/devtools/lorry/cache", "/devtools/lorry/vendor"] {
+            assert!(!config.directories.iter().any(|candidate| candidate == path));
         }
         assert!(!config
             .directories

@@ -394,7 +394,8 @@ and filenames rather than the output-directory topology.
 `cache.rs` stores only verified library/procedural-macro artifacts and
 build-script results.
 It routes immutable crates.io and Git units to
-`$HOME/.cache/lorry` on Linux or `/devtools/lorry/cache` on Motor by default,
+`$HOME/.cache/lorry` on Linux or the role's `/devtools/lorry/<role>/cache` on
+Motor by default,
 while mutable path units stay in the project's `target/lorry/.cache`.
 `cache.directory` may replace the global root from system or user
 configuration; `config.rs` resolves and validates that root for both package

@@ -43,6 +43,7 @@ mod redirect;
 mod repository;
 mod resolver;
 mod review;
+mod role;
 mod run_record;
 mod sandbox;
 mod source_tree;
@@ -115,7 +116,7 @@ fn command_main() -> i32 {
     let (result, messages) = match Cli::parse(arguments) {
         Ok(cli) => {
             let messages = cli.lorry_messages;
-            (run(cli), messages)
+            (role::refuse_system().and_then(|()| run(cli)), messages)
         }
         Err(error) => (Err(error), requested),
     };

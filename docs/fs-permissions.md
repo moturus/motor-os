@@ -77,7 +77,9 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | `/none/cfg` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role configuration, which None may write |
 | `/none/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role scratch |
 | `/devtools/bin` | `rwxr-xr-x` | `rw-r--r--` | `rwxrwxr-x` | `r-xr-xr-x` | Fixed installed tools and Interactive-editable launcher scripts |
-| `/devtools/lorry` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive-owned Lorry repository and cache, hidden from None |
+| `/devtools/lorry` | `rwxr-xr-x` | `rw-r--r--` | `rwxr-xr-x` | `r-xr-xr-x` | Holds the two role trees below |
+| `/devtools/lorry/user` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive Lorry repository and cache, hidden from None |
+| `/devtools/lorry/none` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role Lorry repository and cache |
 | `/devtools/src` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editable sources and project-local Lorry state |
 
 Before any runtime permission changes, the directory modes have these effects:
@@ -107,8 +109,9 @@ Several installed trees deliberately use the default rule:
   been audited for configuration reads.
 - `/devtools/llvm`, `/devtools/rust`, `/devtools/tests`, and `/devtools/www`
   are installed content. Clang reads its target configuration from
-  `/devtools/llvm/cfg`. `/devtools/lorry` is the private,
-  Interactive-writable repository and cache for the installed Lorry tool.
+  `/devtools/llvm/cfg`. `/devtools/lorry/user` and `/devtools/lorry/none` hold
+  the Interactive and None repositories and caches of the installed Lorry
+  tool; Lorry refuses to run as System.
   Other guest build and test writes belong under `/devtools/src` or the
   role's temporary directory.
 - Development source trees staged in `/devtools/src` are consumed in place;

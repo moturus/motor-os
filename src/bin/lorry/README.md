@@ -178,8 +178,8 @@ registry units do not use incremental compilation.
 
 Compiled crates.io and Git dependencies, including host procedural-macro
 dynamic libraries, are reused from the
-per-user cache at `$HOME/.cache/lorry` on Linux and
-`/devtools/lorry/cache` on Motor. Mutable path-dependency units remain in
+per-user cache at `$HOME/.cache/lorry` on Linux and the role's
+`/devtools/lorry/<role>/cache` on Motor. Mutable path-dependency units remain in
 `target/lorry/.cache`; root artifacts, tests, and incremental state are always
 project-local. The cache is a performance aid, not a source integrity
 authority: ordinary builds trust complete entries atomically published by
@@ -421,8 +421,8 @@ change, but it cannot bypass integrity checks, policy denials, or redirect
 trust.
 
 Lorry remembers your decisions for each workspace in your own configuration
-(`/user/cfg/lorry-workspaces/` on Motor OS, `~/.config/lorry/workspaces/` on
-Linux); a cloned repository cannot write them. After `vendor --accept-all`,
+(`/user/cfg/lorry-workspaces/` on Motor OS, `/none/cfg/lorry-workspaces/` as
+None, `~/.config/lorry/workspaces/` on Linux); a cloned repository cannot write them. After `vendor --accept-all`,
 the workspace's build scripts and procedural macros run as they do with Cargo,
 build scripts get every configured native tool, and later reviews there are
 approved without asking. Without it, an interactive review also lists build
@@ -577,9 +577,11 @@ Rust compiler wrappers are unsupported.
 Normal package authors do not need a project `lorry.toml`. Installation
 configuration supplies repository locations, compiler policy, network tools,
 test extraction roots, the global cache location, and approved native tools.
-Linux reads the user Lorry configuration below `$HOME/.config/lorry`; Motor OS
-reads `/user/cfg/lorry.toml`, and its curl, CA bundle, C and C++ compilers,
-and archiver are built in.
+Linux reads the user Lorry configuration below `$HOME/.config/lorry`. On Motor
+OS each role has its own state: Interactive Lorry reads `/user/cfg/lorry.toml`
+and keeps its repository and cache in `/devtools/lorry/user`; None-role Lorry
+uses `/none/cfg/lorry.toml` and `/devtools/lorry/none`. Lorry refuses to run as
+System. Its curl, CA bundle, C and C++ compilers, and archiver are built in.
 
 A project's own `lorry.toml` cannot grant anything, because a cloned
 repository controls it. It may set only `cargo-compat-version`, the `vendor`

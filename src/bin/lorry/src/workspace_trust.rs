@@ -66,7 +66,9 @@ impl Store {
     /// absolute `HOME`.
     pub fn for_workspace(workspace: &Path, environment: &BTreeMap<String, String>) -> Option<Self> {
         let directory = if cfg!(target_os = "motor") {
-            PathBuf::from("/user/cfg/lorry-workspaces")
+            crate::role::Role::current()
+                .config_directory()
+                .join("lorry-workspaces")
         } else {
             let home = Path::new(environment.get("HOME")?);
             if !home.is_absolute() {

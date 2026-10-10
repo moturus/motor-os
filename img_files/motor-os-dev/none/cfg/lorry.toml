@@ -1,0 +1,19 @@
+config-version = 1
+cargo-compat-version = "1.99"
+
+# Lorry's paths and native tools on Motor are built in; settings here
+# replace them. Per-workspace rules go in [workspaces."<root>"] tables.
+
+[policy]
+default = "allow"
+path-roots = []
+
+[policy.limits]
+max-packages = 384
+max-package-bytes = 16777216
+max-extracted-package-bytes = 134217728
+max-package-files = 20000
+max-transaction-bytes = 268435456
+max-extracted-transaction-bytes = 1073741824
+build-script-seconds = 300
+build-script-output-bytes = 8388608

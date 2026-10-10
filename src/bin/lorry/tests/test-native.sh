@@ -15,6 +15,9 @@ MOTOR_TOOLCHAIN="$LORRY_MOTOR_TOOLCHAIN"
 MOTOR_LINKER="$LORRY_MOTOR_LINKER"
 MOTOR_SYSROOT="$LORRY_MOTOR_SYSROOT"
 REMOTE_BASE="/user/tmp/lorry-self"
+NONE_REMOTE_ROOT="/none/tmp/lorry-self-none"
+# CAP_SPAWN and CAP_FS_WRITE without CAP_INTERACTIVE: a None-role process.
+NONE_CAPS=0x204
 
 IMAGE_NAME="motor-os-dev.qcow2"
 # Native rustc builds need enough parallel memory for the VM's vCPU count.
@@ -366,7 +369,7 @@ normalize_equivalence_output() {
         line="${line//"$WORK/native-equivalence-target"/<target>}"
         line="${line//"$REMOTE_ROOT/native-equivalence-target"/<target>}"
         line="${line//"$WORK/host-home/.cache/lorry"/<cache>}"
-        line="${line//\/devtools\/lorry\/cache/<cache>}"
+        line="${line//\/devtools\/lorry\/user\/cache/<cache>}"
         line="${line//"$HOST_TOOLCHAIN_SYSROOT"/<sysroot>}"
         line="${line//\/devtools\/rust/<sysroot>}"
         printf '%s\n' "$line" >>"$output"
@@ -721,6 +724,59 @@ PY
         fail "two Motor debug compilations did not reuse the same incremental root"
     remote_command "$REMOTE_ROOT/cancel-probe $REMOTE_ROOT/lorry-native $REMOTE_ROOT/cancel-fixture"
     remote_command "$REMOTE_ROOT/recovery-probe $REMOTE_ROOT/lorry-native $REMOTE_ROOT/recovery-fixture"
+    run_none_role
+}
+
+# Lorry as None keeps its own state: configuration and decisions in /none/cfg,
+# cache in /devtools/lorry/none, scratch in /none/tmp. None cannot reach
+# Interactive's /user/cfg at all. The fixture has no dependencies, so this
+# needs no network; the build's rustc answers are what land in the cache.
+run_none_role() {
+    local root="$NONE_REMOTE_ROOT"
+    local none="MOTOR_OS_CAPS=$NONE_CAPS"
+    local decisions output
+    decisions="$(decisions_name "$root/fixture").toml"
+    mkdir -p "$WORK/none-fixture/src"
+    printf '%s\n' '[package]' 'name = "none-role"' 'version = "0.1.0"' 'edition = "2021"' \
+        >"$WORK/none-fixture/Cargo.toml"
+    printf '%s\n' 'fn main() {' '    println!("none-role ok");' '}' \
+        >"$WORK/none-fixture/src/main.rs"
+    remote_command "[ ! -e $root ] || /system/bin/rm -r $root"
+    # None creates the directories it writes in; Interactive's would be
+    # read-only to it. Plain puts: `put -p` would also copy the host's mode
+    # onto them.
+    remote_command "$none /system/bin/mkdir $root && $none /system/bin/mkdir $root/fixture && $none /system/bin/mkdir $root/fixture/src"
+    NONE_CREATED=1
+    printf 'put %s %s\nput %s %s\n' \
+        "$WORK/none-fixture/Cargo.toml" "$root/fixture/Cargo.toml" \
+        "$WORK/none-fixture/src/main.rs" "$root/fixture/src/main.rs" >"$WORK/none-upload.batch"
+    timeout 60 sftp "${SFTP_OPTIONS[@]}" -b "$WORK/none-upload.batch" motor@192.168.4.2 \
+        >>"$NATIVE_LOG" 2>&1 || fail "cannot upload the None-role fixture"
+    remote_command "/system/bin/cp $REMOTE_ROOT/lorry-native $root/lorry"
+    remote_command_expect_failure "$none /system/bin/ls /user/cfg"
+
+    remote_command "cd $root && $none $root/lorry cache clean"
+    remote_command "[ ! -e /devtools/lorry/none/cache ] && [ -d /devtools/lorry/user/cache ]" ||
+        fail "None's cache clean did not remove exactly /devtools/lorry/none/cache"
+    remote_command "cd $root/fixture && $none $root/lorry vendor --accept-all"
+    remote_command "[ -f /none/cfg/lorry-workspaces/$decisions ] && [ ! -e /user/cfg/lorry-workspaces/$decisions ]" ||
+        fail "None's workspace decisions are not in /none/cfg/lorry-workspaces"
+    output="$(remote_command "cd $root/fixture && $none $root/lorry run")" ||
+        fail "None could not build and run a package"
+    [[ "$output" == *"none-role ok"* ]] || fail "None's package did not run: $output"
+    remote_command "[ -d /devtools/lorry/none/cache/rustc-queries ]" ||
+        fail "None's build did not use /devtools/lorry/none/cache"
+
+    remote_command "/system/bin/cp /none/cfg/lorry.toml $root/lorry.toml.orig"
+    NONE_CONFIG_SAVED=1
+    remote_command "echo 'not-a-setting = 1' >> /none/cfg/lorry.toml"
+    if output="$(remote_command "cd $root/fixture && $none $root/lorry build")"; then
+        fail "None's Lorry ignored an invalid /none/cfg/lorry.toml"
+    fi
+    [[ "$output" == *"/none/cfg/lorry.toml"* ]] ||
+        fail "None's Lorry did not report its own configuration file: $output"
+    remote_command "/system/bin/cat $root/lorry.toml.orig > /none/cfg/lorry.toml"
+    NONE_CONFIG_SAVED=0
 }
 
 cleanup() {
@@ -738,6 +794,16 @@ cleanup() {
         done < <(remote_decision_roots)
         timeout 10 "${SSH[@]}" "$removals" >/dev/null 2>&1 ||
             echo "test-native: could not remove this run's guest workspace decisions" >&2
+    fi
+    if [ "$NONE_CONFIG_SAVED" -eq 1 ]; then
+        timeout 5 "${SSH[@]}" "/system/bin/cat $NONE_REMOTE_ROOT/lorry.toml.orig > /none/cfg/lorry.toml" \
+            >/dev/null 2>&1 || echo "test-native: could not restore the guest's /none/cfg/lorry.toml" >&2
+    fi
+    if [ "$NONE_CREATED" -eq 1 ]; then
+        local none_decisions
+        none_decisions="/none/cfg/lorry-workspaces/$(decisions_name "$NONE_REMOTE_ROOT/fixture").toml"
+        timeout 10 "${SSH[@]}" "[ ! -f $none_decisions ] || /system/bin/rm $none_decisions; /system/bin/rm -r $NONE_REMOTE_ROOT" \
+            >/dev/null 2>&1 || echo "test-native: could not remove the None-role fixture" >&2
     fi
     if [ "$REMOTE_CREATED" -eq 1 ] && [ "$WARM" -eq 0 ]; then
         case "$REMOTE_ROOT" in
@@ -786,6 +852,8 @@ VM_PID=""
 VM_STARTED=0
 REMOTE_CREATED=0
 REMOTE_POLICY=0
+NONE_CREATED=0
+NONE_CONFIG_SAVED=0
 PHASE_BUDGET="${LORRY_NATIVE_SELF_TIMEOUT:-1200}"
 PHASE_DEADLINE_MS=0
 case "$PHASE_BUDGET" in

@@ -8,6 +8,7 @@ use semver::VersionReq;
 use toml_edit::{Item, Table};
 
 use crate::diagnostic::{Error, Result};
+use crate::role::Role;
 use crate::toml::Document;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,14 +130,20 @@ pub struct TestConfig {
 }
 
 impl TestConfig {
-    pub fn extraction_root(&self, target: &str) -> &Path {
-        self.extraction_root.as_deref().unwrap_or_else(|| {
-            if target.rsplit('-').next() == Some("motor") {
-                Path::new("/user/tmp/lorry/test-extraction")
-            } else {
-                Path::new("/tmp/lorry-tests")
+    /// Where a test bundle for `target` extracts. A Motor target uses the
+    /// running role's temporary directory, which is Interactive's off Motor.
+    pub fn extraction_root(&self, target: &str) -> PathBuf {
+        self.extraction_root_for(target, Role::current())
+    }
+
+    fn extraction_root_for(&self, target: &str, role: Role) -> PathBuf {
+        match &self.extraction_root {
+            Some(root) => root.clone(),
+            None if target.rsplit('-').next() == Some("motor") => {
+                role.temp_directory().join("lorry/test-extraction")
             }
-        })
+            None => PathBuf::from("/tmp/lorry-tests"),
+        }
     }
 }
 
@@ -445,6 +452,9 @@ impl Config {
     fn load_global_with_environment(environment: &BTreeMap<String, String>) -> Result<Self> {
         let mut config = Config::default();
         load_global_lorry_layers(environment, &mut config)?;
+        if let Some(role) = motor_role() {
+            add_motor_repository(&mut config, role);
+        }
         validate_storage_layout(&config, environment)?;
         Ok(config)
     }
@@ -459,7 +469,7 @@ impl Config {
     ) -> Result<PathBuf> {
         match &self.cache.directory {
             Some(directory) => Ok(directory.clone()),
-            None => default_cache_directory(environment, cfg!(target_os = "motor")),
+            None => default_cache_directory(environment, motor_role()),
         }
     }
 
@@ -550,9 +560,17 @@ fn current_environment() -> BTreeMap<String, String> {
         .collect()
 }
 
-fn default_cache_directory(environment: &BTreeMap<String, String>, motor: bool) -> Result<PathBuf> {
-    if motor {
-        return Ok(PathBuf::from("/devtools/lorry/cache"));
+/// The role whose paths Lorry uses on Motor OS; none on other hosts.
+fn motor_role() -> Option<Role> {
+    cfg!(target_os = "motor").then(Role::current)
+}
+
+fn default_cache_directory(
+    environment: &BTreeMap<String, String>,
+    motor: Option<Role>,
+) -> Result<PathBuf> {
+    if let Some(role) = motor {
+        return Ok(role.state_directory().join("cache"));
     }
     let home = environment.get("HOME").ok_or_else(|| {
         Error::failure("HOME is required to locate Lorry's global build cache")
@@ -606,7 +624,8 @@ fn load_lorry_layers(
         fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     let layers = global_lorry_layers(environment);
     load_lorry_files(&layers, Some(&workspace), config)?;
-    if cfg!(target_os = "motor") {
+    if let Some(role) = motor_role() {
+        add_motor_repository(config, role);
         add_motor_native_tools(config);
     }
     if let Some(store) = crate::workspace_trust::Store::for_workspace(&workspace, environment) {
@@ -619,6 +638,14 @@ fn load_lorry_layers(
         merge_lorry_file(&local, LayerKind::Local, None, config)?;
     }
     Ok(())
+}
+
+/// Each role has its own user repository; configuration may replace it.
+fn add_motor_repository(config: &mut Config, role: Role) {
+    config
+        .repositories
+        .user
+        .get_or_insert_with(|| role.state_directory().join("vendor"));
 }
 
 /// Motor's development image installs these tools; configuration may replace
@@ -670,11 +697,10 @@ fn load_global_lorry_layers(
 }
 
 /// The user's Lorry configuration file, as help text names it.
-pub(crate) fn user_config_hint() -> &'static str {
-    if cfg!(target_os = "motor") {
-        "/user/cfg/lorry.toml"
-    } else {
-        "~/.config/lorry/lorry.toml"
+pub(crate) fn user_config_hint() -> String {
+    match motor_role() {
+        Some(role) => role.config_file().display().to_string(),
+        None => "~/.config/lorry/lorry.toml".to_owned(),
     }
 }
 
@@ -687,8 +713,8 @@ pub(crate) fn workspace_table_key(root: &Path) -> String {
 
 fn global_lorry_layers(environment: &BTreeMap<String, String>) -> Vec<(PathBuf, LayerKind)> {
     let mut layers = Vec::new();
-    if cfg!(target_os = "motor") {
-        layers.push((PathBuf::from("/user/cfg/lorry.toml"), LayerKind::MotorUser));
+    if let Some(role) = motor_role() {
+        layers.push((role.config_file(), LayerKind::MotorUser));
     } else if let Some(home) = environment.get("HOME") {
         layers.push((
             Path::new(home).join(".config/lorry/lorry.toml"),
@@ -2613,12 +2639,16 @@ mod tests {
             defaults.extraction_root("x86_64-unknown-motor"),
             Path::new("/user/tmp/lorry/test-extraction")
         );
+        assert_eq!(
+            defaults.extraction_root_for("x86_64-unknown-motor", Role::None),
+            Path::new("/none/tmp/lorry/test-extraction")
+        );
 
         let configured = TestConfig {
             extraction_root: Some(PathBuf::from("/explicit")),
         };
         assert_eq!(
-            configured.extraction_root("x86_64-unknown-motor"),
+            configured.extraction_root_for("x86_64-unknown-motor", Role::None),
             Path::new("/explicit")
         );
     }
@@ -2667,14 +2697,18 @@ mod tests {
     fn global_cache_defaults_follow_the_host_platform() {
         let environment = BTreeMap::from([("HOME".to_owned(), "/home/test".to_owned())]);
         assert_eq!(
-            default_cache_directory(&environment, false).unwrap(),
+            default_cache_directory(&environment, None).unwrap(),
             Path::new("/home/test/.cache/lorry")
         );
         assert_eq!(
-            default_cache_directory(&BTreeMap::new(), true).unwrap(),
-            Path::new("/devtools/lorry/cache")
+            default_cache_directory(&BTreeMap::new(), Some(Role::Interactive)).unwrap(),
+            Path::new("/devtools/lorry/user/cache")
         );
-        assert!(default_cache_directory(&BTreeMap::new(), false).is_err());
+        assert_eq!(
+            default_cache_directory(&BTreeMap::new(), Some(Role::None)).unwrap(),
+            Path::new("/devtools/lorry/none/cache")
+        );
+        assert!(default_cache_directory(&BTreeMap::new(), None).is_err());
     }
 
     #[test]
@@ -3211,7 +3245,7 @@ native-tools = ["cxx-compiler"]
                 error.contains(&format!("project configuration cannot set `{setting}`")),
                 "{setting}: {error}"
             );
-            assert!(error.contains(user_config_hint()), "{error}");
+            assert!(error.contains(&user_config_hint()), "{error}");
         }
     }
 

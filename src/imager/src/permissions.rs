@@ -499,17 +499,25 @@ trees:
                 mode
             );
         }
-        assert_eq!(
-            mode_string(policy.directory_permissions(Path::new("/devtools/lorry/cache"))),
-            "rwxrwx---"
-        );
-        assert_eq!(
-            mode_string(policy.file_permissions(
-                Path::new("/devtools/lorry/vendor/repository.toml"),
-                FileClass::Regular
-            )),
-            "rw-rw----"
-        );
+        for (path, mode) in [
+            ("/devtools/lorry", "rwxr-xr-x"),
+            ("/devtools/lorry/user/cache", "rwxrwx---"),
+            ("/devtools/lorry/none/cache", "rwxrwxrwx"),
+        ] {
+            assert_eq!(
+                mode_string(policy.directory_permissions(Path::new(path))),
+                mode
+            );
+        }
+        for (path, mode) in [
+            ("/devtools/lorry/user/vendor/repository.toml", "rw-rw----"),
+            ("/devtools/lorry/none/vendor/repository.toml", "rw-rw-rw-"),
+        ] {
+            assert_eq!(
+                mode_string(policy.file_permissions(Path::new(path), FileClass::Regular)),
+                mode
+            );
+        }
         assert_eq!(
             mode_string(
                 policy.file_permissions(Path::new("/system/cfg/sshd.toml"), FileClass::Regular)
