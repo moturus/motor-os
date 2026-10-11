@@ -946,6 +946,7 @@ pub struct Thread {
 
     wakes_queued: AtomicU64, // Counts wakes for self wakes.
     wakes_taken: AtomicU64,
+    wake_immediately: AtomicBool,
 
     pub diag: WakeDiag,
 
@@ -1016,6 +1017,7 @@ impl Thread {
             join_handle: SysHandle::NONE,
             wakes_queued: AtomicU64::new(0),
             wakes_taken: AtomicU64::new(0),
+            wake_immediately: AtomicBool::new(false),
             diag: WakeDiag::default(),
             owner: Arc::downgrade(&owner),
             thread_entry_point,
@@ -1580,6 +1582,28 @@ impl Thread {
         self.after_wait()
     }
 
+    /// Hands the CPU to this CPU's scheduler loop from inside a syscall and
+    /// returns once the loop has run this thread again.
+    pub(super) fn scheduler_tick_in_syscall(&self) {
+        self.trace("thread::scheduler_tick_in_syscall", 0, 0);
+        self.wake_immediately.store(true, Ordering::Release);
+        // on_thread_paused() re-queues the thread; a scheduler loop resumes
+        // it in the kernel, and it returns here.
+        self.tcb.pause();
+        finish_direct_switch();
+        let mut status = self.status.lock(line!());
+        match *status {
+            ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op)) => {
+                *status = ThreadStatus::Live(LiveThreadStatus::Syscall(nr, op));
+            }
+            ThreadStatus::Killed(reason) => {
+                core::mem::drop(status); // Unlock.
+                self.die(reason); // Does not return.
+            }
+            x => panic!("scheduler_tick_in_syscall: bad status: {:?}", x),
+        }
+    }
+
     // W7: like wait(), but hands the CPU directly to `next` (claimed via a
     // *_for_switch wake) instead of posting its resume job and bouncing
     // through the scheduler loop. Own park bookkeeping runs from next's
@@ -1642,9 +1666,16 @@ impl Thread {
         self.trace("thread::on_thread_paused", 0, 0);
         self.tcb.validate_rsp();
         let mut call_on_exited = false;
+        let wake_immediately = self.wake_immediately.swap(false, Ordering::AcqRel);
         {
             let mut status = self.status.lock(line!());
             match *status {
+                ThreadStatus::Live(LiveThreadStatus::Syscall(nr, op)) if wake_immediately => {
+                    *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
+                    let this_cpu = self.get_cpu_affinity() == uCpus::MAX
+                        && crate::sched::this_cpu_queues_empty();
+                    self.post_wake_locked(this_cpu);
+                }
                 ThreadStatus::Live(LiveThreadStatus::Syscall(nr, op)) => {
                     let wakers_empty = self.wakers.lock(line!()).is_empty();
                     if wakers_empty

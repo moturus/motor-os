@@ -5,6 +5,7 @@
 
 mod admission;
 mod checked_copy_in;
+mod sched_fairness;
 // mod channel_test;
 mod alloc_bench;
 mod closerace;
@@ -1204,6 +1205,10 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "sched-fairness" {
+        sched_fairness::run_all_tests();
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("process-permissions-child") {
         process_permissions::run_child(&args);
         return;
@@ -1674,6 +1679,7 @@ fn main() {
     sysbox_cat::run_test();
     sysbox_chmod::run_all_tests();
     execute_permissions::run_all_tests();
+    sched_fairness::run_all_tests();
     descriptor_attr::run_all_tests();
     file_locking::run_tests();
     // return;

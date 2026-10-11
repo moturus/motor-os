@@ -30,6 +30,21 @@ pub(crate) fn kernel_metric(name: &str) -> u64 {
         .unwrap_or_else(|| panic!("kernel metric '{name}' not reported"))
 }
 
+/// A kernel metric at a PID scope; the kernel's own per-CPU counters live
+/// under `PID_KERNEL`.
+pub(crate) fn kernel_metric_at(name: &str, scope: u64) -> u64 {
+    use moto_stats::Collector;
+
+    let kernel = Collector::kernel();
+    let descs = Collector::describe(&kernel).unwrap();
+    let desc = descs
+        .iter()
+        .find(|d| d.name == name)
+        .unwrap_or_else(|| panic!("no kernel metric '{name}'"));
+    Collector::read(&kernel, desc.id, scope)
+        .unwrap_or_else(|err| panic!("kernel metric '{name}' at scope {scope}: {err:?}"))
+}
+
 fn used_pages() -> u64 {
     moto_sys::stats::MemoryStats::get().unwrap().used_pages
 }

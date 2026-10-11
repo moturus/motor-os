@@ -138,6 +138,8 @@ struct Scheduler {
     load_prev: AtomicU64,
     load_curr: u64,
 
+    /// Set by every timer tick, cleared by the loop: drives the load
+    /// accounting and the syscall-exit yield.
     timer_irq_tick: AtomicBool,
 
     #[cfg(debug_assertions)]
@@ -710,6 +712,19 @@ pub fn cancel_timer(timer_id: u64, cpu: uCpus) {
         .get_for_cpu(cpu)
         .timers
         .remove_timer(timer_id);
+}
+
+pub fn this_cpu_timer_ticked() -> bool {
+    PERCPU_SCHEDULERS
+        .get_per_cpu()
+        .timer_irq_tick
+        .load(Ordering::Relaxed)
+}
+
+pub fn this_cpu_queues_empty() -> bool {
+    let scheduler = PERCPU_SCHEDULERS.get_per_cpu();
+    scheduler.queue_length.load(Ordering::Acquire) == 0
+        && GLOBAL_QUEUE_LENGTH.load(Ordering::Acquire) == 0
 }
 
 // Called by IRQ.

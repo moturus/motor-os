@@ -179,8 +179,11 @@ pub enum MetricType {
     MemBlockRecombined = 73,
     MemHugePagesMapped = 74,
     MemHugeFallbacks = 75,
+    /// Syscalls that gave the CPU to the scheduler loop before returning,
+    /// because a tick or a wake landed on the CPU while they ran.
+    SchedSyscallExitYields = 76,
 
-    TotalMetricTypes = 76,
+    TotalMetricTypes = 77,
 }
 
 impl MetricType {
@@ -279,6 +282,7 @@ impl MetricType {
             MetricType::MemBlockRecombined => "mem.block_recombined",
             MetricType::MemHugePagesMapped => "mem.huge_pages_mapped",
             MetricType::MemHugeFallbacks => "mem.huge_fallbacks",
+            MetricType::SchedSyscallExitYields => "sched.syscall_exit_yields",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }
@@ -350,7 +354,7 @@ impl MemStats {
     }
 }
 
-const PCPU_STATS_CNT: usize = 76; // struct is 8 * (N + 4) bytes; see the size assert below.
+const PCPU_STATS_CNT: usize = 84; // struct is 8 * (N + 4) bytes; see the size assert below.
 
 #[repr(C, align(64))]
 pub struct PerCpuStatsEntry {
@@ -363,7 +367,7 @@ pub struct PerCpuStatsEntry {
 
 const _: () = assert!(PCPU_STATS_CNT >= MetricType::TotalMetricTypes as usize);
 
-const _: () = assert!(640 == core::mem::size_of::<PerCpuStatsEntry>()); // 64 * 10
+const _: () = assert!(704 == core::mem::size_of::<PerCpuStatsEntry>()); // 64 * 11
 
 impl PerCpuStatsEntry {
     const fn new() -> Self {
