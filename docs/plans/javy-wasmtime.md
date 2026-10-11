@@ -768,6 +768,17 @@ binaries.
   179.7 to 129.0 MiB at 224 MiB. The static TypeScript peak did not move
   (210.4/216.4 to 212.6/210.3 MiB on the wasm/dev images at 224 MiB); it is
   set later in the pipeline, so the headroom remains about 10–12 MiB.
+- **TypeScript peak, 2026-10-11:** the peak is Binaryen's start on top of
+  45–53 MiB of freed walrus memory that Frusa keeps until its 5 s reclaim.
+  Javy `3dc8be1` (`Generator::generate_owned`) frees the 9 MB source once its
+  bytecode and source section are built. Five runs each on the wasm image at
+  224 MiB went from 207.3–212.4 MiB (median 212.1) to 197.3–208.1 MiB (median
+  207.0); the spread follows the reclaim timing. Compile time stays 20.7 s.
+  The add-on built from the published commit passed both matrices and
+  `full-test-dev.sh --release`, with peaks of 201.6–204.2 MiB (wasm) and
+  200.6–202.9 MiB (developer) at 224 MiB, so the median headroom is now about
+  15 MiB. Reclaiming in Frusa on free was rejected: it puts heap-sized work on
+  the free path.
 - **1i:** owned lazy small-page backing costs about 4% of Wasmi TypeScript
   execution (326 against 314 ms median, five runs, at 256 and 224 MiB) and
   about 2 ms of instantiation; hello is unchanged. Accepted: the backing
