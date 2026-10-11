@@ -189,6 +189,7 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_imager"))
             .arg("set")
             .args(args)
+            .arg("-i")
             .arg(&self.image)
             .env("RUST_LOG", "trace")
             .output()

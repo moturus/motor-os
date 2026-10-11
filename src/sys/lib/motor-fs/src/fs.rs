@@ -138,6 +138,21 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         Self::check_access(&metadata, role, entry_id, need)
     }
 
+    /// Runtime permission changes are gated like deletion: by `caller`'s write
+    /// on the entry's current parent. Only System may change the root. The
+    /// setters hold `&mut self`, so the parent cannot change before their
+    /// transaction commits.
+    async fn require_chmod_authority(&self, caller: Role, entry_id: EntryId) -> Result<()> {
+        match self.get_parent(caller, entry_id).await? {
+            Some(parent) => {
+                self.require_access(caller, parent.into(), Need::Write)
+                    .await
+            }
+            None if caller == Role::System => Ok(()),
+            None => Err(ErrorKind::PermissionDenied.into()),
+        }
+    }
+
     /// The permission check of [`Self::require_access`] on already-fetched
     /// entry metadata — hot paths that hold the entry block avoid fetching it
     /// a second time.
@@ -646,6 +661,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         } else {
             entry_id
         };
+        self.require_chmod_authority(caller, entry_id).await?;
         Txn::do_set_permissions_txn(self, caller, entry_id.into(), target, access).await
     }
 
@@ -661,6 +677,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         } else {
             entry_id
         };
+        self.require_chmod_authority(caller, entry_id).await?;
         Txn::do_set_all_permissions_txn(self, caller, entry_id.into(), permissions).await
     }
 

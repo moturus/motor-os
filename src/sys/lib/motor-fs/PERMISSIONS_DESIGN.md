@@ -358,6 +358,15 @@ These transitions apply to files and directories for all roles, including
 System. Direct `Rw` → `Rwx` and `Rx` → `Rw` remain denied; use the permitted
 intermediate state. Every change must *additionally* preserve cross-role
 monotonicity (§4a): the higher-role ceiling must contain every requested bit.
+Runtime changes also require `CAP_FS_WRITE` and the calling role's `w` on the
+entry's current parent directory. Motor FS checks the entry's current parent
+under the exclusive filesystem access its setters hold, so the parent cannot
+change before the update commits. This applies to both setters,
+including narrowing, lower-role changes, and unchanged requests. An entry ID
+requires parent `w` but not `x`; pathname lookup separately requires `x`.
+Only System may change `/` (for either root ID). Offline image administration
+retains its System-only authority. File-content writes still depend on the
+file's own `w`, even when its parent is protected.
 
 ### 4a. Cross-role monotonicity enforcement
 
@@ -365,7 +374,8 @@ Beyond the authority check, every change must keep
 `access(None) ⊆ access(Interactive) ⊆ access(System)` (§1). A single
 `set_permissions(caller, target, new)` maintains it in one pass:
 
-1. **Authorize:** `may_set(caller, target, old, new)` (§3); reject if false.
+1. **Authorize:** check the current parent as above, then
+   `may_set(caller, target, old, new)` (§3); reject if either fails.
 2. **Cap (widen direction):** `target`'s ceiling is the immediately-higher role
    (`Role` index `target + 1`; `System` has none). If the ceiling cannot be
    narrowed to `new` (`!ceiling.can_narrow_to(new)`, i.e. `new ⊄ ceiling`),
@@ -400,7 +410,10 @@ connect `Rw` → `Rx` → `Rwx`, while narrowing allows `Rwx` → `Rw`. Therefor
   higher-privileged role may re-widen it, up to the System ceiling.
 - Sealing contents does not prevent deletion — deletion is gated by the
   **parent directory's** `w`. To make an entry undeletable, seal the parent
-  directory's System byte too.
+  directory's System byte too. A runtime mode change on any child also needs
+  the caller's `w` on that parent, so a sealed parent prevents child mode
+  changes by every role, including System. Existing writable children remain
+  writable in place.
 
 ---
 
@@ -416,8 +429,10 @@ modes, sequenced per the §9 plan (Phase 0 wiring → Mode S → Mode E).
 - The FS **stores** the three bytes and **reports** them via `metadata()`
   (already returns `Metadata` by value, so reporting is free once populated).
 - The FS enforces permission-change authority and cross-role monotonicity,
-  and validates creation authority before linking an entry. Callers cannot
-  edit a higher role or grant a lower role more than its ceiling permits.
+  and validates creation authority before linking an entry. Runtime mode
+  changes require the calling role's `w` on the entry's current parent, even
+  for narrowing or an unchanged mode; only System may change the root's mode.
+  Callers cannot edit a higher role or grant a lower role more than its ceiling permits.
 - The FS does **not** gate `read`/`write`/etc. in Mode S. The `role` parameter is
   already present (Phase 0) but unused on the data path until Mode E; access
   enforcement is done above the FS in the meantime.
@@ -438,6 +453,7 @@ Execute}`) keyed off the caller's own role byte.
 | `create_entry`                | `w`   | the **parent dir** |
 | `delete_entry`                | `w`   | the **parent dir** |
 | `move_entry`                  | `w`   | **old** parent dir AND **new** parent dir |
+| `set_permissions`, `set_all_permissions` | `w` | the entry's **current parent dir** (System-only for root) |
 | `stat`, `get_first_entry`, `get_next_entry` | `x` | the dir being listed / traversed |
 
 Notes:
@@ -449,6 +465,10 @@ Notes:
   helper (not the `x`-gated `stat`), so write alone suffices. (Consequence: a
   `Rw` directory is a write-only "drop-box" — entries can be added/removed but
   not listed; see §1.)
+- Runtime mode changes use that same parent-`w` rule under exclusive FS access,
+  including unchanged requests. Entry-ID requests need no parent `x`;
+  pathname lookup still requires `x`. File-content writes continue to depend
+  on the file's own `w`.
 - `copy_file_range` is composed of `self.read` + `self.write`; those enforce and
   forward the caller role, so it is covered transitively.
 - **Execute (`x`):** on a **directory** it is enforced (traversal/listing/lookup,
@@ -472,7 +492,8 @@ Add to the `FileSystem` trait:
 
 ```rust
 /// Change one role's permission on `entry_id`, acting as `caller`.
-/// Enforces `may_set`; returns PermissionDenied if not allowed.
+/// Enforces parent-write authority (System-only for root), `may_set`, and
+/// monotonicity; returns PermissionDenied if not allowed.
 async fn set_permissions(
     &mut self,
     caller: Role,
@@ -483,7 +504,11 @@ async fn set_permissions(
 ```
 
 Implement via a new `Txn::do_set_permissions_txn` mirroring the existing
-`do_move_entry_txn` structure (`txn.rs:190`). It runs the §4a algorithm:
+`do_move_entry_txn` structure (`txn.rs:190`). `MotorFs::set_permissions` first
+checks the caller's `w` on the entry's current parent (System for root), as
+`delete_entry` does, also when the requested mode is unchanged; `&mut self`
+keeps that parent current until the transaction commits. The transaction then
+runs the §4a algorithm:
 1. Load + `validate_entry` the entry block.
 2. `old = metadata.access(target)?`.
 3. **Authorize:** if `!may_set(caller, target, old, access)` → `Err(PermissionDenied)`.
@@ -499,7 +524,9 @@ Implement via a new `Txn::do_set_permissions_txn` mirroring the existing
 The exact setter takes a complete `RolePermissions` value and changes all
 three bytes in one transaction. It differs the old and requested values before
 calling `may_set`, so unchanged higher-role fields do not cause rejection. It
-then validates monotonicity across the complete requested state and either
+still requires the caller's `w` on the entry's current parent (or System for
+root), even when no field differs. It then validates monotonicity
+across the complete requested state and either
 writes all three bytes plus `modified`, or writes nothing. Unlike the
 single-role setter, it never cascades or clamps.
 

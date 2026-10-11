@@ -1,3 +1,6 @@
 #!/system/bin/rush
 
+# Motor keeps user configuration in /user/cfg and caches under /user/tmp.
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/user/cfg}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/user/tmp/.cache}"
 exec /devtools/helix/hx "$@"

@@ -58,7 +58,9 @@ fi
 
 targets="$ROOT_DIR/build/crossterm-host/$profile"
 for features in events events,use-dev-tty; do
-  (cd "$copy" && CARGO_TARGET_DIR="$targets/$features" cargo test --quiet \
+  # Colored's round-trip tests require ANSI output; an inherited NO_COLOR=1
+  # makes their result depend on which test first changes the global switch.
+  (cd "$copy" && NO_COLOR= CARGO_TARGET_DIR="$targets/$features" cargo test --quiet \
     --locked "${network_args[@]}" "${profile_args[@]}" --lib \
     --no-default-features --features "$features" "${test_args[@]}")
 done

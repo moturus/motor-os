@@ -385,8 +385,10 @@ pub trait FileSystem {
     ) -> Result<EntryId>;
 
     /// Change one role's permission on an entry, acting as `caller`. Enforces
-    /// authority and cross-role monotonicity (see PERMISSIONS_DESIGN.md);
-    /// returns `PermissionDenied` if not allowed.
+    /// authority and cross-role monotonicity (see PERMISSIONS_DESIGN.md).
+    /// Runtime changes also require the caller's `w` on the entry's current
+    /// parent; only System may change the root's mode. Returns
+    /// `PermissionDenied` if any check fails.
     async fn set_permissions(
         &mut self,
         caller: Role,
@@ -395,8 +397,10 @@ pub trait FileSystem {
         access: AccessPermissions,
     ) -> Result<()>;
 
-    /// Atomically install an exact complete permission state. Authority is
-    /// checked only for fields that differ from their current values.
+    /// Atomically install an exact complete permission state. Role-transition
+    /// authority is checked only for fields that differ from their current
+    /// values. The caller must have `w` on the entry's current parent even
+    /// when the requested state is unchanged; only System may change the root.
     async fn set_all_permissions(
         &mut self,
         caller: Role,

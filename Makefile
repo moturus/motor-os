@@ -25,16 +25,19 @@ ifeq ($(BUILD), release)
 	OBJ_DIR := $(OBJ_ROOT)/release
 	SUB_DIR := x86_64-unknown-motor/release
 	IMG_CMD := release
+	IMAGER_INSTALL_STRIP := -s
 else
 	CARGO_RELEASE :=
 	BIN_DIR := $(CURDIR)/build/bin/debug
 	OBJ_DIR := $(OBJ_ROOT)/debug
 	SUB_DIR := x86_64-unknown-motor/debug
 	IMG_CMD := debug
+	IMAGER_INSTALL_STRIP :=
 endif
 
 IMAGER_LOCK := $(ROOT_DIR)/build/imager.lock
 IMAGER_TARGET_DIR := $(OBJ_DIR)/imager
+IMAGER_BIN := $(IMAGER_TARGET_DIR)/$(IMG_CMD)/imager
 ASSEMBLY_RESOLVER := $(ROOT_DIR)/src/resolve-toolchain-assembly.sh
 DO_BUILD = cargo build --target x86_64-unknown-motor $(CARGO_RELEASE)
 
@@ -270,19 +273,25 @@ curl: assembly-resolved
 define INSTALL_VM_SCRIPTS
 	flock "$(IMAGER_LOCK)" sh -c 'cp -f "$(ROOT_DIR)/src/vm_scripts/"* \
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/" && \
-		chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"'
+		chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key" && \
+		install -D -m 755 $(IMAGER_INSTALL_STRIP) "$(IMAGER_BIN)" "$(ROOT_DIR)/vm_images/$(IMG_CMD)/tools/imager"'
 endef
+
+# A statically linked imager, so that the copy in vm_images/$(IMG_CMD)/tools/
+# (stripped in release) runs on other Linux hosts. Only the final link gets
+# crt-static; proc macros cannot. Static glibc warns about NSS functions in std
+# that imager never uses.
+BUILD_IMAGER = CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" cargo rustc $(CARGO_RELEASE) \
+	--bin imager -- -C target-feature=+crt-static -A linker-messages
 
 # The standard image adds production networking and user programs to base.
 main.img: assembly-resolved boot core sys user
 	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2" && \
-	cd src/imager && \
-		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
+	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
 		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
-		cargo run $(CARGO_RELEASE) -- \
-			"$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml
+		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2"
 
@@ -292,11 +301,9 @@ raw.img: assembly-resolved boot core sys user
 	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img" && \
-	cd src/imager && \
-		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
+	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
 		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
-		cargo run $(CARGO_RELEASE) -- \
-			"$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml --raw-output motor-os.img
+		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml --raw-output motor-os.img ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the raw standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img"
 
@@ -311,10 +318,8 @@ define BUILD_TEST_IMAGE
 	mkdir -p "$$test_root/build" "$$test_root/vm_images/$(IMG_CMD)" && \
 	ln -sfn "$(ROOT_DIR)/build/bin" "$$test_root/build/bin" && \
 	ln -sfn "$(ROOT_DIR)/img_files" "$$test_root/img_files" && \
-	cd src/imager && \
-		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
-		cargo run $(CARGO_RELEASE) -- \
-			"$$test_root" $(IMG_CMD) motor-os-$(1).yaml
+	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
+		"$(IMAGER_BIN)" "$$test_root" $(IMG_CMD) motor-os-$(1).yaml ) 9>"$(IMAGER_LOCK)"
 	cp -f "$(ROOT_DIR)/src/vm_scripts/"* "$(TEST_IMAGE_ROOT)/vm_images/$(IMG_CMD)/"
 	chmod 400 "$(TEST_IMAGE_ROOT)/vm_images/$(IMG_CMD)/test.key"
 endef
@@ -331,10 +336,8 @@ vsock-test.img: boot core sys-base sysbox rush systest
 base.img: boot core sys-base user-base
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-base.img"
-	cd src/imager && \
-		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
-		cargo run $(CARGO_RELEASE) -- \
-			"$(ROOT_DIR)" $(IMG_CMD) motor-os-base.yaml
+	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
+		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-base.yaml ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS base image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
@@ -344,11 +347,9 @@ dev.img: assembly-resolved boot core sys user-dev
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img" \
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2" && \
-	cd src/imager && \
-		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
+	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
 		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
-		cargo run $(CARGO_RELEASE) -- \
-			"$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml
+		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS dev image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2"
 

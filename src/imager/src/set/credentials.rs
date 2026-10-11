@@ -9,7 +9,7 @@ pub(super) const SSH_CONFIG: &str = "/system/cfg/sshd.toml";
 pub(super) const TLS_CERT: &str = "/system/cfg/ssl/ssl-cert.pem";
 pub(super) const TLS_KEY: &str = "/system/cfg/ssl/ssl-key.pem";
 
-pub(super) enum Credentials {
+pub(crate) enum Credentials {
     Password { salt: String, hash: String },
     LoginKey(String),
     HostKey(String),
@@ -35,7 +35,7 @@ fn read_artifact(path: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(super) fn validate_password(password: &str) -> io::Result<()> {
+pub(crate) fn validate_password(password: &str) -> io::Result<()> {
     if password.is_empty()
         || password.len() > MAX_ARTIFACT_SIZE
         || password.contains(['\r', '\n', '\u{feff}'])
@@ -47,8 +47,36 @@ pub(super) fn validate_password(password: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// A freshly generated SSH host key and the public line operators can pin.
+pub(crate) struct GeneratedHostKey {
+    pub(crate) credentials: Credentials,
+    pub(crate) public_key: String,
+    pub(crate) fingerprint: String,
+}
+
 impl Credentials {
-    pub(super) fn read(input: Input<'_>) -> io::Result<Self> {
+    pub(crate) fn generate_host_key() -> io::Result<GeneratedHostKey> {
+        use ssh_key::private::{Ed25519Keypair, KeypairData, PrivateKey};
+        let mut seed = [0; 32];
+        File::open("/dev/urandom")?.read_exact(&mut seed)?;
+        let keypair = Ed25519Keypair::from_seed(&seed);
+        let key = PrivateKey::new(KeypairData::Ed25519(keypair), "")
+            .map_err(|_| io::Error::other("cannot build SSH host key"))?;
+        let private = key
+            .to_openssh(ssh_key::LineEnding::LF)
+            .map_err(|_| io::Error::other("cannot encode SSH host key"))?;
+        let public_key = key
+            .public_key()
+            .to_openssh()
+            .map_err(|_| io::Error::other("cannot encode SSH host public key"))?;
+        Ok(GeneratedHostKey {
+            credentials: Self::HostKey(private.as_str().to_owned()),
+            public_key,
+            fingerprint: key.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+        })
+    }
+
+    pub(crate) fn read(input: Input<'_>) -> io::Result<Self> {
         match input {
             Input::Password(password) => {
                 validate_password(password)?;

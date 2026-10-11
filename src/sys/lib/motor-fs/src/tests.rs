@@ -3247,6 +3247,196 @@ fn permissions_authority() {
     rt.block_on(permissions_authority_test()).unwrap();
 }
 
+#[test]
+fn permissions_require_parent_write() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(permissions_require_parent_write_test())
+        .unwrap();
+}
+
+async fn permissions_require_parent_write_test() -> Result<()> {
+    let mut fs = create_fs("motor_fs_permissions_parent_test", 4096).await?;
+    let root = crate::ROOT_DIR_ID;
+    let all = RolePermissions::all(AccessPermissions::Rwx);
+    let protected = fs
+        .create_entry(Role::System, root, EntryKind::Directory, "protected", all)
+        .await?;
+    fs.set_all_permissions(
+        Role::System,
+        protected,
+        RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rx,
+            AccessPermissions::Rx,
+        ),
+    )
+    .await?;
+
+    for (name, kind) in [("file", EntryKind::File), ("dir", EntryKind::Directory)] {
+        let entry = fs
+            .create_entry(Role::System, protected, kind, name, all)
+            .await?;
+        let before = fs.metadata(Role::System, entry).await?;
+        for caller in [Role::Interactive, Role::None] {
+            // Even narrowing, changing a lower role, or an unchanged request
+            // must not touch mode or modification time under this parent.
+            for access in [AccessPermissions::Rx, AccessPermissions::Rwx] {
+                assert_eq!(
+                    ErrorKind::PermissionDenied,
+                    fs.set_permissions(caller, entry, caller, access)
+                        .await
+                        .unwrap_err()
+                        .kind()
+                );
+            }
+            assert_eq!(
+                ErrorKind::PermissionDenied,
+                fs.set_all_permissions(caller, entry, all)
+                    .await
+                    .unwrap_err()
+                    .kind()
+            );
+        }
+        assert_eq!(
+            before.permissions()?,
+            fs.metadata(Role::System, entry).await?.permissions()?
+        );
+        assert_eq!(
+            before.modified.as_nanos(),
+            fs.metadata(Role::System, entry).await?.modified.as_nanos()
+        );
+        fs.set_permissions(Role::System, entry, Role::None, AccessPermissions::Rx)
+            .await?;
+    }
+
+    let root_before = fs.metadata(Role::System, root).await?;
+    for root_id in [root, async_fs::ROOT_ID] {
+        assert_eq!(
+            ErrorKind::PermissionDenied,
+            fs.set_permissions(
+                Role::Interactive,
+                root_id,
+                Role::Interactive,
+                AccessPermissions::Rx,
+            )
+            .await
+            .unwrap_err()
+            .kind()
+        );
+        assert_eq!(
+            ErrorKind::PermissionDenied,
+            fs.set_all_permissions(Role::Interactive, root_id, root_before.permissions()?)
+                .await
+                .unwrap_err()
+                .kind()
+        );
+    }
+    assert_eq!(
+        root_before.modified.as_nanos(),
+        fs.metadata(Role::System, root).await?.modified.as_nanos()
+    );
+    fs.set_all_permissions(Role::System, async_fs::ROOT_ID, root_before.permissions()?)
+        .await?;
+
+    // Known entry IDs need only parent write, even without traversal.
+    let rw_parent = fs
+        .create_entry(Role::System, root, EntryKind::Directory, "rw-parent", all)
+        .await?;
+    fs.set_all_permissions(
+        Role::System,
+        rw_parent,
+        RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rw,
+            AccessPermissions::Rw,
+        ),
+    )
+    .await?;
+    let child = fs
+        .create_entry(Role::System, rw_parent, EntryKind::File, "child", all)
+        .await?;
+    fs.set_permissions(Role::None, child, Role::None, AccessPermissions::Rx)
+        .await?;
+    fs.set_all_permissions(
+        Role::Interactive,
+        child,
+        RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rx,
+            AccessPermissions::Rx,
+        ),
+    )
+    .await?;
+
+    // The caller's role decides, not the target's: Interactive may change
+    // None's byte under a parent that denies None `w`, while None may not.
+    let interactive_parent = fs
+        .create_entry(Role::System, root, EntryKind::Directory, "int-parent", all)
+        .await?;
+    fs.set_all_permissions(
+        Role::System,
+        interactive_parent,
+        RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rwx,
+            AccessPermissions::Rx,
+        ),
+    )
+    .await?;
+    let entry = fs
+        .create_entry(
+            Role::System,
+            interactive_parent,
+            EntryKind::File,
+            "entry",
+            all,
+        )
+        .await?;
+    fs.set_permissions(Role::Interactive, entry, Role::None, AccessPermissions::Rx)
+        .await?;
+    assert_eq!(
+        ErrorKind::PermissionDenied,
+        fs.set_permissions(Role::None, entry, Role::None, AccessPermissions::R)
+            .await
+            .unwrap_err()
+            .kind()
+    );
+    assert_eq!(
+        AccessPermissions::Rx,
+        perm_of(&mut fs, entry, Role::None).await
+    );
+
+    // The entry's current parent decides, even when the caller retains its ID.
+    fs.move_entry(Role::System, child, protected, "moved")
+        .await?;
+    let before = fs.metadata(Role::System, child).await?;
+    assert_eq!(
+        ErrorKind::PermissionDenied,
+        fs.set_permissions(
+            Role::Interactive,
+            child,
+            Role::None,
+            AccessPermissions::None
+        )
+        .await
+        .unwrap_err()
+        .kind()
+    );
+    assert_eq!(
+        ErrorKind::PermissionDenied,
+        fs.set_all_permissions(Role::Interactive, child, before.permissions()?)
+            .await
+            .unwrap_err()
+            .kind()
+    );
+    assert_eq!(
+        before.modified.as_nanos(),
+        fs.metadata(Role::System, child).await?.modified.as_nanos()
+    );
+    Ok(())
+}
+
 /// The decoded permission for `role` on `id` (queried as System).
 async fn perm_of(fs: &mut MotorFs, id: EntryId, role: Role) -> AccessPermissions {
     fs.metadata(Role::System, id)

@@ -30,6 +30,9 @@ pub fn run_child(args: &[String]) {
         }
         "branch" => {
             let mut grandchild = idle_child();
+            // Child::wait closes stdin first, which would let the target exit
+            // on its own before the kill arrives; keep it open instead.
+            let _stdin = grandchild.stdin.take();
             println!("{}", grandchild.id());
             std::io::stdout().flush().unwrap();
             assert_eq!(Some(-1), grandchild.wait().unwrap().code());

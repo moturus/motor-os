@@ -27,6 +27,8 @@ pub struct SftpSession {
 
 struct OpenFile {
     file: tokio::fs::File,
+    #[cfg(target_os = "motor")]
+    entry_id: moto_io::fs::EntryId,
     path: String,
     writable: bool,
     pending_permissions: Option<SavedPermissions>,
@@ -153,6 +155,7 @@ async fn open_file(
     path: &str,
     pflags: OpenFlags,
     requested_mode: Option<u32>,
+    _preserve_attributes: bool,
 ) -> std::io::Result<OpenFile> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -187,8 +190,6 @@ async fn open_file(
     if writable {
         open_file.pending_permissions =
             Some(requested_mode.map(unix_mode).unwrap_or(original_mode));
-    } else if let Some(mode) = requested_mode {
-        set_file_permissions(&open_file, mode).await?;
     }
     Ok(open_file)
 }
@@ -210,6 +211,14 @@ async fn create_directory(path: &str, mode: Option<u32>) -> std::io::Result<()> 
 #[cfg(unix)]
 fn file_attributes(
     _path: &str,
+    metadata: &std::fs::Metadata,
+) -> Result<FileAttributes, StatusCode> {
+    Ok(FileAttributes::from(metadata))
+}
+
+#[cfg(unix)]
+async fn handle_attributes(
+    _file: &OpenFile,
     metadata: &std::fs::Metadata,
 ) -> Result<FileAttributes, StatusCode> {
     Ok(FileAttributes::from(metadata))
@@ -321,11 +330,30 @@ fn narrow_lower_roles(
     permissions
 }
 
+/// Whether installing `mode` on an existing file would take read access away
+/// from a lower role, that is, whether the file's current mode would expose
+/// the upload's contents to a role the client excluded.
+#[cfg(target_os = "motor")]
+fn would_expose_private_data(permissions: moto_io::fs::RolePermissions, mode: u32) -> bool {
+    use moto_io::fs::Role;
+
+    let requested = translated_permissions(permissions, mode, false);
+    let loses_read =
+        |role: Role| permissions.get(role).can_read() && !requested.get(role).can_read();
+    match current_role() {
+        Role::System => loses_read(Role::Interactive) || loses_read(Role::None),
+        Role::Interactive => loses_read(Role::None),
+        Role::None => false,
+    }
+}
+
 #[cfg(target_os = "motor")]
 fn motor_io<T>(operation: impl Future<Output = moto_rt::Result<T>>) -> std::io::Result<T> {
     moto_async::LocalRuntime::new()
         .block_on(operation)
-        .map_err(|error| std::io::Error::other(error.to_string()))
+        .map_err(|error| {
+            std::io::Error::from_raw_os_error(i32::from(moto_rt::ErrorCode::from(error)))
+        })
 }
 
 #[cfg(target_os = "motor")]
@@ -351,7 +379,11 @@ async fn set_file_permissions(
     file: &OpenFile,
     permissions: SavedPermissions,
 ) -> std::io::Result<()> {
-    set_path_permissions(&file.path, permissions).await
+    motor_io(async {
+        moto_io::fs::FsClient::connect()?
+            .set_all_permissions(file.entry_id, permissions)
+            .await
+    })
 }
 
 #[cfg(target_os = "motor")]
@@ -391,6 +423,7 @@ async fn open_file(
     path: &str,
     pflags: OpenFlags,
     requested_mode: Option<u32>,
+    preserve_attributes: bool,
 ) -> std::io::Result<OpenFile> {
     let writable = pflags.intersects(OpenFlags::WRITE);
     let mut original = match path_permissions(path) {
@@ -404,51 +437,80 @@ async fn open_file(
     }
 
     let mut actual_flags = pflags;
-    if writable {
-        if let Some(permissions) = original {
-            set_path_permissions(path, narrow_lower_roles(permissions)).await?;
-        } else if pflags.contains(OpenFlags::CREATE) {
-            match create_motor_entry(path, moto_io::fs::EntryKind::File, staging_permissions()) {
-                Ok(()) => actual_flags.remove(OpenFlags::CREATE | OpenFlags::EXCLUDE),
-                Err(_error)
-                    if !pflags.contains(OpenFlags::EXCLUDE)
-                        && std::path::Path::new(path).exists() =>
-                {
-                    let permissions = path_permissions(path)?;
-                    set_path_permissions(path, narrow_lower_roles(permissions)).await?;
-                    original = Some(permissions);
-                }
-                Err(error) => return Err(error),
+    if writable && original.is_none() && pflags.contains(OpenFlags::CREATE) {
+        // A new upload is created private; close installs OPEN's mode.
+        match create_motor_entry(path, moto_io::fs::EntryKind::File, staging_permissions()) {
+            Ok(()) => {}
+            Err(_error)
+                if !pflags.contains(OpenFlags::EXCLUDE) && std::path::Path::new(path).exists() =>
+            {
+                original = Some(path_permissions(path)?);
             }
+            Err(error) => return Err(error),
         }
     }
-    let options: std::fs::OpenOptions = actual_flags.into();
-    let opened = tokio::fs::OpenOptions::from(options).open(path).await;
-    let file = match opened {
-        Ok(file) => file,
-        Err(error) => {
-            if let Some(permissions) = original {
-                let _ = set_path_permissions(path, permissions).await;
-            }
-            return Err(error);
-        }
-    };
+    if original.is_some() || (writable && pflags.contains(OpenFlags::CREATE)) {
+        // The entry exists now, found above or just created. A path that
+        // vanishes before the open fails instead of creating a file whose
+        // mode nothing manages.
+        actual_flags.remove(OpenFlags::CREATE | OpenFlags::EXCLUDE);
+    }
+    let mut options: std::fs::OpenOptions = actual_flags.into();
+    options.truncate(false);
+    let path_owned = path.to_owned();
+    let (file, entry_id) = tokio::task::spawn_blocking(move || {
+        use std::os::fd::AsRawFd;
+        let file = options.open(path_owned)?;
+        let entry_id = motor_io(async { moto_rt::fs::get_file_attr(file.as_raw_fd()) })?.entry_id;
+        Ok::<_, std::io::Error>((tokio::fs::File::from_std(file), entry_id))
+    })
+    .await
+    .map_err(std::io::Error::other)??;
     let mut open_file = OpenFile {
         file,
+        entry_id,
         path: path.to_owned(),
         writable,
         pending_permissions: None,
     };
-    if writable {
-        open_file.pending_permissions = Some(match (requested_mode, original) {
-            (Some(mode), Some(permissions)) => translated_permissions(permissions, mode, false),
-            (Some(mode), None) => new_permissions(mode, false),
-            (None, Some(permissions)) => permissions,
-            (None, None) => staging_permissions(),
-        });
-    } else if let Some(mode) = requested_mode {
-        let existing = path_permissions(path)?;
-        set_file_permissions(&open_file, translated_permissions(existing, mode, false)).await?;
+    // OPEN's mode is a creation hint. An existing file keeps its installed
+    // mode unless an explicit SETSTAT/FSETSTAT follows, and a read-only open
+    // never changes one.
+    let mut narrowed = None;
+    if writable && original.is_some() {
+        let permissions = installed_permissions(&open_file).await?;
+        if !permissions.get(current_role()).can_write() {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        if let Some(mode) = requested_mode {
+            if preserve_attributes {
+                // OpenSSH's put -p/scp -p install the mode after the contents.
+                // A mode change the filesystem would refuse fails the open
+                // instead, before the upload truncates the file.
+                stage_file_mode(&mut open_file, permissions, mode).await?;
+                narrowed = Some(permissions);
+            } else if would_expose_private_data(permissions, mode) {
+                // Hide the file from the lower roles before any contents move.
+                // The caller's own byte keeps the installed mode: the upload
+                // needs its write access, which a file mode with `x` or
+                // without `w` loses.
+                set_file_permissions(&open_file, narrow_lower_roles(permissions)).await?;
+                narrowed = Some(permissions);
+            }
+        }
+    } else if writable {
+        open_file.pending_permissions = Some(
+            requested_mode.map_or_else(staging_permissions, |mode| new_permissions(mode, false)),
+        );
+    }
+    if pflags.contains(OpenFlags::TRUNCATE)
+        && let Err(error) = open_file.file.set_len(0).await
+    {
+        // Nothing has been written: the lower roles get their access back.
+        if let Some(permissions) = narrowed {
+            let _ = set_file_permissions(&open_file, permissions).await;
+        }
+        return Err(error);
     }
     Ok(open_file)
 }
@@ -464,12 +526,34 @@ async fn create_directory(path: &str, mode: Option<u32>) -> std::io::Result<()> 
 
 #[cfg(target_os = "motor")]
 fn file_attributes(path: &str, metadata: &std::fs::Metadata) -> Result<FileAttributes, StatusCode> {
-    use moto_io::fs::Role;
-
     let permissions = path_permissions(path).map_err(|error| {
         log::warn!("stat permissions for {path}: {error}");
         io_status(&error)
     })?;
+    Ok(role_attributes(permissions, metadata))
+}
+
+/// The attributes of an open handle: its mode follows the entry it opened,
+/// whatever its path names by now.
+#[cfg(target_os = "motor")]
+async fn handle_attributes(
+    file: &OpenFile,
+    metadata: &std::fs::Metadata,
+) -> Result<FileAttributes, StatusCode> {
+    let permissions = installed_permissions(file).await.map_err(|error| {
+        log::warn!("fstat permissions for {}: {error}", file.path);
+        io_status(&error)
+    })?;
+    Ok(role_attributes(permissions, metadata))
+}
+
+#[cfg(target_os = "motor")]
+fn role_attributes(
+    permissions: moto_io::fs::RolePermissions,
+    metadata: &std::fs::Metadata,
+) -> FileAttributes {
+    use moto_io::fs::Role;
+
     let directory = metadata.is_dir();
     let (owner, public) = match current_role() {
         Role::System => {
@@ -486,7 +570,7 @@ fn file_attributes(path: &str, metadata: &std::fs::Metadata) -> Result<FileAttri
     let mut attrs = FileAttributes::from(metadata);
     let kind = if directory { 0o040000 } else { 0o100000 };
     attrs.permissions = Some(kind | NormalizedMode { owner, public }.reported_posix());
-    Ok(attrs)
+    attrs
 }
 
 #[cfg(unix)]
@@ -501,6 +585,79 @@ fn updated_permissions(
 #[cfg(target_os = "motor")]
 fn updated_permissions(current: SavedPermissions, mode: u32, directory: bool) -> SavedPermissions {
     translated_permissions(current, mode, directory)
+}
+
+/// The mode a handle's file has on disk right now.
+#[cfg(unix)]
+async fn installed_permissions(file: &OpenFile) -> std::io::Result<SavedPermissions> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(file.file.metadata().await?.permissions().mode() & 0o777)
+}
+
+#[cfg(target_os = "motor")]
+async fn installed_permissions(file: &OpenFile) -> std::io::Result<SavedPermissions> {
+    motor_io(async {
+        moto_io::fs::FsClient::connect()?
+            .metadata(file.entry_id)
+            .await?
+            .permissions()
+    })
+}
+
+#[cfg(unix)]
+fn upload_permissions(
+    current: SavedPermissions,
+    requested: SavedPermissions,
+) -> std::io::Result<SavedPermissions> {
+    Ok((current & requested) | 0o600)
+}
+
+#[cfg(target_os = "motor")]
+fn upload_permissions(
+    mut current: SavedPermissions,
+    requested: SavedPermissions,
+) -> std::io::Result<SavedPermissions> {
+    use moto_io::fs::Role;
+    // A writable caller is at Rw or Rwx, from which every normalized file
+    // mode is permitted. Check the higher-role ceiling before deferring it.
+    if !current.get(current_role()).can_write()
+        || !requested.system.can_narrow_to(requested.interactive)
+        || !requested.interactive.can_narrow_to(requested.none)
+    {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    match current_role() {
+        Role::System => {
+            current.interactive = current.interactive.meet(requested.interactive);
+            current.none = current.none.meet(requested.none);
+        }
+        Role::Interactive => current.none = current.none.meet(requested.none),
+        Role::None => {}
+    }
+    Ok(current)
+}
+
+/// Authorize now and narrow lower roles before acknowledging the request.
+/// Finalization may remove the writer's access, so it waits until close.
+async fn apply_file_mode(file: &mut OpenFile, mode: u32) -> std::io::Result<()> {
+    let current = installed_permissions(file).await?;
+    stage_file_mode(file, current, mode).await
+}
+
+async fn stage_file_mode(
+    file: &mut OpenFile,
+    current: SavedPermissions,
+    mode: u32,
+) -> std::io::Result<()> {
+    let requested = updated_permissions(current, mode, false);
+    if file.writable {
+        let staging = upload_permissions(current, requested)?;
+        set_file_permissions(file, staging).await?;
+        file.pending_permissions = Some(requested);
+        Ok(())
+    } else {
+        set_file_permissions(file, requested).await
+    }
 }
 
 async fn apply_path_mode(path: &str, mode: u32, directory: bool) -> std::io::Result<()> {
@@ -664,7 +821,8 @@ impl russh_sftp::server::Handler for SftpSession {
         }
 
         let requested_mode = permission_mode(&attrs)?;
-        let file = open_file(&filename, pflags, requested_mode)
+        let preserve_attributes = attrs.atime.is_some() || attrs.mtime.is_some();
+        let file = open_file(&filename, pflags, requested_mode, preserve_attributes)
             .await
             .map_err(|error| {
                 log::warn!("open: {filename}: {error}");
@@ -772,17 +930,31 @@ impl russh_sftp::server::Handler for SftpSession {
         let Some(mode) = permission_mode(&attrs)? else {
             return Ok(ok_status(id));
         };
-        let mut deferred = false;
-        for file in self
-            .open_files
-            .values_mut()
-            .filter(|file| file.writable && file.path == path)
-        {
-            let current = file.pending_permissions.ok_or(StatusCode::Failure)?;
-            file.pending_permissions = Some(updated_permissions(current, mode, false));
-            deferred = true;
-        }
-        if deferred {
+        #[cfg(target_os = "motor")]
+        let entry_id = motor_io(async {
+            moto_io::fs::FsClient::connect()?
+                .stat(&canonicalize_lexical(&path))
+                .await
+                .map(|(id, _)| id)
+        })
+        .map_err(|error| io_status(&error))?;
+        // An open upload installs the mode at close, after its contents. The
+        // handles on one entry share its staging chmod and deferred mode.
+        let mut uploads = self.open_files.values_mut().filter(|file| {
+            #[cfg(unix)]
+            let matches = file.path == path;
+            #[cfg(target_os = "motor")]
+            let matches = file.entry_id == entry_id;
+            file.writable && matches
+        });
+        if let Some(first) = uploads.next() {
+            apply_file_mode(first, mode)
+                .await
+                .map_err(|error| io_status(&error))?;
+            let pending = first.pending_permissions;
+            for file in uploads {
+                file.pending_permissions = pending;
+            }
             return Ok(ok_status(id));
         }
         let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
@@ -810,29 +982,17 @@ impl russh_sftp::server::Handler for SftpSession {
         // OpenSSH scp pins each in-place upload to its last acknowledged byte.
         let size = attrs.size.take();
         let mode = permission_mode(&attrs)?;
+        if let Some(mode) = mode {
+            apply_file_mode(file, mode).await.map_err(|error| {
+                log::warn!("fsetstat permissions {handle}: {error}");
+                io_status(&error)
+            })?;
+        }
         if let Some(size) = size {
             file.file.set_len(size).await.map_err(|error| {
                 log::warn!("fsetstat size {handle}: {error}");
                 io_status(&error)
             })?;
-        }
-        if let Some(mode) = mode {
-            if file.writable {
-                let current = file.pending_permissions.ok_or(StatusCode::Failure)?;
-                file.pending_permissions = Some(updated_permissions(current, mode, false));
-            } else {
-                #[cfg(unix)]
-                let current = 0;
-                #[cfg(target_os = "motor")]
-                let current = path_permissions(&file.path).map_err(|error| io_status(&error))?;
-                let permissions = updated_permissions(current, mode, false);
-                set_file_permissions(file, permissions)
-                    .await
-                    .map_err(|error| {
-                        log::warn!("fsetstat permissions {handle}: {error}");
-                        io_status(&error)
-                    })?;
-            }
         }
         Ok(ok_status(id))
     }
@@ -851,7 +1011,7 @@ impl russh_sftp::server::Handler for SftpSession {
         })?;
         Ok(russh_sftp::protocol::Attrs {
             id,
-            attrs: file_attributes(&file.path, &metadata)?,
+            attrs: handle_attributes(file, &metadata).await?,
         })
     }
 

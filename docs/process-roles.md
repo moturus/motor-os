@@ -589,7 +589,10 @@ belong to `PERMISSIONS_DESIGN.md`:
   narrowing or either exact transition `Rw` → `Rx` and `Rx` → `Rwx`, cascades
   removed permissions to lower roles, and rejects other direct self-widens.
   Each change still obeys the immediately higher role's ceiling; System has
-  none. This applies to files and directories. A future
+  none. Motor FS also requires the caller's `w` on the entry's current parent
+  directory, even for narrowing or an unchanged mode; only System may chmod
+  `/`. Entry-ID changes need parent `w`, while pathname lookup needs `x` too.
+  This applies to files and directories. A future
   administrative API that explicitly edits a lower role can add a distinct
   command/target field when it has a real consumer; it is not required to make
   chmod work correctly.
@@ -602,8 +605,12 @@ belong to `PERMISSIONS_DESIGN.md`:
   A role at `R` or `None` still cannot widen itself: the std readonly
   round-trip (`Rw` → `R` → `Rw`) fails on its second step. Its recovery idiom
   remains read/create/write/delete/rename through a writable staging file.
-  `std::fs::copy` preserves source permissions; deletion and replacement
-  require parent-directory `w` (§10.7).
+  `std::fs::copy` installs the source's permissions on the destination, so it
+  needs the caller's `w` on the destination's parent and is refused where
+  that is denied; deletion and replacement require parent-directory `w`
+  (§10.7). An existing writable file under a protected parent can still be
+  edited in place by writing to it, and an SFTP upload replaces its contents
+  and keeps its installed mode; a separate SFTP chmod request remains denied.
 - Ordinary client create requests use creator-relative defaults: files are
   `Rw` for the creator, `Rwx` for higher roles, and `R` for lower roles;
   directories are `Rwx` for the creator and higher roles and `Rx` for lower
@@ -617,7 +624,9 @@ belong to `PERMISSIONS_DESIGN.md`:
   monotonicity. The destination is staged as `Rw` while contents move, then
   `R`, `Rw`, or `Rx` is restored; a legacy caller-role `Rwx` source is
   finalized as `Rx`. Higher-role bytes retain their creator-relative defaults
-  because the caller cannot edit them. sysbox `cp` relies on that behavior for
+  because the caller cannot edit them. The staging change doubles as the
+  authority check: a parent that denies the caller `w` refuses it before the
+  destination is truncated. sysbox `cp` relies on that behavior for
   files and leaves copied directories at their creator-relative default.
 
 ---

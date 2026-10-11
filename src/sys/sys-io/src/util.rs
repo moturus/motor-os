@@ -12,37 +12,34 @@ pub fn map_err_into_native(err: std::io::Error) -> moto_rt::Error {
         std::io::ErrorKind::ConnectionAborted => moto_rt::Error::NotConnected,
         std::io::ErrorKind::NotConnected => moto_rt::Error::NotConnected,
         std::io::ErrorKind::AddrInUse => moto_rt::Error::AlreadyInUse,
-        std::io::ErrorKind::AddrNotAvailable => todo!(),
+        std::io::ErrorKind::AddrNotAvailable => moto_rt::Error::InvalidArgument,
         std::io::ErrorKind::NetworkDown => moto_rt::Error::NotConnected,
         std::io::ErrorKind::BrokenPipe => moto_rt::Error::NotConnected,
         std::io::ErrorKind::AlreadyExists => moto_rt::Error::AlreadyInUse,
         std::io::ErrorKind::WouldBlock => moto_rt::Error::NotReady,
         std::io::ErrorKind::NotADirectory => moto_rt::Error::NotADirectory,
-        std::io::ErrorKind::IsADirectory => todo!(),
+        std::io::ErrorKind::IsADirectory => moto_rt::Error::InvalidArgument,
         std::io::ErrorKind::DirectoryNotEmpty => moto_rt::Error::FileTooLarge,
-        std::io::ErrorKind::ReadOnlyFilesystem => todo!(),
-        std::io::ErrorKind::FilesystemLoop => todo!(),
-        std::io::ErrorKind::StaleNetworkFileHandle => todo!(),
+        std::io::ErrorKind::ReadOnlyFilesystem => moto_rt::Error::NotAllowed,
+        std::io::ErrorKind::StaleNetworkFileHandle => moto_rt::Error::BadHandle,
         std::io::ErrorKind::InvalidInput => moto_rt::Error::InvalidArgument,
         std::io::ErrorKind::InvalidData => moto_rt::Error::InvalidData,
         std::io::ErrorKind::TimedOut => moto_rt::Error::TimedOut,
-        std::io::ErrorKind::WriteZero => todo!(),
-        std::io::ErrorKind::StorageFull => moto_rt::Error::StorageFull,
-        std::io::ErrorKind::NotSeekable => todo!(),
-        std::io::ErrorKind::QuotaExceeded => todo!(),
-        std::io::ErrorKind::FileTooLarge => todo!(),
-        std::io::ErrorKind::ResourceBusy => todo!(),
-        std::io::ErrorKind::ExecutableFileBusy => todo!(),
-        std::io::ErrorKind::Deadlock => todo!(),
-        std::io::ErrorKind::CrossesDevices => todo!(),
-        std::io::ErrorKind::TooManyLinks => todo!(),
+        std::io::ErrorKind::WriteZero => moto_rt::Error::UnexpectedEof,
+        std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => {
+            moto_rt::Error::StorageFull
+        }
+        std::io::ErrorKind::FileTooLarge => moto_rt::Error::FileTooLarge,
+        std::io::ErrorKind::ResourceBusy | std::io::ErrorKind::ExecutableFileBusy => {
+            moto_rt::Error::AlreadyInUse
+        }
         std::io::ErrorKind::InvalidFilename => moto_rt::Error::InvalidFilename,
-        std::io::ErrorKind::ArgumentListTooLong => todo!(),
         std::io::ErrorKind::Interrupted => moto_rt::Error::InternalError,
         std::io::ErrorKind::Unsupported => moto_rt::Error::NotImplemented,
         std::io::ErrorKind::UnexpectedEof => moto_rt::Error::UnexpectedEof,
         std::io::ErrorKind::OutOfMemory => moto_rt::Error::OutOfMemory,
-        std::io::ErrorKind::Other => moto_rt::Error::Unknown,
+        // Nothing in sys-io produces the remaining kinds; a client sees an
+        // error rather than sys-io panicking on a kind nobody anticipated.
         _ => moto_rt::Error::Unknown,
     }
 }
