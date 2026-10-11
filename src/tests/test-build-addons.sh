@@ -104,8 +104,8 @@ if (validate_helix_elf "$temporary/tls-pie") 2>/dev/null; then
 fi
 
 case "$(declare -f build_helix)" in
-	*'fetch --locked'*'build --target "$TARGET" --release --locked'*\
-*'--offline --no-default-features -p helix-term --bin hx'*) ;;
+	*'fetch --locked'*'CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-clang"'*\
+*'build --target "$TARGET" --release --locked'*'--offline -p helix-term --bin hx'*) ;;
 	*) fail "Helix build is not an explicit fetch followed by an offline locked build" ;;
 esac
 # Add-ons are built for new and reused assemblies alike, outside the keyed
