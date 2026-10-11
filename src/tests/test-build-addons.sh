@@ -159,4 +159,100 @@ if (ensure_addon test source-3 "$overlay" bin/tool build_nothing) 2>/dev/null; t
 	fail "an add-on build that staged nothing was accepted"
 fi
 
+# The wasm add-ons build with the orchestrator's selection, managed or
+# authoring, and the selection is part of each add-on's source identity.
+case "$(declare -f build_addons)" in
+	*'build_javy_addon'*'build_wasmtime_addon'*) ;;
+	*) fail "Javy/Wasmi and Wasmtime are not both add-ons" ;;
+esac
+javy_root="$temporary/javy"
+javy_log="$javy_root/toolchains.log"
+mkdir -p "$javy_root/motorh/javy" "$javy_root/motorh/wasmtime/motor-runtime"
+for tool in javy wasmtime; do
+	cat > "$javy_root/motorh/$tool/motor-build.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'build %s %s\n' "$RUSTUP_TOOLCHAIN" "$*" >> "$JAVY_TOOLCHAIN_LOG"
+EOF
+	chmod +x "$javy_root/motorh/$tool/motor-build.sh"
+done
+for selection in managed-probe authoring-probe; do
+	(
+		export RUSTUP_TOOLCHAIN="$selection" JAVY_TOOLCHAIN_LOG="$javy_log"
+		MOTORH="$javy_root/motorh"
+		ASSEMBLY_BUILD_ROOT="$javy_root/build"
+		JAVY_IMG="$javy_root/images/javy" JAVY_TESTS="$javy_root/tests/javy"
+		WASMTIME_IMG="$javy_root/images/wasmtime" WASMTIME_TESTS="$javy_root/tests/wasmtime"
+		JAVY_PLUGIN_SHA=plugin JAVY_TYPESCRIPT_SHA=typescript JAVY_SOURCE_MANIFEST=manifest
+		WASMTIME_SOURCE_MANIFEST=manifest
+		javy_download() { : > "$3"; }
+		cargo() { printf 'fetch %s %s\n' "$RUSTUP_TOOLCHAIN" "${PWD##*/}" >> "$JAVY_TOOLCHAIN_LOG"; }
+		gzip() { :; }
+		tar() { :; }
+		install() { :; }
+		sha256sum() { cat > /dev/null; }
+		build_wasmtime_fixtures() { printf 'fixtures %s\n' "$RUSTUP_TOOLCHAIN" >> "$JAVY_TOOLCHAIN_LOG"; }
+		javy_linux_reference() { :; }
+		build_javy_test_plugins() { :; }
+		build_javy
+		build_wasmtime
+	) < /dev/null > /dev/null 2>&1 || fail "a wasm add-on stage failed with selection $selection"
+done
+expected=""
+for selection in managed-probe authoring-probe; do
+	expected+="fetch $selection javy"$'\n'"build $selection "$'\n'
+	expected+="fetch $selection motor-runtime"$'\n'"fetch $selection motor-runtime"$'\n'
+	expected+="build $selection runtime"$'\n'"fixtures $selection"$'\n'
+done
+[ "$(cat "$javy_log")"$'\n' = "$expected" ] ||
+	fail "the wasm add-ons did not fetch and build with the selected toolchain"
+# The host Pulley compiler uses the selected toolchain; guest programs use the
+# pinned upstream one with wasm32 targets, which the Motor toolchain lacks.
+case "$(declare -f build_wasmtime_fixtures)" in
+	*'--features compile --bin compile'*'RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"'*\
+*'--target wasm32-wasip2 -p test-programs --features motor'*) ;;
+	*) fail "the Wasmtime fixtures are not built with the expected toolchains" ;;
+esac
+case "$(declare -f build_addons)" in
+	*'ensure_wasm_guest_toolchain'*'ensure_wasi_sdk'*'build_javy_addon'*'build_wasmtime_addon'*) ;;
+	*) fail "the guest toolchain and wasi-sdk are not provided before the wasm add-ons" ;;
+esac
+# javy-smoke's test plugins are guests too, and their QuickJS C code is built
+# with the pinned wasi-sdk, checked before it is unpacked.
+case "$(declare -f build_javy_test_plugins)" in
+	*'RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" WASI_SDK'*'--target wasm32-wasip1'*\
+*'--target wasm32-wasip2'*) ;;
+	*) fail "the Javy test plugins are not built with the guest toolchain and wasi-sdk" ;;
+esac
+case "$(declare -f ensure_wasi_sdk)" in
+	*'"$WASI_SDK_SHA"'*'sha256sum -c'*'tar -xzf'*) ;;
+	*) fail "wasi-sdk is not checked before it is unpacked" ;;
+esac
+javy_manifest() (
+	RUSTUP_TOOLCHAIN="$1"
+	rustc() { printf 'rustc for %s\n' "$RUSTUP_TOOLCHAIN"; }
+	JAVY_SOURCES=()
+	JAVY_PLUGIN_SHA=plugin
+	JAVY_TYPESCRIPT_SHA=typescript
+	javy_source_manifest
+)
+managed_manifest="$(javy_manifest managed-probe)"
+authoring_manifest="$(javy_manifest authoring-probe)"
+case "$authoring_manifest" in
+	*'toolchain=authoring-probe'*'rustc=rustc for authoring-probe'*) ;;
+	*) fail "the Javy manifest does not name the selected toolchain" ;;
+esac
+[ "$managed_manifest" != "$authoring_manifest" ] ||
+	fail "a changed toolchain selection would reuse the Javy add-on"
+# The Linux reference digests come from the pinned Linux Javy and the fixtures
+# javy-smoke compiles, so each is part of the Javy add-on's source identity.
+case "$managed_manifest" in
+	*'fixtures/hello.js'*"javy-linux=$JAVY_LINUX_SHA"*) ;;
+	*) fail "the Javy manifest does not name the Linux reference inputs" ;;
+esac
+case "$managed_manifest" in
+	*'plugins/p1/src/lib.rs'*'guest-toolchain=rustc for '"$WASM_GUEST_TOOLCHAIN"*\
+*"wasi-sdk=$WASI_SDK_SHA"*) ;;
+	*) fail "the Javy manifest does not name the test plugin inputs" ;;
+esac
+
 echo "test-build-addons PASS"

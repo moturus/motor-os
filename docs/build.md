@@ -14,7 +14,7 @@ src/build-motor-os.sh
 The script installs missing host packages and rustup, configures the VM host,
 checks out the exact Rust, LLVM, Cargo, and mlibc revisions declared in
 `src/toolchain-versions.sh`, builds the complete host and native toolchains,
-and creates all three release images. Package installation and VM networking
+and creates the base, standard, developer, and wasm release images. Package installation and VM networking
 setup use `sudo`, and both run at the very start, so the rest of the build can
 be left unattended; managed source and dependency acquisition uses the network.
 If the build is interrupted or fails, run the same command again.
@@ -38,10 +38,66 @@ toolchains/      immutable key-qualified host toolchain prefixes
 assemblies/      keyed C sysroots, native tools, and generated image roots
 ripgrep/ helix/ sed/ lua-<version>/
                  sources of the userspace add-ons, built last
+javy/ wasmi/ wasmtime/ target-lexicon/ tokio/ mio/
+                 published Motor branches for the Javy/Wasmi and Wasmtime add-ons
+wasi-sdk-24.0-x86_64-linux/
+                 pinned wasi-sdk for the QuickJS code of the Javy test plugins
 ```
 
 Re-running `src/build-motor-os.sh` validates and reuses a complete matching
 prefix or assembly. It does not broadly delete older keyed outputs.
+
+With an installed assembly, build just the wasm add-ons and their images with:
+
+```sh
+src/build-motor-os.sh --javy-only --wasmtime-only
+make dev.img wasm.img BUILD=release -j"$(nproc)"
+```
+
+Both images install `/devtools/bin/javy`, `/devtools/bin/wasmi` and the
+runtime-only `/devtools/bin/wasmtime-rt`, with Javy's default plugin at
+`/devtools/javy/plugins/default.wasm` and build provenance under
+`/devtools/javy` and `/devtools/wasmtime`. See
+[WebAssembly on Motor OS](wasm.md) for the installed files and the developer
+image's example under `/devtools/src/wasm`.
+
+The wasm image has a 1 GiB data partition and does not include the native
+development toolchain. The full Wasmtime compiler follows in a later milestone.
+
+On Motor, compile into a writable directory and execute with explicit masks:
+
+```sh
+MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /user/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /devtools/bin/wasmi /user/tmp/hello.wasm
+```
+
+The add-ons follow published `moturus` branches and record resolved revisions,
+the selected assembly, native library content, and input digests in
+`/devtools/javy/sources.txt` and `/devtools/wasmtime/sources.txt`. Their test
+inputs are staged outside the images, in the assembly's `tests/javy` and
+`tests/wasmtime`, and uploaded by the tests; the Wasmtime fixtures and two
+custom Javy plugins are built with a pinned upstream Rust that has the
+`wasm32-wasip1`/`wasm32-wasip2` targets, the plugins' QuickJS code with the
+pinned wasi-sdk. Build-time downloads are
+digest-checked; the installed-tool tests require no Internet access:
+
+```sh
+src/tests/test-wasm.sh --prepare
+src/tests/test-wasm.sh
+```
+
+By default these Rust checks run both release images at 256 and 224 MiB
+(`--vm IMAGE:MIB` selects VMs instead), with the repeat-for-identical-bytes
+checks on the first VM only: Javy static and
+dynamic compilation, TypeScript, default and custom plugins, Wasmi execution,
+memory limits and a deliberately refused page fault, errors, fuel and
+permission refusals, and `wasmtime-rt` lifecycle, limits, artifact
+refusals, TypeScript and WASI p2 sockets. `src/tests/full-test-dev.sh --release`
+runs them on the wasm image at 224 MiB and the developer image at 256 MiB, and
+the Linux identity checks once; debug suites skip them.
+Engine regressions remain in the owning forks. Upstream Brotli is used; compressed
+source bytes can differ between Linux and Motor because their math libraries
+round some logarithms differently.
 
 For the source layout, authoring mode, generated manifests, and update policy,
 see [Building the complete toolchain](build-motor-os.md). The LLVM/C++ and

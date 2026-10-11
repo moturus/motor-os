@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # build-motor-os.sh — build the complete Motor OS release environment and the
-# base, standard, and development VM images.
+# base, standard, development, and wasm VM images.
 #
 # This is the single entry point for the exact toolchain pipeline: it provisions
 # the host, resolves the declared Rust/LLVM source tuple, builds and validates a
@@ -36,10 +36,11 @@ trap 'die "failed at line $LINENO"' ERR
 usage() {
 	cat << 'EOF'
 Usage: src/build-motor-os.sh [--source-mode managed]
+       src/build-motor-os.sh [--javy-only] [--wasmtime-only]
        src/build-motor-os.sh --source-mode authoring \
          --rust-source /absolute/path/to/rust --authoring-base FULL_COMMIT
 
-Build the complete Motor OS release environment and all three images, including:
+Build the complete Motor OS release environment and all four images, including:
   - the exact key-qualified Rust 1.99 Motor toolchain;
   - Linux-host rust-analyzer and its matching proc-macro server;
   - host cross LLVM/Clang and the mlibc/libc++ sysroot;
@@ -48,8 +49,14 @@ Build the complete Motor OS release environment and all three images, including:
   - Helix as /devtools/helix/hx in the development image;
   - uutils sed as /devtools/bin/sed in the development image;
   - native rust-analyzer and matching rust-src in the development image;
+  - Javy and Wasmi in the development and small wasm images;
+  - runtime-only Wasmtime as /devtools/bin/wasmtime-rt in both of those images;
   - all standard and dev-image Motor OS binaries;
-  - base, standard, and dev images under vm_images/release.
+  - base, standard, dev, and wasm images under vm_images/release.
+
+--javy-only and --wasmtime-only build the Javy/Wasmi and runtime-only Wasmtime
+add-ons with the selected installed assembly; they skip toolchain provisioning
+and image construction.
 
 Environment:
   MOTORH  Development root for sibling checkouts and build trees.
@@ -69,11 +76,15 @@ EOF
 
 parse_options() {
 	SOURCE_MODE=managed
+	JAVY_ONLY=false
+	WASMTIME_ONLY=false
 	RUST_SOURCE=
 	AUTHORING_BASE=
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			-h|--help) usage; return 2 ;;
+			--javy-only) JAVY_ONLY=true; shift ;;
+			--wasmtime-only) WASMTIME_ONLY=true; shift ;;
 			--source-mode) [ "$#" -ge 2 ] || die "--source-mode needs a value"; SOURCE_MODE="$2"; shift 2 ;;
 			--rust-source) [ "$#" -ge 2 ] || die "--rust-source needs a value"; RUST_SOURCE="$2"; shift 2 ;;
 			--authoring-base) [ "$#" -ge 2 ] || die "--authoring-base needs a value"; AUTHORING_BASE="$2"; shift 2 ;;
@@ -113,6 +124,8 @@ MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/toolchain-patched-crates.sh"
 . "$SCRIPT_DIR/toolchain-rust-analyzer.sh"
 . "$SCRIPT_DIR/patches/crates.sh"
+. "$SCRIPT_DIR/build-javy.sh"
+. "$SCRIPT_DIR/build-wasmtime.sh"
 toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
 
 MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
@@ -142,6 +155,13 @@ SED_BRANCH=main
 CLANG_MAJOR=""                      # detected after the host toolchain is built
 
 HOST=x86_64-unknown-linux-gnu
+# Guest WebAssembly test inputs of the wasm add-ons are built with this pinned
+# upstream Rust; the Motor toolchain itself carries no wasm32 targets.
+WASM_GUEST_TOOLCHAIN=1.99.0
+# The QuickJS C code of javy-smoke's test plugins needs wasi-sdk: the release
+# rquickjs-sys would otherwise download unchecked.
+WASI_SDK_VERSION=24.0
+WASI_SDK_SHA=c6c38aab56e5de88adf6c1ebc9c3ae8da72f88ec2b656fb024eda8d4167a0bc5
 TARGET=x86_64-unknown-motor
 MAKE_LOG="$MOTORH/build-motor-os-make.log"
 
@@ -860,6 +880,28 @@ ensure_addon() {
 	printf '%s\n' "$source" > "$stamp"
 }
 
+ensure_wasm_guest_toolchain() {
+	log "providing Rust $WASM_GUEST_TOOLCHAIN with wasm32-wasip1 and wasm32-wasip2 for wasm test inputs"
+	rustup toolchain install "$WASM_GUEST_TOOLCHAIN" --profile minimal --no-self-update \
+		--target wasm32-wasip1 --target wasm32-wasip2
+}
+
+ensure_wasi_sdk() {
+	local name="wasi-sdk-$WASI_SDK_VERSION-x86_64-linux"
+	WASI_SDK="$MOTORH/$name"
+	[ ! -d "$WASI_SDK" ] || return 0
+	log "fetching wasi-sdk $WASI_SDK_VERSION for javy-smoke's test plugins"
+	local archive="$MOTORH/$name.tar.gz.part"
+	curl --fail --location -o "$archive" \
+		"https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%.*}/$name.tar.gz"
+	printf '%s  %s\n' "$WASI_SDK_SHA" "$archive" | sha256sum -c -
+	rm -rf "$WASI_SDK.part"
+	mkdir "$WASI_SDK.part"
+	tar -xzf "$archive" -C "$WASI_SDK.part" --strip-components=1
+	rm "$archive"
+	mv "$WASI_SDK.part" "$WASI_SDK"
+}
+
 build_addons() {
 	configure_exact_cross_driver
 	ensure_addon lua "$LUA_VER" "$LUA_IMG" devtools/bin/lua build_lua
@@ -872,6 +914,10 @@ build_addons() {
 	update_addon_source sed "$SED" "$SED_REPOSITORY" "$SED_BRANCH"
 	ensure_addon sed "$(git -C "$SED" rev-parse HEAD)" \
 		"$SED_IMG" devtools/bin/sed build_sed
+	ensure_wasm_guest_toolchain
+	ensure_wasi_sdk
+	build_javy_addon
+	build_wasmtime_addon
 }
 
 build_helix() {
@@ -898,7 +944,7 @@ build_helix() {
 	stage_helix
 }
 
-# --- rebuild the OS and all three images -------------------------------------
+# --- rebuild the OS and images ----------------------------------------------
 build_images() {
 	log "rebuilding Motor OS and all images (make images BUILD=release)"
 	# Keep make's output visible: when a component fails, the compiler diagnostic
@@ -908,8 +954,9 @@ build_images() {
 		2>&1 | tee "$MAKE_LOG"
 	grep -q 'built the Motor OS base image' "$MAKE_LOG" &&
 		grep -q 'built the standard Motor OS image' "$MAKE_LOG" &&
-		grep -q 'built the Motor OS dev image' "$MAKE_LOG" ||
-		die "make finished without all three imagers running — see $MAKE_LOG"
+		grep -q 'built the Motor OS dev image' "$MAKE_LOG" &&
+		grep -q 'built the Motor OS wasm image' "$MAKE_LOG" ||
+		die "make finished without all four imagers running — see $MAKE_LOG"
 }
 
 main() {
@@ -919,6 +966,26 @@ main() {
 		[ "$parse_status" -eq 2 ] && return 0
 		return "$parse_status"
 	}
+	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ]; then
+		[ "$SOURCE_MODE" = managed ] ||
+			die "--javy-only and --wasmtime-only use the selected installed toolchain"
+		# Select once, as ordinary builds do, and pass that choice to every step.
+		if [ -z "${RUSTUP_TOOLCHAIN:-}" ]; then
+			RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$MOTOR/rust-toolchain.toml")"
+			[ -n "$RUSTUP_TOOLCHAIN" ] || die "no Rust channel in $MOTOR/rust-toolchain.toml"
+		fi
+		export RUSTUP_TOOLCHAIN
+		ASSEMBLY_IMAGE_ROOT="$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)"
+		ASSEMBLY_ROOT="${ASSEMBLY_IMAGE_ROOT%/images}"
+		ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
+		ensure_wasm_guest_toolchain
+		if [ "$JAVY_ONLY" = true ]; then
+			ensure_wasi_sdk
+			build_javy_addon
+		fi
+		[ "$WASMTIME_ONLY" = false ] || build_wasmtime_addon
+		return
+	fi
 	log "complete Motor OS build starting"
 	log "Motor OS checkout: $MOTOR"
 	log "development root:  $MOTORH"
@@ -1002,12 +1069,16 @@ main() {
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
+		"$MOTOR/vm_images/release/motor-os-wasm.qcow2"
+		"$JAVY_IMG/devtools/bin/javy"
+		"$JAVY_IMG/devtools/bin/wasmi"
+		"$WASMTIME_IMG/devtools/bin/wasmtime-rt"
 	)
 	local output
 	for output in "${required_outputs[@]}"; do
 		[ -f "$output" ] || die "final build output is missing: $output"
 	done
-	log "base, standard, and dev release images built successfully"
+	log "base, standard, dev, and wasm release images built successfully"
 	[ "$caller_has_rustup" = true ] ||
 		warn "this shell's PATH lacks rustup: open a new shell or run '. \"\$HOME/.cargo/env\"' before make or the tests"
 	return 0

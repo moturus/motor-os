@@ -13,6 +13,10 @@ for script in full-test.sh test-dev-sources.sh; do
     > "$temporary/src/tests/$script"
   chmod +x "$temporary/src/tests/$script"
 done
+printf '%s\n' '#!/bin/bash' \
+  'printf "test-wasm.sh %s\n" "$*" >> "$MEMORY_TEST_LOG"' \
+  > "$temporary/src/tests/test-wasm.sh"
+chmod +x "$temporary/src/tests/test-wasm.sh"
 printf '%s\n' '#!/bin/bash' 'exit 0' > "$temporary/bin/python3"
 cp "$temporary/bin/python3" "$temporary/src/bin/lorry/tests/test-all.sh"
 chmod +x "$temporary/bin/python3" "$temporary/src/bin/lorry/tests/test-all.sh"
@@ -23,9 +27,11 @@ EOF
 chmod +x "$temporary/src/bin/httpd-axum/tests/run.sh"
 export MEMORY_TEST_LOG="$temporary/observed"
 export PATH="$temporary/bin:$PATH"
+wasm_expected=$'\ntest-wasm.sh --prepare --vm wasm:224 --vm dev:256 --release\ntest-wasm.sh --vm wasm:224 --vm dev:256 --linux-identity --release'
 
 env -u MOTO_MEMORY_MIB -u MOTO_IMAGE bash "$temporary/src/tests/full-test-dev.sh" --release > "$temporary/wrapper.log"
 expected=$'full-test.sh 8192 --release\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 4096 --release'
+expected+="$wasm_expected"
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VM defaults changed' >&2; exit 1;
 }
@@ -33,6 +39,7 @@ expected=$'full-test.sh 8192 --release\nhttpd-axum 4096 motor-os-dev.qcow2 --mot
 MOTO_MEMORY_MIB=6144 MOTO_IMAGE=caller.qcow2 \
   bash "$temporary/src/tests/full-test-dev.sh" --release >> "$temporary/wrapper.log"
 expected=$'full-test.sh 6144 --release\nhttpd-axum 6144 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 6144 --release'
+expected+="$wasm_expected"
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VM caller override was not preserved' >&2; exit 1;
 }
@@ -42,6 +49,7 @@ env -u MOTO_MEMORY_MIB \
   bash "$temporary/src/tests/full-test-dev.sh" --release --vmm chv \
   >> "$temporary/wrapper.log"
 expected=$'full-test.sh 8192 --release --vmm chv\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release --vmm chv\ntest-dev-sources.sh 4096 --release --vmm chv'
+expected+="${wasm_expected//--release/--release --vmm chv}"
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VMM selection was not forwarded to every phase' >&2; exit 1;
 }

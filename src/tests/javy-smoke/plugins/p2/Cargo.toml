@@ -1,0 +1,13 @@
+[package]
+name = "javy-smoke-plugin-p2"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+
+[dependencies]
+javy-plugin-api.workspace = true
+wit-bindgen = "=0.61.1"

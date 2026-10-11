@@ -1,0 +1,18 @@
+# Test-only Javy plugins for javy-smoke. src/build-javy.sh builds them on the
+# host into the assembly's tests/javy and test-wasm.sh uploads them; they are
+# part of no image.
+[workspace]
+members = ["p1", "p2"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+javy-plugin-api = { version = "=7.1.0", features = ["json"] }
+
+# Upstream Javy's own release profile.
+[profile.release]
+lto = true
+opt-level = 3

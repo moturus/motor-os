@@ -99,3 +99,19 @@ pub extern "C" fn __stack_chk_fail() -> ! {
 pub extern "C" fn __assert_fail() -> ! {
     panic!("__assert_fail")
 }
+
+/// Return the byte length of a NUL-terminated string.
+///
+/// # Safety
+/// `start` must point to readable bytes through the first NUL in one allocation.
+#[linkage = "weak"] // Yield to mlibc when a C program links its strong definition.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strlen(start: *const core::ffi::c_char) -> usize {
+    let mut end = start;
+    unsafe {
+        while *end != 0 {
+            end = end.add(1);
+        }
+        end.offset_from(start) as usize
+    }
+}

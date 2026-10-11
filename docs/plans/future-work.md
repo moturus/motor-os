@@ -1,5 +1,49 @@
 # Future work -- recorded, deliberately not scheduled
 
+## Frusa work
+
+(a) Investigate moving Rust heap from Frusa4k to Frusa16k or Frusa32k
+
+The problem is that 16k allocs must often be aligned on 16k, but
+Frusa will only serve 4k-aligned buffers. Also how to make frusa
+deduce layout from address so that it can replace mlibc's alloc
+(so that C/C++ binaries on Motor OS have a single heap, not two).
+
+(b) Investigate using RCU and a background memory reclaim task:
+current reclaim stalls allocs/frees.
+
+## A pipe writer is never told that its reader is gone (2026-10-09)
+
+When a parent drops the read end of a child's piped stdout, the child's
+writes keep succeeding: a native writer looping on `write_all` to stdout ran
+until killed after 30 s, using CPU throughout, and never saw an error. POSIX
+would deliver `EPIPE`. `stdio_pipe.rs` has `reader_closing` →
+`E_NOT_CONNECTED` handling, so the reader's close probably never reaches the
+writer while the parent's rt.vdso relay keeps draining; this is unconfirmed.
+Upstream Wasmtime's `p2_cli_stdout_epipe` program cannot pass, so it is
+excluded from `wasmtime-smoke`. rush pipelines do not show it: rush runs
+stages one at a time through temp files, so `writer | head` never starts
+`head` while the writer runs.
+
+## Motor FS behavior that WASI guests see (2026-10-09)
+
+`moto_rt::Error` has no "directory not empty": sys-io's `map_err_into_native`
+sends `DirectoryNotEmpty` as `FileTooLarge`, so native `std::fs::remove_dir`
+on a non-empty directory reports `FileTooLarge`. The Wasmtime adapter maps it
+back for directory removal and rename. A lookup under a deleted directory's
+handle fails with `InvalidData` rather than `NotFound`, which WASI reports as
+`io`. Motor checks write permission on each write, not at open, so an open
+for writing succeeds where POSIX would fail with `EACCES`, and the guest's
+libc reports the failed write as `EIO`. A proper fix for the first needs a
+`moto_rt::Error` variant and std's mapping.
+
+Native rename replaces a destination of the other kind: a directory moved
+onto a file deletes the file, and a file moved onto an empty directory deletes
+the directory, where POSIX fails with `ENOTDIR`/`EISDIR` (motor-fs
+`do_move_entry_txn`). The adapter looks up the destination's kind first; a
+concurrent replacement between that lookup and the move still gets the native
+behavior, within the same parent.
+
 ## sys-io aborts when a TCP connection is established at the memory floor (2026-10-04)
 
 A release `full-test.sh` run on 2026-10-04 timed out after 900 s with

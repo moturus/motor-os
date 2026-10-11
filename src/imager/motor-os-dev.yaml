@@ -45,6 +45,8 @@ directories:
   - "/none/tmp"
   - "/devtools"
   - "/devtools/bin"
+  - "/devtools/javy"
+  - "/devtools/javy/plugins"
   - "/devtools/llvm"
   - "/devtools/llvm/bin"
   - "/devtools/llvm/cfg"
@@ -71,6 +73,7 @@ directories:
   - "/devtools/src"
   - "/devtools/tests"
   - "/devtools/tests/gears"
+  - "/devtools/wasmtime"
   - "/devtools/www"
 static_dirs:
   - "img_files/motor-os-base"
@@ -85,6 +88,8 @@ assembly_dirs:
   - "lua"
   - "sed"
   - "rust-analyzer"
+  - "javy"
+  - "wasmtime"
 assembly_required_executables:
   - "rg/system/bin/rg"
   - "llvm/devtools/bin/cc"
@@ -99,6 +104,9 @@ assembly_required_executables:
   - "helix/devtools/helix/hx"
   - "sed/devtools/bin/sed"
   - "rust-analyzer/devtools/rust/bin/rust-analyzer"
+  - "javy/devtools/bin/javy"
+  - "javy/devtools/bin/wasmi"
+  - "wasmtime/devtools/bin/wasmtime-rt"
 source_dirs:
   - source: "src/bin/red"
     destination: "/devtools/src/motor-os/bin/red"
