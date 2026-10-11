@@ -393,6 +393,9 @@ pub struct PlanOptions<'a> {
     /// `None` is a native Linux build. Native Motor passes its normalized
     /// explicit Motor target identity here.
     pub logical_target: Option<&'a str>,
+    /// An actual target selection isolates host Rust flags, unlike the
+    /// logical target identity used by native Motor builds.
+    pub physical_target: Option<&'a str>,
     pub rustflags: &'a [String],
 }
 
@@ -2207,7 +2210,8 @@ fn unit_settings(
         CompileKind::Target => options.logical_target.map(str::to_owned),
         CompileKind::Host => None,
     };
-    let rustflags = if key.compile_kind == CompileKind::Target || options.logical_target.is_none() {
+    let rustflags = if key.compile_kind == CompileKind::Target || options.physical_target.is_none()
+    {
         options.rustflags.to_vec()
     } else {
         Vec::new()
@@ -2833,6 +2837,7 @@ mod tests {
                 profile: &Profile::default(),
                 rustc: &toolchain(),
                 logical_target: None,
+                physical_target: None,
                 rustflags: &[],
             },
         )
@@ -3095,6 +3100,7 @@ mod tests {
             profile: &Profile::default(),
             rustc: &toolchain(),
             logical_target: None,
+            physical_target: None,
             rustflags: &[],
         };
         for (kind, name, command, mode) in [
@@ -3352,6 +3358,7 @@ mod tests {
                         profile: &Profile::default(),
                         rustc: &toolchain(),
                         logical_target: None,
+                        physical_target: None,
                         rustflags: &[],
                     },
                 )
@@ -3662,6 +3669,7 @@ mod tests {
             profile: &Profile::default(),
             rustc: &toolchain(),
             logical_target: None,
+            physical_target: None,
             rustflags: &[],
         };
         let named_integration = |name| CheckTargetSelection {
@@ -3722,6 +3730,7 @@ mod tests {
             let options = PlanOptions {
                 profile: &profile,
                 logical_target,
+                physical_target: logical_target,
                 ..options
             };
             let mode = if checking {
@@ -4049,6 +4058,7 @@ mod tests {
                 },
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
+                physical_target: Some("x86_64-unknown-motor"),
                 rustflags: &rustflags,
             },
         )
@@ -4115,6 +4125,7 @@ mod tests {
                 profile: &Profile::default(),
                 rustc: &toolchain(),
                 logical_target: None,
+                physical_target: None,
                 rustflags: &rustflags,
             },
         )
@@ -4357,6 +4368,7 @@ mod tests {
                 },
                 rustc: &toolchain(),
                 logical_target: None,
+                physical_target: None,
                 rustflags: &[],
             },
         )

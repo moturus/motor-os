@@ -1187,6 +1187,7 @@ fn build_inner(
         profile: &build.manifest.profile,
         rustc: build.toolchain,
         logical_target: build.logical_target,
+        physical_target: build.physical_target,
         rustflags: build.rustflags,
     };
     let plan = |selection| prepared.plan(&plan_options, &selected_packages, selection);
@@ -1566,7 +1567,7 @@ fn build_inner(
                         &host_profile,
                         None,
                         build.host_options,
-                        if build.logical_target.is_none() {
+                        if build.physical_target.is_none() {
                             build.rustflags
                         } else {
                             &[]
@@ -1855,7 +1856,7 @@ fn runtime_library_paths(
     {
         arguments.extend([OsString::from("--target"), target.into()]);
     }
-    if compile_kind == CompileKind::Target || build.logical_target.is_none() {
+    if compile_kind == CompileKind::Target || build.physical_target.is_none() {
         arguments.extend(build.rustflags.iter().map(OsString::from));
     }
     let output = process::RustcCommand {
@@ -2030,7 +2031,7 @@ fn freshness_base(
         return Ok(base);
     }
     let mut digest = FreshDigest::new();
-    digest.bytes("schema", b"lorry-root-profile-v1");
+    digest.bytes("schema", b"lorry-root-profile-v2");
     digest.debug("manifest", build.manifest);
     digest.debug("config", build.config);
     digest.debug("toolchain", build.toolchain);

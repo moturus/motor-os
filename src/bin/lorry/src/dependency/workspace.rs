@@ -492,6 +492,7 @@ mod tests {
                     profile: &crate::manifest::Profile::default(),
                     rustc: &toolchain,
                     logical_target: None,
+                    physical_target: None,
                     rustflags: &[],
                 },
                 &[app],

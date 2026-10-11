@@ -157,8 +157,8 @@ hooks. Ctrl+C reaches the editor as an input event. Normal exit and startup
 failure restore terminal modes and the alternate screen. Mouse input is
 disabled by default. Suspend/job control, external URL launching, system
 clipboard access, OSC 52, and dynamic grammar loading are unavailable;
-ordinary internal registers work. The build leaves Helix's `git` feature
-disabled.
+ordinary internal registers work. Motor builds exclude Helix's Git backend
+and its dependencies even when the default `git` feature is enabled.
 
 Local-file URI conversion is centralized in the fork's
 `helix-core/src/uri/file_url.rs`. It handles absolute UTF-8 paths, percent
@@ -184,12 +184,11 @@ and the branch to follow; no commit is declared. Dependency patches and
 grammar revisions live in that fork. After the toolchain and its assembly are
 complete, the [producer](build-motor-os.md) updates the checkout in
 `$MOTORH/helix`, explicitly fetches locked Cargo dependencies, then builds
-with the Motor compiler using `--locked`, `--offline`, and
-`--no-default-features`. The built commit is recorded in the assembly's
-`ADDON-helix` file, and Helix is rebuilt alone when the branch head differs;
-it is no part of the assembly's key, manifest, or validation. The image
-contains only the binary, queries, themes, and tutor; raw and stripped
-binaries undergo ELF checks.
+with the Motor compiler using `--locked` and `--offline`. The built commit
+is recorded in the assembly's `ADDON-helix` file, and Helix is rebuilt alone
+when the branch head differs; it is no part of the assembly's key, manifest,
+or validation. The image contains only the binary, queries, themes, and
+tutor; raw and stripped binaries undergo ELF checks.
 
 The Motor `parking_lot` fork parks idle Tokio workers with `moto_rt::Futex`.
 Its generic fallback used to spin, causing editor and file-picker latency.

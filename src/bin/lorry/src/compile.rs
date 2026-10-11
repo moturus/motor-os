@@ -1474,6 +1474,7 @@ mod tests {
                 },
                 rustc: &toolchain(),
                 logical_target: None,
+                physical_target: None,
                 rustflags: &[],
             },
         )
@@ -1910,6 +1911,7 @@ mod tests {
                 },
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
+                physical_target: Some("x86_64-unknown-motor"),
                 rustflags: &cross_flags,
             },
         )
@@ -2058,6 +2060,7 @@ mod tests {
                 profile: &Profile::default(),
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
+                physical_target: Some("x86_64-unknown-motor"),
                 rustflags: &[],
             },
         )

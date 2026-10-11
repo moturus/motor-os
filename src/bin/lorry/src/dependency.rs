@@ -888,6 +888,7 @@ mod tests {
             },
             rustc: &toolchain(),
             logical_target: None,
+            physical_target: None,
             rustflags: &[],
         };
         let plan = graph

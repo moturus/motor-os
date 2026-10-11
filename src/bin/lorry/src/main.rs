@@ -31,6 +31,9 @@ mod lockfile;
 mod manifest;
 mod member_source;
 mod metadata;
+#[cfg(test)]
+#[path = "../tests/unit/native-rustflags.rs"]
+mod native_rustflags;
 mod native_tool;
 mod new_package;
 mod offline;

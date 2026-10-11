@@ -883,7 +883,7 @@ build_helix() {
 		env \
 			RUSTC="$MOTOR_RUSTC" \
 			RUSTDOC="$MOTOR_RUSTDOC" \
-			CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-rust-cc" \
+			CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-clang" \
 			CC_x86_64_unknown_motor="$SYSROOT/bin/motor-clang" \
 			CXX_x86_64_unknown_motor="$SYSROOT/bin/motor-clang++" \
 			CXXSTDLIB_x86_64_unknown_motor=c++ \
@@ -893,7 +893,7 @@ build_helix() {
 			HELIX_DEFAULT_RUNTIME=/devtools/helix/runtime \
 			HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 \
 			"$MOTOR_CARGO" build --target "$TARGET" --release --locked \
-				--offline --no-default-features -p helix-term --bin hx
+				--offline -p helix-term --bin hx
 	)
 	stage_helix
 }

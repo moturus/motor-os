@@ -669,7 +669,10 @@ Lorry reads only these parts of Cargo's configuration:
 
 It follows Cargo's discovery and merge behavior and the supported
 `CARGO_BUILD_*` and `CARGO_TARGET_<TRIPLE>_*` environment forms for that
-subset. Settings that cannot change a build are ignored with a note; the
+subset. Without a CLI/configured target, Rust flags also reach build scripts,
+proc macros, and their host dependencies, including on native Motor. Motor's
+logical target identity does not isolate host flags; an actual target selection
+does. Settings that cannot change a build are ignored with a note; the
 command-line section lists them. Every other setting, such as source
 replacement, unstable features, or a compiler wrapper, is an error rather
 than adopted or silently ignored.
