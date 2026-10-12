@@ -124,6 +124,7 @@ MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/toolchain-patched-crates.sh"
 . "$SCRIPT_DIR/toolchain-rust-analyzer.sh"
 . "$SCRIPT_DIR/patches/crates.sh"
+. "$SCRIPT_DIR/build-addon-sources.sh"
 . "$SCRIPT_DIR/build-javy.sh"
 . "$SCRIPT_DIR/build-wasmtime.sh"
 toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
@@ -146,11 +147,8 @@ CROSS_FILE="$MOTORH/motor.cross-file"
 # Userspace add-ons. They are built with the finished toolchain and are no part
 # of its identity: Lua is a release, ripgrep, Helix, and sed follow a fork branch.
 LUA_VER=5.4.8
-RIPGREP_REPOSITORY=https://github.com/moturus/ripgrep.git
 RIPGREP_BRANCH=master
-HELIX_REPOSITORY=https://github.com/moturus/helix.git
 HELIX_BRANCH=helix-motor-25.7.1_2026-08-31
-SED_REPOSITORY=https://github.com/moturus/sed.git
 SED_BRANCH=main
 CLANG_MAJOR=""                      # detected after the host toolchain is built
 
@@ -905,13 +903,10 @@ ensure_wasi_sdk() {
 build_addons() {
 	configure_exact_cross_driver
 	ensure_addon lua "$LUA_VER" "$LUA_IMG" devtools/bin/lua build_lua
-	update_addon_source ripgrep "$RIPGREP" "$RIPGREP_REPOSITORY" "$RIPGREP_BRANCH"
 	ensure_addon ripgrep "$(git -C "$RIPGREP" rev-parse HEAD)" \
 		"$RG_IMG" system/bin/rg build_ripgrep
-	update_addon_source helix "$HELIX" "$HELIX_REPOSITORY" "$HELIX_BRANCH"
 	ensure_addon helix "$(git -C "$HELIX" rev-parse HEAD)" \
 		"$HELIX_IMG" devtools/helix/hx build_helix
-	update_addon_source sed "$SED" "$SED_REPOSITORY" "$SED_BRANCH"
 	ensure_addon sed "$(git -C "$SED" rev-parse HEAD)" \
 		"$SED_IMG" devtools/bin/sed build_sed
 	ensure_wasm_guest_toolchain
@@ -975,6 +970,12 @@ main() {
 			[ -n "$RUSTUP_TOOLCHAIN" ] || die "no Rust channel in $MOTOR/rust-toolchain.toml"
 		fi
 		export RUSTUP_TOOLCHAIN
+		local selection=wasm
+		if [ "$WASMTIME_ONLY" = false ]; then selection=javy
+		elif [ "$JAVY_ONLY" = false ]; then selection=wasmtime; fi
+		select_addon_workspaces "$selection"
+		prepare_addon_sources
+		check_addon_lockfiles || die "add-on preflight failed; see $MOTOR/build/addon-lockfiles.log"
 		ASSEMBLY_IMAGE_ROOT="$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)"
 		ASSEMBLY_ROOT="${ASSEMBLY_IMAGE_ROOT%/images}"
 		ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
@@ -1016,6 +1017,9 @@ main() {
 		"$MOTOR/src/sys/lib/moto-rt" "$TOOLCHAIN_SRC_ROOT/rust/build/cache"
 	log "host toolchain: $MOTOR_RUSTUP_TOOLCHAIN"
 	export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"
+	select_addon_workspaces all
+	prepare_addon_sources
+	check_addon_lockfiles || die "add-on preflight failed; see $MOTOR/build/addon-lockfiles.log"
 	export PYTHONDONTWRITEBYTECODE=1
 	export PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache"
 

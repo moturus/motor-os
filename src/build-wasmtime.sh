@@ -100,16 +100,9 @@ build_wasmtime() {
 }
 
 build_wasmtime_addon() {
-	WASMTIME_SOURCES=(wasmtime:motor-48.0.1 target-lexicon:motor-0.13.5 tokio:motor-1.51.1 mio:motor-1.2.0)
 	WASMTIME_IMG="$ASSEMBLY_IMAGE_ROOT/wasmtime"
 	WASMTIME_TESTS="$ASSEMBLY_ROOT/tests/wasmtime"
-	[ "$(readlink -f "$MOTORH/motor-os")" = "$MOTOR" ] ||
-		die "Wasmtime's sibling motor-os path must resolve to this checkout: $MOTORH/motor-os"
-	local spec repo branch source
-	for spec in "${WASMTIME_SOURCES[@]}"; do
-		repo=${spec%%:*}; branch=${spec#*:}
-		update_addon_source "$repo" "$MOTORH/$repo" "https://github.com/moturus/$repo.git" "$branch"
-	done
+	local source
 	WASMTIME_SOURCE_MANIFEST="$(
 		wasm_source_manifest "${WASMTIME_SOURCES[*]}" src/build-wasmtime.sh
 		printf 'guest-toolchain=%s\n' "$(RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" rustc --version)"

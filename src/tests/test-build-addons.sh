@@ -125,8 +125,8 @@ case "$(declare -f build_addons)" in
 	*'ensure_addon lua'*'ensure_addon ripgrep'*'ensure_addon helix'*'ensure_addon sed'*) ;;
 	*) fail "Lua, ripgrep, Helix, and sed are not all add-ons" ;;
 esac
-case "$(declare -f build_addons)" in
-	*'update_addon_source sed "$SED" "$SED_REPOSITORY" "$SED_BRANCH"'*'ensure_addon sed'*) ;;
+case "$(declare -f select_addon_workspaces)" in
+	*'"sed:$SED_BRANCH"'*) ;;
 	*) fail "sed does not follow its fork branch" ;;
 esac
 case "$(declare -f build_sed)" in

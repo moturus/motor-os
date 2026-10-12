@@ -146,16 +146,9 @@ build_javy() {
 }
 
 build_javy_addon() {
-	JAVY_SOURCES=(javy:motor-9.1.0 wasmi:motor-1.1.0 wasmtime:motor-48.0.1)
 	JAVY_IMG="$ASSEMBLY_IMAGE_ROOT/javy"
 	JAVY_TESTS="$ASSEMBLY_ROOT/tests/javy"
-	[ "$(readlink -f "$MOTORH/motor-os")" = "$MOTOR" ] ||
-		die "Javy's sibling motor-os path must resolve to this checkout: $MOTORH/motor-os"
-	local spec repo branch source
-	for spec in "${JAVY_SOURCES[@]}"; do
-		repo=${spec%%:*}; branch=${spec#*:}
-		update_addon_source "$repo" "$MOTORH/$repo" "https://github.com/moturus/$repo.git" "$branch"
-	done
+	local source
 	JAVY_SOURCE_MANIFEST="$(javy_source_manifest)"
 	source="$(printf '%s\n' "$JAVY_SOURCE_MANIFEST" | sha256sum | cut -d' ' -f1)"
 	# All outputs must still match, not just the executable used by ensure_addon.
