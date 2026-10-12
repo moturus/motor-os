@@ -97,6 +97,7 @@ dependencies = [
 name = "wasm-smoke-suite"
 version = "0.1.0"
 dependencies = [
+ "moto-rt",
  "moto-stats",
  "moto-sys",
 ]
