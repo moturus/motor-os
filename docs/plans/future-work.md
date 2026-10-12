@@ -812,3 +812,29 @@ repeated touch/unmap cycles and concurrent faults inside Motor OS, including
 slab boundaries, and check that reclamation does not regress allocation
 performance. This reclaims kernel bookkeeping memory, independently of
 reserved-versus-resident process statistics.
+
+## P2: closed TCP connections hold sys-io memory for 10 s (2026-10-11)
+
+A connection that sys-io closes first, as an HTTP server usually does, stays
+in TIME-WAIT for `CLOSE_DELAY`, 10 s
+(`src/sys/sys-io/netstack/src/socket/tcp.rs:388`), and sys-io's memory for it
+is held that long. On a 224 MiB VM, 50 sequential loopback HTTP/1.1 requests
+with `Connection: close`, to `wasmtime-rt serve` or to a native std server,
+raised sys-io's `net.tcp_sockets` from 13 to 63 and its `pages_user` by
+6.5 MiB, about 130 KiB per connection. Both returned to baseline about 10 s
+after the last request. An earlier 100-request run against `wasmtime-rt serve`
+went from 30 to 70 MiB, about 400 KiB per connection, which is not explained.
+A server taking 20 new connections a second therefore holds 26-80 MiB in
+sys-io at steady state.
+
+Keeping TIME-WAIT is intended (`cdd7c886`), but only the tuple and its timer
+need to stay. The netstack shrinks an orphaned socket's rings to 1 byte on
+entering TIME-WAIT (`set_state`, tcp.rs:2096-2119), but only on the state
+transition and only if `rx_shutdown` is already set; `set_rx_shutdown`
+(tcp.rs:1502) just sets the flag. A socket that reaches FIN-WAIT-2 or
+TIME-WAIT before the application closes it keeps its full rings, 64 KiB each
+way at 224 MiB. That does not explain the native server's case, which closes
+by drop before its FIN. First, read the TIME-WAIT sockets' ring capacities
+(`TcpSocketStatsV1`) and the channel count during a burst. Then release the
+rings whatever the close order, and keep only the tuple and timer for the
+10 s. Measurements and the client used are in `build/claude-targets/m3/`.
