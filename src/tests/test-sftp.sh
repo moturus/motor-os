@@ -55,7 +55,7 @@ WORK="$(mktemp -d)"
 ABANDONED_PID=""
 PROTECTED_PARENT="$TEST_TMP/sftp-protected-$$"
 PUBLIC_FILE="$TEST_TMP/sftp-public-$$"
-MODE_ROOT="$TEST_TMP/sftp-modes-$$"
+MODE_ROOT="$NONE_TEST_TMP/sftp-modes-$$"
 
 run_ssh() {
     ssh \
