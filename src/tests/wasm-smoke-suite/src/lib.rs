@@ -7,11 +7,11 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use moto_stats::Collector;
-use moto_sys::stats::MemoryStats;
+use moto_sys::stats::{MemoryStats, ProcessInfoV1};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const DEADLINE: Duration = Duration::from_secs(120);
@@ -66,37 +66,52 @@ impl Suite {
         code: i32,
         input: Option<&[u8]>,
     ) -> Result<(String, String)> {
+        let mut job = self.spawn(label, command, input.is_some(), false)?;
+        if let Some(bytes) = input {
+            job.stdin
+                .as_mut()
+                .ok_or("missing stdin pipe")?
+                .write_all(bytes)?;
+        }
+        self.wait(&mut job, code)
+    }
+
+    /// Starts `command` for a case that interacts with it before `wait`. With
+    /// `terminal`, its stdin is an open pipe marked as a terminal, as an
+    /// interactive session's is, so `Job::ctrl_c` reaches its foreground job.
+    pub fn start(&self, label: &str, command: &str, terminal: bool) -> Result<Job> {
+        self.spawn(label, command, terminal, terminal)
+    }
+
+    fn spawn(&self, label: &str, command: &str, piped: bool, terminal: bool) -> Result<Job> {
         let stdout_path = self.root.join(format!("{label}.stdout"));
         let stderr_path = self.root.join(format!("{label}.stderr"));
-        let mut child = Command::new("/system/bin/rush")
-            .args(["-c", command])
+        let mut rush = Command::new("/system/bin/rush");
+        rush.args(["-c", command])
             .current_dir(&self.root)
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
+            .stdin(if piped { Stdio::piped() } else { Stdio::null() })
             .stdout(fs::File::create(&stdout_path)?)
-            .stderr(fs::File::create(&stderr_path)?)
-            .spawn()?;
-        let _stdin = match input {
-            Some(bytes) => {
-                let mut pipe = child.stdin.take().ok_or("missing stdin pipe")?;
-                pipe.write_all(bytes)?;
-                Some(pipe)
-            }
-            None => None,
-        };
-        let started = Instant::now();
-        let mut last = started;
+            .stderr(fs::File::create(&stderr_path)?);
+        if terminal {
+            rush.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
+        }
+        let mut child = rush.spawn()?;
+        Ok(Job {
+            label: label.to_owned(),
+            stdin: child.stdin.take(),
+            child,
+            stdout_path,
+            stderr_path,
+            started: Instant::now(),
+        })
+    }
+
+    /// Waits for `job` to exit with `code` while sampling whole-VM memory.
+    pub fn wait(&mut self, job: &mut Job, code: i32) -> Result<(String, String)> {
+        let label = &job.label;
+        let mut last = Instant::now();
         let mut gap = Duration::ZERO;
         let mut peak = 0;
-        let read_log = |path: &Path| -> Result<String> {
-            if fs::metadata(path)?.len() > 256 * 1024 {
-                return Err(format!("oversized command log: {path:?}").into());
-            }
-            Ok(fs::read_to_string(path)?)
-        };
         // Sampled whole-VM peaks include this driver; they are not RSS.
         let status = loop {
             let sample = MemoryStats::get().map_err(|e| format!("memory stats: {e:?}"))?;
@@ -104,19 +119,18 @@ impl Suite {
             let now = Instant::now();
             gap = gap.max(now - last);
             last = now;
-            if let Some(status) = child.try_wait()? {
+            if let Some(status) = job.child.try_wait()? {
                 break status;
             }
-            if started.elapsed() >= DEADLINE {
-                child.kill()?;
-                child.wait()?;
-                let (stdout, stderr) = (read_log(&stdout_path)?, read_log(&stderr_path)?);
+            if job.started.elapsed() >= DEADLINE {
+                job.child.kill()?;
+                job.child.wait()?;
+                let (stdout, stderr) = job.logs()?;
                 return Err(format!("{label}: exceeded {DEADLINE:?}\n{stdout}\n{stderr}").into());
             }
             std::thread::sleep(Duration::from_millis(10));
         };
-        let stdout = read_log(&stdout_path)?;
-        let stderr = read_log(&stderr_path)?;
+        let (stdout, stderr) = job.logs()?;
         if status.code() != Some(code) {
             return Err(
                 format!("{label}: expected exit {code}, got {status}\n{stdout}\n{stderr}").into(),
@@ -124,7 +138,7 @@ impl Suite {
         }
         println!(
             "PASS {label}: exit={code} elapsed_ms={} sampled_vm_peak_bytes={peak} max_gap_us={}",
-            started.elapsed().as_millis(),
+            job.started.elapsed().as_millis(),
             gap.as_micros()
         );
         self.cases += 1;
@@ -196,6 +210,77 @@ impl Suite {
         );
         Ok(())
     }
+}
+
+/// A rush command started by `Suite::start`.
+pub struct Job {
+    label: String,
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+    started: Instant,
+}
+
+impl Job {
+    /// Waits until the command's stdout contains `text`.
+    pub fn wait_stdout(&mut self, text: &str) -> Result<()> {
+        loop {
+            let (stdout, stderr) = self.logs()?;
+            if stdout.contains(text) {
+                return Ok(());
+            }
+            if let Some(status) = self.child.try_wait()? {
+                return Err(
+                    format!("{}: exited {status} before {text:?}\n{stderr}", self.label).into(),
+                );
+            }
+            if self.started.elapsed() >= DEADLINE {
+                return Err(format!("{}: no {text:?} within {DEADLINE:?}", self.label).into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Types Ctrl+C on the terminal of a job started with `terminal`.
+    pub fn ctrl_c(&mut self) -> Result<()> {
+        let stdin = self.stdin.as_mut().ok_or("not a terminal job")?;
+        stdin.write_all(b"\x03")?;
+        Ok(())
+    }
+
+    pub fn kill(&mut self) -> Result<()> {
+        Ok(self.child.kill()?)
+    }
+
+    /// Active direct children of the job's rush, as (pid, name).
+    pub fn children(&self) -> Result<Vec<(u64, String)>> {
+        let mut list = [ProcessInfoV1::default(); 16];
+        let count = ProcessInfoV1::list_children(self.child.id().into(), &mut list)
+            .map_err(|e| format!("process list: {e:?}"))?;
+        Ok(list[..count]
+            .iter()
+            .filter(|info| info.active != 0)
+            .map(|info| (info.pid, info.debug_name().to_owned()))
+            .collect())
+    }
+
+    fn logs(&self) -> Result<(String, String)> {
+        let read = |path: &Path| -> Result<String> {
+            if fs::metadata(path)?.len() > 256 * 1024 {
+                return Err(format!("oversized command log: {path:?}").into());
+            }
+            Ok(fs::read_to_string(path)?)
+        };
+        Ok((read(&self.stdout_path)?, read(&self.stderr_path)?))
+    }
+}
+
+/// Whether `pid` names a process that has not exited.
+pub fn process_active(pid: u64) -> Result<bool> {
+    let mut list = [ProcessInfoV1::default(); 1];
+    let count = ProcessInfoV1::list(pid, &mut list).map_err(|e| format!("process list: {e:?}"))?;
+    Ok(count == 1 && list[0].pid == pid && list[0].active != 0)
 }
 
 /// Whole-VM used memory, as the cases sample it.
