@@ -116,7 +116,8 @@ build_javy() {
 	[ -n "${RUSTUP_TOOLCHAIN:-}" ] || die "no Rust toolchain was selected for Javy"
 	(
 		cd "$MOTORH/javy"
-		cargo fetch --locked --target x86_64-unknown-motor
+		# Fetch the complete locked graph, including host build dependencies.
+		cargo fetch --locked
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" JOBS="$(wasm_addon_jobs)" \
 			JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" ./motor-build.sh
 	)

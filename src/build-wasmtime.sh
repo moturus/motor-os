@@ -46,7 +46,7 @@ build_wasmtime_fixtures() {
 			--manifest-path motor-runtime/Cargo.toml --features compile --bin compile \
 			-j "$(wasm_addon_jobs)"
 		export RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"
-		cargo fetch --locked --target wasm32-wasip2
+		cargo fetch --locked
 		local bins=() program
 		for program in "${WASMTIME_GUEST_PROGRAMS[@]}" "${WASMTIME_FILESYSTEM_PROGRAMS[@]}"; do
 			bins+=(--bin "$program")
@@ -79,8 +79,9 @@ build_wasmtime() {
 	[ -n "${RUSTUP_TOOLCHAIN:-}" ] || die "no Rust toolchain was selected for Wasmtime"
 	(
 		cd "$MOTORH/wasmtime/motor-runtime"
-		cargo fetch --locked --target x86_64-unknown-motor
-		cargo fetch --locked --target x86_64-unknown-linux-gnu
+		# Separate target-filtered fetches miss host dependencies below a
+		# Motor-only edge; Cargo's offline build still needs those packages.
+		cargo fetch --locked
 		cd ..
 		CARGO_NET_OFFLINE=true MOTOR_BUILD_DIR="$ASSEMBLY_BUILD_ROOT/wasmtime" \
 			JOBS="$(wasm_addon_jobs)" ./motor-build.sh runtime

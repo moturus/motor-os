@@ -185,7 +185,7 @@ for selection in managed-probe authoring-probe; do
 		JAVY_PLUGIN_SHA=plugin JAVY_TYPESCRIPT_SHA=typescript JAVY_SOURCE_MANIFEST=manifest
 		WASMTIME_SOURCE_MANIFEST=manifest
 		javy_download() { : > "$3"; }
-		cargo() { printf 'fetch %s %s\n' "$RUSTUP_TOOLCHAIN" "${PWD##*/}" >> "$JAVY_TOOLCHAIN_LOG"; }
+		cargo() { printf 'cargo %s %s %s\n' "$RUSTUP_TOOLCHAIN" "${PWD##*/}" "$*" >> "$JAVY_TOOLCHAIN_LOG"; }
 		gzip() { :; }
 		tar() { :; }
 		install() { :; }
@@ -199,8 +199,8 @@ for selection in managed-probe authoring-probe; do
 done
 expected=""
 for selection in managed-probe authoring-probe; do
-	expected+="fetch $selection javy"$'\n'"build $selection "$'\n'
-	expected+="fetch $selection motor-runtime"$'\n'"fetch $selection motor-runtime"$'\n'
+	expected+="cargo $selection javy fetch --locked"$'\n'"build $selection "$'\n'
+	expected+="cargo $selection motor-runtime fetch --locked"$'\n'
 	expected+="build $selection runtime"$'\n'"fixtures $selection"$'\n'
 done
 [ "$(cat "$javy_log")"$'\n' = "$expected" ] ||
@@ -255,4 +255,5 @@ case "$managed_manifest" in
 	*) fail "the Javy manifest does not name the test plugin inputs" ;;
 esac
 
+bash "$ROOT_DIR/src/tests/test-wasm-addon-fetch.sh"
 echo "test-build-addons PASS"

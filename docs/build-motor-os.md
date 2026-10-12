@@ -75,6 +75,12 @@ along with the selected source commits and working-tree status. A stale
 lockfile must be updated and reviewed in its owning repository; validation
 never repairs it automatically.
 
+Before offline compilation, the wasm add-ons fetch their complete locked
+dependency graphs. Target-filtered fetches can miss host dependencies reached
+through Motor-only dependency edges, even when Motor and Linux are fetched
+separately. Fetching without a target filter also makes cold-cache builds
+independent of packages left over from earlier builds.
+
 To validate an existing set of checkouts without fetching or compiling:
 
 ```sh

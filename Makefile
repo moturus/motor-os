@@ -193,7 +193,7 @@ httpd:
 
 httpd-axum:
 	mkdir -p $(BIN_DIR)
-	cd src/bin/httpd-axum && CARGO_TARGET_DIR="$(OBJ_DIR)/httpd-axum" $(DO_BUILD)
+	cd src/bin/httpd-axum && CARGO_TARGET_DIR="$(OBJ_DIR)/httpd-axum" $(DO_BUILD) --locked
 	strip -o "$(BIN_DIR)/httpd-axum" "$(OBJ_DIR)/httpd-axum/$(SUB_DIR)/httpd-axum"
 
 kibim:
@@ -380,7 +380,7 @@ clippy: vdso
 	cd src/bin/rush && $(DO_CLIPPY)
 	cd src/bin/russhd && $(DO_CLIPPY)
 	cd src/bin/httpd && $(DO_CLIPPY)
-	cd src/bin/httpd-axum && $(DO_CLIPPY)
+	cd src/bin/httpd-axum && $(DO_CLIPPY) --locked
 	cd src/bin/kibim && $(DO_CLIPPY)
 	cd src/bin/red && $(DO_CLIPPY)
 	cd src/bin/rmux && $(DO_CLIPPY)
