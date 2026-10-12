@@ -921,7 +921,13 @@ qualified with locally built binaries on both images at 224 MiB (evidence in
   costs 4,202,496 bytes of charge. `run` delivers stdout and stderr, exit
   status 7, traps as abnormal exits, and `-W timeout=1s` interrupts a loop
   compiled with epoch interruption. The arena is documented in the fork's
-  MOTOR.md. Foreground Ctrl-C and parent exit need a terminal and remain open.
+  MOTOR.md. Since 2026-10-11 `wasmtime-smoke` also covers foreground Ctrl-C
+  and parent exit on the fixture's `ready-loop` export (fork `75d22026a`).
+  The driver supplies the terminal: rush runs with a stdin pipe marked as a
+  terminal, and Ctrl-C on it ends a `run` spinning in Pulley with status 130
+  while rush is still held. A runtime whose rush is killed ends once rush is
+  reaped. Both passed on both images and in ten consecutive suite runs at
+  224 MiB.
 - **2g:** stores default to 64 instances, 16 tables and 32,768 table
   elements, overridable with `-W`; the reservations are a fixed host bound.
   Defaults are recorded in `docs/wasm.md`.
