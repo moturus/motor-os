@@ -31,6 +31,9 @@ pub const CMD_CREATE_WITH_PERMISSIONS: u16 = 19;
 /// Resolve a whole absolute path in one round trip (CMD_STAT resolves one
 /// component under a known parent).
 pub const CMD_STAT_PATH: u16 = 20;
+/// Build a child process from an executable on the caller's behalf; see
+/// `spawn_msg_encode`.
+pub const CMD_SPAWN: u16 = 21;
 
 /// True for the command ids the FS server dispatches; keep in sync with the
 /// `CMD_*` list above. sys-io's memory-pressure gate consults this so an
@@ -787,4 +790,68 @@ pub fn copy_file_range_resp_encode(msg_id: u64, copied: u64) -> Msg {
 pub fn copy_file_range_resp_decode(msg: Msg) -> Result<u64> {
     msg.status()?;
     Ok(msg.payload.args_64()[0])
+}
+
+/// A spawn request: what sys-io needs to build a child, which stays stopped
+/// until its parent has written the startup data and woken it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnRequest {
+    pub entry_id: EntryId,
+    pub capabilities: u64,
+    pub detached: bool,
+    pub debug_name: String,
+}
+
+pub const SPAWN_MAX_DEBUG_NAME: usize = 256;
+
+pub fn spawn_msg_encode(req: &SpawnRequest, io_page: IoPage) -> Msg {
+    assert!(req.debug_name.len() <= SPAWN_MAX_DEBUG_NAME);
+    let mut msg = Msg::new();
+    msg.command = CMD_SPAWN;
+    msg.payload.set_arg_128(req.entry_id);
+
+    let bytes = io_page.bytes_mut();
+    bytes[0..8].copy_from_slice(&req.capabilities.to_ne_bytes());
+    bytes[8..16].copy_from_slice(&u64::from(req.detached).to_ne_bytes());
+    bytes[24..26].copy_from_slice(&(req.debug_name.len() as u16).to_ne_bytes());
+    bytes[26..(26 + req.debug_name.len())].copy_from_slice(req.debug_name.as_bytes());
+
+    msg.payload.shared_pages_mut()[SINGLE_PAGE_SLOT] = IoPage::into_u16(io_page);
+    msg
+}
+
+pub fn spawn_msg_decode(msg: Msg, sender: &Sender) -> Result<SpawnRequest> {
+    let io_page = sender.get_page(msg.payload.shared_pages()[SINGLE_PAGE_SLOT])?;
+    let bytes = io_page.bytes();
+    let word = |idx: usize| u64::from_ne_bytes(bytes[idx * 8..idx * 8 + 8].try_into().unwrap());
+    let detached = match word(1) {
+        0 => false,
+        1 => true,
+        _ => return Err(moto_rt::Error::InvalidArgument),
+    };
+    let name_len = u16::from_ne_bytes([bytes[24], bytes[25]]) as usize;
+    if name_len > SPAWN_MAX_DEBUG_NAME {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let debug_name = core::str::from_utf8(&bytes[26..26 + name_len])
+        .map_err(|_| moto_rt::Error::InvalidArgument)?
+        .into();
+    Ok(SpawnRequest {
+        entry_id: msg.payload.arg_128(),
+        capabilities: word(0),
+        detached,
+        debug_name,
+    })
+}
+
+/// The child's process handle, valid in the requester's handle table.
+pub fn spawn_resp_encode(msg_id: u64, process_handle: u64) -> Msg {
+    let mut resp = empty_resp_encode(msg_id, Ok(()));
+    resp.handle = process_handle;
+    resp
+}
+
+pub fn spawn_resp_decode(msg: Msg) -> Result<u64> {
+    msg.status()?;
+    Ok(msg.handle)
 }
