@@ -8,8 +8,8 @@ Run these commands in the VM's shell:
 
 ```sh
 cd /devtools/src/wasm
-MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /user/tmp/hello.wasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmi /user/tmp/hello.wasm
+MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm
 ```
 
 Expected output:
@@ -21,7 +21,7 @@ Hello from WebAssembly on Motor OS!
 
 The capability masks launch the tools with role None. `0x200` grants Javy
 filesystem write access for its output; Wasmi needs no capabilities for this
-example. `/user/tmp` is writable by role None. Javy embeds the default QuickJS
+example. `/none/tmp` is writable by role None. Javy embeds the default QuickJS
 plugin, so no plugin argument is needed.
 
 Edit `hello.js` and repeat the two commands to compile and run your changes.

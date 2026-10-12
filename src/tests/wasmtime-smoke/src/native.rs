@@ -8,7 +8,7 @@ mod filesystem;
 
 const RUNTIME: &str = "/devtools/bin/wasmtime-rt";
 /// Precompiled fixtures that test-wasm.sh uploads; they are not part of the images.
-const FIXTURES: &str = "/user/tmp/wasmtime-tests";
+const FIXTURES: &str = "/none/tmp/wasmtime-tests";
 /// Upstream p2 socket programs carrying Motor's accepted socket semantics.
 const SOCKET_PROGRAMS: [&str; 13] = [
     "p2_tcp_bind",

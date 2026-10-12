@@ -67,8 +67,8 @@ development toolchain. The full Wasmtime compiler follows in a later milestone.
 On Motor, compile into a writable directory and execute with explicit masks:
 
 ```sh
-MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /user/tmp/hello.wasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmi /user/tmp/hello.wasm
+MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm
 ```
 
 The add-ons follow published `moturus` branches and record resolved revisions,

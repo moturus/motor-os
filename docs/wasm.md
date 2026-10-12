@@ -25,7 +25,7 @@ The smaller `wasm.img` also includes the three tools and their data
 directories. The test inputs (the TypeScript workload, the Linux identity
 digests, two custom Javy plugins and the precompiled Wasmtime fixtures) are
 not installed;
-`src/tests/test-wasm.sh` uploads them to `/user/tmp` on every VM boot during tests.
+`src/tests/test-wasm.sh` uploads them to `/none/tmp` on every VM boot during tests.
 
 `wasmtime-rt` runs as role None (`MOTOR_OS_CAPS=0`, `0x100`, `0x200` or
 `0x300`) and needs `--allow-precompiled`. Each linear memory is limited to
@@ -41,8 +41,8 @@ In the developer VM's shell:
 
 ```sh
 cd /devtools/src/wasm
-MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /user/tmp/hello.wasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmi /user/tmp/hello.wasm
+MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm
 ```
 
 Expected output:
@@ -54,7 +54,7 @@ Hello from WebAssembly on Motor OS!
 
 The masks launch the tools with role None: `0x200` grants Javy filesystem
 write access for its output, while Wasmi needs no capabilities for this example.
-`/user/tmp` is writable by role None. The default plugin is embedded, and the
+`/none/tmp` is writable by role None. The default plugin is embedded, and the
 example runs offline. Edit `hello.js` and repeat the commands to try changes.
 
 See [Building Motor OS](build.md) for image construction and the focused
