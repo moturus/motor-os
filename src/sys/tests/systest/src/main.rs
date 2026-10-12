@@ -5,6 +5,7 @@
 
 mod admission;
 mod checked_copy_in;
+mod raw_spawn;
 mod sched_fairness;
 // mod channel_test;
 mod alloc_bench;
@@ -1209,6 +1210,10 @@ fn main() {
         sched_fairness::run_all_tests();
         return;
     }
+    if args.len() == 2 && args[1] == "raw-spawn" {
+        raw_spawn::run_all_tests();
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("process-permissions-child") {
         process_permissions::run_child(&args);
         return;
@@ -1528,6 +1533,9 @@ fn main() {
     if spawn_wait_kill::is_thread_exit_race_child(&args) {
         spawn_wait_kill::run_thread_exit_race_child();
     }
+    if raw_spawn::is_child(&args) {
+        raw_spawn::run_child(&args);
+    }
     if ctrl_c::is_helper(&args) {
         ctrl_c::run_helper(&args);
     }
@@ -1680,6 +1688,7 @@ fn main() {
     sysbox_chmod::run_all_tests();
     execute_permissions::run_all_tests();
     sched_fairness::run_all_tests();
+    raw_spawn::run_all_tests();
     descriptor_attr::run_all_tests();
     file_locking::run_tests();
     // return;

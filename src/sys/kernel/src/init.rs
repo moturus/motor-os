@@ -401,7 +401,7 @@ pub fn start_userspace_processes() {
     }
     let entry_point = result.unwrap();
 
-    let process = crate::uspace::Process::new(
+    let (process, _object) = crate::uspace::Process::new(
         crate::xray::stats::kernel_stats(),
         address_space,
         entry_point,

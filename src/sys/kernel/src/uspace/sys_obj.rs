@@ -29,7 +29,7 @@ fn sys_handle_create(
     thread: &super::process::Thread,
     parent: SysHandle,
     url: &str,
-) -> Result<SysHandle, ErrorCode> {
+) -> Result<(SysHandle, u64), ErrorCode> {
     if let Some((prefix, suffix)) = url.split_once(':') {
         match prefix {
             "address_space" => {
@@ -66,7 +66,7 @@ fn sys_handle_create(
                     alloc::sync::Weak::new(),
                 );
                 log::debug!("created {url}");
-                return Ok(thread.owner().add_object(sys_object));
+                return Ok((thread.owner().add_object(sys_object), 0));
             }
             "process" => {
                 match super::process::Process::new_child(
@@ -74,9 +74,15 @@ fn sys_handle_create(
                     parent,
                     &moto_sys::url_decode(suffix),
                 ) {
-                    Ok(process) => {
+                    Ok((object, requester)) => {
                         log::debug!("created {url}");
-                        return Ok(thread.owner().add_object(process.self_object().unwrap()));
+                        let handle = thread.owner().add_object(object.clone());
+                        // A delegated child: the requester (its parent) gets
+                        // a handle of its own, returned second; the
+                        // builder's is for cleanup until the parent is told.
+                        let delegated =
+                            requester.map_or(0, |requester| requester.add_object(object).as_u64());
+                        return Ok((handle, delegated));
                     }
                     Err(err) => {
                         // Propagate the real error (e.g. E_NOT_ALLOWED for a
@@ -88,7 +94,8 @@ fn sys_handle_create(
                 }
             }
             "shared" => {
-                return sys_handle_shared(SysObj::OP_CREATE, thread, parent, suffix);
+                return sys_handle_shared(SysObj::OP_CREATE, thread, parent, suffix)
+                    .map(|handle| (handle, 0));
             }
             _ => {}
         }
@@ -248,6 +255,10 @@ fn sys_handle_get(
     }
 }
 
+/// `put_remote_1`'s `arg` for abandoning a delegated child (see
+/// sys_handle_put); sys-io only. moto-sys's `SysObj::ABANDON_DELEGATED`.
+const ABANDON_DELEGATED: u64 = 1;
+
 fn sys_handle_put(
     thread: &super::process::Thread,
     owner: SysHandle,
@@ -259,25 +270,47 @@ fn sys_handle_put(
         thread.finish();
     }
 
-    if arg != 0 {
-        return Err(moto_rt::E_INVALID_ARGUMENT);
-    }
-
     let this_process = thread.owner();
     if owner == SysHandle::SELF {
+        if arg != 0 {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
         return this_process
             .put_object(&handle)
             .map_err(|_| moto_rt::E_BAD_HANDLE);
     }
 
-    match super::sysobject::object_from_handle::<super::Process>(&this_process, owner) {
-        Some(proc) => proc
+    let Some(target) = this_process.get_object(&owner) else {
+        log::debug!("sys_handle_put: bad process handle");
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    };
+    let Some(proc) = super::sysobject::object_from_sysobject::<super::Process>(&target.sys_object)
+    else {
+        log::debug!("sys_handle_put: bad process handle");
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    };
+    match arg {
+        0 => proc
             .put_object(&handle)
             .map_err(|_| moto_rt::E_INVALID_ARGUMENT),
-        None => {
-            log::debug!("sys_handle_put: bad process handle");
-            Err(moto_rt::E_INVALID_ARGUMENT)
+        // sys-io abandoning a delegated child (`requester=`) whose handle it
+        // could not hand over: `owner` is sys-io's own handle to the child,
+        // `handle` the number placed in the requester's table. A child that
+        // was never woken, killed now if still alive, has its number taken
+        // back from the requester, which is the child's parent, reached
+        // through the child because the connection may be closed by now; the
+        // number goes only while it still refers to that child. A child the
+        // requester has woken is the requester's, and nothing happens.
+        ABANDON_DELEGATED if this_process.pid() == super::process::SYS_IO_PID => {
+            if !proc.abandon_if_never_woken() {
+                return Err(moto_rt::E_ALREADY_IN_USE);
+            }
+            let requester = proc.parent().ok_or(moto_rt::E_BAD_HANDLE)?;
+            requester
+                .put_object_of(&handle, &target.sys_object)
+                .map_err(|_| moto_rt::E_BAD_HANDLE)
         }
+        _ => Err(moto_rt::E_INVALID_ARGUMENT),
     }
 }
 
@@ -387,7 +420,7 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             }
 
             match sys_handle_create(thread, parent, &url) {
-                Ok(handle) => ResultBuilder::ok_1(handle.as_u64()),
+                Ok((handle, extra)) => ResultBuilder::ok_2(handle.as_u64(), extra),
                 Err(err) => ResultBuilder::result(err),
             }
         }

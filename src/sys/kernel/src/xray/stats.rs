@@ -568,14 +568,15 @@ impl KProcessStats {
         // are tracked.
         //
         // Detached children are the exception: they are owned by the kernel and
-        // outlive us on purpose (CAP_SPAWN_DETACHED), so they are left running.
+        // outlive us on purpose (CAP_SPAWN_DETACHED), so they are left running,
+        // unless they were never started: nobody else can wake them.
         Self::for_each_child(
             &self.children,
             ProcessId::from_u64(0),
             line!(),
             |_, child| {
-                if let Some(child) = child.filter(|child| !child.detached) {
-                    crate::uspace::process::post_kill(child.owner.clone());
+                if let Some(child) = child {
+                    crate::uspace::process::post_parent_dropped(child.owner.clone());
                 }
                 true
             },
@@ -621,6 +622,10 @@ impl KProcessStats {
 
     pub fn parent(&self) -> Option<Arc<KProcessStats>> {
         self.parent.clone()
+    }
+
+    pub fn is_detached(&self) -> bool {
+        self.detached
     }
 
     pub fn pid(&self) -> ProcessId {
