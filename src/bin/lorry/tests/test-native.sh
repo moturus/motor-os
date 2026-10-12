@@ -457,7 +457,7 @@ prepare_host() {
     cp "$WORK/editor-target/$MOTOR_TARGET/release/lorry-editor-workspace" "$WORK/editor-workspace"
     python3 - "$ROOT_DIR" "$WORK/editor-config.json" <<'PY'
 import json, pathlib, sys, tomllib
-source = pathlib.Path(sys.argv[1]) / 'img_files/motor-os-dev/user/.config/helix/languages.toml'
+source = pathlib.Path(sys.argv[1]) / 'img_files/motor-os-dev/user/cfg/helix/languages.toml'
 config = tomllib.loads(source.read_text())['language-server']['rust-analyzer']['config']
 pathlib.Path(sys.argv[2]).write_text(json.dumps(config))
 PY
@@ -681,8 +681,8 @@ PY
     done
     compare_equivalence_output messages set
     run_workspace_identity
-    download_file /user/.config/helix/languages.toml "$WORK/native-editor-config.toml"
-    cmp "$ROOT_DIR/img_files/motor-os-dev/user/.config/helix/languages.toml" "$WORK/native-editor-config.toml" ||
+    download_file /user/cfg/helix/languages.toml "$WORK/native-editor-config.toml"
+    cmp "$ROOT_DIR/img_files/motor-os-dev/user/cfg/helix/languages.toml" "$WORK/native-editor-config.toml" ||
         fail "native editor configuration differs from the tested shipped configuration"
     remote_command "[ ! -d $REMOTE_ROOT/editor-evidence ] || /system/bin/rm -r $REMOTE_ROOT/editor-evidence"
     remote_command "/system/bin/mkdir $REMOTE_ROOT/editor-evidence && $REMOTE_ROOT/editor-workspace $REMOTE_ROOT/lorry-native $REMOTE_ROOT $REMOTE_ROOT/editor-evidence $REMOTE_ROOT/editor-config.json"

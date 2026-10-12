@@ -11,7 +11,7 @@ trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained 
 python3 - "$ROOT_DIR" "$WORK/shipped.json" <<'PY'
 import json, pathlib, sys, tomllib
 root = pathlib.Path(sys.argv[1])
-shipped = tomllib.loads((root / 'img_files/motor-os-dev/user/.config/helix/languages.toml').read_text())
+shipped = tomllib.loads((root / 'img_files/motor-os-dev/user/cfg/helix/languages.toml').read_text())
 config = shipped['language-server']['rust-analyzer']['config']
 assert 'workspace' not in config['check']
 project = tomllib.loads((root / '.helix/languages.toml').read_text())

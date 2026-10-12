@@ -132,6 +132,12 @@ fn run(
         ]);
     }
     let mut options = shipped.clone();
+    #[cfg(not(target_os = "motor"))]
+    {
+        // The installed Motor sysroot has a different location on the host.
+        assert_eq!(options["cargo"]["sysroot"], "/devtools/rust");
+        options["cargo"]["sysroot"] = json!(toolchain.sysroot);
+    }
     options["cargo"]["buildScripts"]["overrideCommand"] = json!(override_command);
     if custom {
         options["cargo"]["targetDir"] = json!(target);
