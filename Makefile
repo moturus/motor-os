@@ -234,6 +234,13 @@ gears-mock-provider:
 
 lorry: assembly-resolved
 	mkdir -p $(BIN_DIR)
+	# Prepare the exact cc-rs archive used by the offline C++ contract.
+	mkdir -p "$(OBJ_DIR)/lorry-cxx-deps/src"
+	printf '%s\n' '[package]' 'name = "lorry-cxx-deps"' 'version = "0.0.0"' \
+		'edition = "2024"' '[workspace]' '[dependencies]' 'cc = "=1.2.29"' \
+		> "$(OBJ_DIR)/lorry-cxx-deps/Cargo.toml"
+	touch "$(OBJ_DIR)/lorry-cxx-deps/src/lib.rs"
+	cargo fetch --manifest-path "$(OBJ_DIR)/lorry-cxx-deps/Cargo.toml"
 	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/lorry && \
