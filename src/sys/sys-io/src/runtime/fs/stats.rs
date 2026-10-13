@@ -108,11 +108,23 @@ mod ids {
     pub const FS_PRESSURE_REFUSED_CLIENTS: u32 = 1015;
     pub const FS_CHANNELS: u32 = 1016;
     pub const FS_CACHE_CAPACITY_BYTES: u32 = 1017;
+
+    // Spawning (see `super::spawn`).
+    pub const EXEC_LOCKED_FILES: u32 = 1018;
+    pub const SPAWNS: u32 = 1019;
+    pub const SPAWN_BUILD_US: u32 = 1020;
+    pub const SPAWN_VDSO_US: u32 = 1021;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
 /// [`descriptors`].
-async fn entries(fs: &FS, stats: &FsStats, channels: u64) -> Vec<MetricEntry> {
+async fn entries(
+    fs: &FS,
+    stats: &FsStats,
+    channels: u64,
+    locked_files: u64,
+    spawn: &super::spawn::SpawnStats,
+) -> Vec<MetricEntry> {
     let num_blocks = fs.num_blocks();
     let empty_blocks = fs
         .empty_blocks()
@@ -146,6 +158,10 @@ async fn entries(fs: &FS, stats: &FsStats, channels: u64) -> Vec<MetricEntry> {
         ),
         MetricEntry::global(ids::FS_CHANNELS, channels),
         MetricEntry::global(ids::FS_CACHE_CAPACITY_BYTES, cache_stats.capacity * 4096),
+        MetricEntry::global(ids::EXEC_LOCKED_FILES, locked_files),
+        MetricEntry::global(ids::SPAWNS, spawn.requests.get()),
+        MetricEntry::global(ids::SPAWN_BUILD_US, spawn.build_us.get()),
+        MetricEntry::global(ids::SPAWN_VDSO_US, spawn.vdso_us.get()),
     ]
 }
 
@@ -175,6 +191,10 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         ),
         MetricDescWire::new(ids::FS_CHANNELS, "fs.channels"),
         MetricDescWire::new(ids::FS_CACHE_CAPACITY_BYTES, "fs.cache.capacity_bytes"),
+        MetricDescWire::new(ids::EXEC_LOCKED_FILES, "exec.locked_files"),
+        MetricDescWire::new(ids::SPAWNS, "spawn.requests"),
+        MetricDescWire::new(ids::SPAWN_BUILD_US, "spawn.build_us"),
+        MetricDescWire::new(ids::SPAWN_VDSO_US, "spawn.vdso_us"),
     ]
 }
 
@@ -211,10 +231,14 @@ async fn stats_responder_task(
     mut requests: moto_async::channel::Receiver<StatsRequest>,
 ) {
     while let Some(req) = requests.recv().await {
+        // Not borrowed across the await below.
+        let locked_files = runtime.exec_locks.borrow().num_locked() as u64;
         let snapshot = entries(
             &*runtime.fs.read().await,
             &runtime.fs_stats,
             runtime.channel_budget.fs_channels(),
+            locked_files,
+            &runtime.spawn_stats,
         )
         .await;
         // The receiver is gone if the stats-server thread stopped waiting; ignore.

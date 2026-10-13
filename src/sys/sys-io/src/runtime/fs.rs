@@ -22,6 +22,7 @@ use crate::util::map_native_error;
 mod block_io;
 mod lock_manager;
 mod mbr;
+mod spawn;
 pub mod stats;
 mod virtio_partition;
 
@@ -310,6 +311,19 @@ pub(crate) struct FsRuntime {
     fs_stats: Rc<stats::FsStats>,
     locks: Rc<RefCell<lock_manager::LockManager<PendingLockResponse>>>,
     channel_budget: Rc<channel_budget::ChannelBudget>,
+    exec_locks: Rc<RefCell<spawn::ExecLocks>>,
+    spawn_stats: Rc<spawn::SpawnStats>,
+}
+
+/// Every mutation of an executable that is being loaded is refused; see
+/// `spawn::ExecLocks`.
+fn refuse_if_executing(runtime: &FsRuntime, entry: EntryId) -> Result<()> {
+    if runtime.exec_locks.borrow().is_locked(entry) {
+        return Err(std::io::Error::from_raw_os_error(
+            moto_rt::E_NOT_ALLOWED as i32,
+        ));
+    }
+    Ok(())
 }
 
 struct PendingLockResponse {
@@ -396,6 +410,8 @@ pub(super) async fn init(
         fs_stats,
         locks: Default::default(),
         channel_budget,
+        exec_locks: Default::default(),
+        spawn_stats: Default::default(),
     };
     spawn_fs_listeners(runtime.clone()).await;
     stats::spawn_stats_responder(runtime);
@@ -465,19 +481,21 @@ async fn fs_listener(
         return Ok(());
     }
 
-    let (role, can_write) = match moto_sys::SysObj::get_capabilities(sender.remote_handle()) {
-        Ok(capabilities) => (
-            fs_role(capabilities),
-            capabilities & moto_sys::caps::CAP_FS_WRITE != 0,
-        ),
-        Err(err) => {
-            log::warn!(
-                "FS: dropping client 0x{:x}: cannot query peer capabilities: {err:?}",
-                sender.remote_handle().as_u64()
-            );
-            return Ok(());
-        }
-    };
+    let (role, can_write, can_spawn) =
+        match moto_sys::SysObj::get_capabilities(sender.remote_handle()) {
+            Ok(capabilities) => (
+                fs_role(capabilities),
+                capabilities & moto_sys::caps::CAP_FS_WRITE != 0,
+                capabilities & moto_sys::caps::CAP_SPAWN != 0,
+            ),
+            Err(err) => {
+                log::warn!(
+                    "FS: dropping client 0x{:x}: cannot query peer capabilities: {err:?}",
+                    sender.remote_handle().as_u64()
+                );
+                return Ok(());
+            }
+        };
 
     // The wait-handle budget (see channel_budget): a channel past it would
     // eventually make the runtime thread's SysCpu::wait exceed the kernel's
@@ -516,7 +534,7 @@ async fn fs_listener(
                 let runtime = runtime.clone();
                 let ticket_tx = ticket_tx.clone();
                 moto_async::LocalRuntime::spawn(async move {
-                    on_msg(msg, sender, runtime, role, can_write).await;
+                    on_msg(msg, sender, runtime, role, can_write, can_spawn).await;
                     let _ = ticket_tx.send(()).await;
                 });
                 requests_since_io += 1;
@@ -562,11 +580,17 @@ async fn on_msg(
     runtime: FsRuntime,
     role: Role,
     can_write: bool,
+    can_spawn: bool,
 ) {
     // The capability gate, ahead of the pressure gate so that a forbidden
     // request is reported as such. It covers every lock operation and flush,
     // and frees donated pages for the same reason the pressure gate does.
-    if !can_write && api_fs::known_cmd(msg.command) && !api_fs::is_read_command(msg.command) {
+    // Building a child takes the requester's spawn capability, which the
+    // kernel would check only once the image is loaded.
+    let forbidden =
+        (!can_write && api_fs::known_cmd(msg.command) && !api_fs::is_read_command(msg.command))
+            || (!can_spawn && msg.command == api_fs::CMD_SPAWN);
+    if forbidden {
         api_fs::release_donated_pages(&msg, &sender);
         let resp = api_fs::empty_resp_encode(msg.id, Err(moto_rt::Error::NotAllowed));
         let _ = sender.send(resp).await;
@@ -635,6 +659,7 @@ async fn on_msg(
             on_cmd_copy_file_range(msg, &sender, runtime, role).await
         }
         moto_sys_io::api_fs::CMD_FILE_LOCK => on_cmd_file_lock(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_SPAWN => spawn::on_cmd_spawn(msg, &sender, runtime, role).await,
 
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
@@ -968,6 +993,7 @@ async fn on_cmd_write(
 
     let (file_id, offset, len, io_page) =
         api_fs::write_msg_decode(msg, sender).map_err(map_native_error)?;
+    refuse_if_executing(&runtime, file_id)?;
 
     // `len` comes from the (untrusted) client; reject anything that does not
     // fit into an io_page instead of panicking on the slice below.
@@ -1006,6 +1032,7 @@ async fn on_cmd_write_multi(
 ) -> Result<()> {
     let (file_id, offset, len, pages) =
         api_fs::write_multi_msg_decode(msg, sender).map_err(map_native_error)?;
+    refuse_if_executing(&runtime, file_id)?;
 
     // One FS lock acquire for the whole message. The decode above recovered
     // every page, so all paths below free them on drop.
@@ -1260,6 +1287,7 @@ async fn on_cmd_set_permissions(
     role: Role,
 ) -> Result<()> {
     let (entry_id, raw_access) = api_fs::set_permissions_msg_decode(msg);
+    refuse_if_executing(&runtime, entry_id)?;
     let access = AccessPermissions::try_from(raw_access)?;
 
     let mut fs = runtime.fs.write().await;
@@ -1282,6 +1310,7 @@ async fn on_cmd_set_all_permissions(
     role: Role,
 ) -> Result<()> {
     let (entry_id, raw_permissions) = api_fs::set_all_permissions_msg_decode(msg);
+    refuse_if_executing(&runtime, entry_id)?;
     let permissions = RolePermissions::new(
         raw_permissions[0].try_into()?,
         raw_permissions[1].try_into()?,
@@ -1308,6 +1337,7 @@ async fn on_cmd_resize(
     role: Role,
 ) -> Result<()> {
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
+    refuse_if_executing(&runtime, file_id)?;
 
     let mut fs = runtime.fs.write().await;
     let resp = api_fs::empty_resp_encode(
@@ -1329,6 +1359,7 @@ async fn on_cmd_delete_entry(
     role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::delete_entry_msg_decode(msg);
+    refuse_if_executing(&runtime, entry_id)?;
 
     let mut fs = runtime.fs.write().await;
     let resp = api_fs::empty_resp_encode(
@@ -1421,8 +1452,15 @@ async fn on_cmd_move_entry(
 ) -> Result<()> {
     let (entry_id, new_parent_id, fname) =
         api_fs::move_entry_req_decode(msg, sender).map_err(map_native_error)?;
+    refuse_if_executing(&runtime, entry_id)?;
 
     let mut fs = runtime.fs.write().await;
+    // A rename onto an executing file would delete it.
+    if replace
+        && let Ok(Some((replaced, _))) = fs.stat(Role::System, new_parent_id, fname.as_str()).await
+    {
+        refuse_if_executing(&runtime, replaced)?;
+    }
     let result = if replace {
         fs.move_entry(role, entry_id, new_parent_id, fname.as_str())
             .await
@@ -1444,6 +1482,7 @@ async fn on_cmd_copy_file_range(
     role: Role,
 ) -> Result<()> {
     let (from, to, offset, size) = api_fs::copy_file_range_req_decode(msg);
+    refuse_if_executing(&runtime, to)?;
 
     let mut fs = runtime.fs.write().await;
 

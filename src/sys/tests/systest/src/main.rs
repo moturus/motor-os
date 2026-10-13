@@ -5,6 +5,7 @@
 
 mod admission;
 mod checked_copy_in;
+mod cold_spawn;
 mod raw_spawn;
 mod sched_fairness;
 // mod channel_test;
@@ -1206,6 +1207,10 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "cold-spawn" {
+        cold_spawn::run_all_tests();
+        return;
+    }
     if args.len() == 2 && args[1] == "sched-fairness" {
         sched_fairness::run_all_tests();
         return;
@@ -1689,6 +1694,7 @@ fn main() {
     execute_permissions::run_all_tests();
     sched_fairness::run_all_tests();
     raw_spawn::run_all_tests();
+    cold_spawn::run_all_tests();
     descriptor_attr::run_all_tests();
     file_locking::run_tests();
     // return;

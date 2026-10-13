@@ -40,7 +40,7 @@ pub const CMD_SPAWN: u16 = 21;
 /// unrecognized command is answered `InvalidData` as usual, not counted and
 /// refused as a pressure refusal.
 pub fn known_cmd(cmd: u16) -> bool {
-    (CMD_STAT..=CMD_STAT_PATH).contains(&cmd)
+    (CMD_STAT..=CMD_SPAWN).contains(&cmd)
 }
 
 /// Commands allowed without CAP_FS_WRITE. New commands require it unless
@@ -50,6 +50,7 @@ pub fn is_read_command(cmd: u16) -> bool {
         cmd,
         CMD_STAT
             | CMD_STAT_PATH
+            | CMD_SPAWN
             | CMD_READ
             | CMD_METADATA
             | CMD_GET_FIRST_ENTRY
@@ -235,7 +236,8 @@ pub fn release_donated_pages(msg: &Msg, sender: &Sender) {
         | CMD_CREATE_DIR
         | CMD_CREATE_WITH_PERMISSIONS
         | CMD_MOVE_ENTRY
-        | CMD_MOVE_NOREPLACE => {
+        | CMD_MOVE_NOREPLACE
+        | CMD_SPAWN => {
             release(msg.payload.shared_pages()[SINGLE_PAGE_SLOT]);
         }
         CMD_WRITE => {

@@ -74,7 +74,7 @@ fn test_requester_refused() {
 }
 
 /// Waits, bounded, for the process behind the handle to exit.
-fn wait_exit(process: SysHandle, what: &str) {
+pub(crate) fn wait_exit(process: SysHandle, what: &str) {
     let deadline = moto_rt::time::Instant::now() + Duration::from_secs(10);
     loop {
         SysCpu::wait(
