@@ -36,6 +36,13 @@ pub struct KernelStaticPage {
     // sys-io clients) should fail fast with OOM instead of digging the hole
     // deeper. Appended last: earlier field offsets are ABI.
     pub memory_pressure: AtomicU32,
+
+    // Admission's two "taken but not allocated" counts, appended after
+    // `memory_pressure` for the same reason: pages reserved by admitted
+    // operations that have not completed yet, and pages committed to
+    // demand-paged executable images and not yet filled.
+    pub committed_pages: AtomicU64,
+    pub reserved_pages: AtomicU64,
 }
 
 impl KernelStaticPage {

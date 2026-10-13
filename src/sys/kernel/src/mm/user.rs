@@ -561,12 +561,88 @@ impl UserAddressSpace {
             })
     }
 
+    /// Reserves a sparse segment whose pages the executable pager installs
+    /// on demand. The whole segment is accounted now, like an eager one.
+    pub fn reserve_file(
+        &self,
+        start: u64,
+        num_pages: u64,
+        writable: bool,
+        executable: bool,
+    ) -> Result<(), ErrorCode> {
+        if writable && executable {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        let mut options =
+            MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE | MappingOptions::FILE_PAGED;
+        if writable {
+            options |= MappingOptions::WRITABLE;
+        }
+        if executable {
+            options |= MappingOptions::EXECUTABLE;
+        }
+        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
+        self.inner
+            .vmem_allocate_user_fixed(start, num_pages, options)
+            .map(|_| ())
+            .inspect_err(|_| self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2))
+    }
+
+    /// Copies each source page into a fresh frame and installs the copies
+    /// from `start` on, keeping pages that are already present. Returns the
+    /// number of pages installed.
+    pub fn fill_file(&self, start: u64, sources: &[PinnedUserPage]) -> Result<u64, ErrorCode> {
+        // Admitted: the mapping's reservation covers these pages.
+        self.inner.with_file_segment(start, |segment| {
+            let end = (sources.len() as u64)
+                .checked_mul(PAGE_SIZE_SMALL)
+                .and_then(|bytes| start.checked_add(bytes))
+                .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+            if !start.is_multiple_of(PAGE_SIZE_SMALL) || end > segment.segment().end() {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
+            let mut installed = 0;
+            for (idx, source) in sources.iter().enumerate() {
+                let addr = start + ((idx as u64) << PAGE_SIZE_SMALL_LOG2);
+                if segment.fill_file_page(addr, Some(source))? {
+                    installed += 1;
+                }
+            }
+            Ok(installed)
+        })
+    }
+
+    /// Installs a zeroed page in a file-paged segment unless one is present.
+    pub fn fill_file_zero(&self, page: u64) -> Result<bool, ErrorCode> {
+        self.inner
+            .with_file_segment(page, |segment| segment.fill_file_page(page, None))
+    }
+
     pub fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         // A refused fault cannot be reported to the faulting instruction, so
         // the faulting thread is killed. Deliberate: there is no OOM killer,
         // and the victim is whoever faults below the floor.
-        let _admission =
-            super::admission::admit(self.mem_class(), super::admission::lazy_fault_charge())?;
+        //
+        // Admission comes first because it is cheaper than the segment lookup;
+        // a refusal is re-examined for file-paged segments, whose pages were
+        // committed when they were reserved (uspace::pager) and whose faults
+        // allocate nothing here.
+        let _admission = match super::admission::admit(
+            self.mem_class(),
+            super::admission::lazy_fault_charge(),
+        ) {
+            Ok(admission) => admission,
+            Err(err) => {
+                // Check and handle the same segment: unmap must not replace
+                // it with a lazy mapping after the admission bypass.
+                return self
+                    .inner
+                    .with_file_segment(pf_addr, |segment| {
+                        Ok(segment.fix_pagefault(pf_addr, error_code))
+                    })
+                    .unwrap_or(Err(err));
+            }
+        };
         self.inner.fix_pagefault(pf_addr, error_code)
     }
 

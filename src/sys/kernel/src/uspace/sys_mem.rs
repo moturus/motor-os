@@ -386,7 +386,8 @@ fn sys_mem_global_stats(
 
             let stats = moto_sys::stats::AdmissionStats {
                 available_small_pages: crate::mm::phys::available_small_pages(),
-                reserved_small_pages: admission::reserved_pages(),
+                // Everything admission counts as taken but not allocated.
+                reserved_small_pages: admission::reserved_pages() + admission::committed_pages(),
                 user_floor_pages: admission::USER_FLOOR_PAGES,
                 sys_io_floor_pages: admission::SYS_IO_FLOOR_PAGES,
                 pressure_low_pages: admission::PRESSURE_LOW_PAGES,

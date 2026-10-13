@@ -7,16 +7,17 @@ which has since been reshaped in the working tree into the production form
 this plan describes: the experimental modes, the shared page cache, the
 relocation search, and the mlibc emulation are gone, and the hardening
 items below are in. Section 3 is the order in which to carve that tree
-into reviewed patches. Progress (2026-10-12): step 0 (the syscall-exit
+into reviewed patches. Progress (2026-10-13): step 0 (the syscall-exit
 yield) is committed as cdba6480, step 1 as 16172957, step 2 as
 fbec3547 (simplified by a second reviewer, reviewed again and re-gated
 with three release and three debug full-test runs), step 3 as
 294ad2e2 (without the host test it was gated with: the parser's tests
-move into systest later) and step 4 as 33646420; step 5 is staged and
-gated (three release and three debug full-test runs, all passing),
-awaiting review; e1b39bab, between them, is a test-only fix for a
-pre-existing systest race that step 5's first gate attempt exposed;
-the rest of the tree is uncommitted.
+move into systest later), step 4 as 33646420 and step 5 as 1c79579b
+(between them, e1b39bab is a test-only fix for a pre-existing systest
+race that step 5's first gate attempt exposed, and 43c7fcd1 adds an
+AGENTS.md rule); step 6 is staged: its reviewed version passed three
+release and three debug full-test runs and awaits the commit. The rest
+of the tree is uncommitted.
 
 The goal is to read, allocate, and relocate only the executable pages a
 program needs. On the prototype's host (nested KVM, so absolute times are
@@ -233,8 +234,10 @@ descriptors open on success and failure.
 Bound service work and memory: one request per parked thread, a fixed
 cap on concurrent serves (32 windows of at most 32 pages, 4 MiB of
 buffers), allocation failures reported as fill failures, and the FS
-channel budgets for requests. No kernel lock is held across I/O or across
-frame allocation (zero fills run outside the pager registry lock). Every
+channel budgets for requests. The pager registry lock is not held across
+I/O or frame allocation; the address-space region lock covers the absence
+check, allocation, and installation so overlapping fills cannot spend the
+same commitment twice. Every
 address sys-io passes is checked, even though only sys-io may call the
 pager operations. Metrics: sys-io's `spawn.requests`, `pager.mappings`,
 `exec.locked_files`, `pager.faults`, `pager.filled_pages`,
@@ -378,17 +381,73 @@ larger ones are marked.
    the test's exact-equality wait on `net.channels`, which then ended
    one below its baseline. Pre-existing and unrelated to the spawn
    work; the test now accepts a count at or below its baseline
-   (e1b39bab, committed on its own).
+   (e1b39bab, committed on its own). Committed as 1c79579b.
 6. **Kernel, file-paged segments:** the `FILE_PAGED` segment kind,
    reserve, fill, zero fill, protection checks and `E_NOT_READY` in the
-   fault path, and the admission commitment with its metric. No behavior
-   change yet; gated by the existing suite.
+   fault path, and the admission commitment with its metric. The
+   commitment counter lives on `KernelStaticPage`, beside the pressure
+   flag: no new kernel statics (user decision, 2026-10-12). The paging
+   entry points have no callers yet. Carved 2026-10-12 and
+   staged: `MappingOptions::FILE_PAGED`; `VmemSegment` leaves such a
+   segment sparse, installs pages through `fill_file_page` (a private
+   copy of a pinned source page, or a zeroed one), reports an absent page
+   as unmapped, refuses to share it, accounts its full size on free, and
+   in the fault path serves only not-present user faults the segment's
+   protection allows, answering `E_NOT_READY` for an absent page;
+   `UserAddressSpace::reserve_file`, `fill_file` (copies pinned user
+   pages into fresh frames), `fill_file_zero`, and an admission refusal
+   re-examined for file-paged segments, whose pages were committed at
+   reservation; `admission::commit`/`Commitment` and the
+   `mem.committed_pages` metric, with the committed pages counted in the
+   global reserved figure. Nothing calls the new functions until step 7;
+   the kernel build stays warning-free. On the way, admission's counters
+   left `mm/admission.rs` (user request, 2026-10-12), which keeps only
+   its publication lock: the reservation joins the commitment on
+   `KernelStaticPage`, the low-water mark and the debug
+   free-notification oracle are fields of the system stats node, and
+   refusals are per-CPU kernel metrics that systest reads under
+   `PID_KERNEL`. Gate on 1c79579b plus the index, 2026-10-12/13: three
+   release runs (10.7, 9.9 and 9.9 min) and three debug runs (15.8,
+   15.6 and 15.4 min), all passing; no developer-image run, at the
+   user's direction. Three earlier attempts did not count: two were
+   stopped while the counters moved (the second had put them in a new
+   static), and one failed release run 1 in
+   `admission::test_oversized_mapping_refused` because two of the
+   test's reads of the refusal metric still used the global scope after
+   the metric moved under `PID_KERNEL`; a slip in the carve, not a
+   kernel defect, fixed before this gate without weakening the test.
+   Review fixes, 2026-10-13: the admission-refusal fallback now checks
+   and handles the file segment under one region lock; fills check for
+   existing pages before allocating and copying under that same lock,
+   with the whole destination range validated first; file reservations
+   use only the normal userspace region. The pre-existing fixed-mapping
+   overlap check now handles containment and half-open boundaries, with
+   a native systest regression in the default full-test path. The
+   low-water update uses guarded `fetch_min`, retaining the read-only
+   fast path, and refusals borrow the kernel stats node. These fixes
+   are staged and passed one release (10.1 min) and one debug (15.5 min)
+   full-test run in an isolated index checkout, including the new overlap
+   regression in both; unrelated pager work remains unstaged. Formatting
+   passed, with no new compiler or clippy warnings (systest clippy reports
+   three existing warnings in unchanged virtio-async).
+   Two setup attempts failed before the guest tests: the index export
+   omitted httpd-axum's ignored local Cargo.lock, and the isolated
+   checkout's default MOTORH did not locate the sibling Rust sources.
+   Copying the existing lock and setting MOTORH to /home/posk/motor-dev
+   corrected these inputs; the original failure logs are retained under
+   /tmp/motor-staged-review.GRMA0k. The earlier three-per-profile gate
+   predates these fixes; the reviewed index then passed its own, on
+   1c79579b, 2026-10-13: three release runs (11.7, 9.9 and 10.0 min) and
+   three debug runs (15.8, 15.7 and 15.7 min), the overlap regression
+   passing in each; no commit was made. End-to-end fill and fault race
+   coverage still waits for the pager integration.
 7. **Kernel, pager:** `uspace/pager.rs` (parking and resumption,
    coalescing, zero fills outside the registry lock, retirement at exit,
    drop, and unmap), the `OP_PAGER` syscall family and moto-sys wrappers,
    `E_PAGE_ABSENT` from user copies with the retry in `do_syscall`, the
    handle-array copy ahead of the wake in the wait syscall, and the miss
-   metric. Lands with step 8, which carries its tests.
+   metric, a per-CPU kernel counter read under `PID_KERNEL` like the
+   scheduler's. Lands with step 8, which carries its tests.
 8. **sys-io demand paging of read-only segments:** the pager task, drain
    before refusing, mapping references, the adaptive window, bounded
    serves, the failed-fill metric. Tests: lock refusals while mapped,

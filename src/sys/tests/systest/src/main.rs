@@ -690,6 +690,63 @@ fn test_concurrent_lazy_memory_map_write() {
     println!("test_concurrent_lazy_memory_map_write: done");
 }
 
+fn test_fixed_memory_map_overlap() {
+    use moto_sys::{SysHandle, SysMem, SysObj, sys_mem::PAGE_SIZE_SMALL};
+
+    let space = SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=map-overlap").unwrap();
+    const BASE: u64 = 0x10_0000;
+    let map = |offset, pages| {
+        SysMem::map2(
+            space,
+            SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE,
+            u64::MAX,
+            BASE + offset * PAGE_SIZE_SMALL,
+            PAGE_SIZE_SMALL,
+            pages,
+        )
+    };
+    let unmap = |(remote, local)| {
+        SysMem::unmap(space, 0, u64::MAX, remote).unwrap();
+        SysMem::free(local).unwrap();
+    };
+
+    // Two disjoint intervals, [2, 4) and [6, 8), in an otherwise empty space.
+    let mappings = [map(2, 2).unwrap(), map(6, 2).unwrap()];
+    for (_, local) in mappings {
+        unsafe { (local as *mut u64).write_volatile(0x1234_5678) };
+    }
+    for (offset, pages) in [
+        (1, 4), // Contains the first mapping.
+        (1, 2), // Overlaps its left edge.
+        (2, 2), // Identical.
+        (3, 2), // Overlaps its right edge.
+        (2, 1), // Contained in it.
+        (1, 8), // Contains both mappings.
+        (3, 3), // Ends at the next mapping's start; still overlaps the first.
+    ] {
+        assert!(
+            map(offset, pages).is_err(),
+            "overlap accepted: offset {offset}, pages {pages}"
+        );
+    }
+    // Half-open boundaries: touching on either side and an exact gap are valid.
+    for offset in [0, 4, 8] {
+        let mapping = map(offset, 2).unwrap();
+        assert_eq!(mapping.0, BASE + offset * PAGE_SIZE_SMALL);
+        unmap(mapping);
+    }
+    for mapping in mappings {
+        assert_eq!(
+            unsafe { (mapping.1 as *const u64).read_volatile() },
+            0x1234_5678
+        );
+        unmap(mapping);
+    }
+    unmap(map(0, 10).unwrap());
+    SysObj::put(space).unwrap();
+    println!("test_fixed_memory_map_overlap PASS");
+}
+
 fn test_invalid_memory_map_options() {
     use moto_sys::*;
 
@@ -1675,6 +1732,7 @@ fn main() {
     mem_blocks::run_all_tests();
     pressure::run_all_tests();
     test_invalid_memory_map_options();
+    test_fixed_memory_map_overlap();
     checked_copy_in::run_all_tests();
     test_lazy_memory_map_read();
     test_lazy_memory_map_write();

@@ -179,11 +179,13 @@ pub enum MetricType {
     MemBlockRecombined = 73,
     MemHugePagesMapped = 74,
     MemHugeFallbacks = 75,
+    /// Pages committed to demand-paged executable images, not yet filled.
+    MemCommittedPages = 76,
     /// Syscalls that gave the CPU to the scheduler loop before returning,
     /// because a tick or a wake landed on the CPU while they ran.
-    SchedSyscallExitYields = 76,
+    SchedSyscallExitYields = 77,
 
-    TotalMetricTypes = 77,
+    TotalMetricTypes = 78,
 }
 
 impl MetricType {
@@ -282,6 +284,7 @@ impl MetricType {
             MetricType::MemBlockRecombined => "mem.block_recombined",
             MetricType::MemHugePagesMapped => "mem.huge_pages_mapped",
             MetricType::MemHugeFallbacks => "mem.huge_fallbacks",
+            MetricType::MemCommittedPages => "mem.committed_pages",
             MetricType::SchedSyscallExitYields => "sched.syscall_exit_yields",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
@@ -454,6 +457,14 @@ pub struct KProcessStats {
     pub owner: Weak<crate::uspace::Process>,
 
     per_cpu_stats: PerCpuStats,
+
+    // Admission's gauges, system-wide: kept on the PID_SYSTEM node only.
+    // The lowest number of free small pages seen at an admission check,
+    // `u64::MAX` until the first.
+    admission_low_water: AtomicU64,
+    // How many times the free path has notified admission; a debug test oracle.
+    #[cfg(debug_assertions)]
+    admission_free_notifications: AtomicU64,
 }
 
 impl Drop for KProcessStats {
@@ -516,6 +527,9 @@ impl KProcessStats {
             mem_stats_kernel,
             owner,
             per_cpu_stats: PerCpuStats::new(),
+            admission_low_water: AtomicU64::new(u64::MAX),
+            #[cfg(debug_assertions)]
+            admission_free_notifications: AtomicU64::new(0),
         });
 
         match self_.parent.as_ref() {
@@ -720,12 +734,10 @@ impl KProcessStats {
                 crate::arch::x64::tlb::TLB_SHOOTDOWN_SLOW_COUNT.load(Ordering::Relaxed);
 
             use crate::mm::admission;
-            vals[MetricType::AdmissionRefusedUser as usize] =
-                admission::REFUSED_USER.load(Ordering::Relaxed);
-            vals[MetricType::AdmissionRefusedSysIo as usize] =
-                admission::REFUSED_SYS_IO.load(Ordering::Relaxed);
             vals[MetricType::AdmissionReservedPages as usize] = admission::reserved_pages();
-            vals[MetricType::SmallPagesLowWater as usize] = admission::low_water_pages();
+            vals[MetricType::MemCommittedPages as usize] = admission::committed_pages();
+            vals[MetricType::SmallPagesLowWater as usize] =
+                self.admission_low_water.load(Ordering::Relaxed);
             vals[MetricType::UserFloorPages as usize] = admission::USER_FLOOR_PAGES;
             vals[MetricType::SysIoFloorPages as usize] = admission::SYS_IO_FLOOR_PAGES;
             vals[MetricType::PhysSmallPagesLowWater as usize] =
@@ -897,6 +909,33 @@ impl KProcessStats {
 
 static SYSTEM_STATS: StaticRef<Arc<KProcessStats>> = StaticRef::default_const();
 static KERNEL_STATS: StaticRef<Arc<KProcessStats>> = StaticRef::default_const();
+
+/// Records a free-small-page count seen at an admission check: the system
+/// node keeps the minimum. Admission runs for userspace only, after `init()`.
+pub fn record_admission_low_water(available: u64) {
+    let low_water = &SYSTEM_STATS.admission_low_water;
+    if available < low_water.load(Ordering::Relaxed) {
+        low_water.fetch_min(available, Ordering::Relaxed);
+    }
+}
+
+/// The free path notified admission; a debug test oracle on the system node.
+/// Frees before `init()` are not counted.
+#[cfg(debug_assertions)]
+pub fn note_admission_free_notification() {
+    if SYSTEM_STATS.is_set() {
+        SYSTEM_STATS
+            .admission_free_notifications
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(debug_assertions)]
+pub fn admission_free_notifications() -> u64 {
+    SYSTEM_STATS
+        .admission_free_notifications
+        .load(Ordering::Relaxed)
+}
 
 /// Pids fit i32 by design: see docs/plans/pid-refactoring-design.md.
 pub const PID_MAX: u64 = 1 << 31;
