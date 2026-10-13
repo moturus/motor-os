@@ -6,7 +6,6 @@
 #![feature(allocator_api)]
 
 mod io_runtime;
-mod load;
 mod posix;
 mod proc_fd;
 mod rt_alloc;

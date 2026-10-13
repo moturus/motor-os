@@ -7,6 +7,7 @@ use moto_sys::stats::ProcessInfoV1;
 use moto_sys::{SysCpu, SysHandle, SysObj, SysRay};
 use moto_sys_io::api_fs::SpawnRequest;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 
 const EXEC: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC;
@@ -182,6 +183,23 @@ fn test_malformed_images(dir: &Path, requester: &mut Requester) {
             Err(moto_rt::Error::InvalidArgument),
             "{name}"
         );
+        // std's spawn goes through sys-io too and must report the same error.
+        match Command::new(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                let _ = child.kill();
+                panic!("{name}: std's spawn accepted a malformed image");
+            }
+            Err(err) => assert_eq!(
+                err.raw_os_error(),
+                Some(moto_rt::E_INVALID_ARGUMENT as i32),
+                "{name}: {err:?}"
+            ),
+        }
         std::fs::remove_file(&path).unwrap();
     }
     let program = copy(dir, "well-formed", EXEC, |_| {});
