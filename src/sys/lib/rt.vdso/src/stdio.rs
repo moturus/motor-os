@@ -875,7 +875,20 @@ async fn transfer_file_output(
             // no reason to reserve an empty range and ask again.
             Ok(0) => return Ok(()),
             Ok(read) => {
-                let start = claim.source.file().reserve_output_relay_range(read)?;
+                let file = claim.source.file();
+                let append_end = if file.appends() {
+                    Some(
+                        claim
+                            .source
+                            .client
+                            .file_size(file.entry_id())
+                            .await
+                            .map_err(|err| err as ErrorCode)?,
+                    )
+                } else {
+                    None
+                };
+                let start = file.reserve_output_relay_range(read, append_end)?;
                 let mut written = 0;
                 while written < read {
                     let offset = start

@@ -374,6 +374,7 @@ impl AsyncFsClient {
                 pos,
                 input_relay: false,
                 output_relays: 0,
+                relay_append_end: 0,
             }),
             append: (opts & moto_rt::fs::O_APPEND) != 0,
             readable: (opts & moto_rt::fs::O_READ) != 0,
@@ -429,6 +430,16 @@ impl AsyncFsClient {
         self.async_run(move |fs_client| async move {
             let result = fs_client.read(file_id, offset, &mut buf).await;
             (buf, result)
+        })
+        .await
+    }
+
+    pub(crate) async fn file_size(&self, file_id: EntryId) -> Result<u64> {
+        self.async_run(move |fs_client| async move {
+            fs_client
+                .metadata(file_id)
+                .await
+                .map(|metadata| metadata.size)
         })
         .await
     }
@@ -743,6 +754,9 @@ struct PosState {
     pos: u64,
     input_relay: bool,
     output_relays: usize,
+    // The end of the last range reserved by this handle's output relays, so
+    // concurrent append relays (stdout and stderr) never overlap.
+    relay_append_end: u64,
 }
 
 const FILE_LOCK_UNLOCKED: u8 = 0;
@@ -814,6 +828,7 @@ impl File {
             offset: pos.pos,
             readable: self.readable,
             writable: self.writable,
+            append: self.append,
             parent_open_id: self.open_id,
         })
     }
@@ -830,6 +845,10 @@ impl File {
         self.writable
     }
 
+    pub(crate) fn appends(&self) -> bool {
+        self.append
+    }
+
     pub(crate) fn register_output_relay(&self) -> core::result::Result<(), moto_rt::ErrorCode> {
         let mut pos = self.pos.lock();
         if self.lock_state.load(Ordering::Acquire) != FILE_LOCK_UNLOCKED {
@@ -840,6 +859,9 @@ impl File {
         }
         if pos.input_relay {
             return Err(moto_rt::E_ALREADY_IN_USE);
+        }
+        if pos.output_relays == 0 {
+            pos.relay_append_end = 0;
         }
         pos.output_relays = pos
             .output_relays
@@ -875,17 +897,23 @@ impl File {
         pos.input_relay = false;
     }
 
+    /// Reserve `len` bytes for relayed output; an append-mode handle passes
+    /// the file size it just observed in `append_end`.
     pub(crate) fn reserve_output_relay_range(
         &self,
         len: usize,
+        append_end: Option<u64>,
     ) -> core::result::Result<u64, moto_rt::ErrorCode> {
         let mut pos = self.pos.lock();
         assert!(pos.output_relays != 0 && !pos.input_relay);
-        let start = pos.pos;
-        pos.pos = pos
-            .pos
+        let start = match append_end {
+            Some(end) => end.max(pos.relay_append_end),
+            None => pos.pos,
+        };
+        pos.pos = start
             .checked_add(len as u64)
             .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        pos.relay_append_end = pos.pos;
         Ok(start)
     }
 
@@ -918,9 +946,9 @@ impl File {
                 pos: snapshot.offset,
                 input_relay: false,
                 output_relays: 0,
+                relay_append_end: 0,
             }),
-            // Stdio snapshots do not carry the append mode yet.
-            append: false,
+            append: snapshot.append,
             readable: snapshot.readable,
             writable: snapshot.writable,
             lock_state: AtomicU8::new(FILE_LOCK_UNLOCKED),

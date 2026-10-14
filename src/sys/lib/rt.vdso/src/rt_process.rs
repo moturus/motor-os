@@ -901,7 +901,8 @@ impl StdioData {
 
     const FILE_READABLE: u64 = 1;
     const FILE_WRITABLE: u64 = 2;
-    const FILE_FLAGS: u64 = Self::FILE_READABLE | Self::FILE_WRITABLE;
+    const FILE_APPEND: u64 = 4;
+    const FILE_FLAGS: u64 = Self::FILE_READABLE | Self::FILE_WRITABLE | Self::FILE_APPEND;
 
     pub fn null() -> Self {
         Self {
@@ -925,7 +926,8 @@ impl StdioData {
 
     pub fn file(file: StdioFileData) -> Self {
         let flags = (u64::from(file.readable) * Self::FILE_READABLE)
-            | (u64::from(file.writable) * Self::FILE_WRITABLE);
+            | (u64::from(file.writable) * Self::FILE_WRITABLE)
+            | (u64::from(file.append) * Self::FILE_APPEND);
         Self {
             tag: Self::TAG_FILE,
             payload: [
@@ -962,7 +964,11 @@ impl StdioData {
             Self::TAG_FILE => {
                 let flags = self.payload[3];
                 let entry_id = self.payload[0] as u128 | (self.payload[1] as u128) << 64;
-                if entry_id == 0 || flags == 0 || flags & !Self::FILE_FLAGS != 0 {
+                if entry_id == 0
+                    || flags == 0
+                    || flags & !Self::FILE_FLAGS != 0
+                    || (flags & Self::FILE_APPEND != 0 && flags & Self::FILE_WRITABLE == 0)
+                {
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
                 Ok(Some(StdioFileData {
@@ -970,6 +976,7 @@ impl StdioData {
                     offset: self.payload[2],
                     readable: flags & Self::FILE_READABLE != 0,
                     writable: flags & Self::FILE_WRITABLE != 0,
+                    append: flags & Self::FILE_APPEND != 0,
                     parent_open_id: self.payload[4],
                 }))
             }
@@ -988,6 +995,7 @@ pub struct StdioFileData {
     pub offset: u64,
     pub readable: bool,
     pub writable: bool,
+    pub append: bool,
     pub parent_open_id: u64,
 }
 

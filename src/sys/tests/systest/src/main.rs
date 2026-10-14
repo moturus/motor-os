@@ -1600,6 +1600,9 @@ fn main() {
     if stdio_file_input::is_child(&args) {
         stdio_file_input::run_child(&args);
     }
+    if file_append::is_child(&args) {
+        file_append::run_child(&args);
+    }
     if stdio_file_relay::is_child(&args) {
         stdio_file_relay::run_child(&args);
     }
