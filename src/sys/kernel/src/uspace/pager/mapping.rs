@@ -1,4 +1,3 @@
-use crate::config::uCpus;
 use crate::mm::{admission::Commitment, user::UserAddressSpace, PAGE_SIZE_SMALL};
 use crate::uspace::process::Thread;
 use alloc::collections::BTreeSet;
@@ -9,7 +8,6 @@ use moto_sys::ErrorCode;
 pub(super) struct Waiter {
     pub(super) page: u64,
     pub(super) thread: Weak<Thread>,
-    pub(super) cpu: uCpus,
 }
 
 pub(super) struct Mapping {

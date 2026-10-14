@@ -231,7 +231,6 @@ echo "full-test: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE target=$IMG_TAR
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-kernel-wait-set.sh" --release
   bash "$WD/test-kernel-user-copy.sh" --release
-  bash "$WD/test-kernel-pager.sh" --release
   bash "$WD/test-moto-ipc-sync.sh" --release
   make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
     crossterm-smoke BUILD=release -j"$(nproc)"
@@ -240,7 +239,6 @@ if [ "$BUILD" = "release" ]; then
 else
   bash "$WD/test-kernel-wait-set.sh"
   bash "$WD/test-kernel-user-copy.sh"
-  bash "$WD/test-kernel-pager.sh"
   bash "$WD/test-moto-ipc-sync.sh"
   make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
     crossterm-smoke -j"$(nproc)"

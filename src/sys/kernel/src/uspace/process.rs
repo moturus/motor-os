@@ -1313,12 +1313,7 @@ impl Thread {
                 LiveThreadStatus::Preempted => {
                     // Paused in resume_in_userspace() or on_thread_preempted().
                     *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
-                    crate::sched::post(crate::sched::Job::new(
-                        Self::job_fn_resume_in_userspace,
-                        self.get_weak(),
-                        self.tid.as_u64(),
-                        self.get_cpu_affinity(),
-                    ));
+                    self.post_resume_in_userspace(false);
                     Ok(())
                 }
                 LiveThreadStatus::Syscall(_, _) => {
@@ -2360,15 +2355,24 @@ impl Thread {
 
         if resume_in_userspace {
             // Page faults should not lead to CPU migrations.
-            crate::sched::post(crate::sched::Job::new(
-                Self::job_fn_resume_in_userspace,
-                self.get_weak(),
-                self.tid.as_u64(),
-                current_cpu(),
-            ));
+            self.post_resume_in_userspace(true);
         } else if call_on_exited {
             self.on_thread_exited();
         }
+    }
+
+    fn post_resume_in_userspace(&self, this_cpu: bool) {
+        let cpu = if this_cpu {
+            current_cpu()
+        } else {
+            self.get_cpu_affinity()
+        };
+        crate::sched::post(crate::sched::Job::new(
+            Self::job_fn_resume_in_userspace,
+            self.get_weak(),
+            self.tid.as_u64(),
+            cpu,
+        ));
     }
 
     fn on_thread_descheduled(&self, tocr: ThreadOffCpuReason) {
@@ -2404,12 +2408,7 @@ impl Thread {
                         }
                     }
                     if resume_in_userspace {
-                        crate::sched::post(crate::sched::Job::new(
-                            Self::job_fn_resume_in_userspace,
-                            self.get_weak(),
-                            self.tid.as_u64(),
-                            self.get_cpu_affinity(),
-                        ));
+                        self.post_resume_in_userspace(false);
                     } else if call_on_exited {
                         self.on_thread_exited();
                     }
