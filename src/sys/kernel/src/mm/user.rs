@@ -647,6 +647,28 @@ impl UserAddressSpace {
     }
 
     pub fn copy_to_user(&self, bytes: &[u8], user_vaddr_start: u64) -> Result<(), ErrorCode> {
+        self.copy_to_user_impl(bytes, user_vaddr_start, MappingOptions::WRITABLE)
+    }
+
+    /// Initialize private ELF pages before the bootstrap process can run.
+    ///
+    /// # Safety
+    /// The destination pages must be private, never exposed to userspace, and
+    /// have no concurrent readers or writers. This bypasses user write protection.
+    pub unsafe fn initialize_user_memory(
+        &self,
+        bytes: &[u8],
+        user_vaddr_start: u64,
+    ) -> Result<(), ErrorCode> {
+        self.copy_to_user_impl(bytes, user_vaddr_start, MappingOptions::READABLE)
+    }
+
+    fn copy_to_user_impl(
+        &self,
+        bytes: &[u8],
+        user_vaddr_start: u64,
+        access: MappingOptions,
+    ) -> Result<(), ErrorCode> {
         let stats = crate::xray::stats::kernel_stats_ref();
         stats.adjust_metric(crate::xray::stats::MetricType::UserCopyWrite, 1);
         stats.adjust_metric(
@@ -662,7 +684,7 @@ impl UserAddressSpace {
         while !source.is_empty() {
             // Pin under the region lock and retain ownership through the copy.
             // Frame-less zero/CoW pages and device mappings remain refused.
-            let page = self.pin_user_page(dst_start)?;
+            let page = self.pin_user_page(dst_start, access)?;
             let bytes_to_copy = source
                 .len()
                 .min((PAGE_SIZE_SMALL - (dst_start & (PAGE_SIZE_SMALL - 1))) as usize);
@@ -680,10 +702,14 @@ impl UserAddressSpace {
         Ok(())
     }
 
-    fn pin_user_page(&self, addr: u64) -> Result<PinnedUserPage, ErrorCode> {
+    fn pin_user_page(
+        &self,
+        addr: u64,
+        access: MappingOptions,
+    ) -> Result<PinnedUserPage, ErrorCode> {
         let (frame, offset) = self
             .inner
-            .pin_user_page(addr)
+            .pin_user_page(addr, access)
             .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
         Ok(PinnedUserPage { frame, offset })
     }
@@ -691,11 +717,12 @@ impl UserAddressSpace {
     pub fn get_user_page_as_kernel(
         &self,
         user_page_addr: u64,
+        access: MappingOptions,
     ) -> Result<PinnedUserPage, ErrorCode> {
         if user_page_addr & (PAGE_SIZE_SMALL - 1) != 0 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        self.pin_user_page(user_page_addr)
+        self.pin_user_page(user_page_addr, access)
     }
 
     pub fn read_from_user(
@@ -887,7 +914,7 @@ pub fn huge_mapping_self_test() {
     );
     let (pinned, offset) = space
         .inner
-        .pin_user_page(huge.start + PAGE_SIZE_MID - 1)
+        .pin_user_page(huge.start + PAGE_SIZE_MID - 1, MappingOptions::READABLE)
         .unwrap();
     assert_eq!(pinned.get().unwrap().kind(), PageType::MidPage);
     assert_eq!(
@@ -969,7 +996,10 @@ pub fn huge_mapping_self_test() {
     assert_eq!(table.leaf_kind(boundary), Some(PageType::SmallPage));
     space.copy_to_user(b"across", boundary - 3).unwrap();
     assert_eq!(space.read_from_user(boundary - 3, 6).unwrap(), b"across");
-    let (pinned, offset) = space.inner.pin_user_page(boundary + 5).unwrap();
+    let (pinned, offset) = space
+        .inner
+        .pin_user_page(boundary + 5, MappingOptions::READABLE)
+        .unwrap();
     assert_eq!(pinned.get().unwrap().kind(), PageType::SmallPage);
     assert_eq!(offset, 5);
     drop(pinned);

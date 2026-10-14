@@ -718,7 +718,7 @@ fn sys_query_percpu_stats(curr: &super::process::Thread, args: &mut SyscallArgs)
     let page_addr = if let Ok(addr) = curr
         .owner()
         .address_space()
-        .get_user_page_as_kernel(user_page_addr)
+        .get_user_page_as_kernel(user_page_addr, crate::mm::MappingOptions::WRITABLE)
     {
         addr
     } else {

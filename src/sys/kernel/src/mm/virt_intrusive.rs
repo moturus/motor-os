@@ -331,8 +331,20 @@ impl VmemSegment {
         }
     }
 
-    pub(super) fn pin_user_page(&self, vmem_addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+    pub(super) fn pin_user_page(
+        &self,
+        vmem_addr: u64,
+        access: MappingOptions,
+    ) -> Option<(SlabArc<Frame>, u64)> {
         let page = self.find_page(vmem_addr)?;
+        // Direct-map accesses bypass PTE protection; check the page's rights
+        // while the caller holds the region lock, before acquiring the pin.
+        if !page
+            .mapping_options
+            .contains(access | MappingOptions::USER_ACCESSIBLE)
+        {
+            return None;
+        }
         let frame = page.frame.get()?;
         if frame.is_mmio() {
             return None;

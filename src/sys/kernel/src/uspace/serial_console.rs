@@ -101,7 +101,9 @@ pub(super) fn get_for_process(
     }
 
     let address_space = process.address_space().clone();
-    let kernel_control_page = match address_space.get_user_page_as_kernel(control_page as u64) {
+    let kernel_control_page = match address_space
+        .get_user_page_as_kernel(control_page as u64, crate::mm::MappingOptions::WRITABLE)
+    {
         Ok(page) => page,
         Err(err) => {
             log::error!("The serial console control block is not mapped: {err:?}");

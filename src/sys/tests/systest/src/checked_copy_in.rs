@@ -30,6 +30,50 @@ fn assert_copied(addr: u64, value: u64) {
     }
 }
 
+fn write_usage(addr: u64) -> SyscallResult {
+    let nr = (u64::from(SYS_CPU) << 56) | (u64::from(SysCpu::OP_USAGE) << 48);
+    do_syscall(nr, addr, u64::from(moto_sys::num_cpus()), 0, 0, 0, 0)
+}
+
+fn test_copy_out_permissions() {
+    let invalid = moto_rt::E_INVALID_ARGUMENT;
+    let readonly = moto_rt::RT_VDSO_START;
+    // The vDSO header is read-only and shared with sys-io and other processes.
+    let before = unsafe {
+        core::slice::from_raw_parts(readonly as *const u8, PAGE_SIZE_SMALL as usize).to_vec()
+    };
+    assert_copied(
+        readonly,
+        u64::from_ne_bytes(before[..8].try_into().unwrap()),
+    );
+
+    // Pass an address directly: an &mut to read-only memory would itself be UB.
+    assert_eq!(write_usage(readonly).error_code(), invalid);
+    assert_eq!(
+        unsafe { core::slice::from_raw_parts(readonly as *const u8, before.len()) },
+        before,
+        "copy-out modified a read-only vDSO page"
+    );
+    assert_eq!(SysCpu::get_percpu_stats_v1(readonly), Err(invalid));
+    assert_eq!(
+        unsafe { core::slice::from_raw_parts(readonly as *const u8, before.len()) },
+        before,
+        "a write-side page pin modified a read-only vDSO page"
+    );
+
+    let mut usage = vec![f32::NAN; moto_sys::num_cpus() as usize];
+    assert!(write_usage(usage.as_mut_ptr() as u64).is_ok());
+    assert!(usage.iter().all(|value| value.is_finite()));
+
+    let output = Mapping(SysMem::alloc(PAGE_SIZE_SMALL, 1).unwrap());
+    unsafe {
+        (output.0 as *mut u64).write(u64::MAX);
+    }
+    assert!(SysCpu::get_percpu_stats_v1(output.0).unwrap() > 0);
+    assert_eq!(unsafe { (output.0 as *const u64).read() }, 0); // System PID.
+    println!("checked_copy_out_permissions PASS");
+}
+
 pub fn run_all_tests() {
     let invalid = moto_rt::E_INVALID_ARGUMENT;
     let ram = Mapping(SysMem::alloc(PAGE_SIZE_SMALL, 2).unwrap());
@@ -86,4 +130,5 @@ pub fn run_all_tests() {
     );
     assert_eq!(SysMem::virt_to_phys(lazy.0 + PAGE_SIZE_SMALL), Err(invalid));
     println!("checked_copy_in PASS");
+    test_copy_out_permissions();
 }
