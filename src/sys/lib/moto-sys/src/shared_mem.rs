@@ -1,5 +1,8 @@
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
+/// Exclusive end of the normal userspace region, including file-paged mappings.
+pub const USERSPACE_REGION_END: u64 = 1_u64 << 45;
+
 // Custom userspace region (1TB): the kernel will never allocate a vaddr in a userspace
 // address space in this region, it is used by lib/iort.
 pub const CUSTOM_USERSPACE_REGION_START: u64 = (1_u64 << 45) + (1_u64 << 40);

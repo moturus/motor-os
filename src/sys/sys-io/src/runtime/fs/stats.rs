@@ -114,6 +114,13 @@ mod ids {
     pub const SPAWNS: u32 = 1019;
     pub const SPAWN_BUILD_US: u32 = 1020;
     pub const SPAWN_VDSO_US: u32 = 1021;
+
+    // The executable pager (see `super::spawn::pager`).
+    pub const PAGER_MAPPINGS: u32 = 1022;
+    pub const PAGER_FAULTS: u32 = 1023;
+    pub const PAGER_FILLED_PAGES: u32 = 1024;
+    pub const PAGER_FAILED_FILLS: u32 = 1025;
+    pub const PAGER_SERVE_US: u32 = 1027;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
@@ -124,6 +131,7 @@ async fn entries(
     channels: u64,
     locked_files: u64,
     spawn: &super::spawn::SpawnStats,
+    pager: &super::spawn::pager::Pager,
 ) -> Vec<MetricEntry> {
     let num_blocks = fs.num_blocks();
     let empty_blocks = fs
@@ -162,6 +170,11 @@ async fn entries(
         MetricEntry::global(ids::SPAWNS, spawn.requests.get()),
         MetricEntry::global(ids::SPAWN_BUILD_US, spawn.build_us.get()),
         MetricEntry::global(ids::SPAWN_VDSO_US, spawn.vdso_us.get()),
+        MetricEntry::global(ids::PAGER_MAPPINGS, pager.num_mappings()),
+        MetricEntry::global(ids::PAGER_FAULTS, pager.faults.get()),
+        MetricEntry::global(ids::PAGER_FILLED_PAGES, pager.filled_pages.get()),
+        MetricEntry::global(ids::PAGER_FAILED_FILLS, pager.failed_fills.get()),
+        MetricEntry::global(ids::PAGER_SERVE_US, pager.serve_us.get()),
     ]
 }
 
@@ -195,6 +208,11 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::SPAWNS, "spawn.requests"),
         MetricDescWire::new(ids::SPAWN_BUILD_US, "spawn.build_us"),
         MetricDescWire::new(ids::SPAWN_VDSO_US, "spawn.vdso_us"),
+        MetricDescWire::new(ids::PAGER_MAPPINGS, "pager.mappings"),
+        MetricDescWire::new(ids::PAGER_FAULTS, "pager.faults"),
+        MetricDescWire::new(ids::PAGER_FILLED_PAGES, "pager.filled_pages"),
+        MetricDescWire::new(ids::PAGER_FAILED_FILLS, "pager.failed_fills"),
+        MetricDescWire::new(ids::PAGER_SERVE_US, "pager.serve_us"),
     ]
 }
 
@@ -239,6 +257,7 @@ async fn stats_responder_task(
             runtime.channel_budget.fs_channels(),
             locked_files,
             &runtime.spawn_stats,
+            &runtime.pager,
         )
         .await;
         // The receiver is gone if the stats-server thread stopped waiting; ignore.

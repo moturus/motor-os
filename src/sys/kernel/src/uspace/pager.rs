@@ -171,11 +171,10 @@ fn reserve(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, Erro
 }
 
 fn dequeue(caller: &Arc<super::Process>, buf: u64, capacity: u64) -> Result<u64, UserCopyError> {
-    const MAX: usize = 64;
-    let mut batch = [(0_u64, 0_u64); MAX];
+    let mut batch = [(0_u64, 0_u64); SysMem::PAGER_MAX_EVENTS];
     let count = {
         let mut pager = registry().lock(line!());
-        let count = (capacity as usize).min(MAX).min(pager.events.len());
+        let count = (capacity as usize).min(batch.len()).min(pager.events.len());
         for slot in batch.iter_mut().take(count) {
             *slot = pager.events.pop_front().unwrap();
         }

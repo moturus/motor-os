@@ -41,6 +41,8 @@ impl SysMem {
     pub const F_PAGER_ZERO_FROM: u32 = 5;
     /// The page value of a dequeued event that retires its mapping.
     pub const PAGER_RETIRED: u64 = u64::MAX;
+    /// Maximum events returned by one dequeue.
+    pub const PAGER_MAX_EVENTS: usize = 64;
 
     // Bit flags for create/map operations.
     pub const F_READABLE: u32 = 1;

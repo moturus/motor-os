@@ -4,6 +4,7 @@
 //! child stays stopped; its parent writes the startup data and wakes it.
 
 mod elf;
+pub(crate) mod pager;
 mod vdso;
 
 use super::FsRuntime;
@@ -31,7 +32,7 @@ fn try_zeroed(len: usize) -> Result<Vec<u8>> {
 }
 
 /// Executables that must not change: each reference is a construction in
-/// progress.
+/// progress or a live demand-paged mapping of the file.
 #[derive(Default)]
 pub(crate) struct ExecLocks {
     refs: BTreeMap<EntryId, u32>,
@@ -172,6 +173,7 @@ async fn read_vec(
 /// The local R+W aliases of the child's segments, in address order.
 struct Aliases {
     regions: Vec<(elf::Segment, u64)>,
+    paged: Vec<elf::Segment>,
 }
 
 impl Aliases {
@@ -240,13 +242,14 @@ async fn load_segment(
 /// One pass over the RELA table: validates every record and applies the
 /// `R_X86_64_RELATIVE` ones through the segment aliases. Images are linked
 /// at their run address, so the addend is the value.
+/// Returns false if a paged segment needs relocation and must be loaded eagerly.
 async fn scan_relocations(
     runtime: &FsRuntime,
     role: Role,
     entry: EntryId,
     relocations: &elf::Relocations,
     aliases: &Aliases,
-) -> Result<()> {
+) -> Result<bool> {
     const CHUNK: u64 = 2730 * elf::RELA_ENTRY_SIZE;
     let mut buf = try_zeroed(relocations.size.min(CHUNK) as usize)?;
     let mut done = 0;
@@ -268,15 +271,23 @@ async fn scan_relocations(
             match kind {
                 elf::R_X86_64_NONE => {}
                 elf::R_X86_64_RELATIVE => {
-                    let local = aliases.local(dst, 8).ok_or(ErrorKind::InvalidInput)?;
-                    unsafe { (local as usize as *mut u64).write_unaligned(addend) };
+                    if let Some(local) = aliases.local(dst, 8) {
+                        unsafe { (local as usize as *mut u64).write_unaligned(addend) };
+                    } else if aliases.paged.iter().any(|s| {
+                        dst >= s.page_start()
+                            && dst.checked_add(8).is_some_and(|end| end <= s.page_end())
+                    }) {
+                        return Ok(false);
+                    } else {
+                        return Err(ErrorKind::InvalidInput.into());
+                    }
                 }
                 _ => return Err(ErrorKind::InvalidInput.into()),
             }
         }
         done += len;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The file's size, once the requester's role is allowed to run it.
@@ -321,7 +332,23 @@ async fn build(
         }
         None => elf::Relocations::default(),
     };
-    let space = load_image(runtime, role, req, &image, &relocations).await?;
+    // Small files cost less to copy up front. A read-only relocation also
+    // requires an eager image; only that explicit outcome selects fallback.
+    let space = match load_image(
+        runtime,
+        role,
+        req,
+        &image,
+        &relocations,
+        file_size >= 1 << 20,
+    )
+    .await?
+    {
+        Some(space) => space,
+        None => load_image(runtime, role, req, &image, &relocations, false)
+            .await?
+            .expect("an eager load applies every supported relocation"),
+    };
 
     let vdso_started = moto_rt::time::Instant::now();
     vdso::load(space.syshandle()).map_err(native)?;
@@ -339,13 +366,15 @@ async fn build(
 }
 
 /// Creates the child's address space and loads the image into it.
+/// None requests an eager rebuild because a read-only segment needs relocation.
 async fn load_image(
     runtime: &FsRuntime,
     role: Role,
     req: &api_fs::SpawnRequest,
     image: &elf::Image,
     relocations: &elf::Relocations,
-) -> Result<RaiiHandle> {
+    paged: bool,
+) -> Result<Option<RaiiHandle>> {
     let entry = req.entry_id;
     let space = RaiiHandle::from(
         SysObj::create(
@@ -360,8 +389,17 @@ async fn load_image(
     );
     let mut aliases = Aliases {
         regions: Vec::with_capacity(image.segments.len()),
+        paged: Vec::new(),
     };
     for segment in &image.segments {
+        if paged
+            && !segment.writable
+            && segment.congruent()
+            && segment.page_end() <= moto_sys::USERSPACE_REGION_END
+        {
+            aliases.paged.push(*segment);
+            continue;
+        }
         load_segment(
             runtime,
             role,
@@ -372,8 +410,25 @@ async fn load_image(
         )
         .await?;
     }
-    scan_relocations(runtime, role, entry, relocations, &aliases).await?;
-    Ok(space)
+    if !scan_relocations(runtime, role, entry, relocations, &aliases).await? {
+        return Ok(None);
+    }
+    // Register immediately: if a later reserve/build fails, dropping the
+    // address space retires every mapping and releases its executable lock.
+    for segment in &aliases.paged {
+        let id = SysMem::pager_reserve(
+            space.syshandle(),
+            segment.page_start(),
+            segment.num_pages(),
+            false,
+            segment.executable,
+        )
+        .map_err(native)?;
+        runtime
+            .pager
+            .add(id, pager::Mapping::new(entry, role, *segment));
+    }
+    Ok(Some(space))
 }
 
 pub(super) async fn on_cmd_spawn(

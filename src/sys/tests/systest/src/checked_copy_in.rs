@@ -171,6 +171,8 @@ pub fn run_all_tests() {
     }
     assert_copied(crossing, bad_handle);
     static READ_ONLY_ZERO: u64 = 0;
+    // Wait arrays must be resident before entering the syscall.
+    unsafe { core::ptr::read_volatile(&READ_ONLY_ZERO) };
     assert_copied(&READ_ONLY_ZERO as *const u64 as u64, 0);
     assert_copied(KernelStaticPage::VADDR, KernelStaticPage::get().version);
     assert_copied(ProcessStaticPage::VADDR, ProcessStaticPage::get().version);

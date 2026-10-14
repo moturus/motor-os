@@ -1,16 +1,147 @@
-//! sys-io's spawn request: a requester gets a stopped child of its own, is
-//! refused a capability it lacks, entries it may not run and malformed
-//! images, and a requester gone before the response loses the child rather
-//! than holding it, stopped, until its own exit.
+//! sys-io loading and demand paging: a requester gets a stopped child of
+//! its own and is refused what it may not run, a demand-paged image holds the
+//! right bytes, an executable stays locked while any child maps it and
+//! unlocks when the last one exits, children die cleanly in every state,
+//! syscall buffers in untouched pages work, and unusual or malformed images
+//! fall back or are refused.
 
 use moto_sys::stats::ProcessInfoV1;
 use moto_sys::{SysCpu, SysHandle, SysObj, SysRay};
 use moto_sys_io::api_fs::SpawnRequest;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 
+const CHILD: &str = "cold-spawn-child";
 const EXEC: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC;
+
+// Read-only bytes spanning many pages, which nothing reads unless asked, so
+// that a page of them lies untouched when a syscall is handed a slice of it.
+const PROBE_PAGES: usize = 32;
+const PROBE: &[u8; PROBE_PAGES * 4096] = &{
+    let mut bytes = [b'p'; PROBE_PAGES * 4096];
+    bytes[40960] = b'#';
+    bytes
+};
+
+/// Read-only bytes are checked against recomputed values, so a wrong file
+/// offset cannot pass by comparing two copies loaded by the same pager.
+fn image_digest() -> String {
+    let mut digest = 0_u64;
+    for (idx, byte) in std::hint::black_box(PROBE).iter().enumerate() {
+        assert_eq!(*byte, if idx == 40960 { b'#' } else { b'p' });
+        digest = (digest ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+    }
+    format!("image-ok {digest:x}")
+}
+
+pub fn is_child(args: &[String]) -> bool {
+    args.get(1).is_some_and(|arg| arg == CHILD)
+}
+
+pub fn run_child(args: &[String]) -> ! {
+    match args.get(2).map(String::as_str) {
+        Some("digest") => println!("{}", image_digest()),
+        Some("syscall-buffer" | "syscall-zero") => {
+            let address = if args[2] == "syscall-zero" {
+                // This image's first read-only segment starts at zero; its
+                // first four bytes are the ASCII ELF magic. Use the raw API
+                // because a Rust reference must be non-null, even if mapped.
+                0
+            } else {
+                let base = PROBE.as_ptr() as u64;
+                (0..PROBE_PAGES)
+                    .map(|idx| base + idx as u64 * 4096)
+                    .find(|addr| moto_sys::SysMem::virt_to_phys(*addr).is_err())
+                    .expect("an untouched page of the probe table")
+            };
+            assert!(moto_sys::SysMem::virt_to_phys(address).is_err());
+            let result = moto_sys::syscalls::do_syscall(
+                ((moto_sys::syscalls::SYS_RAY as u64) << 56) | ((SysRay::OP_LOG as u64) << 48),
+                address,
+                4,
+                0,
+                0,
+                0,
+                0,
+            );
+            assert!(result.is_ok(), "{result:?}");
+            assert!(moto_sys::SysMem::virt_to_phys(address).is_ok());
+            println!("syscall-buffer-ok");
+        }
+        Some("hold") => {
+            // Report readiness, then live until stdin closes.
+            println!("ready");
+            std::io::stdout().flush().unwrap();
+            let mut line = String::new();
+            while std::io::stdin().lock().read_line(&mut line).unwrap() > 0 {}
+        }
+        Some("exit-while-faulting") => {
+            // One thread faults in read-only pages one by one while the main
+            // thread exits: the exit must complete whether or not a thread
+            // is parked on a fault at that moment.
+            std::thread::spawn(|| {
+                let mut sum = 0_u64;
+                loop {
+                    for page in std::hint::black_box(PROBE).chunks(4096) {
+                        sum = sum.wrapping_add(std::hint::black_box(page[7]) as u64);
+                    }
+                    std::hint::black_box(sum);
+                }
+            });
+            std::thread::yield_now();
+            std::process::exit(7)
+        }
+        other => panic!("unknown {CHILD} mode {other:?}"),
+    }
+    std::process::exit(0)
+}
+
+/// A child command with null stdin and inherited stderr.
+fn child(program: &Path, mode: &str) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args([CHILD, mode])
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit());
+    command
+}
+
+fn digest_of(program: &Path) -> String {
+    let output = child(program, "digest").output().unwrap();
+    assert!(output.status.success(), "{:?}", output.status);
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A holding child: alive, with its image mapped, until its stdin closes.
+fn hold(program: &Path) -> Child {
+    let mut child = child(program, "hold")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.as_mut().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "ready\n");
+    child
+}
+
+fn release(mut child: Child) {
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+}
+
+fn assert_refused<T: std::fmt::Debug>(what: &str, result: std::io::Result<T>) {
+    let err = result.expect_err(what);
+    assert_eq!(
+        err.raw_os_error(),
+        Some(moto_rt::E_NOT_ALLOWED as i32),
+        "{what}: {err:?}"
+    );
+}
 
 /// A copy of this executable, altered by `patch`, with `perm`.
 fn copy(dir: &Path, name: &str, perm: u64, patch: impl FnOnce(&mut Vec<u8>)) -> PathBuf {
@@ -20,26 +151,6 @@ fn copy(dir: &Path, name: &str, perm: u64, patch: impl FnOnce(&mut Vec<u8>)) -> 
     std::fs::write(&path, &bytes).unwrap();
     moto_rt::fs::set_perm(path.to_str().unwrap(), perm).unwrap();
     path
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-}
-
-fn u64_at(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
-}
-
-const PT_LOAD: u32 = 1;
-
-/// The file offset of the first program header of type `p_type`.
-fn phdr(bytes: &[u8], p_type: u32) -> usize {
-    let phoff = u64_at(bytes, 32) as usize;
-    let phnum = u16::from_le_bytes([bytes[56], bytes[57]]) as usize;
-    (0..phnum)
-        .map(|idx| phoff + idx * 56)
-        .find(|at| u32_at(bytes, *at) == p_type)
-        .unwrap()
 }
 
 /// One FS connection for the whole suite. sys-io abandons a child whose
@@ -86,6 +197,316 @@ fn kill_unstarted(handle: SysHandle, what: &str) {
     SysCpu::kill(handle).unwrap();
     crate::raw_spawn::wait_exit(handle, what);
     SysObj::put(handle).unwrap();
+}
+
+fn test_image_contents() {
+    let faults = crate::tcp::read_sys_io_metric("pager.faults");
+    let program = std::env::current_exe().unwrap();
+    let digest = digest_of(&program);
+    assert!(digest.starts_with("image-ok "), "{digest}");
+    assert!(crate::tcp::read_sys_io_metric("pager.faults") > faults);
+    println!("cold_spawn::test_image_contents PASS");
+}
+
+/// Eight children at once, with ordinary file I/O going on beside them.
+fn test_concurrent_launches(dir: &Path) {
+    let program = std::env::current_exe().unwrap();
+    let expected = digest_of(&program);
+    let data: Vec<u8> = (0..1_u32 << 20).map(|idx| (idx % 251) as u8).collect();
+    let source = dir.join("io-source");
+    std::fs::write(&source, &data).unwrap();
+
+    let children: Vec<Child> = (0..8)
+        .map(|_| {
+            child(&program, "digest")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let copy = dir.join("io-copy");
+    std::fs::copy(&source, &copy).unwrap();
+    assert_eq!(std::fs::read(&copy).unwrap(), data);
+    for child in children {
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(expected, String::from_utf8(output.stdout).unwrap());
+    }
+    std::fs::remove_file(&source).unwrap();
+    std::fs::remove_file(&copy).unwrap();
+    println!("cold_spawn::test_concurrent_launches PASS");
+}
+
+fn test_executable_lock(dir: &Path) {
+    let program = copy(dir, "locked", EXEC, |_| {});
+    let other = copy(dir, "other", EXEC, |_| {});
+    let first = hold(&program);
+    let second = hold(&program);
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&program)
+        .unwrap();
+    assert_refused("write", file.write_all(b"x").and_then(|_| file.flush()));
+    assert_refused("truncate", file.set_len(0));
+    drop(file);
+    assert_refused("delete", std::fs::remove_file(&program));
+    assert_refused("rename", std::fs::rename(&program, dir.join("renamed")));
+    assert_refused("replace", std::fs::rename(&other, &program));
+    let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+    permissions.set_readonly(true);
+    assert_refused("chmod", std::fs::set_permissions(&program, permissions));
+    assert!(
+        std::fs::copy(&other, &program).is_err(),
+        "copy onto a mapped executable"
+    );
+
+    // Both children map the file; it stays locked until the last one exits,
+    // and is unlocked as soon as that exit is visible.
+    release(first);
+    assert_refused("delete with one child left", std::fs::remove_file(&program));
+    release(second);
+    std::fs::remove_file(&program).unwrap();
+    std::fs::remove_file(&other).unwrap();
+
+    // A relocation into read-only data selects eager loading. The stopped
+    // child holds no executable reference once construction has finished.
+    let eager = copy(dir, "eager", EXEC, |b| retarget_relocation_into_rodata(b));
+    let mut requester = Requester::new();
+    let handle = SysHandle::from_u64(
+        requester
+            .request(&eager, our_capabilities(), "eager")
+            .unwrap(),
+    );
+    std::fs::rename(&eager, dir.join("eager-renamed")).unwrap();
+    kill_unstarted(handle, "eager");
+    std::fs::remove_file(dir.join("eager-renamed")).unwrap();
+    println!("cold_spawn::test_executable_lock PASS");
+}
+
+/// A killed child releases its mapping references like an exiting one.
+fn test_killed_child_unlocks(dir: &Path) {
+    let program = copy(dir, "killed", EXEC, |_| {});
+    let mut child = hold(&program);
+    assert_refused("delete while mapped", std::fs::remove_file(&program));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    std::fs::remove_file(&program).unwrap();
+    println!("cold_spawn::test_killed_child_unlocks PASS");
+}
+
+/// A child killed right after it was woken is most likely parked on its
+/// first instruction fetch; its exit must complete and unlock the file.
+fn test_kill_during_startup(dir: &Path) {
+    let program = copy(dir, "startup", EXEC, |_| {});
+    for _ in 0..20 {
+        let mut child = child(&program, "hold")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        child.kill().unwrap();
+        assert!(!child.wait().unwrap().success());
+    }
+    std::fs::remove_file(&program).unwrap();
+    println!("cold_spawn::test_kill_during_startup PASS");
+}
+
+/// A process exit completes while another of its threads is faulting.
+fn test_exit_while_faulting(dir: &Path) {
+    let program = copy(dir, "exit", EXEC, |_| {});
+    for _ in 0..20 {
+        let status = child(&program, "exit-while-faulting")
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(7), "{status:?}");
+    }
+    std::fs::remove_file(&program).unwrap();
+    println!("cold_spawn::test_exit_while_faulting PASS");
+}
+
+/// A static string on a page no instruction touched is still a valid
+/// syscall argument: the kernel names the absent page and the syscall
+/// wrapper faults it in and retries.
+fn test_syscall_buffer(mode: &str) {
+    let misses_before = crate::admission::kernel_metric_at(
+        "mem.file_paged_syscall_misses",
+        moto_sys::stats::PID_KERNEL,
+    );
+    let output = child(&std::env::current_exe().unwrap(), mode)
+        // Default child capabilities drop CAP_LOG; keep ours.
+        .env(
+            moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+            format!("0x{:x}", moto_sys::ProcessStaticPage::get().capabilities),
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.status);
+    assert_eq!(output.stdout, b"syscall-buffer-ok\n");
+    assert!(
+        crate::admission::kernel_metric_at(
+            "mem.file_paged_syscall_misses",
+            moto_sys::stats::PID_KERNEL,
+        ) > misses_before,
+        "the kernel never reported the absent page"
+    );
+    println!("cold_spawn::test_syscall_buffer({mode}) PASS");
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+fn u64_at(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+}
+
+const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
+
+/// (type, flags, file offset, address, file size, memory size) per program
+/// header.
+fn program_headers(bytes: &[u8]) -> Vec<(u32, u32, u64, u64, u64, u64)> {
+    let phoff = u64_at(bytes, 32) as usize;
+    let phnum = u16::from_le_bytes([bytes[56], bytes[57]]) as usize;
+    (0..phnum)
+        .map(|idx| {
+            let at = phoff + idx * 56;
+            (
+                u32_at(bytes, at),
+                u32_at(bytes, at + 4),
+                u64_at(bytes, at + 8),
+                u64_at(bytes, at + 16),
+                u64_at(bytes, at + 32),
+                u64_at(bytes, at + 40),
+            )
+        })
+        .collect()
+}
+
+/// The file offset of the first program header of type `p_type`.
+fn phdr(bytes: &[u8], p_type: u32) -> usize {
+    let phoff = u64_at(bytes, 32) as usize;
+    let phnum = u16::from_le_bytes([bytes[56], bytes[57]]) as usize;
+    (0..phnum)
+        .map(|idx| phoff + idx * 56)
+        .find(|at| u32_at(bytes, *at) == p_type)
+        .unwrap()
+}
+
+/// The file offset and byte size of the RELA table the dynamic section names.
+fn rela_table(bytes: &[u8]) -> (usize, usize) {
+    let headers = program_headers(bytes);
+    let (_, _, dyn_offset, _, dyn_size, _) = headers
+        .iter()
+        .find(|h| h.0 == PT_DYNAMIC)
+        .expect("a dynamic section");
+    let (mut rela, mut relasz) = (0, 0);
+    for entry in bytes[*dyn_offset as usize..(*dyn_offset + *dyn_size) as usize]
+        .as_chunks::<16>()
+        .0
+    {
+        match u64_at(entry, 0) {
+            0 => break,
+            7 => rela = u64_at(entry, 8),
+            8 => relasz = u64_at(entry, 8),
+            _ => {}
+        }
+    }
+    let (_, _, offset, vaddr, _, _) = headers
+        .iter()
+        .find(|h| h.0 == PT_LOAD && (h.3..h.3 + h.4).contains(&rela))
+        .expect("the relocation table inside a segment");
+    ((rela - vaddr + offset) as usize, relasz as usize)
+}
+
+/// Points the image's first relocation into read-only data. Images are
+/// linked at their run address, so the parent's address of the target is the
+/// child's too. sys-io cannot demand-page a relocated read-only page and
+/// builds such an image eagerly.
+fn retarget_relocation_into_rodata(bytes: &mut [u8]) {
+    let (table, _) = rela_table(bytes);
+    let target = PROBE.as_ptr() as u64;
+    bytes[table..table + 8].copy_from_slice(&target.to_le_bytes());
+}
+
+/// The custom region supports eager mappings, but cannot be file-paged.
+fn test_high_segment(dir: &Path) {
+    let path = copy(dir, "high-segment", EXEC, |bytes| {
+        let at = phdr(bytes, 4); // Replace the ignored PT_NOTE after the load headers.
+        bytes[at..at + 56].fill(0);
+        bytes[at..at + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        bytes[at + 4..at + 8].copy_from_slice(&4_u32.to_le_bytes()); // Read-only.
+        // Leave the region's first page to the runtime's ProcessData.
+        let address = moto_sys::CUSTOM_USERSPACE_REGION_START + (1 << 30);
+        bytes[at + 16..at + 24].copy_from_slice(&address.to_le_bytes());
+        for field in [32, 40, 48] {
+            bytes[at + field..at + field + 8].copy_from_slice(&4096_u64.to_le_bytes());
+        }
+    });
+    assert_eq!(
+        digest_of(&path),
+        digest_of(&std::env::current_exe().unwrap())
+    );
+    std::fs::remove_file(&path).unwrap();
+    println!("cold_spawn::test_high_segment PASS");
+}
+
+/// Images the parser refuses are refused as requests, and as spawns through
+/// std; sys-io goes on serving.
+fn test_malformed_images(dir: &Path, requester: &mut Requester) {
+    type Patch = fn(&mut Vec<u8>);
+    let cases: [(&str, Patch); 7] = [
+        ("phoff-past-end", |b| {
+            let len = b.len() as u64;
+            b[32..40].copy_from_slice(&len.to_le_bytes());
+        }),
+        ("no-phdrs", |b| {
+            b[56..58].copy_from_slice(&0_u16.to_le_bytes())
+        }),
+        ("truncated", |b| b.truncate(100)),
+        ("wrong-machine", |b| {
+            b[18..20].copy_from_slice(&3_u16.to_le_bytes())
+        }),
+        ("filesz-over-memsz", |b| {
+            let at = phdr(b, PT_LOAD);
+            let memsz = u64_at(b, at + 40);
+            b[at + 32..at + 40].copy_from_slice(&(memsz + 1).to_le_bytes());
+        }),
+        ("file-range-past-end", |b| {
+            let at = phdr(b, PT_LOAD);
+            let len = b.len() as u64;
+            b[at + 8..at + 16].copy_from_slice(&len.to_le_bytes());
+        }),
+        ("write-execute", |b| {
+            let at = phdr(b, PT_LOAD);
+            b[at + 4..at + 8].copy_from_slice(&7_u32.to_le_bytes());
+        }),
+    ];
+    let ours = our_capabilities();
+    for (name, patch) in cases {
+        let path = copy(dir, name, EXEC, patch);
+        assert_eq!(
+            requester.request(&path, ours, name),
+            Err(moto_rt::Error::InvalidArgument),
+            "{name}"
+        );
+        let err = child(&path, "digest")
+            .stdout(Stdio::null())
+            .status()
+            .expect_err(name);
+        assert_eq!(
+            err.raw_os_error(),
+            Some(moto_rt::E_INVALID_ARGUMENT as i32),
+            "{name}: {err:?}"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+    // sys-io is unharmed.
+    let program = std::env::current_exe().unwrap();
+    assert!(digest_of(&program).starts_with("image-ok "));
+    println!("cold_spawn::test_malformed_images PASS");
 }
 
 /// The request itself: the handle is ours, the child is ours and carries the
@@ -141,76 +562,6 @@ fn test_unauthorized_entries(dir: &Path, requester: &mut Requester) {
     );
     std::fs::remove_file(&unexecutable).unwrap();
     println!("cold_spawn::test_unauthorized_entries PASS");
-}
-
-/// Images the parser refuses are refused as requests; sys-io goes on
-/// serving.
-fn test_malformed_images(dir: &Path, requester: &mut Requester) {
-    let what = "cold_spawn::test_malformed_images";
-    type Patch = fn(&mut Vec<u8>);
-    let cases: [(&str, Patch); 7] = [
-        ("phoff-past-end", |b| {
-            let len = b.len() as u64;
-            b[32..40].copy_from_slice(&len.to_le_bytes());
-        }),
-        ("no-phdrs", |b| {
-            b[56..58].copy_from_slice(&0_u16.to_le_bytes())
-        }),
-        ("truncated", |b| b.truncate(100)),
-        ("wrong-machine", |b| {
-            b[18..20].copy_from_slice(&3_u16.to_le_bytes())
-        }),
-        ("filesz-over-memsz", |b| {
-            let at = phdr(b, PT_LOAD);
-            let memsz = u64_at(b, at + 40);
-            b[at + 32..at + 40].copy_from_slice(&(memsz + 1).to_le_bytes());
-        }),
-        ("file-range-past-end", |b| {
-            let at = phdr(b, PT_LOAD);
-            let len = b.len() as u64;
-            b[at + 8..at + 16].copy_from_slice(&len.to_le_bytes());
-        }),
-        ("write-execute", |b| {
-            let at = phdr(b, PT_LOAD);
-            b[at + 4..at + 8].copy_from_slice(&7_u32.to_le_bytes());
-        }),
-    ];
-    let ours = our_capabilities();
-    for (name, patch) in cases {
-        let path = copy(dir, name, EXEC, patch);
-        assert_eq!(
-            requester.request(&path, ours, name),
-            Err(moto_rt::Error::InvalidArgument),
-            "{name}"
-        );
-        // std's spawn goes through sys-io too and must report the same error.
-        match Command::new(&path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(mut child) => {
-                let _ = child.kill();
-                panic!("{name}: std's spawn accepted a malformed image");
-            }
-            Err(err) => assert_eq!(
-                err.raw_os_error(),
-                Some(moto_rt::E_INVALID_ARGUMENT as i32),
-                "{name}: {err:?}"
-            ),
-        }
-        std::fs::remove_file(&path).unwrap();
-    }
-    let program = copy(dir, "well-formed", EXEC, |_| {});
-    let handle = SysHandle::from_u64(
-        requester
-            .request(&program, ours, "cold-spawn-well-formed")
-            .unwrap(),
-    );
-    kill_unstarted(handle, what);
-    std::fs::remove_file(&program).unwrap();
-    println!("{what} PASS");
 }
 
 /// A requester that closes its channel before the response: sys-io serves
@@ -290,16 +641,68 @@ fn test_abandoned_request(dir: &Path, requester: &mut Requester) {
     println!("cold_spawn::test_abandoned_request PASS");
 }
 
+/// A paged image commits all of its pages when it is mapped: at the memory
+/// floor the spawn is refused up front, and no child runs to die later.
+fn test_spawn_under_memory_floor(dir: &Path) {
+    use moto_sys::stats::AdmissionStats;
+
+    let program = copy(dir, "floor", EXEC, |_| {});
+    assert!(
+        std::fs::metadata(&program).unwrap().len() >= 2 << 20,
+        "the image is too small to exceed the squeeze band"
+    );
+    // Hold free memory a little above the low watermark: the pressure flag
+    // stays down, so sys-io keeps serving, while a whole image's pages can
+    // no longer be committed over the user floor.
+    let target = AdmissionStats::get().unwrap().pressure_low_pages + 256;
+    let mut squeeze = crate::subcommand::spawn();
+    let mut squeeze_out = std::io::BufReader::new(squeeze.std_child().stdout.take().unwrap());
+    squeeze.pressure_squeeze(target);
+    let mut line = String::new();
+    squeeze_out.read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "squeezed");
+    assert!(!moto_sys::memory_pressure(), "the squeeze raised the flag");
+
+    let result = child(&program, "digest").stdout(Stdio::null()).status();
+
+    squeeze.do_exit(0);
+    assert!(squeeze.wait().unwrap().success());
+    drop(squeeze);
+
+    let err = result.expect_err("a paged image was committed at the floor");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(moto_rt::E_OUT_OF_MEMORY as i32),
+        "{err:?}"
+    );
+    // Nothing of the refused child remains: the file is not locked.
+    std::fs::remove_file(&program).unwrap();
+    println!("cold_spawn::test_spawn_under_memory_floor PASS");
+}
+
 pub fn run_all_tests() {
     let dir = crate::temp_path(&format!("systest-cold-spawn-{}", moto_sys::current_pid()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir(&dir).unwrap();
 
+    test_image_contents();
+    test_concurrent_launches(&dir);
+    test_executable_lock(&dir);
+    test_killed_child_unlocks(&dir);
+    test_kill_during_startup(&dir);
+    test_exit_while_faulting(&dir);
+    if crate::has_cap_log() {
+        test_syscall_buffer("syscall-buffer");
+        test_syscall_buffer("syscall-zero");
+    }
+    test_high_segment(&dir);
     let mut requester = Requester::new();
+    test_malformed_images(&dir, &mut requester);
     test_direct_request(&dir, &mut requester);
     test_unauthorized_entries(&dir, &mut requester);
-    test_malformed_images(&dir, &mut requester);
     test_abandoned_request(&dir, &mut requester);
+    drop(requester);
+    test_spawn_under_memory_floor(&dir);
 
     std::fs::remove_dir_all(&dir).unwrap();
     println!("cold_spawn::run_all_tests PASS");

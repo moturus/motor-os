@@ -313,11 +313,17 @@ pub(crate) struct FsRuntime {
     channel_budget: Rc<channel_budget::ChannelBudget>,
     exec_locks: Rc<RefCell<spawn::ExecLocks>>,
     spawn_stats: Rc<spawn::SpawnStats>,
+    pager: Rc<spawn::pager::Pager>,
 }
 
-/// Every mutation of an executable that is being loaded is refused; see
-/// `spawn::ExecLocks`.
+/// Every mutation of an executable that is being loaded or is mapped for
+/// demand paging is refused; see `spawn::ExecLocks`.
 fn refuse_if_executing(runtime: &FsRuntime, entry: EntryId) -> Result<()> {
+    if !runtime.exec_locks.borrow().is_locked(entry) {
+        return Ok(());
+    }
+    // Apply retirements already queued: a waited-for exit has queued its own.
+    runtime.pager.drain();
     if runtime.exec_locks.borrow().is_locked(entry) {
         return Err(std::io::Error::from_raw_os_error(
             moto_rt::E_NOT_ALLOWED as i32,
@@ -405,14 +411,20 @@ pub(super) async fn init(
         return Err(std::io::Error::from(ErrorKind::InvalidData));
     };
 
+    let exec_locks: Rc<RefCell<spawn::ExecLocks>> = Default::default();
+    let pager_notify = moto_sys::SysMem::pager_init()
+        .map_err(|err| std::io::Error::from_raw_os_error(err as i32))?;
     let runtime = FsRuntime {
         fs: fs.clone(),
         fs_stats,
         locks: Default::default(),
         channel_budget,
-        exec_locks: Default::default(),
+        exec_locks: exec_locks.clone(),
         spawn_stats: Default::default(),
+        pager: Rc::new(spawn::pager::Pager::new(exec_locks)),
     };
+    moto_async::LocalRuntime::spawn(spawn::pager::run(runtime.clone(), pager_notify));
+
     spawn_fs_listeners(runtime.clone()).await;
     stats::spawn_stats_responder(runtime);
     Ok(fs)

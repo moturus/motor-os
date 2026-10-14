@@ -1278,6 +1278,9 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if cold_spawn::is_child(&args) {
+        cold_spawn::run_child(&args);
+    }
     if args.len() == 2 && args[1] == "cold-spawn" {
         cold_spawn::run_all_tests();
         return;

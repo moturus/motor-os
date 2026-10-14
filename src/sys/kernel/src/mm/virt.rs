@@ -65,7 +65,7 @@ const VMEM_K_SLABS_END: u64 = VMEM_K_SLABS_START + 7 * ONE_GB; // 32 GB
 pub const VMEM_K_SYS_IO_START: u64 = VMEM_K_SLABS_END; // 32 GB
 
 // User virtual addresses start at zero and can go up to VMEM_USER_END.
-const VMEM_USER_END: u64 = PAGING_DIRECT_MAP_OFFSET >> 1; // 1 << 45 on x64.
+const VMEM_USER_END: u64 = moto_sys::USERSPACE_REGION_END;
 
 // Note: the address below must NOT be in the L4 region that is used by
 //       the kernel, as we will either have to give the userspace access
