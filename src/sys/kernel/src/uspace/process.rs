@@ -2307,6 +2307,9 @@ impl Thread {
         let (pf_addr, error_code) = self.tcb.pf_addr_error_code().unwrap();
         self.trace("thread pagefault", pf_addr, error_code);
         log::trace!("Thread #PF: 0x{pf_addr:x}");
+        // Publishing Preempted lets another CPU finish the thread's exit.
+        // Keep its process alive until fault dispatch and cleanup return.
+        let owner = self.owner();
         let mut resume_in_userspace = false;
         let mut call_on_exited = false;
         let mut killed_now = false;
@@ -2315,14 +2318,13 @@ impl Thread {
             let mut status = self.status.lock(line!());
             match *status {
                 ThreadStatus::Live(LiveThreadStatus::Running) => {
-                    if self
-                        .owner()
+                    if owner
                         .address_space
                         .fix_pagefault(pf_addr, error_code)
                         .is_ok()
                     {
                         log::trace!("#PF fixed!");
-                        if self.owner().paused_debuggee.load(Ordering::Relaxed) {
+                        if owner.paused_debuggee.load(Ordering::Relaxed) {
                             *status = ThreadStatus::PausedDebuggee(LiveThreadStatus::Preempted);
                         } else {
                             *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
