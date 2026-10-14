@@ -10,8 +10,8 @@ int main() {
 	assert(unsetenv("TEMPDIR") == 0);
 	assert(std::filesystem::temp_directory_path() == "/user/tmp");
 
-	assert(setenv("TMPDIR", "/devtools/tmp", 1) == 0);
-	assert(std::filesystem::temp_directory_path() == "/devtools/tmp");
+	assert(setenv("TMPDIR", "/none/tmp", 1) == 0);
+	assert(std::filesystem::temp_directory_path() == "/none/tmp");
 
 	std::cout << "native-temp-cpp PASS\n";
 	return 0;

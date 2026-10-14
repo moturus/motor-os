@@ -43,8 +43,10 @@ esac
 if [ "${LORRY_TEST_BUDGET_ACTIVE:-0}" -eq 0 ]; then
     start="$SECONDS"
     set +e
+    # Nothing in the suite answers a prompt, so no command gets a terminal:
+    # each behaves the same however the suite was started.
     LORRY_TEST_BUDGET_ACTIVE=1 timeout --foreground "$BUDGET_SECONDS" \
-        "$0" "${NATIVE_ARGUMENTS[@]}"
+        "$0" "${NATIVE_ARGUMENTS[@]}" </dev/null
     status="$?"
     set -e
     elapsed=$((SECONDS - start))
@@ -70,27 +72,60 @@ echo "== cargo_metadata 0.23.1 wire-schema test =="
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$RUSTC" "$CARGO" run \
     --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline
 
-echo "== Paired Cargo resolution oracle =="
-"$SCRIPT_DIR/verify-stage2-resolution-oracle.sh"
+echo "== Paired Cargo resolution oracles =="
+"$SCRIPT_DIR/verify-resolution-oracles.sh"
 
 echo "== Release Lorry and offline review contract =="
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$RUSTC" "$CARGO" build \
     --manifest-path "$LORRY_DIR/Cargo.toml" --locked --offline --release
 LORRY="$LORRY_DIR/target/release/lorry"
+bash "$SCRIPT_DIR/dependency-defaults-contract.sh" "$LORRY"
 "$SCRIPT_DIR/review-contract.sh" "$LORRY"
 "$SCRIPT_DIR/git-patch-contract.sh" "$LORRY"
 
 "$SCRIPT_DIR/rustflags-contract.sh" "$LORRY"
 "$SCRIPT_DIR/compatibility-query-contract.sh" "$LORRY"
 "$SCRIPT_DIR/metadata-contract.sh" "$LORRY"
+"$SCRIPT_DIR/target-description-contract.sh" "$LORRY"
+"$SCRIPT_DIR/workspace-metadata-contract.sh" "$LORRY"
 "$SCRIPT_DIR/check-contract.sh" "$LORRY"
+"$SCRIPT_DIR/clippy-contract.sh" "$LORRY"
+"$SCRIPT_DIR/artifact-lock-contract.sh" "$LORRY"
+"$SCRIPT_DIR/target-dir-contract.sh" "$LORRY"
+"$SCRIPT_DIR/selected-cache-contract.sh" "$LORRY"
 "$SCRIPT_DIR/rust-analyzer-contract.sh" "$LORRY"
 "$SCRIPT_DIR/tree-contract.sh" "$LORRY"
 "$SCRIPT_DIR/stage2-differential.sh" "$LORRY"
+bash "$SCRIPT_DIR/cargo-registry-default-contract.sh" "$LORRY"
 "$SCRIPT_DIR/cargo-identity.sh" "$LORRY"
 "$SCRIPT_DIR/workspace-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/member-build-script-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/build-script-metadata-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/member-cxx-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/release-profile-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/library-crate-type-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/static-library-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/motor-crate-types-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/explicit-tests-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/harness-free-targets-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/workspace-test-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/workspace-build-target-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/workspace-clean-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/workspace-run-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/shared-fresh-profile-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/pipelining-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/member-edit-race-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/script-sandbox-scope-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/workspace-trust-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/required-binary-features-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/member-proc-macro-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/compile-time-deps-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/editor-workspace-contract.sh" "$LORRY"
 "$SCRIPT_DIR/proc-macro-contract.sh" "$LORRY"
 "$SCRIPT_DIR/registry-contract.sh" "$LORRY"
+"$SCRIPT_DIR/fetch-contract.sh" "$LORRY"
+"$SCRIPT_DIR/mixed-case-name-contract.sh" "$LORRY"
+"$SCRIPT_DIR/workspace-admission-contract.sh" "$LORRY"
 "$SCRIPT_DIR/curl-contract.sh" "$LORRY"
 "$SCRIPT_DIR/test-native.sh" "${NATIVE_ARGUMENTS[@]}"
 

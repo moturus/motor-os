@@ -25,6 +25,7 @@ use crate::source_tree::{EntryKind, Exclusions, Tree};
 use super::LockedSource;
 use super::http::Remote;
 use super::materialize::{extract_tree, gix_error, tree_limits};
+use crate::validation::ValidationMode;
 
 #[derive(Clone)]
 struct Object {
@@ -102,28 +103,39 @@ impl DirectCatalog {
     pub(crate) fn sources(&self) -> impl Iterator<Item = &GitSourceEvidence> {
         self.sources.values()
     }
-
-    pub(crate) fn has_sources(&self) -> bool {
-        !self.sources.is_empty()
-    }
 }
 
-pub(crate) fn materialize_locked_dependencies(
+pub(crate) fn materialize_locked_sources(
     manifest: &Manifest,
     network: &NetworkConfig,
     policy: &PolicyLimits,
     verbose: bool,
     progress: Progress,
 ) -> Result<DirectCatalog> {
-    if !has_git_dependency(manifest) {
+    if manifest.lock.is_none() && !has_git_dependency(manifest) {
         return Ok(DirectCatalog::default());
     }
+    materialize_locked_catalog(manifest, network, policy, verbose, progress)
+}
+
+fn materialize_locked_catalog(
+    manifest: &Manifest,
+    network: &NetworkConfig,
+    policy: &PolicyLimits,
+    verbose: bool,
+    progress: Progress,
+) -> Result<DirectCatalog> {
     let mut objects = BTreeMap::new();
     let mut materialized = BTreeSet::new();
     for locked in locked_sources(manifest)? {
         let destination = object_root(&manifest.workspace_root, &locked.cargo_source);
         let object = if destination.exists() {
-            load_object(&manifest.workspace_root, &locked, policy)?
+            load_object(
+                &manifest.workspace_root,
+                &locked,
+                policy,
+                ValidationMode::Strict,
+            )?
         } else {
             progress.report(format_args!("Fetching Git source `{}`", locked.url))?;
             materialized.insert(locked.cargo_source.clone());
@@ -134,19 +146,22 @@ pub(crate) fn materialize_locked_dependencies(
     direct_catalog(manifest, policy, &objects, materialized)
 }
 
-pub(crate) fn configure_direct(
+pub(crate) fn load_locked_sources(
     manifest: &Manifest,
     policy: &PolicyLimits,
-    catalog: &mut Catalog,
-) -> Result<()> {
-    load_locked_dependencies(manifest, policy)?.configure(catalog)
-}
-
-pub(crate) fn load_locked_dependencies(
-    manifest: &Manifest,
-    policy: &PolicyLimits,
+    validation: ValidationMode,
 ) -> Result<DirectCatalog> {
-    if !has_git_dependency(manifest) {
+    let locked_git = manifest
+        .lock
+        .iter()
+        .flat_map(|lock| &lock.packages)
+        .any(|package| {
+            package
+                .source
+                .as_deref()
+                .is_some_and(|source| source.starts_with("git+"))
+        });
+    if !has_git_dependency(manifest) && !locked_git {
         return Ok(DirectCatalog::default());
     }
     let mut objects = BTreeMap::new();
@@ -165,7 +180,7 @@ pub(crate) fn load_locked_dependencies(
         if !objects.contains_key(source) {
             objects.insert(
                 source.to_owned(),
-                load_object(&manifest.workspace_root, &locked, policy)?,
+                load_object(&manifest.workspace_root, &locked, policy, validation)?,
             );
         }
     }
@@ -407,14 +422,19 @@ fn materialize_one(
     })
 }
 
-fn load_object(workspace: &Path, locked: &LockedSource, policy: &PolicyLimits) -> Result<Object> {
+fn load_object(
+    workspace: &Path,
+    locked: &LockedSource,
+    policy: &PolicyLimits,
+    validation: ValidationMode,
+) -> Result<Object> {
     let root = object_root(workspace, &locked.cargo_source);
     let metadata = fs::symlink_metadata(&root).map_err(|error| {
         Error::failure(format!(
             "Git source is not materialized\n  source: `{}`\n  reason: {error}",
             locked.cargo_source
         ))
-        .with_help("run `lorry vendor [--accept-all]` to materialize the locked Git source")
+        .with_help("run `lorry fetch` to materialize the locked Git source")
     })?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(Error::failure(format!(
@@ -459,7 +479,18 @@ fn load_object(workspace: &Path, locked: &LockedSource, policy: &PolicyLimits) -
     }
     let expected = decode_hex::<32>(&string(&document, "source-tree-sha256")?)?;
     let source = root.join("source");
-    let source_tree = Tree::scan(&source, tree_limits(policy)?, Exclusions::None)?;
+    // Ordinary validation rehashes the source only when its file metadata
+    // differs from the record its last hash left.
+    let source_tree = if validation.is_strict() {
+        Tree::scan(&source, tree_limits(policy)?, Exclusions::None)?
+    } else {
+        Tree::scan_recorded(
+            &source,
+            tree_limits(policy)?,
+            Exclusions::None,
+            &root.join("source-record"),
+        )?
+    };
     if source_tree.sha256 != expected {
         return Err(Error::failure(format!(
             "materialized Git source `{}` changed after approval",
@@ -541,7 +572,7 @@ fn locked_package(
     let package_path = relative
         .to_str()
         .ok_or_else(|| Error::failure("Git package path is not valid UTF-8"))?;
-    let mut inspected = Manifest::load_path_dependency(root)?;
+    let mut inspected = Manifest::load_source_dependency(root)?;
     bind_internal_dependencies(&mut inspected, object)?;
     let package_tree = object
         .source_tree
@@ -587,6 +618,7 @@ fn bind_internal_dependencies(manifest: &mut Manifest, object: &Object) -> Resul
             ))
         })?;
         if canonical.strip_prefix(&object.source).is_ok() {
+            dependency.git_path_source = Some(object.locked.cargo_source.clone());
             dependency.source = DependencySource::Git(GitDependency {
                 url: object.locked.url.clone(),
                 selector: object.locked.selector.clone(),
@@ -700,6 +732,10 @@ mod tests {
         };
         let mut manifest = Manifest::load_path_dependency(&source.join("first")).unwrap();
         bind_internal_dependencies(&mut manifest, &object).unwrap();
+        assert_eq!(
+            manifest.dependencies[0].git_path_source.as_deref(),
+            Some(object.locked.cargo_source.as_str())
+        );
 
         assert!(matches!(
             &manifest.dependencies[0].source,
@@ -773,20 +809,53 @@ mod tests {
         )
         .expect("provenance is written");
 
-        let object = load_object(&workspace, &locked, &limits).unwrap();
-        assert_eq!(object.source_tree.sha256, tree.sha256);
-        assert_eq!(object.git_tree, "a".repeat(40));
+        for validation in [ValidationMode::Strict, ValidationMode::Trusted] {
+            let object = load_object(&workspace, &locked, &limits, validation).unwrap();
+            assert_eq!(object.source_tree.sha256, tree.sha256);
+            assert_eq!(object.git_tree, "a".repeat(40));
+        }
+        // Ordinary loads reuse the recorded tree until the files change.
+        assert!(root.join("source-record").is_file());
+        let object = load_object(&workspace, &locked, &limits, ValidationMode::Trusted).unwrap();
+        assert_eq!(object.source_tree, tree);
 
         fs::write(
             source.join("Cargo.toml"),
             "[package]\nname = \"changed\"\nversion = \"1.0.0\"\n",
         )
         .expect("manifest is changed");
-        let error = load_object(&workspace, &locked, &limits)
-            .err()
-            .expect("tampered object must fail");
-        assert!(error.to_string().contains("changed after approval"));
+        for validation in [ValidationMode::Trusted, ValidationMode::Strict] {
+            let error = load_object(&workspace, &locked, &limits, validation)
+                .err()
+                .expect("tampered object must fail");
+            assert!(error.to_string().contains("changed after approval"));
+        }
         fs::remove_dir_all(workspace).expect("test root is removed");
+    }
+
+    #[test]
+    fn loads_locked_git_sources_even_when_the_context_member_has_no_git_declaration() {
+        let workspace = root("other-member-git");
+        let mut manifest = Manifest::parse_dependency(
+            &workspace,
+            &workspace.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        manifest = manifest
+            .with_lock_source(format!(
+                "version = 4\n[[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\
+             [[package]]\nname = \"other-member-dependency\"\nversion = \"1.0.0\"\nsource = {:?}\n",
+                locked().cargo_source
+            ))
+            .unwrap();
+        assert!(manifest.dependencies.is_empty());
+        let error =
+            load_locked_sources(&manifest, &PolicyLimits::default(), ValidationMode::Strict)
+                .err()
+                .expect("the shared lock requires the other member's Git source");
+        assert!(error.to_string().contains("Git source is not materialized"));
+        fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
@@ -794,15 +863,20 @@ mod tests {
         let workspace = root("missing-object");
         let locked = locked();
 
-        let error = load_object(&workspace, &locked, &PolicyLimits::default())
-            .err()
-            .expect("missing object must fail")
-            .render();
+        let error = load_object(
+            &workspace,
+            &locked,
+            &PolicyLimits::default(),
+            ValidationMode::Strict,
+        )
+        .err()
+        .expect("missing object must fail")
+        .render();
 
         assert!(error.starts_with("error: Git source is not materialized\n"));
         assert!(error.contains(&format!("  source: `{}`\n", locked.cargo_source)));
         assert!(error.contains("  reason: "));
-        assert!(error.contains("\nhelp: run `lorry vendor [--accept-all]`"));
+        assert!(error.contains("\nhelp: run `lorry fetch`"));
         fs::remove_dir_all(workspace).expect("test root is removed");
     }
 
@@ -830,10 +904,14 @@ mod tests {
         fs::create_dir_all(source.join("src")).unwrap();
         fs::write(
             source.join("Cargo.toml"),
-            "[package]\nname = \"demo\"\nversion = \"1.2.3\"\nedition = \"2021\"\n",
+            "[package]\nname = \"demo\"\nversion = \"1.2.3\"\nedition = \"2021\"\n\
+             [dev-dependencies]\nself-dev = { package = \"demo\", path = \".\" }\n",
         )
         .unwrap();
         fs::write(source.join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
+        fs::write(source.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(source.join("examples")).unwrap();
+        fs::write(source.join("examples/demo.rs"), "fn main() {}\n").unwrap();
         let limits = PolicyLimits::default();
         let tree = Tree::scan(&source, tree_limits(&limits).unwrap(), Exclusions::None).unwrap();
         fs::write(
@@ -847,18 +925,45 @@ mod tests {
         permissions.set_readonly(true);
         fs::set_permissions(workspace.join("Cargo.toml"), permissions).unwrap();
 
-        let manifest = Manifest::load(&workspace).unwrap();
-        let direct = load_locked_dependencies(&manifest, &limits).unwrap();
+        let manifest = Manifest::load_for_build(&workspace).unwrap();
+        let described = load_locked_sources(&manifest, &limits, ValidationMode::Strict).unwrap();
+        let description = &described.packages[0].0;
+        assert_eq!(
+            description
+                .targets
+                .iter()
+                .map(|target| target.kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::manifest::TargetKind::Bin,
+                crate::manifest::TargetKind::Example
+            ]
+        );
+        assert_eq!(
+            description.dependencies[0].kind,
+            crate::sparse::DependencyKind::Dev
+        );
+        assert!(
+            matches!(&description.dependencies[0].source, DependencySource::Git(git)
+            if locked.matches(git))
+        );
         let mut catalog = Catalog::default();
-        direct.configure(&mut catalog).unwrap();
+        described.configure(&mut catalog).unwrap();
         let options = crate::resolver::Options {
             resolver: crate::manifest::Resolver::V2,
             incompatible_rust_versions: None,
-            rust_version: semver::Version::parse("1.85.0").unwrap(),
-            max_packages: 16,
-            max_depth: 8,
+            rust_versions: vec![semver::Version::parse("1.85.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: Some(8),
         };
-        let resolution = crate::resolver::resolve(&manifest, &catalog, &options, &[]).unwrap();
+        let resolution = crate::resolver::resolve_member(
+            &manifest,
+            &mut catalog,
+            &options,
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert!(resolution.packages.iter().any(|package| {
             matches!(
                 package.source,
@@ -878,7 +983,7 @@ mod tests {
             }],
         )
         .unwrap();
-        assert_eq!(review.locked_git[0].source, locked.cargo_source);
+        assert_eq!(review.locked_git[0].id, locked.cargo_source);
         assert_eq!(
             fs::read_to_string(workspace.join("Cargo.toml")).unwrap(),
             manifest_source

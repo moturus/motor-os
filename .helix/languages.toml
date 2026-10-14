@@ -1,0 +1,3 @@
+# src/sys has member-specific compiler requirements and cannot be checked whole.
+[language-server.rust-analyzer.config]
+check.workspace = false

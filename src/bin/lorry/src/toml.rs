@@ -13,6 +13,43 @@ pub const DOCUMENT_LIMITS: Limits = Limits {
     max_nodes: 100_000,
 };
 
+// Cargo serializes TOML metadata directly, including datetime's private
+// serde wrapper. Parsed documents already bound recursion and node counts.
+pub fn json(item: &Item) -> serde_json::Value {
+    fn table(table: &Table) -> serde_json::Value {
+        serde_json::Value::Object(
+            table
+                .iter()
+                .map(|(key, item)| (key.to_owned(), json(item)))
+                .collect(),
+        )
+    }
+    fn json_value(value: &Value) -> serde_json::Value {
+        match value {
+            Value::String(value) => value.value().clone().into(),
+            Value::Integer(value) => (*value.value()).into(),
+            Value::Float(value) => (*value.value()).into(),
+            Value::Boolean(value) => (*value.value()).into(),
+            Value::Datetime(value) => {
+                serde_json::json!({ "$__toml_private_datetime": value.value().to_string() })
+            }
+            Value::Array(array) => serde_json::Value::Array(array.iter().map(json_value).collect()),
+            Value::InlineTable(table) => serde_json::Value::Object(
+                table
+                    .iter()
+                    .map(|(key, item)| (key.to_owned(), json_value(item)))
+                    .collect(),
+            ),
+        }
+    }
+    match item {
+        Item::None => serde_json::Value::Null,
+        Item::Value(item) => json_value(item),
+        Item::Table(item) => table(item),
+        Item::ArrayOfTables(items) => serde_json::Value::Array(items.iter().map(table).collect()),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     pub max_bytes: usize,
@@ -94,16 +131,21 @@ impl Document {
         Ok(Self { source, parsed })
     }
 
+    /// The exact text that was parsed.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
     pub fn root(&self) -> &Table {
         self.parsed.as_table()
     }
 
     pub fn line_of_item(&self, item: &Item) -> usize {
-        line_for_span(&self.source, item.span())
+        line_for_span(&self.source, item_span(item))
     }
 
     pub fn line_of_table(&self, table: &Table) -> usize {
-        line_for_span(&self.source, table.span())
+        line_for_span(&self.source, table_span(table))
     }
 
     pub fn line_of_value(&self, value: &Value) -> usize {
@@ -234,6 +276,24 @@ fn limit_error(path: &Path, line: usize, context: &str, kind: &str, limit: usize
     )
 }
 
+/// An implicit table, such as `a` in `[a.b]`, has no span of its own. It
+/// starts where its first explicit descendant starts.
+fn table_span(table: &Table) -> Option<Range<usize>> {
+    table.span().or_else(|| {
+        table
+            .iter()
+            .filter_map(|(_, item)| item_span(item))
+            .min_by_key(|span| span.start)
+    })
+}
+
+fn item_span(item: &Item) -> Option<Range<usize>> {
+    match item {
+        Item::Table(table) => table_span(table),
+        _ => item.span(),
+    }
+}
+
 fn line_for_span(source: &str, span: Option<Range<usize>>) -> usize {
     span.map_or(1, |span| line_for_offset(source, span.start))
 }
@@ -272,6 +332,16 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn implicit_tables_start_at_their_first_explicit_descendant() {
+        let source = "config-version = 1\n\n[a.b.c]\nkey = 1\n[a.d]\n".to_owned();
+        let document = Document::parse(Path::new("lorry.toml"), "configuration", source).unwrap();
+        let a = document.root().get("a").unwrap();
+        assert_eq!(document.line_of_item(a), 3);
+        let b = a.as_table().unwrap().get("b").unwrap();
+        assert_eq!(document.line_of_table(b.as_table().unwrap()), 3);
     }
 
     #[test]

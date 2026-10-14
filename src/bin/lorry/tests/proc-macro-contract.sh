@@ -21,18 +21,19 @@ MOTOR_LINKER="$LORRY_MOTOR_LINKER"
 MOTOR_SYSROOT="$LORRY_MOTOR_SYSROOT"
 NATIVE_RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-proc-macro-contract-XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained failed macro fixture: $WORK" >&2; fi' EXIT
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 export HOME="$WORK/home"
 mkdir -p "$HOME/.config/lorry" "$WORK/project/src" \
     "$WORK/project/derive-answer/src" "$WORK/project/macro-helper/src" \
     "$WORK/project/.cargo"
-printf 'config-version = 1\ncargo-compat-version = "1.99"\n[cache]\ndirectory = "%s"\n[policy.rules.local-proc-macro]\naction = "allow"\nname = "derive-answer"\nsource = "path"\nallow-proc-macro = true\n' \
+printf 'config-version = 1\nuse-cargo-registry = false\ncargo-compat-version = "1.99"\n[cache]\ndirectory = "%s"\n[policy.rules.local-proc-macro]\naction = "allow"\nname = "derive-answer"\nsource = "path"\nallow-proc-macro = true\n' \
     "$WORK/cache" \
     >"$HOME/.config/lorry/lorry.toml"
 printf '[target.%s]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
     "$MOTOR_TARGET" "$MOTOR_LINKER" "$MOTOR_SYSROOT" \
     >"$WORK/project/.cargo/config.toml"
+"$SCRIPT_DIR/approve-cargo-config.sh" "$HOME" "$WORK/project" "$WORK/project/.cargo/config.toml"
 
 printf '%s\n' \
     '[package]' \
@@ -76,6 +77,7 @@ printf '%s\n' \
     '#[proc_macro]' \
     'pub fn add_one(input: TokenStream) -> TokenStream {' \
     '    println!("proc-macro stdout is preserved");' \
+    '    eprintln!("proc-macro stderr is preserved");' \
     '    format!("({input} + 1)").parse().unwrap()' \
     '}' \
     '#[proc_macro_attribute]' \
@@ -118,16 +120,51 @@ printf '%s\n' \
     RUSTC="$NATIVE_RUSTC" "$LORRY" vendor --accept-all >/dev/null
     RUSTC="$NATIVE_RUSTC" "$LORRY" build >"$WORK/proc-macro.stdout" 2>&1
     grep -F "proc-macro stdout is preserved" "$WORK/proc-macro.stdout" >/dev/null
+    RUSTC="$NATIVE_RUSTC" "$LORRY" build --message-format=json \
+        --target-dir "$WORK/json-target" >"$WORK/macro-cold.json" 2>"$WORK/macro-cold.err"
+    grep -Fx 'proc-macro stdout is preserved' "$WORK/macro-cold.json" >/dev/null
+    grep -Fx 'proc-macro stderr is preserved' "$WORK/macro-cold.err" >/dev/null
+    RUSTC="$NATIVE_RUSTC" "$LORRY" build --message-format=json \
+        --target-dir "$WORK/json-target" >"$WORK/macro-fresh.json" 2>"$WORK/macro-fresh.err"
+    if grep -F 'proc-macro stdout is preserved' "$WORK/macro-fresh.json" >/dev/null; then
+        echo 'proc-macro-contract: fresh build replayed compiler stdout' >&2
+        exit 1
+    fi
+    grep -Fx 'proc-macro stderr is preserved' "$WORK/macro-fresh.err" >/dev/null
     [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 84 ]
     RUSTC="$NATIVE_RUSTC" "$LORRY" clean
     RUSTC="$NATIVE_RUSTC" "$LORRY" build
     [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 84 ]
     "$LORRY" +"$MOTOR_TOOLCHAIN" build --target "$MOTOR_TARGET"
+    for platform in native motor; do
+        target=()
+        if [ "$platform" = motor ]; then target=(--target "$MOTOR_TARGET"); fi
+        RUSTC="$NATIVE_RUSTC" "$LORRY" build "${target[@]}" --message-format=json \
+            >"$WORK/helper-$platform-lorry.json"
+        RUSTC="$NATIVE_RUSTC" "$LORRY_TEST_CARGO" build "${target[@]}" --locked --offline \
+            --target-dir "$WORK/cargo-target" --message-format=json \
+            >"$WORK/helper-$platform-cargo.json"
+        python3 - "$WORK/helper-$platform-lorry.json" "$WORK/helper-$platform-cargo.json" <<'PY'
+import json, pathlib, sys
+def helpers(path):
+    return sorted((json.dumps(event['profile'], sort_keys=True), event['features'],
+                   sorted(pathlib.Path(file).name for file in event['filenames']))
+                  for line in open(path) if line.startswith('{')
+                  for event in [json.loads(line)]
+                  if event['reason'] == 'compiler-artifact' and event['target']['name'] == 'macro_helper')
+lorry, cargo = map(helpers, sys.argv[1:])
+assert len(lorry) == len(cargo) == 2 and lorry == cargo, (lorry, cargo)
+PY
+    done
 )
 find "$WORK/project/target/lorry/debug/build/derive-answer" -type f \
     -name 'libderive_answer-*.so' | grep -q .
+# Native host tools omit debug information; explicit-target host tools retain it.
+# Cargo consequently publishes one more host helper when the target changes.
 [ "$(find "$WORK/project/target/lorry/debug/build/macro-helper" -type f \
-    -name 'libmacro_helper-*.rlib' | wc -l)" -eq 2 ]
+    -name 'libmacro_helper-*.rlib' | wc -l)" -eq 3 ]
+[ "$(find "$WORK/cargo-target/debug/build/macro-helper" -type f \
+    -name 'libmacro_helper-*.rlib' | wc -l)" -eq 3 ]
 if [ -d "$WORK/project/target/lorry/$MOTOR_TARGET/debug/build/derive-answer" ] &&
     find "$WORK/project/target/lorry/$MOTOR_TARGET/debug/build/derive-answer" \
         -type f -name 'libderive_answer-*.so' | grep -q .; then

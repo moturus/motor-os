@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -15,6 +13,9 @@ use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::{AtomicDirectory, move_no_replace};
 use crate::config::Repositories;
 use crate::diagnostic::{Error, Result};
+use crate::fs_check::{
+    entry_exists, file_identity, path_identity, require_real_directory, require_real_file,
+};
 use crate::hash::{Sha256, decode_hex, hex};
 use crate::json::Value;
 use crate::lockfile::write_toml_string;
@@ -27,6 +28,8 @@ use crate::validation::ValidationMode;
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const INDEX_RECORD_LIMIT: usize = 16 * 1024 * 1024;
 const MANIFEST_LIMIT: usize = 16 * 1024 * 1024;
+
+mod index;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Layer {
@@ -102,6 +105,7 @@ pub struct RepositoryTransaction {
     writer: RepositoryWriter,
     staging: AtomicDirectory,
     objects: Vec<StagedRegistryObject>,
+    index_records: BTreeMap<String, index::Staged>,
 }
 
 #[derive(Debug)]
@@ -175,7 +179,7 @@ impl RepositorySet {
                 .join("objects/crates-io/sha256")
                 .join(&checksum[..2])
                 .join(checksum);
-            if !entry_exists(&object_path)? {
+            if !entry_exists(&object_path, "repository object")? {
                 continue;
             }
             let object = verify_registry_object(
@@ -278,50 +282,9 @@ impl RepositorySet {
                 object.name, object.version
             )));
         }
-        let manifest = Manifest::load_path_dependency(&object.root.join("source"))?;
+        let manifest = Manifest::load_registry_dependency(&object.root.join("source"), false)?;
         lock_cache(&self.verified_registry_manifests).insert(checksum, manifest.clone());
         Ok(manifest)
-    }
-
-    pub fn load_registry_manifests(
-        &self,
-        objects: &[RegistryObject],
-    ) -> Result<BTreeMap<String, Manifest>> {
-        if objects.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let workers = thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(objects.len());
-        let chunk_size = objects.len().div_ceil(workers);
-        let batches = thread::scope(|scope| {
-            let handles = objects
-                .chunks(chunk_size)
-                .map(|chunk| {
-                    scope.spawn(|| {
-                        chunk
-                            .iter()
-                            .map(|object| {
-                                (hex(&object.checksum), self.load_registry_manifest(object))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle.join().map_err(|_| {
-                        Error::failure("registry manifest worker terminated unexpectedly")
-                    })
-                })
-                .collect::<Result<Vec<_>>>()
-        })?;
-        let mut manifests = BTreeMap::new();
-        for (checksum, manifest) in batches.into_iter().flatten() {
-            manifests.insert(checksum, manifest?);
-        }
-        Ok(manifests)
     }
 }
 
@@ -414,16 +377,13 @@ impl RepositoryWriter {
         })
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     pub fn begin(self) -> Result<RepositoryTransaction> {
         let staging = AtomicDirectory::new(&self.root.join(".staging"), "vendor")?;
         Ok(RepositoryTransaction {
             writer: self,
             staging,
             objects: Vec::new(),
+            index_records: BTreeMap::new(),
         })
     }
 }
@@ -433,11 +393,14 @@ impl RepositoryTransaction {
         self.staging.path()
     }
 
-    pub fn stage_registry(
+    /// Stages a crates.io package with the manifest description admission
+    /// reviews; build targets are checked when a build loads it.
+    pub(crate) fn stage_registry_description(
         &mut self,
         record: &SparseRecord,
         archive: &Path,
     ) -> Result<&StagedRegistryObject> {
+        let load = |root: &Path| Manifest::load_registry_dependency(root, true);
         if self
             .objects
             .iter()
@@ -496,7 +459,7 @@ impl RepositoryTransaction {
             &record.version,
             self.writer.archive_limits,
         )?;
-        let manifest = Manifest::load_path_dependency(extracted.path())?;
+        let manifest = load(extracted.path())?;
         let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
             Error::failure(format!(
                 "downloaded package has invalid version `{} {}`: {error}",
@@ -507,12 +470,6 @@ impl RepositoryTransaction {
             return Err(Error::failure(format!(
                 "downloaded archive identifies `{} {}`, but sparse index selected `{} {}`",
                 manifest.name, manifest.version.original, record.name, record.version
-            )));
-        }
-        if manifest.metadata.license.is_empty() {
-            return Err(Error::failure(format!(
-                "downloaded package `{} {}` has no license expression",
-                record.name, record.version
             )));
         }
         let tree = extracted.tree().clone();
@@ -537,10 +494,7 @@ impl RepositoryTransaction {
                 &tree.manifest_bytes(),
             )?;
             extracted.commit(&object_path.join("source"))?;
-            (
-                Manifest::load_path_dependency(&object_path.join("source"))?,
-                None,
-            )
+            (load(&object_path.join("source"))?, None)
         } else {
             (manifest, Some(extracted))
         };
@@ -565,6 +519,7 @@ impl RepositoryTransaction {
     }
 
     pub fn publish(self) -> Result<Vec<PublishedRegistryObject>> {
+        self.validate_index_records()?;
         for staged in &self.objects {
             persist_object_tree(&staged.object.root, &self.writer.sync_file)?;
             let verified = verify_registry_object(
@@ -584,7 +539,7 @@ impl RepositoryTransaction {
 
             let destination = self.object_destination(&staged.object)?;
             ensure_object_prefix(destination.parent().unwrap(), &self.writer.sync_file)?;
-            if entry_exists(&destination)? {
+            if entry_exists(&destination, "repository object")? {
                 verify_matching_object(&self.writer, staged, &destination)?;
             }
         }
@@ -599,7 +554,7 @@ impl RepositoryTransaction {
             let object = verify_matching_object(&self.writer, staged, &destination)?;
             published.push(PublishedRegistryObject { object, added });
         }
-        drop(self);
+        self.publish_index_records()?;
         Ok(published)
     }
 
@@ -985,7 +940,9 @@ fn verify_registry_object(
             package_path.display()
         )));
     }
-    let license = require_nonempty_string(&package_path, &document, document.root(), "license")?;
+    // Source acquisition can inspect a package with no SPDX expression. Empty
+    // evidence cannot satisfy a policy rule that requires a named license.
+    let license = require_string(&package_path, &document, document.root(), "license")?;
     let archive_bytes = require_u64(&package_path, &document, document.root(), "archive-bytes")?;
     let extracted_bytes =
         require_u64(&package_path, &document, document.root(), "extracted-bytes")?;
@@ -1191,49 +1148,6 @@ fn verify_exact_entries(root: &Path, expected: &BTreeSet<&str>) -> Result<()> {
     Ok(())
 }
 
-fn require_real_directory(path: &Path, context: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect {context} `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::failure(format!(
-            "{context} `{}` is not a real directory",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-fn require_real_file(path: &Path, context: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect {context} `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(Error::failure(format!(
-            "{context} `{}` is not a real regular file",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-fn entry_exists(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(Error::failure(format!(
-            "failed to inspect repository object `{}`: {error}",
-            path.display()
-        ))),
-    }
-}
-
 fn hash_bounded_file(path: &Path, limit: u64) -> Result<(u64, [u8; 32])> {
     let bytes = read_bounded_file(path, limit)?;
     let mut hasher = Sha256::new();
@@ -1257,7 +1171,7 @@ fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
             path.display()
         )));
     }
-    let before_identity = path_file_identity(path, &before)?;
+    let before_identity = path_identity(path, &before)?;
     let before_modified = file_modified(path, &before)?;
     let mut file = File::open(path)
         .map_err(|error| Error::failure(format!("failed to open `{}`: {error}", path.display())))?;
@@ -1272,7 +1186,7 @@ fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
         before_modified,
         &opened,
         file_modified(path, &opened)?,
-    ) || before_identity != open_file_identity(&file, &opened)?
+    ) || before_identity != file_identity(&file, &opened)?
     {
         return Err(Error::failure(format!(
             "`{}` changed while being opened",
@@ -1307,8 +1221,8 @@ fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
         before_modified,
         &path_after,
         file_modified(path, &path_after)?,
-    ) || before_identity != open_file_identity(&file, &after)?
-        || before_identity != path_file_identity(path, &path_after)?
+    ) || before_identity != file_identity(&file, &after)?
+        || before_identity != path_identity(path, &path_after)?
         || bytes.len() as u64 != before.len()
     {
         return Err(Error::failure(format!(
@@ -1338,59 +1252,6 @@ fn file_modified(path: &Path, metadata: &Metadata) -> Result<std::time::SystemTi
             path.display()
         ))
     })
-}
-
-#[cfg(unix)]
-fn path_file_identity(_path: &Path, metadata: &Metadata) -> Result<(u128, u128)> {
-    use std::os::unix::fs::MetadataExt;
-    Ok((metadata.dev() as u128, metadata.ino() as u128))
-}
-
-#[cfg(target_os = "motor")]
-fn path_file_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
-    let path = path.to_str().ok_or_else(|| {
-        Error::failure(format!(
-            "repository path is not UTF-8: `{}`",
-            path.display()
-        ))
-    })?;
-    let attr = moto_rt::fs::stat(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect Motor file identity `{path}`: {error}"
-        ))
-    })?;
-    Ok((0, attr.entry_id))
-}
-
-#[cfg(not(any(unix, target_os = "motor")))]
-fn path_file_identity(path: &Path, _metadata: &Metadata) -> Result<(u128, u128)> {
-    Err(Error::failure(format!(
-        "repository file identity is unsupported on this platform: `{}`",
-        path.display()
-    )))
-}
-
-#[cfg(unix)]
-fn open_file_identity(_file: &File, metadata: &Metadata) -> Result<(u128, u128)> {
-    path_file_identity(Path::new(""), metadata)
-}
-
-#[cfg(target_os = "motor")]
-fn open_file_identity(file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
-    use std::os::fd::AsRawFd;
-    let attr = moto_rt::fs::get_file_attr(file.as_raw_fd()).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect open Motor file identity: {error}"
-        ))
-    })?;
-    Ok((0, attr.entry_id))
-}
-
-#[cfg(not(any(unix, target_os = "motor")))]
-fn open_file_identity(_file: &File, _metadata: &Metadata) -> Result<(u128, u128)> {
-    Err(Error::failure(
-        "repository file identity is unsupported on this platform",
-    ))
 }
 
 fn require_format_one(path: &Path, document: &Document) -> Result<()> {
@@ -1504,36 +1365,6 @@ fn require_bool(path: &Path, document: &Document, table: &Table, key: &str) -> R
     })
 }
 
-fn require_string_array(
-    path: &Path,
-    document: &Document,
-    table: &Table,
-    key: &str,
-) -> Result<Vec<String>> {
-    let item = require_item(path, table, key)?;
-    let array = item.as_array().ok_or_else(|| {
-        field_error(
-            path,
-            document,
-            item,
-            format!("repository metadata `{key}` must be an array of strings"),
-        )
-    })?;
-    array
-        .iter()
-        .map(|value| {
-            value.as_str().map(str::to_owned).ok_or_else(|| {
-                field_error(
-                    path,
-                    document,
-                    item,
-                    format!("repository metadata `{key}` must contain only strings"),
-                )
-            })
-        })
-        .collect()
-}
-
 fn require_digest(path: &Path, document: &Document, table: &Table, key: &str) -> Result<[u8; 32]> {
     let item = require_item(path, table, key)?;
     let value = item.as_str().ok_or_else(|| {
@@ -1552,36 +1383,6 @@ fn require_digest(path: &Path, document: &Document, table: &Table, key: &str) ->
             format!("invalid repository metadata `{key}`: {error}"),
         )
     })
-}
-
-fn require_hex_string(
-    path: &Path,
-    document: &Document,
-    key: &str,
-    digits: usize,
-) -> Result<String> {
-    let item = require_item(path, document.root(), key)?;
-    let value = item.as_str().ok_or_else(|| {
-        field_error(
-            path,
-            document,
-            item,
-            format!("repository metadata `{key}` must be hexadecimal"),
-        )
-    })?;
-    if value.len() != digits
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(field_error(
-            path,
-            document,
-            item,
-            format!("repository metadata `{key}` must be {digits} lowercase hexadecimal digits"),
-        ));
-    }
-    Ok(value.to_owned())
 }
 
 fn parse_version(path: &Path, document: &Document, table: &Table, key: &str) -> Result<Version> {
@@ -1605,12 +1406,7 @@ fn parse_version(path: &Path, document: &Document, table: &Table, key: &str) -> 
 }
 
 fn validate_package_name(path: &Path, name: &str) -> Result<()> {
-    if name.is_empty()
-        || name.len() > 64
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    if !crate::manifest::valid_package_name(name) {
         return Err(Error::failure(format!(
             "`{}` contains invalid package name `{name}`",
             path.display()
@@ -1754,6 +1550,17 @@ mod tests {
     }
 
     fn crate_archive(name: &str, version: &str) -> Vec<u8> {
+        crate_archive_with_manifest(
+            name,
+            version,
+            &format!(
+                "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\
+                 edition = \"2021\"\nlicense = \"MIT OR Apache-2.0\"\n"
+            ),
+        )
+    }
+
+    fn crate_archive_with_manifest(name: &str, version: &str, manifest: &str) -> Vec<u8> {
         fn put_octal(field: &mut [u8], value: u64) {
             let text = format!("{value:0width$o}", width = field.len() - 1);
             field[..text.len()].copy_from_slice(text.as_bytes());
@@ -1779,20 +1586,13 @@ mod tests {
 
         let root = format!("{name}-{version}");
         let mut tar = Vec::new();
-        append_file(
-            &mut tar,
-            &format!("{root}/Cargo.toml"),
-            format!(
-                "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\
-                 edition = \"2021\"\nlicense = \"MIT OR Apache-2.0\"\n"
-            )
-            .as_bytes(),
-        );
+        append_file(&mut tar, &format!("{root}/Cargo.toml"), manifest.as_bytes());
         append_file(
             &mut tar,
             &format!("{root}/src/lib.rs"),
             b"pub fn fixture() {}\n",
         );
+        append_file(&mut tar, &format!("{root}/LICENSE"), b"Fixture license\n");
         tar.resize(tar.len() + 1024, 0);
         let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
         gzip.write_all(&tar).unwrap();
@@ -1815,7 +1615,9 @@ mod tests {
             record_bytes.as_bytes(),
         )
         .unwrap();
-        transaction.stage_registry(&record, &archive).unwrap();
+        transaction
+            .stage_registry_description(&record, &archive)
+            .unwrap();
         checksum
     }
 
@@ -1848,7 +1650,7 @@ mod tests {
             archive_limits(),
         )
         .unwrap();
-        assert_eq!(writer.root(), local);
+        assert_eq!(writer.root, local);
         verify_repository_header(&local).unwrap();
         for relative in ["objects/crates-io/sha256", ".staging"] {
             assert!(local.join(relative).is_dir());
@@ -1877,6 +1679,72 @@ mod tests {
         assert!(staged.manifest().path.is_file());
         assert!(staged.object().root.join("source/src/lib.rs").is_file());
         assert_eq!(transaction.objects().len(), 1);
+    }
+
+    #[test]
+    fn stages_source_descriptions_without_build_target_or_spdx_requirements() {
+        let root = TempDir::new("stage-description");
+        let repositories = Repositories {
+            local: Some(root.0.join("repository")),
+            ..Repositories::default()
+        };
+        let writer = RepositoryWriter::open(
+            &repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            archive_limits(),
+        )
+        .unwrap();
+        let bytes = crate_archive_with_manifest(
+            "demo",
+            "1.2.3",
+            "[package]\nname = \"demo\"\nversion = \"1.2.3\"\n\
+             license-file = \"LICENSE\"\n[lib]\ncrate-type = [\"staticlib\"]\n",
+        );
+        let archive = root.0.join("demo.crate");
+        fs::write(&archive, &bytes).unwrap();
+        let mut digest = Sha256::new();
+        digest.update(&bytes);
+        let checksum = digest.finish();
+        let record = SparseRecord::parse(
+            Path::new("/fixture/index.json"),
+            format!(
+                "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\"deps\":[],\
+                 \"cksum\":\"{}\",\"features\":{{}},\"yanked\":false}}\n",
+                hex(&checksum)
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut transaction = writer.begin().unwrap();
+        let staged = transaction
+            .stage_registry_description(&record, &archive)
+            .unwrap();
+        assert_eq!(staged.manifest().metadata.license_file, "LICENSE");
+        assert!(staged.manifest().metadata.license.is_empty());
+        assert_eq!(
+            staged.manifest().library.as_ref().unwrap().crate_types,
+            ["staticlib"]
+        );
+        assert_eq!(staged.object().checksum, checksum);
+        transaction.publish().unwrap();
+        let verified = RepositorySet::open(&repositories, crate::source_tree::DEFAULT_LIMITS, 1024)
+            .unwrap()
+            .lookup_registry(&hex(&checksum))
+            .unwrap()
+            .unwrap();
+        assert!(verified.license.is_empty());
+        fs::write(verified.root.join("source/LICENSE"), "tampered").unwrap();
+        assert!(
+            verify_registry_object(
+                verified.layer,
+                &verified.root,
+                checksum,
+                crate::source_tree::DEFAULT_LIMITS,
+                1024,
+                true,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2239,38 +2107,6 @@ mod tests {
         .unwrap();
         let error = set.lookup_registry(&checksum).unwrap_err();
         assert!(error.to_string().contains("non-canonical"));
-    }
-
-    #[test]
-    fn verifies_external_registry_seed_when_requested() {
-        let Some(root) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let root = PathBuf::from(root);
-        let set = RepositorySet::open(
-            &configurations(Some(&root), None),
-            crate::source_tree::DEFAULT_LIMITS,
-            16 * 1024 * 1024,
-        )
-        .unwrap();
-
-        let registry = object_identities(&root.join("objects/crates-io/sha256"));
-        assert_eq!(registry.len(), 45);
-        for checksum in registry {
-            set.lookup_registry(&checksum).unwrap().unwrap();
-        }
-    }
-
-    fn object_identities(namespace: &Path) -> Vec<String> {
-        let mut identities = Vec::new();
-        for prefix in fs::read_dir(namespace).unwrap() {
-            let prefix = prefix.unwrap().path();
-            for object in fs::read_dir(prefix).unwrap() {
-                identities.push(object.unwrap().file_name().into_string().unwrap());
-            }
-        }
-        identities.sort();
-        identities
     }
 
     fn replace_metadata(path: &Path, old: &str, new: &str) {

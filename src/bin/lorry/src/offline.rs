@@ -1,44 +1,24 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use semver::Version;
 
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
-use crate::manifest::{LockedPackage, Manifest};
+use crate::manifest::{LockedPackage, Lockfile};
 use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedSource};
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-pub fn validate_resolution(manifest: &Manifest, resolution: &Resolution) -> Result<()> {
-    validate(manifest, resolution, EdgeMode::Exact)
+/// Workspace roots are ordinary packages; no synthetic root edges are locked.
+pub(crate) fn validate_workspace_resolution(
+    lock: &Lockfile,
+    resolution: &Resolution,
+) -> Result<()> {
+    validate_packages(lock, resolution, &source_kinds(resolution))
 }
 
-pub fn validate_selected_resolution(manifest: &Manifest, resolution: &Resolution) -> Result<()> {
-    validate(manifest, resolution, EdgeMode::SelectedSubset)
-}
-
-fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -> Result<()> {
-    let lock = manifest
-        .lock
-        .as_ref()
-        .ok_or_else(|| stale("Cargo.lock is missing"))?;
-    let root = lock
-        .packages
-        .iter()
-        .find(|package| {
-            package.name == manifest.name
-                && package.version.original == manifest.version.original
-                && package.source.is_none()
-        })
-        .ok_or_else(|| {
-            stale(format!(
-                "Cargo.lock has no root path package `{} {}`",
-                manifest.name, manifest.version.original
-            ))
-        })?;
-    let source_kinds = resolution
+fn source_kinds(resolution: &Resolution) -> BTreeMap<PackageKey, Option<String>> {
+    resolution
         .packages
         .iter()
         .map(|package| {
@@ -51,16 +31,14 @@ fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -
                 },
             )
         })
-        .collect::<BTreeMap<_, _>>();
-    validate_edges(
-        "root package",
-        &resolution.root_edges,
-        &root.dependencies,
-        &lock.packages,
-        &source_kinds,
-        edge_mode,
-    )?;
+        .collect()
+}
 
+fn validate_packages(
+    lock: &Lockfile,
+    resolution: &Resolution,
+    source_kinds: &BTreeMap<PackageKey, Option<String>>,
+) -> Result<()> {
     let mut selected = BTreeSet::new();
     for package in &resolution.packages {
         if !selected.insert(package.key.clone()) {
@@ -91,17 +69,11 @@ fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -
             &package.lock_edges,
             &locked.dependencies,
             &lock.packages,
-            &source_kinds,
-            edge_mode,
+            source_kinds,
+            lock.format,
         )?;
     }
     Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum EdgeMode {
-    Exact,
-    SelectedSubset,
 }
 
 fn find_registry_package<'a>(
@@ -189,7 +161,7 @@ fn validate_edges(
     locked: &[String],
     packages: &[LockedPackage],
     source_kinds: &BTreeMap<PackageKey, Option<String>>,
-    mode: EdgeMode,
+    format: crate::lockfile::Format,
 ) -> Result<()> {
     let expected = resolved
         .iter()
@@ -215,7 +187,7 @@ fn validate_edges(
                 "{owner} repeats Cargo.lock dependency reference `{reference}`"
             )));
         }
-        let package = resolve_lock_reference(reference, packages)?;
+        let package = resolve_lock_reference(reference, packages, format)?;
         actual.insert(LockKey {
             name: package.name.clone(),
             version: Version::parse(&package.version.original).map_err(|error| {
@@ -226,11 +198,7 @@ fn validate_edges(
             source: package.source.clone(),
         });
     }
-    let agrees = match mode {
-        EdgeMode::Exact => actual == expected,
-        EdgeMode::SelectedSubset => expected.is_subset(&actual),
-    };
-    if !agrees {
+    if actual != expected {
         return Err(stale(format!(
             "{owner} dependency edges disagree with Cargo.lock: resolved [{}], locked [{}]",
             display_keys(&expected),
@@ -243,6 +211,7 @@ fn validate_edges(
 pub(crate) fn resolve_lock_reference<'a>(
     reference: &str,
     packages: &'a [LockedPackage],
+    format: crate::lockfile::Format,
 ) -> Result<&'a LockedPackage> {
     let (identity, source) = match reference.strip_suffix(')') {
         Some(without_close) => {
@@ -286,7 +255,14 @@ pub(crate) fn resolve_lock_reference<'a>(
                     .is_ok_and(|candidate| candidate == *version)
             })
         })
-        .filter(|package| source.is_none_or(|source| package.source.as_deref() == Some(source)))
+        .filter(|package| {
+            source.is_none_or(|source| {
+                package
+                    .source
+                    .as_deref()
+                    .is_some_and(|locked| lock_source_matches(source, locked, format))
+            })
+        })
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [package] => Ok(package),
@@ -309,6 +285,29 @@ pub(crate) fn resolve_lock_reference<'a>(
             "Cargo.lock dependency reference `{reference}` is ambiguous"
         ))),
     }
+}
+
+pub(crate) fn lock_source_matches(
+    reference: &str,
+    locked: &str,
+    format: crate::lockfile::Format,
+) -> bool {
+    if reference == locked {
+        return true;
+    }
+    if !reference.starts_with("git+") || reference.contains('#') {
+        return false;
+    }
+    let Some((remote, _)) = locked.rsplit_once('#') else {
+        return false;
+    };
+    // Cargo's legacy dependency encoding omits master; package source IDs
+    // remain distinct. Never apply this equivalence to modern references.
+    remote == reference
+        || (matches!(
+            format,
+            crate::lockfile::Format::V1 | crate::lockfile::Format::V2
+        ) && remote.strip_suffix("?branch=master") == Some(reference))
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -346,8 +345,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::config::IncompatibleRustVersions;
-    use crate::manifest::Resolver;
-    use crate::resolver::{Catalog, Options, resolve};
+    use crate::manifest::{Manifest, Resolver};
+    use crate::resolver::workspace::resolve_locked_workspace;
+    use crate::resolver::{Catalog, Options};
     use crate::sparse::Record;
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -396,6 +396,7 @@ mod tests {
         )
     }
 
+    /// Returns the complete locked graph.
     fn fixture() -> (TempDir, Manifest, Resolution) {
         let temp = TempDir::new();
         fs::write(
@@ -421,7 +422,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let manifest = Manifest::load(&temp.0).unwrap();
+        let manifest = Manifest::load_for_build(&temp.0).unwrap();
         let mut catalog = Catalog::default();
         catalog
             .insert(record(
@@ -432,33 +433,34 @@ mod tests {
             ))
             .unwrap();
         catalog.insert(record("b", "2.0.0", "[]", 0x22)).unwrap();
-        let locked =
-            crate::resolver::LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
-        let resolution = resolve(
-            &manifest,
-            &catalog,
-            &Options {
-                resolver: Resolver::V2,
-                incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
-                rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 16,
-                max_depth: 8,
-            },
-            &locked,
+        let options = Options {
+            resolver: Resolver::V2,
+            incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
+            rust_versions: vec![Version::parse("1.98.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: Some(8),
+        };
+        let workspace = crate::manifest::SourceWorkspace::load(&temp.0, None).unwrap();
+        let complete = resolve_locked_workspace(
+            &workspace,
+            &mut catalog,
+            &options,
+            manifest.lock.as_ref().unwrap(),
+            &mut |_, _, _| Ok(()),
         )
         .unwrap();
-        (temp, manifest, resolution)
+        (temp, manifest, complete)
     }
 
     #[test]
-    fn accepts_the_selected_subgraph_and_unused_lock_nodes() {
-        let (_temp, manifest, resolution) = fixture();
-        validate_resolution(&manifest, &resolution).unwrap();
+    fn accepts_the_complete_graph_and_unused_lock_nodes() {
+        let (_temp, manifest, complete) = fixture();
+        validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete).unwrap();
     }
 
     #[test]
-    fn selected_validation_allows_inactive_locked_edges_but_exact_validation_does_not() {
-        let (_temp, mut manifest, resolution) = fixture();
+    fn exact_validation_rejects_extra_locked_edges() {
+        let (_temp, mut manifest, complete) = fixture();
         let root = manifest
             .lock
             .as_mut()
@@ -469,9 +471,8 @@ mod tests {
             .unwrap();
         root.dependencies.push("unused".to_owned());
 
-        validate_selected_resolution(&manifest, &resolution).unwrap();
         assert!(
-            validate_resolution(&manifest, &resolution)
+            validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete)
                 .unwrap_err()
                 .to_string()
                 .contains("dependency edges")
@@ -480,7 +481,7 @@ mod tests {
 
     #[test]
     fn rejects_checksum_node_and_edge_drift() {
-        let (_temp, mut manifest, resolution) = fixture();
+        let (_temp, mut manifest, complete) = fixture();
         let lock = manifest.lock.as_mut().unwrap();
         lock.packages
             .iter_mut()
@@ -488,13 +489,13 @@ mod tests {
             .unwrap()
             .checksum = Some(checksum(0xff));
         assert!(
-            validate_resolution(&manifest, &resolution)
+            validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete)
                 .unwrap_err()
                 .to_string()
                 .contains("checksum")
         );
 
-        let (_temp, mut manifest, resolution) = fixture();
+        let (_temp, mut manifest, complete) = fixture();
         let lock = manifest.lock.as_mut().unwrap();
         lock.packages
             .iter_mut()
@@ -503,13 +504,13 @@ mod tests {
             .dependencies
             .clear();
         assert!(
-            validate_resolution(&manifest, &resolution)
+            validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete)
                 .unwrap_err()
                 .to_string()
                 .contains("dependency edges")
         );
 
-        let (_temp, mut manifest, resolution) = fixture();
+        let (_temp, mut manifest, complete) = fixture();
         manifest
             .lock
             .as_mut()
@@ -517,7 +518,7 @@ mod tests {
             .packages
             .retain(|package| package.name != "b");
         assert!(
-            validate_resolution(&manifest, &resolution)
+            validate_workspace_resolution(manifest.lock.as_ref().unwrap(), &complete)
                 .unwrap_err()
                 .to_string()
                 .contains("selects no package")
@@ -532,26 +533,132 @@ mod tests {
             locked("local", "1.0.0", None),
         ];
         assert_eq!(
-            resolve_lock_reference("demo 1.0.0", &packages)
+            resolve_lock_reference("demo 1.0.0", &packages, crate::lockfile::Format::V4)
                 .unwrap()
                 .version
                 .original,
             "1.0.0"
         );
         assert_eq!(
-            resolve_lock_reference(&format!("demo 2.0.0 ({CRATES_IO_SOURCE})"), &packages,)
-                .unwrap()
-                .version
-                .original,
+            resolve_lock_reference(
+                &format!("demo 2.0.0 ({CRATES_IO_SOURCE})"),
+                &packages,
+                crate::lockfile::Format::V4
+            )
+            .unwrap()
+            .version
+            .original,
             "2.0.0"
         );
-        assert!(resolve_lock_reference("demo", &packages).is_err());
-        assert!(resolve_lock_reference("missing", &packages).is_err());
-        assert!(resolve_lock_reference("demo bad version", &packages).is_err());
+        assert!(resolve_lock_reference("demo", &packages, crate::lockfile::Format::V4).is_err());
+        assert!(resolve_lock_reference("missing", &packages, crate::lockfile::Format::V4).is_err());
+        assert!(
+            resolve_lock_reference("demo bad version", &packages, crate::lockfile::Format::V4)
+                .is_err()
+        );
         assert_eq!(
-            resolve_lock_reference("local", &packages).unwrap().name,
+            resolve_lock_reference("local", &packages, crate::lockfile::Format::V4)
+                .unwrap()
+                .name,
             "local"
         );
+    }
+
+    #[test]
+    fn git_dependency_references_omit_the_locked_commit() {
+        let source = format!(
+            "git+https://example.com/demo?branch=motor#{}",
+            "0".repeat(40)
+        );
+        let packages = [locked("demo", "1.0.0", Some(&source))];
+        assert_eq!(
+            resolve_lock_reference(
+                "demo 1.0.0 (git+https://example.com/demo?branch=motor)",
+                &packages,
+                crate::lockfile::Format::V4,
+            )
+            .unwrap()
+            .source
+            .as_deref(),
+            Some(source.as_str())
+        );
+        assert!(
+            resolve_lock_reference(
+                "demo 1.0.0 (git+https://example.com/demo?branch=other)",
+                &packages,
+                crate::lockfile::Format::V4,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_lock_reference(
+                &format!(
+                    "demo 1.0.0 (git+https://example.com/demo?branch=motor#{})",
+                    "1".repeat(40)
+                ),
+                &packages,
+                crate::lockfile::Format::V4,
+            )
+            .is_err()
+        );
+        let mut ambiguous = packages.to_vec();
+        ambiguous.push(LockedPackage {
+            source: Some(source.replace(&"0".repeat(40), &"1".repeat(40))),
+            ..packages[0].clone()
+        });
+        assert!(
+            resolve_lock_reference(
+                "demo 1.0.0 (git+https://example.com/demo?branch=motor)",
+                &ambiguous,
+                crate::lockfile::Format::V4,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_git_master_dependency_reference_omits_the_branch() {
+        // Cargo V1/V2 keep the branch on package sources, but omit it on
+        // dependency references even when a path package needs disambiguation.
+        let source = format!(
+            "git+https://example.com/demo?branch=master#{}",
+            "0".repeat(40)
+        );
+        let packages = [
+            locked("demo", "1.0.0", Some(&source)),
+            locked("demo", "1.0.0", None),
+        ];
+        for format in [crate::lockfile::Format::V1, crate::lockfile::Format::V2] {
+            assert_eq!(
+                resolve_lock_reference(
+                    "demo 1.0.0 (git+https://example.com/demo)",
+                    &packages,
+                    format
+                )
+                .unwrap()
+                .source
+                .as_deref(),
+                Some(source.as_str())
+            );
+        }
+        for format in [crate::lockfile::Format::V3, crate::lockfile::Format::V4] {
+            assert!(
+                resolve_lock_reference(
+                    "demo 1.0.0 (git+https://example.com/demo)",
+                    &packages,
+                    format
+                )
+                .is_err()
+            );
+            assert!(
+                resolve_lock_reference(
+                    "demo 1.0.0 (git+https://example.com/demo?branch=master)",
+                    &packages,
+                    format
+                )
+                .is_ok()
+            );
+        }
     }
 
     fn locked(name: &str, version: &str, source: Option<&str>) -> LockedPackage {

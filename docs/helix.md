@@ -35,10 +35,20 @@ Changing the example's `answer` binding from `u32` to `bool` and saving
 produces a compiler diagnostic; restoring `u32` and saving clears it.
 Navigation on `rt_version` opens the installed Motor standard library.
 
-For another project, open an admitted Lorry package and prepare its
-dependencies explicitly with `lorry vendor`. A virtual workspace root is
-not a Lorry package. Build scripts and checks run with the invoking user's
-authority; opening a project is not a sandbox boundary.
+Same-crate definitions and module navigation also work in a fresh checkout
+with explicit workspace members, including `src/sys/tools/sysbox` in Motor
+OS. Lorry provides source metadata without dependency preparation or a
+lockfile. rust-analyzer uses it as an offline fallback and logs the full
+metadata error.
+
+Dependency navigation and resolved features need a current lock and sources
+prepared explicitly with `lorry fetch`. Metadata describes the whole workspace
+even through a member manifest and does not require admission. Generated
+sources and compiler checks additionally require a covering review with
+`lorry vendor --locked`. Virtual roots support workspace checks and member
+selection. Compilation never downloads missing sources.
+Build scripts and checks run with the invoking user's authority; opening a
+project is not a sandbox boundary.
 
 ## Native Rust integration
 
@@ -54,9 +64,9 @@ needs the native settings copied into its own `helix/languages.toml`.
 
 Helix starts `/devtools/rust/bin/rust-analyzer` directly over stdio. Its
 environment selects `/devtools/bin/lorry` through `CARGO` and
-`/devtools/rust/bin/rustfmt` through `RUSTFMT`, includes `/devtools/bin` in
-`PATH`, and sets `TMPDIR=/devtools/tmp`. These belong in the server's own
-environment: `cargo.extraEnv` only affects its children and cannot select
+`/devtools/rust/bin/rustfmt` through `RUSTFMT`, and includes `/devtools/bin`
+in `PATH`. Motor gives it the role's `TMPDIR`. These belong in the server's
+own environment: `cargo.extraEnv` only affects its children and cannot select
 the metadata/check executable.
 
 `MOTURUS_STDIO_NO_TERMINAL=true` in the server's launch environment is
@@ -71,6 +81,52 @@ Build scripts are enabled without a rustc wrapper; procedural-macro
 expansion in the analyzer is disabled. The client reports file changes.
 Lorry's compiler-side procedural-macro support is separate. General server
 configuration is documented in [build-rustc.md](build-rustc.md#native-motor-rust-analyzer).
+
+The build-script pass uses a complete `check --workspace --all-targets
+--keep-going --compile-time-deps` override for Motor, writing beneath
+`target/rust-analyzer/lorry`. It runs member scripts and builds executable
+procedural macros and their dependencies while skipping ordinary application
+compilation. Ordinary projects keep workspace-wide checks on save.
+
+rust-analyzer runs an override literally; it does not append configured
+features, default-feature settings, target, or target directory. Projects that
+change these settings must supply a complete override too. For example:
+
+```toml
+[language-server.rust-analyzer.config]
+cargo.features = ["app/selected"]
+cargo.noDefaultFeatures = true
+cargo.targetDir = "target/editor"
+cargo.buildScripts.overrideCommand = [
+  "/devtools/bin/lorry", "check", "--workspace", "--message-format=json",
+  "--all-targets", "--keep-going", "--compile-time-deps",
+  "--target", "x86_64-unknown-motor", "--target-dir", "target/editor",
+  "--features", "app/selected", "--no-default-features",
+]
+```
+
+Replace `app/selected` with the project's feature request and review that same
+scope with `lorry vendor --locked --features app/selected --no-default-features`.
+The normal metadata and save-check commands use the configured settings.
+
+The Motor OS checkout's `.helix/languages.toml` sets `check.workspace = false`
+because `src/sys` has member-specific compiler requirements. This exception
+belongs to that checkout. Saving a file outside its members, including files
+under `src/third_party`, starts no member check. The editable `moto-io`
+member has a build script. Without Cargo's cache, Lorry runs it only with a
+rule in your own configuration, under the checkout's `src/sys` workspace
+table, for example
+`[workspaces."/home/me/motor-os/src/sys".policy.rules.moto-io]` with
+`action = "allow"`, `source = "path"`, `name = "moto-io"`, and
+`allow-build-script = true`. Commands started at `src/sys` do not read member-local Cargo configuration;
+the `tokio_unstable` settings in `motor-fs` and `tokio-tests` therefore do not
+apply to those root-started editor checks. Run their real builds from their
+normal directories.
+
+To use Clippy for save diagnostics, set rust-analyzer's `check.command` to
+`"clippy"` in the project's `.helix/languages.toml`. Lorry uses the native
+Clippy driver supplied by the development image and reports Cargo-compatible
+diagnostics. The shipped configuration continues to use `"check"`.
 
 The pinned integration can log a Lorry version-string warning and an
 unsupported `workspace/diagnostic/refresh` response from Helix. Push
@@ -108,8 +164,8 @@ hooks. Ctrl+C reaches the editor as an input event. Normal exit and startup
 failure restore terminal modes and the alternate screen. Mouse input is
 disabled by default. Suspend/job control, external URL launching, system
 clipboard access, OSC 52, and dynamic grammar loading are unavailable;
-ordinary internal registers work. The build leaves Helix's `git` feature
-disabled.
+ordinary internal registers work. Motor builds exclude Helix's Git backend
+and its dependencies even when the default `git` feature is enabled.
 
 Local-file URI conversion is centralized in the fork's
 `helix-core/src/uri/file_url.rs`. It handles absolute UTF-8 paths, percent
@@ -135,12 +191,11 @@ and the branch to follow; no commit is declared. Dependency patches and
 grammar revisions live in that fork. After the toolchain and its assembly are
 complete, the [producer](build-motor-os.md) updates the checkout in
 `$MOTORH/helix`, explicitly fetches locked Cargo dependencies, then builds
-with the Motor compiler using `--locked`, `--offline`, and
-`--no-default-features`. The built commit is recorded in the assembly's
-`ADDON-helix` file, and Helix is rebuilt alone when the branch head differs;
-it is no part of the assembly's key, manifest, or validation. The image
-contains only the binary, queries, themes, and tutor; raw and stripped
-binaries undergo ELF checks.
+with the Motor compiler using `--locked` and `--offline`. The built commit
+is recorded in the assembly's `ADDON-helix` file, and Helix is rebuilt alone
+when the branch head differs; it is no part of the assembly's key, manifest,
+or validation. The image contains only the binary, queries, themes, and
+tutor; raw and stripped binaries undergo ELF checks.
 
 The Motor `parking_lot` fork parks idle Tokio workers with `moto_rt::Futex`.
 Its generic fallback used to spin, causing editor and file-picker latency.
@@ -158,7 +213,8 @@ and [`test-unwind.sh`](../src/tests/test-unwind.sh) cover this requirement.
 `src/tests/test-tui.sh` and its `test-helix-lsp.sh` helper cover parser health,
 editing, saves, terminal restoration, resize, rmux, native semantic requests,
 formatting, and clean server shutdown. The LSP cases include empty editor
-startup, opening a file afterward, edits during loading, paths with spaces,
+startup, opening a file afterward, an unprepared virtual workspace with
+same-file and module definitions, edits during loading, paths with spaces,
 Motor std navigation, and formatter-error recovery. The readiness helper's
 host tests guard waiting for source scans and indexing before semantic
 assertions. These tests run through `src/tests/full-test.sh`; developer

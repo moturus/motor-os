@@ -73,6 +73,7 @@ pub struct Package {
     pub publish: Option<Vec<String>>,
     pub default_run: Option<String>,
     pub rust_version: Option<String>,
+    pub hints: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -95,7 +96,7 @@ pub struct Target {
     pub name: String,
     pub kind: Vec<String>,
     pub crate_types: Vec<String>,
-    pub required_features: Vec<String>,
+    pub required_features: Option<Vec<String>>,
     pub src_path: String,
     pub edition: String,
     pub doctest: bool,
@@ -145,56 +146,88 @@ serialize_wire_struct!(DepKindInfo, "DepKindInfo", 2,
     "kind" => kind,
     "target" => target,
 );
-serialize_wire_struct!(Package, "Package", 24,
-    "name" => name,
-    "version" => version,
-    "authors" => authors,
-    "id" => id,
-    "source" => source,
-    "description" => description,
-    "dependencies" => dependencies,
-    "license" => license,
-    "license_file" => license_file,
-    "targets" => targets,
-    "features" => features,
-    "manifest_path" => manifest_path,
-    "categories" => categories,
-    "keywords" => keywords,
-    "readme" => readme,
-    "repository" => repository,
-    "homepage" => homepage,
-    "documentation" => documentation,
-    "edition" => edition,
-    "metadata" => metadata,
-    "links" => links,
-    "publish" => publish,
-    "default_run" => default_run,
-    "rust_version" => rust_version,
-);
-serialize_wire_struct!(Dependency, "Dependency", 11,
-    "name" => name,
-    "source" => source,
-    "req" => req,
-    "kind" => kind,
-    "optional" => optional,
-    "uses_default_features" => uses_default_features,
-    "features" => features,
-    "target" => target,
-    "rename" => rename,
-    "registry" => registry,
-    "path" => path,
-);
-serialize_wire_struct!(Target, "Target", 9,
-    "name" => name,
-    "kind" => kind,
-    "crate_types" => crate_types,
-    "required-features" => required_features,
-    "src_path" => src_path,
-    "edition" => edition,
-    "doctest" => doctest,
-    "test" => test,
-    "doc" => doc,
-);
+impl Serialize for Package {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut value =
+            serializer.serialize_struct("Package", 24 + usize::from(self.hints.is_some()))?;
+        value.serialize_field("name", &self.name)?;
+        value.serialize_field("version", &self.version)?;
+        value.serialize_field("authors", &self.authors)?;
+        value.serialize_field("id", &self.id)?;
+        value.serialize_field("source", &self.source)?;
+        value.serialize_field("description", &self.description)?;
+        value.serialize_field("dependencies", &self.dependencies)?;
+        value.serialize_field("license", &self.license)?;
+        value.serialize_field("license_file", &self.license_file)?;
+        value.serialize_field("targets", &self.targets)?;
+        value.serialize_field("features", &self.features)?;
+        value.serialize_field("manifest_path", &self.manifest_path)?;
+        value.serialize_field("categories", &self.categories)?;
+        value.serialize_field("keywords", &self.keywords)?;
+        value.serialize_field("readme", &self.readme)?;
+        value.serialize_field("repository", &self.repository)?;
+        value.serialize_field("homepage", &self.homepage)?;
+        value.serialize_field("documentation", &self.documentation)?;
+        value.serialize_field("edition", &self.edition)?;
+        value.serialize_field("metadata", &self.metadata)?;
+        value.serialize_field("links", &self.links)?;
+        value.serialize_field("publish", &self.publish)?;
+        value.serialize_field("default_run", &self.default_run)?;
+        value.serialize_field("rust_version", &self.rust_version)?;
+        if let Some(hints) = &self.hints {
+            value.serialize_field("hints", hints)?;
+        }
+        value.end()
+    }
+}
+impl Serialize for Dependency {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut value =
+            serializer.serialize_struct("Dependency", 10 + usize::from(self.path.is_some()))?;
+        value.serialize_field("name", &self.name)?;
+        value.serialize_field("source", &self.source)?;
+        value.serialize_field("req", &self.req)?;
+        value.serialize_field("kind", &self.kind)?;
+        value.serialize_field("optional", &self.optional)?;
+        value.serialize_field("uses_default_features", &self.uses_default_features)?;
+        value.serialize_field("features", &self.features)?;
+        value.serialize_field("target", &self.target)?;
+        value.serialize_field("rename", &self.rename)?;
+        value.serialize_field("registry", &self.registry)?;
+        if let Some(path) = &self.path {
+            value.serialize_field("path", path)?;
+        }
+        value.end()
+    }
+}
+
+impl Serialize for Target {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut value = serializer
+            .serialize_struct("Target", 8 + usize::from(self.required_features.is_some()))?;
+        value.serialize_field("name", &self.name)?;
+        value.serialize_field("kind", &self.kind)?;
+        value.serialize_field("crate_types", &self.crate_types)?;
+        if let Some(features) = &self.required_features {
+            value.serialize_field("required-features", features)?;
+        }
+        value.serialize_field("src_path", &self.src_path)?;
+        value.serialize_field("edition", &self.edition)?;
+        value.serialize_field("doctest", &self.doctest)?;
+        value.serialize_field("test", &self.test)?;
+        value.serialize_field("doc", &self.doc)?;
+        value.end()
+    }
+}
 
 impl Serialize for DependencyKind {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -249,7 +282,7 @@ mod tests {
                 name: "app".into(),
                 kind: vec!["bin".into()],
                 crate_types: vec!["bin".into()],
-                required_features: Vec::new(),
+                required_features: None,
                 src_path: "/workspace/src/main.rs".into(),
                 edition: "2024".into(),
                 doctest: false,
@@ -272,6 +305,7 @@ mod tests {
             links: Some("native-app".into()),
             publish: None,
             default_run: Some("app".into()),
+            hints: None,
             rust_version: Some("1.85".into()),
         }
     }
@@ -291,7 +325,7 @@ mod tests {
                 name: "dep".into(),
                 kind: vec!["lib".into()],
                 crate_types: vec!["lib".into()],
-                required_features: Vec::new(),
+                required_features: None,
                 src_path: "/cache/dep/src/lib.rs".into(),
                 edition: "2021".into(),
                 doctest: true,
@@ -311,6 +345,7 @@ mod tests {
             links: None,
             publish: None,
             default_run: None,
+            hints: None,
             rust_version: None,
         }
     }
@@ -356,6 +391,45 @@ mod tests {
             workspace_metadata: serde_json::Value::Null,
             version: 1,
         }
+    }
+
+    #[test]
+    fn required_features_preserve_absent_empty_and_nonempty_declarations() {
+        let mut document = fixture(false);
+        let target = &mut document.packages[0].targets[0];
+        assert!(
+            serde_json::to_value(&*target)
+                .unwrap()
+                .get("required-features")
+                .is_none()
+        );
+        target.required_features = Some(Vec::new());
+        assert_eq!(
+            serde_json::to_value(&*target).unwrap()["required-features"],
+            serde_json::json!([])
+        );
+        target.required_features = Some(vec!["extra".to_owned()]);
+        assert_eq!(
+            serde_json::to_value(&*target).unwrap()["required-features"],
+            serde_json::json!(["extra"])
+        );
+    }
+
+    #[test]
+    fn dependency_paths_are_only_serialized_for_path_sources() {
+        let mut document = fixture(false);
+        let dependency = &mut document.packages[0].dependencies[0];
+        assert!(
+            serde_json::to_value(&*dependency)
+                .unwrap()
+                .get("path")
+                .is_none()
+        );
+        dependency.path = Some("/workspace/dependency".to_owned());
+        assert_eq!(
+            serde_json::to_value(&*dependency).unwrap()["path"],
+            "/workspace/dependency"
+        );
     }
 
     #[test]

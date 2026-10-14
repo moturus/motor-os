@@ -806,7 +806,7 @@ mapfile -t executables <<< "$artifact_paths"
 native_port_binary="${executables[0]}"
 gix_binary="${executables[1]}"
 
-guest_root="/devtools/tmp/gix-test-$$"
+guest_root="/user/tmp/gix-test-$$"
 guest_gix="$guest_root/gix"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ]; then
   guest_gix=/devtools/bin/gix

@@ -1,0 +1,8 @@
+[package]
+name = "p"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+a = "1"
+b = "1"

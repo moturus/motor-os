@@ -17,19 +17,22 @@ pub fn query(program: &Path, arguments: &[&str], description: &str) -> Result<Ou
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::failure(format!(
-            "{description} `{}` failed{}{}",
-            program.display(),
-            output
-                .status
-                .code()
-                .map_or_else(String::new, |code| format!(" with status {code}")),
-            if stderr.trim().is_empty() {
-                String::new()
-            } else {
-                format!(": {}", stderr.trim())
-            }
-        )));
+        return Err(command_failure(
+            output.status,
+            format!(
+                "{description} `{}` failed{}{}",
+                program.display(),
+                output
+                    .status
+                    .code()
+                    .map_or_else(String::new, |code| format!(" with status {code}")),
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                }
+            ),
+        ));
     }
     Ok(output)
 }
@@ -50,23 +53,38 @@ pub fn query_rustc(program: &Path, arguments: &[&str], description: &str) -> Res
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::failure(format!(
-            "{description} `{}` failed: {}",
-            program.display(),
-            stderr.trim()
-        )));
+        return Err(command_failure(
+            output.status,
+            format!(
+                "{description} `{}` failed: {}",
+                program.display(),
+                stderr.trim()
+            ),
+        ));
     }
     Ok(output)
 }
 
 pub fn remove_cargo_client_environment(command: &mut Command) {
-    command
-        .env_remove("__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS")
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("CARGO_LOG");
+    for name in REMOVED_CARGO_CLIENT_ENVIRONMENT {
+        command.env_remove(name);
+    }
+}
+
+const REMOVED_CARGO_CLIENT_ENVIRONMENT: [&str; 3] = [
+    "__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS",
+    "RUSTUP_TOOLCHAIN",
+    "CARGO_LOG",
+];
+
+pub fn is_removed_cargo_client_environment(name: &OsStr) -> bool {
+    REMOVED_CARGO_CLIENT_ENVIRONMENT
+        .iter()
+        .any(|removed| name == OsStr::new(removed))
 }
 
 pub struct RustcCommand<'a> {
+    pub child_lease_fd: Option<i32>,
     pub program: &'a Path,
     pub arguments: &'a [OsString],
     pub environment: &'a BTreeMap<String, OsString>,
@@ -85,48 +103,131 @@ impl RustcCommand<'_> {
     /// executing units concurrently can print each unit's diagnostics as one
     /// uninterrupted block via `finish`.
     pub fn execute(&self) -> Result<Output> {
+        self.execute_observed(&mut |_| {})
+    }
+
+    /// Like `execute`, and passes each stderr line to `observe` as rustc
+    /// writes it, so a caller can act on an artifact notification early.
+    pub fn execute_observed(&self, observe: &mut dyn FnMut(&[u8])) -> Result<Output> {
         if self.verbose {
             eprintln!(
                 "Running {}",
                 display_command(self.program.as_os_str(), self.arguments)
             );
         }
-        let mut command = Command::new(self.program);
-        command
-            .args(self.arguments)
-            .envs(self.environment)
-            .current_dir(self.current_dir);
-        remove_cargo_client_environment(&mut command);
-        command.stdin(Stdio::null()).output().map_err(|error| {
+        let failure = |error: std::io::Error| {
             Error::failure(format!(
                 "failed to execute rustc `{}`: {error}",
                 self.program.display()
             ))
+        };
+        let mut command = Command::new(self.program);
+        command
+            .args(self.arguments)
+            .env_remove("CARGO_PRIMARY_PACKAGE")
+            .envs(self.environment)
+            .current_dir(self.current_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::artifact_lock::configure_child_lease(&mut command, self.child_lease_fd);
+        remove_cargo_client_environment(&mut command);
+        let mut child = command.spawn().map_err(failure)?;
+        let mut stdout = child.stdout.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut stdout, &mut bytes).map(|_| bytes)
+        });
+        let mut stderr = Vec::new();
+        let mut lines = std::io::BufReader::new(child.stderr.take().unwrap());
+        let read = loop {
+            let start = stderr.len();
+            match std::io::BufRead::read_until(&mut lines, b'\n', &mut stderr) {
+                Ok(0) => break Ok(()),
+                Ok(_) => observe(&stderr[start..]),
+                Err(error) => {
+                    let _ = child.kill();
+                    break Err(error);
+                }
+            }
+        };
+        let stdout = reader
+            .join()
+            .map_err(|_| Error::failure("rustc stdout reader panicked"))?;
+        let status = child.wait().map_err(failure)?;
+        read.map_err(failure)?;
+        let stdout = stdout.map_err(failure)?;
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
         })
     }
 
     pub fn finish(output: &Output, color: bool) -> Result<()> {
-        render_rustc_output(&output.stdout, color);
-        render_rustc_output(&output.stderr, color);
+        Self::render_messages(&output.stdout, &output.stderr, color);
         Self::require_success(output)
+    }
+
+    pub fn render_messages(stdout: &[u8], stderr: &[u8], color: bool) {
+        render_rustc_output(stdout, color);
+        render_rustc_output(stderr, color);
+    }
+
+    pub fn diagnostic_messages(bytes: &[u8]) -> Vec<u8> {
+        let mut diagnostics = Vec::new();
+        for line in bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let message = serde_json::from_slice::<serde_json::Value>(line).ok();
+            // Artifact notifications contain temporary output paths, and are
+            // reported from the validated outputs rather than replayed.
+            if message.as_ref().is_none_or(|message| {
+                message.get("artifact").is_none() && message.get("unused_extern_names").is_none()
+            }) {
+                diagnostics.extend_from_slice(line);
+                diagnostics.push(b'\n');
+            }
+        }
+        diagnostics
     }
 
     pub fn require_success(output: &Output) -> Result<()> {
         if output.status.success() {
             Ok(())
         } else {
-            Err(Error::failure(match output.status.code() {
-                Some(code) => format!("rustc failed with status {code}"),
-                None => "rustc was terminated by a signal".to_owned(),
-            }))
+            Err(command_failure(
+                output.status,
+                match output.status.code() {
+                    Some(code) => format!("rustc failed with status {code}"),
+                    None => "rustc was terminated by a signal".to_owned(),
+                },
+            ))
         }
     }
+}
+
+pub fn command_failure(status: std::process::ExitStatus, message: impl Into<String>) -> Error {
+    if exit_status_code(status) == 130 {
+        Error::interrupted(message)
+    } else {
+        Error::failure(message)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ChildKind {
+    Program,
+    Test,
 }
 
 pub fn run_child(
     program: &OsStr,
     arguments: &[OsString],
     current_dir: &Path,
+    environment: &BTreeMap<String, OsString>,
+    kind: ChildKind,
     verbose: bool,
 ) -> Result<i32> {
     if verbose {
@@ -134,6 +235,7 @@ pub fn run_child(
     }
     let status = Command::new(program)
         .args(arguments)
+        .envs(environment)
         .current_dir(current_dir)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -145,7 +247,10 @@ pub fn run_child(
                 Path::new(program).display()
             ))
         })?;
-    Ok(exit_status_code(status))
+    Ok(match kind {
+        ChildKind::Program => exit_status_code(status),
+        ChildKind::Test => status.code().unwrap_or(101),
+    })
 }
 
 pub fn exit_status_code(status: std::process::ExitStatus) -> i32 {
@@ -351,6 +456,40 @@ fn quote_display(argument: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_children_keep_exit_130_and_other_failures_keep_101() {
+        use std::os::unix::process::ExitStatusExt;
+        for (status, expected) in [
+            (130 << 8, 130),
+            (libc::SIGINT, 130),
+            (9 << 8, 101),
+            (libc::SIGKILL, 101),
+        ] {
+            let output = Output {
+                status: std::process::ExitStatus::from_raw(status),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            };
+            let error = RustcCommand::require_success(&output).unwrap_err();
+            assert_eq!(error.exit_code(), expected);
+        }
+    }
+
+    #[test]
+    fn stored_diagnostics_omit_temporary_artifact_notifications() {
+        let captured = b"{\"artifact\":\"/staging/library.rlib\"}\n{\"message\":\"warning\",\"rendered\":\"warning\\n\"}\n";
+        assert_eq!(
+            RustcCommand::diagnostic_messages(captured),
+            b"{\"message\":\"warning\",\"rendered\":\"warning\\n\"}\n"
+        );
+        assert_eq!(
+            RustcCommand::diagnostic_messages(b"not JSON\n"),
+            b"not JSON\n"
+        );
+        assert_eq!(RustcCommand::diagnostic_messages(b"42\n"), b"42\n");
+    }
 
     #[test]
     fn extracts_and_decodes_rendered_json_diagnostic() {

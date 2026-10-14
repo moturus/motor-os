@@ -76,7 +76,7 @@ done
 ssh_options=(-F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ROOT_DIR/src/tests/test-known-hosts"
   -i "$ROOT_DIR/src/tests/test.key")
-guest_dir="${MOTOR_TEST_ROOT:-/devtools}/tmp"
+guest_dir="${MOTOR_TEST_TMP:-/user/tmp}"
 failures=0
 run_guest() {
   local label="$1" binary="$2" command="$3" status=0
@@ -109,8 +109,8 @@ for profile in release release-lto; do
 done
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ]; then
-  guest_source="/devtools/tmp/motor-unwind-test-$$.rs"
-  guest_binary="/devtools/tmp/motor-unwind-native-$$"
+  guest_source="$guest_dir/motor-unwind-test-$$.rs"
+  guest_binary="$guest_dir/motor-unwind-native-$$"
   downloaded="$temporary/motor-unwind-native"
   printf 'put "%s" "%s"\n' "$ROOT_DIR/src/tests/unwind/src/main.rs" "$guest_source" |
     sftp "${ssh_options[@]}" -P 2222 -b - motor@192.168.4.2

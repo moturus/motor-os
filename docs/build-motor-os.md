@@ -59,6 +59,40 @@ add-ons follow one branch of their forks, in `$MOTORH/ripgrep`,
 `$MOTORH/wasmtime` siblings, and `$MOTORH/wasmtime` with its
 `$MOTORH/target-lexicon`, `$MOTORH/tokio` and `$MOTORH/mio` siblings.
 
+After selecting the host toolchain, the build prepares all add-on sources and
+checks their lockfiles before building the native assembly, downloading add-on
+assets, or compiling add-ons. The shared inventory in
+`src/build-addon-sources.sh` covers ripgrep, Helix, sed, Javy, Wasmi, Wasmtime,
+the independent Motor test workspaces in the forks, and the Motor smoke/plugin
+workspaces. Upstream-only release and standalone fuzz workspaces are excluded.
+The `--javy-only` and `--wasmtime-only` paths check their selected workspaces too.
+
+The check uses `cargo update --workspace --locked`: Cargo retains existing
+dependency selections wherever valid, prints required changes, and refuses to
+modify a stale lockfile. Builds may fetch registry metadata for this check.
+All workspace failures are reported together in `build/addon-lockfiles.log`,
+along with the selected source commits and working-tree status. A stale
+lockfile must be updated and reviewed in its owning repository; validation
+never repairs it automatically.
+
+Before offline compilation, the wasm add-ons fetch their complete locked
+dependency graphs. Target-filtered fetches can miss host dependencies reached
+through Motor-only dependency edges, even when Motor and Linux are fetched
+separately. Fetching without a target filter also makes cold-cache builds
+independent of packages left over from earlier builds.
+
+To validate an existing set of checkouts without fetching or compiling:
+
+```sh
+src/check-addon-lockfiles.sh
+```
+
+This command uses the same inventory and the selected Motor Cargo, with
+`--offline`. Missing checkouts or cached dependency metadata fail validation
+with their original diagnostics; they are not reported as version drift.
+`$MOTORH/motor-os` must resolve to the checkout being checked so the forks'
+relative path dependencies use that checkout's manifests.
+
 Rust and LLVM development uses explicit authoring mode instead of editing the
 managed checkout:
 

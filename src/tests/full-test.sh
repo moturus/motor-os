@@ -394,14 +394,7 @@ else
   (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --features image-admin)
 fi
 
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  MOTOR_TEST_ROOT=/devtools
-else
-  MOTOR_TEST_ROOT=/user/tmp/motor-tests
-fi
-export MOTOR_TEST_ROOT
-TEST_BIN="$MOTOR_TEST_ROOT/tests"
-TEST_TMP="$MOTOR_TEST_ROOT/tmp"
+. "$WD/test-roots.sh"
 RMUX_TMPDIR="$TEST_TMP/full-test-rmux"
 
 vm_ssh_stdout() {
@@ -614,25 +607,22 @@ rm -f "$ssh_split_stdout" "$ssh_split_stderr"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   vm_ssh "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
-  # An earlier run's leftover test root would fail the mkdir below.
-  if vm_ssh "[ -e $MOTOR_TEST_ROOT ]"; then
-    echo "removing the leftover $MOTOR_TEST_ROOT"
-    vm_ssh "/system/bin/rm -r $MOTOR_TEST_ROOT" ||
-      fail "cannot remove the leftover $MOTOR_TEST_ROOT"
-  fi
-  printf '%s\n' \
-    "mkdir $MOTOR_TEST_ROOT" \
-    "mkdir $TEST_BIN" \
-    "mkdir $TEST_TMP" \
-    "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
-    "put $ROOT_DIR/build/bin/$BUILD/mio-test $TEST_BIN/mio-test" \
-    "put $ROOT_DIR/build/bin/$BUILD/tokio-tests $TEST_BIN/tokio-tests" \
-    "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke" \
-    "put $ROOT_DIR/build/bin/$BUILD/rmux-probe $TEST_BIN/rmux-probe" |
-    sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
-      -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
-      -i "$WD/test.key" motor@192.168.4.2
 fi
+# An earlier run's leftover test directories would fail the mkdirs below.
+remove_test_roots vm_ssh
+{
+  test_root_mkdirs
+  if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
+    printf '%s\n' \
+      "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
+      "put $ROOT_DIR/build/bin/$BUILD/mio-test $TEST_BIN/mio-test" \
+      "put $ROOT_DIR/build/bin/$BUILD/tokio-tests $TEST_BIN/tokio-tests" \
+      "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke" \
+      "put $ROOT_DIR/build/bin/$BUILD/rmux-probe $TEST_BIN/rmux-probe"
+  fi
+} | sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+  -i "$WD/test.key" motor@192.168.4.2
 
 # Fresh-boot physical placement, before allocation-heavy tests fragment the
 # block pool: eight 1 MiB pieces must land in at most 4 + S + 2 * CPUs blocks
@@ -661,6 +651,29 @@ if vm_ssh /system/bin/rmdir /system/tmp; then
 fi
 vm_ssh "[ -d /system/tmp ]" ||
   fail "Interactive session removed /system/tmp"
+# NONE's own tree: a NONE-role process writes /none/cfg and /none/tmp but
+# cannot add entries to /none itself. 0x204 is CAP_SPAWN and CAP_FS_WRITE
+# without CAP_INTERACTIVE, so only the directory modes decide.
+for none_dir in /none/cfg /none/tmp; do
+  vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/rush -c 'echo none >$none_dir/fs-permissions-none-probe'" ||
+    fail "a NONE-role process could not write $none_dir"
+  vm_ssh /system/bin/rm "$none_dir/fs-permissions-none-probe"
+done
+if vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/mkdir /none/fs-permissions-none-probe"; then
+  fail "mkdir returned success after a denied /none creation"
+fi
+vm_ssh "[ ! -e /none/fs-permissions-none-probe ]" ||
+  fail "a NONE-role process created an entry directly in /none"
+# Higher roles' temporary directories are closed. The positive controls are
+# the /none/tmp write above and the /user/tmp write below.
+if vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/ls /user/tmp" >/dev/null 2>&1; then
+  fail "a NONE-role process listed /user/tmp"
+fi
+if vm_ssh /system/bin/mkdir /system/tmp/fs-permissions-probe; then
+  fail "mkdir returned success after a denied /system/tmp creation"
+fi
+vm_ssh "[ ! -e /system/tmp/fs-permissions-probe ]" ||
+  fail "Interactive session created an entry in /system/tmp"
 vm_ssh /system/bin/mkdir "$TEST_TMP/fs-permissions-write-probe"
 vm_ssh /system/bin/rm -r "$TEST_TMP/fs-permissions-write-probe"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
@@ -731,7 +744,7 @@ rush_path="$(printf 'printenv PATH\nexit\n' |
 printf '%s\n' "$rush_path" | grep -q "PATH=$EXPECTED_PATH$" ||
   fail "interactive Rush PATH does not match $EXPECTED_PATH: '$rush_path'"
 [ "$(vm_ssh_stdout "/system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/user/tmp" ] ||
-  fail "Rush did not supply the user TMPDIR fallback"
+  fail "an Interactive shell did not get /user/tmp as its TMPDIR"
 [ "$(vm_ssh_stdout "TMPDIR=/chosen/tmp /system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/chosen/tmp" ] ||
   fail "Rush replaced an explicit TMPDIR"
 for service in russhd strobe sys-init sys-tty dns-resolver; do

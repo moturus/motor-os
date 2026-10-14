@@ -144,7 +144,6 @@ directory and this environment:
 CARGO=/devtools/bin/lorry
 PATH=/devtools/bin:/system/bin
 RUSTFMT=/devtools/rust/bin/rustfmt
-TMPDIR=/devtools/tmp
 ```
 
 An editor that owns a session terminal must additionally pass
@@ -184,13 +183,20 @@ Build scripts and checks run with the invoking user's existing authority.
 Opening a project is not a sandbox boundary, and `lorry vendor` remains an
 explicit developer action.
 
+Before dependency preparation, the analyzer can use Lorry's read-only
+`metadata --no-deps` fallback for packages and explicit workspaces. This
+enables definitions within a crate and its modules, including in a fresh
+Motor OS checkout. Full metadata failures remain visible; dependency
+navigation, resolved features, generated sources, and compiler checks still
+require a supported, prepared Lorry package.
+
 Lorry's [inspect and check commands](../src/bin/lorry/README.md#inspect-and-check)
 define the Cargo-compatible boundary, including `metadata`, JSON `check`
 output, named targets, and `tree`. The analyzer also uses the supported
-`locate-project` and read-only `rustc --print` queries. Metadata describes one
-selected package per invocation; input manifests remain immutable. Client
-notifications of manifest or lock changes trigger metadata reloads, and
-build-script input changes trigger a new build-script pass. Run/test/debug
+`locate-project` and read-only `rustc --print` queries. Resolved metadata
+describes the whole workspace, even through a member manifest; input
+manifests remain immutable. Client notifications of manifest or lock changes trigger metadata
+reloads, and build-script input changes trigger a new build-script pass. Run/test/debug
 runnables remain upstream Cargo command templates outside native acceptance.
 
 ### Native server build
@@ -271,7 +277,8 @@ limitations, save recovery, and regression coverage.
 
 After LLVM, mlibc, compiler-rt, and libc++ are available in the keyed assembly
 sysroot, a second `x.py` invocation builds rustc for
-`x86_64-unknown-motor` from the same effective Rust and LLVM trees. The build
+`x86_64-unknown-motor` from the same effective Rust and LLVM trees, together
+with rustfmt and Clippy. The build
 verifies that this invocation leaves the installed host prefix byte-for-byte
 unchanged.
 
@@ -280,9 +287,11 @@ The development image packages these native Rust files:
 ```text
 /devtools/rust/bin/rustc
 /devtools/rust/bin/rustfmt
+/devtools/rust/bin/clippy-driver
 /devtools/rust/lib/rustlib/x86_64-unknown-motor/lib/*.rlib
 /devtools/bin/rustc          PATH launcher
 /devtools/bin/rustfmt        PATH launcher
+/devtools/bin/clippy-driver  PATH launcher
 /devtools/bin/cc             native linker driver supplied by the C toolchain
 ```
 
@@ -297,6 +306,14 @@ writable temporary directory:
 
 rustfmt discovers `rustfmt.toml` from the source path and its ancestors. A
 syntax error produces a diagnostic and does not replace the source file.
+
+The native Clippy driver is built by the same bootstrap invocation as rustc.
+The assembly validates its compiler identity and native ELF properties and
+records its content hash. `lorry clippy` checks that
+`clippy-driver --rustc -vV` matches the selected rustc, and binds cached member
+units to the driver's contents.
+Run `lorry clippy` in an admitted package to get human diagnostics, or add
+`--message-format=json` for Cargo-compatible messages.
 
 Inside the development VM:
 

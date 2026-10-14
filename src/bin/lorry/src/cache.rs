@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::Write;
@@ -6,23 +6,30 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::artifact_owner;
 use crate::atomic::AtomicDirectory;
 use crate::build_script::{Directive, Output as BuildScriptOutput};
 use crate::compile::{RustcInvocation, RustcOutput};
 use crate::config::CargoCompat;
 use crate::diagnostic::{Error, Result};
-use crate::hash::{Sha256, hex, sha256_file};
+use crate::hash::{FieldDigest, Sha256, hex, modified_time, sha256_file};
 use crate::json::Value;
 use crate::manifest::Manifest;
 use crate::process;
 use crate::resolver::{CompileKind, PackageSourceKey};
 use crate::source_tree::{EntryKind, Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::{TargetInfo, Toolchain};
+use crate::tracked_env::{self, Tracked};
 use crate::unit::{PlannedUnit, UnitKey, UnitKind};
 use crate::validation::ValidationMode;
 
 const FORMAT_VERSION: u64 = 1;
-const KEY_TAG: &[u8] = b"lorry-unit-cache-key-v1\0";
+const KEY_TAG: &[u8] = b"lorry-unit-cache-key-v4\0";
+const PUBLISHED_RECORD: &str = ".lorry-unit-v1";
+const PUBLISHED_STDOUT: &str = ".lorry-rustc-stdout-v1";
+const PUBLISHED_STDERR: &str = ".lorry-rustc-stderr-v1";
+const PUBLISHED_ENVIRONMENT: &str = ".lorry-tracked-environment-v1";
+const PAYLOAD_ENVIRONMENT: &str = "tracked-environment.json";
 
 pub struct Options<'a> {
     pub cargo: &'a Path,
@@ -55,6 +62,7 @@ pub struct DependencyInput<'a> {
 
 pub struct UnitInput<'a> {
     pub key: &'a UnitKey,
+    pub selected: bool,
     pub planned: &'a PlannedUnit,
     pub manifest: &'a Manifest,
     pub invocation: &'a RustcInvocation,
@@ -64,14 +72,31 @@ pub struct UnitInput<'a> {
     pub build_script: Option<BuildScriptInput<'a>>,
 }
 
+#[derive(Clone, Copy)]
+pub struct SelectedInputs<'a> {
+    pub working_dir: &'a Path,
+    pub source_remap: Option<&'a crate::unit::SourceRemap>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheKey([u8; 32]);
+
+/// A unit restored from a cache entry.
+pub struct Restored {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub tracked: Tracked,
+    /// The member's source digest that the entry matched.
+    pub sources: Option<[u8; 32]>,
+}
 
 pub struct BuildCache {
     units: PathBuf,
     quarantine: PathBuf,
     cargo: PathBuf,
     workspace_root: PathBuf,
+    workspace_members: BTreeSet<PathBuf>,
+    clippy: Option<crate::toolchain::ClippyDriver>,
     base: [u8; 32],
     source_limits: TreeLimits,
     payload_limits: TreeLimits,
@@ -151,6 +176,13 @@ impl BuildCache {
             quarantine,
             cargo: options.cargo.to_owned(),
             workspace_root: options.root_manifest.workspace_root.clone(),
+            workspace_members: options
+                .root_manifest
+                .workspace_members
+                .values()
+                .cloned()
+                .collect(),
+            clippy: options.toolchain.clippy.clone(),
             base: digest.finish(),
             source_limits: options.source_limits,
             payload_limits,
@@ -159,23 +191,74 @@ impl BuildCache {
     }
 
     pub fn key(&self, input: &UnitInput<'_>) -> Result<CacheKey> {
-        if !matches!(input.key.kind, UnitKind::Library | UnitKind::ProcMacro) {
+        if input.key.kind == UnitKind::BuildScriptRun {
             return Err(Error::failure(
-                "only library and proc-macro units have build-cache keys",
+                "build-script runs have no compiler identity",
             ));
         }
         let mut digest = KeyDigest::new();
         digest.bytes("base", &self.base);
+        if self.workspace_members.contains(&input.manifest.root)
+            && let Some(driver) = &self.clippy
+        {
+            digest.os("clippy-driver-path", driver.path.as_os_str(), &[]);
+            digest.bytes("clippy-driver-sha256", &driver.sha256);
+            for path in crate::clippy::configuration_candidates(
+                &input.manifest.root,
+                &input.invocation.current_dir,
+                &driver.arguments,
+                input.selected,
+            ) {
+                digest.os("clippy-config-candidate", path.as_os_str(), &[]);
+                match fs::metadata(&path) {
+                    Ok(metadata) if metadata.is_file() => {
+                        let resolved = fs::canonicalize(&path).map_err(|error| {
+                            Error::failure(format!(
+                                "failed to resolve Clippy configuration `{}`: {error}",
+                                path.display()
+                            ))
+                        })?;
+                        digest.os("clippy-config-resolved", resolved.as_os_str(), &[]);
+                        digest.file_contents("clippy-config-content", &resolved)?;
+                    }
+                    Ok(_) => digest.bytes("clippy-config-nonfile", b""),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        digest.bytes("clippy-config-absent", b"");
+                    }
+                    Err(error) => {
+                        return Err(Error::failure(format!(
+                            "failed to inspect Clippy configuration `{}`: {error}",
+                            path.display()
+                        )));
+                    }
+                }
+            }
+        }
         digest.string("package-name", &input.key.package.name);
         digest.string("package-version", &input.key.package.version.to_string());
         digest.string(
             "unit-kind",
-            if input.key.kind == UnitKind::ProcMacro {
-                "proc-macro"
-            } else {
-                "library"
+            match input.key.kind {
+                UnitKind::Library => "library",
+                UnitKind::Binary => "binary",
+                UnitKind::LibraryHarness => "library-harness",
+                UnitKind::BinaryHarness => "binary-harness",
+                UnitKind::IntegrationHarness => "integration-harness",
+                UnitKind::Example => "example",
+                UnitKind::Bench => "bench",
+                UnitKind::ProcMacro => "proc-macro",
+                UnitKind::BuildScriptCompile => "build-script-compile",
+                UnitKind::BuildScriptRun => unreachable!(),
             },
         );
+        if !matches!(input.key.kind, UnitKind::Library | UnitKind::ProcMacro) {
+            digest.string("target", input.key.target.as_deref().unwrap_or(""));
+        }
         let workspace_replacement = [(
             self.workspace_root.as_os_str(),
             b"<workspace-root>".as_slice(),
@@ -210,6 +293,9 @@ impl BuildCache {
             "identity-extra-filename",
             &input.planned.identity.extra_filename,
         );
+        if input.manifest.editable {
+            digest.string("editable-member-cache", "dep-info-inputs-v4");
+        }
 
         let mut replacements = vec![
             (self.cargo.as_os_str(), b"<lorry-executable>".as_slice()),
@@ -236,35 +322,52 @@ impl BuildCache {
             &replacements,
         );
         rustc_arguments_digest(&mut digest, &input.invocation.arguments, &replacements)?;
-        let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
-        for (name, value) in &input.invocation.environment {
-            environment.insert(name.into(), value.clone());
+        // Other process variables are rechecked after compilation when rustc
+        // reports reading them, as Cargo does.
+        let mut environment = input
+            .invocation
+            .environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), Some(value.clone())))
+            .collect::<BTreeMap<_, _>>();
+        for name in tracked_env::COMPILER_VARIABLES {
+            environment
+                .entry(name)
+                .or_insert_with(|| tracked_env::current(name));
         }
-        for (name, value) in &environment {
-            digest.os("rustc-environment-name", name, &replacements);
-            digest.os("rustc-environment-value", value, &replacements);
+        for (name, value) in environment {
+            let Some(value) = value else { continue };
+            digest.os("rustc-environment-name", OsStr::new(name), &replacements);
+            digest.os("rustc-environment-value", &value, &replacements);
         }
 
-        if self.validation.is_strict() {
-            let source = Tree::scan(
-                &input.manifest.root,
-                self.source_limits,
-                input.planned.source_exclusions,
-            )?;
-            digest.bytes("package-source-tree", &source.manifest_bytes());
-            digest.file("package-manifest", &input.manifest.path)?;
-        } else {
-            match &input.key.package.source {
-                PackageSourceKey::CratesIo => {
-                    digest.string("package-source-identity", "immutable-crates.io")
-                }
-                PackageSourceKey::Git(source) => digest.string("package-source-identity", source),
-                PackageSourceKey::Path(_) => metadata_tree_digest(
-                    &mut digest,
+        // A member's sources are its units' dep-info inputs, checked with the
+        // published record and cache entry, so an edit rebuilds only the units
+        // that read the file, as under Cargo.
+        if !input.manifest.editable {
+            if self.validation.is_strict() {
+                let source = Tree::scan(
                     &input.manifest.root,
                     self.source_limits,
                     input.planned.source_exclusions,
-                )?,
+                )?;
+                digest.bytes("package-source-tree", &source.manifest_bytes());
+                digest.file("package-manifest", &input.manifest.path)?;
+            } else {
+                match &input.key.package.source {
+                    PackageSourceKey::CratesIo => {
+                        digest.string("package-source-identity", "immutable-crates.io")
+                    }
+                    PackageSourceKey::Git(source) => {
+                        digest.string("package-source-identity", source)
+                    }
+                    PackageSourceKey::Path(_) => metadata_tree_digest(
+                        &mut digest,
+                        &input.manifest.root,
+                        self.source_limits,
+                        input.planned.source_exclusions,
+                    )?,
+                }
             }
         }
 
@@ -308,38 +411,227 @@ impl BuildCache {
         Ok(CacheKey(digest.finish()))
     }
 
-    pub fn restore(&self, key: CacheKey, output: &RustcOutput) -> Result<bool> {
+    /// The identity that dependents compose: the unit key plus the inputs
+    /// checked only after compilation (tracked variables and a selected
+    /// unit's dep-info inputs), so a change rebuilds them too.
+    pub fn dependency_key(
+        &self,
+        key: CacheKey,
+        sources: Option<[u8; 32]>,
+        tracked: &Tracked,
+    ) -> CacheKey {
+        if tracked.is_empty() && sources.is_none() {
+            return key;
+        }
+        let mut digest = KeyDigest::new();
+        digest.bytes("unit-key", &key.0);
+        digest.bytes("tracked-environment", &tracked_env::encode(tracked));
+        if let Some(sources) = sources {
+            digest.bytes("source-inputs", &sources);
+        }
+        CacheKey(digest.finish())
+    }
+
+    pub fn restore(
+        &self,
+        key: CacheKey,
+        output: &RustcOutput,
+        selected: Option<SelectedInputs<'_>>,
+    ) -> Result<Option<Restored>> {
         let Some(entry) = self.verified_or_quarantine(key)? else {
-            return Ok(false);
+            return Ok(None);
         };
+        let Some(tracked) = fs::read(entry.payload.join(PAYLOAD_ENVIRONMENT))
+            .ok()
+            .and_then(|bytes| tracked_env::decode(&bytes))
+        else {
+            return Ok(None);
+        };
+        if !tracked_env::matches_current(&tracked) {
+            return Ok(None);
+        }
+        if archive_path(output).is_some()
+            && !fs::symlink_metadata(entry.payload.join("library.a"))
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
+            self.quarantine(&self.entry_path(key), key)?;
+            return Ok(None);
+        }
+        let mut sources = None;
+        if let Some(inputs) = selected {
+            let dep_info = entry.payload.join("library.d");
+            let recorded = entry.payload.join("source-inputs.sha256");
+            let Some((current, _)) = source_inputs_digest(&dep_info, inputs).ok() else {
+                return Ok(None);
+            };
+            if fs::read(recorded).ok().as_deref() != Some(current.as_slice()) {
+                return Ok(None);
+            }
+            sources = Some(current);
+        }
         let (rlib, rmeta) = library_paths(output)?;
         copy_new_file(&entry.payload.join("library.rlib"), rlib)?;
         if rmeta != rlib {
             copy_new_file(&entry.payload.join("library.rmeta"), rmeta)?;
         }
-        Ok(true)
+        if let Some(archive) = archive_path(output) {
+            copy_new_file(&entry.payload.join("library.a"), archive)?;
+        }
+        if selected.is_some() {
+            copy_new_file(&entry.payload.join("library.d"), output.dep_info())?;
+        }
+        let stdout = fs::read(entry.payload.join(PUBLISHED_STDOUT))?;
+        let stderr = fs::read(entry.payload.join(PUBLISHED_STDERR))?;
+        Ok(Some(Restored {
+            stdout,
+            stderr,
+            tracked,
+            sources,
+        }))
     }
 
+    /// Returns the variables a published unit read, and a member's source
+    /// digest, when it is still fresh.
+    pub fn published_fresh(
+        &self,
+        key: CacheKey,
+        output: &RustcOutput,
+        selected: Option<SelectedInputs<'_>>,
+        package: &crate::resolver::PackageKey,
+    ) -> Result<Option<(Tracked, Option<[u8; 32]>)>> {
+        let directory = published_unit_directory(output)?;
+        if !artifact_owner::matches(directory, package) {
+            return Ok(None);
+        }
+        let record = directory.join(PUBLISHED_RECORD);
+        match fs::symlink_metadata(&record) {
+            Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 32 => {}
+            _ => return Ok(None),
+        }
+        let Some(tracked) = fs::read(directory.join(PUBLISHED_ENVIRONMENT))
+            .ok()
+            .and_then(|bytes| tracked_env::decode(&bytes))
+            .filter(tracked_env::matches_current)
+        else {
+            return Ok(None);
+        };
+        let Some(sources) = selected
+            .map(|inputs| source_inputs_digest(output.dep_info(), inputs).map(|(digest, _)| digest))
+            .transpose()
+            .ok()
+        else {
+            return Ok(None);
+        };
+        let Some(current) = published_fingerprint(key, output, sources, self.validation).ok()
+        else {
+            return Ok(None);
+        };
+        Ok(
+            (fs::read(record).ok().as_deref() == Some(current.as_slice()))
+                .then_some((tracked, sources)),
+        )
+    }
+
+    pub fn record_published(
+        &self,
+        key: CacheKey,
+        output: &RustcOutput,
+        sources: Option<[u8; 32]>,
+        package: &crate::resolver::PackageKey,
+        (stdout, stderr): (&[u8], &[u8]),
+        tracked: &Tracked,
+    ) -> Result<()> {
+        let directory = published_unit_directory(output)?;
+        write_synced(&directory.join(PUBLISHED_STDOUT), stdout)?;
+        write_synced(&directory.join(PUBLISHED_STDERR), stderr)?;
+        write_synced(
+            &directory.join(PUBLISHED_ENVIRONMENT),
+            &tracked_env::encode(tracked),
+        )?;
+        let fingerprint = published_fingerprint(key, output, sources, self.validation)?;
+        artifact_owner::write(directory, package)?;
+        write_synced(&directory.join(PUBLISHED_RECORD), &fingerprint)
+    }
+
+    /// Removes a unit's success record before its outputs are rewritten in
+    /// place, so an interrupted build cannot leave them looking fresh.
+    pub fn unpublish(&self, output: &RustcOutput) -> Result<()> {
+        let record = published_unit_directory(output)?.join(PUBLISHED_RECORD);
+        match fs::remove_file(&record) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Error::failure(format!(
+                "failed to remove published unit record `{}`: {error}",
+                record.display()
+            ))),
+        }
+    }
+
+    /// Strict keys hash dependency libraries, so a dependent needs them whole.
+    pub fn is_strict(&self) -> bool {
+        self.validation.is_strict()
+    }
+
+    pub fn published_messages(&self, output: &RustcOutput) -> Result<(Vec<u8>, Vec<u8>)> {
+        let directory = published_unit_directory(output)?;
+        let read = |name| {
+            fs::read(directory.join(name)).map_err(|error| {
+                Error::failure(format!(
+                    "failed to read published compiler messages: {error}"
+                ))
+            })
+        };
+        Ok((read(PUBLISHED_STDOUT)?, read(PUBLISHED_STDERR)?))
+    }
+
+    /// Stores a library with its owner record. Writing the owner before
+    /// publication keeps a reader from seeing a partly written entry.
+    #[allow(clippy::too_many_arguments)]
     pub fn store(
         &self,
         key: CacheKey,
         output: &RustcOutput,
         build_script: Option<&BuildScriptInput<'_>>,
+        sources: Option<[u8; 32]>,
+        diagnostics: (&[u8], &[u8]),
+        tracked: &Tracked,
+        owner: &crate::resolver::PackageKey,
     ) -> Result<()> {
         let (rlib, rmeta) = library_paths(output)?;
+        let dep_info = sources.map(|_| output.dep_info());
         let destination = self.entry_path(key);
+        let source_inputs = sources;
+        let environment = tracked_env::encode(tracked);
+        let mut replace = false;
         if let Some(existing) = self.verified_or_quarantine(key)? {
-            if !self.validation.is_strict() {
-                return Ok(());
+            replace = source_inputs.as_ref().is_some_and(|wanted| {
+                fs::read(existing.payload.join("source-inputs.sha256"))
+                    .ok()
+                    .as_deref()
+                    != Some(wanted.as_slice())
+            }) || fs::read(existing.payload.join(PAYLOAD_ENVIRONMENT)).ok()
+                != Some(environment.clone());
+            if !replace {
+                if !self.validation.is_strict() {
+                    return Ok(());
+                }
+                let wanted = payload_manifest(
+                    output,
+                    dep_info,
+                    source_inputs.as_ref(),
+                    build_script,
+                    diagnostics,
+                    &environment,
+                    self.payload_limits,
+                )?;
+                if existing.payload_manifest == wanted {
+                    return Ok(());
+                }
+                return Err(Error::failure(format!(
+                    "concurrent cache writers produced different verified outputs for `{}`",
+                    hex(&key.0)
+                )));
             }
-            let wanted = payload_manifest(rlib, rmeta, build_script, self.payload_limits)?;
-            if existing.payload_manifest == wanted {
-                return Ok(());
-            }
-            return Err(Error::failure(format!(
-                "concurrent cache writers produced different verified outputs for `{}`",
-                hex(&key.0)
-            )));
         }
 
         let parent = destination
@@ -355,6 +647,19 @@ impl BuildCache {
         })?;
         copy_synced_file(rlib, &payload.join("library.rlib"))?;
         copy_synced_file(rmeta, &payload.join("library.rmeta"))?;
+        if let Some(archive) = archive_path(output) {
+            copy_synced_file(archive, &payload.join("library.a"))?;
+        }
+        write_synced(&payload.join(PUBLISHED_STDOUT), diagnostics.0)?;
+        write_synced(&payload.join(PUBLISHED_STDERR), diagnostics.1)?;
+        write_synced(&payload.join(PAYLOAD_ENVIRONMENT), &environment)?;
+        if let Some(dep_info) = dep_info {
+            copy_synced_file(dep_info, &payload.join("library.d"))?;
+            write_synced(
+                &payload.join("source-inputs.sha256"),
+                source_inputs.as_ref().unwrap(),
+            )?;
+        }
         if let Some(build) = build_script {
             write_synced(
                 &payload.join("build-script.json"),
@@ -374,7 +679,12 @@ impl BuildCache {
         )?;
         let manifest = entry_manifest(key, &tree, &payload_manifest);
         write_synced(&staging.path().join("manifest.json"), &manifest)?;
+        artifact_owner::write(staging.path(), owner)?;
 
+        if replace {
+            staging.commit(&destination)?;
+            return Ok(());
+        }
         if staging.commit_no_replace(&destination)? {
             return Ok(());
         }
@@ -389,6 +699,20 @@ impl BuildCache {
             )));
         }
         Ok(())
+    }
+
+    /// Records which package uses an entry. Other builds may read the entry
+    /// meanwhile, so an owner record that already matches is left alone.
+    pub fn record_cache_owner(
+        &self,
+        key: CacheKey,
+        package: &crate::resolver::PackageKey,
+    ) -> Result<()> {
+        let entry = self.entry_path(key);
+        if artifact_owner::matches(&entry, package) {
+            return Ok(());
+        }
+        artifact_owner::write(&entry, package)
     }
 
     fn entry_path(&self, key: CacheKey) -> PathBuf {
@@ -446,7 +770,15 @@ impl BuildCache {
             })
             .collect::<Result<Vec<_>>>()?;
         names.sort();
-        if names != ["manifest.json", "payload", "payload-manifest.json"] {
+        if names != ["manifest.json", "payload", "payload-manifest.json"]
+            && names
+                != [
+                    ".lorry-owner-v1",
+                    "manifest.json",
+                    "payload",
+                    "payload-manifest.json",
+                ]
+        {
             return Err(Error::failure(
                 "cache entry does not contain the exact format-1 file set",
             ));
@@ -470,7 +802,12 @@ impl BuildCache {
         if payload_metadata.file_type().is_symlink() || !payload_metadata.is_dir() {
             return Err(Error::failure("cache payload is not a regular directory"));
         }
-        for required in ["library.rlib", "library.rmeta"] {
+        for required in [
+            "library.rlib",
+            "library.rmeta",
+            PUBLISHED_STDOUT,
+            PUBLISHED_STDERR,
+        ] {
             let metadata = fs::symlink_metadata(payload.join(required)).map_err(|error| {
                 Error::failure(format!("cache payload is missing `{required}`: {error}"))
             })?;
@@ -553,6 +890,8 @@ impl BuildCache {
             quarantine: root.join("v1/quarantine"),
             cargo: PathBuf::from("/test/lorry"),
             workspace_root: PathBuf::from("/test/workspace"),
+            workspace_members: BTreeSet::new(),
+            clippy: None,
             base: [3; 32],
             source_limits: limits,
             payload_limits: limits,
@@ -576,6 +915,10 @@ impl BuildCaches {
         } else {
             &self.local
         }
+    }
+
+    pub fn is_strict(&self) -> bool {
+        self.shared.is_strict()
     }
 
     pub fn report_shared_rebuild(&self, planned: &PlannedUnit) -> bool {
@@ -633,10 +976,14 @@ fn optional_tool_digest(
         Some(path) => {
             digest.string(role, "present");
             digest.os(&format!("{role}-path"), path.as_os_str(), &[]);
+            // A bare tool name runs from PATH, as under Cargo.
+            let Some(path) = crate::toolchain::program_path(path) else {
+                return Ok(());
+            };
             if validation.is_strict() {
-                digest.file(&format!("{role}-contents"), path)
+                digest.file(&format!("{role}-contents"), &path)
             } else {
-                digest.metadata(&format!("{role}-contents"), path)
+                digest.metadata(&format!("{role}-contents"), &path)
             }
         }
         None => {
@@ -781,18 +1128,7 @@ fn metadata_tree_digest(
                         root.display()
                     )));
                 }
-                let modified = metadata.modified().map_err(|error| {
-                    Error::failure(format!(
-                        "failed to read modification time for `{}`: {error}",
-                        path.display()
-                    ))
-                })?;
-                let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
-                    Error::failure(format!(
-                        "modification time for `{}` predates the Unix epoch",
-                        path.display()
-                    ))
-                })?;
+                let modified = modified_time(&path, &metadata)?;
                 entries.push((relative.to_owned(), Some((metadata.len(), modified))));
             } else {
                 return Err(Error::failure(format!(
@@ -848,6 +1184,15 @@ fn directive_digest(
                 digest.string("directive", "rustc-link-lib");
                 digest.os("value", OsStr::new(value), replacements);
             }
+            Directive::RustcLinkArg(value) => {
+                digest.string("directive", "rustc-link-arg");
+                digest.os("value", OsStr::new(value), replacements);
+            }
+            Directive::RustcLinkArgFor { target, value } => {
+                digest.string("directive", "rustc-link-arg-for");
+                digest.string("target", &target.name());
+                digest.os("value", OsStr::new(value), replacements);
+            }
             Directive::RustcLinkSearch { kind, path } => {
                 digest.string("directive", "rustc-link-search");
                 digest.string("kind", kind.as_deref().unwrap_or(""));
@@ -869,20 +1214,155 @@ fn directive_digest(
                 digest.string("directive", "warning");
                 digest.os("value", OsStr::new(value), replacements);
             }
+            Directive::Metadata { key, value } => {
+                digest.string("directive", "metadata");
+                digest.string("key", key);
+                digest.os("value", OsStr::new(value), replacements);
+            }
         }
+    }
+}
+
+fn archive_path(output: &RustcOutput) -> Option<&Path> {
+    match output {
+        RustcOutput::Library { archive, .. } => archive.as_deref(),
+        _ => None,
     }
 }
 
 fn library_paths(output: &RustcOutput) -> Result<(&Path, &Path)> {
     match output {
         RustcOutput::Library { rlib, rmeta, .. } => Ok((rlib, rmeta)),
+        RustcOutput::StaticLibrary { archive, .. } => Ok((archive, archive)),
         RustcOutput::ProcMacro {
             dynamic_library, ..
         } => Ok((dynamic_library, dynamic_library)),
-        RustcOutput::BuildScript { .. } => Err(Error::failure(
-            "build-script executables cannot be stored in the unit cache",
+        RustcOutput::Binary { .. }
+        | RustcOutput::Metadata { .. }
+        | RustcOutput::BuildScript { .. } => Err(Error::failure(
+            "executable artifacts cannot be stored in the dependency unit cache",
         )),
     }
+}
+
+fn published_unit_directory(output: &RustcOutput) -> Result<&Path> {
+    let primary = match output {
+        RustcOutput::Library { rlib, .. } => rlib,
+        RustcOutput::StaticLibrary { archive, .. } => archive,
+        RustcOutput::Binary { executable, .. } | RustcOutput::BuildScript { executable, .. } => {
+            executable
+        }
+        RustcOutput::Metadata { metadata, .. } => metadata,
+        RustcOutput::ProcMacro {
+            dynamic_library, ..
+        } => dynamic_library,
+    };
+    primary
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Error::failure("published library has no unit directory"))
+}
+
+fn published_fingerprint(
+    key: CacheKey,
+    output: &RustcOutput,
+    sources: Option<[u8; 32]>,
+    validation: ValidationMode,
+) -> Result<[u8; 32]> {
+    let files: Vec<&Path> = match output {
+        RustcOutput::Library {
+            rlib,
+            rmeta,
+            dep_info,
+            archive,
+        } => {
+            let mut files = vec![rlib.as_path()];
+            files.extend(archive.iter().map(PathBuf::as_path));
+            if rmeta != rlib {
+                files.push(rmeta);
+            }
+            if sources.is_some() {
+                files.push(dep_info);
+            }
+            files
+        }
+        RustcOutput::ProcMacro {
+            dynamic_library,
+            dep_info,
+        }
+        | RustcOutput::StaticLibrary {
+            archive: dynamic_library,
+            dep_info,
+        } => {
+            let mut files = vec![dynamic_library.as_path()];
+            if sources.is_some() {
+                files.push(dep_info);
+            }
+            files
+        }
+        RustcOutput::Binary {
+            executable,
+            dep_info,
+        }
+        | RustcOutput::Metadata {
+            metadata: executable,
+            dep_info,
+        } => vec![executable, dep_info],
+        RustcOutput::BuildScript {
+            executable,
+            unhashed_executable,
+            dep_info,
+        } => vec![executable, unhashed_executable, dep_info],
+    };
+    let mut digest = KeyDigest::new();
+    digest.bytes("schema", b"published-compiler-unit-v1");
+    digest.bytes("cache-key", &key.0);
+    for path in files {
+        let name = path
+            .file_name()
+            .ok_or_else(|| Error::failure("unit output has no name"))?;
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect unit output `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::failure(format!(
+                "unit output `{}` is not a regular file",
+                path.display()
+            )));
+        }
+        digest.os("artifact-name", name, &[]);
+        if validation.is_strict() {
+            digest.file_contents("artifact-contents", path)?;
+        } else {
+            let modified = modified_time(path, &metadata)?;
+            digest.bytes("artifact-length", &metadata.len().to_le_bytes());
+            digest.bytes("artifact-mtime-secs", &modified.as_secs().to_le_bytes());
+            digest.bytes(
+                "artifact-mtime-nanos",
+                &modified.subsec_nanos().to_le_bytes(),
+            );
+        }
+    }
+    let directory = published_unit_directory(output)?;
+    for name in [PUBLISHED_STDOUT, PUBLISHED_STDERR, PUBLISHED_ENVIRONMENT] {
+        let path = directory.join(name);
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::failure(format!("failed to inspect published unit record: {error}"))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::failure(
+                "published unit record is not a regular file",
+            ));
+        }
+        digest.file_contents(name, &path)?;
+    }
+    if let Some(sources) = sources {
+        digest.bytes("source-inputs", &sources);
+    }
+    Ok(digest.finish())
 }
 
 fn entry_manifest(key: CacheKey, tree: &Tree, payload_manifest: &[u8]) -> Vec<u8> {
@@ -915,11 +1395,15 @@ fn canonical_document(path: &Path, context: &str) -> Result<Value> {
 }
 
 fn payload_manifest(
-    rlib: &Path,
-    rmeta: &Path,
+    output: &RustcOutput,
+    dep_info: Option<&Path>,
+    source_inputs: Option<&[u8; 32]>,
     build_script: Option<&BuildScriptInput<'_>>,
+    diagnostics: (&[u8], &[u8]),
+    environment: &[u8],
     limits: TreeLimits,
 ) -> Result<Vec<u8>> {
+    let (rlib, rmeta) = library_paths(output)?;
     let parent = std::env::temp_dir().join(format!(
         ".lorry-cache-payload-{}-{}",
         std::process::id(),
@@ -942,6 +1426,19 @@ fn payload_manifest(
     })?;
     copy_synced_file(rlib, &payload.join("library.rlib"))?;
     copy_synced_file(rmeta, &payload.join("library.rmeta"))?;
+    if let Some(archive) = archive_path(output) {
+        copy_synced_file(archive, &payload.join("library.a"))?;
+    }
+    write_synced(&payload.join(PUBLISHED_STDOUT), diagnostics.0)?;
+    write_synced(&payload.join(PUBLISHED_STDERR), diagnostics.1)?;
+    write_synced(&payload.join(PAYLOAD_ENVIRONMENT), environment)?;
+    if let Some(dep_info) = dep_info {
+        copy_synced_file(dep_info, &payload.join("library.d"))?;
+        write_synced(
+            &payload.join("source-inputs.sha256"),
+            source_inputs.ok_or_else(|| Error::failure("missing source-input fingerprint"))?,
+        )?;
+    }
     if let Some(build) = build_script {
         write_synced(
             &payload.join("build-script.json"),
@@ -993,6 +1490,17 @@ fn build_script_manifest(build: &BuildScriptInput<'_>) -> Vec<u8> {
                     "rustc-link-lib",
                     vec![("value-encoded", encoded(OsStr::new(value), &replacements))],
                 ),
+                Directive::RustcLinkArg(value) => (
+                    "rustc-link-arg",
+                    vec![("value-encoded", encoded(OsStr::new(value), &replacements))],
+                ),
+                Directive::RustcLinkArgFor { target, value } => (
+                    "rustc-link-arg-for",
+                    vec![
+                        ("target", Value::String(target.name())),
+                        ("value-encoded", encoded(OsStr::new(value), &replacements)),
+                    ],
+                ),
                 Directive::RustcLinkSearch { kind, path } => (
                     "rustc-link-search",
                     vec![
@@ -1023,6 +1531,13 @@ fn build_script_manifest(build: &BuildScriptInput<'_>) -> Vec<u8> {
                 Directive::Warning(value) => (
                     "warning",
                     vec![("value-encoded", encoded(OsStr::new(value), &replacements))],
+                ),
+                Directive::Metadata { key, value } => (
+                    "metadata",
+                    vec![
+                        ("key", Value::String(key.clone())),
+                        ("value-encoded", encoded(OsStr::new(value), &replacements)),
+                    ],
                 ),
             };
             let mut object = BTreeMap::from([("kind".to_owned(), Value::String(kind.to_owned()))]);
@@ -1159,16 +1674,53 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     digest.finish()
 }
 
-struct KeyDigest(Sha256);
+/// Digests a member unit's sources and returns the newest modification time
+/// among them. A caller compares that with when rustc started.
+pub fn source_inputs(
+    output: &RustcOutput,
+    inputs: SelectedInputs<'_>,
+) -> Result<([u8; 32], std::time::Duration)> {
+    source_inputs_digest(output.dep_info(), inputs)
+}
+
+/// Digests every source that a unit's dep-info lists.
+fn source_inputs_digest(
+    dep_info: &Path,
+    inputs: SelectedInputs<'_>,
+) -> Result<([u8; 32], std::time::Duration)> {
+    let parsed = crate::executor::read_dep_info(dep_info, "rustc dep-info input", |source| {
+        inputs
+            .source_remap
+            .and_then(|remap| remap.restore_physical_path(&source))
+            .unwrap_or_else(|| inputs.working_dir.join(source))
+    })?;
+    let mut digest = KeyDigest::new();
+    let mut newest = std::time::Duration::ZERO;
+    digest.bytes("schema", b"dep-info-inputs-v1");
+    for (path, resolved) in parsed.inputs.into_iter().collect::<BTreeMap<_, _>>() {
+        digest.os("source-path", path.as_os_str(), &[]);
+        digest.os("resolved-path", resolved.as_os_str(), &[]);
+        let metadata = fs::metadata(&resolved).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect source `{}`: {error}",
+                resolved.display()
+            ))
+        })?;
+        newest = newest.max(modified_time(&resolved, &metadata)?);
+        digest.file_contents("source-contents", &resolved)?;
+    }
+    Ok((digest.finish(), newest))
+}
+
+struct KeyDigest(FieldDigest);
 
 impl KeyDigest {
     fn new() -> Self {
-        Self(Sha256::new())
+        Self(FieldDigest::new())
     }
 
     fn bytes(&mut self, name: &str, value: &[u8]) {
-        self.field(name.as_bytes());
-        self.field(value);
+        self.0.bytes(name, value);
     }
 
     fn string(&mut self, name: &str, value: &str) {
@@ -1191,37 +1743,7 @@ impl KeyDigest {
     }
 
     fn metadata(&mut self, name: &str, path: &Path) -> Result<()> {
-        let metadata = fs::metadata(path).map_err(|error| {
-            Error::failure(format!("failed to inspect `{}`: {error}", path.display()))
-        })?;
-        let modified = metadata.modified().map_err(|error| {
-            Error::failure(format!(
-                "failed to read modification time for `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        let modified = modified.duration_since(UNIX_EPOCH).map_err(|_| {
-            Error::failure(format!(
-                "modification time for `{}` predates the Unix epoch",
-                path.display()
-            ))
-        })?;
-        self.os(&format!("{name}-path"), path.as_os_str(), &[]);
-        self.bytes(&format!("{name}-length"), &metadata.len().to_le_bytes());
-        self.bytes(
-            &format!("{name}-mtime-secs"),
-            &modified.as_secs().to_le_bytes(),
-        );
-        self.bytes(
-            &format!("{name}-mtime-nanos"),
-            &modified.subsec_nanos().to_le_bytes(),
-        );
-        Ok(())
-    }
-
-    fn field(&mut self, value: &[u8]) {
-        self.0.update(&(value.len() as u64).to_le_bytes());
-        self.0.update(value);
+        self.0.metadata(name, path)
     }
 
     fn finish(self) -> [u8; 32] {
@@ -1254,6 +1776,14 @@ fn normalize(value: &[u8], replacements: &[(&OsStr, &[u8])]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    fn test_owner() -> crate::resolver::PackageKey {
+        crate::resolver::PackageKey {
+            name: "demo".to_owned(),
+            version: "1.0.0".parse().unwrap(),
+            source: crate::resolver::PackageSourceKey::CratesIo,
+        }
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
@@ -1288,6 +1818,7 @@ mod tests {
         RustcOutput::Library {
             rlib: root.join("library.rlib"),
             rmeta: root.join("library.rmeta"),
+            archive: None,
             dep_info: root.join("library.d"),
         }
     }
@@ -1302,6 +1833,7 @@ mod tests {
                 path: out_dir.clone(),
             }],
             diagnostics: Vec::new(),
+            stdout: String::new(),
             stderr: String::new(),
             out_dir: Tree::scan(
                 &out_dir,
@@ -1322,25 +1854,514 @@ mod tests {
     }
 
     #[test]
+    fn archive_outputs_restore_and_participate_in_unit_freshness() {
+        for validation in [ValidationMode::Trusted, ValidationMode::Strict] {
+            let fixture = Fixture::new();
+            let cache = BuildCache::for_test_with_validation(&fixture.0.join("cache"), validation);
+            let key = CacheKey([27; 32]);
+            let mut built = output(&fixture.0.join("built/deps"), b"library");
+            let archive = fixture.0.join("built/deps/library.a");
+            fs::write(&archive, b"archive").unwrap();
+            let RustcOutput::Library { archive: extra, .. } = &mut built else {
+                unreachable!()
+            };
+            *extra = Some(archive);
+            cache
+                .store(
+                    key,
+                    &built,
+                    None,
+                    None,
+                    (b"", b""),
+                    &Tracked::new(),
+                    &test_owner(),
+                )
+                .unwrap();
+            let target = fixture.0.join("restored/deps");
+            fs::create_dir_all(&target).unwrap();
+            let restored = RustcOutput::Library {
+                rlib: target.join("library.rlib"),
+                rmeta: target.join("library.rmeta"),
+                archive: Some(target.join("library.a")),
+                dep_info: target.join("library.d"),
+            };
+            assert!(cache.restore(key, &restored, None).unwrap().is_some());
+            assert_eq!(
+                fs::read(archive_path(&restored).unwrap()).unwrap(),
+                b"archive"
+            );
+            let package = crate::resolver::PackageKey {
+                name: "library".into(),
+                version: "1.0.0".parse().unwrap(),
+                source: crate::resolver::PackageSourceKey::Path(fixture.0.join("source")),
+            };
+            cache
+                .record_published(key, &restored, None, &package, (b"", b""), &Tracked::new())
+                .unwrap();
+            assert!(
+                cache
+                    .published_fresh(key, &restored, None, &package)
+                    .unwrap()
+                    .is_some()
+            );
+            fs::remove_file(archive_path(&restored).unwrap()).unwrap();
+            assert!(
+                cache
+                    .published_fresh(key, &restored, None, &package)
+                    .unwrap()
+                    .is_none()
+            );
+            fs::remove_file(cache.entry_path(key).join("payload/library.a")).unwrap();
+            assert!(cache.restore(key, &restored, None).unwrap().is_none());
+            assert!(!cache.entry_path(key).exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_archive_restore_rejects_payload_symlinks() {
+        let fixture = Fixture::new();
+        let cache =
+            BuildCache::for_test_with_validation(&fixture.0.join("cache"), ValidationMode::Trusted);
+        let key = CacheKey([28; 32]);
+        let mut built = output(&fixture.0.join("built"), b"library");
+        let archive = fixture.0.join("built/library.a");
+        fs::write(&archive, b"archive").unwrap();
+        let RustcOutput::Library { archive: extra, .. } = &mut built else {
+            unreachable!()
+        };
+        *extra = Some(archive.clone());
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
+        let cached = cache.entry_path(key).join("payload/library.a");
+        fs::remove_file(&cached).unwrap();
+        std::os::unix::fs::symlink(archive, cached).unwrap();
+        assert!(cache.restore(key, &built, None).unwrap().is_none());
+        assert!(!cache.entry_path(key).exists());
+    }
+
+    #[test]
     fn stores_restores_and_verifies_library_payloads() {
         let fixture = Fixture::new();
         let cache = BuildCache::for_test(&fixture.0.join("cache"));
         let key = CacheKey([9; 32]);
         let built = output(&fixture.0.join("built"), b"library");
-        cache.store(key, &built, None).unwrap();
+        let warning = b"{\"message\":\"unused variable\",\"rendered\":\"warning\\n\"}\n";
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", warning),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
+        let package = crate::resolver::PackageKey {
+            name: "library".to_owned(),
+            version: "1.0.0".parse().unwrap(),
+            source: crate::resolver::PackageSourceKey::Path(fixture.0.join("library")),
+        };
+        cache.record_cache_owner(key, &package).unwrap();
+        assert!(artifact_owner::matches(&cache.entry_path(key), &package));
 
         let restored_root = fixture.0.join("restored");
         fs::create_dir(&restored_root).unwrap();
         let restored = RustcOutput::Library {
             rlib: restored_root.join("restored.rlib"),
             rmeta: restored_root.join("restored.rmeta"),
+            archive: None,
             dep_info: restored_root.join("restored.d"),
         };
-        assert!(cache.restore(key, &restored).unwrap());
+        let Restored { stdout, stderr, .. } = cache.restore(key, &restored, None).unwrap().unwrap();
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, warning);
         let (rlib, rmeta) = library_paths(&restored).unwrap();
         assert_eq!(fs::read(rlib).unwrap(), b"library");
         assert_eq!(fs::read(rmeta).unwrap(), b"metadata");
         assert!(!restored_root.join("restored.d").exists());
+    }
+
+    #[test]
+    fn restores_only_when_tracked_variables_match_and_replaces_stale_entries() {
+        let fixture = Fixture::new();
+        let cache = BuildCache::for_test(&fixture.0.join("cache"));
+        let key = CacheKey([10; 32]);
+        let path = std::env::var("PATH").unwrap();
+        let stale = Tracked::from([("PATH".to_owned(), Some("/nowhere".to_owned()))]);
+        let current = Tracked::from([("PATH".to_owned(), Some(path))]);
+        let restore = |name: &str| {
+            let root = fixture.0.join(name);
+            fs::create_dir(&root).unwrap();
+            let output = output(&root, b"unused");
+            fs::remove_file(root.join("library.rlib")).unwrap();
+            fs::remove_file(root.join("library.rmeta")).unwrap();
+            cache.restore(key, &output, None).unwrap()
+        };
+
+        let built = output(&fixture.0.join("old"), b"old");
+        cache
+            .store(key, &built, None, None, (b"", b""), &stale, &test_owner())
+            .unwrap();
+        assert!(restore("miss").is_none());
+
+        let built = output(&fixture.0.join("new"), b"new");
+        cache
+            .store(key, &built, None, None, (b"", b""), &current, &test_owner())
+            .unwrap();
+        let restored = restore("hit").unwrap();
+        assert_eq!(restored.tracked, current);
+        assert_eq!(
+            fs::read(fixture.0.join("hit/library.rlib")).unwrap(),
+            b"new"
+        );
+
+        let identity = |tracked: &Tracked| cache.dependency_key(key, None, tracked);
+        assert_eq!(identity(&Tracked::new()), key);
+        assert_ne!(identity(&current), key);
+        assert_ne!(identity(&current), identity(&stale));
+    }
+
+    #[test]
+    fn selected_library_cache_restores_rustc_dep_info() {
+        let fixture = Fixture::new();
+        let cache = BuildCache::for_test(&fixture.0.join("cache"));
+        let key = CacheKey([10; 32]);
+        let built = output(&fixture.0.join("built"), b"library");
+        let source = fixture.0.join("package");
+        fs::create_dir_all(source.join("src")).unwrap();
+        fs::write(source.join("src/lib.rs"), b"pub fn value() {}\n").unwrap();
+        let inputs = SelectedInputs {
+            working_dir: &source,
+            source_remap: None,
+        };
+        let dep_info = built.dep_info();
+        fs::write(dep_info, b"library.rlib: src/lib.rs\n").unwrap();
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                Some(source_inputs(&built, inputs).unwrap().0),
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
+
+        let restored_root = fixture.0.join("restored");
+        fs::create_dir(&restored_root).unwrap();
+        let restored = RustcOutput::Library {
+            rlib: restored_root.join("library.rlib"),
+            rmeta: restored_root.join("library.rmeta"),
+            archive: None,
+            dep_info: restored_root.join("library.d"),
+        };
+        assert!(
+            cache
+                .restore(key, &restored, Some(inputs))
+                .unwrap()
+                .is_some()
+        );
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                Some(source_inputs(&built, inputs).unwrap().0),
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read(restored_root.join("library.d")).unwrap(),
+            b"library.rlib: src/lib.rs\n"
+        );
+        // A member's own sources are inputs too.
+        fs::write(source.join("src/lib.rs"), b"pub fn changed() {}\n").unwrap();
+        assert!(
+            cache
+                .restore(key, &restored, Some(inputs))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn selected_cache_replaces_entry_when_external_dep_info_input_changes() {
+        let fixture = Fixture::new();
+        let cache = BuildCache::for_test(&fixture.0.join("cache"));
+        let key = CacheKey([11; 32]);
+        let source = fixture.0.join("package");
+        fs::create_dir(&source).unwrap();
+        let external = fixture.0.join("shared.rs");
+        fs::write(&external, b"first").unwrap();
+        let inputs = SelectedInputs {
+            working_dir: &source,
+            source_remap: None,
+        };
+        let built = output(&fixture.0.join("built"), b"old library");
+        fs::write(
+            built.dep_info(),
+            format!("library.rlib: {}\n", external.display()),
+        )
+        .unwrap();
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                Some(source_inputs(&built, inputs).unwrap().0),
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
+
+        let restored_root = fixture.0.join("restored");
+        fs::create_dir(&restored_root).unwrap();
+        let restored = RustcOutput::Library {
+            rlib: restored_root.join("library.rlib"),
+            rmeta: restored_root.join("library.rmeta"),
+            archive: None,
+            dep_info: restored_root.join("library.d"),
+        };
+        assert!(
+            cache
+                .restore(key, &restored, Some(inputs))
+                .unwrap()
+                .is_some()
+        );
+        fs::remove_file(restored_root.join("library.rlib")).unwrap();
+        fs::remove_file(restored_root.join("library.rmeta")).unwrap();
+        fs::remove_file(restored_root.join("library.d")).unwrap();
+
+        fs::write(&external, b"second").unwrap();
+        assert!(
+            !cache
+                .restore(key, &restored, Some(inputs))
+                .unwrap()
+                .is_some()
+        );
+        fs::write(library_paths(&built).unwrap().0, b"new library").unwrap();
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                Some(source_inputs(&built, inputs).unwrap().0),
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
+        assert!(
+            cache
+                .restore(key, &restored, Some(inputs))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            fs::read(library_paths(&restored).unwrap().0).unwrap(),
+            b"new library"
+        );
+
+        fs::remove_file(&external).unwrap();
+        assert!(
+            !cache
+                .restore(key, &restored, Some(inputs))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn published_selected_unit_checks_artifact_and_source_inputs() {
+        let fixture = Fixture::new();
+        let cache = BuildCache::for_test(&fixture.0.join("cache"));
+        let key = CacheKey([12; 32]);
+        let source = fixture.0.join("package");
+        fs::create_dir(&source).unwrap();
+        let external = fixture.0.join("shared.rs");
+        fs::write(&external, b"first").unwrap();
+        let output = output(&fixture.0.join("unit/deps"), b"library");
+        fs::write(
+            output.dep_info(),
+            format!("library.rlib: {}\n", external.display()),
+        )
+        .unwrap();
+        let inputs = SelectedInputs {
+            working_dir: &source,
+            source_remap: None,
+        };
+        let package = crate::resolver::PackageKey {
+            name: "app".to_owned(),
+            version: "1.0.0".parse().unwrap(),
+            source: crate::resolver::PackageSourceKey::Path(source.clone()),
+        };
+
+        assert!(
+            cache
+                .published_fresh(key, &output, Some(inputs), &package)
+                .unwrap()
+                .is_none()
+        );
+        cache
+            .record_published(
+                key,
+                &output,
+                Some(source_inputs(&output, inputs).unwrap().0),
+                &package,
+                (b"", b""),
+                &Tracked::new(),
+            )
+            .unwrap();
+        assert!(
+            cache
+                .published_fresh(key, &output, Some(inputs), &package)
+                .unwrap()
+                .is_some()
+        );
+        let identity = || {
+            cache.dependency_key(
+                key,
+                Some(source_inputs(&output, inputs).unwrap().0),
+                &Tracked::new(),
+            )
+        };
+        let first = identity();
+        fs::write(&external, b"second").unwrap();
+        assert!(
+            cache
+                .published_fresh(key, &output, Some(inputs), &package)
+                .unwrap()
+                .is_none()
+        );
+        // Dependents must rebuild when a selected unit's external input changes.
+        assert_ne!(identity(), first);
+        fs::write(&external, b"first").unwrap();
+        assert_eq!(identity(), first);
+        fs::write(library_paths(&output).unwrap().0, b"tampered").unwrap();
+        assert!(
+            cache
+                .published_fresh(key, &output, Some(inputs), &package)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn published_check_replays_and_validates_compiler_messages() {
+        let fixture = Fixture::new();
+        let cache = BuildCache::for_test(&fixture.0.join("cache"));
+        let output = output(&fixture.0.join("unit/deps"), b"library");
+        let key = CacheKey([14; 32]);
+        let package = crate::resolver::PackageKey {
+            name: "app".to_owned(),
+            version: "1.0.0".parse().unwrap(),
+            source: crate::resolver::PackageSourceKey::Path(fixture.0.clone()),
+        };
+        let warning = b"{\"message\":\"warning marker\"}\n";
+        assert!(
+            cache
+                .published_fresh(key, &output, None, &package)
+                .unwrap()
+                .is_none()
+        );
+        cache
+            .record_published(
+                key,
+                &output,
+                None,
+                &package,
+                (warning, b""),
+                &Tracked::new(),
+            )
+            .unwrap();
+        assert!(
+            cache
+                .published_fresh(key, &output, None, &package)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(cache.published_messages(&output).unwrap().0, warning);
+        fs::write(fixture.0.join("unit").join(PUBLISHED_STDOUT), b"changed").unwrap();
+        assert!(
+            cache
+                .published_fresh(key, &output, None, &package)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dep_info_digest_detects_symlink_retarget() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("package");
+        fs::create_dir(&source).unwrap();
+        let first = fixture.0.join("first.rs");
+        let second = fixture.0.join("second.rs");
+        fs::write(&first, b"same contents").unwrap();
+        fs::write(&second, b"same contents").unwrap();
+        let link = fixture.0.join("shared.rs");
+        std::os::unix::fs::symlink(&first, &link).unwrap();
+        let dep_info = fixture.0.join("library.d");
+        fs::write(&dep_info, format!("library.rlib: {}\n", link.display())).unwrap();
+        let inputs = SelectedInputs {
+            working_dir: &source,
+            source_remap: None,
+        };
+        let previous = source_inputs_digest(&dep_info, inputs).unwrap().0;
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&second, &link).unwrap();
+        assert_ne!(previous, source_inputs_digest(&dep_info, inputs).unwrap().0);
+    }
+
+    #[test]
+    fn link_arguments_bind_cached_outputs_in_emission_order() {
+        let fixture = Fixture::new();
+        let profile = fixture.0.join("profile");
+        let (mut output, environment) = generated_build_output(&profile);
+        output.directives.extend([
+            Directive::RustcLinkArg("-Wl,--gc-sections".to_owned()),
+            Directive::RustcLinkArg("-Wl,--as-needed".to_owned()),
+        ]);
+        let out_dir = profile.join("build/package-hash/out");
+        let temp_dir = profile.join("build/package-hash/tmp");
+        let record = |output: &BuildScriptOutput| {
+            build_script_manifest(&BuildScriptInput {
+                output,
+                environment: &environment,
+                executable_sha256: [6; 32],
+                out_dir: &out_dir,
+                temp_dir: &temp_dir,
+            })
+        };
+        let digest = |output: &BuildScriptOutput| {
+            let mut digest = KeyDigest::new();
+            directive_digest(&mut digest, &output.directives, &[]);
+            digest.finish()
+        };
+        let original_record = record(&output);
+        let original_digest = digest(&output);
+        output.directives.swap(1, 2);
+        assert_ne!(original_record, record(&output));
+        assert_ne!(original_digest, digest(&output));
+        output.directives[1] = Directive::RustcLinkArg("-s".to_owned());
+        assert_ne!(original_record, record(&output));
+        assert_ne!(original_digest, digest(&output));
     }
 
     #[test]
@@ -1376,7 +2397,17 @@ mod tests {
             build_script_manifest(&second)
         );
 
-        cache.store(key, &built, Some(&first)).unwrap();
+        cache
+            .store(
+                key,
+                &built,
+                Some(&first),
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
         let payload = cache.entry_path(key).join("payload");
         assert_eq!(
             fs::read(payload.join("build-output/generated.rs")).unwrap(),
@@ -1391,17 +2422,38 @@ mod tests {
         let cache = BuildCache::for_test(&fixture.0.join("cache"));
         let key = CacheKey([7; 32]);
         let built = output(&fixture.0.join("built"), b"good");
-        cache.store(key, &built, None).unwrap();
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
         fs::write(cache.entry_path(key).join("payload/library.rlib"), b"bad").unwrap();
 
         let restore = RustcOutput::Library {
             rlib: fixture.0.join("miss.rlib"),
             rmeta: fixture.0.join("miss.rmeta"),
+            archive: None,
             dep_info: fixture.0.join("miss.d"),
         };
-        assert!(!cache.restore(key, &restore).unwrap());
+        assert!(!cache.restore(key, &restore, None).unwrap().is_some());
         assert_eq!(fs::read_dir(&cache.quarantine).unwrap().count(), 1);
-        cache.store(key, &built, None).unwrap();
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
         assert!(cache.entry_path(key).is_dir());
     }
 
@@ -1412,7 +2464,17 @@ mod tests {
             BuildCache::for_test_with_validation(&fixture.0.join("cache"), ValidationMode::Trusted);
         let key = CacheKey([6; 32]);
         let built = output(&fixture.0.join("built"), b"original");
-        cache.store(key, &built, None).unwrap();
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
         fs::write(
             cache.entry_path(key).join("payload/library.rlib"),
             b"changed",
@@ -1422,9 +2484,10 @@ mod tests {
         let restored = RustcOutput::Library {
             rlib: fixture.0.join("restored.rlib"),
             rmeta: fixture.0.join("restored.rmeta"),
+            archive: None,
             dep_info: fixture.0.join("restored.d"),
         };
-        assert!(cache.restore(key, &restored).unwrap());
+        assert!(cache.restore(key, &restored, None).unwrap().is_some());
         assert_eq!(
             fs::read(library_paths(&restored).unwrap().0).unwrap(),
             b"changed"
@@ -1477,9 +2540,37 @@ mod tests {
         let restore = RustcOutput::Library {
             rlib: fixture.0.join("miss.rlib"),
             rmeta: fixture.0.join("miss.rmeta"),
+            archive: None,
             dep_info: fixture.0.join("miss.d"),
         };
-        assert!(!cache.restore(key, &restore).unwrap());
+        assert!(!cache.restore(key, &restore, None).unwrap().is_some());
+    }
+
+    #[test]
+    fn stored_entries_carry_their_owner_and_keep_a_matching_one() {
+        let fixture = Fixture::new();
+        let cache = BuildCache::for_test(&fixture.0.join("cache"));
+        let key = CacheKey([5; 32]);
+        let built = output(&fixture.0.join("built"), b"library");
+        cache
+            .store(
+                key,
+                &built,
+                None,
+                None,
+                (b"", b""),
+                &Tracked::new(),
+                &test_owner(),
+            )
+            .unwrap();
+        let entry = cache.entry_path(key);
+        assert!(artifact_owner::matches(&entry, &test_owner()));
+        let owner = entry.join(".lorry-owner-v1");
+        let before = fs::metadata(&owner).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cache.record_cache_owner(key, &test_owner()).unwrap();
+        // A reader listing the entry never sees an owner staging file.
+        assert_eq!(fs::metadata(&owner).unwrap().modified().unwrap(), before);
     }
 
     #[test]
@@ -1497,7 +2588,17 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    cache.store(key, &output, None).unwrap();
+                    cache
+                        .store(
+                            key,
+                            &output,
+                            None,
+                            None,
+                            (b"", b""),
+                            &Tracked::new(),
+                            &test_owner(),
+                        )
+                        .unwrap();
                 })
             })
             .collect::<Vec<_>>();

@@ -5,9 +5,10 @@ retained Cargo output to verify Lorry's compatibility behavior. Lorry never
 loads these files, invokes Cargo, or falls back to an oracle during normal
 operation.
 
-Do not confuse an oracle with `--use-cargo-registry`. That explicit Lorry mode
-is an operational, offline reader for an already populated local Cargo
-archive/source cache; it does not execute Cargo or compare results with Cargo.
+Do not confuse an oracle with Cargo cache mode (`--use-cargo-registry`). That
+Lorry mode, the default, is an operational, offline reader for an already
+populated local Cargo archive/source cache; it does not execute Cargo or
+compare results with Cargo.
 
 ## Stage 2 resolution
 
@@ -18,10 +19,25 @@ by the current Motor Cargo, compatibility family 1.99. Lorry parses the checked-
 resolves the same complete lock graph, renders the same lockfile, and
 separately verifies the selected Linux subgraph.
 
-Re-run the Cargo oracle lane with:
+## Candidate order
+
+`candidate-order/` has the same layout. Its fresh lock checks that a wider
+requirement takes the highest compatible version instead of a selected lower
+one, and that one declaration used from host and target code resolves to one
+version. Lorry's unit test resolves it without a lock and renders the same
+bytes.
+
+## Dependency order
+
+`dependency-order/` checks the order in which dependencies are resolved when
+the resolver must backtrack. Cargo takes the dependency with the fewest
+candidates first. Ties follow its manifest order: dev-dependencies before
+build-dependencies, sorted names, and target tables sorted by name.
+
+Re-run the Cargo oracle lane for all three fixtures with:
 
 ```sh
-./tests/verify-stage2-resolution-oracle.sh
+./tests/verify-resolution-oracles.sh
 ```
 
 `../fixtures/cargo-identity/` is the dependency-free release artifact fixture.

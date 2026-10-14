@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::{Error, Result};
-use crate::hash::{Sha256, hex, sha256_file};
+use crate::hash::{FieldDigest, hex, sha256_file};
 use crate::process::RustcCommand;
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::{TargetInfo, Toolchain};
@@ -15,12 +15,26 @@ pub struct LayoutOptions<'a> {
     pub extraction_root: &'a Path,
     pub package_name: &'a str,
     pub package_root: &'a Path,
-    pub lorry: &'a Path,
+    pub compiler_identity: &'a CompilerIdentity,
     pub toolchain: &'a Toolchain,
     pub target: &'a TargetInfo,
     pub release: bool,
-    pub test_name: Option<&'a str>,
+    pub build_inputs: &'a [u8; 32],
     pub source_limits: TreeLimits,
+}
+
+pub struct CompilerIdentity {
+    lorry: [u8; 32],
+    rustc: [u8; 32],
+}
+
+impl CompilerIdentity {
+    pub fn new(lorry: &Path, rustc: &Path) -> Result<Self> {
+        Ok(Self {
+            lorry: sha256_file(lorry)?,
+            rustc: sha256_file(rustc)?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,6 +45,7 @@ pub struct Layout {
 }
 
 pub struct BuildOptions<'a> {
+    pub child_lease_fd: Option<i32>,
     pub layout: &'a Layout,
     pub package_name: &'a str,
     pub package_root: &'a Path,
@@ -68,20 +83,22 @@ impl Layout {
             options.source_limits,
             Exclusions::GitAndTarget,
         )?;
-        let mut digest = Digest::new();
+        let mut digest = FieldDigest::new();
         digest.field(FORMAT_TAG);
-        digest.string(options.package_name);
+        digest.field(options.package_name.as_bytes());
         digest.field(&source.manifest_bytes());
-        digest.field(&sha256_file(options.lorry)?);
-        digest.field(&sha256_file(&options.toolchain.rustc)?);
-        digest.string(&options.toolchain.verbose_version);
-        digest.string(&options.target.triple);
+        digest.field(options.build_inputs);
+        digest.field(&options.compiler_identity.lorry);
+        digest.field(&options.compiler_identity.rustc);
+        digest.field(options.toolchain.verbose_version.as_bytes());
+        digest.field(options.target.triple.as_bytes());
         for (name, value) in options.target.cfg.cargo_environment() {
-            digest.string(&name);
-            digest.string(&value);
+            digest.field(name.as_bytes());
+            digest.field(value.as_bytes());
         }
-        digest.string(if options.release { "release" } else { "debug" });
-        digest.string(options.test_name.unwrap_or("<all>"));
+        digest.field(if options.release { "release" } else { "debug" }.as_bytes());
+        // The former integration-test selector, kept so bundle IDs stay stable.
+        digest.field(b"<all>");
         digest.field(options.extraction_root.as_os_str().as_encoded_bytes());
         let id = hex(&digest.finish());
         let directory = options
@@ -172,6 +189,7 @@ pub fn build(options: &BuildOptions<'_>) -> Result<PathBuf> {
     }
     arguments.extend(options.rustflags.iter().map(OsString::from));
     let result = RustcCommand {
+        child_lease_fd: options.child_lease_fd,
         program: options.rustc,
         arguments: &arguments,
         environment: &BTreeMap::new(),
@@ -274,27 +292,6 @@ fn launcher_source(layout: &Layout, payloads: &[Payload<'_>], manifest: &str) ->
          const MANIFEST: &[u8] = {manifest:?}.as_bytes();\n\
          static PAYLOADS: &[Payload] = &[\n{table}];\n\n{LAUNCHER_RUNTIME}"
     ))
-}
-
-struct Digest(Sha256);
-
-impl Digest {
-    fn new() -> Self {
-        Self(Sha256::new())
-    }
-
-    fn string(&mut self, value: &str) {
-        self.field(value.as_bytes());
-    }
-
-    fn field(&mut self, value: &[u8]) {
-        self.0.update(&(value.len() as u64).to_le_bytes());
-        self.0.update(value);
-    }
-
-    fn finish(self) -> [u8; 32] {
-        self.0.finish()
-    }
 }
 
 const LAUNCHER_RUNTIME: &str = r#"
@@ -607,16 +604,14 @@ fn set_private_executable(_file: &File, path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "motor")]
 fn set_private_executable(file: &File, _path: &Path) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
-
-    unsafe extern "C" {
-        fn fchmod(fd: i32, mode: u32) -> i32;
+    let launcher = std::env::current_exe().map_err(display("locate bundle launcher"))?;
+    let permissions = fs::metadata(launcher).map_err(display("inspect bundle launcher"))?.permissions();
+    if !permissions.readonly() {
+        return Err("bundle launcher must be sealed read/execute".to_owned());
     }
-
-    if unsafe { fchmod(file.as_raw_fd(), 0o555) } != 0 {
-        return Err(format!("set private executable permissions: {}", std::io::Error::last_os_error()));
-    }
-    Ok(())
+    // Motor exposes executable permissions through metadata. Preserve the launcher's
+    // read/execute permissions while sealing the extracted file's open descriptor.
+    file.set_permissions(permissions).map_err(display("set private executable permissions"))
 }
 
 #[cfg(not(any(unix, target_os = "motor")))]

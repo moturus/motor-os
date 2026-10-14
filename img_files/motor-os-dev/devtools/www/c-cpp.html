@@ -534,12 +534,13 @@ the LLVM multicall binary in <code>/devtools/llvm/bin</code>; headers are under
 <code>/devtools/llvm/include</code> and the libraries under <code>/devtools/llvm/lib</code>.
 The samples in <code>/devtools/src/hello-world</code> build like this:</p>
 <pre><code>cd /devtools/src/hello-world
-cc -O2 hello.c -o /devtools/tmp/hello && /devtools/tmp/hello
-c++ -O2 hello.cpp -o /devtools/tmp/hello-cpp && /devtools/tmp/hello-cpp</code></pre>
+cc -O2 hello.c -o /user/tmp/hello && /user/tmp/hello
+c++ -O2 hello.cpp -o /user/tmp/hello-cpp && /user/tmp/hello-cpp</code></pre>
 <p>A freshly linked program is executable by its creator and by higher roles, so it can
 be run at once. The developer image has no <code>make</code>; small projects are built from
 a rush script or by listing the sources on one <code>cc</code> line. Compiler temporary
-files go to <code>/devtools/tmp</code>.</p>
+files go to <code>TMPDIR</code>, which Motor OS sets by role: <code>/user/tmp</code> for
+an interactive shell.</p>
 
 <h3>On Linux</h3>
 <p>The Motor OS build produces the same Clang for the Linux host together with a

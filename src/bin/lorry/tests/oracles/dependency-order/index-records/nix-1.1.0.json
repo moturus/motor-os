@@ -1,0 +1,1 @@
+{"name":"nix","vers":"1.1.0","deps":[{"name":"v","req":"=1.1.0","features":[],"optional":false,"default_features":true,"target":null,"kind":"normal"}],"cksum":"24d2ab00fc285f9f11138079e7a913efcbd1deb5d085f66b5f16c3f708e12efb","features":{},"yanked":false}

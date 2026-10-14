@@ -71,9 +71,19 @@ pub(super) fn map(
             presented_root.display()
         ))
     })?;
-    let dependencies = manifest
-        .dependencies
-        .iter()
+    let mut declarations = manifest.dependencies.iter().collect::<Vec<_>>();
+    declarations.sort_by_key(|dependency| {
+        let kind = match (dependency.target.is_some(), dependency.kind) {
+            (_, crate::sparse::DependencyKind::Normal) => 0,
+            (false, crate::sparse::DependencyKind::Dev)
+            | (true, crate::sparse::DependencyKind::Build) => 1,
+            (false, crate::sparse::DependencyKind::Build)
+            | (true, crate::sparse::DependencyKind::Dev) => 2,
+        };
+        (&dependency.target, kind, &dependency.alias)
+    });
+    let dependencies = declarations
+        .into_iter()
         .map(|dependency| map_dependency(dependency, dependency_roots))
         .collect::<Result<Vec<_>>>()?;
 
@@ -90,18 +100,19 @@ pub(super) fn map(
         targets: map_targets(manifest, &root)?,
         features: cargo_features(manifest),
         manifest_path: canonical_utf8(&root.join("Cargo.toml"), "package manifest")?,
-        categories: Vec::new(),
-        keywords: Vec::new(),
+        categories: manifest.metadata.categories.clone(),
+        keywords: manifest.metadata.keywords.clone(),
         readme: nonempty(&manifest.metadata.readme),
         repository: nonempty(&manifest.metadata.repository),
         homepage: nonempty(&manifest.metadata.homepage),
         documentation: nonempty(&manifest.metadata.documentation),
         edition: edition(manifest.edition).to_owned(),
-        metadata: serde_json::Value::Null,
+        metadata: manifest.metadata.custom.clone(),
         links: manifest.links.clone(),
-        publish: None,
+        publish: manifest.metadata.publish.clone(),
         default_run: manifest.default_run.clone(),
         rust_version: nonempty(&manifest.metadata.rust_version),
+        hints: manifest.metadata.hints.clone(),
     })
 }
 
@@ -139,14 +150,14 @@ fn validate_aliases(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::Target>> {
+pub(crate) fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::Target>> {
     let mut targets = Vec::new();
     if let Some(library) = &manifest.library {
         targets.push(wire::Target {
             name: library.name.clone(),
             kind: library.crate_types.clone(),
             crate_types: library.crate_types.clone(),
-            required_features: Vec::new(),
+            required_features: None,
             src_path: rebase_path(manifest, root, &library.path, "library source")?,
             edition: edition(manifest.edition).to_owned(),
             doctest: library.doctest,
@@ -154,38 +165,27 @@ fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::Target>> {
             doc: library.doc,
         });
     }
-    for binary in &manifest.binaries {
+    // Manifest targets already follow Cargo's kind and name order.
+    for target in &manifest.targets {
         targets.push(wire::Target {
-            name: binary.name.clone(),
-            kind: vec!["bin".to_owned()],
-            crate_types: vec!["bin".to_owned()],
-            required_features: Vec::new(),
-            src_path: rebase_path(manifest, root, &binary.path, "binary source")?,
-            edition: edition(manifest.edition).to_owned(),
+            name: target.name.clone(),
+            kind: vec![target.kind.as_str().to_owned()],
+            crate_types: target.crate_types.clone(),
+            required_features: target.required_features.clone(),
+            src_path: rebase_path(manifest, root, &target.path, "target source")?,
+            edition: edition(target.edition).to_owned(),
             doctest: false,
-            test: binary.test,
-            doc: binary.doc,
+            test: target.test,
+            doc: target.doc,
         });
     }
-    for test in &manifest.integration_tests {
+    if let (Some(build_script), Some(name)) = (&manifest.build_script, manifest.build_script_name())
+    {
         targets.push(wire::Target {
-            name: test.name.clone(),
-            kind: vec!["test".to_owned()],
-            crate_types: vec!["bin".to_owned()],
-            required_features: Vec::new(),
-            src_path: rebase_path(manifest, root, &test.path, "integration-test source")?,
-            edition: edition(manifest.edition).to_owned(),
-            doctest: false,
-            test: true,
-            doc: false,
-        });
-    }
-    if let Some(build_script) = &manifest.build_script {
-        targets.push(wire::Target {
-            name: "build-script-build".to_owned(),
+            name,
             kind: vec!["custom-build".to_owned()],
             crate_types: vec!["bin".to_owned()],
-            required_features: Vec::new(),
+            required_features: None,
             src_path: rebase_path(manifest, root, build_script, "build-script source")?,
             edition: edition(manifest.edition).to_owned(),
             doctest: false,
@@ -212,7 +212,15 @@ fn map_dependency(
             let presented = dependency_roots.get(&canonical).unwrap_or(&canonical);
             (None, Some(path_utf8(presented, "dependency path")?))
         }
-        DependencySource::Git(git) => (Some(git_source(git)), None),
+        DependencySource::Git(git) => (
+            Some(
+                dependency
+                    .git_path_source
+                    .clone()
+                    .unwrap_or_else(|| git_source(git)),
+            ),
+            None,
+        ),
     };
     Ok(wire::Dependency {
         name: dependency.package.clone(),
@@ -226,8 +234,12 @@ fn map_dependency(
         optional: dependency.optional,
         uses_default_features: dependency.default_features,
         features: dependency.features.clone(),
-        target: dependency.target.clone(),
-        rename: (dependency.alias != dependency.package).then(|| dependency.alias.clone()),
+        target: dependency
+            .target
+            .as_deref()
+            .map(crate::toolchain::canonical_selector)
+            .transpose()?,
+        rename: dependency.renamed.then(|| dependency.alias.clone()),
         registry: None,
         path,
     })
@@ -255,7 +267,7 @@ fn validate_identity(manifest: &Manifest, package: &ResolvedPackage) -> Result<(
     Ok(())
 }
 
-fn path_package_id(root: &Path, name: &str, version: &str) -> Result<String> {
+pub(crate) fn path_package_id(root: &Path, name: &str, version: &str) -> Result<String> {
     let root = fs::canonicalize(root).map_err(|error| {
         Error::failure(format!(
             "failed to canonicalize package root `{}`: {error}",
@@ -311,7 +323,18 @@ fn rebase_path(manifest: &Manifest, root: &Path, path: &Path, what: &str) -> Res
             path.display()
         ))
     })?;
-    canonical_utf8(&root.join(relative), what)
+    // Cargo normalizes components without resolving a target's symbolic links.
+    let mut normalized = PathBuf::new();
+    for component in root.join(relative).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    path_utf8(&normalized, what)
 }
 
 fn canonical_utf8(path: &Path, what: &str) -> Result<String> {
@@ -414,6 +437,30 @@ mod tests {
                 "1.0.0"
             ),
             "git+https://example.test/demo.git#demo@1.0.0"
+        );
+    }
+
+    #[test]
+    fn internal_git_path_sources_retain_the_precise_commit() {
+        let mut manifest = Manifest::parse_dependency(Path::new("/fixture"), Path::new("/fixture/Cargo.toml"),
+            "[package]\nname=\"root\"\nversion=\"1.0.0\"\n[dependencies]\nchild={git=\"https://example.test/repo.git\",branch=\"main\"}\n").unwrap();
+        let dependency = &mut manifest.dependencies[0];
+        let source = "git+https://example.test/repo.git?branch=main";
+        assert_eq!(
+            map_dependency(dependency, &BTreeMap::new())
+                .unwrap()
+                .source
+                .as_deref(),
+            Some(source)
+        );
+        let precise = format!("{source}#{}", "1".repeat(40));
+        dependency.git_path_source = Some(precise.clone());
+        assert_eq!(
+            map_dependency(dependency, &BTreeMap::new())
+                .unwrap()
+                .source
+                .as_deref(),
+            Some(precise.as_str())
         );
     }
 

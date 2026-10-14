@@ -1,5 +1,9 @@
 # Component tests
 
+The checked-in `Cargo.lock` preserves the Motor Tokio and Mio forks and their
+compatible transitive dependencies. Builds and tests use `--locked`; review
+dependency updates together with their Motor-target build and component tests.
+
 Run the complete component gate with cached Cargo dependencies:
 
 ```sh
@@ -24,13 +28,13 @@ The filesystem workload in `src/tests/stress-soak.sh` launches httpd-axum with
 Run the CLI regressions on the host with the repository-selected toolchain:
 
 ```sh
-cargo test --manifest-path src/bin/httpd-axum/Cargo.toml --release --test cli
+cargo test --locked --manifest-path src/bin/httpd-axum/Cargo.toml --release --test cli
 ```
 
 The test executable also runs directly on Motor OS. Cross-compile it with:
 
 ```sh
-cargo test --manifest-path src/bin/httpd-axum/Cargo.toml --release \
+cargo test --locked --manifest-path src/bin/httpd-axum/Cargo.toml --release \
   --target x86_64-unknown-motor --test cli --no-run
 ```
 

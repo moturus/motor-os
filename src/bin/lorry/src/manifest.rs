@@ -6,57 +6,58 @@ use semver::{Version as SemVersion, VersionReq};
 use toml_edit::{Array, InlineTable, Item, Table, Value};
 
 use crate::diagnostic::{Error, Result};
+use crate::identity::CargoDebugInfo;
 use crate::sparse::DependencyKind;
 use crate::toml::Document;
-use crate::toolchain::TargetInfo;
+
+mod inheritance;
+pub(crate) mod profiles;
+mod selection;
+mod source;
+mod targets;
+pub(crate) use selection::PackageSelection;
+pub(crate) use source::{Documents, SourceWorkspace};
+pub(crate) use targets::{Target, TargetKind};
 
 const MANIFEST_NAME: &str = "Cargo.toml";
 const LOCK_NAME: &str = "Cargo.lock";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
-const MAX_BINARY_TARGETS: usize = 64;
 const MAX_WORKSPACE_MEMBERS: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Manifest {
     pub root: PathBuf,
+    /// Selected packages and members may access editable source trees.
+    pub editable: bool,
     pub workspace_root: PathBuf,
-    pub workspace_members: BTreeSet<String>,
+    /// Workspace members by name, with their canonical directories.
+    pub workspace_members: BTreeMap<String, PathBuf>,
     pub path: PathBuf,
+    pub warnings: Vec<String>,
     pub name: String,
-    pub crate_name: String,
     pub version: Version,
     pub edition: Edition,
     pub metadata: PackageMetadata,
     pub default_run: Option<String>,
-    pub dev: DevProfile,
-    pub release: ReleaseProfile,
-    #[allow(dead_code)]
+    /// The selected profile; build commands apply it after loading.
+    pub profile: Profile,
+    pub profile_directory: Option<String>,
+    pub profile_name: Option<String>,
+    /// Dependencies drop unresolved explicit targets; members reject them.
+    unresolved_target: Option<Error>,
     pub resolver: Resolver,
     pub links: Option<String>,
-    #[allow(dead_code)]
     pub build_script: Option<PathBuf>,
-    #[allow(dead_code)]
     pub library: Option<LibraryTarget>,
-    #[allow(dead_code)]
-    pub binaries: Vec<BinaryTarget>,
-    pub integration_tests: Vec<IntegrationTestTarget>,
-    #[allow(dead_code)]
+    /// Non-library targets, ordered by kind and then by name.
+    pub targets: Vec<Target>,
     pub dependencies: Vec<Dependency>,
-    #[allow(dead_code)]
     pub features: BTreeMap<String, Vec<String>>,
-    #[allow(dead_code)]
     pub patches: Vec<Patch>,
-    #[allow(dead_code)]
     pub rust_lints: BTreeMap<String, Lint>,
-    #[allow(dead_code)]
+    pub clippy_lints: BTreeMap<String, Lint>,
+    pub rustdoc_lints: BTreeMap<String, Lint>,
     pub lock: Option<Lockfile>,
-    unsupported_target_dev_dependencies: Vec<UnsupportedTargetDevDependency>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct UnsupportedTargetDevDependency {
-    selector: String,
-    line: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,7 +87,11 @@ pub struct Version {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PackageMetadata {
+    pub custom: serde_json::Value,
+    pub hints: Option<serde_json::Value>,
     pub authors: Vec<String>,
+    pub keywords: Vec<String>,
+    pub categories: Vec<String>,
     pub description: String,
     pub homepage: String,
     pub documentation: String,
@@ -95,6 +100,9 @@ pub struct PackageMetadata {
     pub license_file: String,
     pub readme: String,
     pub rust_version: String,
+    pub publish: Option<Vec<String>>,
+    pub include: Option<Vec<String>>,
+    pub exclude: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,36 +116,55 @@ pub enum Lto {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Strip {
+    Default,
     None,
     Debuginfo,
     Symbols,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DevProfile {
-    pub panic_abort: bool,
-}
-
+/// One resolved Cargo profile; its defaults are those of `dev`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReleaseProfile {
+pub struct Profile {
     pub panic_abort: bool,
+    pub opt_level: &'static str,
+    pub debug: Option<CargoDebugInfo>,
     pub lto: Lto,
     pub strip: Strip,
     pub codegen_units: Option<u32>,
+    pub debug_assertions: bool,
+    pub overflow_checks: bool,
+    pub incremental: bool,
 }
 
-impl Default for ReleaseProfile {
+impl Default for Profile {
     fn default() -> Self {
         Self {
             panic_abort: false,
+            opt_level: "0",
+            debug: None,
             lto: Lto::Default,
-            strip: Strip::None,
+            strip: Strip::Default,
             codegen_units: None,
+            debug_assertions: true,
+            overflow_checks: true,
+            incremental: true,
         }
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
+impl Profile {
+    pub(crate) fn release() -> Self {
+        Self {
+            opt_level: "3",
+            debug_assertions: false,
+            overflow_checks: false,
+            incremental: false,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LibraryTarget {
     pub name: String,
@@ -145,31 +172,38 @@ pub struct LibraryTarget {
     pub proc_macro: bool,
     pub crate_types: Vec<String>,
     pub test: bool,
+    pub bench: bool,
     pub doctest: bool,
     pub doc: bool,
+    pub harness: bool,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BinaryTarget {
-    pub name: String,
-    pub path: PathBuf,
-    pub test: bool,
-    pub doc: bool,
+impl LibraryTarget {
+    pub(crate) fn requires_upstream_objects(&self) -> bool {
+        self.crate_types.iter().any(|kind| {
+            matches!(
+                kind.as_str(),
+                "staticlib" | "dylib" | "cdylib" | "proc-macro"
+            )
+        })
+    }
+
+    pub(crate) fn dynamic(&self) -> bool {
+        self.crate_types
+            .iter()
+            .any(|kind| matches!(kind.as_str(), "dylib" | "cdylib"))
+    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IntegrationTestTarget {
-    pub name: String,
-    pub path: PathBuf,
-}
-
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dependency {
     pub alias: String,
     pub package: String,
+    /// An explicit package key supplies a Cargo alias even if the names agree.
+    pub renamed: bool,
     pub requirement: VersionReq,
+    pub version_specified: bool,
+    pub git_path_source: Option<String>,
     pub source: DependencySource,
     pub optional: bool,
     pub default_features: bool,
@@ -178,7 +212,6 @@ pub struct Dependency {
     pub kind: DependencyKind,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DependencySource {
     CratesIo,
@@ -200,7 +233,6 @@ pub enum GitSelector {
     Revision(String),
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Patch {
     pub alias: String,
@@ -214,7 +246,6 @@ pub enum PatchSource {
     Git(GitDependency),
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Lint {
     pub level: String,
@@ -222,13 +253,38 @@ pub struct Lint {
     pub check_cfg: Vec<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Lockfile {
+    pub format: crate::lockfile::Format,
     pub packages: Vec<LockedPackage>,
 }
 
-#[allow(dead_code)]
+impl Lockfile {
+    pub(crate) fn load(path: &Path) -> Result<Self> {
+        let document = Document::load(path, "Cargo lockfile")?;
+        parse_lock_document(None, path, &document)
+    }
+
+    fn require_root(&self, manifest: &Manifest) -> Result<()> {
+        let roots = self
+            .packages
+            .iter()
+            .filter(|package| {
+                package.name == manifest.name
+                    && package.version.original == manifest.version.original
+                    && package.source.is_none()
+            })
+            .count();
+        if roots != 1 {
+            return Err(Error::failure(format!(
+                "Cargo.lock is stale: expected one root path package `{} {}`, found {roots}",
+                manifest.name, manifest.version.original
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LockedPackage {
     pub name: String,
@@ -239,194 +295,124 @@ pub struct LockedPackage {
 }
 
 impl Manifest {
-    pub fn panic_abort(&self, release: bool) -> bool {
-        if release {
-            self.release.panic_abort
-        } else {
-            self.dev.panic_abort
+    /// Cargo's target name for the build script: `build-script-<file stem>`.
+    pub fn build_script_name(&self) -> Option<String> {
+        let stem = self.build_script.as_ref()?.file_stem()?.to_str()?;
+        Some(format!("build-script-{stem}"))
+    }
+
+    pub fn report_warnings<'a>(
+        manifests: impl IntoIterator<Item = &'a Self>,
+        verbosity: crate::cli::Verbosity,
+    ) {
+        if verbosity == crate::cli::Verbosity::Quiet {
+            return;
+        }
+        let warnings = manifests
+            .into_iter()
+            .flat_map(|manifest| &manifest.warnings)
+            .collect::<BTreeSet<_>>();
+        for warning in warnings {
+            eprintln!("warning: {warning}");
         }
     }
 
-    #[allow(dead_code)]
-    pub fn load(root: &Path) -> Result<Self> {
-        Self::load_selected(root, None)
+    pub(crate) fn targets_of(&self, kind: TargetKind) -> impl Iterator<Item = &Target> + Clone {
+        self.targets
+            .iter()
+            .filter(move |target| target.kind == kind)
     }
 
-    #[allow(dead_code)]
-    pub fn load_for_vendor(root: &Path) -> Result<Self> {
-        Self::load_for_vendor_selected(root, None)
+    pub(crate) fn target(&self, kind: TargetKind, name: &str) -> Option<&Target> {
+        self.targets_of(kind).find(|target| target.name == name)
     }
 
-    pub fn load_selected(root: &Path, package: Option<&str>) -> Result<Self> {
-        Self::load_project(root, package, true)
+    fn require_member_targets(&self) -> Result<()> {
+        self.unresolved_target.clone().map_or(Ok(()), Err)
     }
 
-    pub fn load_for_vendor_selected(root: &Path, package: Option<&str>) -> Result<Self> {
-        Self::load_project(root, package, false)
+    // Tests load the one package that a build in `current` selects by default.
+    #[cfg(test)]
+    pub(crate) fn load_for_build(current: &Path) -> Result<Self> {
+        let (_, mut selected) =
+            SourceWorkspace::load_compilation(current, None, &PackageSelection::default())?;
+        assert_eq!(selected.len(), 1, "test fixture must select one package");
+        Ok(selected.pop().unwrap())
     }
 
-    pub fn load_selected_or_manifest_path(
-        root: &Path,
-        manifest_path: Option<&Path>,
-        package: Option<&str>,
-        require_current_lock: bool,
+    // Vendor sees source-level rules and an optional, possibly stale lock.
+    #[cfg(test)]
+    pub(crate) fn load_for_vendor(current: &Path) -> Result<Self> {
+        let mut workspace = SourceWorkspace::load(current, None)?;
+        workspace.load_context(false)?;
+        assert_eq!(
+            workspace.default_members.len(),
+            1,
+            "test fixture must select one package"
+        );
+        let root = workspace.default_members.pop().unwrap();
+        Ok(workspace
+            .packages
+            .into_iter()
+            .find(|package| package.root == root)
+            .unwrap())
+    }
+
+    // A selected member also obeys the build-only rules of a root manifest,
+    // checked in parse order on the documents and lock already loaded.
+    pub(crate) fn load_compilation_member(
+        source: &Self,
+        documents: &source::Documents,
     ) -> Result<Self> {
-        match manifest_path {
-            Some(path) => Self::load_manifest_path(path, package, require_current_lock),
-            None => Self::load_project(root, package, require_current_lock),
-        }
-    }
-
-    pub fn load_manifest_path(
-        manifest_path: &Path,
-        package: Option<&str>,
-        require_current_lock: bool,
-    ) -> Result<Self> {
-        let path = fs::canonicalize(manifest_path).map_err(|error| {
-            Error::failure(format!(
-                "failed to canonicalize manifest path `{}`: {error}",
-                manifest_path.display()
-            ))
-        })?;
-        if path.file_name().and_then(|name| name.to_str()) != Some(MANIFEST_NAME) {
-            return Err(Error::failure(format!(
-                "manifest path `{}` does not name Cargo.toml",
-                manifest_path.display()
-            )));
-        }
-        let root = path
-            .parent()
-            .ok_or_else(|| Error::failure("manifest path has no parent directory"))?;
-        let manifest = Self::load_project(root, package, require_current_lock)?;
-        if manifest.path != path {
-            return Err(Error::failure(format!(
-                "manifest path `{}` does not select package `{}`",
-                path.display(),
-                manifest.name
-            ))
-            .with_help("make --manifest-path and -p select the same exact package"));
-        }
+        let path = &source.path;
+        let document = documents.load(path, "Cargo workspace member manifest")?;
+        let inherited = dependency_workspace_package(&source.root, documents)?;
+        let member = inherited
+            .as_ref()
+            .is_some_and(|workspace| workspace.path != *path);
+        validate_manifest_tables(path, &document, ManifestMode::Root, member)?;
+        let package = document.root().get("package").and_then(Item::as_table);
+        validate_package_keys(path, &document, package.unwrap(), ManifestMode::Root)?;
+        let lints = inheritance::lint_table(path, &document, inherited.as_ref())?;
+        parse_lint_namespace(lints.as_ref(), ManifestMode::Root, "rust")?;
+        let mut manifest = source.clone();
+        resolve_target_defaults(&mut manifest, true)?;
+        let lock = match manifest.lock.take() {
+            Some(lock) => lock,
+            None => {
+                let lock_path = manifest.workspace_root.join(LOCK_NAME);
+                if !lock_path.is_file() {
+                    return Err(Error::failure(format!(
+                        "required lockfile `{}` is missing",
+                        lock_path.display()
+                    ))
+                    .with_help(
+                        "create a version-4 Cargo.lock; build commands never resolve or write it",
+                    ));
+                }
+                Lockfile::load(&lock_path)?
+            }
+        };
+        lock.require_root(&manifest)?;
+        manifest.lock = Some(lock);
         Ok(manifest)
     }
 
     pub fn with_lock_source(mut self, source: String) -> Result<Self> {
         let path = self.root.join(LOCK_NAME);
         let document = Document::parse(&path, "Cargo lockfile", source)?;
-        self.lock = Some(parse_lock_document(&self, &path, &document, true)?);
+        self.lock = Some(parse_lock_document(Some(&self), &path, &document)?);
         Ok(self)
     }
 
-    pub fn require_supported_target(&self, target: &TargetInfo) -> Result<()> {
-        for dependency in &self.unsupported_target_dev_dependencies {
-            let selected = if dependency.selector.starts_with("cfg(") {
-                target.cfg.matches_selector(&dependency.selector)?
-            } else {
-                dependency.selector == target.triple
-            };
-            if selected {
-                return Err(Error::at(
-                    &self.path,
-                    dependency.line,
-                    format!(
-                        "root `target.{}.dev-dependencies` is not supported in Stage 2",
-                        dependency.selector
-                    ),
-                    "remove the selected target's root dev-dependencies",
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn load_project(
-        root: &Path,
-        package: Option<&str>,
-        require_current_lock: bool,
-    ) -> Result<Self> {
-        let root = fs::canonicalize(root).map_err(|error| {
-            Error::failure(format!(
-                "failed to canonicalize package directory `{}`: {error}",
-                root.display()
-            ))
-        })?;
-        let path = root.join(MANIFEST_NAME);
-        if !path.is_file() {
-            return Err(Error::failure(format!(
-                "manifest `{}` does not exist; Lorry does not search parent directories",
-                path.display()
-            )));
-        }
-        let document = Document::load(&path, "Cargo manifest")?;
-        let Some(workspace) = discover_workspace(&root, &path, &document)? else {
-            let mut manifest =
-                Self::finish_root(root.clone(), path, document, &root, require_current_lock)?;
-            if let Some(requested) = package
-                && requested != manifest.name
-            {
-                return Err(Error::failure(format!(
-                    "package `{requested}` is not the current package `{}`",
-                    manifest.name
-                )));
-            }
-            manifest.workspace_root = root;
-            return Ok(manifest);
-        };
-        let member = workspace.select(&root, package)?;
-        let member_path = member.join(MANIFEST_NAME);
-        let member_document = if member == root {
-            document
-        } else {
-            Document::load(&member_path, "Cargo workspace member manifest")?
-        };
-        let mut manifest = Self::finish_root(
-            member,
-            member_path,
-            member_document,
-            &workspace.root,
-            require_current_lock,
-        )?;
-        workspace.apply(&mut manifest)?;
-        Ok(manifest)
-    }
-
-    fn finish_root(
-        root: PathBuf,
-        path: PathBuf,
-        document: Document,
-        lock_root: &Path,
-        require_current_lock: bool,
-    ) -> Result<Self> {
-        let mut manifest = Self::parse_document(&root, &path, &document, ManifestMode::Root)?;
-        manifest.root = root;
-        manifest.workspace_root = lock_root.to_owned();
-        manifest.path = manifest.root.join(MANIFEST_NAME);
-        resolve_target_defaults(&mut manifest)?;
-        manifest.integration_tests = discover_integration_tests(&manifest.root)?;
-
-        let lock_path = lock_root.join(LOCK_NAME);
-        if !lock_path.is_file() {
-            if require_current_lock {
-                return Err(Error::failure(format!(
-                    "required lockfile `{}` is missing",
-                    lock_path.display()
-                ))
-                .with_help(
-                    "create a version-4 Cargo.lock; build commands never resolve or write it",
-                ));
-            }
-            return Ok(manifest);
-        }
-        let lock_document = Document::load(&lock_path, "Cargo lockfile")?;
-        manifest.lock = Some(parse_lock_document(
-            &manifest,
-            &lock_path,
-            &lock_document,
-            require_current_lock,
-        )?);
-        Ok(manifest)
-    }
-
     pub fn load_path_dependency(root: &Path) -> Result<Self> {
+        Self::load_path_dependency_in(root, &source::Documents::default())
+    }
+
+    pub(crate) fn load_path_dependency_in(
+        root: &Path,
+        documents: &source::Documents,
+    ) -> Result<Self> {
         let root = fs::canonicalize(root).map_err(|error| {
             Error::failure(format!(
                 "failed to canonicalize path dependency directory `{}`: {error}",
@@ -440,8 +426,8 @@ impl Manifest {
                 path.display()
             )));
         }
-        let document = Document::load(&path, "Cargo path dependency manifest")?;
-        let inherited = dependency_workspace_package(&root, &path, &document)?;
+        let document = documents.load(&path, "Cargo path dependency manifest")?;
+        let inherited = dependency_workspace_package(&root, documents)?;
         let mut manifest = Self::parse_document_with_inheritance(
             &root,
             &path,
@@ -451,7 +437,49 @@ impl Manifest {
         )?;
         manifest.root = root;
         manifest.path = manifest.root.join(MANIFEST_NAME);
-        resolve_target_defaults(&mut manifest)?;
+        resolve_target_defaults(&mut manifest, true)?;
+        Ok(manifest)
+    }
+
+    /// Loads a registry package. It is published with any workspace
+    /// inheritance resolved, so unlike a path or Git package it never reads
+    /// an enclosing directory's manifest, such as one planted in a shared
+    /// temporary directory above an extracted archive.
+    pub(crate) fn load_registry_dependency(root: &Path, describe: bool) -> Result<Self> {
+        let root = fs::canonicalize(root).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize registry package `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        let path = root.join(MANIFEST_NAME);
+        let document = Document::load(&path, "Cargo registry package manifest")?;
+        let mode = if describe {
+            ManifestMode::Source
+        } else {
+            ManifestMode::Dependency
+        };
+        let mut manifest =
+            Self::parse_document_with_inheritance(&root, &path, &document, mode, None)?;
+        manifest.path = root.join(MANIFEST_NAME);
+        resolve_target_defaults(&mut manifest, !describe)?;
+        if describe {
+            manifest.workspace_root.clone_from(&root);
+            manifest.editable = false;
+        }
+        manifest.root = root;
+        Ok(manifest)
+    }
+
+    pub(crate) fn load_source_dependency(root: &Path) -> Result<Self> {
+        let root = fs::canonicalize(root).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize source package `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        let mut manifest = source::load_package(&root, &root, &source::Documents::default())?;
+        manifest.editable = false;
         Ok(manifest)
     }
 
@@ -467,6 +495,7 @@ impl Manifest {
         Self::parse_document(root, path, &document, ManifestMode::Dependency)
     }
 
+    #[cfg(test)]
     fn parse_document(
         root: &Path,
         path: &Path,
@@ -483,7 +512,8 @@ impl Manifest {
         mode: ManifestMode,
         inherited: Option<&InheritedPackage>,
     ) -> Result<Self> {
-        validate_manifest_tables(path, document, mode)?;
+        let member = inherited.is_some_and(|workspace| workspace.path != path);
+        validate_manifest_tables(path, document, mode, member)?;
         let package_item = document.root().get("package").ok_or_else(|| {
             Error::failure(format!(
                 "manifest `{}` is missing required table `[package]`",
@@ -517,50 +547,57 @@ impl Manifest {
             edition,
             document.line_of_table(package),
         )?;
-        let mut metadata = parse_package_metadata(path, document, package, inherited)?;
-        if metadata.readme.is_empty() {
-            for candidate in ["README.md", "README.txt", "README"] {
-                if root.join(candidate).is_file() {
-                    metadata.readme = candidate.to_owned();
-                    break;
-                }
-            }
-        }
+        let metadata = parse_package_metadata(root, path, document, package, inherited)?;
 
         let links = optional_string(path, document, package, "package", "links")?;
         let build_script = parse_build_script(path, document, package, root)?;
-        let library = parse_library(path, document, root, &name, mode)?;
-        let binaries = if mode == ManifestMode::Root {
-            parse_binaries(path, document, root, package, &name)?
-        } else {
-            Vec::new()
+        let library = parse_library(path, document, root, &name)?;
+        let mut warnings = Vec::new();
+        let package_targets = targets::Package {
+            root,
+            path,
+            document,
+            table: package,
+            name: &name,
+            edition,
+            has_library: library.is_some(),
         };
-        let integration_tests = if mode == ManifestMode::Dependency {
-            parse_dependency_integration_tests(path, document, root, package)?
-        } else {
-            Vec::new()
-        };
+        let mut targets = Vec::new();
+        let mut unresolved_target = None;
+        for kind in TargetKind::ALL {
+            // Dependency binaries are neither built nor described.
+            if kind != TargetKind::Bin || mode != ManifestMode::Dependency {
+                targets.extend(targets::parse(
+                    &package_targets,
+                    kind,
+                    &mut warnings,
+                    &mut unresolved_target,
+                )?);
+            }
+        }
         let mut dependencies = Vec::new();
+        let mut fields = DependencyFields {
+            path,
+            document,
+            root,
+            inherited,
+            edition,
+            warnings: &mut warnings,
+        };
         if let Some(item) = document.root().get("dependencies") {
             let table = require_table(path, document, item, "dependencies")?;
             parse_dependency_table(
-                path,
-                document,
-                root,
+                &mut fields,
                 table,
                 None,
                 DependencyKind::Normal,
                 &mut dependencies,
             )?;
         }
-        if mode == ManifestMode::Dependency
-            && let Some(item) = document.root().get("build-dependencies")
-        {
+        if let Some(item) = document.root().get("build-dependencies") {
             let table = require_table(path, document, item, "build-dependencies")?;
             parse_dependency_table(
-                path,
-                document,
-                root,
+                &mut fields,
                 table,
                 None,
                 DependencyKind::Build,
@@ -568,241 +605,117 @@ impl Manifest {
             )?;
         }
         validate_ignored_dev_dependencies(path, document)?;
-        let mut unsupported_target_dev_dependencies = Vec::new();
-        parse_target_dependencies(
-            path,
-            document,
-            root,
-            mode,
-            &mut dependencies,
-            &mut unsupported_target_dev_dependencies,
-        )?;
+        if mode != ManifestMode::Dependency
+            && let Some(item) = document.root().get("dev-dependencies")
+        {
+            let table = require_table(path, document, item, "dev-dependencies")?;
+            parse_dependency_table(
+                &mut fields,
+                table,
+                None,
+                DependencyKind::Dev,
+                &mut dependencies,
+            )?;
+        }
+        parse_target_dependencies(&mut fields, mode, &mut dependencies)?;
         let features = parse_features(path, document)?;
-        let patches = if mode == ManifestMode::Root {
+        let patches = if mode == ManifestMode::Root && !member {
             parse_patches(path, document, root)?
         } else {
             Vec::new()
         };
-        let rust_lints = parse_rust_lints(path, document, mode)?;
-        let (dev, release) = if mode == ManifestMode::Root {
-            parse_profiles(path, document)?
-        } else {
-            (DevProfile::default(), ReleaseProfile::default())
-        };
+        let lint_table = inheritance::lint_table(path, document, inherited)?;
+        let rust_lints = parse_lint_namespace(lint_table.as_ref(), mode, "rust")?;
+        let clippy_lints = parse_lint_namespace(lint_table.as_ref(), mode, "clippy")?;
+        let rustdoc_lints = parse_lint_namespace(lint_table.as_ref(), mode, "rustdoc")?;
+        if mode == ManifestMode::Root && !member {
+            profiles::validate(path, document)?;
+        }
 
         Ok(Self {
             root: root.to_path_buf(),
             workspace_root: root.to_path_buf(),
-            workspace_members: std::iter::once(name.clone()).collect(),
+            editable: mode != ManifestMode::Dependency,
+            workspace_members: std::iter::once((name.clone(), root.to_path_buf())).collect(),
             path: path.to_path_buf(),
-            crate_name: name.replace('-', "_"),
+            warnings,
             name,
             version,
             edition,
             metadata,
             default_run: optional_string(path, document, package, "package", "default-run")?,
-            dev,
-            release,
+            profile: Profile::default(),
+            unresolved_target,
+            profile_directory: None,
+            profile_name: None,
             resolver,
             links,
             build_script,
             library,
-            binaries,
-            integration_tests,
+            targets,
             dependencies,
             features,
             patches,
             rust_lints,
+            clippy_lints,
+            rustdoc_lints,
             lock: None,
-            unsupported_target_dev_dependencies,
         })
     }
 }
 
-#[derive(Clone)]
-struct Workspace {
-    root: PathBuf,
-    members: BTreeMap<String, PathBuf>,
-    dev: DevProfile,
-    release: ReleaseProfile,
-    resolver: Resolver,
-    patches: Vec<Patch>,
+fn discover_manifest(current: &Path, manifest_path: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = manifest_path {
+        return canonical_manifest(&current.join(path));
+    }
+    let current = fs::canonicalize(current).map_err(|error| {
+        Error::failure(format!(
+            "failed to canonicalize invocation directory `{}`: {error}",
+            current.display()
+        ))
+    })?;
+    for directory in current.ancestors() {
+        let path = directory.join(MANIFEST_NAME);
+        if path.is_file() {
+            return canonical_manifest(&path);
+        }
+    }
+    Err(Error::failure(format!(
+        "could not find Cargo.toml in `{}` or any parent directory",
+        current.display()
+    )))
 }
 
-impl Workspace {
-    fn parse(root: &Path, path: &Path, document: &Document) -> Result<Self> {
-        let item = document.root().get("workspace").ok_or_else(|| {
-            Error::failure(format!(
-                "workspace manifest `{}` has no `[workspace]`",
-                path.display()
-            ))
-        })?;
-        let table = require_table(path, document, item, "workspace")?;
-        for (key, item) in table.iter() {
-            if !matches!(key, "members" | "resolver") {
+fn canonical_manifest(manifest_path: &Path) -> Result<PathBuf> {
+    let path = fs::canonicalize(manifest_path).map_err(|error| {
+        Error::failure(format!(
+            "failed to canonicalize manifest path `{}`: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    if path.file_name().and_then(|name| name.to_str()) != Some(MANIFEST_NAME) {
+        return Err(Error::failure(format!(
+            "manifest path `{}` does not name Cargo.toml",
+            manifest_path.display()
+        )));
+    }
+    Ok(path)
+}
+
+fn validate_virtual_workspace(path: &Path, document: &Document) -> Result<()> {
+    if !document.root().contains_key("package") {
+        for (key, item) in document.root().iter() {
+            if !matches!(key, "workspace" | "profile" | "patch") {
                 return Err(Error::at(
                     path,
                     document.line_of_item(item),
-                    format!("workspace.{key} is outside selected-member workspace support"),
-                    "use explicit members without workspace inheritance, exclusions, or defaults",
+                    format!("unsupported virtual-workspace table or key `{key}`"),
+                    "keep only workspace-wide profiles and crates.io patches",
                 ));
             }
         }
-        let declared = table.get("members").ok_or_else(|| {
-            Error::at(
-                path,
-                document.line_of_table(table),
-                "workspace.members is required",
-                "list each member with an explicit relative path",
-            )
-        })?;
-        let declared = string_array(path, document, declared, "workspace.members")?;
-        if declared.len() > MAX_WORKSPACE_MEMBERS {
-            return Err(Error::failure(format!(
-                "workspace declares more than {MAX_WORKSPACE_MEMBERS} members"
-            )));
-        }
-
-        if !document.root().contains_key("package") {
-            for (key, item) in document.root().iter() {
-                if !matches!(key, "workspace" | "profile" | "patch") {
-                    return Err(Error::at(
-                        path,
-                        document.line_of_item(item),
-                        format!("unsupported virtual-workspace table or key `{key}`"),
-                        "keep only workspace-wide profiles and crates.io patches",
-                    ));
-                }
-            }
-        }
-        let resolver = if let Some(item) = table.get("resolver") {
-            parse_resolver(path, document, Some(item), Edition::E2015, 1)?
-        } else if let Some(package) = document.root().get("package") {
-            let package = require_table(path, document, package, "package")?;
-            let edition = parse_edition(path, document, package.get("edition"), 1, None)?;
-            parse_resolver(path, document, package.get("resolver"), edition, 1)?
-        } else {
-            Resolver::V1
-        };
-
-        let mut roots = declared
-            .into_iter()
-            .map(|member| workspace_member_root(root, path, document, &member))
-            .collect::<Result<Vec<_>>>()?;
-        if document.root().contains_key("package") {
-            roots.push(root.to_owned());
-        }
-        roots.sort();
-        roots.dedup();
-        let mut members = BTreeMap::new();
-        for member in roots {
-            let member_path = member.join(MANIFEST_NAME);
-            let member_document = Document::load(&member_path, "Cargo workspace member manifest")?;
-            let package = member_document.root().get("package").ok_or_else(|| {
-                Error::failure(format!(
-                    "workspace member `{}` has no `[package]`",
-                    member.display()
-                ))
-            })?;
-            let package = require_table(&member_path, &member_document, package, "package")?;
-            let name = required_string(&member_path, &member_document, package, "package", "name")?;
-            validate_package_name(&member_path, member_document.line_of_table(package), &name)?;
-            if members.insert(name.clone(), member).is_some() {
-                return Err(Error::failure(format!(
-                    "workspace contains duplicate package name `{name}`"
-                )));
-            }
-        }
-        let (dev, release) = parse_profiles(path, document)?;
-        Ok(Self {
-            root: root.to_owned(),
-            members,
-            dev,
-            release,
-            resolver,
-            patches: parse_patches(path, document, root)?,
-        })
     }
-
-    fn select(&self, current: &Path, requested: Option<&str>) -> Result<PathBuf> {
-        if let Some(name) = requested {
-            return self.members.get(name).cloned().ok_or_else(|| {
-                Error::failure(format!("workspace has no package named `{name}`")).with_help(
-                    format!(
-                        "available workspace packages: {}",
-                        self.members.keys().cloned().collect::<Vec<_>>().join(", ")
-                    ),
-                )
-            });
-        }
-        if let Some((_, member)) = self.members.iter().find(|(_, root)| *root == current) {
-            return Ok(member.clone());
-        }
-        Err(Error::failure("a virtual workspace has no current package")
-            .with_help("select one exact workspace package with `-p NAME`"))
-    }
-
-    fn apply(&self, manifest: &mut Manifest) -> Result<()> {
-        if manifest.root != self.root {
-            let document = Document::load(&manifest.path, "Cargo workspace member manifest")?;
-            for key in ["workspace", "profile", "patch"] {
-                if let Some(item) = document.root().get(key) {
-                    return Err(Error::at(
-                        &manifest.path,
-                        document.line_of_item(item),
-                        format!("workspace member cannot define `{key}`"),
-                        "move workspace-wide settings to the workspace root",
-                    ));
-                }
-            }
-            let package = require_table(
-                &manifest.path,
-                &document,
-                document.root().get("package").unwrap(),
-                "package",
-            )?;
-            if let Some(item) = package.get("resolver") {
-                return Err(Error::at(
-                    &manifest.path,
-                    document.line_of_item(item),
-                    "workspace member cannot define package.resolver",
-                    "set workspace.resolver at the workspace root",
-                ));
-            }
-        }
-        manifest.workspace_root.clone_from(&self.root);
-        manifest.workspace_members = self.members.keys().cloned().collect();
-        manifest.dev.clone_from(&self.dev);
-        manifest.release.clone_from(&self.release);
-        manifest.resolver = self.resolver;
-        manifest.patches.clone_from(&self.patches);
-        Ok(())
-    }
-}
-
-fn discover_workspace(
-    current: &Path,
-    path: &Path,
-    document: &Document,
-) -> Result<Option<Workspace>> {
-    if document.root().contains_key("workspace") {
-        return Workspace::parse(current, path, document).map(Some);
-    }
-    for parent in current.ancestors().skip(1) {
-        let candidate = parent.join(MANIFEST_NAME);
-        if !candidate.is_file() {
-            continue;
-        }
-        let candidate_document = Document::load(&candidate, "possible Cargo workspace manifest")?;
-        if !candidate_document.root().contains_key("workspace") {
-            continue;
-        }
-        let workspace = Workspace::parse(parent, &candidate, &candidate_document)?;
-        if workspace.members.values().any(|member| member == current) {
-            return Ok(Some(workspace));
-        }
-    }
-    Ok(None)
+    Ok(())
 }
 
 fn workspace_member_root(
@@ -816,15 +729,12 @@ fn workspace_member_root(
         || candidate
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
-        || member
-            .bytes()
-            .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b']'))
     {
         return Err(Error::at(
             path,
             document.line_of_item(document.root().get("workspace").unwrap()),
             format!("unsupported workspace member path `{member}`"),
-            "use an explicit descendant path without globs or `..`",
+            "use a descendant path without `..`",
         ));
     }
     let declared = root.join(candidate);
@@ -834,7 +744,7 @@ fn workspace_member_root(
             declared.display()
         ))
     })?;
-    if !canonical.starts_with(root) || !canonical.join(MANIFEST_NAME).is_file() {
+    if !canonical.starts_with(root) {
         return Err(Error::failure(format!(
             "workspace member `{}` is not a package directory below the workspace root",
             declared.display()
@@ -847,162 +757,150 @@ fn workspace_member_root(
 enum ManifestMode {
     Root,
     Dependency,
+    Source,
 }
 
-#[derive(Default)]
 struct InheritedPackage {
     version: Option<String>,
     edition: Option<String>,
     rust_version: Option<String>,
+    path: PathBuf,
+    document: std::rc::Rc<Document>,
 }
 
 fn dependency_workspace_package(
     root: &Path,
-    path: &Path,
-    document: &Document,
+    documents: &source::Documents,
 ) -> Result<Option<InheritedPackage>> {
-    for ancestor in root.ancestors() {
-        let candidate_path = ancestor.join(MANIFEST_NAME);
-        let candidate_document;
-        let workspace_document = if candidate_path == path {
-            document
-        } else {
-            if !candidate_path.is_file() {
-                continue;
-            }
-            candidate_document =
-                Document::load(&candidate_path, "possible dependency workspace manifest")?;
-            &candidate_document
-        };
-        let Some(workspace_item) = workspace_document.root().get("workspace") else {
-            continue;
-        };
-        let workspace = require_table(
-            &candidate_path,
-            workspace_document,
-            workspace_item,
-            "workspace",
-        )?;
-        if ancestor != root
-            && !dependency_workspace_contains(
-                root,
-                ancestor,
-                &candidate_path,
-                workspace_document,
-                workspace,
-            )?
-        {
-            continue;
-        }
-        let Some(package_item) = workspace.get("package") else {
-            return Ok(Some(InheritedPackage::default()));
-        };
-        let package = require_table(
-            &candidate_path,
-            workspace_document,
-            package_item,
-            "workspace.package",
-        )?;
-        return Ok(Some(InheritedPackage {
-            version: optional_string(
-                &candidate_path,
-                workspace_document,
-                package,
-                "workspace.package",
-                "version",
-            )?,
-            edition: optional_string(
-                &candidate_path,
-                workspace_document,
-                package,
-                "workspace.package",
-                "edition",
-            )?,
-            rust_version: optional_string(
-                &candidate_path,
-                workspace_document,
-                package,
-                "workspace.package",
-                "rust-version",
-            )?,
-        }));
-    }
-    Ok(None)
+    let Some(workspace) = source::nearest_workspace(root, documents)? else {
+        return Ok(None);
+    };
+    let path = workspace.root.join(MANIFEST_NAME);
+    let document = workspace.document;
+    let table = require_table(
+        &path,
+        &document,
+        document.root().get("workspace").unwrap(),
+        "workspace",
+    )?;
+    let package = table
+        .get("package")
+        .map(|item| require_table(&path, &document, item, "workspace.package"))
+        .transpose()?;
+    let field = |key| {
+        package
+            .map(|package| optional_string(&path, &document, package, "workspace.package", key))
+            .transpose()
+            .map(Option::flatten)
+    };
+    Ok(Some(InheritedPackage {
+        version: field("version")?,
+        edition: field("edition")?,
+        rust_version: field("rust-version")?,
+        path,
+        document,
+    }))
 }
 
-fn dependency_workspace_contains(
+fn workspace_resolver(
     root: &Path,
-    workspace_root: &Path,
     path: &Path,
     document: &Document,
-    workspace: &Table,
-) -> Result<bool> {
-    let Some(item) = workspace.get("members") else {
-        return Ok(false);
-    };
-    for member in string_array(path, document, item, "workspace.members")? {
-        let relative = Path::new(&member);
-        if member.is_empty()
-            || relative
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-            || member
-                .bytes()
-                .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b']'))
-        {
-            continue;
-        }
-        let candidate = workspace_root.join(relative);
-        if fs::canonicalize(candidate).is_ok_and(|candidate| candidate == root) {
-            return Ok(true);
-        }
+    documents: &source::Documents,
+) -> Result<Resolver> {
+    let workspace = require_table(
+        path,
+        document,
+        document.root().get("workspace").unwrap(),
+        "workspace",
+    )?;
+    if let Some(item) = workspace.get("resolver") {
+        return parse_resolver(path, document, Some(item), Edition::E2015, 1);
     }
-    Ok(false)
+    let Some(item) = document.root().get("package") else {
+        return Ok(Resolver::V1);
+    };
+    let package = require_table(path, document, item, "package")?;
+    let inherited = dependency_workspace_package(root, documents)?;
+    let edition = parse_edition(
+        path,
+        document,
+        package.get("edition"),
+        1,
+        inherited
+            .as_ref()
+            .and_then(|values| values.edition.as_deref()),
+    )?;
+    parse_resolver(path, document, package.get("resolver"), edition, 1)
 }
 
-fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode) -> Result<()> {
+fn workspace_metadata(document: &Document) -> serde_json::Value {
+    document
+        .root()
+        .get("workspace")
+        .and_then(Item::as_table)
+        .and_then(|workspace| workspace.get("metadata"))
+        .map(crate::toml::json)
+        .unwrap_or_default()
+}
+
+fn validate_manifest_tables(
+    path: &Path,
+    document: &Document,
+    mode: ManifestMode,
+    member: bool,
+) -> Result<()> {
     for (key, item) in document.root().iter() {
-        let supported = matches!(
-            (mode, key),
-            (
-                ManifestMode::Root,
-                "package"
-                    | "dependencies"
-                    | "target"
-                    | "features"
-                    | "patch"
-                    | "profile"
-                    | "lib"
-                    | "bin"
-                    | "lints"
-                    | "workspace"
-            ) | (
-                ManifestMode::Dependency,
-                "package"
-                    | "dependencies"
-                    | "build-dependencies"
-                    | "dev-dependencies"
-                    | "target"
-                    | "features"
-                    | "profile"
-                    | "lib"
-                    | "bin"
-                    | "example"
-                    | "test"
-                    | "bench"
-                    | "lints"
-                    | "hints"
-                    | "badges"
-                    | "workspace"
-                    | "patch"
-            )
-        );
+        let supported = (member && key == "replace")
+            || matches!(
+                (mode, key),
+                (
+                    ManifestMode::Root,
+                    "package"
+                        | "dependencies"
+                        | "build-dependencies"
+                        | "dev-dependencies"
+                        | "target"
+                        | "features"
+                        | "patch"
+                        | "profile"
+                        | "lib"
+                        | "bin"
+                        | "test"
+                        | "example"
+                        | "bench"
+                        | "badges"
+                        | "lints"
+                        | "workspace"
+                ) | (
+                    // Source descriptions accept every table that a dependency may
+                    // use, which includes every table of a root package.
+                    ManifestMode::Dependency | ManifestMode::Source,
+                    "package"
+                        | "dependencies"
+                        | "build-dependencies"
+                        | "dev-dependencies"
+                        | "target"
+                        | "features"
+                        | "profile"
+                        | "lib"
+                        | "bin"
+                        | "example"
+                        | "test"
+                        | "bench"
+                        | "lints"
+                        | "hints"
+                        | "badges"
+                        | "workspace"
+                        | "patch"
+                )
+            );
         if !supported {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                format!("unsupported Stage-2 manifest table or key `{key}`"),
-                "remove it or use a later Lorry stage that supports its build semantics",
+                format!("unsupported manifest table or key `{key}`"),
+                "remove it; Lorry does not support its build semantics",
             ));
         }
     }
@@ -1036,111 +934,83 @@ fn validate_package_keys(
         "include",
         "exclude",
         "default-run",
-        "autobins",
-        "metadata",
-    ];
-    const DEPENDENCY_ONLY: &[&str] = &[
-        "links",
         "autolib",
         "autobins",
-        "autoexamples",
         "autotests",
+        "autoexamples",
         "autobenches",
+        "metadata",
     ];
+    let dependency = matches!(mode, ManifestMode::Dependency | ManifestMode::Source);
     for (key, item) in package.iter() {
-        if !ROOT_ALLOWED.contains(&key)
-            && !(mode == ManifestMode::Dependency && DEPENDENCY_ONLY.contains(&key))
-        {
+        if !ROOT_ALLOWED.contains(&key) && !(dependency && key == "links") {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                format!("unsupported Stage-2 manifest key `package.{key}`"),
-                "remove the key or use a later Lorry stage that supports its build semantics",
+                format!("unsupported manifest key `package.{key}`"),
+                "remove the key; Lorry does not support its build semantics",
             ));
         }
     }
-    if let Some(item) = package.get("autobins")
-        && item.as_bool().is_none()
+    for key in [
+        "autolib",
+        "autobins",
+        "autotests",
+        "autoexamples",
+        "autobenches",
+    ] {
+        if let Some(item) = package.get(key)
+            && item.as_bool().is_none()
+        {
+            return Err(type_error(
+                path,
+                document.line_of_item(item),
+                &format!("package.{key}"),
+                "a boolean",
+            ));
+        }
+    }
+    if dependency
+        && let Some(item) = package.get("links")
+        && item.as_str().is_none()
     {
         return Err(type_error(
             path,
             document.line_of_item(item),
-            "package.autobins",
-            "a boolean",
+            "package.links",
+            "a string",
         ));
-    }
-    if mode == ManifestMode::Dependency {
-        for key in DEPENDENCY_ONLY
-            .iter()
-            .copied()
-            .filter(|key| *key != "links")
-        {
-            if let Some(item) = package.get(key)
-                && item.as_bool().is_none()
-            {
-                return Err(type_error(
-                    path,
-                    document.line_of_item(item),
-                    &format!("package.{key}"),
-                    "a boolean",
-                ));
-            }
-        }
-        if let Some(item) = package.get("links")
-            && item.as_str().is_none()
-        {
-            return Err(type_error(
-                path,
-                document.line_of_item(item),
-                "package.links",
-                "a string",
-            ));
-        }
-    }
-    for key in ["authors", "keywords", "categories", "include", "exclude"] {
-        if let Some(item) = package.get(key) {
-            string_array(path, document, item, &format!("package.{key}"))?;
-        }
-    }
-    if let Some(item) = package.get("publish") {
-        if item.as_bool().is_none() && item.as_array().is_none() {
-            return Err(type_error(
-                path,
-                document.line_of_item(item),
-                "package.publish",
-                "a boolean or string array",
-            ));
-        }
-        if item.as_array().is_some() {
-            string_array(path, document, item, "package.publish")?;
-        }
     }
     Ok(())
 }
 
 fn parse_package_metadata(
+    root: &Path,
     path: &Path,
     document: &Document,
     package: &Table,
     inherited: Option<&InheritedPackage>,
 ) -> Result<PackageMetadata> {
+    let fields = inheritance::PackageFields::new(path, document, package, inherited);
     Ok(PackageMetadata {
-        authors: optional_string_array(path, document, package, "package", "authors")?
+        hints: document.root().get("hints").map(|item| {
+            let table = require_table(path, document, item, "hints")?;
+            Ok::<_, Error>(serde_json::json!({"mostly-unused": table.get("mostly-unused").map(crate::toml::json).unwrap_or_default()}))
+        }).transpose()?,
+        custom: package
+            .get("metadata")
+            .map(crate::toml::json)
             .unwrap_or_default(),
-        description: optional_string(path, document, package, "package", "description")?
-            .unwrap_or_default(),
-        homepage: optional_string(path, document, package, "package", "homepage")?
-            .unwrap_or_default(),
-        documentation: optional_string(path, document, package, "package", "documentation")?
-            .unwrap_or_default(),
-        repository: optional_string(path, document, package, "package", "repository")?
-            .unwrap_or_default(),
-        license: optional_string(path, document, package, "package", "license")?
-            .unwrap_or_default(),
-        license_file: optional_string(path, document, package, "package", "license-file")?
-            .unwrap_or_default(),
-        readme: optional_string_or_false(path, document, package, "package", "readme")?
-            .unwrap_or_default(),
+        authors: fields.array("authors")?.unwrap_or_default(),
+        keywords: fields.array("keywords")?.unwrap_or_default(),
+        categories: fields.array("categories")?.unwrap_or_default(),
+        description: fields.string("description")?.unwrap_or_default(),
+        homepage: fields.string("homepage")?.unwrap_or_default(),
+        documentation: fields.string("documentation")?.unwrap_or_default(),
+        repository: fields.string("repository")?.unwrap_or_default(),
+        license: fields.string("license")?.unwrap_or_default(),
+        license_file: fields.file("license-file", root)?,
+        readme: fields.readme(root)?,
         rust_version: optional_package_string(
             path,
             document,
@@ -1149,6 +1019,9 @@ fn parse_package_metadata(
             inherited.and_then(|values| values.rust_version.as_deref()),
         )?
         .unwrap_or_default(),
+        publish: fields.publish()?,
+        include: fields.array("include")?,
+        exclude: fields.array("exclude")?,
     })
 }
 
@@ -1219,6 +1092,14 @@ fn parse_build_script(
         Some(item) if item.as_str().is_some() => {
             let value = item.as_str().unwrap();
             validate_relative_path(path, document.line_of_item(item), "package.build", value)?;
+            if Path::new(value).file_stem().is_none() {
+                return Err(Error::at(
+                    path,
+                    document.line_of_item(item),
+                    "`package.build` must name a file",
+                    "use the path of the build script's source file",
+                ));
+            }
             Ok(Some(root.join(value)))
         }
         Some(item) => Err(type_error(
@@ -1237,28 +1118,48 @@ fn parse_library(
     document: &Document,
     root: &Path,
     package_name: &str,
-    mode: ManifestMode,
 ) -> Result<Option<LibraryTarget>> {
     let Some(item) = document.root().get("lib") else {
+        if document
+            .root()
+            .get("package")
+            .and_then(Item::as_table)
+            .and_then(|package| package.get("autolib"))
+            .and_then(Item::as_bool)
+            == Some(false)
+        {
+            return Ok(None);
+        }
         return Ok(root.join("src/lib.rs").is_file().then(|| LibraryTarget {
             name: package_name.replace('-', "_"),
             path: root.join("src/lib.rs"),
             proc_macro: false,
             crate_types: vec!["lib".to_owned()],
             test: true,
+            bench: true,
             doctest: true,
             doc: true,
+            harness: true,
         }));
     };
     let table = require_table(path, document, item, "lib")?;
     for (key, item) in table.iter() {
         if !matches!(
             key,
-            "name" | "path" | "test" | "doctest" | "crate-type" | "bench" | "doc" | "proc-macro"
+            "name"
+                | "path"
+                | "test"
+                | "doctest"
+                | "crate-type"
+                | "bench"
+                | "doc"
+                | "proc-macro"
+                | "doc-scrape-examples"
+                | "harness"
         ) {
             return Err(unsupported_key(path, document, item, &format!("lib.{key}")));
         }
-        if matches!(key, "bench" | "doc") && item.as_bool().is_none() {
+        if matches!(key, "bench" | "doc" | "doc-scrape-examples") && item.as_bool().is_none() {
             return Err(type_error(
                 path,
                 document.line_of_item(item),
@@ -1275,47 +1176,35 @@ fn parse_library(
             ));
         }
     }
-    if mode == ManifestMode::Root {
-        for key in ["bench", "doc"] {
-            if table
-                .get(key)
-                .is_some_and(|item| item.as_bool() != Some(false))
-            {
-                return Err(Error::at(
-                    path,
-                    item_line(document, table, key),
-                    format!("`lib.{key}` must be false in Stage 2 root packages"),
-                    "disable the unsupported library target mode",
-                ));
-            }
-        }
-    }
     let declared_crate_types = table
         .get("crate-type")
         .map(|item| string_array(path, document, item, "lib.crate-type"))
         .transpose()?;
     if let Some(values) = &declared_crate_types
         && (values.is_empty()
-            || values
-                .iter()
-                .any(|value| !matches!(value.as_str(), "lib" | "rlib")))
+            || values.iter().any(|value| {
+                !matches!(
+                    value.as_str(),
+                    "lib" | "rlib" | "staticlib" | "dylib" | "cdylib"
+                )
+            }))
     {
         return Err(Error::at(
             path,
             document.line_of_item(table.get("crate-type").unwrap()),
-            "custom library crate types are not supported in Stage 2",
-            "use `lib` or `rlib` only",
+            "custom library crate types are not supported",
+            "use a supported Rust library crate type",
+        ));
+    }
+    if let Some(types) = &declared_crate_types
+        && types.iter().any(|kind| kind == "dylib")
+        && types.iter().any(|kind| kind == "cdylib")
+    {
+        return Err(Error::failure(
+            "library cannot set both `dylib` and `cdylib` crate types",
         ));
     }
     let proc_macro = optional_bool(path, document, table, "lib", "proc-macro")?.unwrap_or(false);
-    if mode == ManifestMode::Root && proc_macro {
-        return Err(Error::at(
-            path,
-            document.line_of_item(table.get("proc-macro").unwrap()),
-            "selecting a procedural-macro package as the root is not supported",
-            "use procedural-macro crates as dependencies of an ordinary root package",
-        ));
-    }
     if proc_macro && table.contains_key("crate-type") {
         return Err(Error::at(
             path,
@@ -1330,180 +1219,31 @@ fn parse_library(
     let relative = optional_string(path, document, table, "lib", "path")?
         .unwrap_or_else(|| "src/lib.rs".to_owned());
     validate_relative_path(path, document.line_of_table(table), "lib.path", &relative)?;
+    let crate_types = if proc_macro {
+        vec!["proc-macro".to_owned()]
+    } else {
+        declared_crate_types.unwrap_or_else(|| vec!["lib".to_owned()])
+    };
+    let doctestable = crate_types
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "proc-macro"));
     Ok(Some(LibraryTarget {
         name,
         path: root.join(relative),
         proc_macro,
-        crate_types: if proc_macro {
-            vec!["proc-macro".to_owned()]
-        } else {
-            declared_crate_types.unwrap_or_else(|| vec!["lib".to_owned()])
-        },
+        crate_types,
         test: optional_bool(path, document, table, "lib", "test")?.unwrap_or(true),
-        doctest: optional_bool(path, document, table, "lib", "doctest")?.unwrap_or(true),
+        bench: optional_bool(path, document, table, "lib", "bench")?.unwrap_or(true),
+        doctest: optional_bool(path, document, table, "lib", "doctest")?.unwrap_or(true)
+            && doctestable,
         doc: optional_bool(path, document, table, "lib", "doc")?.unwrap_or(true),
+        harness: optional_bool(path, document, table, "lib", "harness")?.unwrap_or(true),
     }))
 }
 
-fn parse_binaries(
-    path: &Path,
-    document: &Document,
-    root: &Path,
-    package: &Table,
-    package_name: &str,
-) -> Result<Vec<BinaryTarget>> {
-    let mut binaries = if package.get("autobins").and_then(Item::as_bool) == Some(false) {
-        BTreeMap::new()
-    } else {
-        discover_binaries(root, package_name)?
-    };
-    if let Some(item) = document.root().get("bin") {
-        let mut explicit_names = BTreeSet::new();
-        let tables = item.as_array_of_tables().ok_or_else(|| {
-            type_error(
-                path,
-                document.line_of_item(item),
-                "bin",
-                "an array of tables",
-            )
-        })?;
-        if tables.len() > MAX_BINARY_TARGETS {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("package declares more than {MAX_BINARY_TARGETS} binary targets"),
-                "reduce the number of program targets",
-            ));
-        }
-        for table in tables.iter() {
-            for (key, item) in table.iter() {
-                if !matches!(key, "name" | "path" | "test" | "bench" | "doc") {
-                    return Err(unsupported_key(path, document, item, &format!("bin.{key}")));
-                }
-                if matches!(key, "bench" | "doc") && item.as_bool() != Some(false) {
-                    return Err(Error::at(
-                        path,
-                        document.line_of_item(item),
-                        format!("`bin.{key}` must be false in Stage 2"),
-                        "benches and binary documentation targets are deferred",
-                    ));
-                }
-            }
-            let name = optional_string(path, document, table, "bin", "name")?
-                .unwrap_or_else(|| package_name.to_owned());
-            validate_package_name(path, document.line_of_table(table), &name)?;
-            let relative = optional_string(path, document, table, "bin", "path")?
-                .unwrap_or_else(|| "src/main.rs".to_owned());
-            validate_relative_path(path, document.line_of_table(table), "bin.path", &relative)?;
-            let target = BinaryTarget {
-                name,
-                path: root.join(relative),
-                test: optional_bool(path, document, table, "bin", "test")?.unwrap_or(true),
-                doc: optional_bool(path, document, table, "bin", "doc")?.unwrap_or(true),
-            };
-            if !explicit_names.insert(target.name.clone()) {
-                return Err(Error::at(
-                    path,
-                    document.line_of_table(table),
-                    "duplicate binary target name",
-                    "give every `[[bin]]` target a distinct name",
-                ));
-            }
-            binaries.insert(target.name.clone(), target);
-        }
-    }
-    if binaries.len() > MAX_BINARY_TARGETS {
-        return Err(Error::failure(format!(
-            "package discovers more than {MAX_BINARY_TARGETS} binary targets"
-        )));
-    }
-    Ok(binaries.into_values().collect())
-}
-
-fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String, BinaryTarget>> {
-    let mut binaries = BTreeMap::new();
-    let main = root.join("src/main.rs");
-    if main.is_file() {
-        binaries.insert(
-            package_name.to_owned(),
-            BinaryTarget {
-                name: package_name.to_owned(),
-                path: main,
-                test: true,
-                doc: true,
-            },
-        );
-    }
-    let directory = root.join("src/bin");
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(binaries),
-        Err(error) => {
-            return Err(Error::failure(format!(
-                "failed to discover binary targets in `{}`: {error}",
-                directory.display()
-            )));
-        }
-    };
-    let mut entries = entries
-        .collect::<std::io::Result<Vec<_>>>()
-        .map_err(|error| {
-            Error::failure(format!(
-                "failed to read a binary target in `{}`: {error}",
-                directory.display()
-            ))
-        })?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        let metadata = entry.file_type().map_err(|error| {
-            Error::failure(format!(
-                "failed to inspect binary target `{}`: {error}",
-                entry.path().display()
-            ))
-        })?;
-        let (name, source) = if metadata.is_file()
-            && entry.path().extension().and_then(|value| value.to_str()) == Some("rs")
-        {
-            (
-                entry.path().file_stem().map(|value| value.to_owned()),
-                entry.path(),
-            )
-        } else if metadata.is_dir() && entry.path().join("main.rs").is_file() {
-            (Some(entry.file_name()), entry.path().join("main.rs"))
-        } else {
-            continue;
-        };
-        let name = name
-            .and_then(|value| value.into_string().ok())
-            .ok_or_else(|| {
-                Error::failure(format!(
-                    "binary target name in `{}` is not valid UTF-8",
-                    directory.display()
-                ))
-            })?;
-        validate_package_name(&root.join(MANIFEST_NAME), 1, &name)?;
-        if binaries
-            .insert(
-                name.clone(),
-                BinaryTarget {
-                    name: name.clone(),
-                    path: source,
-                    test: true,
-                    doc: true,
-                },
-            )
-            .is_some()
-        {
-            return Err(Error::failure(format!(
-                "binary target name `{name}` is discovered more than once"
-            )));
-        }
-    }
-    Ok(binaries)
-}
-
-fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
-    if let Some(library) = &manifest.library
+fn resolve_target_defaults(manifest: &mut Manifest, check_sources: bool) -> Result<()> {
+    if check_sources
+        && let Some(library) = &manifest.library
         && !library.path.is_file()
     {
         return Err(Error::failure(format!(
@@ -1511,23 +1251,26 @@ fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
             library.path.display()
         )));
     }
-    for binary in &manifest.binaries {
-        if !binary.path.is_file() {
+    for target in &manifest.targets {
+        // Missing example and bench sources fail only when compiled.
+        if check_sources
+            && manifest.editable
+            && matches!(target.kind, TargetKind::Bin | TargetKind::Test)
+            && !target.path.is_file()
+        {
             return Err(Error::failure(format!(
-                "binary target `{}` does not exist",
-                binary.path.display()
+                "{} target `{}` does not exist",
+                target.kind.description(),
+                target.path.display()
             )));
         }
     }
-    for test in &manifest.integration_tests {
-        if !test.path.is_file() {
-            return Err(Error::failure(format!(
-                "integration-test target `{}` does not exist",
-                test.path.display()
-            )));
-        }
-    }
-    if manifest.library.is_none() && manifest.binaries.is_empty() {
+    if manifest.library.is_none()
+        && manifest
+            .targets
+            .iter()
+            .all(|target| target.kind == TargetKind::Test)
+    {
         return Err(Error::failure(format!(
             "package `{}` has no supported library or binary target",
             manifest.name
@@ -1535,10 +1278,7 @@ fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
         .with_help("add `src/lib.rs`, `src/main.rs`, or one supported `[[bin]]`"));
     }
     if let Some(default) = &manifest.default_run
-        && !manifest
-            .binaries
-            .iter()
-            .any(|binary| &binary.name == default)
+        && manifest.target(TargetKind::Bin, default).is_none()
     {
         return Err(Error::failure(format!(
             "package.default-run names unknown binary target `{default}`"
@@ -1548,186 +1288,47 @@ fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
     Ok(())
 }
 
-fn parse_dependency_integration_tests(
-    path: &Path,
-    document: &Document,
-    root: &Path,
-    package: &Table,
-) -> Result<Vec<IntegrationTestTarget>> {
-    let mut targets = if package.get("autotests").and_then(Item::as_bool) == Some(false) {
-        BTreeMap::new()
-    } else {
-        discover_integration_tests(root)?
-            .into_iter()
-            .map(|target| (target.name.clone(), target))
-            .collect()
-    };
-    if let Some(item) = document.root().get("test") {
-        let mut explicit_names = BTreeSet::new();
-        let tables = item.as_array_of_tables().ok_or_else(|| {
-            type_error(
-                path,
-                document.line_of_item(item),
-                "test",
-                "an array of tables",
-            )
-        })?;
-        for table in tables {
-            let name = required_string(path, document, table, "test", "name")?;
-            validate_package_name(path, document.line_of_table(table), &name)?;
-            let relative = optional_string(path, document, table, "test", "path")?
-                .unwrap_or_else(|| format!("tests/{name}.rs"));
-            validate_relative_path(path, document.line_of_table(table), "test.path", &relative)?;
-            let crate_name = name.replace('-', "_");
-            if !explicit_names.insert(crate_name.clone()) {
-                return Err(Error::at(
-                    path,
-                    document.line_of_table(table),
-                    format!("duplicate integration-test crate name `{crate_name}`"),
-                    "give every `[[test]]` target a distinct name",
-                ));
-            }
-            let target_path = root.join(relative);
-            targets.retain(|_, target| {
-                target.path != target_path && target.name.replace('-', "_") != crate_name
-            });
-            targets.insert(
-                name.clone(),
-                IntegrationTestTarget {
-                    name,
-                    path: target_path,
-                },
-            );
-        }
-    }
-    if targets.len() > MAX_BINARY_TARGETS {
-        return Err(Error::failure(format!(
-            "package describes more than {MAX_BINARY_TARGETS} integration-test targets"
-        )));
-    }
-    let mut crate_names = BTreeSet::new();
-    for target in targets.values() {
-        let crate_name = target.name.replace('-', "_");
-        if !crate_names.insert(crate_name.clone()) {
-            return Err(Error::failure(format!(
-                "integration-test target `{}` has duplicate crate name `{crate_name}`",
-                target.name
-            )));
-        }
-    }
-    Ok(targets.into_values().collect())
-}
-
-fn discover_integration_tests(root: &Path) -> Result<Vec<IntegrationTestTarget>> {
-    let directory = root.join("tests");
-    let metadata = match fs::symlink_metadata(&directory) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(Error::failure(format!(
-                "failed to inspect integration-test directory `{}`: {error}",
-                directory.display()
-            )));
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::failure(format!(
-            "integration-test path `{}` is not a real directory",
-            directory.display()
-        )));
-    }
-
-    let mut targets = Vec::new();
-    let mut crate_names = BTreeSet::new();
-    for entry in fs::read_dir(&directory).map_err(|error| {
-        Error::failure(format!(
-            "failed to read integration-test directory `{}`: {error}",
-            directory.display()
-        ))
-    })? {
-        let entry = entry.map_err(|error| {
-            Error::failure(format!(
-                "failed to read an integration-test entry in `{}`: {error}",
-                directory.display()
-            ))
-        })?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            Error::failure(format!(
-                "failed to inspect integration-test entry `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(Error::failure(format!(
-                "integration-test entry `{}` is a symbolic link",
-                path.display()
-            )));
-        }
-        if metadata.is_dir() || path.extension().is_none_or(|extension| extension != "rs") {
-            continue;
-        }
-        if !metadata.is_file() {
-            return Err(Error::failure(format!(
-                "integration-test entry `{}` is not a regular file",
-                path.display()
-            )));
-        }
-        let name = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                Error::failure(format!(
-                    "integration-test filename `{}` is not valid UTF-8",
-                    path.display()
-                ))
-            })?
-            .to_owned();
-        validate_package_name(&root.join(MANIFEST_NAME), 1, &name)?;
-        let crate_name = name.replace('-', "_");
-        if !crate_names.insert(crate_name.clone()) {
-            return Err(Error::failure(format!(
-                "integration-test target `{name}` has duplicate crate name `{crate_name}`"
-            )));
-        }
-        targets.push(IntegrationTestTarget { name, path });
-    }
-    targets.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(targets)
+struct DependencyFields<'a> {
+    path: &'a Path,
+    document: &'a Document,
+    root: &'a Path,
+    inherited: Option<&'a InheritedPackage>,
+    edition: Edition,
+    warnings: &'a mut Vec<String>,
 }
 
 fn parse_dependency_table(
-    path: &Path,
-    document: &Document,
-    root: &Path,
+    fields: &mut DependencyFields<'_>,
     table: &Table,
     target: Option<&str>,
     kind: DependencyKind,
     output: &mut Vec<Dependency>,
 ) -> Result<()> {
     for (alias, item) in table.iter() {
-        validate_package_name(path, document.line_of_item(item), alias)?;
-        output.push(parse_dependency(
-            path, document, root, alias, item, target, kind,
-        )?);
+        validate_package_name(fields.path, fields.document.line_of_item(item), alias)?;
+        output.push(parse_dependency(fields, alias, item, target, kind)?);
     }
     Ok(())
 }
 
 fn parse_dependency(
-    path: &Path,
-    document: &Document,
-    root: &Path,
+    fields: &mut DependencyFields<'_>,
     alias: &str,
     item: &Item,
     target: Option<&str>,
     kind: DependencyKind,
 ) -> Result<Dependency> {
+    let path = fields.path;
+    let document = fields.document;
+    let root = fields.root;
     if let Some(requirement) = item.as_str() {
         return Ok(Dependency {
             alias: alias.to_owned(),
             package: alias.to_owned(),
+            renamed: false,
             requirement: parse_requirement(path, document.line_of_item(item), alias, requirement)?,
+            version_specified: true,
+            git_path_source: None,
             source: DependencySource::CratesIo,
             optional: false,
             default_features: true,
@@ -1750,6 +1351,9 @@ fn parse_dependency(
             ));
         }
     };
+    if lookup.get("workspace").is_some() {
+        return inheritance::dependency(fields, alias, &lookup, line, target, kind);
+    }
     const ALLOWED: &[&str] = &[
         "version",
         "path",
@@ -1760,6 +1364,7 @@ fn parse_dependency(
         "package",
         "optional",
         "default-features",
+        "default_features",
         "features",
     ];
     for (key, value) in lookup.entries() {
@@ -1768,7 +1373,7 @@ fn parse_dependency(
                 key,
                 "registry" | "registry-index" | "workspace" | "artifact" | "lib"
             ) {
-                format!("dependency source or mode `{key}` is not supported in Stage 2")
+                format!("dependency source or mode `{key}` is not supported")
             } else {
                 format!("unknown dependency key `{key}`")
             };
@@ -1901,11 +1506,13 @@ fn parse_dependency(
     Ok(Dependency {
         alias: alias.to_owned(),
         package,
+        renamed: lookup.get("package").is_some(),
         requirement,
+        version_specified: lookup.get("version").is_some(),
+        git_path_source: None,
         source,
         optional: lookup_bool(path, document, &lookup, alias, "optional")?.unwrap_or(false),
-        default_features: lookup_bool(path, document, &lookup, alias, "default-features")?
-            .unwrap_or(true),
+        default_features: dependency_default_features(fields, &lookup, alias)?.unwrap_or(true),
         features: match lookup.get("features") {
             Some(value) => node_string_array(
                 path,
@@ -1918,6 +1525,55 @@ fn parse_dependency(
         target: target.map(str::to_owned),
         kind,
     })
+}
+
+fn dependency_default_features(
+    fields: &mut DependencyFields<'_>,
+    lookup: &DependencyTable<'_>,
+    alias: &str,
+) -> Result<Option<bool>> {
+    let modern = lookup_bool(
+        fields.path,
+        fields.document,
+        lookup,
+        alias,
+        "default-features",
+    )?;
+    let legacy = lookup_bool(
+        fields.path,
+        fields.document,
+        lookup,
+        alias,
+        "default_features",
+    )?;
+    if legacy.is_some() {
+        if fields.edition == Edition::E2024 {
+            return Err(Error::at(
+                fields.path,
+                lookup
+                    .get("default_features")
+                    .unwrap()
+                    .line(fields.document),
+                format!(
+                    "`default_features` is unsupported as of the 2024 edition (in the `{alias}` dependency)"
+                ),
+                "use `default-features` instead",
+            ));
+        }
+        let message = if modern.is_some() {
+            format!(
+                "`default_features` is redundant with `default-features`, preferring `default-features` in the `{alias}` dependency"
+            )
+        } else {
+            format!(
+                "`default_features` is deprecated in favor of `default-features` and will not work in the 2024 edition (in the `{alias}` dependency)"
+            )
+        };
+        fields
+            .warnings
+            .push(format!("{}: {message}", fields.path.display()));
+    }
+    Ok(modern.or(legacy))
 }
 
 fn validate_git_url(path: &Path, line: usize, url: &str) -> Result<()> {
@@ -1960,13 +1616,12 @@ fn validate_git_revision(path: &Path, line: usize, value: &str) -> Result<()> {
 }
 
 fn parse_target_dependencies(
-    path: &Path,
-    document: &Document,
-    root: &Path,
+    fields: &mut DependencyFields<'_>,
     mode: ManifestMode,
     output: &mut Vec<Dependency>,
-    unsupported_target_dev_dependencies: &mut Vec<UnsupportedTargetDevDependency>,
 ) -> Result<()> {
+    let path = fields.path;
+    let document = fields.document;
     let Some(item) = document.root().get("target") else {
         return Ok(());
     };
@@ -1977,42 +1632,24 @@ fn parse_target_dependencies(
         for (key, item) in target.iter() {
             let kind = match (mode, key) {
                 (_, "dependencies") => Some(DependencyKind::Normal),
-                (ManifestMode::Dependency, "build-dependencies") => Some(DependencyKind::Build),
-                (ManifestMode::Dependency, "dev-dependencies") => None,
-                (ManifestMode::Root, "dev-dependencies") => {
-                    require_table(
-                        path,
-                        document,
-                        item,
-                        &format!("target.{selector}.dev-dependencies"),
-                    )?;
-                    unsupported_target_dev_dependencies.push(UnsupportedTargetDevDependency {
-                        selector: selector.to_owned(),
-                        line: document.line_of_item(item),
-                    });
-                    continue;
+                (_, "build-dependencies") => Some(DependencyKind::Build),
+                (ManifestMode::Root | ManifestMode::Source, "dev-dependencies") => {
+                    Some(DependencyKind::Dev)
                 }
+                (ManifestMode::Dependency, "dev-dependencies") => None,
                 _ => {
                     return Err(Error::at(
                         path,
                         document.line_of_item(item),
-                        format!("root `target.{selector}.{key}` is not supported in Stage 2"),
-                        "root build-dependencies and dev-dependencies are deferred",
+                        format!("unsupported manifest key `target.{selector}.{key}`"),
+                        "use dependencies, build-dependencies, or dev-dependencies",
                     ));
                 }
             };
             let dependencies =
                 require_table(path, document, item, &format!("target.{selector}.{key}"))?;
             if let Some(kind) = kind {
-                parse_dependency_table(
-                    path,
-                    document,
-                    root,
-                    dependencies,
-                    Some(selector),
-                    kind,
-                    output,
-                )?;
+                parse_dependency_table(fields, dependencies, Some(selector), kind, output)?;
             }
         }
     }
@@ -2053,7 +1690,7 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                format!("patch source `{source}` is not supported in Stage 2"),
+                format!("patch source `{source}` is not supported"),
                 "use `[patch.crates-io]` with exact local path replacements",
             ));
         }
@@ -2065,19 +1702,23 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
     let mut result = Vec::new();
     for (alias, item) in crates_io.iter() {
         validate_package_name(path, document.line_of_item(item), alias)?;
-        let table = item.as_inline_table().ok_or_else(|| {
-            type_error(
-                path,
-                document.line_of_item(item),
-                &format!("patch.crates-io.{alias}"),
-                "an inline path or Git table",
-            )
-        })?;
+        let table = match item {
+            Item::Value(Value::InlineTable(table)) => DependencyTable::Inline(table),
+            Item::Table(table) => DependencyTable::Regular(table),
+            _ => {
+                return Err(type_error(
+                    path,
+                    document.line_of_item(item),
+                    &format!("patch.crates-io.{alias}"),
+                    "a path or Git table",
+                ));
+            }
+        };
         let package = match table.get("package") {
             Some(value) => value.as_str().ok_or_else(|| {
                 type_error(
                     path,
-                    document.line_of_value(value),
+                    value.line(document),
                     &format!("patch.crates-io.{alias}.package"),
                     "a string",
                 )
@@ -2096,11 +1737,11 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                 ));
             }
             (Some(value), None) => {
-                for (key, value) in table.iter() {
+                for (key, value) in table.entries() {
                     if !matches!(key, "path" | "package") {
                         return Err(Error::at(
                             path,
-                            document.line_of_value(value),
+                            value.line(document),
                             format!("path patch `{alias}` contains unsupported key `{key}`"),
                             "use only path and optional package",
                         ));
@@ -2109,25 +1750,25 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                 let declared = value.as_str().ok_or_else(|| {
                     type_error(
                         path,
-                        document.line_of_value(value),
+                        value.line(document),
                         &format!("patch.crates-io.{alias}.path"),
                         "a string",
                     )
                 })?;
                 validate_dependency_path(
                     path,
-                    document.line_of_value(value),
+                    value.line(document),
                     &format!("patch.crates-io.{alias}.path"),
                     declared,
                 )?;
                 PatchSource::Path(resolve_declared_path(root, declared))
             }
             (None, Some(value)) => {
-                for (key, value) in table.iter() {
+                for (key, value) in table.entries() {
                     if !matches!(key, "git" | "branch" | "tag" | "rev" | "package") {
                         return Err(Error::at(
                             path,
-                            document.line_of_value(value),
+                            value.line(document),
                             format!("Git patch `{alias}` contains unsupported key `{key}`"),
                             "use only git, one optional branch/tag/rev, and optional package",
                         ));
@@ -2136,12 +1777,12 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                 let url = value.as_str().ok_or_else(|| {
                     type_error(
                         path,
-                        document.line_of_value(value),
+                        value.line(document),
                         &format!("patch.crates-io.{alias}.git"),
                         "a string",
                     )
                 })?;
-                validate_git_url(path, document.line_of_value(value), url)?;
+                validate_git_url(path, value.line(document), url)?;
                 let selectors = ["branch", "tag", "rev"]
                     .into_iter()
                     .filter_map(|key| table.get(key).map(|value| (key, value)))
@@ -2160,12 +1801,12 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                         let revision = value.as_str().ok_or_else(|| {
                             type_error(
                                 path,
-                                document.line_of_value(value),
+                                value.line(document),
                                 &format!("patch.crates-io.{alias}.{key}"),
                                 "a string",
                             )
                         })?;
-                        validate_git_revision(path, document.line_of_value(value), revision)?;
+                        validate_git_revision(path, value.line(document), revision)?;
                         match *key {
                             "branch" => GitSelector::Branch(revision.to_owned()),
                             "tag" => GitSelector::Tag(revision.to_owned()),
@@ -2198,31 +1839,42 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
     Ok(result)
 }
 
-fn parse_rust_lints(
-    path: &Path,
-    document: &Document,
+fn parse_lint_namespace(
+    field: Option<&inheritance::Field<'_>>,
     mode: ManifestMode,
+    namespace: &str,
 ) -> Result<BTreeMap<String, Lint>> {
-    let Some(item) = document.root().get("lints") else {
+    let Some(field) = field else {
         return Ok(BTreeMap::new());
     };
-    let lints = require_table(path, document, item, "lints")?;
+    let path = field.path;
+    let document = field.document;
+    let lints = require_table(path, document, field.item, "lints")?;
     for (key, item) in lints.iter() {
-        if key != "rust" && mode == ManifestMode::Root {
+        if !matches!(key, "rust" | "clippy" | "rustdoc" | "workspace") && mode == ManifestMode::Root
+        {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                format!("lint namespace `lints.{key}` is not supported in Stage 2"),
-                "configure Rust lints under `[lints.rust]`",
+                format!("lint namespace `lints.{key}` is not supported"),
+                "configure lints under rust, clippy, or rustdoc namespaces",
             ));
         }
     }
-    let Some(item) = lints.get("rust") else {
+    let Some(item) = lints.get(namespace) else {
         return Ok(BTreeMap::new());
     };
-    let rust = require_table(path, document, item, "lints.rust")?;
+    let table = require_table(path, document, item, &format!("lints.{namespace}"))?;
     let mut result = BTreeMap::new();
-    for (name, item) in rust.iter() {
+    for (name, item) in table.iter() {
+        if name.contains("::") {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("`lints.{namespace}.{name}` is not a valid lint name"),
+                "use an unqualified lint name in its namespace table",
+            ));
+        }
         let lint = if let Some(level) = item.as_str() {
             Lint {
                 level: validate_lint_level(path, document.line_of_item(item), level)?,
@@ -2236,7 +1888,9 @@ fn parse_rust_lints(
                 _ => unreachable!(),
             };
             for (key, value) in lookup.entries() {
-                if !matches!(key, "level" | "priority" | "check-cfg") {
+                if !matches!(key, "level" | "priority")
+                    && !(key == "check-cfg" && namespace == "rust")
+                {
                     return Err(Error::at(
                         path,
                         value.line(document),
@@ -2265,7 +1919,7 @@ fn parse_rust_lints(
                             type_error(
                                 path,
                                 value.line(document),
-                                &format!("lints.rust.{name}.priority"),
+                                &format!("lints.{namespace}.{name}.priority"),
                                 "an integer",
                             )
                         })
@@ -2280,11 +1934,11 @@ fn parse_rust_lints(
                             type_error(
                                 path,
                                 value.line(document),
-                                &format!("lints.rust.{name}.check-cfg"),
+                                &format!("lints.{namespace}.{name}.check-cfg"),
                                 "an array of strings",
                             )
                         })?,
-                        &format!("lints.rust.{name}.check-cfg"),
+                        &format!("lints.{namespace}.{name}.check-cfg"),
                     )?,
                     None => Vec::new(),
                 },
@@ -2293,7 +1947,7 @@ fn parse_rust_lints(
             return Err(type_error(
                 path,
                 document.line_of_item(item),
-                &format!("lints.rust.{name}"),
+                &format!("lints.{namespace}.{name}"),
                 "a level string or inline table",
             ));
         };
@@ -2302,68 +1956,14 @@ fn parse_rust_lints(
     Ok(result)
 }
 
-fn parse_profiles(path: &Path, document: &Document) -> Result<(DevProfile, ReleaseProfile)> {
-    let Some(item) = document.root().get("profile") else {
-        return Ok((DevProfile::default(), ReleaseProfile::default()));
-    };
-    let profiles = require_table(path, document, item, "profile")?;
-    for (key, item) in profiles.iter() {
-        if !matches!(key, "dev" | "release") {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("custom profile `profile.{key}` is not supported in Stage 2"),
-                "use only supported dev and release profile keys",
-            ));
-        }
-    }
-    let dev = match profiles.get("dev") {
-        Some(dev) => parse_dev(
-            path,
-            document,
-            require_table(path, document, dev, "profile.dev")?,
-        )?,
-        None => DevProfile::default(),
-    };
-    let release = match profiles.get("release") {
-        Some(release) => parse_release(
-            path,
-            document,
-            require_table(path, document, release, "profile.release")?,
-        )?,
-        None => ReleaseProfile::default(),
-    };
-    Ok((dev, release))
-}
-
-fn parse_dev(path: &Path, document: &Document, table: &Table) -> Result<DevProfile> {
-    for (key, item) in table.iter() {
-        if key != "panic" {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("unsupported dev profile key `profile.dev.{key}`"),
-                "the dev profile supports only panic",
-            ));
-        }
-    }
-    Ok(DevProfile {
-        panic_abort: parse_panic_abort(path, document, table, "profile.dev")?,
-    })
-}
-
-fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<ReleaseProfile> {
-    for (key, item) in table.iter() {
-        if !matches!(key, "panic" | "lto" | "strip" | "codegen-units") {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("unsupported Stage-2 release profile key `profile.release.{key}`"),
-                "Stage 2 supports only panic, lto, strip, and codegen-units",
-            ));
-        }
-    }
-    let panic_abort = parse_panic_abort(path, document, table, "profile.release")?;
+fn parse_profile(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    profile: &str,
+    default_opt: &'static str,
+) -> Result<Profile> {
+    let panic_abort = parse_panic_abort(path, document, table, profile)?;
     let lto = match table.get("lto") {
         None => Lto::Default,
         Some(item) if item.as_bool() == Some(false) => Lto::Default,
@@ -2375,13 +1975,13 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                "unsupported value for `profile.release.lto`",
+                format!("unsupported value for `{profile}.lto`"),
                 "choose false, true, `fat`, `thin`, or `off`",
             ));
         }
     };
     let strip = match table.get("strip") {
-        None => Strip::None,
+        None => Strip::Default,
         Some(item) if item.as_bool() == Some(false) => Strip::None,
         Some(item) if item.as_bool() == Some(true) => Strip::Symbols,
         Some(item) if item.as_str() == Some("none") => Strip::None,
@@ -2391,7 +1991,7 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
-                "unsupported value for `profile.release.strip`",
+                format!("unsupported value for `{profile}.strip`"),
                 "choose false, true, `none`, `debuginfo`, or `symbols`",
             ));
         }
@@ -2404,18 +2004,101 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
                 return Err(Error::at(
                     path,
                     document.line_of_item(item),
-                    "`profile.release.codegen-units` must be an integer from 1 through 4294967295",
+                    format!(
+                        "`{profile}.codegen-units` must be an integer from 1 through 4294967295"
+                    ),
                     "use a positive codegen unit count",
                 ));
             }
         },
     };
-    Ok(ReleaseProfile {
+    Ok(Profile {
+        opt_level: parse_opt_level(path, document, table, profile, default_opt)?,
+        debug: parse_profile_debug(path, document, table, profile)?,
         panic_abort,
         lto,
         strip,
         codegen_units,
+        debug_assertions: optional_bool(path, document, table, profile, "debug-assertions")?
+            .unwrap_or(default_opt == "0"),
+        overflow_checks: optional_bool(path, document, table, profile, "overflow-checks")?
+            .unwrap_or(default_opt == "0"),
+        incremental: optional_bool(path, document, table, profile, "incremental")?
+            .unwrap_or(default_opt == "0"),
     })
+}
+
+fn parse_opt_level(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    profile: &str,
+    default: &'static str,
+) -> Result<&'static str> {
+    let Some(item) = table.get("opt-level") else {
+        return Ok(default);
+    };
+    let text = item
+        .as_integer()
+        .map(|value| value.to_string())
+        .or_else(|| {
+            item.as_str()
+                .filter(|value| matches!(*value, "s" | "z"))
+                .map(str::to_owned)
+        });
+    match text.as_deref() {
+        Some("0") => Ok("0"),
+        Some("1") => Ok("1"),
+        Some("2") => Ok("2"),
+        Some("3") => Ok("3"),
+        Some("s") => Ok("s"),
+        Some("z") => Ok("z"),
+        _ => Err(Error::at(
+            path,
+            document.line_of_item(item),
+            format!("unsupported `{profile}.opt-level`"),
+            "choose 0, 1, 2, 3, `s`, or `z`",
+        )),
+    }
+}
+
+fn parse_profile_debug(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    profile: &str,
+) -> Result<Option<CargoDebugInfo>> {
+    let Some(item) = table.get("debug") else {
+        return Ok(None);
+    };
+    let text = item
+        .as_bool()
+        .map(|value| if value { "full" } else { "none" })
+        .or_else(|| {
+            item.as_integer().and_then(|value| match value {
+                0 => Some("none"),
+                1 => Some("limited"),
+                2 => Some("full"),
+                _ => None,
+            })
+        })
+        .or_else(|| item.as_str());
+    let value = match text {
+        Some("none") => CargoDebugInfo::None,
+        Some("limited") => CargoDebugInfo::Limited,
+        Some("full") => CargoDebugInfo::Full,
+        Some("line-tables-only") => CargoDebugInfo::LineTablesOnly,
+        Some("line-directives-only") => CargoDebugInfo::LineDirectivesOnly,
+        _ => {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("unsupported `{profile}.debug`"),
+                "choose false, true, 0, 1, 2, `none`, `limited`, `full`, `line-tables-only`, or `line-directives-only`",
+            ));
+        }
+    };
+    Ok(Some(value))
 }
 
 fn parse_panic_abort(
@@ -2442,57 +2125,59 @@ fn parse_panic_abort(
 #[cfg(test)]
 fn validate_lock_source(manifest: &Manifest, path: &Path, source: &str) -> Result<Lockfile> {
     let document = Document::parse(path, "Cargo lockfile", source.to_owned())?;
-    parse_lock_document(manifest, path, &document, true)
+    parse_lock_document(Some(manifest), path, &document)
 }
 
 fn parse_lock_document(
-    manifest: &Manifest,
+    manifest: Option<&Manifest>,
     path: &Path,
     document: &Document,
-    require_current_root: bool,
 ) -> Result<Lockfile> {
     for (key, item) in document.root().iter() {
-        if !matches!(key, "version" | "package") {
+        if !matches!(key, "version" | "package" | "metadata") {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
                 format!("unsupported root Cargo.lock key `{key}`"),
-                "use Cargo.lock format version 3 or 4",
+                "use a supported Cargo.lock format",
             ));
         }
     }
-    let version = document.root().get("version").ok_or_else(|| {
-        Error::failure(format!(
-            "lockfile `{}` is missing a supported format version",
-            path.display()
-        ))
-        .with_help("regenerate the lockfile with a current Cargo")
-    })?;
-    if !matches!(version.as_integer(), Some(3 | 4)) {
-        return Err(Error::at(
-            path,
-            document.line_of_item(version),
-            "unsupported Cargo.lock format; expected `version = 3` or `version = 4`",
-            "regenerate the lockfile with a current Cargo",
-        ));
-    }
-    let package_item = document.root().get("package").ok_or_else(|| {
-        Error::failure(format!(
-            "lockfile `{}` contains no package records",
-            path.display()
-        ))
-    })?;
-    let tables = package_item.as_array_of_tables().ok_or_else(|| {
-        type_error(
-            path,
-            document.line_of_item(package_item),
-            "package",
-            "an array of tables",
-        )
-    })?;
+    let mut format = match document.root().get("version") {
+        None => crate::lockfile::Format::V1,
+        Some(version) if version.as_integer() == Some(3) => crate::lockfile::Format::V3,
+        Some(version) if version.as_integer() == Some(4) => crate::lockfile::Format::V4,
+        Some(version) => {
+            return Err(Error::at(
+                path,
+                document.line_of_item(version),
+                "unsupported Cargo.lock format; expected `version = 3` or `version = 4`, or a legacy lock without a version field",
+                "regenerate the lockfile with a current Cargo",
+            ));
+        }
+    };
+    let metadata = document
+        .root()
+        .get("metadata")
+        .map(|item| require_table(path, document, item, "metadata"))
+        .transpose()?;
+    let tables = document
+        .root()
+        .get("package")
+        .map(|package_item| {
+            package_item.as_array_of_tables().ok_or_else(|| {
+                type_error(
+                    path,
+                    document.line_of_item(package_item),
+                    "package",
+                    "an array of tables",
+                )
+            })
+        })
+        .transpose()?;
     let mut packages = Vec::new();
     let mut identities = BTreeSet::new();
-    for table in tables.iter() {
+    for table in tables.into_iter().flat_map(|tables| tables.iter()) {
         for (key, item) in table.iter() {
             if !matches!(
                 key,
@@ -2524,7 +2209,27 @@ fn parse_lock_document(
                 "use crates.io, a canonical pinned anonymous HTTPS Git source, or a local path package",
             ));
         }
-        let checksum = optional_string(path, document, table, "package", "checksum")?;
+        let mut checksum = optional_string(path, document, table, "package", "checksum")?;
+        if checksum.is_some() && format == crate::lockfile::Format::V1 {
+            format = crate::lockfile::Format::V2;
+        }
+        if let Some(source) = &source
+            && checksum.is_none()
+            && let Some(metadata) = metadata
+        {
+            let key = format!(
+                "checksum {name} {version_text} ({})",
+                crate::lockfile::encode_source(source, crate::lockfile::Format::V1, false)?
+            );
+            if let Some(item) = metadata.get(&key) {
+                let value = item.as_str().ok_or_else(|| {
+                    type_error(path, document.line_of_item(item), &key, "a checksum string")
+                })?;
+                if value != "<none>" {
+                    checksum = Some(value.to_owned());
+                }
+            }
+        }
         match (&source, &checksum) {
             (Some(_), Some(value)) if is_sha256(value) => {}
             (Some(source), None) if crate::git::parse_locked_source(source).is_ok() => {}
@@ -2550,6 +2255,13 @@ fn parse_lock_document(
         }
         let dependencies = optional_string_array(path, document, table, "package", "dependencies")?
             .unwrap_or_default();
+        if format == crate::lockfile::Format::V1
+            && dependencies
+                .iter()
+                .any(|reference| reference.split_whitespace().nth(1).is_none())
+        {
+            format = crate::lockfile::Format::V2;
+        }
         let identity = (name.clone(), version.original.clone(), source.clone());
         if !identities.insert(identity) {
             return Err(Error::at(
@@ -2567,21 +2279,11 @@ fn parse_lock_document(
             dependencies,
         });
     }
-    let roots = packages
-        .iter()
-        .filter(|package| {
-            package.name == manifest.name
-                && package.version.original == manifest.version.original
-                && package.source.is_none()
-        })
-        .count();
-    if require_current_root && roots != 1 {
-        return Err(Error::failure(format!(
-            "Cargo.lock is stale: expected one root path package `{} {}`, found {roots}",
-            manifest.name, manifest.version.original
-        )));
+    let lock = Lockfile { format, packages };
+    if let Some(manifest) = manifest {
+        lock.require_root(manifest)?;
     }
-    Ok(Lockfile { packages })
+    Ok(lock)
 }
 
 #[derive(Clone, Copy)]
@@ -2798,27 +2500,6 @@ fn optional_bool(
     }
 }
 
-fn optional_string_or_false(
-    path: &Path,
-    document: &Document,
-    table: &Table,
-    table_name: &str,
-    key: &str,
-) -> Result<Option<String>> {
-    match table.get(key) {
-        None => Ok(None),
-        Some(item) if item.as_bool() == Some(false) => Ok(None),
-        Some(item) => item.as_str().map(str::to_owned).map(Some).ok_or_else(|| {
-            type_error(
-                path,
-                document.line_of_item(item),
-                &format!("{table_name}.{key}"),
-                "a string or false",
-            )
-        }),
-    }
-}
-
 fn optional_string_array(
     path: &Path,
     document: &Document,
@@ -2924,18 +2605,23 @@ fn parse_requirement(path: &Path, line: usize, name: &str, value: &str) -> Resul
     })
 }
 
-fn validate_package_name(path: &Path, line: usize, name: &str) -> Result<()> {
-    let valid = !name.is_empty()
+/// Lorry's package names: 1–64 ASCII letters, digits, `-`, or `_`, with at
+/// least one letter.
+pub(crate) fn valid_package_name(name: &str) -> bool {
+    !name.is_empty()
         && name.len() <= 64
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        && name.bytes().any(|byte| byte.is_ascii_alphabetic());
-    if !valid {
+        && name.bytes().any(|byte| byte.is_ascii_alphabetic())
+}
+
+fn validate_package_name(path: &Path, line: usize, name: &str) -> Result<()> {
+    if !valid_package_name(name) {
         return Err(Error::at(
             path,
             line,
-            format!("unsupported Stage-2 package name `{name}`"),
+            format!("unsupported package name `{name}`"),
             "use 1–64 ASCII letters, digits, `-`, or `_`, including at least one letter",
         ));
     }
@@ -3046,14 +2732,14 @@ fn resolve_declared_path(root: &Path, value: &str) -> PathBuf {
 }
 
 fn validate_lint_level(path: &Path, line: usize, value: &str) -> Result<String> {
-    if matches!(value, "allow" | "warn" | "force-warn" | "deny" | "forbid") {
+    if matches!(value, "allow" | "warn" | "deny" | "forbid") {
         Ok(value.to_owned())
     } else {
         Err(Error::at(
             path,
             line,
             format!("unsupported rustc lint level `{value}`"),
-            "choose allow, warn, force-warn, deny, or forbid",
+            "choose allow, warn, deny, or forbid",
         ))
     }
 }
@@ -3069,8 +2755,8 @@ fn unsupported_key(path: &Path, document: &Document, item: &Item, name: &str) ->
     Error::at(
         path,
         document.line_of_item(item),
-        format!("unsupported Stage-2 manifest key `{name}`"),
-        "remove the key or use a later Lorry stage",
+        format!("unsupported manifest key `{name}`"),
+        "remove the key; Lorry does not support it",
     )
 }
 
@@ -3086,7 +2772,6 @@ fn type_error(path: &Path, line: usize, name: &str, expected: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::toolchain::CfgSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_VENDOR_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -3114,6 +2799,13 @@ strip = true
 codegen-units = 1
 "#;
 
+    fn target_names(manifest: &Manifest, kind: TargetKind) -> Vec<&str> {
+        manifest
+            .targets_of(kind)
+            .map(|target| target.name.as_str())
+            .collect()
+    }
+
     fn parsed(source: &str) -> Result<Manifest> {
         Manifest::parse(
             Path::new("/tmp/pkg"),
@@ -3126,15 +2818,56 @@ codegen-units = 1
     fn parses_dependency_free_manifest_compatibly() {
         let manifest = parsed(RED).unwrap();
         assert_eq!(manifest.name, "red");
-        assert_eq!(manifest.crate_name, "red");
         assert_eq!(manifest.edition, Edition::E2024);
         assert_eq!(manifest.resolver, Resolver::V3);
         assert_eq!(manifest.metadata.authors, ["A", "B"]);
-        assert!(manifest.dev.panic_abort);
-        assert!(manifest.release.panic_abort);
-        assert_eq!(manifest.release.lto, Lto::Fat);
-        assert_eq!(manifest.release.strip, Strip::Symbols);
-        assert_eq!(manifest.release.codegen_units, Some(1));
+    }
+
+    #[test]
+    fn legacy_dependency_defaults_follow_cargo_editions_and_precedence() {
+        for edition in ["2015", "2018", "2021", "2024"] {
+            for (keys, expected) in [
+                ("default_features = false", false),
+                ("default_features = false, default-features = true", true),
+            ] {
+                let source = format!(
+                    "[package]\nname = 'probe'\nversion = '1.0.0'\nedition = '{edition}'\n\
+                     [dependencies]\ndep = {{ version = '1', {keys} }}\n"
+                );
+                let result = parsed(&source);
+                if edition == "2024" {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .render()
+                            .contains("unsupported as of the 2024 edition")
+                    );
+                } else {
+                    let manifest = result.unwrap();
+                    assert_eq!(manifest.dependencies[0].default_features, expected);
+                    assert_eq!(manifest.warnings.len(), 1);
+                    assert!(manifest.warnings[0].contains(if expected {
+                        "redundant"
+                    } else {
+                        "deprecated"
+                    }));
+                }
+            }
+        }
+        for keys in [
+            "default_features = 'false'",
+            "default_features = 0\ndefault-features = true",
+        ] {
+            assert!(
+                parsed(&format!(
+                    "[package]\nname = 'probe'\nversion = '1.0.0'\nedition = '2021'\n\
+                 [dependencies.dep]\nversion = '1'\n{keys}\n"
+                ))
+                .unwrap_err()
+                .render()
+                .contains("a boolean")
+            );
+        }
     }
 
     #[test]
@@ -3149,6 +2882,57 @@ codegen-units = 1
         assert_eq!(manifest.name, "hinted");
         assert!(manifest.dependencies.is_empty());
         assert!(manifest.features.is_empty());
+    }
+
+    #[test]
+    fn library_documentation_scraping_is_inert_for_builds() {
+        let root = Path::new("/dependency");
+        let path = root.join("Cargo.toml");
+        for value in ["true", "false", "\"invalid\""] {
+            let source = format!("{RED}\n[lib]\ndoc-scrape-examples = {value}\n");
+            let document = Document::parse(&path, "Cargo manifest", source).unwrap();
+            for mode in [ManifestMode::Root, ManifestMode::Dependency] {
+                let result = Manifest::parse_document(root, &path, &document, mode);
+                if value == "\"invalid\"" {
+                    assert!(result.unwrap_err().render().contains("a boolean"));
+                } else {
+                    let library = result.unwrap().library.unwrap();
+                    assert_eq!(library.path, root.join("src/lib.rs"));
+                    assert_eq!(library.crate_types, ["lib"]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn library_and_binary_benchmark_flags_are_independent_of_tests() {
+        for flags in [
+            "",
+            "test = false\nbench = true\ndoc = true\n",
+            "bench = false\n",
+        ] {
+            let manifest = parsed(&format!(
+                "{RED}\n[lib]\n{flags}\n[[bin]]\nname = \"runner\"\npath = \"src/main.rs\"\n{flags}"
+            ))
+            .unwrap();
+            let library = manifest.library.unwrap();
+            let binary = &manifest.targets[0];
+            assert_eq!(library.bench, !flags.contains("bench = false"));
+            assert_eq!(binary.bench, library.bench);
+            assert_eq!(library.test, !flags.contains("test = false"));
+            assert_eq!(binary.test, library.test);
+            assert!(library.doc && binary.doc);
+        }
+        for section in [
+            "[lib]",
+            "[[bin]]\nname = \"runner\"\npath = \"src/main.rs\"",
+        ] {
+            for key in ["bench", "doc"] {
+                let error =
+                    parsed(&format!("{RED}\n{section}\n{key} = \"invalid\"\n")).unwrap_err();
+                assert!(error.render().contains("a boolean"));
+            }
+        }
     }
 
     #[test]
@@ -3210,6 +2994,31 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert_eq!(manifest.patches[0].package, "ring");
         assert!(matches!(manifest.patches[0].source, PatchSource::Path(_)));
         assert_eq!(manifest.rust_lints["unsafe_code"].priority, 1);
+    }
+
+    #[test]
+    fn parses_clippy_lints_for_roots_and_dependencies() {
+        let source = format!(
+            "{RED}\n[lints.clippy]\nall = {{ level = \"deny\", priority = -1 }}\n\
+             needless_return = \"allow\"\n"
+        );
+        let path = Path::new("/fixture/Cargo.toml");
+        let document = Document::parse(path, "Cargo manifest", source).unwrap();
+        for mode in [ManifestMode::Root, ManifestMode::Dependency] {
+            let manifest =
+                Manifest::parse_document(Path::new("/fixture"), path, &document, mode).unwrap();
+            assert_eq!(manifest.clippy_lints["all"].level, "deny");
+            assert_eq!(manifest.clippy_lints["all"].priority, -1);
+            assert_eq!(manifest.clippy_lints["needless_return"].level, "allow");
+        }
+        for configuration in [
+            "needless_return = \"force-warn\"",
+            "needless_return = { level = \"warn\", priority = \"first\" }",
+            "\"clippy::needless_return\" = \"warn\"",
+        ] {
+            let source = format!("{RED}\n[lints.clippy]\n{configuration}\n");
+            assert!(parsed(&source).is_err(), "accepted {configuration}");
+        }
     }
 
     #[test]
@@ -3280,6 +3089,24 @@ unsafe_code = { level = "forbid", priority = 1 }
             );
             assert!(parsed(&invalid).is_err(), "accepted `{declaration}`");
         }
+
+        let regular = "[package]\nname = \"root\"\nversion = \"0.1.0\"\n\
+                       [patch.crates-io.local]\npath = \"../local\"\n\
+                       [patch.crates-io.remote]\ngit = \"https://example.com/repo.git\"\n\
+                       tag = \"v1\"\n";
+        let manifest = parsed(regular).unwrap();
+        assert!(matches!(manifest.patches[0].source, PatchSource::Path(_)));
+        assert_eq!(
+            manifest.patches[1].source,
+            PatchSource::Git(GitDependency {
+                url: "https://example.com/repo.git".to_owned(),
+                selector: GitSelector::Tag("v1".to_owned()),
+            })
+        );
+        let error = parsed(&regular.replace("tag", "branch = \"a\"\ntag"))
+            .unwrap_err()
+            .render();
+        assert!(error.contains("Cargo.toml:6"), "{error}");
     }
 
     #[test]
@@ -3308,20 +3135,16 @@ unsafe_code = { level = "forbid", priority = 1 }
         )
         .unwrap();
 
-        let manifest = Manifest::load(&root).unwrap();
+        let manifest = Manifest::load_for_build(&root).unwrap();
         assert_eq!(manifest.default_run.as_deref(), Some("worker"));
         assert_eq!(
-            manifest
-                .binaries
-                .iter()
-                .map(|target| target.name.as_str())
-                .collect::<Vec<_>>(),
+            target_names(&manifest, TargetKind::Bin),
             ["demo", "tool", "worker"]
         );
-        assert_eq!(manifest.binaries[1].path, root.join("src/custom.rs"));
-        assert!(manifest.binaries[0].doc);
-        assert!(!manifest.binaries[1].doc);
-        assert!(manifest.binaries[2].doc);
+        assert_eq!(manifest.targets[1].path, root.join("src/custom.rs"));
+        assert!(manifest.targets[0].doc);
+        assert!(!manifest.targets[1].doc);
+        assert!(manifest.targets[2].doc);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3342,7 +3165,8 @@ unsafe_code = { level = "forbid", priority = 1 }
             root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"app\", \"shared\"]\nresolver = \"2\"\n\
              [profile.dev]\npanic = \"abort\"\n\
-             [profile.release]\nlto = \"thin\"\ncodegen-units = 2\n",
+             [profile.release]\nlto = \"thin\"\ncodegen-units = 2\n\
+             [patch.crates-io]\nshared = { path = \"shared\" }\n",
         )
         .unwrap();
         fs::write(
@@ -3364,51 +3188,206 @@ unsafe_code = { level = "forbid", priority = 1 }
         )
         .unwrap();
 
-        let from_root = Manifest::load_selected(&root, Some("app")).unwrap();
-        let from_member = Manifest::load(&root.join("app")).unwrap();
-        let from_path = Manifest::load_selected_or_manifest_path(
-            &root,
-            Some(&root.join("app/Cargo.toml")),
-            Some("app"),
-            true,
-        )
-        .unwrap();
+        let compile = |current: &Path,
+                       manifest_path: Option<&Path>,
+                       packages: &[&str],
+                       workspace,
+                       exclude: &[&str]| {
+            let selection = PackageSelection {
+                packages: packages.iter().map(|name| (*name).to_owned()).collect(),
+                workspace,
+                exclude: exclude.iter().map(|name| (*name).to_owned()).collect(),
+            };
+            SourceWorkspace::load_compilation(current, manifest_path, &selection)
+                .map(|(_, selected)| selected)
+        };
+        let names = |selected: Vec<Manifest>| {
+            selected
+                .into_iter()
+                .map(|member| member.name)
+                .collect::<Vec<_>>()
+        };
+        let [from_root] = compile(&root, None, &["app"], false, &[])
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let from_member = Manifest::load_for_build(&root.join("app")).unwrap();
         assert_eq!(from_root, from_member);
-        assert_eq!(from_root, from_path);
+        for manifest_path in [root.join("app/Cargo.toml"), PathBuf::from("app/Cargo.toml")] {
+            assert_eq!(
+                compile(&root, Some(&manifest_path), &["app"], false, &[]).unwrap(),
+                std::slice::from_ref(&from_root)
+            );
+        }
         assert_eq!(from_root.root, root.join("app"));
         assert_eq!(from_root.workspace_root, root);
         assert_eq!(from_root.resolver, Resolver::V2);
-        assert!(from_root.dev.panic_abort);
-        assert_eq!(from_root.release.lto, Lto::Thin);
-        assert_eq!(from_root.release.codegen_units, Some(2));
+        let member_workspace = SourceWorkspace::load(&root.join("app"), None).unwrap();
+        for (name, panic_abort, lto, codegen_units) in [
+            ("dev", true, Lto::Default, None),
+            ("release", false, Lto::Thin, Some(2)),
+        ] {
+            let mut member = from_root.clone();
+            profiles::SelectedProfile::load(&member_workspace, name)
+                .unwrap()
+                .apply(&mut member);
+            assert_eq!(member.profile.panic_abort, panic_abort);
+            assert_eq!(member.profile.lto, lto);
+            assert_eq!(member.profile.codegen_units, codegen_units);
+        }
         assert!(from_root.lock.is_some());
-        assert!(Manifest::load_selected(&from_root.workspace_root, None).is_err());
-        assert!(Manifest::load_selected(&from_root.workspace_root, Some("missing")).is_err());
-        assert!(
-            Manifest::load_selected_or_manifest_path(
-                &from_root.root,
-                Some(&root.join("app/Cargo.toml")),
-                Some("shared"),
-                true,
-            )
-            .is_err()
+        let shared = Manifest::load_for_build(&root.join("shared")).unwrap();
+        for selection in [
+            PackageSelection::default(),
+            PackageSelection {
+                workspace: true,
+                ..PackageSelection::default()
+            },
+            PackageSelection {
+                packages: vec!["app".into(), "shared".into()],
+                ..PackageSelection::default()
+            },
+        ] {
+            let (workspace, selected) =
+                SourceWorkspace::load_compilation(&root, None, &selection).unwrap();
+            assert_eq!(workspace.root, root);
+            assert_eq!(selected, [from_root.clone(), shared.clone()]);
+        }
+        let (_, selected) = SourceWorkspace::load_compilation(
+            &root.join("app"),
+            None,
+            &PackageSelection::default(),
+        )
+        .unwrap();
+        assert_eq!(selected.as_slice(), std::slice::from_ref(&from_root));
+        let (_, selected) = SourceWorkspace::load_compilation(
+            &root,
+            Some(Path::new("app/Cargo.toml")),
+            &PackageSelection::default(),
+        )
+        .unwrap();
+        assert_eq!(selected.as_slice(), std::slice::from_ref(&from_root));
+        let (_, selected) = SourceWorkspace::load_compilation(
+            &root,
+            None,
+            &PackageSelection {
+                workspace: true,
+                exclude: vec!["app".into()],
+                ..PackageSelection::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(selected, [shared]);
+        let selected = |packages: &[&str], workspace, exclude: &[&str]| {
+            compile(&root, None, packages, workspace, exclude)
+        };
+        assert!(selected(&["missing"], false, &[]).is_err());
+        assert_eq!(
+            names(selected(&["app", "app@0.1"], false, &[]).unwrap()),
+            ["app"]
+        );
+        assert_eq!(names(selected(&[], true, &["sha*"]).unwrap()), ["app"]);
+        assert_eq!(
+            names(selected(&["missing"], true, &["shared"]).unwrap()),
+            ["app"]
         );
         assert!(
-            Manifest::load_selected_or_manifest_path(
-                &from_root.root,
-                Some(&root.join("Cargo.toml")),
-                None,
-                true,
-            )
-            .is_err()
+            selected(&["missing"], true, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("did not match")
         );
+        let mut workspace = SourceWorkspace::load(&root, None).unwrap();
+        assert!(
+            workspace
+                .packages
+                .iter()
+                .all(|member| member.lock.is_none())
+        );
+        workspace.load_locked_context().unwrap();
+        for member in &workspace.packages {
+            assert_eq!(member.workspace_root, root);
+            assert_eq!(member.workspace_members, from_root.workspace_members);
+            assert_eq!(member.lock, from_root.lock);
+            assert_eq!(member.patches, from_root.patches);
+            assert_eq!(member.patches.len(), 1);
+        }
+        let selection = PackageSelection {
+            packages: vec!["app".to_owned(), "app@0.1".to_owned(), "sha*".to_owned()],
+            ..PackageSelection::default()
+        };
+        let (roots, warnings) = selection
+            .select(
+                workspace
+                    .packages
+                    .iter()
+                    .map(|member| (member.name.as_str(), &member.version, member.root.as_path())),
+                workspace.default_members.iter().map(PathBuf::as_path),
+            )
+            .unwrap();
+        assert_eq!(roots, [root.join("app"), root.join("shared")]);
+        assert!(warnings.is_empty());
+        let unmatched = selected(&[], true, &["shared", "missing"]).unwrap();
+        assert!(
+            unmatched[0]
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("excluded package selector `missing`"))
+        );
+        assert!(
+            selected(&[], true, &["*"])
+                .unwrap_err()
+                .to_string()
+                .contains("no packages")
+        );
+        assert!(
+            selected(&["app"], false, &["shared"])
+                .unwrap_err()
+                .to_string()
+                .contains("--exclude")
+        );
+        // From a member directory, a virtual root manifest path selects every member.
+        for (manifest, packages, expected) in [
+            ("app/Cargo.toml", &["shared"][..], &["shared"][..]),
+            ("Cargo.toml", &[], &["app", "shared"]),
+        ] {
+            let manifest = root.join(manifest);
+            let selected = compile(&from_root.root, Some(&manifest), packages, false, &[]);
+            assert_eq!(names(selected.unwrap()), expected);
+        }
         fs::write(
             from_root.workspace_root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"app\", \"shared\"]\ndefault-members = [\"app\"]\n",
         )
         .unwrap();
-        assert!(Manifest::load_selected(&from_root.workspace_root, Some("app")).is_err());
+        assert_eq!(
+            Manifest::load_for_build(&from_root.workspace_root)
+                .unwrap()
+                .name,
+            "app"
+        );
         fs::remove_dir_all(from_root.workspace_root).unwrap();
+    }
+
+    #[test]
+    fn root_build_dependencies_match_source_manifest_declarations() {
+        let root = Path::new("/workspace/member");
+        let path = root.join("Cargo.toml");
+        let source = "[package]\nname = \"member\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\
+                      build = \"build.rs\"\n[build-dependencies]\nbuilder = \"1\"\n\
+                      [target.'cfg(unix)'.build-dependencies]\ntarget-builder = \"2\"\n";
+        let manifest = Manifest::parse(root, &path, source).unwrap();
+        let document = Document::parse(&path, "Cargo manifest", source.to_owned()).unwrap();
+        let description =
+            Manifest::parse_document(root, &path, &document, ManifestMode::Source).unwrap();
+        assert_eq!(manifest.dependencies, description.dependencies);
+        assert_eq!(manifest.dependencies.len(), 2);
+        assert!(
+            manifest
+                .dependencies
+                .iter()
+                .all(|dependency| dependency.kind == DependencyKind::Build)
+        );
     }
 
     #[test]
@@ -3479,10 +3458,10 @@ members = ["ignored-member"]
         .unwrap();
         assert_eq!(manifest.links.as_deref(), Some("native"));
         assert!(manifest.build_script.is_some());
-        assert_eq!(manifest.integration_tests.len(), 1);
-        assert_eq!(manifest.integration_tests[0].name, "ignored-test");
+        assert_eq!(manifest.targets.len(), 1);
+        assert_eq!(manifest.targets[0].name, "ignored-test");
         assert_eq!(
-            manifest.integration_tests[0].path,
+            manifest.targets[0].path,
             Path::new("/dependency/tests/ignored.rs")
         );
         let library = manifest.library.as_ref().unwrap();
@@ -3568,11 +3547,16 @@ members = ["ignored-member"]
     fn loads_lorrys_frozen_stage_two_manifest_and_lock() {
         let root = Path::new(".");
         assert!(root.join("Cargo.toml").is_file());
-        let manifest = Manifest::load(root).unwrap();
+        let manifest = Manifest::load_for_build(root).unwrap();
         assert_eq!(manifest.name, "lorry");
-        assert_eq!(manifest.dependencies.len(), 12);
+        assert_eq!(manifest.dependencies.len(), 14);
         assert!(manifest.dependencies.iter().any(|dependency| {
             dependency.package == "moto-rt"
+                && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
+                && matches!(dependency.source, DependencySource::CratesIo)
+        }));
+        assert!(manifest.dependencies.iter().any(|dependency| {
+            dependency.package == "moto-sys"
                 && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
                 && matches!(dependency.source, DependencySource::CratesIo)
         }));
@@ -3581,7 +3565,20 @@ members = ["ignored-member"]
                 && dependency.target.as_deref() == Some("cfg(target_os = \"linux\")")
                 && matches!(dependency.source, DependencySource::CratesIo)
         }));
-        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 153);
+        assert!(manifest.dependencies.iter().any(|dependency| {
+            dependency.package == "gix"
+                && dependency
+                    .features
+                    .iter()
+                    .any(|feature| feature == "attributes")
+        }));
+        assert!(
+            manifest
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.package == "gix-dir")
+        );
+        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 164);
     }
 
     #[test]
@@ -3598,7 +3595,7 @@ members = ["ignored-member"]
         .unwrap();
         fs::write(root.join("src/lib.rs"), "").unwrap();
 
-        assert!(Manifest::load(&root).is_err());
+        assert!(Manifest::load_for_build(&root).is_err());
         assert!(Manifest::load_for_vendor(&root).unwrap().lock.is_none());
 
         fs::write(
@@ -3607,7 +3604,7 @@ members = ["ignored-member"]
              [[package]]\nname = \"vendor-root\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        assert!(Manifest::load(&root).is_err());
+        assert!(Manifest::load_for_build(&root).is_err());
         assert_eq!(
             Manifest::load_for_vendor(&root)
                 .unwrap()
@@ -3625,13 +3622,13 @@ members = ["ignored-member"]
              [[package]]\nname = \"vendor-root\"\nversion = \"0.2.0\"\n",
         )
         .unwrap();
-        assert!(Manifest::load(&root).is_ok());
+        assert!(Manifest::load_for_build(&root).is_ok());
         assert!(Manifest::load_for_vendor(&root).is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn discovers_sorted_direct_integration_test_targets() {
+    fn discovers_sorted_integration_test_targets() {
         let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "lorry-integration-targets-{}-{id}",
@@ -3656,22 +3653,231 @@ members = ["ignored-member"]
         fs::write(root.join("tests/readme.txt"), "").unwrap();
         fs::write(root.join("tests/nested/main.rs"), "").unwrap();
 
-        let manifest = Manifest::load(&root).unwrap();
+        let manifest = Manifest::load_for_build(&root).unwrap();
         assert_eq!(
-            manifest
-                .integration_tests
+            target_names(&manifest, TargetKind::Test),
+            ["a-b", "nested", "z"]
+        );
+        assert_eq!(manifest.targets[0].path, root.join("tests/a-b.rs"));
+
+        let path = root.join("Cargo.toml");
+        let source = fs::read_to_string(&path).unwrap();
+        for declarations in [
+            "[[test]]\nname = \"z\"\npath = \"tests/z.rs\"\n[[test]]\nname = \"extra\"\npath = \"tests/z.rs\"\n",
+            "[[test]]\nname = \"extra\"\npath = \"tests/z.rs\"\n[[test]]\nname = \"z\"\npath = \"tests/z.rs\"\n",
+            "[[test]]\nname = \"extra\"\npath = \"tests/z.rs\"\n",
+        ] {
+            fs::write(&path, format!("{source}\n{declarations}")).unwrap();
+            let manifest = Manifest::load_for_build(&root).unwrap();
+            let cargo = std::process::Command::new(env!("CARGO"))
+                .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
+                .env("CARGO_HOME", root.join("cargo-home"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                cargo.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+            let cargo: serde_json::Value = serde_json::from_slice(&cargo.stdout).unwrap();
+            let cargo_tests = cargo["packages"][0]["targets"]
+                .as_array()
+                .unwrap()
                 .iter()
-                .map(|target| target.name.as_str())
-                .collect::<Vec<_>>(),
-            ["a-b", "z"]
-        );
-        assert_eq!(
-            manifest.integration_tests[0].path,
-            root.join("tests/a-b.rs")
-        );
+                .filter(|target| target["kind"] == serde_json::json!(["test"]))
+                .map(|target| {
+                    (
+                        target["name"].as_str().unwrap(),
+                        PathBuf::from(target["src_path"].as_str().unwrap()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let tests = manifest
+                .targets_of(TargetKind::Test)
+                .map(|target| (target.name.as_str(), target.path.clone()))
+                .collect::<Vec<_>>();
+            assert_eq!(tests, cargo_tests, "{declarations}");
+        }
 
         fs::write(root.join("tests/a_b.rs"), "").unwrap();
-        assert!(Manifest::load(&root).is_err());
+        assert!(Manifest::load_for_build(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auxiliary_benchmark_flags_match_cargo_roots() {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("lorry-benchmark-flags-{}-{id}", std::process::id()));
+        for directory in ["src", "tests", "examples", "benches"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for source in [
+            "src/lib.rs",
+            "src/main.rs",
+            "tests/selected.rs",
+            "tests/default.rs",
+            "examples/selected.rs",
+            "examples/default.rs",
+            "benches/selected.rs",
+            "benches/disabled.rs",
+        ] {
+            fs::write(root.join(source), "").unwrap();
+        }
+        let source = r#"[package]
+name = "flags"
+version = "1.0.0"
+edition = "2024"
+[[test]]
+name = "selected"
+test = false
+bench = true
+[[example]]
+name = "selected"
+bench = true
+[[bench]]
+name = "disabled"
+bench = false
+"#;
+        fs::write(root.join("Cargo.toml"), source).unwrap();
+        let manifest = Manifest::load_source_dependency(&root).unwrap();
+        let mut expected = vec![
+            ("lib".to_owned(), "flags".to_owned()),
+            ("bin".to_owned(), "flags".to_owned()),
+        ];
+        expected.extend(
+            manifest
+                .targets
+                .iter()
+                .filter(|target| target.kind != TargetKind::Bin && target.bench)
+                .map(|target| (target.kind.as_str().to_owned(), target.name.clone())),
+        );
+        expected.sort();
+        let output = std::process::Command::new(env!("CARGO"))
+            .args([
+                "-Z",
+                "unstable-options",
+                "check",
+                "--unit-graph",
+                "--offline",
+                "--benches",
+            ])
+            .env("CARGO_HOME", root.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let graph: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let mut actual = graph["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|index| {
+                let target = &graph["units"][index.as_u64().unwrap() as usize]["target"];
+                (
+                    target["kind"][0].as_str().unwrap().to_owned(),
+                    target["name"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        actual.sort();
+        assert_eq!(expected.len(), 5);
+        assert_eq!(expected, actual);
+        for kind in ["test", "example", "bench"] {
+            fs::write(root.join("Cargo.toml"), format!("{source}\n[[{kind}]]\nname = \"invalid\"\npath = \"src/main.rs\"\nbench = \"true\"\n")).unwrap();
+            assert!(
+                Manifest::load_source_dependency(&root)
+                    .unwrap_err()
+                    .render()
+                    .contains("must be a boolean")
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_metadata_describes_missing_explicit_target_files_like_cargo() {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("lorry-missing-targets-{}-{id}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname=\"demo\"\nversion=\"1.0.0\"\nedition=\"2021\"\n[workspace]\n\
+            [lib]\npath=\"missing/lib.rs\"\n\
+            [[bin]]\nname=\"program\"\npath=\"missing/main.rs\"\n\
+            [[test]]\nname=\"integration\"\npath=\"missing/test.rs\"\nrequired-features=[\"extra\"]\ntest=false\ndoc=true\nharness=false\n\
+            [[example]]\nname=\"sample\"\npath=\"missing/example.rs\"\n\
+            [[bench]]\nname=\"benchmark\"\npath=\"missing/bench.rs\"\n",
+        )
+        .unwrap();
+        let cargo = std::process::Command::new(env!("CARGO"))
+            .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
+            .env("CARGO_HOME", root.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            cargo.status.success(),
+            "{}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+        let cargo: serde_json::Value = serde_json::from_slice(&cargo.stdout).unwrap();
+        let manifest = Manifest::load_source_dependency(&root).unwrap();
+        let targets = cargo["packages"][0]["targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 5);
+        let test = manifest.targets_of(TargetKind::Test).next().unwrap();
+        assert_eq!(test.required_features.as_ref().unwrap(), &["extra"]);
+        assert!(!test.test && test.doc && !test.harness);
+        let cargo_test = targets
+            .iter()
+            .find(|target| target["name"] == "integration")
+            .unwrap();
+        assert_eq!(
+            cargo_test["required-features"],
+            serde_json::json!(["extra"])
+        );
+        assert_eq!(cargo_test["test"], test.test);
+        assert_eq!(cargo_test["doc"], test.doc);
+        let mut paths = vec![manifest.library.as_ref().unwrap().path.clone()];
+        paths.extend(manifest.targets.iter().map(|target| target.path.clone()));
+        for path in paths {
+            assert!(
+                targets
+                    .iter()
+                    .any(|target| target["src_path"].as_str() == path.to_str())
+            );
+        }
+        // Compilation still diagnoses its missing library input.
+        assert!(
+            Manifest::load_path_dependency(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("library target")
+        );
+        fs::write(root.join("lib.rs"), "").unwrap();
+        let text = fs::read_to_string(root.join("Cargo.toml"))
+            .unwrap()
+            .replace("missing/lib.rs", "lib.rs");
+        fs::write(root.join("Cargo.toml"), text).unwrap();
+        let dependency = Manifest::load_path_dependency(&root).unwrap();
+        assert_eq!(
+            dependency
+                .targets
+                .iter()
+                .map(|target| target.kind)
+                .collect::<Vec<_>>(),
+            [TargetKind::Example, TargetKind::Test, TargetKind::Bench]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3687,47 +3893,335 @@ members = ["ignored-member"]
         fs::create_dir_all(root.join("tests")).unwrap();
         fs::write(
             root.join("Cargo.toml"),
-            "[package]\nname = \"dependency\"\nversion = \"1.0.0\"\n\n\
+            "[package]\nname = \"dependency\"\nversion = \"1.0.0\"\nautotests = true\n\n\
              [[test]]\nname = \"auto-test\"\npath = \"tests/auto_test.rs\"\n",
         )
         .unwrap();
         fs::write(root.join("src/lib.rs"), "").unwrap();
         fs::write(root.join("tests/auto_test.rs"), "").unwrap();
+        fs::create_dir_all(root.join("tests/directory-test")).unwrap();
+        fs::write(root.join("tests/directory-test/main.rs"), "").unwrap();
 
         let manifest = Manifest::load_path_dependency(&root).unwrap();
-        assert_eq!(manifest.integration_tests.len(), 1);
-        assert_eq!(manifest.integration_tests[0].name, "auto-test");
+        assert_eq!(
+            target_names(&manifest, TargetKind::Test),
+            ["auto-test", "directory-test"]
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dependency_target_names_follow_cargo_rules() {
+        let root = target_fixture("dependency-target-names");
+        fs::create_dir_all(root.join("examples")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        // prettyplease ships such an example and disables example discovery.
+        fs::write(root.join("examples/output.pretty.rs"), "fn main() {}\n").unwrap();
+        let long = "t".repeat(70);
+        fs::write(root.join(format!("tests/{long}.rs")), "").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"dep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+                 autoexamples = false\n[[test]]\nname = \"{long}\"\n"
+            ),
+        )
+        .unwrap();
+        let manifest = Manifest::load_path_dependency(&root).unwrap();
+        assert!(
+            manifest
+                .targets
+                .iter()
+                .all(|target| target.kind != TargetKind::Example)
+        );
+        assert!(manifest.targets.iter().any(|target| target.name == long));
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"dep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             [[test]]\nname = \"../escape\"\n",
+        )
+        .unwrap();
+        let error = Manifest::load_path_dependency(&root).unwrap_err().render();
+        assert!(error.contains("unsupported target name"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registry_packages_ignore_enclosing_manifests() {
+        let parent = target_fixture("registry-enclosing");
+        // Another user could plant this in a shared temporary directory.
+        fs::write(parent.join("Cargo.toml"), "[workspace\nbroken").unwrap();
+        let package = parent.join("demo-1.0.0");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(package.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        for describe in [false, true] {
+            let manifest = Manifest::load_registry_dependency(&package, describe).unwrap();
+            assert_eq!(manifest.name, "demo");
+        }
+        assert!(Manifest::load_path_dependency(&package).is_err());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    fn target_fixture(name: &str) -> PathBuf {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("lorry-{name}-{}-{id}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        root
+    }
+
+    fn cargo_metadata_targets(root: &Path) -> std::process::Output {
+        std::process::Command::new(env!("CARGO"))
+            .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
+            .env("CARGO_HOME", root.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(root)
+            .output()
+            .unwrap()
     }
 
     #[cfg(unix)]
     #[test]
-    fn rejects_linked_integration_test_entries() {
+    fn infers_and_merges_targets_like_cargo() {
         use std::os::unix::fs::symlink;
 
-        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "lorry-linked-integration-targets-{}-{id}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::create_dir_all(root.join("tests")).unwrap();
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"integration-root\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("Cargo.lock"),
-            "version = 4\n\n[[package]]\nname = \"integration-root\"\nversion = \"0.1.0\"\n",
-        )
-        .unwrap();
-        fs::write(root.join("src/lib.rs"), "").unwrap();
-        fs::write(root.join("outside.rs"), "").unwrap();
-        symlink(root.join("outside.rs"), root.join("tests/linked.rs")).unwrap();
+        let root = target_fixture("target-inference");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(root.join("outside/linked-dir")).unwrap();
+        fs::create_dir_all(root.join("bench-sources")).unwrap();
+        fs::write(root.join("outside/linked.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("outside/linked-dir/main.rs"), "fn main() {}\n").unwrap();
+        symlink(root.join("bench-sources"), root.join("benches")).unwrap();
+        let mut explicit = String::new();
+        for (kind, directory) in [
+            ("bin", "src/bin"),
+            ("example", "examples"),
+            ("test", "tests"),
+            ("bench", "benches"),
+        ] {
+            // An explicit name selects `sub/main.rs`; an explicit path hides `plain`.
+            explicit.push_str(&format!(
+                "[[{kind}]]\nname = \"sub\"\n[[{kind}]]\nname = \"renamed\"\npath = \"{directory}/plain.rs\"\n"
+            ));
+            let directory = root.join(directory);
+            for entry in ["sub", ".hidden-dir", "no-main"] {
+                fs::create_dir_all(directory.join(entry)).unwrap();
+            }
+            for file in [
+                "plain.rs",
+                ".hidden.rs",
+                "sub/main.rs",
+                ".hidden-dir/main.rs",
+                "no-main/lib.rs",
+                "notes.txt",
+                "no-extension",
+            ] {
+                fs::write(directory.join(file), "fn main() {}\n").unwrap();
+            }
+            symlink(root.join("outside/linked.rs"), directory.join("linked.rs")).unwrap();
+            symlink(
+                root.join("outside/linked-dir"),
+                directory.join("linked-dir"),
+            )
+            .unwrap();
+        }
+        let disabled =
+            "autobins = false\nautoexamples = false\nautotests = false\nautobenches = false\n";
+        for (edition, auto, tables) in [
+            ("2021", "", ""),
+            ("2021", "", explicit.as_str()),
+            ("2021", disabled, explicit.as_str()),
+            ("2021", disabled, ""),
+            ("2015", "", explicit.as_str()),
+        ] {
+            fs::write(
+                root.join("Cargo.toml"),
+                format!("[package]\nname = \"infer\"\nversion = \"1.0.0\"\nedition = \"{edition}\"\n{auto}[workspace]\n{tables}"),
+            )
+            .unwrap();
+            let manifest = Manifest::load_source_dependency(&root).unwrap();
+            let lorry = manifest
+                .targets
+                .iter()
+                .map(|target| {
+                    (
+                        target.kind.as_str(),
+                        target.name.as_str(),
+                        target.path.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let cargo = cargo_metadata_targets(&root);
+            assert!(
+                cargo.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+            let cargo: serde_json::Value = serde_json::from_slice(&cargo.stdout).unwrap();
+            let cargo = cargo["packages"][0]["targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|target| target["kind"][0] != "lib")
+                .map(|target| {
+                    (
+                        target["kind"][0].as_str().unwrap(),
+                        target["name"].as_str().unwrap(),
+                        PathBuf::from(target["src_path"].as_str().unwrap()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(lorry, cargo, "edition {edition}, {auto}{tables}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
-        assert!(Manifest::load(&root).is_err());
+    #[test]
+    fn explicit_targets_follow_cargo_requirements() {
+        let root = target_fixture("explicit-targets");
+        let header = "[package]\nname = \"explicit\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[workspace]\n";
+        let load = |tables: &str| {
+            fs::write(root.join("Cargo.toml"), format!("{header}{tables}")).unwrap();
+            Manifest::load_source_dependency(&root)
+        };
+        // A file in place of a target directory holds no targets in Cargo.
+        fs::write(root.join("tests"), "").unwrap();
+        assert!(load("").unwrap().targets.is_empty());
+        assert!(cargo_metadata_targets(&root).status.success());
+        fs::remove_file(root.join("tests")).unwrap();
+        for (kind, directory) in [
+            ("bin", "src/bin"),
+            ("example", "examples"),
+            ("test", "tests"),
+            ("bench", "benches"),
+        ] {
+            // Only an unresolved binary fails in a dependency, as in Cargo.
+            let missing = load(&format!("[[{kind}]]\nname = \"missing\"\n"));
+            assert_eq!(missing.is_err(), kind == "bin", "{kind}");
+            assert!(load(&format!("[[{kind}]]\npath = \"src/lib.rs\"\n")).is_err());
+
+            // A file and a directory with the same name collide in Cargo too.
+            fs::create_dir_all(root.join(directory).join("twin")).unwrap();
+            fs::write(root.join(directory).join("twin.rs"), "").unwrap();
+            fs::write(root.join(directory).join("twin/main.rs"), "").unwrap();
+            assert!(
+                load("").unwrap_err().render().contains("duplicate"),
+                "{kind}"
+            );
+            assert!(!cargo_metadata_targets(&root).status.success());
+            fs::remove_dir_all(root.join(directory)).unwrap();
+        }
+
+        let manifest = load(
+            "[[bin]]\nname = \"tool\"\npath = \"src/lib.rs\"\nedition = \"2018\"\ndoctest = false\n\
+             [[test]]\nname = \"check\"\npath = \"src/lib.rs\"\ncrate-type = [\"lib\"]\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.targets[0].edition, Edition::E2018);
+        assert_eq!(manifest.targets[1].crate_types, ["bin"]);
+        assert!(manifest.warnings[0].contains("`edition` is set on bin `tool`"));
+        let error =
+            load("[[bin]]\nname = \"tool\"\npath = \"src/lib.rs\"\ncrate-type = [\"lib\"]\n")
+                .unwrap_err();
+        assert!(error.render().contains("unsupported bin crate-type"));
+
+        fs::create_dir_all(root.join("src/bin")).unwrap();
+        for index in 0..1_025 {
+            fs::write(root.join(format!("src/bin/b{index}.rs")), "").unwrap();
+        }
+        let error = load("").unwrap_err();
+        assert!(error.render().contains("more than 1024 binary targets"));
+        fs::remove_file(root.join("src/bin/b0.rs")).unwrap();
+        assert_eq!(load("").unwrap().targets.len(), 1_024);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dependencies_drop_unresolved_explicit_targets_like_cargo() {
+        let root = target_fixture("unresolved-targets");
+        // Published crates may declare targets whose files the archive excludes.
+        let dependency = root.join("vendor/dep");
+        fs::create_dir_all(dependency.join("src")).unwrap();
+        fs::write(dependency.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            dependency.join(".cargo-checksum.json"),
+            format!("{{\"files\":{{}},\"package\":\"{}\"}}", "0".repeat(64)),
+        )
+        .unwrap();
+        fs::write(
+            dependency.join("Cargo.toml"),
+            "[package]\nname = \"dep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             [[test]]\nname = \"excluded-test\"\n[[example]]\nname = \"excluded-example\"\n\
+             [[bench]]\nname = \"excluded-bench\"\nharness = false\n",
+        )
+        .unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(app.join("src")).unwrap();
+        fs::create_dir_all(app.join(".cargo")).unwrap();
+        fs::write(
+            app.join(".cargo/config.toml"),
+            format!(
+                "[source.crates-io]\nreplace-with = \"vendored\"\n\
+                 [source.vendored]\ndirectory = \"{}\"\n",
+                root.join("vendor").display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            app.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             [workspace]\n[dependencies]\ndep = \"1.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let cargo = |directory: &Path, command: &[&str]| {
+            std::process::Command::new(env!("CARGO"))
+                .args(command)
+                .arg("--offline")
+                .env("CARGO_HOME", root.join("cargo-home"))
+                .env("CARGO_TARGET_DIR", root.join("target"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(directory)
+                .output()
+                .unwrap()
+        };
+        // Cargo builds the registry dependency and omits the targets.
+        let build = cargo(&app, &["check"]);
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let metadata = cargo(&app, &["metadata", "--format-version=1"]);
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        let dependency_targets = metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "dep")
+            .unwrap()["targets"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(dependency_targets, 1);
+        for manifest in [
+            Manifest::load_path_dependency(&dependency).unwrap(),
+            Manifest::load_source_dependency(&dependency).unwrap(),
+        ] {
+            assert!(manifest.library.is_some() && manifest.targets.is_empty());
+        }
+        // As a member, Cargo and Lorry both reject the package.
+        assert!(!cargo(&dependency, &["check"]).status.success());
+        let Err(error) = SourceWorkspace::load(&dependency, None) else {
+            panic!("a member must reject an unresolved explicit target");
+        };
+        assert!(error.render().contains("cannot infer source path"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3773,7 +4267,6 @@ members = ["ignored-member"]
     #[test]
     fn rejects_unknown_and_unsupported_build_semantics() {
         for source in [
-            format!("{RED}\n[dev-dependencies]\nhelper = \"1\"\n"),
             RED.replace(
                 "[dependencies]",
                 "[dependencies]\nthing = { version = \"1\", registry = \"alternate\" }",
@@ -3798,36 +4291,26 @@ members = ["ignored-member"]
         let root = Path::new("/dependency");
         let path = root.join("Cargo.toml");
         let source = format!("{RED}\n[lib]\nproc-macro = true\n");
-        let document = Document::parse(&path, "Cargo manifest", source).unwrap();
+        let document = Document::parse(&path, "Cargo manifest", source.clone()).unwrap();
         let manifest =
             Manifest::parse_document(root, &path, &document, ManifestMode::Dependency).unwrap();
         assert!(manifest.library.unwrap().proc_macro);
 
-        let error = parsed(&format!("{RED}\n[lib]\nproc-macro = true\n")).unwrap_err();
-        assert!(error.to_string().contains("as the root"), "{error}");
+        assert!(parsed(&source).unwrap().library.unwrap().proc_macro);
     }
 
     #[test]
-    fn rejects_root_target_dev_dependencies_only_for_matching_targets() {
+    fn retains_root_dev_dependencies() {
         let source = format!("{RED}\n[target.'cfg(unix)'.dev-dependencies]\nlibc = \"0.2\"\n");
         let manifest = parsed(&source).unwrap();
-        let linux = TargetInfo {
-            triple: "x86_64-unknown-linux-gnu".to_owned(),
-            cfg: CfgSet::parse("target_os=\"linux\"\nunix\n").unwrap(),
-        };
-        let error = manifest.require_supported_target(&linux).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("target.cfg(unix).dev-dependencies"),
-            "{error}"
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].kind, DependencyKind::Dev);
+        assert_eq!(
+            manifest.dependencies[0].target.as_deref(),
+            Some("cfg(unix)")
         );
-
-        let motor = TargetInfo {
-            triple: "x86_64-unknown-motor".to_owned(),
-            cfg: CfgSet::parse("target_os=\"motor\"\n").unwrap(),
-        };
-        manifest.require_supported_target(&motor).unwrap();
+        let regular = parsed(&format!("{RED}\n[dev-dependencies]\nhelper = \"1\"\n")).unwrap();
+        assert_eq!(regular.dependencies[0].kind, DependencyKind::Dev);
     }
 
     #[test]
@@ -3872,6 +4355,37 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
                 .len(),
             2
         );
+        let version_two = valid.replace("version = 4\n", "");
+        let loaded =
+            validate_lock_source(&manifest, Path::new("Cargo.lock"), &version_two).unwrap();
+        assert_eq!(loaded.format, crate::lockfile::Format::V2);
+        let version_one = version_two.replace("dependencies = [\"serde\"]", &format!("dependencies = [\"serde 1.0.228 ({CRATES_IO_SOURCE})\"]"))
+            .replace("checksum = \"9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e\"", &format!("[metadata]\n\"checksum serde 1.0.228 ({CRATES_IO_SOURCE})\" = \"9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e\""));
+        let loaded =
+            validate_lock_source(&manifest, Path::new("Cargo.lock"), &version_one).unwrap();
+        assert_eq!(loaded.format, crate::lockfile::Format::V1);
+        assert!(
+            loaded
+                .packages
+                .iter()
+                .find(|package| package.name == "serde")
+                .unwrap()
+                .checksum
+                .is_some()
+        );
+        for invalid in [
+            version_one.replace(
+                "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
+                "invalid",
+            ),
+            version_one.replace(
+                "\" = \"9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e\"",
+                "\" = 9",
+            ),
+            version_one.replace("checksum serde 1.0.228", "checksum other 1.0.228"),
+        ] {
+            assert!(validate_lock_source(&manifest, Path::new("Cargo.lock"), &invalid).is_err());
+        }
         let unsupported = valid.replace("version = 4", "version = 2");
         let error = validate_lock_source(&manifest, Path::new("Cargo.lock"), &unsupported)
             .unwrap_err()

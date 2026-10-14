@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -11,9 +9,10 @@ use crate::identity::{
     CargoProfileLto, CargoSource, CargoStrip, CargoTargetKind, CargoUnitIdentityInput,
     CargoUnitLto, Identity, cargo_unit_identity,
 };
-use crate::manifest::{Lto as ManifestLto, Manifest, ReleaseProfile, Strip as ManifestStrip};
+use crate::manifest::{Lto as ManifestLto, Manifest, Profile, Target, TargetKind};
 use crate::resolver::{
-    CompileKind, FeatureContext, PackageKey, PackageSourceKey, Resolution, ResolvedPackage,
+    CompileKind, FeatureContext, PackageKey, PackageSourceKey, Resolution, ResolvedEdge,
+    ResolvedPackage, selected_root_features,
 };
 use crate::source_tree::Exclusions;
 use crate::sparse::DependencyKind;
@@ -22,24 +21,98 @@ use crate::toolchain::Toolchain;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum UnitKind {
     Library,
+    Binary,
+    LibraryHarness,
+    BinaryHarness,
+    IntegrationHarness,
+    Example,
+    Bench,
     ProcMacro,
     BuildScriptCompile,
     BuildScriptRun,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ProfileContext {
+    Normal,
+    Test,
+    Selected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum UnitMode {
+    Build,
+    Test,
+    Check,
+    CheckTest,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct UnitKey {
     pub package: PackageKey,
     pub kind: UnitKind,
+    pub mode: UnitMode,
+    pub target: Option<String>,
     pub compile_kind: CompileKind,
+    pub profile: ProfileContext,
     pub features: BTreeSet<String>,
+}
+
+impl UnitKey {
+    pub(crate) fn manifest_target<'a>(&self, manifest: &'a Manifest) -> Option<&'a Target> {
+        let kind = match self.kind {
+            UnitKind::Binary | UnitKind::BinaryHarness => TargetKind::Bin,
+            UnitKind::IntegrationHarness => TargetKind::Test,
+            UnitKind::Example => TargetKind::Example,
+            UnitKind::Bench => TargetKind::Bench,
+            _ => return None,
+        };
+        manifest.target(kind, self.target.as_deref()?)
+    }
+
+    pub(crate) fn is_harness(&self) -> bool {
+        matches!(self.mode, UnitMode::Test | UnitMode::CheckTest)
+    }
+
+    pub(crate) fn library_types<'a>(&self, manifest: &'a Manifest) -> Option<&'a [String]> {
+        if self.is_harness() {
+            return None;
+        }
+        if self.kind == UnitKind::Library {
+            Some(&manifest.library.as_ref().unwrap().crate_types)
+        } else {
+            self.manifest_target(manifest)
+                .filter(|target| target.crate_types != ["bin"])
+                .map(|target| target.crate_types.as_slice())
+        }
+    }
+
+    pub fn with_profile(mut self, profile: ProfileContext, panic_abort: bool) -> Self {
+        self.profile =
+            if panic_abort && !self.uses_host_profile() && self.kind != UnitKind::BuildScriptRun {
+                profile
+            } else {
+                ProfileContext::Normal
+            };
+        self
+    }
+
+    fn uses_host_profile(&self) -> bool {
+        matches!(
+            self.kind,
+            UnitKind::BuildScriptCompile | UnitKind::ProcMacro
+        ) || self.compile_kind == CompileKind::Host
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum UnitEdgeKind {
     RustDependency,
+    ArtifactDependency,
     BuildScriptExecutable,
     BuildScriptOutput,
+    /// A build-script run reads the metadata of a dependency's script run.
+    BuildScriptMetadata,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -59,6 +132,70 @@ pub struct Unit {
 pub struct UnitGraph {
     pub units: BTreeMap<UnitKey, Unit>,
     pub order: Vec<UnitKey>,
+    pub selected_packages: BTreeSet<PackageKey>,
+    // Selecting an example still treats its owning macro library as a host dependency.
+    pub primary_macros: BTreeSet<PackageKey>,
+}
+
+impl UnitGraph {
+    pub fn with_profile(mut self, profile: ProfileContext, panic_abort: bool) -> Self {
+        let mut units = BTreeMap::new();
+        for (_, mut unit) in std::mem::take(&mut self.units) {
+            unit.key = unit.key.with_profile(profile, panic_abort);
+            unit.dependencies = unit
+                .dependencies
+                .into_iter()
+                .map(|mut edge| {
+                    edge.unit = edge.unit.with_profile(profile, panic_abort);
+                    edge
+                })
+                .collect();
+            units.insert(unit.key.clone(), unit);
+        }
+        for key in &mut self.order {
+            *key = key.clone().with_profile(profile, panic_abort);
+        }
+        self.units = units;
+        self
+    }
+
+    pub fn merge(&mut self, other: Self) -> Result<()> {
+        self.selected_packages.extend(other.selected_packages);
+        self.primary_macros.extend(other.primary_macros);
+        for (key, unit) in other.units {
+            if let Some(existing) = self.units.get(&key) {
+                if existing != &unit {
+                    return Err(Error::failure(format!(
+                        "unit graph has conflicting dependencies for `{} {}` {:?}",
+                        key.package.name, key.package.version, key.kind
+                    )));
+                }
+            } else {
+                self.units.insert(key, unit);
+            }
+        }
+        self.order = topological_order(&self.units)?;
+        Ok(())
+    }
+
+    fn rekey(mut self, rekey: impl Fn(UnitKey) -> UnitKey) -> Result<Self> {
+        let mut units = BTreeMap::new();
+        for (_, mut unit) in std::mem::take(&mut self.units) {
+            unit.key = rekey(unit.key);
+            unit.dependencies = unit
+                .dependencies
+                .into_iter()
+                .map(|mut edge| {
+                    edge.unit = rekey(edge.unit);
+                    edge
+                })
+                .collect();
+            units.insert(unit.key.clone(), unit);
+        }
+        self.units = units;
+        self.order = topological_order(&self.units)?;
+        Ok(self)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -213,22 +350,606 @@ pub struct CompilationPlan {
     pub order: Vec<UnitKey>,
 }
 
+impl CompilationPlan {
+    pub(crate) fn compile_time_dependencies(mut self) -> Result<Self> {
+        let mut pending = self
+            .units
+            .keys()
+            .filter(|key| {
+                key.kind == UnitKind::BuildScriptRun
+                    || key.kind == UnitKind::ProcMacro && key.mode == UnitMode::Build
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut retained = BTreeSet::new();
+        while let Some(key) = pending.pop() {
+            if retained.insert(key.clone()) {
+                let planned = self.units.get(&key).ok_or_else(|| {
+                    Error::failure("compile-time dependency is missing from the compilation plan")
+                })?;
+                pending.extend(
+                    planned
+                        .unit
+                        .dependencies
+                        .iter()
+                        .map(|edge| edge.unit.clone()),
+                );
+            }
+        }
+        // Keep identities and settings from the full graph: skipped ordinary
+        // units still affect Cargo's host profile sharing and dependency hashes.
+        self.units.retain(|key, _| retained.contains(key));
+        self.order.retain(|key| retained.contains(key));
+        Ok(self)
+    }
+}
+
 pub struct PlanOptions<'a> {
     pub workspace_root: &'a Path,
     pub release: bool,
-    pub test_profile: bool,
     pub panic_abort: bool,
-    pub release_profile: &'a ReleaseProfile,
+    pub profile: &'a Profile,
     pub rustc: &'a Toolchain,
     /// `None` is a native Linux build. Native Motor passes its normalized
     /// explicit Motor target identity here.
     pub logical_target: Option<&'a str>,
+    /// An actual target selection isolates host Rust flags, unlike the
+    /// logical target identity used by native Motor builds.
+    pub physical_target: Option<&'a str>,
     pub rustflags: &'a [String],
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) enum HarnessFilter {
+    #[default]
+    All,
+    Tests,
+    Benches,
+    Any,
+}
+
+impl HarnessFilter {
+    fn matches(self, tested: bool, benched: bool) -> bool {
+        match self {
+            Self::All => tested || benched,
+            Self::Tests => tested,
+            Self::Benches => benched,
+            Self::Any => true,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct CheckTargetSelection<'a> {
+    pub normal: bool,
+    pub binaries: bool,
+    pub binary_name: Option<&'a str>,
+    pub harnesses: bool,
+    pub harness_filter: HarnessFilter,
+    pub integrations: bool,
+    pub integration_name: Option<&'a str>,
+    pub examples: bool,
+    pub example_name: Option<&'a str>,
+    pub benches: bool,
+    pub bench_name: Option<&'a str>,
+}
+
+pub(crate) struct AuxiliarySelection<'a> {
+    pub kind: &'static str,
+    pub name: Option<&'a str>,
+    pub mode: UnitMode,
+    pub tested: Option<bool>,
+    pub benched: Option<bool>,
+    pub test_profile: bool,
+}
+
+pub(crate) fn workspace_auxiliary_units(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    options: &PlanOptions<'_>,
+    selection: &AuxiliarySelection<'_>,
+) -> Result<UnitGraph> {
+    if let Some(name) = selection.name
+        && !selected.iter().any(|package| {
+            manifests[package]
+                .targets
+                .iter()
+                .any(|target| target.kind.as_str() == selection.kind && target.name == name)
+        })
+    {
+        return Err(Error::failure(format!(
+            "no {} target named `{name}`",
+            selection.kind
+        )));
+    }
+    let matches = |target: &Target| {
+        target.kind.as_str() == selection.kind
+            && selection.name.is_none_or(|name| name == target.name)
+            && selection.tested.is_none_or(|tested| tested == target.test)
+            && selection
+                .benched
+                .is_none_or(|benched| benched == target.bench)
+    };
+    if !selected
+        .iter()
+        .any(|key| manifests[key].targets.iter().any(&matches))
+    {
+        return Ok(UnitGraph {
+            units: BTreeMap::new(),
+            order: Vec::new(),
+            selected_packages: selected.iter().cloned().collect(),
+            primary_macros: BTreeSet::new(),
+        });
+    }
+    let mut graph = dependency_units_with_selected(resolution, manifests, selected)?;
+    graph.selected_packages.extend(selected.iter().cloned());
+    let mut roots = Vec::new();
+    for package in resolution
+        .packages
+        .iter()
+        .filter(|package| selected.contains(&package.key))
+    {
+        let manifest = &manifests[&package.key];
+        let features = features_for(package, CompileKind::Target);
+        for target in manifest.targets.iter().filter(|target| matches(target)) {
+            if !target_enabled(
+                resolution,
+                manifest,
+                &features,
+                &target.name,
+                target.required_features.as_deref(),
+                selection.name.is_some(),
+            )? {
+                continue;
+            }
+            if target
+                .crate_types
+                .iter()
+                .any(|kind| !matches!(kind.as_str(), "bin" | "lib" | "rlib" | "staticlib"))
+                || target.crate_types.len() > 1
+                    && target.crate_types.iter().any(|kind| kind == "bin")
+            {
+                return Err(Error::failure(format!(
+                    "example `{}` uses unsupported crate types; use bin, lib, rlib, or staticlib",
+                    target.name
+                )));
+            }
+            let kind = if selection.kind == "example" {
+                UnitKind::Example
+            } else {
+                UnitKind::Bench
+            };
+            let mut key = unit_key(package, kind, CompileKind::Target, &features);
+            key.target = Some(target.name.clone());
+            key.mode = selection.mode;
+            insert_unit(&mut graph.units, key.clone());
+            add_member_target_edges(&mut graph, resolution, manifests, &key, true, true)?;
+            roots.push(key);
+        }
+    }
+    if selection.test_profile || matches!(selection.mode, UnitMode::Test | UnitMode::CheckTest) {
+        graph = graph.with_profile(ProfileContext::Test, options.panic_abort);
+        roots = roots
+            .into_iter()
+            .map(|key| key.with_profile(ProfileContext::Test, options.panic_abort))
+            .collect();
+    }
+    if selection.kind == "bench" && selection.mode == UnitMode::Test {
+        let mut programs = workspace_units(
+            resolution,
+            manifests,
+            selected,
+            false,
+            true,
+            None,
+            options.release || options.profile.opt_level != "0",
+        )?;
+        let keys = programs
+            .units
+            .keys()
+            .filter(|key| key.kind == UnitKind::Binary)
+            .cloned()
+            .collect::<Vec<_>>();
+        retain_unit_roots(&mut programs, keys.clone())?;
+        graph.merge(programs)?;
+        for root in &roots {
+            for program in keys.iter().filter(|key| key.package == root.package) {
+                add_edge(
+                    &mut graph.units,
+                    root,
+                    program.clone(),
+                    UnitEdgeKind::ArtifactDependency,
+                    None,
+                )?;
+            }
+        }
+    }
+    if matches!(selection.mode, UnitMode::Check | UnitMode::CheckTest) {
+        graph = graph.rekey(|mut key| {
+            if key.kind == UnitKind::Library
+                && manifests[&key.package].editable
+                && key.compile_kind == CompileKind::Target
+            {
+                key.mode = UnitMode::Check;
+            }
+            key
+        })?;
+    }
+    retain_unit_roots(&mut graph, roots)?;
+    Ok(graph)
+}
+
+pub(crate) fn workspace_compiler_targets(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    targets: &crate::cli::TargetSelection,
+    options: &PlanOptions<'_>,
+    mode: UnitMode,
+) -> Result<UnitGraph> {
+    if mode == UnitMode::CheckTest {
+        let mut graph = workspace_compiler_targets(
+            resolution,
+            manifests,
+            selected,
+            targets,
+            options,
+            UnitMode::Test,
+        )?;
+        let checked = |mut key: UnitKey| {
+            if key.mode == UnitMode::Test {
+                key.mode = UnitMode::CheckTest;
+            } else if key.kind == UnitKind::Library
+                && key.compile_kind == CompileKind::Target
+                && manifests[&key.package].editable
+            {
+                key.mode = UnitMode::Check;
+            }
+            key
+        };
+        let roots = graph
+            .units
+            .keys()
+            .filter(|key| key.mode == UnitMode::Test && selected.contains(&key.package))
+            .cloned()
+            .map(checked)
+            .collect();
+        for unit in graph.units.values_mut() {
+            unit.dependencies
+                .retain(|edge| edge.kind != UnitEdgeKind::ArtifactDependency);
+        }
+        graph = graph.rekey(checked)?;
+        retain_unit_roots(&mut graph, roots)?;
+        return Ok(graph);
+    }
+    let harness_mode = if mode == UnitMode::Check {
+        UnitMode::CheckTest
+    } else {
+        UnitMode::Test
+    };
+    let default = !targets.has_target_selector();
+    let testing = targets.tests || targets.all_targets;
+    let benching = targets.benches || targets.all_targets;
+    let mut graph = workspace_target_units(
+        resolution,
+        manifests,
+        selected,
+        &CheckTargetSelection {
+            normal: targets.all_targets || targets.lib || targets.bins || default,
+            binaries: targets.all_targets || targets.bins || default,
+            harnesses: testing || benching,
+            harness_filter: match (testing, benching) {
+                (true, false) => HarnessFilter::Tests,
+                (false, true) => HarnessFilter::Benches,
+                _ => HarnessFilter::All,
+            },
+            integrations: testing || benching,
+            examples: targets.all_targets || targets.examples,
+            benches: benching,
+            ..CheckTargetSelection::default()
+        },
+        options,
+        mode,
+    )?;
+    if targets.bins && !targets.selects_library() {
+        let roots = graph
+            .units
+            .keys()
+            .filter(|key| {
+                selected.contains(&key.package)
+                    && (key.kind == UnitKind::Binary
+                        || key.is_harness()
+                        || matches!(key.kind, UnitKind::Example | UnitKind::Bench))
+                    && (mode != UnitMode::Test
+                        || key.kind != UnitKind::LibraryHarness
+                        || manifests[&key.package]
+                            .library
+                            .as_ref()
+                            .is_some_and(|library| {
+                                testing && library.test || benching && library.bench
+                            }))
+            })
+            .cloned()
+            .collect();
+        graph.primary_macros.clear();
+        retain_unit_roots(&mut graph, roots)?;
+    }
+    for (enabled, kind, tested, benched) in [
+        (testing, "example", Some(true), None),
+        (testing, "bench", Some(true), None),
+        (benching, "example", None, Some(true)),
+    ] {
+        if enabled {
+            graph.merge(workspace_auxiliary_units(
+                resolution,
+                manifests,
+                selected,
+                options,
+                &AuxiliarySelection {
+                    kind,
+                    name: None,
+                    mode: harness_mode,
+                    tested,
+                    benched,
+                    test_profile: true,
+                },
+            )?)?;
+        }
+    }
+    for (kind, names, all) in [
+        ("bin", &targets.bin, targets.bins),
+        ("test", &targets.test, targets.tests),
+        ("example", &targets.example, targets.examples),
+        ("bench", &targets.bench, targets.benches),
+    ] {
+        if targets.all_targets || all {
+            continue;
+        }
+        for name in names {
+            let mut selection = CheckTargetSelection::default();
+            match kind {
+                "bin" => {
+                    selection.normal = true;
+                    selection.binaries = true;
+                    selection.binary_name = Some(name);
+                }
+                "test" => {
+                    selection.integrations = true;
+                    selection.integration_name = Some(name);
+                }
+                "example" => selection.example_name = Some(name),
+                "bench" => selection.bench_name = Some(name),
+                _ => unreachable!(),
+            }
+            let mut part =
+                workspace_target_units(resolution, manifests, selected, &selection, options, mode)?;
+            if kind == "bin" {
+                let roots = part
+                    .units
+                    .keys()
+                    .filter(|key| {
+                        key.kind
+                            == if mode == UnitMode::Test {
+                                UnitKind::BinaryHarness
+                            } else {
+                                UnitKind::Binary
+                            }
+                            && selected.contains(&key.package)
+                            && key.target.as_deref() == Some(name)
+                    })
+                    .cloned()
+                    .collect();
+                part.primary_macros.clear();
+                retain_unit_roots(&mut part, roots)?;
+            }
+            graph.merge(part)?;
+        }
+    }
+    Ok(graph)
+}
+
+fn workspace_target_units(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    selection: &CheckTargetSelection<'_>,
+    options: &PlanOptions<'_>,
+    mode: UnitMode,
+) -> Result<UnitGraph> {
+    let mut graph = if selection.normal && mode == UnitMode::Test {
+        if let Some(name) = selection.binary_name {
+            for package in resolution
+                .packages
+                .iter()
+                .filter(|package| selected.contains(&package.key))
+            {
+                let manifest = &manifests[&package.key];
+                if let Some(binary) = manifest.target(TargetKind::Bin, name) {
+                    target_enabled(
+                        resolution,
+                        manifest,
+                        &features_for(package, CompileKind::Target),
+                        name,
+                        binary.required_features.as_deref(),
+                        true,
+                    )?;
+                }
+            }
+        }
+        let mut tests = workspace_harness_units(
+            resolution,
+            manifests,
+            selected,
+            options,
+            None,
+            HarnessFilter::Any,
+        )?;
+        let roots = tests
+            .units
+            .keys()
+            .filter(|key| {
+                selected.contains(&key.package)
+                    && (key.kind == UnitKind::LibraryHarness
+                        || key.kind == UnitKind::BinaryHarness
+                            && selection.binaries
+                            && selection
+                                .binary_name
+                                .is_none_or(|name| key.target.as_deref() == Some(name)))
+            })
+            .cloned()
+            .collect();
+        retain_unit_roots(&mut tests, roots)?;
+        tests
+    } else if selection.normal {
+        workspace_units(
+            resolution,
+            manifests,
+            selected,
+            mode == UnitMode::Check,
+            selection.binaries,
+            selection.binary_name,
+            options.release || options.profile.opt_level != "0",
+        )?
+    } else {
+        UnitGraph {
+            units: BTreeMap::new(),
+            order: Vec::new(),
+            selected_packages: selected.iter().cloned().collect(),
+            primary_macros: BTreeSet::new(),
+        }
+    };
+    if selection.harnesses || selection.integrations {
+        let mut tests = workspace_harness_units(
+            resolution,
+            manifests,
+            selected,
+            options,
+            selection.integration_name,
+            selection.harness_filter,
+        )?;
+        if mode == UnitMode::Check {
+            for unit in tests.units.values_mut() {
+                unit.dependencies
+                    .retain(|edge| edge.kind != UnitEdgeKind::ArtifactDependency);
+            }
+            let mut pending = tests
+                .units
+                .keys()
+                .filter(|key| {
+                    key.mode == UnitMode::Test
+                        && if key.kind == UnitKind::IntegrationHarness {
+                            selection.integrations
+                        } else {
+                            selection.harnesses
+                        }
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut checked = BTreeMap::new();
+            let roots = pending
+                .iter()
+                .map(|key| UnitKey {
+                    mode: UnitMode::CheckTest,
+                    ..key.clone()
+                })
+                .collect::<Vec<_>>();
+            while let Some(key) = pending.pop() {
+                let mode = if key.mode == UnitMode::Test {
+                    UnitMode::CheckTest
+                } else {
+                    UnitMode::Check
+                };
+                let checked_key = UnitKey {
+                    mode,
+                    ..key.clone()
+                };
+                if checked.contains_key(&checked_key) {
+                    continue;
+                }
+                let mut unit = tests.units[&key].clone();
+                unit.key = checked_key.clone();
+                unit.dependencies = unit
+                    .dependencies
+                    .into_iter()
+                    .map(|mut edge| {
+                        if edge.kind == UnitEdgeKind::RustDependency
+                            && edge.unit.kind == UnitKind::Library
+                            && manifests[&edge.unit.package].editable
+                        {
+                            pending.push(edge.unit.clone());
+                            edge.unit.mode = UnitMode::Check;
+                        }
+                        edge
+                    })
+                    .collect();
+                checked.insert(checked_key, unit);
+            }
+            tests.units.extend(checked);
+            retain_unit_roots(&mut tests, roots)?;
+        } else {
+            let roots = tests
+                .units
+                .keys()
+                .filter(|key| {
+                    key.mode == UnitMode::Test
+                        && if key.kind == UnitKind::IntegrationHarness {
+                            selection.integrations
+                        } else {
+                            selection.harnesses
+                        }
+                })
+                .cloned()
+                .collect();
+            retain_unit_roots(&mut tests, roots)?;
+        }
+        graph.merge(tests)?;
+    }
+    for (enabled, name, kind, mode) in [
+        (selection.examples, selection.example_name, "example", mode),
+        (
+            selection.benches,
+            selection.bench_name,
+            "bench",
+            if mode == UnitMode::Check {
+                UnitMode::CheckTest
+            } else {
+                UnitMode::Test
+            },
+        ),
+    ] {
+        if enabled || name.is_some() {
+            graph.merge(workspace_auxiliary_units(
+                resolution,
+                manifests,
+                selected,
+                options,
+                &AuxiliarySelection {
+                    kind,
+                    name: if enabled { None } else { name },
+                    mode,
+                    tested: None,
+                    benched: (kind == "bench" && enabled).then_some(true),
+                    test_profile: false,
+                },
+            )?)?;
+        }
+    }
+    Ok(graph)
+}
+
+#[cfg(test)]
 pub fn dependency_units(
     resolution: &Resolution,
     manifests: &BTreeMap<PackageKey, Manifest>,
+) -> Result<UnitGraph> {
+    dependency_units_with_selected(resolution, manifests, &[])
+}
+
+fn dependency_units_with_selected(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
 ) -> Result<UnitGraph> {
     let packages = resolution
         .packages
@@ -246,7 +967,7 @@ pub fn dependency_units(
     let mut units = BTreeMap::new();
     for package in &resolution.packages {
         let manifest = &manifests[&package.key];
-        if manifest.library.is_none() {
+        if manifest.library.is_none() && !selected.contains(&package.key) {
             return Err(Error::failure(format!(
                 "dependency package `{} {}` has no supported library target",
                 package.key.name, package.key.version
@@ -255,8 +976,14 @@ pub fn dependency_units(
         for compile_kind in &package.compile_kinds {
             let features = features_for(package, *compile_kind);
             let kind = library_unit_kind(manifest);
-            let library = unit_key(package, kind, *compile_kind, &features);
-            insert_unit(&mut units, library.clone());
+            let library = manifest
+                .library
+                .as_ref()
+                .filter(|library| !library.proc_macro || *compile_kind == CompileKind::Host)
+                .map(|_| unit_key(package, kind, *compile_kind, &features));
+            if let Some(library) = &library {
+                insert_unit(&mut units, library.clone());
+            }
             if manifest.build_script.is_some() {
                 let compile = unit_key(
                     package,
@@ -274,13 +1001,15 @@ pub fn dependency_units(
                     UnitEdgeKind::BuildScriptExecutable,
                     None,
                 )?;
-                add_edge(
-                    &mut units,
-                    &library,
-                    run,
-                    UnitEdgeKind::BuildScriptOutput,
-                    None,
-                )?;
+                if let Some(library) = &library {
+                    add_edge(
+                        &mut units,
+                        library,
+                        run,
+                        UnitEdgeKind::BuildScriptOutput,
+                        None,
+                    )?;
+                }
             }
         }
     }
@@ -290,12 +1019,20 @@ pub fn dependency_units(
         for edge in &package.edges {
             match edge.kind {
                 DependencyKind::Normal => {
+                    if manifest.library.is_none() {
+                        continue;
+                    }
                     let parent_compile_kind = edge.parent_compile_kind.ok_or_else(|| {
                         Error::failure(format!(
                             "resolved edge from `{} {}` omitted its parent compilation context",
                             package.key.name, package.key.version
                         ))
                     })?;
+                    if manifest.library.as_ref().unwrap().proc_macro
+                        && parent_compile_kind == CompileKind::Target
+                    {
+                        continue;
+                    }
                     let parent = unit_key(
                         package,
                         library_unit_kind(manifest),
@@ -322,7 +1059,11 @@ pub fn dependency_units(
                         &parent,
                         child,
                         UnitEdgeKind::RustDependency,
-                        Some(edge.alias.clone()),
+                        Some(dependency_alias(
+                            edge,
+                            manifest,
+                            &manifests[&dependency.key],
+                        )),
                     )?;
                 }
                 DependencyKind::Build => {
@@ -357,21 +1098,619 @@ pub fn dependency_units(
                             &compile,
                             child.clone(),
                             UnitEdgeKind::RustDependency,
-                            Some(edge.alias.clone()),
+                            Some(dependency_alias(
+                                edge,
+                                manifest,
+                                &manifests[&dependency.key],
+                            )),
                         )?;
                     }
                 }
-                DependencyKind::Dev => {
-                    return Err(Error::failure(
-                        "selected dependency unit graph contains a dev-dependency edge",
-                    ));
-                }
+                // Development edges belong to harness/example units, never ordinary libraries.
+                DependencyKind::Dev => {}
+            }
+        }
+    }
+    // As in Cargo, a build script runs after the scripts of its package's
+    // direct normal dependencies that have `links`, and reads their metadata.
+    for package in &resolution.packages {
+        if manifests[&package.key].build_script.is_none() {
+            continue;
+        }
+        for edge in package
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == DependencyKind::Normal)
+        {
+            let dependency = &manifests[&edge.package];
+            if dependency.links.is_none()
+                || dependency.build_script.is_none()
+                || dependency
+                    .library
+                    .as_ref()
+                    .is_none_or(|library| library.proc_macro)
+            {
+                continue;
+            }
+            let Some(parent_kind) = edge.parent_compile_kind else {
+                continue;
+            };
+            let run = unit_key(
+                package,
+                UnitKind::BuildScriptRun,
+                parent_kind,
+                &features_for(package, parent_kind),
+            );
+            let dependency_package = packages[&edge.package];
+            let child = unit_key(
+                dependency_package,
+                UnitKind::BuildScriptRun,
+                edge.compile_kind,
+                &features_for(dependency_package, edge.compile_kind),
+            );
+            if units.contains_key(&run) && units.contains_key(&child) {
+                add_edge(
+                    &mut units,
+                    &run,
+                    child,
+                    UnitEdgeKind::BuildScriptMetadata,
+                    None,
+                )?;
             }
         }
     }
 
     let order = topological_order(&units)?;
-    Ok(UnitGraph { units, order })
+    Ok(UnitGraph {
+        units,
+        order,
+        selected_packages: BTreeSet::new(),
+        primary_macros: BTreeSet::new(),
+    })
+}
+
+/// Member roots retain the resolver's feature unions even when a selected
+/// member is also another selected member's dependency.
+pub(crate) fn workspace_units(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    check: bool,
+    binaries: bool,
+    binary_name: Option<&str>,
+    separate_macros: bool,
+) -> Result<UnitGraph> {
+    let mut graph = dependency_units_with_selected(resolution, manifests, selected)?;
+    graph.selected_packages.extend(selected.iter().cloned());
+    graph.primary_macros.extend(
+        selected
+            .iter()
+            .filter(|key| {
+                manifests[*key]
+                    .library
+                    .as_ref()
+                    .is_some_and(|library| library.proc_macro)
+            })
+            .cloned(),
+    );
+    for key in selected {
+        let package = resolution
+            .packages
+            .iter()
+            .find(|package| &package.key == key)
+            .ok_or_else(|| Error::failure("selected member is absent from the unit resolution"))?;
+        let manifest = &manifests[key];
+        if !binaries {
+            continue;
+        }
+        for target in manifest
+            .targets_of(TargetKind::Bin)
+            .filter(|target| binary_name.is_none_or(|name| name == target.name))
+        {
+            if !target_enabled(
+                resolution,
+                manifest,
+                &features_for(package, CompileKind::Target),
+                &target.name,
+                target.required_features.as_deref(),
+                binary_name.is_some(),
+            )? {
+                continue;
+            }
+            let mut binary = unit_key(
+                package,
+                UnitKind::Binary,
+                CompileKind::Target,
+                &features_for(package, CompileKind::Target),
+            );
+            binary.target = Some(target.name.clone());
+            insert_unit(&mut graph.units, binary.clone());
+            add_member_target_edges(&mut graph, resolution, manifests, &binary, false, true)?;
+        }
+    }
+    if separate_macros {
+        let macros = graph
+            .units
+            .keys()
+            .filter(|key| selected.contains(&key.package) && key.kind == UnitKind::ProcMacro)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in macros {
+            let mut root = graph.units[&key].clone();
+            root.key.profile = ProfileContext::Selected;
+            graph.units.insert(root.key.clone(), root);
+            if !graph
+                .units
+                .values()
+                .any(|unit| unit.dependencies.iter().any(|edge| edge.unit == key))
+            {
+                graph.units.remove(&key);
+            }
+        }
+        graph.order = topological_order(&graph.units)?;
+    }
+    if check {
+        graph = graph.rekey(|mut key| {
+            if manifests[&key.package].editable
+                && key.compile_kind == CompileKind::Target
+                && matches!(key.kind, UnitKind::Library | UnitKind::Binary)
+            {
+                key.mode = UnitMode::Check;
+            }
+            key
+        })?;
+        let mut checks = BTreeSet::new();
+        let mut pending = graph
+            .units
+            .keys()
+            .filter(|key| {
+                selected.contains(&key.package)
+                    && key.kind == UnitKind::ProcMacro
+                    && (!separate_macros || key.profile == ProfileContext::Selected)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        while let Some(key) = pending.pop() {
+            if !checks.insert(key.clone()) {
+                continue;
+            }
+            pending.extend(
+                graph.units[&key]
+                    .dependencies
+                    .iter()
+                    .filter(|edge| {
+                        edge.kind == UnitEdgeKind::RustDependency
+                            && edge.unit.kind == UnitKind::Library
+                    })
+                    .map(|edge| edge.unit.clone()),
+            );
+        }
+        for key in graph
+            .order
+            .clone()
+            .iter()
+            .filter(|key| checks.contains(*key))
+        {
+            let mut unit = graph.units[key].clone();
+            unit.key.mode = UnitMode::Check;
+            unit.dependencies = unit
+                .dependencies
+                .into_iter()
+                .map(|mut edge| {
+                    if checks.contains(&edge.unit) {
+                        edge.unit.mode = UnitMode::Check;
+                    }
+                    edge
+                })
+                .collect();
+            graph.units.insert(unit.key.clone(), unit);
+        }
+    }
+    let roots = graph
+        .units
+        .keys()
+        .filter(|key| {
+            selected.contains(&key.package)
+                && match key.kind {
+                    UnitKind::Library | UnitKind::Binary => key.compile_kind == CompileKind::Target,
+                    UnitKind::ProcMacro => {
+                        key.mode
+                            == if check {
+                                UnitMode::Check
+                            } else {
+                                UnitMode::Build
+                            }
+                            && (!separate_macros || key.profile == ProfileContext::Selected)
+                    }
+                    _ => false,
+                }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    retain_unit_roots(&mut graph, roots)?;
+    Ok(graph)
+}
+
+fn retain_unit_roots(graph: &mut UnitGraph, mut pending: Vec<UnitKey>) -> Result<()> {
+    let mut reachable = BTreeSet::new();
+    while let Some(key) = pending.pop() {
+        if reachable.insert(key.clone()) {
+            pending.extend(
+                graph.units[&key]
+                    .dependencies
+                    .iter()
+                    .map(|edge| edge.unit.clone()),
+            );
+        }
+    }
+    graph.units.retain(|key, _| reachable.contains(key));
+    graph.order = topological_order(&graph.units)?;
+    Ok(())
+}
+
+pub(crate) fn workspace_test_units(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    options: &PlanOptions<'_>,
+) -> Result<UnitGraph> {
+    let mut graph = workspace_harness_units(
+        resolution,
+        manifests,
+        selected,
+        options,
+        None,
+        HarnessFilter::Tests,
+    )?;
+    for (kind, tested, mode) in [
+        ("example", false, UnitMode::Build),
+        ("example", true, UnitMode::Test),
+        ("bench", true, UnitMode::Test),
+    ] {
+        if !selected.iter().any(|key| {
+            manifests[key]
+                .targets
+                .iter()
+                .any(|target| target.kind.as_str() == kind && target.test == tested)
+        }) {
+            continue;
+        }
+        graph.merge(workspace_auxiliary_units(
+            resolution,
+            manifests,
+            selected,
+            options,
+            &AuxiliarySelection {
+                kind,
+                name: None,
+                mode,
+                tested: Some(tested),
+                benched: None,
+                test_profile: true,
+            },
+        )?)?;
+    }
+    Ok(graph)
+}
+
+fn workspace_harness_units(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &[PackageKey],
+    options: &PlanOptions<'_>,
+    integration_name: Option<&str>,
+    filter: HarnessFilter,
+) -> Result<UnitGraph> {
+    let panic_abort = options.panic_abort;
+    if let Some(name) = integration_name
+        && !selected
+            .iter()
+            .any(|package| manifests[package].target(TargetKind::Test, name).is_some())
+    {
+        return Err(Error::failure(format!(
+            "no integration-test target named `{name}`"
+        )));
+    }
+    let base = dependency_units_with_selected(resolution, manifests, selected)?;
+    let mut normal = base.clone();
+    let mut tests = base;
+    tests.selected_packages.extend(selected.iter().cloned());
+    let mut roots = Vec::new();
+    let mut programs = Vec::new();
+    for package in resolution
+        .packages
+        .iter()
+        .filter(|package| selected.contains(&package.key))
+    {
+        let manifest = &manifests[&package.key];
+        let features = features_for(package, CompileKind::Target);
+        let library = manifest
+            .library
+            .iter()
+            .filter(|target| {
+                integration_name.is_none() && filter.matches(target.test, target.bench)
+            })
+            .map(|target| (UnitKind::LibraryHarness, &target.name, None));
+        let targets = manifest
+            .targets
+            .iter()
+            .filter(|target| match target.kind {
+                TargetKind::Bin => {
+                    integration_name.is_none() && filter.matches(target.test, target.bench)
+                }
+                TargetKind::Test => integration_name
+                    .map_or(filter.matches(target.test, target.bench), |name| {
+                        name == target.name
+                    }),
+                TargetKind::Example | TargetKind::Bench => false,
+            })
+            .map(|target| {
+                (
+                    if target.kind == TargetKind::Bin {
+                        UnitKind::BinaryHarness
+                    } else {
+                        UnitKind::IntegrationHarness
+                    },
+                    &target.name,
+                    target.required_features.as_deref(),
+                )
+            });
+        let mut integration = false;
+        for (kind, name, required) in library.chain(targets) {
+            if !target_enabled(
+                resolution,
+                manifest,
+                &features,
+                name,
+                required,
+                integration_name.is_some(),
+            )? {
+                continue;
+            }
+            let compile_kind = if kind == UnitKind::LibraryHarness
+                && manifest
+                    .library
+                    .as_ref()
+                    .is_some_and(|library| library.proc_macro)
+            {
+                CompileKind::Host
+            } else {
+                CompileKind::Target
+            };
+            let mut key = unit_key(
+                package,
+                kind,
+                compile_kind,
+                &features_for(package, compile_kind),
+            );
+            key.mode = UnitMode::Test;
+            key.target = Some(name.clone());
+            insert_unit(&mut tests.units, key.clone());
+            add_member_target_edges(
+                &mut tests,
+                resolution,
+                manifests,
+                &key,
+                true,
+                kind != UnitKind::LibraryHarness,
+            )?;
+            integration |= kind == UnitKind::IntegrationHarness;
+            roots.push(key.with_profile(ProfileContext::Test, panic_abort));
+        }
+        if integration {
+            for target in manifest.targets_of(TargetKind::Bin) {
+                if !target_enabled(
+                    resolution,
+                    manifest,
+                    &features,
+                    &target.name,
+                    target.required_features.as_deref(),
+                    false,
+                )? {
+                    continue;
+                }
+                let mut key = unit_key(package, UnitKind::Binary, CompileKind::Target, &features);
+                key.target = Some(target.name.clone());
+                insert_unit(&mut normal.units, key.clone());
+                add_member_target_edges(&mut normal, resolution, manifests, &key, false, true)?;
+                programs.push(key);
+            }
+        }
+    }
+    tests = tests.with_profile(ProfileContext::Test, panic_abort);
+    // Normal programs keep their panic strategy; harnesses and their libraries unwind.
+    // Keeping those graphs separate also permits legal dev cycles back to ordinary libraries.
+    if programs.is_empty() {
+        retain_unit_roots(&mut tests, roots)?;
+        Ok(tests)
+    } else {
+        retain_unit_roots(&mut normal, programs.clone())?;
+        normal.merge(tests)?;
+        for harness in roots
+            .iter()
+            .filter(|key| key.kind == UnitKind::IntegrationHarness)
+        {
+            for program in programs.iter().filter(|key| key.package == harness.package) {
+                add_edge(
+                    &mut normal.units,
+                    harness,
+                    program.clone(),
+                    UnitEdgeKind::ArtifactDependency,
+                    None,
+                )?;
+            }
+        }
+        roots.extend(programs);
+        retain_unit_roots(&mut normal, roots)?;
+        Ok(normal)
+    }
+}
+
+fn add_member_target_edges(
+    graph: &mut UnitGraph,
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    parent: &UnitKey,
+    dev: bool,
+    own_library: bool,
+) -> Result<()> {
+    let package = resolution
+        .packages
+        .iter()
+        .find(|package| package.key == parent.package)
+        .ok_or_else(|| Error::failure("selected member is absent from the unit resolution"))?;
+    let manifest = &manifests[&package.key];
+    if manifest.build_script.is_some() {
+        add_edge(
+            &mut graph.units,
+            parent,
+            unit_key(
+                package,
+                UnitKind::BuildScriptRun,
+                parent.compile_kind,
+                &features_for(package, parent.compile_kind),
+            ),
+            UnitEdgeKind::BuildScriptOutput,
+            None,
+        )?;
+    }
+    for edge in package.edges.iter().filter(|edge| {
+        (edge.kind == DependencyKind::Normal || (dev && edge.kind == DependencyKind::Dev))
+            && edge.parent_compile_kind == Some(parent.compile_kind)
+    }) {
+        let dependency = resolution
+            .packages
+            .iter()
+            .find(|package| package.key == edge.package)
+            .ok_or_else(|| Error::failure("member dependency is absent from the resolution"))?;
+        let child = &manifests[&edge.package];
+        add_edge(
+            &mut graph.units,
+            parent,
+            unit_key(
+                dependency,
+                library_unit_kind(child),
+                edge.compile_kind,
+                &features_for(dependency, edge.compile_kind),
+            ),
+            UnitEdgeKind::RustDependency,
+            Some(dependency_alias(edge, manifest, child)),
+        )?;
+    }
+    if own_library && let Some(library) = &manifest.library {
+        let compile_kind = if library.proc_macro {
+            CompileKind::Host
+        } else {
+            parent.compile_kind
+        };
+        add_edge(
+            &mut graph.units,
+            parent,
+            unit_key(
+                package,
+                library_unit_kind(manifest),
+                compile_kind,
+                &features_for(package, compile_kind),
+            ),
+            UnitEdgeKind::RustDependency,
+            Some(library.name.clone()),
+        )?;
+    }
+    Ok(())
+}
+
+fn target_enabled(
+    resolution: &Resolution,
+    manifest: &Manifest,
+    features: &BTreeSet<String>,
+    name: &str,
+    required: Option<&[String]>,
+    explicit: bool,
+) -> Result<bool> {
+    let Some(required) = required else {
+        return Ok(true);
+    };
+    let package = selected_library_key(manifest)?.package;
+    let edges = resolution
+        .packages
+        .iter()
+        .find(|candidate| candidate.key == package)
+        .map_or(resolution.root_edges.as_slice(), |package| {
+            package.edges.as_slice()
+        });
+    let mut enabled = features.clone();
+    for edge in edges {
+        if let Some(child) = resolution
+            .packages
+            .iter()
+            .find(|child| child.key == edge.package)
+        {
+            enabled.extend(
+                features_for(child, edge.compile_kind)
+                    .iter()
+                    .map(|feature| format!("{}/{feature}", edge.alias)),
+            );
+        }
+    }
+    if required.iter().all(|feature| enabled.contains(feature)) {
+        return Ok(true);
+    }
+    if explicit {
+        return Err(Error::failure(format!(
+            "target `{name}` in package `{}` requires the features: {}",
+            manifest.name,
+            required
+                .iter()
+                .map(|feature| format!("`{feature}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+        .with_help(format!(
+            "enable the required features: {}",
+            required.join(",")
+        )));
+    }
+    Ok(false)
+}
+
+pub fn selected_library_key(manifest: &Manifest) -> Result<UnitKey> {
+    Ok(UnitKey {
+        package: PackageKey {
+            name: manifest.name.clone(),
+            version: semver::Version::parse(&manifest.version.original).map_err(|error| {
+                Error::failure(format!(
+                    "invalid selected package version `{}`: {error}",
+                    manifest.version.original
+                ))
+            })?,
+            source: PackageSourceKey::Path(manifest.root.clone()),
+        },
+        kind: UnitKind::Library,
+        mode: UnitMode::Build,
+        target: None,
+        compile_kind: CompileKind::Target,
+        profile: ProfileContext::Normal,
+        features: selected_root_features(manifest)?,
+    })
+}
+
+fn dependency_alias(edge: &ResolvedEdge, parent: &Manifest, child: &Manifest) -> String {
+    let renamed = edge.alias != edge.package.name
+        || parent.dependencies.iter().any(|dependency| {
+            dependency.alias == edge.alias
+                && dependency.package == edge.package.name
+                && dependency.kind == edge.kind
+                && dependency.target == edge.target
+                && dependency.renamed
+        });
+    if renamed {
+        edge.alias.clone()
+    } else {
+        child
+            .library
+            .as_ref()
+            .map_or_else(|| edge.alias.clone(), |library| library.name.clone())
+    }
 }
 
 fn library_unit_kind(manifest: &Manifest) -> UnitKind {
@@ -386,6 +1725,7 @@ fn library_unit_kind(manifest: &Manifest) -> UnitKind {
     }
 }
 
+#[cfg(test)]
 pub fn plan_dependency_units(
     graph: &UnitGraph,
     manifests: &BTreeMap<PackageKey, Manifest>,
@@ -407,6 +1747,8 @@ pub fn plan_dependency_units_with_remaps(
     source_remaps: &BTreeMap<PackageKey, SourceRemap>,
     source_exclusions: &BTreeMap<PackageKey, Exclusions>,
 ) -> Result<CompilationPlan> {
+    let normalized = selected_macro_script_units(graph, manifests, options)?;
+    let graph = normalized.as_ref().unwrap_or(graph);
     if graph.units.values().any(|unit| {
         !unit
             .dependencies
@@ -418,11 +1760,13 @@ pub fn plan_dependency_units_with_remaps(
         ));
     }
 
-    let mut planned: BTreeMap<UnitKey, PlannedUnit> = BTreeMap::new();
+    let mut settings_by_unit = BTreeMap::new();
     for key in &graph.order {
-        let unit = graph.units.get(key).ok_or_else(|| {
-            Error::failure("dependency compilation order references an absent unit")
-        })?;
+        if !graph.units.contains_key(key) {
+            return Err(Error::failure(
+                "dependency compilation order references an absent unit",
+            ));
+        }
         let manifest = manifests.get(&key.package).ok_or_else(|| {
             Error::failure(format!(
                 "dependency compilation plan has no manifest for `{} {}`",
@@ -430,8 +1774,33 @@ pub fn plan_dependency_units_with_remaps(
             ))
         })?;
         validate_manifest_identity(&key.package, manifest)?;
+        settings_by_unit.insert(key.clone(), unit_settings(graph, key, manifest, options));
+    }
+    // Mixed libraries need objects for their archive and bitcode for LTO consumers.
+    // Propagate that requirement before calculating identities, including shared inputs.
+    for key in graph.order.iter().rev() {
+        if settings_by_unit[key].lto != CargoUnitLto::ObjectAndBitcode {
+            continue;
+        }
+        for edge in &graph.units[key].dependencies {
+            if edge.kind == UnitEdgeKind::RustDependency {
+                let settings = settings_by_unit.get_mut(&edge.unit).ok_or_else(|| {
+                    Error::failure("dependency compilation order omits a dependency unit")
+                })?;
+                if settings.lto == CargoUnitLto::OnlyBitcode {
+                    settings.lto = CargoUnitLto::ObjectAndBitcode;
+                }
+            }
+        }
+    }
 
-        let settings = unit_settings(graph, key, options);
+    let mut planned: BTreeMap<UnitKey, PlannedUnit> = BTreeMap::new();
+    for key in &graph.order {
+        let unit = &graph.units[key];
+        let manifest = &manifests[&key.package];
+        let settings = settings_by_unit
+            .remove(key)
+            .ok_or_else(|| Error::failure("dependency compilation order repeats a unit"))?;
         let profile = settings.profile.cargo_profile();
         let source_value;
         let source = match &key.package.source {
@@ -452,9 +1821,19 @@ pub fn plan_dependency_units_with_remaps(
             }
         };
         let features = key.features.iter().cloned().collect::<Vec<_>>();
-        let dependencies = unit
-            .dependencies
-            .iter()
+        let mut edges = unit.dependencies.iter().collect::<Vec<_>>();
+        if matches!(
+            key.kind,
+            UnitKind::Binary
+                | UnitKind::BinaryHarness
+                | UnitKind::IntegrationHarness
+                | UnitKind::Example
+                | UnitKind::Bench
+        ) {
+            edges.sort_by_key(|edge| edge.unit.package == key.package);
+        }
+        let dependencies = edges
+            .into_iter()
             .map(|dependency| {
                 planned
                     .get(&dependency.unit)
@@ -469,6 +1848,7 @@ pub fn plan_dependency_units_with_remaps(
                     })
             })
             .collect::<Result<Vec<_>>>()?;
+        let build_script_name = manifest.build_script_name();
         let (target_name, target_kind) = match key.kind {
             UnitKind::Library | UnitKind::ProcMacro => {
                 let library = manifest.library.as_ref().ok_or_else(|| {
@@ -479,16 +1859,53 @@ pub fn plan_dependency_units_with_remaps(
                 })?;
                 (
                     library.name.as_str(),
-                    CargoTargetKind::Lib(vec![if key.kind == UnitKind::ProcMacro {
-                        CargoCrateType::ProcMacro
-                    } else {
-                        CargoCrateType::Lib
-                    }]),
+                    CargoTargetKind::Lib(library_crate_types(manifest)),
                 )
             }
-            UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => {
-                ("build-script-build", CargoTargetKind::CustomBuild)
-            }
+            UnitKind::Binary => (
+                key.target
+                    .as_deref()
+                    .ok_or_else(|| Error::failure("selected binary unit has no target name"))?,
+                CargoTargetKind::Bin,
+            ),
+            UnitKind::LibraryHarness | UnitKind::BinaryHarness => (
+                key.target
+                    .as_deref()
+                    .ok_or_else(|| Error::failure("selected harness unit has no target name"))?,
+                if key.kind == UnitKind::LibraryHarness {
+                    CargoTargetKind::Lib(library_crate_types(manifest))
+                } else {
+                    CargoTargetKind::Bin
+                },
+            ),
+            UnitKind::IntegrationHarness => (
+                key.target.as_deref().ok_or_else(|| {
+                    Error::failure("selected integration harness unit has no target name")
+                })?,
+                CargoTargetKind::Test,
+            ),
+            UnitKind::Example | UnitKind::Bench => (
+                key.manifest_target(manifest)
+                    .ok_or_else(|| Error::failure("auxiliary unit has no target"))?
+                    .name
+                    .as_str(),
+                if key.kind == UnitKind::Example {
+                    let types = &key.manifest_target(manifest).unwrap().crate_types;
+                    if types == &["bin"] {
+                        CargoTargetKind::ExampleBin
+                    } else {
+                        CargoTargetKind::ExampleLib(cargo_crate_types(types))
+                    }
+                } else {
+                    CargoTargetKind::Bench
+                },
+            ),
+            UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => (
+                build_script_name
+                    .as_deref()
+                    .ok_or_else(|| Error::failure("build-script unit has no build script"))?,
+                CargoTargetKind::CustomBuild,
+            ),
         };
         let identity = cargo_unit_identity(&CargoUnitIdentityInput {
             package_name: &manifest.name,
@@ -529,10 +1946,122 @@ pub fn plan_dependency_units_with_remaps(
             "dependency compilation order does not cover every unit",
         ));
     }
-    Ok(CompilationPlan {
+    let mut plan = CompilationPlan {
         units: planned,
         order: graph.order.clone(),
-    })
+    };
+    if options.logical_target.is_none() {
+        merge_identical_host_units(&mut plan);
+    }
+    Ok(plan)
+}
+
+/// Without `--target`, Cargo builds a host unit and its target twin once when
+/// their identities match. Merges such pairs, which would otherwise compile
+/// twice into the same output directory.
+fn merge_identical_host_units(plan: &mut CompilationPlan) {
+    let merged = plan
+        .units
+        .iter()
+        .filter(|(key, _)| {
+            key.compile_kind == CompileKind::Host
+                && matches!(key.kind, UnitKind::Library | UnitKind::BuildScriptRun)
+        })
+        .filter_map(|(key, unit)| {
+            let twin = UnitKey {
+                compile_kind: CompileKind::Target,
+                ..key.clone()
+            };
+            (plan.units.get(&twin)?.identity == unit.identity).then(|| (key.clone(), twin))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if merged.is_empty() {
+        return;
+    }
+    for key in merged.keys() {
+        plan.units.remove(key);
+    }
+    for planned in plan.units.values_mut() {
+        planned.unit.dependencies = std::mem::take(&mut planned.unit.dependencies)
+            .into_iter()
+            .map(|mut edge| {
+                if let Some(twin) = merged.get(&edge.unit) {
+                    edge.unit = twin.clone();
+                }
+                edge
+            })
+            .collect();
+    }
+    // A twin takes the earlier position, so dependencies still come first.
+    let mut placed = BTreeSet::new();
+    plan.order = plan
+        .order
+        .iter()
+        .map(|key| merged.get(key).unwrap_or(key))
+        .filter(|key| placed.insert((*key).clone()))
+        .cloned()
+        .collect();
+}
+
+fn selected_macro_script_units(
+    graph: &UnitGraph,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    options: &PlanOptions<'_>,
+) -> Result<Option<UnitGraph>> {
+    let root_opt = options.profile.opt_level;
+    // Equal pre-reduction script profiles share Cargo's host debug adjustment.
+    if root_opt == "0" {
+        return Ok(None);
+    }
+    let mut normalized = None;
+    for parent in graph.units.values().filter(|unit| {
+        graph.selected_packages.contains(&unit.key.package)
+            && (unit.key.kind == UnitKind::ProcMacro
+                && unit.key.profile == ProfileContext::Selected
+                || unit.key.kind == UnitKind::LibraryHarness
+                    && unit.key.compile_kind == CompileKind::Host)
+    }) {
+        let Some(edge) = parent
+            .dependencies
+            .iter()
+            .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
+        else {
+            continue;
+        };
+        let mut run = graph.units[&edge.unit].clone();
+        run.key.profile = ProfileContext::Selected;
+        let manifest = &manifests[&parent.key.package];
+        if unit_settings(graph, &edge.unit, manifest, options)
+            == unit_settings(graph, &run.key, manifest, options)
+        {
+            continue;
+        }
+        let graph = normalized.get_or_insert_with(|| graph.clone());
+        let selected = run.key.clone();
+        graph.units.insert(selected.clone(), run);
+        let parent = graph.units.get_mut(&parent.key).unwrap();
+        parent.dependencies = parent
+            .dependencies
+            .iter()
+            .cloned()
+            .map(|mut dependency| {
+                if dependency.kind == UnitEdgeKind::BuildScriptOutput {
+                    dependency.unit = selected.clone();
+                }
+                dependency
+            })
+            .collect();
+    }
+    if let Some(graph) = &mut normalized {
+        let roots = graph
+            .units
+            .keys()
+            .filter(|key| key.kind != UnitKind::BuildScriptRun)
+            .cloned()
+            .collect();
+        retain_unit_roots(graph, roots)?;
+    }
+    Ok(normalized)
 }
 
 impl UnitProfile {
@@ -555,6 +2084,25 @@ impl UnitProfile {
     }
 }
 
+fn library_crate_types(manifest: &Manifest) -> Vec<CargoCrateType<'_>> {
+    cargo_crate_types(&manifest.library.as_ref().unwrap().crate_types)
+}
+
+fn cargo_crate_types(types: &[String]) -> Vec<CargoCrateType<'_>> {
+    types
+        .iter()
+        .map(|kind| match kind.as_str() {
+            "lib" => CargoCrateType::Lib,
+            "rlib" => CargoCrateType::Rlib,
+            "staticlib" => CargoCrateType::Staticlib,
+            "dylib" => CargoCrateType::Dylib,
+            "cdylib" => CargoCrateType::Cdylib,
+            "proc-macro" => CargoCrateType::ProcMacro,
+            other => CargoCrateType::Other(other),
+        })
+        .collect()
+}
+
 fn validate_manifest_identity(key: &PackageKey, manifest: &Manifest) -> Result<()> {
     let version = &manifest.version;
     if manifest.name != key.name
@@ -571,17 +2119,68 @@ fn validate_manifest_identity(key: &PackageKey, manifest: &Manifest) -> Result<(
     Ok(())
 }
 
-fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) -> UnitSettings {
+fn unit_settings(
+    graph: &UnitGraph,
+    key: &UnitKey,
+    manifest: &Manifest,
+    options: &PlanOptions<'_>,
+) -> UnitSettings {
     let local = matches!(key.package.source, PackageSourceKey::Path(_));
     let mut profile = base_profile(
         options.release,
-        options.release_profile,
+        options.profile,
         options.panic_abort,
         local,
-        options.test_profile,
+        key.profile == ProfileContext::Test,
     );
-    let for_host = matches!(key.kind, UnitKind::BuildScriptCompile | UnitKind::ProcMacro)
-        || key.compile_kind == CompileKind::Host;
+    let test_graph = graph
+        .units
+        .keys()
+        .any(|key| matches!(key.mode, UnitMode::Test | UnitMode::CheckTest));
+    let selected_macro_profile = |key: &UnitKey| {
+        let selected_macro = (key.kind == UnitKind::ProcMacro
+            && graph.primary_macros.contains(&key.package)
+            && (!test_graph || key.mode == UnitMode::Check)
+            && (key.profile == ProfileContext::Selected
+                || (!options.release
+                    && !graph.units.keys().any(|other| {
+                        other.package == key.package
+                            && other.kind == UnitKind::ProcMacro
+                            && other.profile == ProfileContext::Selected
+                    })
+                    && (key.mode == UnitMode::Check
+                        || !graph.units.contains_key(&UnitKey {
+                            mode: UnitMode::Check,
+                            ..key.clone()
+                        })))))
+            || (key.kind == UnitKind::LibraryHarness
+                && manifest
+                    .library
+                    .as_ref()
+                    .is_some_and(|library| library.proc_macro));
+        selected_macro && graph.selected_packages.contains(&key.package)
+    };
+    let macro_dependency = graph.units.keys().any(|parent| {
+        parent.package == key.package
+            && parent.kind == UnitKind::ProcMacro
+            && !selected_macro_profile(parent)
+    });
+    let selected_macro = selected_macro_profile(key)
+        || (key.kind == UnitKind::BuildScriptRun
+            && (key.profile == ProfileContext::Selected
+                || (!macro_dependency
+                    && graph.units.values().any(|parent| {
+                        parent.key.package == key.package
+                            && selected_macro_profile(&parent.key)
+                            && parent.dependencies.iter().any(|edge| {
+                                edge.kind == UnitEdgeKind::BuildScriptOutput && edge.unit == *key
+                            })
+                    }))));
+    let for_host = key.uses_host_profile() && !selected_macro;
+    let run_strip = run_build_profile(&profile).strip;
+    if selected_macro {
+        profile.panic = CargoPanicStrategy::Unwind;
+    }
     if for_host {
         profile.opt_level = "0";
         profile.codegen_units = None;
@@ -595,76 +2194,110 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
             key.clone()
         };
         if profile.debuginfo != CargoDebugInfo::None
-            && !shared_native_library(graph, &sharing_key, options.logical_target)
+            && options.logical_target.is_none()
+            && !shared_native_library(graph, &sharing_key, options, &profile)
         {
             profile.debuginfo = CargoDebugInfo::None;
         }
     }
     if key.kind == UnitKind::BuildScriptRun {
         profile = run_build_profile(&profile);
+        // Cargo chooses automatic stripping before it reduces host debug information.
+        profile.strip = run_strip;
     }
 
     let logical_target = match key.compile_kind {
         CompileKind::Target => options.logical_target.map(str::to_owned),
         CompileKind::Host => None,
     };
-    let rustflags = if key.compile_kind == CompileKind::Target || options.logical_target.is_none() {
+    let rustflags = if key.compile_kind == CompileKind::Target || options.physical_target.is_none()
+    {
         options.rustflags.to_vec()
     } else {
         Vec::new()
     };
     UnitSettings {
         profile,
-        mode: if key.kind == UnitKind::BuildScriptRun {
-            CargoCompileMode::RunCustomBuild
-        } else {
-            CargoCompileMode::Build
+        mode: match key.mode {
+            UnitMode::Build if key.kind == UnitKind::BuildScriptRun => {
+                CargoCompileMode::RunCustomBuild
+            }
+            UnitMode::Build => CargoCompileMode::Build,
+            UnitMode::Test => CargoCompileMode::Test,
+            UnitMode::Check => CargoCompileMode::Check { test: false },
+            UnitMode::CheckTest => CargoCompileMode::Check { test: true },
         },
-        lto: unit_lto(key, options.release, options.release_profile.lto),
+        lto: if let Some(types) = key.library_types(manifest)
+            && types.iter().any(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "staticlib" | "dylib" | "cdylib" | "proc-macro"
+                )
+            }) {
+            library_lto(key, types, options)
+        } else {
+            unit_lto(
+                key,
+                key.library_types(manifest).is_some(),
+                options.release,
+                options.profile.lto,
+            )
+        },
         logical_target,
         rustflags,
     }
 }
 
+fn library_lto(
+    key: &UnitKey,
+    types: &[String],
+    options: &PlanOptions<'_>,
+) -> CargoUnitLto<'static> {
+    let configured = options.profile.lto;
+    let ordinary = unit_lto(key, true, options.release, configured);
+    if key.compile_kind == CompileKind::Host
+        || matches!(configured, ManifestLto::Default | ManifestLto::Off)
+    {
+        return ordinary;
+    }
+    if types
+        .iter()
+        .all(|kind| matches!(kind.as_str(), "staticlib" | "cdylib"))
+    {
+        root_lto(configured)
+    } else if types.iter().all(|kind| kind == "dylib") {
+        CargoUnitLto::OnlyObject
+    } else {
+        CargoUnitLto::ObjectAndBitcode
+    }
+}
+
 fn base_profile(
     release: bool,
-    configured: &ReleaseProfile,
+    profile: &Profile,
     panic_abort: bool,
     local: bool,
     test_profile: bool,
 ) -> UnitProfile {
-    if release {
-        UnitProfile {
-            opt_level: "3",
-            lto: profile_lto(configured.lto),
-            codegen_units: configured.codegen_units,
-            debuginfo: CargoDebugInfo::None,
-            debug_assertions: false,
-            overflow_checks: false,
-            incremental: false,
-            panic: if panic_abort && !test_profile {
-                CargoPanicStrategy::Abort
-            } else {
-                CargoPanicStrategy::Unwind
-            },
-            strip: profile_strip(configured.strip),
-        }
+    let debuginfo = profile.debug.unwrap_or(if release {
+        CargoDebugInfo::None
     } else {
-        UnitProfile {
-            opt_level: "0",
-            lto: CargoProfileLto::Bool(false),
-            codegen_units: None,
-            debuginfo: CargoDebugInfo::Full,
-            debug_assertions: true,
-            overflow_checks: true,
-            incremental: local,
-            panic: if panic_abort && !test_profile {
-                CargoPanicStrategy::Abort
-            } else {
-                CargoPanicStrategy::Unwind
-            },
-            strip: CargoStrip::None,
-        }
+        CargoDebugInfo::Full
+    });
+    UnitProfile {
+        opt_level: profile.opt_level,
+        lto: profile_lto(profile.lto),
+        codegen_units: profile.codegen_units,
+        debuginfo,
+        debug_assertions: profile.debug_assertions,
+        overflow_checks: profile.overflow_checks,
+        incremental: local && profile.incremental,
+        panic: if panic_abort && !test_profile {
+            CargoPanicStrategy::Abort
+        } else {
+            CargoPanicStrategy::Unwind
+        },
+        strip: crate::identity::manifest_strip(profile.strip, debuginfo),
     }
 }
 
@@ -686,14 +2319,30 @@ fn run_build_profile(for_unit: &UnitProfile) -> UnitProfile {
     }
 }
 
-fn shared_native_library(graph: &UnitGraph, key: &UnitKey, logical_target: Option<&str>) -> bool {
+fn shared_native_library(
+    graph: &UnitGraph,
+    key: &UnitKey,
+    options: &PlanOptions<'_>,
+    host_profile: &UnitProfile,
+) -> bool {
+    let target = UnitKey {
+        compile_kind: CompileKind::Target,
+        ..key.clone()
+    };
     key.kind == UnitKind::Library
         && key.compile_kind == CompileKind::Host
-        && logical_target.is_none()
-        && graph.units.contains_key(&UnitKey {
-            compile_kind: CompileKind::Target,
-            ..key.clone()
-        })
+        && options.logical_target.is_none()
+        && graph.units.contains_key(&target)
+        && *host_profile
+            == base_profile(
+                options.release,
+                options.profile,
+                options.panic_abort,
+                matches!(key.package.source, PackageSourceKey::Path(_)),
+                key.profile == ProfileContext::Test,
+            )
+        && unit_lto(key, true, options.release, options.profile.lto)
+            == unit_lto(&target, true, options.release, options.profile.lto)
 }
 
 fn profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
@@ -706,22 +2355,42 @@ fn profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
     }
 }
 
-fn profile_strip(strip: ManifestStrip) -> CargoStrip<'static> {
-    match strip {
-        ManifestStrip::None => CargoStrip::None,
-        ManifestStrip::Debuginfo => CargoStrip::Named("debuginfo"),
-        ManifestStrip::Symbols => CargoStrip::Named("symbols"),
+fn unit_lto(
+    key: &UnitKey,
+    library: bool,
+    release: bool,
+    configured: ManifestLto,
+) -> CargoUnitLto<'static> {
+    if key.is_harness() {
+        return root_lto(configured);
     }
-}
-
-fn unit_lto(key: &UnitKey, release: bool, configured: ManifestLto) -> CargoUnitLto<'static> {
-    if !release || key.compile_kind == CompileKind::Host || key.kind != UnitKind::Library {
+    if !library
+        && matches!(
+            key.kind,
+            UnitKind::Binary | UnitKind::Example | UnitKind::Bench
+        )
+    {
+        return root_lto(configured);
+    }
+    let release = release || configured != ManifestLto::Default;
+    if !release || key.compile_kind == CompileKind::Host || !library {
         return CargoUnitLto::OnlyObject;
     }
     match configured {
         ManifestLto::Default => CargoUnitLto::OnlyObject,
         ManifestLto::Off => CargoUnitLto::Off,
         ManifestLto::True | ManifestLto::Fat | ManifestLto::Thin => CargoUnitLto::OnlyBitcode,
+    }
+}
+
+/// Cargo's LTO mode for a linked root, which depends only on the profile setting.
+fn root_lto(configured: ManifestLto) -> CargoUnitLto<'static> {
+    match configured {
+        ManifestLto::True => CargoUnitLto::Run(None),
+        ManifestLto::Fat => CargoUnitLto::Run(Some("fat")),
+        ManifestLto::Thin => CargoUnitLto::Run(Some("thin")),
+        ManifestLto::Off => CargoUnitLto::Off,
+        ManifestLto::Default => CargoUnitLto::OnlyObject,
     }
 }
 
@@ -793,7 +2462,10 @@ fn unit_key(
     UnitKey {
         package: package.key.clone(),
         kind,
+        mode: UnitMode::Build,
+        target: None,
         compile_kind,
+        profile: ProfileContext::Normal,
         features: features.clone(),
     }
 }
@@ -898,13 +2570,16 @@ mod tests {
     use super::*;
     use crate::config::CargoCompat;
     use crate::manifest::Manifest;
+    use crate::manifest::Strip as ManifestStrip;
     use crate::resolver::{
         Catalog, Options, ResolvedEdge, ResolvedSource, TargetSelection, resolve_selected,
     };
     use crate::toolchain::CfgSet;
     use semver::Version;
+    use serde_json::Value;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -942,6 +2617,7 @@ mod tests {
     fn toolchain() -> Toolchain {
         Toolchain {
             rustc: "/rustc".into(),
+            clippy: None,
             verbose_version: "rustc 1.98.0-nightly (bc2112ed5 2026-06-18)\n\
                               binary: rustc\n\
                               commit-hash: bc2112ed56c99fa649e09ab3ab286afab3d9059a\n\
@@ -953,6 +2629,1303 @@ mod tests {
             release: "1.98.0-nightly".to_owned(),
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
+            query_cache: None,
+        }
+    }
+
+    #[test]
+    fn custom_library_dependency_names_match_cargo() {
+        let fixture = Fixture::new();
+        fixture.package(
+            "shared",
+            "[package]\nname = \"shared\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\
+             [lib]\nname = \"shared_crate\"\n",
+            false,
+        );
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        for (declaration, expected) in [
+            ("shared = { path = \"shared\" }", "shared_crate"),
+            (
+                "renamed = { package = \"shared\", path = \"shared\" }",
+                "renamed",
+            ),
+            (
+                "shared = { package = \"shared\", path = \"shared\" }",
+                "shared",
+            ),
+        ] {
+            fs::write(
+                fixture.0.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"root\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\
+                         [dependencies]\n{declaration}\n"
+                ),
+            )
+            .unwrap();
+            let cargo = Command::new(env!("CARGO"))
+                .current_dir(&fixture.0)
+                .env(
+                    "RUSTC",
+                    Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+                )
+                .args([
+                    "-Z",
+                    "unstable-options",
+                    "build",
+                    "--unit-graph",
+                    "--offline",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                cargo.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+            let cargo: Value = serde_json::from_slice(&cargo.stdout).unwrap();
+            let root_index = cargo["roots"][0].as_u64().unwrap() as usize;
+            let cargo_alias = cargo["units"][root_index]["dependencies"][0]["extern_crate_name"]
+                .as_str()
+                .unwrap();
+            assert_eq!(cargo_alias, expected);
+            let root = Manifest::load_for_build(&fixture.0).unwrap();
+            let resolution = resolve_selected(
+                &root,
+                &Catalog::default(),
+                &Options {
+                    resolver: root.resolver,
+                    incompatible_rust_versions: None,
+                    rust_versions: vec![Version::parse("1.99.0").unwrap()],
+                    package_limit: crate::policy::PackageLimit::with_max(16),
+                    max_depth: Some(8),
+                },
+                &[],
+                TargetSelection {
+                    target_triple: "x86_64-unknown-linux-gnu",
+                    target_cfg: &cfg,
+                    host_triple: "x86_64-unknown-linux-gnu",
+                    host_cfg: &cfg,
+                },
+            )
+            .unwrap();
+            let manifests = resolution
+                .packages
+                .iter()
+                .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+                .collect::<BTreeMap<_, _>>();
+            let library = selected_library_key(&root).unwrap();
+            let mut resolved_root = resolution.packages[0].clone();
+            resolved_root.key = library.package.clone();
+            resolved_root.local_manifest = Some(root.clone());
+            resolved_root.edges = resolution.root_edges.clone();
+            for edge in &mut resolved_root.edges {
+                edge.parent_compile_kind = Some(CompileKind::Target);
+            }
+            let mut complete = resolution.clone();
+            complete.packages.push(resolved_root);
+            let mut manifests = manifests.clone();
+            manifests.insert(library.package.clone(), root);
+            let graph = dependency_units(&complete, &manifests).unwrap();
+            let edge = graph.units[&library].dependencies.iter().next().unwrap();
+            assert_eq!(
+                edge.alias.as_deref(),
+                Some(cargo_alias),
+                "dependency {declaration}"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_build_graph_matches_cargo_unit_graph() {
+        let fixture = Fixture::new();
+        let workspace = fixture.0.join("workspace");
+        fs::create_dir_all(workspace.join("app/src")).unwrap();
+        fs::create_dir_all(workspace.join("shared/src")).unwrap();
+        fs::write(
+            workspace.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"shared\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\
+             dependencies = [\"shared\"]\n[[package]]\nname = \"shared\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [dependencies]\nrenamed = { package = \"shared\", path = \"../shared\" }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("shared/Cargo.toml"),
+            "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(workspace.join("app/src/lib.rs"), "pub fn value() {}\n").unwrap();
+        fs::write(workspace.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(workspace.join("shared/src/lib.rs"), "pub fn value() {}\n").unwrap();
+
+        let source = crate::manifest::SourceWorkspace::load(&workspace, None).unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let options = Options {
+            resolver: source.packages[0].resolver,
+            incompatible_rust_versions: None,
+            rust_versions: vec![Version::parse("1.99.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: Some(8),
+        };
+        let mut catalog = Catalog::default();
+        let complete = crate::resolver::workspace::resolve_complete_workspace(
+            &source,
+            &mut catalog,
+            &options,
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let resolution = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &options,
+            &[crate::resolver::workspace::MemberRequest {
+                root: workspace.join("app"),
+                features: BTreeSet::new(),
+                default_features: true,
+                dev: false,
+                selected: true,
+                target_units: false,
+            }],
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let manifests = resolution
+            .packages
+            .iter()
+            .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let app = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "app")
+            .unwrap()
+            .key
+            .clone();
+        let graph = workspace_units(
+            &resolution,
+            &manifests,
+            std::slice::from_ref(&app),
+            false,
+            true,
+            None,
+            false,
+        )
+        .unwrap();
+        let plan = plan_dependency_units(
+            &graph,
+            &manifests,
+            &PlanOptions {
+                workspace_root: &workspace,
+                release: false,
+                panic_abort: false,
+                profile: &Profile::default(),
+                rustc: &toolchain(),
+                logical_target: None,
+                physical_target: None,
+                rustflags: &[],
+            },
+        )
+        .unwrap();
+
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let result = Command::new(cargo)
+            .args([
+                "-Z",
+                "unstable-options",
+                "build",
+                "--unit-graph",
+                "--offline",
+            ])
+            .arg("--manifest-path")
+            .arg(workspace.join("Cargo.toml"))
+            .args(["-p", "app"])
+            .env("CARGO_NET_OFFLINE", "true")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let cargo: Value = serde_json::from_slice(&result.stdout).unwrap();
+        let roots = plan
+            .units
+            .keys()
+            .filter(|key| key.package == app)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_ordinary_cargo_plan(&cargo, &plan, &manifests, &roots, "dev");
+    }
+
+    fn assert_ordinary_cargo_plan(
+        cargo: &Value,
+        plan: &CompilationPlan,
+        manifests: &BTreeMap<PackageKey, Manifest>,
+        roots: &[UnitKey],
+        profile_name: &str,
+    ) {
+        let units = cargo["units"].as_array().unwrap();
+        let cargo_nodes = units
+            .iter()
+            .map(|unit| {
+                let package = unit["pkg_id"]
+                    .as_str()
+                    .unwrap()
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .split('#')
+                    .next()
+                    .unwrap();
+                let kind = unit["target"]["kind"][0].as_str().unwrap();
+                let name = unit["target"]["name"].as_str().unwrap();
+                (
+                    package.to_owned(),
+                    kind.to_owned(),
+                    name.to_owned(),
+                    unit["mode"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let lorry_node = |key: &UnitKey| {
+            let kind = match key.kind {
+                UnitKind::Library | UnitKind::LibraryHarness => "lib",
+                UnitKind::Binary | UnitKind::BinaryHarness => "bin",
+                UnitKind::IntegrationHarness => "test",
+                UnitKind::Example => "example",
+                UnitKind::Bench => "bench",
+                _ => panic!("unexpected unit in build oracle: {:?}", key.kind),
+            };
+            let name = key.target.as_deref().unwrap_or_else(|| {
+                manifests[&key.package]
+                    .library
+                    .as_ref()
+                    .unwrap()
+                    .name
+                    .as_str()
+            });
+            (
+                key.package.name.clone(),
+                kind.to_owned(),
+                name.to_owned(),
+                match key.mode {
+                    UnitMode::Build => "build",
+                    UnitMode::Test => "test",
+                    UnitMode::Check | UnitMode::CheckTest => "check",
+                }
+                .to_owned(),
+            )
+        };
+        let lorry_nodes = plan.units.keys().map(lorry_node).collect::<Vec<_>>();
+        assert_eq!(
+            cargo_nodes.iter().cloned().collect::<BTreeSet<_>>(),
+            lorry_nodes.iter().cloned().collect::<BTreeSet<_>>()
+        );
+        let mut cargo_edges = BTreeSet::new();
+        for (parent, unit) in units.iter().enumerate() {
+            for edge in unit["dependencies"].as_array().unwrap() {
+                cargo_edges.insert((
+                    cargo_nodes[parent].clone(),
+                    cargo_nodes[edge["index"].as_u64().unwrap() as usize].clone(),
+                    edge["extern_crate_name"].as_str().unwrap().to_owned(),
+                ));
+            }
+        }
+        let lorry_edges = plan
+            .units
+            .values()
+            .flat_map(|planned| {
+                planned.unit.dependencies.iter().map(|edge| {
+                    (
+                        lorry_node(&planned.unit.key),
+                        lorry_node(&edge.unit),
+                        edge.alias.clone().unwrap(),
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(cargo_edges, lorry_edges);
+        let cargo_roots = cargo["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|index| cargo_nodes[index.as_u64().unwrap() as usize].clone())
+            .collect::<BTreeSet<_>>();
+        let lorry_roots = roots.iter().map(lorry_node).collect::<BTreeSet<_>>();
+        assert_eq!(cargo_roots, lorry_roots);
+        for (key, planned) in &plan.units {
+            let node = lorry_node(key);
+            let unit = &units[cargo_nodes
+                .iter()
+                .position(|candidate| *candidate == node)
+                .unwrap()];
+            let profile = &unit["profile"];
+            if let Some(target) = key.manifest_target(&manifests[&key.package]) {
+                assert_eq!(
+                    unit["target"]["crate_types"],
+                    serde_json::json!(target.crate_types)
+                );
+            }
+            let (mode, compile_mode) = match key.mode {
+                UnitMode::Check => ("check", CargoCompileMode::Check { test: false }),
+                UnitMode::CheckTest => ("check", CargoCompileMode::Check { test: true }),
+                UnitMode::Test => ("test", CargoCompileMode::Test),
+                UnitMode::Build => ("build", CargoCompileMode::Build),
+            };
+            assert_eq!(planned.settings.mode, compile_mode);
+            assert_eq!(unit["mode"], mode);
+            assert!(unit["platform"].is_null());
+            assert_eq!(unit["features"], serde_json::json!(key.features));
+            assert_eq!(profile["name"], profile_name);
+            assert_eq!(profile["opt_level"], planned.settings.profile.opt_level);
+            assert_eq!(planned.settings.profile.lto, CargoProfileLto::Bool(false));
+            assert_eq!(profile["lto"], "false");
+            assert!(profile["codegen_backend"].is_null());
+            assert!(profile["codegen_units"].is_null());
+            assert_eq!(profile["debuginfo"], 2);
+            assert_eq!(planned.settings.profile.debuginfo, CargoDebugInfo::Full);
+            assert!(profile["split_debuginfo"].is_null());
+            assert_eq!(
+                profile["debug_assertions"],
+                planned.settings.profile.debug_assertions
+            );
+            assert_eq!(
+                profile["overflow_checks"],
+                planned.settings.profile.overflow_checks
+            );
+            assert_eq!(profile["incremental"], planned.settings.profile.incremental);
+            assert_eq!(profile["panic"], "unwind");
+            assert_eq!(planned.settings.profile.panic, CargoPanicStrategy::Unwind);
+            assert_eq!(planned.settings.profile.strip, CargoStrip::None);
+            assert_eq!(profile["strip"], serde_json::json!({ "deferred": "None" }));
+            assert_eq!(profile["rpath"], false);
+            assert!(planned.settings.rustflags.is_empty());
+        }
+    }
+
+    #[test]
+    fn workspace_auxiliary_graphs_match_cargo_with_dev_dependencies() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fixture.package("a", "[package]\nname = \"a\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ndoctest = false\n[dev-dependencies]\nb = { path = \"../b\", features = [\"dev\"] }\n", false);
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[features]\ndev = []\n[dependencies]\na = { path = \"../a\" }\n", false);
+        for directory in ["examples", "benches"] {
+            fs::create_dir(fixture.0.join("a").join(directory)).unwrap();
+            fs::write(
+                fixture.0.join("a").join(directory).join("selected.rs"),
+                "fn main() {}\n",
+            )
+            .unwrap();
+        }
+        let path = fixture.0.join("a/Cargo.toml");
+        let source = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("{source}\n[[example]]\nname = \"library\"\ncrate-type = [\"rlib\", \"staticlib\"]\n")).unwrap();
+        fs::write(
+            fixture.0.join("a/examples/library.rs"),
+            "pub fn value() {}\n",
+        )
+        .unwrap();
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let limits = Options {
+            resolver: crate::manifest::Resolver::V2,
+            incompatible_rust_versions: None,
+            rust_versions: vec![Version::parse("1.99.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: None,
+        };
+        let mut catalog = Catalog::default();
+        let complete = crate::resolver::workspace::resolve_complete_workspace(
+            &workspace,
+            &mut catalog,
+            &limits,
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let resolution = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &limits,
+            &[crate::resolver::workspace::MemberRequest {
+                root: fixture.0.join("a"),
+                features: BTreeSet::new(),
+                default_features: true,
+                dev: true,
+                selected: true,
+                target_units: true,
+            }],
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let manifests = resolution
+            .packages
+            .iter()
+            .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let selected = manifests
+            .keys()
+            .filter(|key| key.name == "a")
+            .cloned()
+            .collect::<Vec<_>>();
+        let options = PlanOptions {
+            workspace_root: &fixture.0,
+            release: false,
+            panic_abort: false,
+            profile: &Profile::default(),
+            rustc: &toolchain(),
+            logical_target: None,
+            physical_target: None,
+            rustflags: &[],
+        };
+        for (kind, name, command, mode) in [
+            ("example", "selected", "build", UnitMode::Build),
+            ("example", "selected", "check", UnitMode::Check),
+            ("example", "selected", "test", UnitMode::Test),
+            ("example", "library", "build", UnitMode::Build),
+            ("example", "library", "check", UnitMode::Check),
+            ("example", "library", "test", UnitMode::Test),
+            ("bench", "selected", "build", UnitMode::Test),
+            ("bench", "selected", "check", UnitMode::CheckTest),
+            ("bench", "selected", "test", UnitMode::Test),
+            ("default", "", "test", UnitMode::Test),
+            ("all", "", "build", UnitMode::Build),
+            ("all", "", "check", UnitMode::Check),
+            ("all", "", "test", UnitMode::Test),
+        ] {
+            let graph = if kind == "default" {
+                workspace_test_units(&resolution, &manifests, &selected, &options)
+            } else if kind == "all" {
+                workspace_compiler_targets(
+                    &resolution,
+                    &manifests,
+                    &selected,
+                    &crate::cli::TargetSelection {
+                        all_targets: true,
+                        ..Default::default()
+                    },
+                    &options,
+                    mode,
+                )
+            } else {
+                workspace_auxiliary_units(
+                    &resolution,
+                    &manifests,
+                    &selected,
+                    &options,
+                    &AuxiliarySelection {
+                        kind,
+                        name: Some(name),
+                        mode,
+                        tested: None,
+                        benched: None,
+                        test_profile: false,
+                    },
+                )
+            }
+            .unwrap();
+            let roots = graph
+                .units
+                .keys()
+                .filter(|key| {
+                    key.package.name == "a"
+                        && (kind == "all" && key.kind == UnitKind::Library && command != "test"
+                            || key.is_harness()
+                            || matches!(key.kind, UnitKind::Example | UnitKind::Bench))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let plan = plan_dependency_units(&graph, &manifests, &options).unwrap();
+            let mut cargo_command = Command::new(env!("CARGO"));
+            cargo_command
+                .current_dir(&fixture.0)
+                .args([
+                    "-Z",
+                    "unstable-options",
+                    command,
+                    "--unit-graph",
+                    "--offline",
+                    "-p",
+                    "a",
+                ])
+                .env("CARGO_NET_OFFLINE", "true");
+            if kind == "all" {
+                cargo_command.arg("--all-targets");
+            } else if kind != "default" {
+                cargo_command.args([&format!("--{kind}"), name]);
+            }
+            let output = cargo_command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_ordinary_cargo_plan(
+                &cargo,
+                &plan,
+                &manifests,
+                &roots,
+                if command == "test" { "test" } else { "dev" },
+            );
+            if kind == "example" {
+                let invocation = crate::compile::dependency_rustc_invocation(
+                    &plan,
+                    &manifests,
+                    &roots[0],
+                    &crate::compile::CommandOptions {
+                        cargo: Path::new("/lorry"),
+                        workspace_root: &fixture.0,
+                        selected_packages: &selected,
+                        host_profile: Path::new("/outputs"),
+                        target_profile: Path::new("/outputs"),
+                        host_incremental: Path::new("/incremental"),
+                        target_incremental: Path::new("/incremental"),
+                        physical_target: None,
+                        host_linker: None,
+                        target_linker: None,
+                        integration_binaries: None,
+                        integration_temp_dirs: None,
+                        verbose: false,
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    invocation.environment.contains_key("CARGO_BIN_NAME"),
+                    name == "selected"
+                );
+                assert_eq!(
+                    invocation
+                        .arguments
+                        .iter()
+                        .any(|argument| argument == "--test"),
+                    mode == UnitMode::Test
+                );
+                if name == "library" && mode == UnitMode::Build {
+                    assert!(matches!(
+                        invocation.output,
+                        crate::compile::RustcOutput::Library {
+                            archive: Some(_),
+                            ..
+                        }
+                    ));
+                    for kind in ["rlib", "staticlib"] {
+                        assert!(
+                            invocation
+                                .arguments
+                                .windows(2)
+                                .any(|args| args[0] == "--crate-type" && args[1] == kind)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_build_and_check_plans_match_cargo() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\", \"shared\"]\ndefault-members = [\"a\", \"b\"]\nresolver = \"2\"\n").unwrap();
+        fixture.package("shared", "[package]\nname = \"shared\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\nname = \"shared_crate\"\n[features]\nred = []\nblue = []\n", false);
+        for (member, feature) in [("a", "red"), ("b", "blue")] {
+            fixture.package(member, &format!("[package]\nname = \"{member}\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[dependencies]\nshared = {{ path = \"../shared\", features = [\"{feature}\"] }}\n"), false);
+            fs::write(fixture.0.join(member).join("src/main.rs"), "fn main() {}\n").unwrap();
+        }
+        fs::remove_file(fixture.0.join("b/src/lib.rs")).unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let limits = Options {
+            resolver: workspace.packages[0].resolver,
+            incompatible_rust_versions: None,
+            rust_versions: vec![Version::parse("1.99.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: None,
+        };
+        let mut catalog = Catalog::default();
+        let complete = crate::resolver::workspace::resolve_complete_workspace(
+            &workspace,
+            &mut catalog,
+            &limits,
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        for (arguments, names) in [
+            (vec![], vec!["a", "b"]),
+            (vec!["--workspace"], vec!["a", "b", "shared"]),
+            (vec!["-p", "a", "-p", "b"], vec!["a", "b"]),
+            (vec!["--workspace", "--exclude", "b"], vec!["a", "shared"]),
+        ] {
+            let requests = names
+                .iter()
+                .map(|name| crate::resolver::workspace::MemberRequest {
+                    root: fixture.0.join(name),
+                    features: BTreeSet::new(),
+                    default_features: true,
+                    dev: false,
+                    selected: true,
+                    target_units: false,
+                })
+                .collect::<Vec<_>>();
+            let resolution = crate::resolver::workspace::resolve_selected_workspace(
+                &complete,
+                &catalog,
+                &limits,
+                &requests,
+                TargetSelection {
+                    host_triple: "x86_64-unknown-linux-gnu",
+                    host_cfg: &cfg,
+                    target_triple: "x86_64-unknown-linux-gnu",
+                    target_cfg: &cfg,
+                },
+            )
+            .unwrap();
+            let manifests = resolution
+                .packages
+                .iter()
+                .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+                .collect::<BTreeMap<_, _>>();
+            let selected = resolution
+                .packages
+                .iter()
+                .filter(|package| names.contains(&package.key.name.as_str()))
+                .map(|package| package.key.clone())
+                .collect::<Vec<_>>();
+            for command in ["build", "check"] {
+                let result = Command::new(env!("CARGO"))
+                    .args([
+                        "-Z",
+                        "unstable-options",
+                        command,
+                        "--unit-graph",
+                        "--offline",
+                    ])
+                    .args(&arguments)
+                    .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                    .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                    .current_dir(&fixture.0)
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                let cargo = serde_json::from_slice(&result.stdout).unwrap();
+                let graph = workspace_units(
+                    &resolution,
+                    &manifests,
+                    &selected,
+                    command == "check",
+                    true,
+                    None,
+                    false,
+                )
+                .unwrap();
+                let plan = plan_dependency_units(
+                    &graph,
+                    &manifests,
+                    &PlanOptions {
+                        workspace_root: &fixture.0,
+                        release: false,
+                        panic_abort: false,
+                        profile: &Profile::default(),
+                        rustc: &toolchain(),
+                        logical_target: None,
+                        physical_target: None,
+                        rustflags: &[],
+                    },
+                )
+                .unwrap();
+                let roots = plan
+                    .units
+                    .keys()
+                    .filter(|key| selected.contains(&key.package))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_ordinary_cargo_plan(&cargo, &plan, &manifests, &roots, "dev");
+            }
+        }
+    }
+
+    #[test]
+    fn selected_member_build_script_graphs_match_cargo() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\", \"builder\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fixture.package("builder", "[package]\nname = \"builder\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[features]\nnormal = []\nbuild = []\n", false);
+        fixture.package("a", "[package]\nname = \"a\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[dependencies]\nbuilder = { path = \"../builder\", features = [\"normal\"] }\n[build-dependencies]\nbuilder = { path = \"../builder\", features = [\"build\"] }\n", true);
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[target.'cfg(unix)'.build-dependencies]\nbuilder = { path = \"../builder\", features = [\"build\"] }\n", true);
+        fs::remove_file(fixture.0.join("b/src/lib.rs")).unwrap();
+        fs::write(fixture.0.join("b/src/main.rs"), "fn main() {}\n").unwrap();
+        let lock = Command::new(env!("CARGO"))
+            .args(["generate-lockfile", "--offline"])
+            .env("CARGO_HOME", fixture.0.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(&fixture.0)
+            .output()
+            .unwrap();
+        assert!(
+            lock.status.success(),
+            "{}",
+            String::from_utf8_lossy(&lock.stderr)
+        );
+        let (workspace, members) = crate::manifest::SourceWorkspace::load_compilation(
+            &fixture.0,
+            None,
+            &crate::manifest::PackageSelection {
+                workspace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            members
+                .iter()
+                .filter(|member| member.build_script.is_some())
+                .all(|member| member
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency.kind == DependencyKind::Build))
+        );
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let options = Options {
+            resolver: members[0].resolver,
+            incompatible_rust_versions: None,
+            rust_versions: vec![Version::parse("1.99.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: None,
+        };
+        let mut catalog = Catalog::default();
+        let complete = crate::resolver::workspace::resolve_complete_workspace(
+            &workspace,
+            &mut catalog,
+            &options,
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let requests = crate::resolver::workspace::features::member_requests(
+            &workspace,
+            &members.iter().map(|member| member.root.clone()).collect(),
+            &crate::cli::FeatureSelection::default(),
+            false,
+        )
+        .unwrap();
+        let resolution = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &options,
+            &requests,
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let manifests = resolution
+            .packages
+            .iter()
+            .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let selected = resolution
+            .packages
+            .iter()
+            .map(|package| package.key.clone())
+            .collect::<Vec<_>>();
+        for command in ["build", "check"] {
+            let output = Command::new(env!("CARGO"))
+                .args([
+                    "-Z",
+                    "unstable-options",
+                    command,
+                    "--unit-graph",
+                    "--offline",
+                    "--workspace",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
+                ])
+                .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(&fixture.0)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let units = cargo["units"].as_array().unwrap();
+            let cargo_nodes = units
+                .iter()
+                .map(|unit| {
+                    (
+                        unit["pkg_id"]
+                            .as_str()
+                            .unwrap()
+                            .split('#')
+                            .next()
+                            .unwrap()
+                            .rsplit('/')
+                            .next()
+                            .unwrap()
+                            .to_owned(),
+                        unit["target"]["kind"][0].as_str().unwrap().to_owned(),
+                        unit["mode"].as_str().unwrap().to_owned(),
+                        unit["platform"].as_str().is_some(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let graph = workspace_units(
+                &resolution,
+                &manifests,
+                &selected,
+                command == "check",
+                true,
+                None,
+                false,
+            )
+            .unwrap();
+            let node = |key: &UnitKey| {
+                (
+                    key.package.name.clone(),
+                    match key.kind {
+                        UnitKind::Library => "lib",
+                        UnitKind::Binary => "bin",
+                        UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => "custom-build",
+                        _ => panic!("unexpected scripted member unit"),
+                    }
+                    .to_owned(),
+                    if key.kind == UnitKind::BuildScriptRun {
+                        "run-custom-build"
+                    } else if key.mode == UnitMode::Check {
+                        "check"
+                    } else {
+                        "build"
+                    }
+                    .to_owned(),
+                    key.compile_kind == CompileKind::Target,
+                )
+            };
+            assert_eq!(
+                cargo_nodes.iter().cloned().collect::<BTreeSet<_>>(),
+                graph.units.keys().map(node).collect()
+            );
+            let cargo_edges = units
+                .iter()
+                .enumerate()
+                .flat_map(|(parent, unit)| {
+                    let nodes = &cargo_nodes;
+                    unit["dependencies"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(move |edge| {
+                            (
+                                nodes[parent].clone(),
+                                nodes[edge["index"].as_u64().unwrap() as usize].clone(),
+                            )
+                        })
+                })
+                .collect::<BTreeSet<_>>();
+            let edges = graph
+                .units
+                .values()
+                .flat_map(|unit| {
+                    unit.dependencies
+                        .iter()
+                        .map(|edge| (node(&unit.key), node(&edge.unit)))
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(cargo_edges, edges);
+            for unit in graph.units.values() {
+                let index = cargo_nodes
+                    .iter()
+                    .position(|candidate| *candidate == node(&unit.key))
+                    .unwrap();
+                assert_eq!(
+                    units[index]["features"],
+                    serde_json::json!(unit.key.features)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_harness_graph_matches_cargo_with_legal_dev_cycle() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\", \"helper\", \"derive\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fixture.package("helper", "[package]\nname = \"helper\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ntest = false\nbench = false\ndoctest = false\n[features]\nbuild = []\nnormal = []\n", false);
+        fixture.package("a", "[package]\nname = \"a\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ndoctest = false\n[features]\nnormal = []\n[dependencies]\nderive = { path = \"../derive\" }\nhelper = { path = \"../helper\", features = [\"normal\"] }\n[dev-dependencies]\nb = { path = \"../b\", features = [\"dev\"] }\n[build-dependencies]\nhelper = { path = \"../helper\", features = [\"build\"] }\n", true);
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\ndoctest = false\n[features]\ndev = []\n[dependencies]\na = { path = \"../a\", features = [\"normal\"] }\n", false);
+        fixture.package("derive", "[package]\nname = \"derive\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\nproc-macro = true\ndoctest = false\n[features]\ndefault = [\"harness\"]\nharness = []\n[dependencies]\nhelper = { path = \"../helper\", features = [\"normal\"] }\n[build-dependencies]\nhelper = { path = \"../helper\", features = [\"build\"] }\n", true);
+        fs::write(fixture.0.join("a/src/main.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir(fixture.0.join("a/tests")).unwrap();
+        fs::write(
+            fixture.0.join("a/tests/integration.rs"),
+            "#[test]\nfn integration() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.0.join("a/tests/disabled.rs"),
+            "#[test] fn disabled() {}\n",
+        )
+        .unwrap();
+        let manifest_path = fixture.0.join("a/Cargo.toml");
+        let manifest_text = fs::read_to_string(&manifest_path).unwrap();
+        fs::write(&manifest_path, format!("{manifest_text}\n[[test]]\nname = \"disabled\"\ntest = false\nrequired-features = [\"normal\"]\n")).unwrap();
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let options = Options {
+            resolver: crate::manifest::Resolver::V2,
+            incompatible_rust_versions: None,
+            rust_versions: vec![Version::parse("1.99.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: None,
+        };
+        let mut catalog = Catalog::default();
+        let complete = crate::resolver::workspace::resolve_complete_workspace(
+            &workspace,
+            &mut catalog,
+            &options,
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let requests = crate::resolver::workspace::features::member_requests(
+            &workspace,
+            &workspace
+                .packages
+                .iter()
+                .map(|member| member.root.clone())
+                .collect(),
+            &crate::cli::FeatureSelection::default(),
+            true,
+        )
+        .unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let resolution = crate::resolver::workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &options,
+            &requests,
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+            },
+        )
+        .unwrap();
+        let manifests = resolution
+            .packages
+            .iter()
+            .map(|package| (package.key.clone(), package.local_manifest.clone().unwrap()))
+            .collect();
+        let selected = resolution
+            .packages
+            .iter()
+            .map(|package| package.key.clone())
+            .collect::<Vec<_>>();
+        let options = PlanOptions {
+            workspace_root: &fixture.0,
+            release: false,
+            panic_abort: false,
+            profile: &Profile::default(),
+            rustc: &toolchain(),
+            logical_target: None,
+            physical_target: None,
+            rustflags: &[],
+        };
+        let named_integration = |name| CheckTargetSelection {
+            integrations: true,
+            integration_name: Some(name),
+            ..CheckTargetSelection::default()
+        };
+        assert!(
+            workspace_target_units(
+                &resolution,
+                &manifests,
+                &selected,
+                &named_integration("missing"),
+                &options,
+                UnitMode::Test,
+            )
+            .is_err()
+        );
+        for (integration_name, logical_target, checking, opt_level) in [
+            (None, None, false, "0"),
+            (None, Some("x86_64-unknown-linux-gnu"), false, "0"),
+            (
+                Some("integration"),
+                Some("x86_64-unknown-linux-gnu"),
+                false,
+                "0",
+            ),
+            (
+                Some("disabled"),
+                Some("x86_64-unknown-linux-gnu"),
+                false,
+                "0",
+            ),
+            (None, None, true, "0"),
+            (None, Some("x86_64-unknown-linux-gnu"), true, "0"),
+            (
+                Some("integration"),
+                Some("x86_64-unknown-linux-gnu"),
+                true,
+                "0",
+            ),
+            (None, None, false, "2"),
+            (None, Some("x86_64-unknown-linux-gnu"), false, "2"),
+            (None, None, true, "2"),
+            (None, Some("x86_64-unknown-linux-gnu"), true, "2"),
+        ] {
+            let original = fs::read_to_string(fixture.0.join("Cargo.toml")).unwrap();
+            let workspace_text = original.split("[profile.dev]").next().unwrap();
+            fs::write(
+                fixture.0.join("Cargo.toml"),
+                format!("{workspace_text}\n[profile.dev]\nopt-level = {opt_level}\n"),
+            )
+            .unwrap();
+            let profile = Profile {
+                opt_level,
+                ..Profile::default()
+            };
+            let options = PlanOptions {
+                profile: &profile,
+                logical_target,
+                physical_target: logical_target,
+                ..options
+            };
+            let mode = if checking {
+                UnitMode::Check
+            } else {
+                UnitMode::Test
+            };
+            let graph = match integration_name {
+                Some(name) => workspace_target_units(
+                    &resolution,
+                    &manifests,
+                    &selected,
+                    &named_integration(name),
+                    &options,
+                    mode,
+                ),
+                None if checking => workspace_target_units(
+                    &resolution,
+                    &manifests,
+                    &selected,
+                    &CheckTargetSelection {
+                        normal: true,
+                        binaries: true,
+                        harnesses: true,
+                        harness_filter: HarnessFilter::All,
+                        integrations: true,
+                        ..CheckTargetSelection::default()
+                    },
+                    &options,
+                    mode,
+                ),
+                None => workspace_test_units(&resolution, &manifests, &selected, &options),
+            }
+            .unwrap();
+            let plan = plan_dependency_units(&graph, &manifests, &options).unwrap();
+            let mut command = Command::new(env!("CARGO"));
+            command
+                .args([
+                    "-Z",
+                    "unstable-options",
+                    if checking { "check" } else { "test" },
+                    "--unit-graph",
+                    "--workspace",
+                    "--offline",
+                ])
+                .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(&fixture.0);
+            if checking && integration_name.is_none() {
+                command.arg("--all-targets");
+            }
+            if let Some(target) = logical_target {
+                command.args(["--target", target]);
+            }
+            if let Some(name) = integration_name {
+                command.args(["--test", name]);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let units = cargo["units"].as_array().unwrap();
+            let cargo_nodes = units
+                .iter()
+                .map(|unit| {
+                    (
+                        unit["pkg_id"]
+                            .as_str()
+                            .unwrap()
+                            .split('#')
+                            .next()
+                            .unwrap()
+                            .rsplit('/')
+                            .next()
+                            .unwrap()
+                            .to_owned(),
+                        unit["target"]["kind"][0].as_str().unwrap().to_owned(),
+                        unit["target"]["name"].as_str().unwrap().to_owned(),
+                        unit["mode"].as_str().unwrap().to_owned(),
+                        unit["platform"].is_string(),
+                        unit["profile"]["opt_level"].as_str().unwrap().to_owned(),
+                        unit["features"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|feature| feature.as_str().unwrap().to_owned())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let node = |key: &UnitKey| {
+                (
+                    key.package.name.clone(),
+                    match key.kind {
+                        UnitKind::Library | UnitKind::LibraryHarness => {
+                            if manifests[&key.package].library.as_ref().unwrap().proc_macro {
+                                "proc-macro"
+                            } else {
+                                "lib"
+                            }
+                        }
+                        UnitKind::Binary | UnitKind::BinaryHarness => "bin",
+                        UnitKind::IntegrationHarness => "test",
+                        UnitKind::Example => "example",
+                        UnitKind::Bench => "bench",
+                        UnitKind::ProcMacro => "proc-macro",
+                        UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun => "custom-build",
+                    }
+                    .to_owned(),
+                    key.target.clone().unwrap_or_else(|| {
+                        if matches!(
+                            key.kind,
+                            UnitKind::BuildScriptCompile | UnitKind::BuildScriptRun
+                        ) {
+                            "build-script-build".to_owned()
+                        } else {
+                            key.package.name.clone()
+                        }
+                    }),
+                    match key.kind {
+                        UnitKind::BuildScriptRun => "run-custom-build",
+                        _ if matches!(key.mode, UnitMode::Check | UnitMode::CheckTest) => "check",
+                        _ if key.mode == UnitMode::Test => "test",
+                        _ => "build",
+                    }
+                    .to_owned(),
+                    key.compile_kind == CompileKind::Target && logical_target.is_some(),
+                    plan.units[key].settings.profile.opt_level.to_owned(),
+                    key.features.iter().cloned().collect::<Vec<_>>(),
+                )
+            };
+            assert_eq!(
+                cargo_nodes.iter().cloned().collect::<BTreeSet<_>>(),
+                plan.units.keys().map(node).collect()
+            );
+            let cargo_edges = units
+                .iter()
+                .enumerate()
+                .flat_map(|(parent, unit)| {
+                    let nodes = &cargo_nodes;
+                    unit["dependencies"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(move |edge| {
+                            (
+                                nodes[parent].clone(),
+                                nodes[edge["index"].as_u64().unwrap() as usize].clone(),
+                                edge["extern_crate_name"].as_str().unwrap().to_owned(),
+                            )
+                        })
+                })
+                .collect::<BTreeSet<_>>();
+            let edges = plan
+                .units
+                .values()
+                .flat_map(|unit| {
+                    unit.unit.dependencies.iter().map(|edge| {
+                        (
+                            node(&unit.unit.key),
+                            node(&edge.unit),
+                            edge.alias.clone().unwrap_or_else(|| {
+                                edge.unit
+                                    .target
+                                    .as_deref()
+                                    .unwrap_or("build-script-build")
+                                    .replace('-', "_")
+                            }),
+                        )
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(cargo_edges, edges);
+            for (key, unit) in &plan.units {
+                let reference = &units[cargo_nodes
+                    .iter()
+                    .position(|candidate| *candidate == node(key))
+                    .unwrap()];
+                assert_eq!(reference["features"], serde_json::json!(key.features));
+                assert_eq!(
+                    reference["profile"]["opt_level"],
+                    unit.settings.profile.opt_level
+                );
+                let debug = match unit.settings.profile.debuginfo {
+                    CargoDebugInfo::None => 0,
+                    CargoDebugInfo::Full => 2,
+                    other => panic!("unexpected debug setting {other:?}"),
+                };
+                assert_eq!(reference["profile"]["debuginfo"], debug);
+                assert_eq!(reference["profile"]["panic"], "unwind");
+                assert_eq!(unit.settings.profile.panic, CargoPanicStrategy::Unwind);
+            }
         }
     }
 
@@ -989,9 +3962,9 @@ mod tests {
             &Options {
                 resolver: root.resolver,
                 incompatible_rust_versions: None,
-                rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 16,
-                max_depth: 8,
+                rust_versions: vec![Version::parse("1.98.0").unwrap()],
+                package_limit: crate::policy::PackageLimit::with_max(16),
+                max_depth: Some(8),
             },
             &[],
             TargetSelection {
@@ -1068,12 +4041,6 @@ mod tests {
             }
         }
 
-        let release_profile = ReleaseProfile {
-            panic_abort: true,
-            lto: ManifestLto::Fat,
-            strip: ManifestStrip::Symbols,
-            codegen_units: Some(1),
-        };
         let rustflags = vec!["-Ctarget-cpu=x86-64-v3".to_owned()];
         let plan = plan_dependency_units(
             &graph,
@@ -1081,11 +4048,17 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
-                test_profile: false,
                 panic_abort: true,
-                release_profile: &release_profile,
+                profile: &Profile {
+                    panic_abort: true,
+                    lto: ManifestLto::Fat,
+                    strip: ManifestStrip::Symbols,
+                    codegen_units: Some(1),
+                    ..Profile::release()
+                },
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
+                physical_target: Some("x86_64-unknown-motor"),
                 rustflags: &rustflags,
             },
         )
@@ -1148,11 +4121,11 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: false,
-                test_profile: false,
                 panic_abort: true,
-                release_profile: &ReleaseProfile::default(),
+                profile: &Profile::default(),
                 rustc: &toolchain(),
                 logical_target: None,
+                physical_target: None,
                 rustflags: &rustflags,
             },
         )
@@ -1165,7 +4138,7 @@ mod tests {
                     && unit.unit.key.compile_kind == CompileKind::Host
             })
             .unwrap();
-        assert_eq!(shared_host.settings.profile.debuginfo, CargoDebugInfo::Full);
+        assert_eq!(shared_host.settings.profile.debuginfo, CargoDebugInfo::None);
         assert_eq!(
             shared_host.settings.profile.panic,
             CargoPanicStrategy::Unwind
@@ -1220,9 +4193,9 @@ mod tests {
             &Options {
                 resolver: root.resolver,
                 incompatible_rust_versions: None,
-                rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 16,
-                max_depth: 8,
+                rust_versions: vec![Version::parse("1.98.0").unwrap()],
+                package_limit: crate::policy::PackageLimit::with_max(16),
+                max_depth: Some(8),
             },
             &[],
             TargetSelection {
@@ -1338,6 +4311,7 @@ mod tests {
         let normal_edge = ResolvedEdge {
             dependency_index: 0,
             alias: "typenum".to_owned(),
+            target: None,
             kind: DependencyKind::Normal,
             parent_compile_kind: Some(CompileKind::Target),
             compile_kind: CompileKind::Target,
@@ -1347,6 +4321,7 @@ mod tests {
         let build_edge = ResolvedEdge {
             dependency_index: 1,
             alias: "version_check".to_owned(),
+            target: None,
             kind: DependencyKind::Build,
             parent_compile_kind: Some(CompileKind::Target),
             compile_kind: CompileKind::Host,
@@ -1383,16 +4358,17 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
-                test_profile: false,
                 panic_abort: true,
-                release_profile: &ReleaseProfile {
+                profile: &Profile {
                     panic_abort: true,
                     lto: ManifestLto::Fat,
                     strip: ManifestStrip::Symbols,
                     codegen_units: Some(1),
+                    ..Profile::release()
                 },
                 rustc: &toolchain(),
                 logical_target: None,
+                physical_target: None,
                 rustflags: &[],
             },
         )
@@ -1442,7 +4418,10 @@ mod tests {
                 source: crate::resolver::PackageSourceKey::Path(Path::new("/cycle").to_owned()),
             },
             kind: UnitKind::Library,
+            mode: UnitMode::Build,
+            target: None,
             compile_kind: CompileKind::Target,
+            profile: ProfileContext::Normal,
             features: BTreeSet::new(),
         };
         let incomplete = Resolution {

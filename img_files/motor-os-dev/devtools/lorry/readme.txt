@@ -1,5 +1,6 @@
 Lorry data on the developer image
 
-This writable directory contains Lorry's shared developer state. `lorry vendor`
-stores fetched dependencies under vendor/; compiled dependency units are stored
-under cache/. The developer image ships both directories without dependency data.
+Each role has its own Lorry state: user/ for Interactive and none/ for None.
+In each, `lorry vendor` stores fetched dependencies under vendor/, and
+compiled dependency units are stored under cache/. The developer image ships
+these directories without dependency data.

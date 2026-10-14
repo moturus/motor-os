@@ -63,6 +63,7 @@ pub fn answer() -> u32 { 42 }
 EOF
 cat >"$HOME_DIR/.config/lorry/lorry.toml" <<EOF
 config-version = 1
+use-cargo-registry = false
 
 [repositories]
 user = "$REPOSITORY"
@@ -91,10 +92,23 @@ expect_failure() {
     }
 }
 
-echo "== Creating deterministic local dependency state =="
-(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all >/dev/null)
+expect_no_warning() {
+    if grep -E '^warning:' "$WORK/$1.stderr" >/dev/null; then
+        cat "$WORK/$1.stderr" >&2
+        echo "review-contract: $1 vendor printed a warning" >&2
+        exit 1
+    fi
+}
 
-echo "== Applying an unrelated candidate only with explicit automation approval =="
+echo "== Creating deterministic local dependency state =="
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all) \
+    >/dev/null 2>"$WORK/initial.stderr"
+expect_no_warning initial
+# Keep the approved review but not the standing `--accept-all`, as an
+# interactive approval would, so later changes still need a review.
+sed -i '/^accept-all = true$/d' "$HOME_DIR"/.config/lorry/workspaces/*.toml
+
+echo "== Preserving admission for unused member declarations =="
 cat >>"$PROJECT/Cargo.toml" <<'EOF'
 
 [features]
@@ -103,23 +117,38 @@ EOF
 manifest_hash="$(sha256sum "$PROJECT/Cargo.toml")"
 lock_hash="$(sha256sum "$PROJECT/Cargo.lock")"
 state_hash="$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")"
-if (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor </dev/null) \
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor </dev/null) \
+    >"$WORK/unused.stdout" 2>"$WORK/unused.stderr"
+[ "$(sha256sum "$PROJECT/Cargo.toml")" = "$manifest_hash" ]
+[ "$(sha256sum "$PROJECT/Cargo.lock")" = "$lock_hash" ]
+[ "$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")" = "$state_hash" ]
+
+echo "== Approving an explicit change to the reviewed feature scope =="
+if (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --features automated-change </dev/null) \
     >"$WORK/unapproved.stdout" 2>"$WORK/unapproved.stderr"; then
-    echo "review-contract: non-interactive vendor approved an unrelated change" >&2
+    echo "review-contract: non-interactive vendor approved a scope change" >&2
     exit 1
 fi
 grep -F 'no interactive terminal is available' "$WORK/unapproved.stderr" >/dev/null
 [ "$(sha256sum "$PROJECT/Cargo.toml")" = "$manifest_hash" ]
 [ "$(sha256sum "$PROJECT/Cargo.lock")" = "$lock_hash" ]
 [ "$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")" = "$state_hash" ]
-(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all </dev/null) \
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --features automated-change --accept-all </dev/null) \
     >"$WORK/automated.stdout" 2>"$WORK/automated.stderr"
 grep -F 'automated-change' "$WORK/automated.stderr" >/dev/null
 if grep -F '[y/N]' "$WORK/automated.stderr" >/dev/null; then
-    echo "review-contract: --accept-all prompted for an unrelated change" >&2
+    echo "review-contract: --accept-all prompted for a scope change" >&2
     exit 1
 fi
 [ "$(sha256sum "$PROJECT/Cargo.toml")" = "$manifest_hash" ]
+[ "$(sha256sum "$PROJECT/Cargo.lock")" = "$lock_hash" ]
+[ "$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")" != "$state_hash" ]
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor </dev/null) \
+    >"$WORK/retained.stdout" 2>"$WORK/retained.stderr"
+grep -F 'Review scope: all workspace members; default features; features: automated-change' \
+    "$WORK/retained.stderr" >/dev/null
+expect_no_warning automated
+expect_no_warning retained
 
 echo "== Proving review is read-only and committed =="
 before="$(find "$PROJECT" "$REPOSITORY" -printf '%y %p %s %T@\n' | sort | sha256sum)"
@@ -137,8 +166,27 @@ commitment="$(sed -n 's/^review-sha256 = "\([0-9a-f]*\)"/\1/p' \
 }
 expect_failure cargo-registry 'cannot be combined with `review`' \
     --use-cargo-registry review
+for selector in "-p review-fixture" "--features extra" "--all-features"; do
+    # shellcheck disable=SC2086
+    expect_failure selected-review 'does not accept package or feature selection' \
+        review $selector
+done
 sed -i 's/^review-sha256 = ".*"/review-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"/' \
     "$PROJECT/.lorry/dependencies-v2.toml"
-expect_failure stale-commitment "dependency state commitment does not match" review
+expect_failure stale-commitment "workspace admission commitment does not match" review
+
+echo "== Falling back silently when vendor cannot reconstruct the previous review =="
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all </dev/null) \
+    >/dev/null 2>"$WORK/unreconstructed.stderr"
+grep -F 'Previous review cannot be reconstructed; showing the complete candidate.' \
+    "$WORK/unreconstructed.stderr" >/dev/null
+expect_no_warning unreconstructed
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" review) >/dev/null
+sed -i 's/^review-format-version = 4$/review-format-version = 3/' \
+    "$PROJECT/.lorry/dependencies-v2.toml"
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all </dev/null) \
+    >/dev/null 2>"$WORK/retired.stderr"
+expect_no_warning retired
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" review) >/dev/null
 
 echo "PASS: offline review contract"

@@ -110,10 +110,11 @@ for vm in "${vms[@]}"; do
   installed=(javy/devtools/bin/javy javy/devtools/bin/wasmi wasmtime/devtools/bin/wasmtime-rt)
   {
     for suite in "${suites[@]}"; do printf 'put "%s" /user/tmp/%s\n' "$(binary "$suite")" "$suite"; done
+    # The tools run as role None, which cannot traverse /user/tmp.
     for addon in javy wasmtime; do
-      printf 'mkdir /user/tmp/%s-tests\n' "$addon"
+      printf 'mkdir /none/tmp/%s-tests\n' "$addon"
       for file in "$test_inputs/$addon"/*; do
-        printf 'put "%s" /user/tmp/%s-tests/%s\n' "$file" "$addon" "${file##*/}"
+        printf 'put "%s" /none/tmp/%s-tests/%s\n' "$file" "$addon" "${file##*/}"
       done
     done
     for tool in "${installed[@]}"; do

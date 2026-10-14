@@ -242,6 +242,69 @@ gates. Log: `/tmp/claude-1000/-home-posk-motor-dev-motor-os/44e5b204-1009-467e-b
 future stall fails the test quickly and names itself instead of running out
 the suite's clock.
 
+Seen again on 2026-10-07, on `0a91105d` (release `full-test-dev.sh`, 8 GiB):
+the last systest line was again `test_listener_pool_growth PASS`, and the
+suite ran out its 1500 s clock. The late `do_rpc` deadline did not fire, so
+this stall was elsewhere in the test: most likely the first `do_rpc(None)`,
+which has no deadline, or a read from the peer or the hoarder. The next run
+on the same commit passed the test in under 5 s, as did three more runs.
+
+Not reproduced on 2026-10-08 (`94a97b45`), with a temporary watchdog that
+named the step that stopped for 60 s. These all passed, on the release dev
+image with 8 GiB and 4 vCPUs:
+
+- 15 full systest runs, each in a fresh boot;
+- 3 runs of the developer gate's `full-test.sh` phase, where systest runs
+  after the rest of the suite;
+- 150 runs of the IPC tests alone while busy loops kept all 16 host CPUs
+  busy.
+
+Next time, a step watchdog in the test would name where it stops. That is a
+test change under `src/sys`, so it needs the full debug and release gates.
+
+Seen a third time on 2026-10-08, on the `dev` branch at `a4d30f3c` (the
+lorry branch's kernel and sys-io fixes cherry-picked onto `99a13d6f`), in a
+release `full-test-dev.sh` run with 8 GiB. The last systest line was again
+`test_listener_pool_growth PASS`, and the suite ran out its 1500 s clock.
+That tree has no step watchdog, so the stopped step is unknown. The console
+shows nothing after 297 s and no `fatal: sys-io exited` line, but it also
+dropped records. `dev`'s own future-work list traces an identical-looking
+timeout on 2026-10-04 to sys-io aborting when a TCP connection is
+established at the memory floor, and says these stalls probably share that
+cause. The same tree had just passed `full-test.sh` three times in debug and
+three times in release. Logs:
+`/tmp/claude-1000/-home-posk-motor-dev-motor-os/8e448414-375a-41fc-8871-292a39ae0700/scratchpad/devbranch-stall/`.
+
+Seen a fourth time on 2026-10-09, on the lorry branch at `b57d14d0` plus
+uncommitted Lorry configuration changes (release `full-test-dev.sh`, 8 GiB,
+4 vCPUs). The step watchdog named the step: "waiting for the server to retry"
+(step 6). The server never printed `retrying`, so no `wait()` returned
+without a request while the hoarder held memory. The console shows no sys-io
+failure. Logs: `/tmp/claude-1000/-home-posk-motor-dev-motor-os/c73e7c97-f286-45f2-ab9d-03782d6b4132/scratchpad/refill-stall-2026-10-09/`.
+
+A likely cause, by code reading, not verified: the test assumes every refill
+stays refused during step 6, but the hoarder takes freed memory back only
+once per millisecond (`fill()` then a 1 ms sleep). If the server's
+`add_listener()` wins a freed page first, the refill succeeds, `wait()` gets
+no timeout (`refused` stays false), and it waits for a client. The late
+client connects only after the test reads `retrying`, so both sides wait
+forever. A fix belongs in the test (for example, let `retry` also report a
+successful refill) and touches `src/sys/tests`, so it needs the full gates.
+
+## A directory listing ends when another process removes an entry (2026-10-08)
+
+`readdir` in rt.vdso (`src/sys/lib/rt.vdso/src/rt_fs.rs`) remembers the next
+entry before it returns the current one. If another process removes that next
+entry first, the listing reports one error and ends, so later entries are
+never returned. POSIX lets a listing skip or repeat only the entries that
+change during it.
+
+This keeps Lorry from pipelining builds on Motor. A dependent's rustc lists
+each dependency directory while a library's rustc still removes temporary
+files there, so the listing could miss a library and the build would fail
+with "can't find crate". Lorry pipelines on Linux only, until `readdir` keeps
+going past a removed entry.
+
 ## A process can take an rmux server's name first (2026-09-27)
 
 rmux on Motor finds its server by a service name made of the server's mask

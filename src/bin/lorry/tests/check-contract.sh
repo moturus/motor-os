@@ -15,7 +15,7 @@ if [ -z "${LORRY_TEST_RUSTC:-}" ]; then
     lorry_load_current_toolchain
 fi
 WORK="$(mktemp -d /tmp/lorry-check-contract-XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'status=$?; if [ "$status" = 0 ]; then rm -rf "$WORK"; else echo "Retained failed fixture: $WORK" >&2; fi' EXIT
 HOST_CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 HOME_DIR="$WORK/home"
 PROJECT="$WORK/project"
@@ -23,18 +23,17 @@ DEPENDENCY="$WORK/dependency"
 LOG="$WORK/rustc.log"
 mkdir -p "$HOME_DIR/.config/lorry" "$PROJECT/src/bin" "$PROJECT/tests" \
     "$DEPENDENCY/src"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$HOME_DIR/.config/lorry/lorry.toml"
 printf '%s\n' \
-    'config-version = 1' \
-    '[policy.rules.allow-fixture-dependency]' \
+    "[workspaces.\"$PROJECT\".policy.rules.allow-fixture-dependency]" \
     'action = "allow"' \
     'name = "fixture-dependency"' \
     'version = "=1.0.0"' \
     'source = "path"' \
     'license = "MIT"' \
     'allow-build-script = true' \
-    >"$PROJECT/lorry.toml"
+    >>"$HOME_DIR/.config/lorry/lorry.toml"
 
 printf '%s\n' \
     '[package]' \
@@ -44,6 +43,10 @@ printf '%s\n' \
     '' \
     '[dependencies]' \
     'fixture-dependency = { path = "../dependency" }' \
+    '' \
+    '[lints.clippy]' \
+    'all = { level = "deny", priority = -1 }' \
+    'needless_return = "allow"' \
     >"$PROJECT/Cargo.toml"
 printf '%s\n' \
     '[package]' \
@@ -77,11 +80,13 @@ printf '%s\n' \
 printf '%s\n' \
     '#[cfg(generated_fixture)]' \
     'include!(concat!(env!("OUT_DIR"), "/generated.rs"));' \
+    'pub const TRACKED: Option<&str> = option_env!("LORRY_CHECK_TRACKED");' \
     >"$DEPENDENCY/src/lib.rs"
 printf '%s\n' \
     '#[deprecated]' \
     'pub fn old_value() -> u8 { fixture_dependency::VALUE }' \
     'pub fn value() -> u8 { fixture_dependency::VALUE }' \
+    'pub const MEMBER_TRACKED: Option<&str> = option_env!("LORRY_CHECK_MEMBER_TRACKED");' \
     >"$PROJECT/src/lib.rs"
 printf 'fn main() { assert_eq!(check_fixture::old_value(), 42); }\n' \
     >"$PROJECT/src/bin/first.rs"
@@ -112,11 +117,22 @@ export HOME="$HOME_DIR"
 export RUSTC="$WORK/rustc-log"
 export REAL_RUSTC="$LORRY_TEST_RUSTC"
 export LORRY_CHECK_RUSTC_LOG="$LOG"
+# The rustc wrapper writes several chunks per invocation; serialize this
+# contract's calls so log counts and fail-fast order are deterministic.
+export LORRY_JOBS=1
 
 (
     cd "$PROJECT"
     "$LORRY" vendor --accept-all
 )
+
+: >"$LOG"
+"$LORRY" check --examples --manifest-path "$PROJECT/Cargo.toml" \
+    >"$WORK/examples.out" 2>"$WORK/examples.err"
+if grep -F -- '--crate-name' "$LOG"; then
+    echo "check-contract: empty example selection compiled a target" >&2
+    exit 1
+fi
 
 TARGET="$WORK/editor-target"
 : >"$LOG"
@@ -142,6 +158,75 @@ if find "$PROFILE/build/check-fixture" -type f -perm /111 -print -quit | grep .;
     exit 1
 fi
 
+# CARGO_LOG is stripped before rustc. A changed value must not rebuild the
+# dependency cache entry used by a later check.
+: >"$LOG"
+CARGO_LOG=trace "$LORRY" check --lib --quiet \
+    --manifest-path "$PROJECT/Cargo.toml" --target-dir "$TARGET"
+if grep -F "<$DEPENDENCY/src/lib.rs>" "$LOG" >/dev/null; then
+    echo "check-contract: CARGO_LOG rebuilt an unchanged dependency" >&2
+    exit 1
+fi
+
+(
+    cd "$PROJECT"
+    "$LORRY" --quiet build
+    : >"$LOG"
+    "$LORRY" --quiet build --message-format=json >"$WORK/profile-fresh.json"
+    if grep -F '<--crate-name>' "$LOG" >/dev/null; then
+        echo "check-contract: JSON build compiled an unchanged profile" >&2
+        exit 1
+    fi
+    grep -F '"reason":"compiler-message"' "$WORK/profile-fresh.json" | \
+        grep -F 'deprecated' >/dev/null
+    : >"$LOG"
+    "$LORRY" --quiet build
+    if grep -F '<--crate-name>' "$LOG" >/dev/null; then
+        echo "check-contract: same-environment build missed freshness" >&2
+        exit 1
+    fi
+    : >"$LOG"
+    CARGO_LOG=trace "$LORRY" --quiet build
+    : # Keep Bash from replacing the subshell for its final command.
+)
+if grep -F '<--crate-name>' "$LOG" >/dev/null; then
+    echo "check-contract: CARGO_LOG invalidated unchanged build freshness" >&2
+    exit 1
+fi
+
+# As in Cargo, unit keys cover only the variables Lorry sets for rustc. A
+# variable that a unit reads with option_env! is rechecked; a new value
+# rebuilds that unit and its dependents. Other variables, including `_` set
+# by whatever program launches Lorry, invalidate nothing.
+compiled() { grep -F -- "$1" "$LOG" >/dev/null; }
+tracked_failure() {
+    echo "check-contract: $1" >&2
+    exit 1
+}
+(
+    cd "$PROJECT"
+    : >"$LOG"
+    LORRY_CHECK_UNRELATED=1 env "$LORRY" --quiet build
+    ! compiled '<--crate-name>' || tracked_failure "an unrelated variable rebuilt units"
+    : >"$LOG"
+    LORRY_CHECK_TRACKED=one "$LORRY" --quiet build
+    compiled "<$DEPENDENCY/src/lib.rs>" ||
+        tracked_failure "a variable read by a dependency did not rebuild it"
+    compiled '<src/lib.rs>' || tracked_failure "a rebuilt dependency left its dependent fresh"
+    : >"$LOG"
+    LORRY_CHECK_TRACKED=one LORRY_CHECK_UNRELATED=2 "$LORRY" --quiet build
+    ! compiled '<--crate-name>' || tracked_failure "an unchanged tracked variable rebuilt units"
+    : >"$LOG"
+    LORRY_CHECK_TRACKED=one LORRY_CHECK_MEMBER_TRACKED=yes "$LORRY" --quiet build
+    compiled '<src/lib.rs>' || tracked_failure "a variable read by the member did not rebuild it"
+    ! compiled "<$DEPENDENCY/src/lib.rs>" ||
+        tracked_failure "a variable read only by the member rebuilt its dependency"
+    : >"$LOG"
+    "$LORRY" --quiet build
+    compiled "<$DEPENDENCY/src/lib.rs>" ||
+        tracked_failure "unsetting a tracked variable did not rebuild its reader"
+)
+
 LIB_TARGET="$WORK/lib-target"
 : >"$LOG"
 "$LORRY" check --lib --quiet --manifest-path "$PROJECT/Cargo.toml" \
@@ -153,6 +238,9 @@ if grep -F '<src/bin/' "$LOG" >/dev/null; then
 fi
 
 : >"$LOG"
+# In-place unit reuse skips unchanged compiler invocations. Change the root
+# source so this assertion still observes both all-targets compiler modes.
+printf '\n' >>"$PROJECT/src/lib.rs"
 "$LORRY" check --all-targets --keep-going --quiet \
     --manifest-path "$PROJECT/Cargo.toml" --target-dir "$TARGET"
 [ "$(grep -Fc '<src/lib.rs>' "$LOG")" -eq 2 ]
@@ -168,6 +256,144 @@ JSON_TARGET="$WORK/json-target"
 # rust-analyzer does when saving a binary or integration-test target.
 PACKAGE_ID="$(sed -n 's/.*"root":[[:space:]]*"\([^"]*\)".*/\1/p' "$WORK/metadata.json")"
 [[ "$PACKAGE_ID" == path+file://* ]] || { echo "missing metadata root ID" >&2; exit 1; }
+for format in json json,json-diagnostic-rendered-ansi; do
+    ansi=plain
+    [ "$format" = json ] || ansi=ansi
+    (
+        cd "$PROJECT"
+        "$LORRY" --quiet build --message-format "$format" \
+            --target-dir "$WORK/build-$ansi"
+    ) >"$WORK/build-$ansi.json" 2>"$WORK/build-$ansi.err"
+    CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+        --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+        -- messages "$WORK/build-$ansi.json" "$WORK/metadata.json" success "$ansi" any
+    [ -x "$WORK/build-$ansi/lorry/debug/first" ]
+    [ -x "$WORK/build-$ansi/lorry/debug/second" ]
+done
+(
+    cd "$PROJECT"
+    "$LORRY" --quiet test --no-run --message-format=json \
+        --target-dir "$WORK/test-json"
+) >"$WORK/test-no-run.json" 2>"$WORK/test-no-run.err"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- test-messages "$WORK/test-no-run.json" "$WORK/metadata.json" success plain any
+
+for command in build check test; do
+    extra=()
+    comparison=differential-success-messages
+    [ "$command" != check ] || comparison=differential-check-messages
+    [ "$command" != test ] || extra+=(--no-run)
+    for phase in cold fresh; do
+        (
+            cd "$PROJECT"
+            "$LORRY" --quiet "$command" -j1 --message-format=json \
+                --target-dir "$WORK/paired-lorry-$command" "${extra[@]}"
+        ) >"$WORK/paired-lorry-$command-$phase.json" 2>"$WORK/paired-lorry-$command-$phase.err"
+        (
+            cd "$PROJECT"
+            CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" "$command" --locked --offline \
+                -j1 --message-format=json --target-dir "$WORK/paired-cargo-$command" "${extra[@]}"
+        ) >"$WORK/paired-cargo-$command-$phase.json" 2>"$WORK/paired-cargo-$command-$phase.err"
+        CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+            --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+            -- "$comparison" "$WORK/paired-lorry-$command-$phase.json" \
+                "$WORK/paired-cargo-$command-$phase.json"
+    done
+done
+# Fail-fast builders may visit independent binaries in different orders, even
+# with one job. Put the warning in a prerequisite of the failing target.
+cp "$PROJECT/src/lib.rs" "$WORK/library-before-failure.rs"
+printf 'pub fn failure_warning() -> u8 { old_value() }\n' >>"$PROJECT/src/lib.rs"
+printf 'fn main() { assert_eq!(check_fixture::value(), 42); }\n' >"$PROJECT/src/bin/first.rs"
+printf 'fn main() { compile_error!("paired build failure"); }\n' >"$PROJECT/src/bin/second.rs"
+for failure_target in all second; do
+    failure_selection=()
+    [ "$failure_target" = all ] || failure_selection=(--bin second)
+    for driver in lorry cargo; do
+        executable="$LORRY"
+        [ "$driver" != cargo ] || executable="$LORRY_TEST_CARGO"
+        if (
+            cd "$PROJECT"
+            CARGO_HOME="$HOST_CARGO_HOME" "$executable" build --locked --offline \
+                -j1 --message-format=json --target-dir "$WORK/paired-$driver-build" \
+                "${failure_selection[@]}"
+        ) >"$WORK/paired-$driver-failure-$failure_target.json" \
+            2>"$WORK/paired-$driver-failure-$failure_target.err"; then
+            echo "check-contract: paired failing build succeeded ($driver)" >&2
+            exit 1
+        else
+            [ "$?" -eq 101 ]
+        fi
+    done
+    CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+        --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+        -- differential-messages "$WORK/paired-lorry-failure-$failure_target.json" \
+            "$WORK/paired-cargo-failure-$failure_target.json"
+done
+cp "$WORK/library-before-failure.rs" "$PROJECT/src/lib.rs"
+printf 'fn main() { assert_eq!(check_fixture::old_value(), 42); }\n' >"$PROJECT/src/bin/first.rs"
+printf 'fn main() { assert_eq!(check_fixture::value(), 42); }\n' >"$PROJECT/src/bin/second.rs"
+
+printf 'fn main() { println!("program output"); std::process::exit(7); }\n' \
+    >"$PROJECT/src/bin/first.rs"
+if (
+    cd "$PROJECT"
+    "$LORRY" --quiet run --bin first --message-format=json \
+        --target-dir "$WORK/run-json"
+) >"$WORK/run-json.out" 2>"$WORK/run-json.err"; then
+    echo "check-contract: run lost the program's failure status" >&2
+    exit 1
+else
+    [ "$?" -eq 7 ]
+fi
+[ "$(tail -1 "$WORK/run-json.out")" = 'program output' ]
+sed '$d' "$WORK/run-json.out" >"$WORK/run-json-prefix.json"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- messages "$WORK/run-json-prefix.json" "$WORK/metadata.json" success plain any
+if (
+    cd "$PROJECT"
+    "$LORRY" --quiet run --bin first --message-format=json \
+        --target-dir "$WORK/run-json"
+) >"$WORK/run-fresh.out" 2>"$WORK/run-fresh.err"; then
+    echo "check-contract: fresh run lost the program's failure status" >&2
+    exit 1
+else
+    [ "$?" -eq 7 ]
+fi
+[ "$(tail -1 "$WORK/run-fresh.out")" = 'program output' ]
+sed '$d' "$WORK/run-fresh.out" >"$WORK/run-fresh-prefix.json"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- messages "$WORK/run-fresh-prefix.json" "$WORK/metadata.json" success plain fresh
+printf 'fn main() { assert_eq!(check_fixture::old_value(), 42); }\n' \
+    >"$PROJECT/src/bin/first.rs"
+
+printf '\n#[test]\nfn failing_harness() { panic!("harness failure"); }\n' \
+    >>"$PROJECT/tests/integration.rs"
+if (
+    cd "$PROJECT"
+    "$LORRY" --quiet test --test integration --message-format=json \
+        --target-dir "$WORK/test-json" -- --nocapture
+) >"$WORK/test-json.out" 2>"$WORK/test-json.err"; then
+    echo "check-contract: test lost the harness's failure status" >&2
+    exit 1
+else
+    [ "$?" -eq 101 ]
+fi
+sed '/"reason":"build-finished"/q' "$WORK/test-json.out" >"$WORK/test-json-prefix.json"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- test-messages "$WORK/test-json-prefix.json" "$WORK/metadata.json" success plain any
+grep -F 'test result: FAILED' "$WORK/test-json.out" >/dev/null
+(
+    cd "$PROJECT"
+    "$LORRY" --quiet test integration --test integration --message-format=json \
+        --target-dir "$WORK/test-json" -- --exact
+) >"$WORK/test-filter.out" 2>"$WORK/test-filter.err"
+grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out' \
+    "$WORK/test-filter.out" >/dev/null
 for selector in first second; do
     : >"$LOG"
     "$LORRY" check -p "$PACKAGE_ID" --bin "$selector" --quiet \
@@ -210,13 +436,27 @@ reject_check_selector() {
 for wrong in "${PACKAGE_ID%0.1.0}9.9.9" "${PACKAGE_ID/check-fixture/other-name}" \
     "${PACKAGE_ID/\/project/\/another-project}"; do
     reject_check_selector -p "$wrong" --manifest-path "$PROJECT/Cargo.toml"
-    grep -F 'does not match selected package' "$WORK/rejected.err" >/dev/null
+    grep -F 'did not match any workspace package' "$WORK/rejected.err" >/dev/null
 done
-reject_check_selector -p "$PACKAGE_ID"
-grep -F 'requires --manifest-path' "$WORK/rejected.err" >/dev/null
+(cd "$PROJECT" && "$LORRY" check -p "$PACKAGE_ID" --quiet --target-dir "$TARGET")
 for selector in bin test; do
-    reject_check_selector --"$selector" missing --all-targets --manifest-path "$PROJECT/Cargo.toml"
+    reject_check_selector --"$selector" missing --manifest-path "$PROJECT/Cargo.toml"
 done
+
+for driver in lorry cargo; do
+    executable="$LORRY"
+    [ "$driver" != cargo ] || executable="$LORRY_TEST_CARGO"
+    (
+        cd "$PROJECT"
+        CARGO_HOME="$HOST_CARGO_HOME" "$executable" check --all-targets \
+            --bin missing --test missing --example missing --bench missing \
+            --offline --message-format=json --target-dir "$WORK/all-$driver" \
+            >"$WORK/all-$driver.json"
+    )
+done
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
+    -- differential-check-messages "$WORK/all-lorry.json" "$WORK/all-cargo.json"
 
 "$LORRY" check --all-targets --keep-going --quiet --message-format=json \
     --manifest-path "$PROJECT/Cargo.toml" --target-dir "$JSON_TARGET" \
@@ -224,6 +464,8 @@ done
 CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
     --manifest-path "$SCHEMA_MANIFEST" --locked --offline --quiet \
     -- messages "$WORK/messages.json" "$WORK/metadata.json" success plain any
+# Exercise ANSI diagnostics while still requiring fresh dependency artifacts.
+printf '\n' >>"$PROJECT/src/lib.rs"
 "$LORRY" check --all-targets --keep-going --quiet \
     --message-format=json-diagnostic-rendered-ansi \
     --manifest-path "$PROJECT/Cargo.toml" --target-dir "$JSON_TARGET" \
@@ -311,10 +553,69 @@ grep -F '<src/bin/first.rs>' "$LOG" >/dev/null
 grep -F '<src/bin/second.rs>' "$LOG" >/dev/null
 [ -f "$PROFILE/successful-profile" ]
 
+printf '\ncompile_error!("remapped dependency failure");\n' >>"$DEPENDENCY/src/lib.rs"
+if "$LORRY" --quiet check --lib --message-format=json \
+    --manifest-path "$PROJECT/Cargo.toml" --target-dir "$JSON_TARGET" \
+    >"$WORK/dependency-failure.json" 2>"$WORK/dependency-failure.err"; then
+    echo "check-contract: dependency compile error succeeded" >&2
+    exit 1
+else
+    [ "$?" -eq 101 ]
+fi
+grep -F '"reason":"compiler-message"' "$WORK/dependency-failure.json" | \
+    grep -F '"file_name":"'"$DEPENDENCY/src/lib.rs"'"' >/dev/null
+grep -F -- '--> '"$DEPENDENCY/src/lib.rs" "$WORK/dependency-failure.json" >/dev/null
+if "$LORRY" --quiet check --lib --manifest-path "$PROJECT/Cargo.toml" \
+    --target-dir "$TARGET" >"$WORK/dependency-human.out" 2>"$WORK/dependency-human.err"; then
+    echo "check-contract: human dependency compile error succeeded" >&2
+    exit 1
+else
+    [ "$?" -eq 101 ]
+fi
+grep -F -- '--> '"$DEPENDENCY/src/lib.rs" "$WORK/dependency-human.err" >/dev/null
+
 (
     cd "$PROJECT"
     "$LORRY" --quiet clean --target-dir "$TARGET"
 )
 [ ! -e "$TARGET/lorry" ]
+
+# Without --target, a library that both a build script and the program use is
+# one unit, as in Cargo, and compiles once.
+TWIN="$WORK/twin"
+mkdir -p "$TWIN/app/src" "$TWIN/shared/src"
+printf '[package]\nname = "shared"\nversion = "0.1.0"\nedition = "2024"\n' \
+    >"$TWIN/shared/Cargo.toml"
+printf 'pub fn value() -> u8 { 7 }\n' >"$TWIN/shared/src/lib.rs"
+printf '%s\n' \
+    '[package]' \
+    'name = "app"' \
+    'version = "0.1.0"' \
+    'edition = "2024"' \
+    '' \
+    '[dependencies]' \
+    'shared = { path = "../shared" }' \
+    '' \
+    '[build-dependencies]' \
+    'shared = { path = "../shared" }' \
+    >"$TWIN/app/Cargo.toml"
+printf 'fn main() { assert_eq!(shared::value(), 7); }\n' >"$TWIN/app/build.rs"
+printf 'fn main() { println!("{}", shared::value()); }\n' >"$TWIN/app/src/main.rs"
+printf '%s\n' 'version = 4' '[[package]]' 'name = "app"' 'version = "0.1.0"' \
+    'dependencies = [' ' "shared",' ']' '[[package]]' 'name = "shared"' 'version = "0.1.0"' \
+    >"$TWIN/app/Cargo.lock"
+printf '%s\n' "[workspaces.\"$TWIN/app\".policy.rules.app]" 'action = "allow"' 'name = "app"' \
+    'source = "path"' 'allow-build-script = true' >>"$HOME_DIR/.config/lorry/lorry.toml"
+(
+    cd "$TWIN/app"
+    "$LORRY" vendor --accept-all >/dev/null 2>&1
+    : >"$LOG"
+    "$LORRY" --quiet build
+    [ "$(target/lorry/debug/app)" = 7 ]
+)
+if [ "$(grep -Fc -- '<--crate-name> <shared>' "$LOG")" -ne 1 ]; then
+    echo "check-contract: a library shared by a build script and the program compiled twice" >&2
+    exit 1
+fi
 
 echo "PASS: check selects root targets, links none, and honors keep-going"

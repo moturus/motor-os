@@ -7,6 +7,7 @@ mod admission;
 mod checked_copy_in;
 // mod channel_test;
 mod alloc_bench;
+mod boot_identity;
 mod closerace;
 mod command_output;
 mod ctrl_c;
@@ -43,6 +44,7 @@ mod stdio_file_relay;
 mod stdio_peek;
 mod stdio_terminal;
 mod subcommand;
+mod swap_cancel;
 mod sys_io_self_test;
 mod sys_tty;
 mod sysbox_cat;
@@ -56,6 +58,7 @@ mod sysbox_tail;
 mod sysbox_wc;
 mod sysbox_which;
 mod tcp;
+mod temp_dir;
 mod threads;
 mod tls;
 mod udp;
@@ -76,6 +79,12 @@ use moto_sys::SysHandle;
 
 pub(crate) fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(name)
+}
+
+/// A path for fixtures that a None-role child must reach. `TMPDIR` may be
+/// closed to None, so these go in None's own temporary directory.
+pub(crate) fn none_temp_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new("/none/tmp").join(name)
 }
 
 pub(crate) fn set_directory_access(
@@ -1204,6 +1213,13 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if swap_cancel::run_command(&args) {
+        return;
+    }
+    if args.len() == 2 && args[1] == "boot-random-id" {
+        println!("{:016x}", moto_sys::KernelStaticPage::get().boot_random_id);
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("process-permissions-child") {
         process_permissions::run_child(&args);
         return;
@@ -1218,6 +1234,9 @@ fn main() {
     }
     if rush_caps::is_print_caps_child(&args) {
         rush_caps::run_print_caps_child(&args);
+    }
+    if temp_dir::is_print_tmpdir_child(&args) {
+        temp_dir::run_print_tmpdir_child();
     }
     if args.len() == 2 && args[1] == "rush-caps-precedence" {
         rush_caps::test_detach_grant_precedence();
@@ -1420,6 +1439,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "test-fs-client-progress" {
         fs::concurrent_client_progress_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs-metadata-page-pressure" {
+        fs::metadata_page_pressure_test();
         return;
     }
     // The FS pressure regression; the suite runs the same body at spam size
@@ -1636,6 +1659,7 @@ fn main() {
     }
 
     println!("Systest starting...");
+    let boot_random_id = boot_identity::run_tests();
 
     assert!(!args.is_empty());
     assert_eq!(
@@ -1707,6 +1731,7 @@ fn main() {
     tls::test_tls_set_no_dtor();
     tls::test_tls_current_on_drop();
     test_caps();
+    temp_dir::test_child_temp_dir();
     test_liveness();
 
     spawn_wait_kill::test_pid_invariants();
@@ -1724,6 +1749,7 @@ fn main() {
     spawn_wait_kill::test_shared_listener_restart();
     ipc_service::run_tests();
     spawn_wait_kill::test_thread_creation_exit_rollback();
+    swap_cancel::run_tests();
     ctrl_c::run_tests();
     command_output::run_test();
     sysbox_diff::run_test();
@@ -1773,6 +1799,11 @@ fn main() {
     stdio_file_relay::run_tests();
     // fs::run_tests();
 
+    assert_eq!(
+        moto_sys::KernelStaticPage::get().boot_random_id,
+        boot_random_id,
+        "boot identity changed during the system tests"
+    );
     println!("systest: ALL PASS");
 
     std::thread::sleep(Duration::new(0, 10_000_000));

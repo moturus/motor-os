@@ -6,16 +6,16 @@ use crate::atomic::AtomicFile;
 use crate::config::{NativeToolRole, Policy, PolicyAction, PolicyRule};
 use crate::diagnostic::{Error, Result};
 use crate::hash::{Sha256, hex};
-use crate::manifest::{DependencySource, GitSelector, LockedPackage, Lockfile, Manifest, Resolver};
+use crate::manifest::{LockedPackage, Lockfile, Manifest, Resolver};
 use crate::policy::{Admission, PackageEvidence};
 use crate::resolver::{CompileKind, PackageKey, Resolution, ResolvedSource};
-use crate::sparse::DependencyKind;
 use crate::toml::Document;
 use toml_edit::{Item, Table};
 
 pub const RELATIVE_PATH: &str = ".lorry/dependencies-v2.toml";
 
-/// Derives compact grants for registry packages that execute build-time code.
+/// Derives compact grants for registry and Git packages that execute
+/// build-time code.
 pub fn capabilities_from(
     selected: &Resolution,
     evidence: &BTreeMap<PackageKey, PackageEvidence>,
@@ -37,11 +37,12 @@ pub fn capabilities_from(
         if !package_evidence.build_script && !package_evidence.proc_macro {
             continue;
         }
-        let native_tools = admission
+        let mut native_tools = admission
             .packages
             .get(&package.key)
             .map(|admission| admission.native_tools.iter().copied().collect::<Vec<_>>())
             .unwrap_or_default();
+        native_tools.sort_by_key(|role| native_tool_name(*role));
         capabilities.push(Capability {
             package: package.key.name.clone(),
             version: package.key.version.to_string(),
@@ -49,6 +50,11 @@ pub fn capabilities_from(
             build_script: package_evidence.build_script,
             proc_macro: package_evidence.proc_macro,
             native_tools,
+            caller_env: admission
+                .packages
+                .get(&package.key)
+                .map(|admission| admission.caller_env.iter().cloned().collect())
+                .unwrap_or_default(),
         });
     }
     capabilities.sort_by(|a, b| {
@@ -118,9 +124,10 @@ fn required_strings(path: &Path, table: &Table, key: &str) -> Result<Vec<String>
         .collect()
 }
 
-fn native_tool_name(role: NativeToolRole) -> &'static str {
+pub(crate) fn native_tool_name(role: NativeToolRole) -> &'static str {
     match role {
         NativeToolRole::CCompiler => "c-compiler",
+        NativeToolRole::CxxCompiler => "cxx-compiler",
         NativeToolRole::Archiver => "archiver",
     }
 }
@@ -131,11 +138,12 @@ fn source_digest(source: &str) -> String {
     hex(&digest.finish())
 }
 
-pub use review::{Capability, CompactState, Context, Review};
+pub use review::{
+    Capability, CompactState, Context, ContextPackage, Review, ReviewScope, UnitKind,
+};
 #[cfg(test)]
-pub use review::{ContextRegistry, LockedRegistry, RegistrySource, UnitKind};
+pub use review::{LockedRegistry, SourceEvidence};
 
-#[allow(dead_code)]
 mod review {
     use super::*;
 
@@ -148,60 +156,108 @@ mod review {
     const MAX_CONTEXT_PACKAGES: usize = 65_536;
     const MAX_EDGES: usize = 131_072;
     const MAX_FEATURES: usize = 262_144;
-    const MAX_CFG_NODES: usize = 4_096;
-    const MAX_CFG_DEPTH: usize = 64;
     const COMPACT_FORMAT_VERSION: u64 = 3;
-    const REVIEW_FORMAT_VERSION: u64 = 3;
+    const REVIEW_FORMAT_VERSION: u64 = 4;
+    // Single-package review records; vendor replaces them with a workspace review.
+    const RETIRED_REVIEW_FORMAT_VERSION: i64 = 3;
+
+    /// Empty package selection means the whole workspace. Names and feature
+    /// requests are normalized so the same scope reconstructs the same review.
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub struct ReviewScope {
+        pub packages: Vec<String>,
+        pub features: Vec<String>,
+        pub all_features: bool,
+        pub no_default_features: bool,
+    }
+
+    impl ReviewScope {
+        pub(crate) fn description(&self) -> String {
+            let packages = if self.packages.is_empty() {
+                "all workspace members".to_owned()
+            } else {
+                self.packages.join(", ")
+            };
+            let defaults = if self.no_default_features {
+                "no default features"
+            } else {
+                "default features"
+            };
+            let features = if self.all_features {
+                "all features".to_owned()
+            } else if self.features.is_empty() {
+                "no additional feature requests".to_owned()
+            } else {
+                format!("features: {}", self.features.join(", "))
+            };
+            format!("Review scope: {packages}; {defaults}; {features}")
+        }
+
+        fn validate(&self) -> Result<()> {
+            limit(self.packages.len(), 64, "reviewed members")?;
+            limit(
+                self.features.len(),
+                MAX_FEATURES,
+                "reviewed feature requests",
+            )?;
+            ordered(&self.packages, "reviewed members")?;
+            ordered(&self.features, "reviewed feature requests")?;
+            for name in &self.packages {
+                nonempty(name, "reviewed member name")?;
+                if !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                {
+                    return Err(invalid("contains an invalid reviewed member name"));
+                }
+            }
+            for feature in &self.features {
+                nonempty(feature, "reviewed feature request")?;
+            }
+            Ok(())
+        }
+
+        fn parse(path: &Path, table: &Table) -> Result<Self> {
+            require_keys(
+                path,
+                table,
+                &[
+                    "packages",
+                    "features",
+                    "all-features",
+                    "no-default-features",
+                ],
+                &[],
+            )?;
+            let boolean = |key| {
+                required_item(path, table, key)?
+                    .as_bool()
+                    .ok_or_else(|| invalid(format!("review scope `{key}` must be a boolean")))
+            };
+            let scope = Self {
+                packages: required_strings(path, table, "packages")?,
+                features: required_strings(path, table, "features")?,
+                all_features: boolean("all-features")?,
+                no_default_features: boolean("no-default-features")?,
+            };
+            scope.validate()?;
+            Ok(scope)
+        }
+
+        fn write(&self, writer: &mut Writer) -> Result<()> {
+            self.validate()?;
+            writer.raw("\n[review-scope]\n")?;
+            writer.strings("packages", &self.packages)?;
+            writer.strings("features", &self.features)?;
+            writer.boolean("all-features", self.all_features)?;
+            writer.boolean("no-default-features", self.no_default_features)
+        }
+    }
 
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub struct Context {
         pub host: String,
         pub target: String,
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub enum ReviewKind {
-        Build,
-        Development,
-        Normal,
-    }
-
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct DirectRegistry {
-        pub alias: String,
-        pub package: String,
-        pub requirement: String,
-        pub kind: ReviewKind,
-        pub target: Option<String>,
-        pub optional: bool,
-        pub default_features: bool,
-        pub features: Vec<String>,
-    }
-
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct DirectGit {
-        pub alias: String,
-        pub package: String,
-        pub requirement: String,
-        pub url: String,
-        pub selector: String,
-        pub kind: ReviewKind,
-        pub target: Option<String>,
-        pub optional: bool,
-        pub default_features: bool,
-        pub features: Vec<String>,
-    }
-
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct RootFeature {
-        pub name: String,
-        pub values: Vec<String>,
-    }
-
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct CratesIoPatch {
-        pub alias: String,
-        pub package: String,
     }
 
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -218,21 +274,81 @@ mod review {
         pub version: String,
     }
 
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct LockedRegistry {
-        pub name: String,
-        pub version: String,
-        pub checksum: String,
-        pub dependencies: Vec<DependencyReference>,
+    /// Admitted packages come from crates.io or Git. A registry package is
+    /// identified by its archive checksum, a Git package by its Cargo source.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum SourceKind {
+        Registry,
+        Git,
     }
 
+    impl SourceKind {
+        /// The part of review table names that names this kind.
+        fn table(self) -> &'static str {
+            match self {
+                Self::Registry => "registry",
+                Self::Git => "git",
+            }
+        }
+
+        /// The key that holds a package's `id` in review tables.
+        fn id_key(self) -> &'static str {
+            match self {
+                Self::Registry => "checksum",
+                Self::Git => "source",
+            }
+        }
+
+        /// The prefix of messages about this kind.
+        fn label(self) -> &'static str {
+            match self {
+                Self::Registry => "",
+                Self::Git => "Git ",
+            }
+        }
+
+        fn validate(self, name: &str, version: &str, id: &str) -> Result<()> {
+            match self {
+                Self::Registry => identity(name, version, id),
+                Self::Git => {
+                    nonempty(name, "Git package name")?;
+                    canonical_version(version)?;
+                    crate::git::parse_locked_source(id)
+                        .map(drop)
+                        .map_err(|error| invalid(format!("has an invalid Git source: {error}")))
+                }
+            }
+        }
+
+        /// Capability grants name a Git package by a digest of its source.
+        fn grants(self, id: &str, capability: &Capability) -> bool {
+            match self {
+                Self::Registry => id == capability.checksum,
+                Self::Git => source_digest(id) == capability.checksum,
+            }
+        }
+    }
+
+    /// A crates.io or Git package in Cargo.lock. `id` is the checksum or the
+    /// Git source.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct LockedGit {
+    pub struct Locked<D> {
         pub name: String,
         pub version: String,
-        pub source: String,
-        pub dependencies: Vec<String>,
+        pub id: String,
+        pub dependencies: Vec<D>,
     }
+
+    impl<D> Locked<D> {
+        fn key(&self) -> (&str, &str, &str) {
+            (&self.name, &self.version, &self.id)
+        }
+    }
+
+    /// Registry dependencies name their source. Git dependencies keep the
+    /// Cargo.lock spelling.
+    pub type LockedRegistry = Locked<DependencyReference>;
+    pub type LockedGit = Locked<String>;
 
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub enum UnitKind {
@@ -240,50 +356,51 @@ mod review {
         Target,
     }
 
+    /// A crates.io or Git package that one reviewed context selects.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct ContextRegistry {
+    pub struct ContextPackage {
         pub host: String,
         pub target: String,
         pub name: String,
         pub version: String,
-        pub checksum: String,
+        pub id: String,
         pub compile_kinds: Vec<UnitKind>,
         pub host_features: Vec<String>,
         pub target_features: Vec<String>,
     }
 
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct ContextGit {
-        pub host: String,
-        pub target: String,
-        pub name: String,
-        pub version: String,
-        pub source: String,
-        pub compile_kinds: Vec<UnitKind>,
-        pub host_features: Vec<String>,
-        pub target_features: Vec<String>,
+    impl ContextPackage {
+        fn key(&self) -> (&str, &str, &str, &str, &str) {
+            (
+                &self.host,
+                &self.target,
+                &self.name,
+                &self.version,
+                &self.id,
+            )
+        }
+
+        fn package(&self) -> (&str, &str, &str) {
+            (&self.name, &self.version, &self.id)
+        }
     }
 
+    /// Verified evidence for a selected crates.io or Git package.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct RegistrySource {
+    pub struct SourceEvidence {
         pub name: String,
         pub version: String,
-        pub checksum: String,
+        pub id: String,
         pub license: String,
         pub source_tree_sha256: String,
         pub build_script: bool,
         pub proc_macro: bool,
     }
 
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct GitSource {
-        pub name: String,
-        pub version: String,
-        pub source: String,
-        pub license: String,
-        pub source_tree_sha256: String,
-        pub build_script: bool,
-        pub proc_macro: bool,
+    impl SourceEvidence {
+        fn key(&self) -> (&str, &str, &str) {
+            (&self.name, &self.version, &self.id)
+        }
     }
 
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -294,27 +411,26 @@ mod review {
         pub build_script: bool,
         pub proc_macro: bool,
         pub native_tools: Vec<NativeToolRole>,
+        pub caller_env: Vec<String>,
     }
 
     #[derive(Clone, Debug, Default, Eq, PartialEq)]
     pub struct Review {
+        pub scope: ReviewScope,
         pub resolver_version: u64,
         pub contexts: Vec<Context>,
-        pub direct_registry: Vec<DirectRegistry>,
-        pub direct_git: Vec<DirectGit>,
-        pub root_features: Vec<RootFeature>,
-        pub crates_io_patches: Vec<CratesIoPatch>,
         pub locked_registry: Vec<LockedRegistry>,
         pub locked_git: Vec<LockedGit>,
-        pub context_registry: Vec<ContextRegistry>,
-        pub context_git: Vec<ContextGit>,
-        pub registry_sources: Vec<RegistrySource>,
-        pub git_sources: Vec<GitSource>,
+        pub context_registry: Vec<ContextPackage>,
+        pub context_git: Vec<ContextPackage>,
+        pub registry_sources: Vec<SourceEvidence>,
+        pub git_sources: Vec<SourceEvidence>,
         pub capabilities: Vec<Capability>,
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct CompactState {
+        pub scope: ReviewScope,
         pub review_sha256: String,
         pub contexts: Vec<Context>,
         pub capabilities: Vec<Capability>,
@@ -326,30 +442,53 @@ mod review {
         }
 
         /// Strictly parses the project's compact state. A missing file is not
-        /// an error: the project then has no registry admission and every
-        /// registry package fails closed at policy.
+        /// an error: Lorry-registry builds then reject crates.io and Git
+        /// packages, and Cargo-registry builds rely on policy alone.
         pub fn load(root: &Path) -> Result<Option<Self>> {
+            Self::document(root)?
+                .map(|(path, document)| Self::from_document(&path, &document))
+                .transpose()
+        }
+
+        /// Loads the state a new workspace review replaces. A retired record
+        /// counts as absent, so vendor can follow its own rejection advice.
+        pub fn load_replaceable(root: &Path) -> Result<Option<Self>> {
+            match Self::document(root)? {
+                Some((_, document)) if retired(&document) => Ok(None),
+                Some((path, document)) => Self::from_document(&path, &document).map(Some),
+                None => Ok(None),
+            }
+        }
+
+        /// Reports whether the state is a regular file without parsing it.
+        pub fn exists(root: &Path) -> Result<bool> {
             let path = Self::path(root);
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    return Err(Error::failure(format!(
+                    Err(Error::failure(format!(
                         "Lorry dependency state `{}` is not a regular file",
                         path.display()
-                    )));
+                    )))
                 }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => {
-                    return Err(Error::failure(format!(
-                        "failed to inspect Lorry dependency state `{}`: {error}",
-                        path.display()
-                    )));
-                }
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(Error::failure(format!(
+                    "failed to inspect Lorry dependency state `{}`: {error}",
+                    path.display()
+                ))),
             }
-            let document = Document::load(&path, "Lorry compact dependency state")?;
-            Self::from_document(&path, &document).map(Some)
         }
 
+        fn document(root: &Path) -> Result<Option<(PathBuf, Document)>> {
+            if !Self::exists(root)? {
+                return Ok(None);
+            }
+            let path = Self::path(root);
+            let document = Document::load(&path, "Lorry compact dependency state")?;
+            Ok(Some((path, document)))
+        }
+
+        #[cfg(test)]
         pub fn parse(path: &Path, source: String) -> Result<Self> {
             let document = Document::parse(path, "Lorry compact dependency state", source)?;
             Self::from_document(path, &document)
@@ -415,6 +554,15 @@ mod review {
         }
 
         fn from_document(path: &Path, document: &Document) -> Result<Self> {
+            if retired(document) {
+                return Err(Error::failure(format!(
+                    "Lorry dependency state `{}` uses the retired single-package review format 3",
+                    path.display()
+                ))
+                .with_help(
+                    "run `lorry vendor --locked` again at the workspace root to review the workspace",
+                ));
+            }
             require_keys(
                 path,
                 document.root(),
@@ -422,6 +570,7 @@ mod review {
                     "format-version",
                     "review-format-version",
                     "review-sha256",
+                    "review-scope",
                     "context",
                 ],
                 &["capability"],
@@ -438,7 +587,14 @@ mod review {
                 "review-format-version",
                 REVIEW_FORMAT_VERSION,
             )?;
+            let scope = ReviewScope::parse(
+                path,
+                required_item(path, document.root(), "review-scope")?
+                    .as_table()
+                    .ok_or_else(|| invalid("review scope must be a table"))?,
+            )?;
             let state = Self {
+                scope,
                 review_sha256: required_string(path, document.root(), "review-sha256")?,
                 contexts: parse_compact_contexts(path, document)?,
                 capabilities: parse_compact_capabilities(path, document)?,
@@ -454,6 +610,7 @@ mod review {
             writer.integer("format-version", COMPACT_FORMAT_VERSION)?;
             writer.integer("review-format-version", REVIEW_FORMAT_VERSION)?;
             writer.string("review-sha256", &self.review_sha256)?;
+            self.scope.write(&mut writer)?;
             write_contexts(&mut writer, &self.contexts)?;
             write_capabilities(&mut writer, &self.capabilities)?;
             writer.finish()
@@ -461,97 +618,40 @@ mod review {
 
         pub fn validate(&self) -> Result<()> {
             digest(&self.review_sha256, "review digest")?;
+            self.scope.validate()?;
             validate_contexts(&self.contexts)?;
             validate_capabilities(&self.capabilities)
         }
     }
 
     impl Review {
-        /// Builds the graph portion of the canonical document from the parsed
-        /// manifest and lockfile. Contexts come from compact state or the
-        /// vendor candidate set; context resolution, source evidence, and
-        /// capabilities are later builder stages.
+        /// Builds the graph portion of the canonical document from the root
+        /// resolver and the lockfile. Scope and contexts come from compact
+        /// state or the vendor candidate; context resolution, source evidence,
+        /// and capabilities are later builder stages.
         pub fn from_graph(
             manifest: &Manifest,
             lock: &Lockfile,
             contexts: Vec<Context>,
         ) -> Result<Self> {
-            let mut review = Self {
+            let review = Self {
                 resolver_version: match manifest.resolver {
                     Resolver::V1 => 1,
                     Resolver::V2 => 2,
                     Resolver::V3 => 3,
                 },
                 contexts,
+                locked_registry: locked_graph(lock)?,
+                locked_git: locked_git_graph(lock)?,
                 ..Self::default()
             };
-            for dependency in &manifest.dependencies {
-                let common = || match dependency.kind {
-                    DependencyKind::Build => ReviewKind::Build,
-                    DependencyKind::Dev => ReviewKind::Development,
-                    DependencyKind::Normal => ReviewKind::Normal,
-                };
-                if dependency.source == DependencySource::CratesIo {
-                    review.direct_registry.push(DirectRegistry {
-                        alias: dependency.alias.clone(),
-                        package: dependency.package.clone(),
-                        requirement: dependency.requirement.to_string(),
-                        kind: common(),
-                        target: dependency
-                            .target
-                            .as_deref()
-                            .map(canonical_target_selector)
-                            .transpose()?,
-                        optional: dependency.optional,
-                        default_features: dependency.default_features,
-                        features: sorted_set(&dependency.features, "direct dependency features")?,
-                    });
-                } else if let DependencySource::Git(git) = &dependency.source {
-                    review.direct_git.push(DirectGit {
-                        alias: dependency.alias.clone(),
-                        package: dependency.package.clone(),
-                        requirement: dependency.requirement.to_string(),
-                        url: git.url.clone(),
-                        selector: git_selector(&git.selector),
-                        kind: common(),
-                        target: dependency
-                            .target
-                            .as_deref()
-                            .map(canonical_target_selector)
-                            .transpose()?,
-                        optional: dependency.optional,
-                        default_features: dependency.default_features,
-                        features: sorted_set(
-                            &dependency.features,
-                            "direct Git dependency features",
-                        )?,
-                    });
-                }
-            }
-            review.direct_registry.sort();
-            review.direct_git.sort();
-            for (name, values) in &manifest.features {
-                review.root_features.push(RootFeature {
-                    name: name.clone(),
-                    values: sorted_set(values, "root feature values")?,
-                });
-            }
-            for patch in &manifest.patches {
-                review.crates_io_patches.push(CratesIoPatch {
-                    alias: patch.alias.clone(),
-                    package: patch.package.clone(),
-                });
-            }
-            review.crates_io_patches.sort();
-            review.locked_registry = locked_graph(lock)?;
-            review.locked_git = locked_git_graph(lock)?;
             review.validate()?;
             Ok(review)
         }
 
-        /// Records one reviewed context's independently resolved registry
-        /// selection and its verified source evidence. Path packages keep
-        /// their independent rules and never enter registry admission.
+        /// Records one reviewed context's independently resolved registry and
+        /// Git selection and its verified source evidence. Path packages keep
+        /// their independent rules and never enter admission.
         pub fn add_context_resolution(
             &mut self,
             context: &Context,
@@ -565,65 +665,13 @@ mod review {
                 )));
             }
             for package in &resolution.packages {
-                if let ResolvedSource::Git { cargo_source, .. } = &package.source {
-                    let version = package.key.version.to_string();
-                    let package_evidence = evidence.get(&package.key).ok_or_else(|| {
-                        invalid(format!(
-                            "is missing verified evidence for `{} {version}`",
-                            package.key.name
-                        ))
-                    })?;
-                    let mut compile_kinds: Vec<UnitKind> = package
-                        .compile_kinds
-                        .iter()
-                        .map(|kind| match kind {
-                            CompileKind::Host => UnitKind::Host,
-                            CompileKind::Target => UnitKind::Target,
-                        })
-                        .collect();
-                    compile_kinds.sort();
-                    self.context_git.push(ContextGit {
-                        host: context.host.clone(),
-                        target: context.target.clone(),
-                        name: package.key.name.clone(),
-                        version: version.clone(),
-                        source: cargo_source.clone(),
-                        compile_kinds,
-                        host_features: package.host_features.iter().cloned().collect(),
-                        target_features: package.target_features.iter().cloned().collect(),
-                    });
-                    let source = GitSource {
-                        name: package.key.name.clone(),
-                        version,
-                        source: cargo_source.clone(),
-                        license: package_evidence.license.clone(),
-                        source_tree_sha256: hex(&package_evidence.source_tree_sha256),
-                        build_script: package_evidence.build_script,
-                        proc_macro: package_evidence.proc_macro,
-                    };
-                    let position = self.git_sources.binary_search_by(|value| {
-                        git_key(&value.name, &value.version, &value.source).cmp(&git_key(
-                            &source.name,
-                            &source.version,
-                            &source.source,
-                        ))
-                    });
-                    match position {
-                        Ok(index) if self.git_sources[index] == source => {}
-                        Ok(_) => {
-                            return Err(invalid(format!(
-                                "has conflicting Git evidence for `{} {}`",
-                                source.name, source.version
-                            )));
-                        }
-                        Err(index) => self.git_sources.insert(index, source),
+                let (kind, id) = match &package.source {
+                    ResolvedSource::CratesIo { checksum } => (SourceKind::Registry, hex(checksum)),
+                    ResolvedSource::Git { cargo_source, .. } => {
+                        (SourceKind::Git, cargo_source.clone())
                     }
-                    continue;
-                }
-                let ResolvedSource::CratesIo { checksum } = &package.source else {
-                    continue;
+                    ResolvedSource::Path { .. } => continue,
                 };
-                let checksum = hex(checksum);
                 let version = package.key.version.to_string();
                 let package_evidence = evidence.get(&package.key).ok_or_else(|| {
                     invalid(format!(
@@ -640,47 +688,46 @@ mod review {
                     })
                     .collect();
                 compile_kinds.sort();
-                self.context_registry.push(ContextRegistry {
+                let (selected, sources) = match kind {
+                    SourceKind::Registry => {
+                        (&mut self.context_registry, &mut self.registry_sources)
+                    }
+                    SourceKind::Git => (&mut self.context_git, &mut self.git_sources),
+                };
+                selected.push(ContextPackage {
                     host: context.host.clone(),
                     target: context.target.clone(),
                     name: package.key.name.clone(),
                     version: version.clone(),
-                    checksum: checksum.clone(),
+                    id: id.clone(),
                     compile_kinds,
                     host_features: package.host_features.iter().cloned().collect(),
                     target_features: package.target_features.iter().cloned().collect(),
                 });
-                let source = RegistrySource {
+                let source = SourceEvidence {
                     name: package.key.name.clone(),
                     version,
-                    checksum,
+                    id,
                     license: package_evidence.license.clone(),
                     source_tree_sha256: hex(&package_evidence.source_tree_sha256),
                     build_script: package_evidence.build_script,
                     proc_macro: package_evidence.proc_macro,
                 };
-                let position = self.registry_sources.binary_search_by(|value| {
-                    key(&value.name, &value.version, &value.checksum).cmp(&key(
-                        &source.name,
-                        &source.version,
-                        &source.checksum,
-                    ))
-                });
-                match position {
-                    Ok(index) if self.registry_sources[index] == source => {}
+                match sources.binary_search_by(|value| value.key().cmp(&source.key())) {
+                    Ok(index) if sources[index] == source => {}
                     Ok(_) => {
                         return Err(invalid(format!(
-                            "has conflicting evidence for `{} {}`",
-                            source.name, source.version
+                            "has conflicting {}evidence for `{} {}`",
+                            kind.label(),
+                            source.name,
+                            source.version
                         )));
                     }
-                    Err(index) => self.registry_sources.insert(index, source),
+                    Err(index) => sources.insert(index, source),
                 }
             }
-            self.context_registry
-                .sort_by(|a, b| context_package_key(a).cmp(&context_package_key(b)));
-            self.context_git
-                .sort_by(|a, b| context_git_key(a).cmp(&context_git_key(b)));
+            self.context_registry.sort_by(|a, b| a.key().cmp(&b.key()));
+            self.context_git.sort_by(|a, b| a.key().cmp(&b.key()));
             Ok(())
         }
 
@@ -700,85 +747,74 @@ mod review {
         /// evidence and explicit capabilities. Explicit configured denies
         /// retain precedence through ordinary policy evaluation.
         pub fn apply_to_policy(&self, policy: &mut Policy, root: &Path) -> Result<()> {
-            for (index, source) in self.registry_sources.iter().enumerate() {
-                let id = format!("lorry-state-{index:05}");
-                if policy.rules.contains_key(&id) {
-                    return Err(Error::failure(format!(
-                        "configured policy rule `{id}` conflicts with generated dependency state"
-                    )));
+            for (kind, _, sources) in self.kinds() {
+                for (index, source) in sources.iter().enumerate() {
+                    let id = match kind {
+                        SourceKind::Registry => format!("lorry-state-{index:05}"),
+                        SourceKind::Git => format!("lorry-state-git-{index:05}"),
+                    };
+                    if policy.rules.contains_key(&id) {
+                        return Err(Error::failure(format!(
+                            "configured policy rule `{id}` conflicts with generated dependency state"
+                        )));
+                    }
+                    let capability = self.capabilities.iter().find(|capability| {
+                        capability.package == source.name
+                            && capability.version == source.version
+                            && kind.grants(&source.id, capability)
+                    });
+                    let version = semver::VersionReq::parse(&format!("={}", source.version))
+                        .map_err(|error| {
+                            Error::failure(format!(
+                                "dependency state has invalid exact {}version for `{} {}`: {error}",
+                                kind.label(),
+                                source.name,
+                                source.version
+                            ))
+                        })?;
+                    policy.rules.insert(
+                        id,
+                        PolicyRule {
+                            action: PolicyAction::Allow,
+                            name: Some(source.name.clone()),
+                            version: Some(version),
+                            source: Some(
+                                match kind {
+                                    SourceKind::Registry => "crates.io",
+                                    SourceKind::Git => "git",
+                                }
+                                .to_owned(),
+                            ),
+                            checksum: (kind == SourceKind::Registry).then(|| source.id.clone()),
+                            source_tree_sha256: Some(source.source_tree_sha256.clone()),
+                            license: Some(source.license.clone()),
+                            allow_build_script: capability.is_some_and(|value| value.build_script),
+                            allow_proc_macro: capability.is_some_and(|value| value.proc_macro),
+                            native_tools: capability
+                                .map(|capability| capability.native_tools.iter().copied().collect())
+                                .unwrap_or_default(),
+                            configured_native_tools: false,
+                            caller_env: capability
+                                .map(|value| value.caller_env.iter().cloned().collect())
+                                .unwrap_or_default(),
+                            provenance: CompactState::path(root),
+                        },
+                    );
                 }
-                let capability = self.capabilities.iter().find(|capability| {
-                    capability_key(capability)
-                        == key(&source.name, &source.version, &source.checksum)
-                });
-                policy.rules.insert(
-                    id,
-                    PolicyRule {
-                        action: PolicyAction::Allow,
-                        name: Some(source.name.clone()),
-                        version: Some(
-                            semver::VersionReq::parse(&format!("={}", source.version)).map_err(
-                                |error| {
-                                    Error::failure(format!(
-                                        "dependency state has invalid exact version for `{} {}`: {error}",
-                                        source.name, source.version
-                                    ))
-                                },
-                            )?,
-                        ),
-                        source: Some("crates.io".to_owned()),
-                        checksum: Some(source.checksum.clone()),
-                        source_tree_sha256: Some(source.source_tree_sha256.clone()),
-                        license: Some(source.license.clone()),
-                        allow_build_script: capability.is_some_and(|value| value.build_script),
-                        allow_proc_macro: capability.is_some_and(|value| value.proc_macro),
-                        native_tools: capability
-                            .map(|capability| capability.native_tools.iter().copied().collect())
-                            .unwrap_or_default(),
-                        provenance: CompactState::path(root),
-                    },
-                );
-            }
-            for (index, source) in self.git_sources.iter().enumerate() {
-                let id = format!("lorry-state-git-{index:05}");
-                if policy.rules.contains_key(&id) {
-                    return Err(Error::failure(format!(
-                        "configured policy rule `{id}` conflicts with generated dependency state"
-                    )));
-                }
-                let identity = source_digest(&source.source);
-                let capability = self.capabilities.iter().find(|capability| {
-                    capability_key(capability) == key(&source.name, &source.version, &identity)
-                });
-                policy.rules.insert(
-                    id,
-                    PolicyRule {
-                        action: PolicyAction::Allow,
-                        name: Some(source.name.clone()),
-                        version: Some(
-                            semver::VersionReq::parse(&format!("={}", source.version)).map_err(
-                                |error| {
-                                    Error::failure(format!(
-                                        "dependency state has invalid exact Git version for `{} {}`: {error}",
-                                        source.name, source.version
-                                    ))
-                                },
-                            )?,
-                        ),
-                        source: Some("git".to_owned()),
-                        checksum: None,
-                        source_tree_sha256: Some(source.source_tree_sha256.clone()),
-                        license: Some(source.license.clone()),
-                        allow_build_script: capability.is_some_and(|value| value.build_script),
-                        allow_proc_macro: capability.is_some_and(|value| value.proc_macro),
-                        native_tools: capability
-                            .map(|capability| capability.native_tools.iter().copied().collect())
-                            .unwrap_or_default(),
-                        provenance: CompactState::path(root),
-                    },
-                );
             }
             Ok(())
+        }
+
+        /// Each source kind with its context selections and source evidence.
+        fn kinds(&self) -> [(SourceKind, &[ContextPackage], &[SourceEvidence]); 2] {
+            [
+                (
+                    SourceKind::Registry,
+                    &self.context_registry,
+                    &self.registry_sources,
+                ),
+                (SourceKind::Git, &self.context_git, &self.git_sources),
+            ]
         }
 
         pub fn render(&self) -> Result<Vec<u8>> {
@@ -788,215 +824,100 @@ mod review {
             writer.integer("source-tree-format-version", 1)?;
             writer.integer("cargo-lock-format-version", 4)?;
             writer.integer("resolver-version", self.resolver_version)?;
+            self.scope.write(&mut writer)?;
             write_contexts(&mut writer, &self.contexts)?;
-            for value in &self.direct_registry {
-                writer.table("direct-registry")?;
-                writer.string("alias", &value.alias)?;
-                writer.string("package", &value.package)?;
-                writer.string("requirement", &value.requirement)?;
-                writer.string("kind", review_kind_name(value.kind))?;
-                if let Some(target) = &value.target {
-                    writer.string("target", target)?;
-                }
-                writer.boolean("optional", value.optional)?;
-                writer.boolean("default-features", value.default_features)?;
-                writer.strings("features", &value.features)?;
-            }
-            for value in &self.direct_git {
-                writer.table("direct-git")?;
-                writer.string("alias", &value.alias)?;
-                writer.string("package", &value.package)?;
-                writer.string("requirement", &value.requirement)?;
-                writer.string("url", &value.url)?;
-                writer.string("selector", &value.selector)?;
-                writer.string("kind", review_kind_name(value.kind))?;
-                if let Some(target) = &value.target {
-                    writer.string("target", target)?;
-                }
-                writer.boolean("optional", value.optional)?;
-                writer.boolean("default-features", value.default_features)?;
-                writer.strings("features", &value.features)?;
-            }
-            for value in &self.root_features {
-                writer.table("root-feature")?;
-                writer.string("name", &value.name)?;
-                writer.strings("values", &value.values)?;
-            }
-            for value in &self.crates_io_patches {
-                writer.table("crates-io-patch")?;
-                writer.string("alias", &value.alias)?;
-                writer.string("package", &value.package)?;
-            }
             for value in &self.locked_registry {
                 writer.table("locked-registry")?;
-                write_identity(&mut writer, &value.name, &value.version, &value.checksum)?;
+                write_identity(&mut writer, SourceKind::Registry, value.key())?;
                 writer.dependencies(&value.dependencies)?;
             }
             for value in &self.locked_git {
                 writer.table("locked-git")?;
-                writer.string("name", &value.name)?;
-                writer.string("version", &value.version)?;
-                writer.string("source", &value.source)?;
+                write_identity(&mut writer, SourceKind::Git, value.key())?;
                 writer.strings("dependencies", &value.dependencies)?;
             }
-            for value in &self.context_registry {
-                writer.table("context-registry")?;
-                writer.string("host", &value.host)?;
-                writer.string("target", &value.target)?;
-                write_identity(&mut writer, &value.name, &value.version, &value.checksum)?;
-                writer.names("compile-kinds", &value.compile_kinds, unit_kind_name)?;
-                writer.strings("host-features", &value.host_features)?;
-                writer.strings("target-features", &value.target_features)?;
+            for (kind, selected, _) in self.kinds() {
+                for value in selected {
+                    writer.table(&format!("context-{}", kind.table()))?;
+                    writer.string("host", &value.host)?;
+                    writer.string("target", &value.target)?;
+                    write_identity(&mut writer, kind, value.package())?;
+                    writer.names("compile-kinds", &value.compile_kinds, unit_kind_name)?;
+                    writer.strings("host-features", &value.host_features)?;
+                    writer.strings("target-features", &value.target_features)?;
+                }
             }
-            for value in &self.context_git {
-                writer.table("context-git")?;
-                writer.string("host", &value.host)?;
-                writer.string("target", &value.target)?;
-                writer.string("name", &value.name)?;
-                writer.string("version", &value.version)?;
-                writer.string("source", &value.source)?;
-                writer.names("compile-kinds", &value.compile_kinds, unit_kind_name)?;
-                writer.strings("host-features", &value.host_features)?;
-                writer.strings("target-features", &value.target_features)?;
-            }
-            for value in &self.registry_sources {
-                writer.table("registry-source")?;
-                write_identity(&mut writer, &value.name, &value.version, &value.checksum)?;
-                writer.string("license", &value.license)?;
-                writer.string("source-tree-sha256", &value.source_tree_sha256)?;
-                writer.boolean("build-script", value.build_script)?;
-                writer.boolean("proc-macro", value.proc_macro)?;
-            }
-            for value in &self.git_sources {
-                writer.table("git-source")?;
-                writer.string("name", &value.name)?;
-                writer.string("version", &value.version)?;
-                writer.string("source", &value.source)?;
-                writer.string("license", &value.license)?;
-                writer.string("source-tree-sha256", &value.source_tree_sha256)?;
-                writer.boolean("build-script", value.build_script)?;
-                writer.boolean("proc-macro", value.proc_macro)?;
+            for (kind, _, sources) in self.kinds() {
+                for value in sources {
+                    writer.table(&format!("{}-source", kind.table()))?;
+                    write_identity(&mut writer, kind, value.key())?;
+                    writer.string("license", &value.license)?;
+                    writer.string("source-tree-sha256", &value.source_tree_sha256)?;
+                    writer.boolean("build-script", value.build_script)?;
+                    writer.boolean("proc-macro", value.proc_macro)?;
+                }
             }
             write_capabilities(&mut writer, &self.capabilities)?;
             writer.finish()
         }
 
         pub fn validate(&self) -> Result<()> {
+            self.scope.validate()?;
             validate_contexts(&self.contexts)?;
             validate_capabilities(&self.capabilities)?;
-            limit(
-                self.direct_registry.len(),
-                MAX_TABLES,
-                "direct dependencies",
-            )?;
-            limit(self.direct_git.len(), MAX_TABLES, "direct Git dependencies")?;
-            limit(self.root_features.len(), MAX_TABLES, "root features")?;
-            limit(self.crates_io_patches.len(), MAX_TABLES, "patches")?;
-            limit(self.locked_registry.len(), MAX_TABLES, "locked packages")?;
-            limit(self.locked_git.len(), MAX_TABLES, "locked Git packages")?;
-            limit(
-                self.context_registry.len(),
-                MAX_CONTEXT_PACKAGES,
-                "context package memberships",
-            )?;
-            limit(
-                self.context_git.len(),
-                MAX_CONTEXT_PACKAGES,
-                "context Git package memberships",
-            )?;
-            limit(self.registry_sources.len(), MAX_TABLES, "source evidence")?;
-            limit(self.git_sources.len(), MAX_TABLES, "Git source evidence")?;
             if !(1..=3).contains(&self.resolver_version) {
                 return Err(invalid("has an unsupported resolver version"));
             }
-            ordered(&self.direct_registry, "direct dependencies")?;
-            ordered(&self.direct_git, "direct Git dependencies")?;
-            ordered_by(
-                &self.root_features,
-                |a, b| a.name.cmp(&b.name),
-                "root features",
-            )?;
-            ordered(&self.crates_io_patches, "patches")?;
+            limit(self.locked_registry.len(), MAX_TABLES, "locked packages")?;
+            limit(self.locked_git.len(), MAX_TABLES, "locked Git packages")?;
             ordered_by(
                 &self.locked_registry,
-                |a, b| {
-                    key(&a.name, &a.version, &a.checksum).cmp(&key(
-                        &b.name,
-                        &b.version,
-                        &b.checksum,
-                    ))
-                },
+                |a, b| a.key().cmp(&b.key()),
                 "locked packages",
             )?;
             ordered_by(
                 &self.locked_git,
-                |a, b| {
-                    git_key(&a.name, &a.version, &a.source)
-                        .cmp(&git_key(&b.name, &b.version, &b.source))
-                },
+                |a, b| a.key().cmp(&b.key()),
                 "locked Git packages",
             )?;
-            ordered_by(
-                &self.context_registry,
-                |a, b| context_package_key(a).cmp(&context_package_key(b)),
-                "context packages",
-            )?;
-            ordered_by(
-                &self.context_git,
-                |a, b| context_git_key(a).cmp(&context_git_key(b)),
-                "context Git packages",
-            )?;
-            ordered_by(
-                &self.registry_sources,
-                |a, b| {
-                    key(&a.name, &a.version, &a.checksum).cmp(&key(
-                        &b.name,
-                        &b.version,
-                        &b.checksum,
-                    ))
-                },
-                "source evidence",
-            )?;
-            ordered_by(
-                &self.git_sources,
-                |a, b| {
-                    git_key(&a.name, &a.version, &a.source)
-                        .cmp(&git_key(&b.name, &b.version, &b.source))
-                },
-                "Git source evidence",
-            )?;
-            for value in &self.direct_registry {
-                ordered(&value.features, "direct dependency features")?;
-            }
-            for value in &self.direct_git {
-                ordered(&value.features, "direct Git dependency features")?;
-            }
-            for value in &self.root_features {
-                ordered(&value.values, "root feature values")?;
-            }
             for value in &self.locked_registry {
                 ordered(&value.dependencies, "locked dependency references")?;
             }
             for value in &self.locked_git {
                 ordered(&value.dependencies, "locked Git dependency references")?;
             }
-            for value in &self.context_registry {
-                if value.compile_kinds.is_empty() {
-                    return Err(invalid("contains a context package with no compile kind"));
+            for (kind, selected, sources) in self.kinds() {
+                let label = kind.label();
+                limit(
+                    selected.len(),
+                    MAX_CONTEXT_PACKAGES,
+                    &format!("context {label}package memberships"),
+                )?;
+                limit(
+                    sources.len(),
+                    MAX_TABLES,
+                    &format!("{label}source evidence"),
+                )?;
+                ordered_by(
+                    selected,
+                    |a, b| a.key().cmp(&b.key()),
+                    &format!("context {label}packages"),
+                )?;
+                ordered_by(
+                    sources,
+                    |a, b| a.key().cmp(&b.key()),
+                    &format!("{label}source evidence"),
+                )?;
+                for value in selected {
+                    if value.compile_kinds.is_empty() {
+                        return Err(invalid(format!(
+                            "contains a context {label}package with no compile kind"
+                        )));
+                    }
+                    ordered(&value.compile_kinds, &format!("{label}compile kinds"))?;
+                    ordered(&value.host_features, &format!("{label}host features"))?;
+                    ordered(&value.target_features, &format!("{label}target features"))?;
                 }
-                ordered(&value.compile_kinds, "compile kinds")?;
-                ordered(&value.host_features, "host features")?;
-                ordered(&value.target_features, "target features")?;
-            }
-            for value in &self.context_git {
-                if value.compile_kinds.is_empty() {
-                    return Err(invalid(
-                        "contains a context Git package with no compile kind",
-                    ));
-                }
-                ordered(&value.compile_kinds, "Git compile kinds")?;
-                ordered(&value.host_features, "Git host features")?;
-                ordered(&value.target_features, "Git target features")?;
             }
             self.validate_values()?;
             self.validate_relationships()
@@ -1005,54 +926,8 @@ mod review {
         fn validate_values(&self) -> Result<()> {
             let mut edges = 0;
             let mut features = 0;
-            for value in &self.direct_registry {
-                nonempty(&value.alias, "direct dependency alias")?;
-                nonempty(&value.package, "direct dependency package")?;
-                canonical_requirement(&value.requirement)?;
-                if let Some(target) = &value.target
-                    && canonical_target_selector(target)? != *target
-                {
-                    return Err(invalid(format!(
-                        "has a noncanonical target selector `{target}`"
-                    )));
-                }
-                add(
-                    &mut features,
-                    value.features.len(),
-                    MAX_FEATURES,
-                    "features",
-                )?;
-            }
-            for value in &self.direct_git {
-                nonempty(&value.alias, "direct Git dependency alias")?;
-                nonempty(&value.package, "direct Git dependency package")?;
-                canonical_requirement(&value.requirement)?;
-                nonempty(&value.url, "direct Git dependency URL")?;
-                nonempty(&value.selector, "direct Git dependency selector")?;
-                if let Some(target) = &value.target
-                    && canonical_target_selector(target)? != *target
-                {
-                    return Err(invalid(format!(
-                        "has a noncanonical target selector `{target}`"
-                    )));
-                }
-                add(
-                    &mut features,
-                    value.features.len(),
-                    MAX_FEATURES,
-                    "features",
-                )?;
-            }
-            for value in &self.root_features {
-                nonempty(&value.name, "root feature name")?;
-                add(&mut features, value.values.len(), MAX_FEATURES, "features")?;
-            }
-            for value in &self.crates_io_patches {
-                nonempty(&value.alias, "patch alias")?;
-                nonempty(&value.package, "patch package")?;
-            }
             for value in &self.locked_registry {
-                identity(&value.name, &value.version, &value.checksum)?;
+                SourceKind::Registry.validate(&value.name, &value.version, &value.id)?;
                 add(
                     &mut edges,
                     value.dependencies.len(),
@@ -1065,10 +940,7 @@ mod review {
                 }
             }
             for value in &self.locked_git {
-                nonempty(&value.name, "Git package name")?;
-                canonical_version(&value.version)?;
-                crate::git::parse_locked_source(&value.source)
-                    .map_err(|error| invalid(format!("has an invalid Git source: {error}")))?;
+                SourceKind::Git.validate(&value.name, &value.version, &value.id)?;
                 add(
                     &mut edges,
                     value.dependencies.len(),
@@ -1076,43 +948,20 @@ mod review {
                     "dependency edges",
                 )?;
             }
-            for value in &self.context_registry {
-                identity(&value.name, &value.version, &value.checksum)?;
-                add(
-                    &mut features,
-                    value.host_features.len(),
-                    MAX_FEATURES,
-                    "features",
-                )?;
-                add(
-                    &mut features,
-                    value.target_features.len(),
-                    MAX_FEATURES,
-                    "features",
-                )?;
-            }
-            for value in &self.context_git {
-                nonempty(&value.name, "Git context package name")?;
-                canonical_version(&value.version)?;
-                crate::git::parse_locked_source(&value.source)
-                    .map_err(|error| invalid(format!("has an invalid Git source: {error}")))?;
-                add(
-                    &mut features,
-                    value.host_features.len() + value.target_features.len(),
-                    MAX_FEATURES,
-                    "features",
-                )?;
-            }
-            for value in &self.registry_sources {
-                identity(&value.name, &value.version, &value.checksum)?;
-                digest(&value.source_tree_sha256, "source-tree digest")?;
-            }
-            for value in &self.git_sources {
-                nonempty(&value.name, "Git source package name")?;
-                canonical_version(&value.version)?;
-                crate::git::parse_locked_source(&value.source)
-                    .map_err(|error| invalid(format!("has an invalid Git source: {error}")))?;
-                digest(&value.source_tree_sha256, "Git source-tree digest")?;
+            for (kind, selected, sources) in self.kinds() {
+                for value in selected {
+                    kind.validate(&value.name, &value.version, &value.id)?;
+                    for values in [&value.host_features, &value.target_features] {
+                        add(&mut features, values.len(), MAX_FEATURES, "features")?;
+                    }
+                }
+                for value in sources {
+                    kind.validate(&value.name, &value.version, &value.id)?;
+                    digest(
+                        &value.source_tree_sha256,
+                        &format!("{}source-tree digest", kind.label()),
+                    )?;
+                }
             }
             Ok(())
         }
@@ -1122,16 +971,6 @@ mod review {
                 .contexts
                 .iter()
                 .map(|value| (&*value.host, &*value.target))
-                .collect();
-            let locked: BTreeSet<_> = self
-                .locked_registry
-                .iter()
-                .map(|value| key(&value.name, &value.version, &value.checksum))
-                .collect();
-            let locked_git: BTreeSet<_> = self
-                .locked_git
-                .iter()
-                .map(|value| git_key(&value.name, &value.version, &value.source))
                 .collect();
             let mut locked_versions = BTreeSet::new();
             for value in &self.locked_registry {
@@ -1148,76 +987,51 @@ mod review {
                     }
                 }
             }
-
-            let mut selected = BTreeSet::new();
-            for value in &self.context_registry {
-                if !contexts.contains(&(&*value.host, &*value.target)) {
-                    return Err(invalid("contains a package for an unreviewed context"));
+            let locked: [BTreeSet<_>; 2] = [
+                self.locked_registry.iter().map(Locked::key).collect(),
+                self.locked_git.iter().map(Locked::key).collect(),
+            ];
+            for ((kind, selected, sources), locked) in self.kinds().into_iter().zip(&locked) {
+                let label = kind.label();
+                let mut packages = BTreeSet::new();
+                for value in selected {
+                    if !contexts.contains(&(&*value.host, &*value.target)) {
+                        return Err(invalid(format!(
+                            "contains a {label}package for an unreviewed context"
+                        )));
+                    }
+                    if !locked.contains(&value.package()) {
+                        return Err(invalid(format!(
+                            "contains a context {label}package absent from Cargo.lock"
+                        )));
+                    }
+                    packages.insert(value.package());
                 }
-                let identity = key(&value.name, &value.version, &value.checksum);
-                if !locked.contains(&identity) {
-                    return Err(invalid("contains a context package absent from Cargo.lock"));
+                limit(
+                    packages.len(),
+                    MAX_TABLES,
+                    &format!("distinct selected {label}packages"),
+                )?;
+                if sources
+                    .iter()
+                    .map(SourceEvidence::key)
+                    .collect::<BTreeSet<_>>()
+                    != packages
+                {
+                    return Err(invalid(format!(
+                        "{label}source evidence does not equal selected {label}packages"
+                    )));
                 }
-                selected.insert(identity);
-            }
-            limit(
-                selected.len(),
-                MAX_TABLES,
-                "distinct selected registry packages",
-            )?;
-            let sources: BTreeSet<_> = self
-                .registry_sources
-                .iter()
-                .map(|value| key(&value.name, &value.version, &value.checksum))
-                .collect();
-            if sources != selected {
-                return Err(invalid("source evidence does not equal selected packages"));
-            }
-            let mut selected_git = BTreeSet::new();
-            for value in &self.context_git {
-                if !contexts.contains(&(&*value.host, &*value.target)) {
-                    return Err(invalid("contains a Git package for an unreviewed context"));
-                }
-                let identity = git_key(&value.name, &value.version, &value.source);
-                if !locked_git.contains(&identity) {
-                    return Err(invalid(
-                        "contains a context Git package absent from Cargo.lock",
-                    ));
-                }
-                selected_git.insert(identity);
-            }
-            limit(
-                selected_git.len(),
-                MAX_TABLES,
-                "distinct selected Git packages",
-            )?;
-            let git_sources: BTreeSet<_> = self
-                .git_sources
-                .iter()
-                .map(|value| git_key(&value.name, &value.version, &value.source))
-                .collect();
-            if git_sources != selected_git {
-                return Err(invalid(
-                    "Git source evidence does not equal selected Git packages",
-                ));
             }
             for capability in &self.capabilities {
-                let identity = capability_key(capability);
-                let registry = self
-                    .registry_sources
-                    .iter()
-                    .find(|value| key(&value.name, &value.version, &value.checksum) == identity);
-                let git = self.git_sources.iter().find(|value| {
-                    value.name == capability.package
-                        && value.version == capability.version
-                        && source_digest(&value.source) == capability.checksum
-                });
-                let valid = registry.is_some_and(|value| {
-                    (!capability.build_script || value.build_script)
-                        && (!capability.proc_macro || value.proc_macro)
-                }) || git.is_some_and(|value| {
-                    (!capability.build_script || value.build_script)
-                        && (!capability.proc_macro || value.proc_macro)
+                let valid = self.kinds().into_iter().any(|(kind, _, sources)| {
+                    sources.iter().any(|value| {
+                        value.name == capability.package
+                            && value.version == capability.version
+                            && kind.grants(&value.id, capability)
+                            && (!capability.build_script || value.build_script)
+                            && (!capability.proc_macro || value.proc_macro)
+                    })
                 });
                 if !valid {
                     return Err(invalid(
@@ -1227,34 +1041,6 @@ mod review {
             }
             Ok(())
         }
-    }
-
-    fn key<'a>(a: &'a str, b: &'a str, c: &'a str) -> (&'a str, &'a str, &'a str) {
-        (a, b, c)
-    }
-
-    fn git_key<'a>(a: &'a str, b: &'a str, c: &'a str) -> (&'a str, &'a str, &'a str) {
-        (a, b, c)
-    }
-
-    fn context_package_key(value: &ContextRegistry) -> (&str, &str, &str, &str, &str) {
-        (
-            &value.host,
-            &value.target,
-            &value.name,
-            &value.version,
-            &value.checksum,
-        )
-    }
-
-    fn context_git_key(value: &ContextGit) -> (&str, &str, &str, &str, &str) {
-        (
-            &value.host,
-            &value.target,
-            &value.name,
-            &value.version,
-            &value.source,
-        )
     }
 
     fn capability_key(value: &Capability) -> (&str, &str, &str) {
@@ -1298,22 +1084,29 @@ mod review {
                     "contains native-tool grants without a build-script grant",
                 ));
             }
+            ordered(&value.caller_env, "caller environment names")?;
+            for name in &value.caller_env {
+                crate::build_script::validate_caller_environment_name(name)?;
+            }
+            if !value.build_script && !value.caller_env.is_empty() {
+                return Err(invalid(
+                    "contains caller environment grants without a build-script grant",
+                ));
+            }
         }
         Ok(())
-    }
-
-    fn review_kind_name(value: ReviewKind) -> &'static str {
-        match value {
-            ReviewKind::Build => "build",
-            ReviewKind::Development => "development",
-            ReviewKind::Normal => "normal",
-        }
     }
 
     fn unit_kind_name(value: UnitKind) -> &'static str {
         match value {
             UnitKind::Host => "host",
             UnitKind::Target => "target",
+        }
+    }
+
+    impl std::fmt::Display for UnitKind {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(unit_kind_name(*self))
         }
     }
 
@@ -1325,15 +1118,22 @@ mod review {
         }
     }
 
+    /// The canonical `source name version` spelling of a locked dependency.
+    impl std::fmt::Display for DependencyReference {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let source = reference_source_name(self.source);
+            write!(formatter, "{source} {} {}", self.name, self.version)
+        }
+    }
+
     fn write_identity(
         writer: &mut Writer,
-        name: &str,
-        version: &str,
-        checksum: &str,
+        kind: SourceKind,
+        (name, version, id): (&str, &str, &str),
     ) -> Result<()> {
         writer.string("name", name)?;
         writer.string("version", version)?;
-        writer.string("checksum", checksum)
+        writer.string(kind.id_key(), id)
     }
 
     fn write_contexts(writer: &mut Writer, values: &[Context]) -> Result<()> {
@@ -1354,8 +1154,19 @@ mod review {
             writer.boolean("build-script", value.build_script)?;
             writer.boolean("proc-macro", value.proc_macro)?;
             writer.names("native-tools", &value.native_tools, native_tool_name)?;
+            if !value.caller_env.is_empty() {
+                writer.strings("caller-env", &value.caller_env)?;
+            }
         }
         Ok(())
+    }
+
+    fn retired(document: &Document) -> bool {
+        document
+            .root()
+            .get("review-format-version")
+            .and_then(Item::as_integer)
+            == Some(RETIRED_REVIEW_FORMAT_VERSION)
     }
 
     fn compact_version(path: &Path, table: &Table, key: &str, expected: u64) -> Result<()> {
@@ -1414,13 +1225,14 @@ mod review {
                         "proc-macro",
                         "native-tools",
                     ],
-                    &[],
+                    &["caller-env"],
                 )?;
                 let native_tools = required_strings(path, table, "native-tools")?
                     .into_iter()
                     .map(|value| match value.as_str() {
                         "archiver" => Ok(NativeToolRole::Archiver),
                         "c-compiler" => Ok(NativeToolRole::CCompiler),
+                        "cxx-compiler" => Ok(NativeToolRole::CxxCompiler),
                         _ => Err(Error::failure(format!(
                             "compact dependency state `{}` has unsupported native-tool role `{value}`",
                             path.display()
@@ -1450,6 +1262,9 @@ mod review {
                     build_script,
                     proc_macro,
                     native_tools,
+                    caller_env: if table.contains_key("caller-env") {
+                        required_strings(path, table, "caller-env")?
+                    } else { Vec::new() },
                 })
             })
             .collect()
@@ -1489,162 +1304,6 @@ mod review {
         Ok(())
     }
 
-    fn canonical_requirement(value: &str) -> Result<()> {
-        let parsed = semver::VersionReq::parse(value)
-            .map_err(|error| invalid(format!("has invalid requirement `{value}`: {error}")))?;
-        if parsed.to_string() != value {
-            return Err(invalid(format!("has noncanonical requirement `{value}`")));
-        }
-        Ok(())
-    }
-
-    fn canonical_target_selector(value: &str) -> Result<String> {
-        let Some(prefixed) = value.strip_prefix("cfg(") else {
-            let triple = !value.is_empty()
-                && !value.ends_with(".json")
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
-            if !triple {
-                return Err(invalid(format!(
-                    "has an unsupported plain target selector `{value}`"
-                )));
-            }
-            return Ok(value.to_owned());
-        };
-        let Some(expression) = prefixed.strip_suffix(')') else {
-            return Err(invalid(format!(
-                "has an unterminated cfg target selector `{value}`"
-            )));
-        };
-        let mut parser = SelectorParser {
-            source: expression.as_bytes(),
-            position: 0,
-            nodes: 0,
-        };
-        let rendered = parser.expression(1)?;
-        parser.space();
-        if parser.position != parser.source.len() {
-            return Err(parser.error("unexpected trailing cfg syntax"));
-        }
-        Ok(format!("cfg({rendered})"))
-    }
-
-    // Mirrors the operational cfg evaluator's grammar but is frozen with the
-    // review format: reviewed canonical bytes must not change when the
-    // evaluator does.
-    struct SelectorParser<'a> {
-        source: &'a [u8],
-        position: usize,
-        nodes: usize,
-    }
-
-    impl SelectorParser<'_> {
-        fn expression(&mut self, depth: usize) -> Result<String> {
-            limit(depth, MAX_CFG_DEPTH, "cfg-expression nesting levels")?;
-            self.nodes += 1;
-            limit(self.nodes, MAX_CFG_NODES, "cfg-expression nodes")?;
-            self.space();
-            let name = self.identifier()?;
-            self.space();
-            if self.take(b'=') {
-                self.space();
-                let value = self.string()?;
-                return Ok(format!("{name}=\"{value}\""));
-            }
-            if !self.take(b'(') {
-                return Ok(name);
-            }
-            let mut children = Vec::new();
-            loop {
-                self.space();
-                if self.take(b')') {
-                    break;
-                }
-                children.push(self.expression(depth + 1)?);
-                self.space();
-                if self.take(b')') {
-                    break;
-                }
-                if !self.take(b',') {
-                    return Err(self.error("expected `,` or `)`"));
-                }
-            }
-            match name.as_str() {
-                "all" | "any" => {
-                    children.sort();
-                    children.dedup();
-                    Ok(format!("{name}({})", children.join(",")))
-                }
-                "not" if children.len() == 1 => Ok(format!("not({})", children[0])),
-                "not" => Err(self.error("`not` requires exactly one argument")),
-                _ => Err(self.error(format!("unknown cfg predicate `{name}`"))),
-            }
-        }
-
-        fn identifier(&mut self) -> Result<String> {
-            let start = self.position;
-            while self
-                .source
-                .get(self.position)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            {
-                self.position += 1;
-            }
-            if start == self.position {
-                return Err(self.error("expected cfg identifier"));
-            }
-            Ok(String::from_utf8(self.source[start..self.position].to_vec()).unwrap())
-        }
-
-        fn string(&mut self) -> Result<String> {
-            if !self.take(b'"') {
-                return Err(self.error("expected quoted cfg value"));
-            }
-            let start = self.position;
-            while self
-                .source
-                .get(self.position)
-                .is_some_and(|byte| *byte != b'"')
-            {
-                if self.source[self.position] == b'\\' {
-                    return Err(self.error("cfg string escapes are not supported"));
-                }
-                self.position += 1;
-            }
-            if !self.take(b'"') {
-                return Err(self.error("unterminated cfg value"));
-            }
-            Ok(String::from_utf8(self.source[start..self.position - 1].to_vec()).unwrap())
-        }
-
-        fn space(&mut self) {
-            while self
-                .source
-                .get(self.position)
-                .is_some_and(u8::is_ascii_whitespace)
-            {
-                self.position += 1;
-            }
-        }
-
-        fn take(&mut self, byte: u8) -> bool {
-            if self.source.get(self.position) == Some(&byte) {
-                self.position += 1;
-                true
-            } else {
-                false
-            }
-        }
-
-        fn error(&self, message: impl std::fmt::Display) -> Error {
-            invalid(format!(
-                "has an invalid cfg target selector at byte {}: {message}",
-                self.position
-            ))
-        }
-    }
-
     const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
     fn locked_graph(lock: &Lockfile) -> Result<Vec<LockedRegistry>> {
@@ -1681,19 +1340,17 @@ mod review {
             let mut dependencies = package
                 .dependencies
                 .iter()
-                .map(|spelling| resolve_reference(&nodes, spelling))
+                .map(|spelling| resolve_reference(&nodes, spelling, lock.format))
                 .collect::<Result<Vec<_>>>()?;
             dependencies.sort();
             result.push(LockedRegistry {
                 name: package.name.clone(),
                 version: package.version.original.clone(),
-                checksum,
+                id: checksum,
                 dependencies,
             });
         }
-        result.sort_by(|a, b| {
-            key(&a.name, &a.version, &a.checksum).cmp(&key(&b.name, &b.version, &b.checksum))
-        });
+        result.sort_by(|a, b| a.key().cmp(&b.key()));
         Ok(result)
     }
 
@@ -1709,26 +1366,15 @@ mod review {
             result.push(LockedGit {
                 name: package.name.clone(),
                 version: package.version.original.clone(),
-                source: source.to_owned(),
+                id: source.to_owned(),
                 dependencies: sorted_set(
                     &package.dependencies,
                     "locked Git dependency references",
                 )?,
             });
         }
-        result.sort_by(|a, b| {
-            git_key(&a.name, &a.version, &a.source).cmp(&git_key(&b.name, &b.version, &b.source))
-        });
+        result.sort_by(|a, b| a.key().cmp(&b.key()));
         Ok(result)
-    }
-
-    fn git_selector(selector: &GitSelector) -> String {
-        match selector {
-            GitSelector::Head => "head".to_owned(),
-            GitSelector::Branch(value) => format!("branch:{value}"),
-            GitSelector::Tag(value) => format!("tag:{value}"),
-            GitSelector::Revision(value) => format!("rev:{value}"),
-        }
     }
 
     // A lock dependency spelling is `NAME`, `NAME VERSION`, or
@@ -1736,6 +1382,7 @@ mod review {
     fn resolve_reference(
         nodes: &BTreeMap<&str, Vec<(&LockedPackage, ReferenceSource)>>,
         spelling: &str,
+        format: crate::lockfile::Format,
     ) -> Result<DependencyReference> {
         let mut fields = spelling.split(' ');
         let name = fields.next().unwrap_or_default();
@@ -1765,7 +1412,11 @@ mod review {
             .iter()
             .filter(|(package, _)| version.is_none_or(|value| package.version.original == value))
             .filter(|(package, _)| {
-                source.is_none_or(|value| package.source.as_deref() == Some(value))
+                source.is_none_or(|value| {
+                    package.source.as_deref().is_some_and(|locked| {
+                        crate::offline::lock_source_matches(value, locked, format)
+                    })
+                })
             })
             .collect();
         match candidates.as_slice() {
@@ -1933,12 +1584,7 @@ mod review {
             for value in values {
                 self.item()?;
                 self.raw("    ")?;
-                self.quoted(&format!(
-                    "{} {} {}",
-                    reference_source_name(value.source),
-                    value.name,
-                    value.version
-                ))?;
+                self.quoted(&value.to_string())?;
                 self.raw(",\n")?;
             }
             self.raw("]\n")
@@ -2019,10 +1665,48 @@ mod review {
 
         fn compact_state() -> CompactState {
             CompactState {
+                scope: ReviewScope::default(),
                 review_sha256: "44".repeat(32),
                 contexts: empty_review().contexts,
                 capabilities: Vec::new(),
             }
+        }
+
+        #[test]
+        fn workspace_scope_round_trips_and_is_part_of_the_commitment() {
+            let scope = ReviewScope {
+                packages: vec!["app".to_owned(), "helper".to_owned()],
+                features: vec!["app/extra".to_owned()],
+                all_features: false,
+                no_default_features: true,
+            };
+            let mut compact = compact_state();
+            compact.scope = scope.clone();
+            let bytes = compact.render().unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("review-format-version = 4"));
+            assert_eq!(
+                CompactState::parse(Path::new("state.toml"), text.clone()).unwrap(),
+                compact
+            );
+            let unscoped = text.split_once("\n[review-scope]").unwrap().0.to_owned()
+                + &text[text.find("\n[[context]]").unwrap()..];
+            assert!(CompactState::parse(Path::new("state.toml"), unscoped).is_err());
+            assert!(
+                CompactState::parse(
+                    Path::new("state.toml"),
+                    text.replace(
+                        "packages = [\"app\", \"helper\"]",
+                        "packages = [\"app\", \"app\"]"
+                    ),
+                )
+                .is_err()
+            );
+            let mut review = empty_review();
+            review.scope = scope;
+            let first = review.commitment().unwrap();
+            review.scope.no_default_features = false;
+            assert_ne!(review.commitment().unwrap(), first);
         }
 
         fn capability() -> Capability {
@@ -2033,6 +1717,7 @@ mod review {
                 build_script: true,
                 proc_macro: false,
                 native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
+                caller_env: Vec::new(),
             }
         }
 
@@ -2042,23 +1727,23 @@ mod review {
             review.locked_registry.push(LockedRegistry {
                 name: "demo".to_owned(),
                 version: "1.0.0".to_owned(),
-                checksum: checksum.clone(),
+                id: checksum.clone(),
                 dependencies: Vec::new(),
             });
-            review.context_registry.push(ContextRegistry {
+            review.context_registry.push(ContextPackage {
                 host: review.contexts[0].host.clone(),
                 target: review.contexts[0].target.clone(),
                 name: "demo".to_owned(),
                 version: "1.0.0".to_owned(),
-                checksum: checksum.clone(),
+                id: checksum.clone(),
                 compile_kinds: vec![UnitKind::Target],
                 host_features: Vec::new(),
                 target_features: vec!["enabled".to_owned()],
             });
-            review.registry_sources.push(RegistrySource {
+            review.registry_sources.push(SourceEvidence {
                 name: "demo".to_owned(),
                 version: "1.0.0".to_owned(),
-                checksum,
+                id: checksum,
                 license: "MIT".to_owned(),
                 source_tree_sha256: "22".repeat(32),
                 build_script: true,
@@ -2105,13 +1790,121 @@ mod review {
         }
 
         #[test]
+        fn cxx_tool_grants_round_trip_and_bind_the_review() {
+            let mut state = compact_state();
+            let mut grant = capability();
+            grant.native_tools.push(NativeToolRole::CxxCompiler);
+            state.capabilities.push(grant.clone());
+            let text = String::from_utf8(state.render().unwrap()).unwrap();
+            assert!(
+                text.contains("native-tools = [\"archiver\", \"c-compiler\", \"cxx-compiler\"]")
+            );
+            assert_eq!(
+                CompactState::parse(Path::new("state.toml"), text).unwrap(),
+                state
+            );
+            let mut review = registry_review();
+            review.capabilities.push(grant);
+            let before = review.commitment().unwrap();
+            review.capabilities[0].native_tools.pop();
+            assert_ne!(before, review.commitment().unwrap());
+        }
+
+        #[test]
+        fn caller_grants_round_trip_and_bind_the_review_commitment() {
+            let mut state = compact_state();
+            state.capabilities.push(capability());
+            let old = String::from_utf8(state.render().unwrap()).unwrap();
+            assert!(!old.contains("caller-env"));
+            assert!(
+                CompactState::parse(Path::new("state.toml"), old)
+                    .unwrap()
+                    .capabilities[0]
+                    .caller_env
+                    .is_empty()
+            );
+            state.capabilities[0].caller_env = vec!["EMPTY".into(), "PUBLIC".into()];
+            let bytes = state.render().unwrap();
+            assert_eq!(
+                CompactState::parse(Path::new("state.toml"), String::from_utf8(bytes).unwrap())
+                    .unwrap(),
+                state
+            );
+            let mut review = registry_review();
+            review.complete(vec![capability()]).unwrap();
+            let old = review.commitment().unwrap();
+            review.capabilities[0].caller_env = vec!["PUBLIC".into()];
+            assert_ne!(old, review.commitment().unwrap());
+            let mut policy = Policy::default();
+            review
+                .apply_to_policy(&mut policy, Path::new("/workspace"))
+                .unwrap();
+            assert_eq!(
+                policy.rules["lorry-state-00000"].caller_env,
+                ["PUBLIC".into()].into()
+            );
+            let source = "git+https://example.test/repo#0123456789012345678901234567890123456789";
+            review.git_sources.push(SourceEvidence {
+                name: "git-demo".into(),
+                version: "1.0.0".into(),
+                id: source.into(),
+                license: "MIT".into(),
+                source_tree_sha256: "22".repeat(32),
+                build_script: true,
+                proc_macro: false,
+            });
+            let mut grant = capability();
+            grant.package = "git-demo".into();
+            grant.checksum = source_digest(source);
+            grant.caller_env = vec!["GIT_INPUT".into()];
+            review.capabilities.push(grant);
+            let mut policy = Policy::default();
+            review
+                .apply_to_policy(&mut policy, Path::new("/workspace"))
+                .unwrap();
+            assert_eq!(
+                policy.rules["lorry-state-git-00000"].caller_env,
+                ["GIT_INPUT".into()].into()
+            );
+        }
+
+        #[test]
+        fn caller_grants_reject_noncanonical_or_controlled_names() {
+            let mut state = compact_state();
+            state.capabilities.push(capability());
+            for names in [
+                vec!["PUBLIC", "EMPTY"],
+                vec!["PUBLIC", "PUBLIC"],
+                vec!["PATH"],
+                vec!["9BAD"],
+                vec!["CC_TARGET"],
+                vec!["RUSTC"],
+            ] {
+                state.capabilities[0].caller_env =
+                    names.iter().map(|name| (*name).into()).collect();
+                assert!(state.validate().is_err(), "{names:?}");
+            }
+            state.capabilities[0].caller_env = vec!["PUBLIC".into()];
+            state.capabilities[0].native_tools.clear();
+            state.capabilities[0].build_script = false;
+            state.capabilities[0].proc_macro = true;
+            assert!(state.validate().is_err());
+        }
+
+        #[test]
         fn renders_canonical_compact_state() {
             let mut state = compact_state();
             state.capabilities.push(capability());
             let expected = br#"# Generated by Lorry. Do not edit.
 format-version = 3
-review-format-version = 3
+review-format-version = 4
 review-sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
+
+[review-scope]
+packages = []
+features = []
+all-features = false
+no-default-features = false
 
 [[context]]
 host = "x86_64-unknown-linux-gnu"
@@ -2151,7 +1944,7 @@ native-tools = ["archiver", "c-compiler"]
 
             let invalid = [
                 source.replace("format-version = 3", "format-version = 4"),
-                source.replace("review-format-version = 3\n", ""),
+                source.replace("review-format-version = 4\n", ""),
                 source.replace(&"44".repeat(32), "invalid"),
                 source.replace("\n[[context]]", "\nunknown = true\n\n[[context]]"),
                 source.replace(
@@ -2168,22 +1961,6 @@ native-tools = ["archiver", "c-compiler"]
             for source in invalid {
                 assert!(CompactState::parse(path, source).is_err());
             }
-        }
-
-        #[test]
-        fn rejects_noncanonical_nested_ordering() {
-            let mut review = empty_review();
-            review.direct_registry.push(DirectRegistry {
-                alias: "demo".to_owned(),
-                package: "demo".to_owned(),
-                requirement: "=1.0.0".to_owned(),
-                kind: ReviewKind::Normal,
-                target: None,
-                optional: false,
-                default_features: true,
-                features: vec!["z".to_owned(), "a".to_owned()],
-            });
-            assert!(review.validate().is_err());
         }
 
         #[test]
@@ -2217,6 +1994,7 @@ native-tools = ["archiver", "c-compiler"]
                 build_script: true,
                 proc_macro: false,
                 native_tools: Vec::new(),
+                caller_env: Vec::new(),
             });
             review.validate().unwrap();
             review.capabilities[0].build_script = false;
@@ -2230,18 +2008,6 @@ native-tools = ["archiver", "c-compiler"]
         fn rejects_noncanonical_identities_and_aggregate_overflow() {
             let mut review = registry_review();
             review.locked_registry[0].version = "1.0".to_owned();
-            assert!(review.validate().is_err());
-            review = registry_review();
-            review.direct_registry.push(DirectRegistry {
-                alias: "demo".to_owned(),
-                package: "demo".to_owned(),
-                requirement: "1.0.0".to_owned(),
-                kind: ReviewKind::Normal,
-                target: None,
-                optional: false,
-                default_features: true,
-                features: Vec::new(),
-            });
             assert!(review.validate().is_err());
 
             let mut total = MAX_FEATURES;
@@ -2312,7 +2078,7 @@ dependencies = ["cc", "libc"]
             }
 
             fn review(&self) -> Result<Review> {
-                let manifest = Manifest::load(&self.0)?;
+                let manifest = Manifest::load_for_build(&self.0)?;
                 let lock = manifest.lock.clone().unwrap();
                 Review::from_graph(&manifest, &lock, empty_review().contexts)
             }
@@ -2328,17 +2094,6 @@ dependencies = ["cc", "libc"]
         fn builds_the_graph_review_from_manifest_and_lockfile() {
             let review = Project::new(BASE_MANIFEST, BASE_LOCK).review().unwrap();
             assert_eq!(review.resolver_version, 1);
-            assert_eq!(review.direct_registry.len(), 2);
-            assert_eq!(review.direct_registry[0].alias, "cc");
-            assert_eq!(review.direct_registry[0].requirement, "^1.0");
-            assert_eq!(
-                review.direct_registry[0].target.as_deref(),
-                Some("cfg(unix)")
-            );
-            assert_eq!(review.direct_registry[1].alias, "libc");
-            assert_eq!(review.direct_registry[1].features, ["extra", "std"]);
-            assert_eq!(review.root_features.len(), 2);
-            assert_eq!(review.crates_io_patches[0].package, "upstream");
             assert_eq!(review.locked_registry.len(), 2);
             assert_eq!(review.locked_registry[0].name, "cc");
             assert_eq!(
@@ -2413,26 +2168,6 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             let helper_node = "[[package]]\nname = \"helper\"\nversion = \"0.1.0\"";
             let variants = [
                 (BASE_MANIFEST.to_owned(), BASE_LOCK.to_owned()),
-                (
-                    BASE_MANIFEST.replace("=0.2.186", "=0.2.185"),
-                    BASE_LOCK.to_owned(),
-                ),
-                (
-                    BASE_MANIFEST.replace("[\"std\", \"extra\"]", "[\"std\"]"),
-                    BASE_LOCK.to_owned(),
-                ),
-                (
-                    BASE_MANIFEST.replace("default = [\"extra\"]", "default = []"),
-                    BASE_LOCK.to_owned(),
-                ),
-                (
-                    BASE_MANIFEST.replace("\"upstream\"", "\"upstream2\""),
-                    BASE_LOCK.to_owned(),
-                ),
-                (
-                    BASE_MANIFEST.replace("cfg( unix )", "cfg( windows )"),
-                    BASE_LOCK.to_owned(),
-                ),
                 (
                     BASE_MANIFEST.to_owned(),
                     BASE_LOCK.replace(&"bb".repeat(32), &"cc".repeat(32)),
@@ -2516,13 +2251,54 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 dependencies: Vec::new(),
             };
             let git = Lockfile {
+                format: crate::lockfile::Format::V4,
                 packages: vec![package(Some("git+https://example.com/demo"), None)],
             };
             assert!(locked_graph(&git).is_err());
             let unchecksummed = Lockfile {
+                format: crate::lockfile::Format::V4,
                 packages: vec![package(Some(CRATES_IO_SOURCE), None)],
             };
             assert!(locked_graph(&unchecksummed).is_err());
+        }
+
+        #[test]
+        fn registry_graph_resolves_git_references_without_commits() {
+            let project = Project::new(
+                "[package]\nname = \"root\"\nversion = \"0.1.0\"\n",
+                &format!(
+                    "version = 4\n\n[[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\
+                     [[package]]\nname = \"git\"\nversion = \"1.0.0\"\n\
+                     source = \"git+https://example.com/demo?branch=master#{}\"\n\
+                     [[package]]\nname = \"user\"\nversion = \"1.0.0\"\n\
+                     source = \"{CRATES_IO_SOURCE}\"\nchecksum = \"{}\"\n\
+                     dependencies = [\"git 1.0.0 (git+https://example.com/demo?branch=master)\"]\n",
+                    "0".repeat(40),
+                    "1".repeat(64),
+                ),
+            );
+            let mut lock = Manifest::load_for_build(&project.0).unwrap().lock.unwrap();
+            for format in [crate::lockfile::Format::V3, crate::lockfile::Format::V4] {
+                lock.format = format;
+                assert_eq!(
+                    locked_graph(&lock).unwrap()[0].dependencies[0].source,
+                    ReferenceSource::Git
+                );
+            }
+            lock.packages
+                .iter_mut()
+                .find(|package| package.name == "user")
+                .unwrap()
+                .dependencies[0] = "git 1.0.0 (git+https://example.com/demo)".to_owned();
+            for format in [crate::lockfile::Format::V1, crate::lockfile::Format::V2] {
+                lock.format = format;
+                assert_eq!(
+                    locked_graph(&lock).unwrap()[0].dependencies[0].source,
+                    ReferenceSource::Git
+                );
+            }
+            lock.format = crate::lockfile::Format::V4;
+            assert!(locked_graph(&lock).is_err());
         }
 
         fn resolved(
@@ -2585,7 +2361,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }
 
         fn completed_review(project: &Project, libc_features: &[&str]) -> Review {
-            let manifest = Manifest::load(&project.0).unwrap();
+            let manifest = Manifest::load_for_build(&project.0).unwrap();
             let lock = manifest.lock.clone().unwrap();
             let (native, cross) = contexts();
             let mut review =
@@ -2652,6 +2428,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     build_script: true,
                     proc_macro: false,
                     native_tools: Vec::new(),
+                    caller_env: Vec::new(),
                 }])
                 .unwrap();
             review
@@ -2696,7 +2473,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         #[test]
         fn rejects_missing_conflicting_and_drifted_context_evidence() {
             let project = Project::new(BASE_MANIFEST, BASE_LOCK);
-            let manifest = Manifest::load(&project.0).unwrap();
+            let manifest = Manifest::load_for_build(&project.0).unwrap();
             let lock = manifest.lock.clone().unwrap();
             let (native, cross) = contexts();
             let build = || {
@@ -2755,123 +2532,14 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }
 
         #[test]
-        fn canonicalizes_cfg_selectors_and_plain_triples() {
-            let canonical = |value: &str| canonical_target_selector(value).unwrap();
-            assert_eq!(
-                canonical("cfg(all( unix, target_os = \"linux\" ))"),
-                "cfg(all(target_os=\"linux\",unix))"
-            );
-            assert_eq!(
-                canonical("cfg(any(target_os=\"linux\" , unix ,))"),
-                canonical("cfg(any(unix,target_os=\"linux\"))")
-            );
-            assert_eq!(canonical("cfg(all(unix,unix))"), "cfg(all(unix))");
-            assert_eq!(
-                canonical("cfg(not( all( any() , unix ) ))"),
-                "cfg(not(all(any(),unix)))"
-            );
-            assert_eq!(canonical("x86_64-unknown-motor"), "x86_64-unknown-motor");
-            for value in [
-                "cfg(all(target_os=\"linux\",unix))",
-                "cfg(any())",
-                "x86_64-unknown-motor",
-            ] {
-                assert_eq!(canonical(&canonical(value)), canonical(value));
-            }
-        }
-
-        #[test]
-        fn rejects_invalid_selectors_and_enforces_cfg_bounds() {
-            for value in [
-                "",
-                "custom-target.json",
-                "bad triple",
-                "cfg(unix",
-                "cfg()",
-                "cfg(unix) ",
-                "cfg(unix windows)",
-                "cfg(not())",
-                "cfg(not(unix,windows))",
-                "cfg(version(\"1.0\"))",
-                "cfg(target_os=linux)",
-                "cfg(target_os=\"a\\\"b\")",
-                "cfg(target_os=\"open)",
-            ] {
-                assert!(canonical_target_selector(value).is_err(), "{value}");
-            }
-
-            let nested =
-                |count: usize| format!("cfg({}unix{})", "not(".repeat(count), ")".repeat(count));
-            assert!(canonical_target_selector(&nested(MAX_CFG_DEPTH - 1)).is_ok());
-            assert!(canonical_target_selector(&nested(MAX_CFG_DEPTH)).is_err());
-
-            let wide = |count: usize| {
-                let children: Vec<String> = (0..count).map(|index| format!("k{index}")).collect();
-                format!("cfg(any({}))", children.join(","))
-            };
-            assert!(canonical_target_selector(&wide(MAX_CFG_NODES - 1)).is_ok());
-            assert!(canonical_target_selector(&wide(MAX_CFG_NODES)).is_err());
-        }
-
-        #[test]
-        fn target_selector_mutations_change_the_commitment() {
-            let with_target = |target: &str| {
-                let mut review = empty_review();
-                review.direct_registry.push(DirectRegistry {
-                    alias: "demo".to_owned(),
-                    package: "demo".to_owned(),
-                    requirement: "=1.0.0".to_owned(),
-                    kind: ReviewKind::Normal,
-                    target: Some(target.to_owned()),
-                    optional: false,
-                    default_features: true,
-                    features: Vec::new(),
-                });
-                review
-            };
-            assert!(with_target("cfg( unix )").render().is_err());
-            assert!(with_target("cfg(all(unix,unix))").render().is_err());
-
-            let variants = [
-                "cfg(unix)",
-                "cfg(linux)",
-                "cfg(not(unix))",
-                "cfg(target_os=\"linux\")",
-                "cfg(target_os=\"motor\")",
-            ];
-            let hashes: BTreeSet<String> = variants
-                .iter()
-                .map(|target| sha256(&with_target(target).render().unwrap()))
-                .collect();
-            assert_eq!(hashes.len(), variants.len());
-        }
-
-        #[test]
         fn renders_and_hashes_representative_review_golden() {
             let mut review = registry_review();
-            let direct = |alias: &str, kind, target| DirectRegistry {
-                alias: alias.to_owned(),
-                package: "demo".to_owned(),
-                requirement: "=1.0.0".to_owned(),
-                kind,
-                target,
-                optional: false,
-                default_features: true,
-                features: Vec::new(),
+            review.scope = ReviewScope {
+                packages: vec!["app".to_owned()],
+                features: vec!["app/extra".to_owned()],
+                all_features: false,
+                no_default_features: false,
             };
-            review.direct_registry = vec![
-                direct("a", ReviewKind::Build, None),
-                direct("b", ReviewKind::Development, None),
-                direct("c", ReviewKind::Normal, Some("cfg(unix)".to_owned())),
-            ];
-            review.root_features.push(RootFeature {
-                name: "default".to_owned(),
-                values: vec!["feature-a".to_owned()],
-            });
-            review.crates_io_patches.push(CratesIoPatch {
-                alias: "patched".to_owned(),
-                package: "demo".to_owned(),
-            });
             review.locked_registry[0].dependencies = vec![
                 DependencyReference {
                     source: ReferenceSource::CratesIo,
@@ -2887,7 +2555,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             review.locked_registry.push(LockedRegistry {
                 name: "leaf".to_owned(),
                 version: "1.0.0".to_owned(),
-                checksum: "33".repeat(32),
+                id: "33".repeat(32),
                 dependencies: Vec::new(),
             });
             review.context_registry[0].compile_kinds = vec![UnitKind::Host, UnitKind::Target];
@@ -2898,53 +2566,24 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 build_script: true,
                 proc_macro: false,
                 native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
+                caller_env: Vec::new(),
             });
 
             let bytes = review.render().unwrap();
-            let expected = br#"review-format-version = 3
+            let expected = br#"review-format-version = 4
 source-tree-format-version = 1
 cargo-lock-format-version = 4
 resolver-version = 2
 
+[review-scope]
+packages = ["app"]
+features = ["app/extra"]
+all-features = false
+no-default-features = false
+
 [[context]]
 host = "x86_64-unknown-linux-gnu"
 target = "x86_64-unknown-motor"
-
-[[direct-registry]]
-alias = "a"
-package = "demo"
-requirement = "=1.0.0"
-kind = "build"
-optional = false
-default-features = true
-features = []
-
-[[direct-registry]]
-alias = "b"
-package = "demo"
-requirement = "=1.0.0"
-kind = "development"
-optional = false
-default-features = true
-features = []
-
-[[direct-registry]]
-alias = "c"
-package = "demo"
-requirement = "=1.0.0"
-kind = "normal"
-target = "cfg(unix)"
-optional = false
-default-features = true
-features = []
-
-[[root-feature]]
-name = "default"
-values = ["feature-a"]
-
-[[crates-io-patch]]
-alias = "patched"
-package = "demo"
 
 [[locked-registry]]
 name = "demo"
@@ -2991,17 +2630,100 @@ native-tools = ["archiver", "c-compiler"]
             assert_eq!(bytes, expected);
             assert_eq!(
                 sha256(&bytes),
-                "0d7e36ea7d42bce8a6058e9e101c1e969cdaf851aebe51fe6031d5160275ed84"
+                "bf7f482431fb470e05d678449ebb0895538a74c3ab957bee3be417ead45f6236"
+            );
+        }
+
+        #[test]
+        fn renders_and_hashes_git_review_golden() {
+            let source = "git+https://example.test/repo#0123456789012345678901234567890123456789";
+            let mut review = empty_review();
+            review.locked_git.push(LockedGit {
+                name: "git-demo".to_owned(),
+                version: "1.0.0".to_owned(),
+                id: source.to_owned(),
+                dependencies: vec!["leaf".to_owned()],
+            });
+            review.context_git.push(ContextPackage {
+                host: review.contexts[0].host.clone(),
+                target: review.contexts[0].target.clone(),
+                name: "git-demo".to_owned(),
+                version: "1.0.0".to_owned(),
+                id: source.to_owned(),
+                compile_kinds: vec![UnitKind::Target],
+                host_features: Vec::new(),
+                target_features: vec!["std".to_owned()],
+            });
+            review.git_sources.push(SourceEvidence {
+                name: "git-demo".to_owned(),
+                version: "1.0.0".to_owned(),
+                id: source.to_owned(),
+                license: "MIT".to_owned(),
+                source_tree_sha256: "22".repeat(32),
+                build_script: false,
+                proc_macro: true,
+            });
+            let bytes = review.render().unwrap();
+            let expected = br#"review-format-version = 4
+source-tree-format-version = 1
+cargo-lock-format-version = 4
+resolver-version = 2
+
+[review-scope]
+packages = []
+features = []
+all-features = false
+no-default-features = false
+
+[[context]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
+
+[[locked-git]]
+name = "git-demo"
+version = "1.0.0"
+source = "git+https://example.test/repo#0123456789012345678901234567890123456789"
+dependencies = ["leaf"]
+
+[[context-git]]
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-motor"
+name = "git-demo"
+version = "1.0.0"
+source = "git+https://example.test/repo#0123456789012345678901234567890123456789"
+compile-kinds = ["target"]
+host-features = []
+target-features = ["std"]
+
+[[git-source]]
+name = "git-demo"
+version = "1.0.0"
+source = "git+https://example.test/repo#0123456789012345678901234567890123456789"
+license = "MIT"
+source-tree-sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+build-script = false
+proc-macro = true
+"#;
+            assert_eq!(bytes, expected);
+            assert_eq!(
+                sha256(&bytes),
+                "54d75e09db707a9c0bd471620f5753e419f7dd803eaa24c05f1c78dfe85fb4fa"
             );
         }
 
         #[test]
         fn renders_and_hashes_empty_registry_review_golden() {
             let bytes = empty_review().render().unwrap();
-            let expected = b"review-format-version = 3\n\
+            let expected = b"review-format-version = 4\n\
 source-tree-format-version = 1\n\
 cargo-lock-format-version = 4\n\
 resolver-version = 2\n\
+\n\
+[review-scope]\n\
+packages = []\n\
+features = []\n\
+all-features = false\n\
+no-default-features = false\n\
 \n\
 [[context]]\n\
 host = \"x86_64-unknown-linux-gnu\"\n\
@@ -3009,7 +2731,7 @@ target = \"x86_64-unknown-motor\"\n";
             assert_eq!(bytes, expected);
             assert_eq!(
                 sha256(&bytes),
-                "d17025c2cce30fe1cca7048cebd939147b4b5ae0a6bd7394159ed95ab35d9f16"
+                "e71c1f4298aba2759f97d2a070ee64e86fbf4b1bae6461d8f165ecc4a7d3387a"
             );
         }
 
@@ -3064,6 +2786,7 @@ mod tests {
     use super::*;
     use crate::config::PolicyDefault;
     use crate::resolver::{FeatureContext, PackageSourceKey, ResolvedEdge, ResolvedPackage};
+    use crate::sparse::DependencyKind;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3097,6 +2820,7 @@ mod tests {
 
     fn state() -> CompactState {
         CompactState {
+            scope: ReviewScope::default(),
             review_sha256: "44".repeat(32),
             contexts: vec![context()],
             capabilities: vec![Capability {
@@ -3106,6 +2830,7 @@ mod tests {
                 build_script: true,
                 proc_macro: false,
                 native_tools: Vec::new(),
+                caller_env: Vec::new(),
             }],
         }
     }
@@ -3119,23 +2844,23 @@ mod tests {
         review.locked_registry.push(LockedRegistry {
             name: "libc".to_owned(),
             version: "0.2.186".to_owned(),
-            checksum: "33".repeat(32),
+            id: "33".repeat(32),
             dependencies: Vec::new(),
         });
-        review.context_registry.push(ContextRegistry {
+        review.context_registry.push(ContextPackage {
             host: review.contexts[0].host.clone(),
             target: review.contexts[0].target.clone(),
             name: "libc".to_owned(),
             version: "0.2.186".to_owned(),
-            checksum: "33".repeat(32),
+            id: "33".repeat(32),
             compile_kinds: vec![UnitKind::Target],
             host_features: Vec::new(),
             target_features: Vec::new(),
         });
-        review.registry_sources.push(RegistrySource {
+        review.registry_sources.push(SourceEvidence {
             name: "libc".to_owned(),
             version: "0.2.186".to_owned(),
-            checksum: "33".repeat(32),
+            id: "33".repeat(32),
             license: "MIT OR Apache-2.0".to_owned(),
             source_tree_sha256: "44".repeat(32),
             build_script: true,
@@ -3149,6 +2874,7 @@ mod tests {
                 build_script: true,
                 proc_macro: false,
                 native_tools: Vec::new(),
+                caller_env: Vec::new(),
             }])
             .unwrap();
         review
@@ -3167,6 +2893,28 @@ mod tests {
         source.push_str("unknown = true\n");
         fs::write(CompactState::path(&fixture.0), source).unwrap();
         assert!(CompactState::load(&fixture.0).is_err());
+    }
+
+    #[test]
+    fn rejects_a_retired_format_3_record_but_lets_vendor_replace_it() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.0.join(".lorry")).unwrap();
+        fs::write(
+            CompactState::path(&fixture.0),
+            format!(
+                "format-version = 3\nreview-format-version = 3\nreview-sha256 = \"{}\"\n\n\
+                 [[context]]\nhost = \"x86_64-unknown-linux-gnu\"\ntarget = \"x86_64-unknown-motor\"\n",
+                "44".repeat(32)
+            ),
+        )
+        .unwrap();
+        let error = CompactState::load(&fixture.0).unwrap_err().render();
+        assert!(
+            error.contains("retired single-package review format 3"),
+            "{error}"
+        );
+        assert!(error.contains("run `lorry vendor --locked` again at the workspace root"));
+        assert_eq!(CompactState::load_replaceable(&fixture.0).unwrap(), None);
     }
 
     #[test]
@@ -3265,6 +3013,8 @@ mod tests {
                 allow_build_script: false,
                 allow_proc_macro: false,
                 native_tools: BTreeSet::new(),
+                configured_native_tools: false,
+                caller_env: Default::default(),
                 provenance: fixture.0.join("policy.toml"),
             },
         );
@@ -3289,13 +3039,14 @@ mod tests {
         let root_edge = ResolvedEdge {
             dependency_index: 0,
             alias: "libc".to_owned(),
+            target: None,
             kind: DependencyKind::Normal,
             parent_compile_kind: None,
             compile_kind: CompileKind::Target,
             context: FeatureContext::Unified,
             package: package.key.clone(),
         };
-        let error = crate::policy::preflight(
+        let error = crate::policy::preflight_workspace(
             &policy,
             &Resolution {
                 root_edges: vec![root_edge],

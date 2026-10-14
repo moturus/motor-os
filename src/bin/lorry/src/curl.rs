@@ -72,8 +72,10 @@ impl Client {
     }
 }
 
+/// The index file of `name`. Its path is lowercase; the records in it keep the
+/// name's case.
 pub fn sparse_url(name: &str) -> Result<String> {
-    let name = canonical_name(name)?;
+    let name = valid_name(name)?.to_ascii_lowercase();
     let path = match name.len() {
         1 => format!("1/{name}"),
         2 => format!("2/{name}"),
@@ -83,26 +85,22 @@ pub fn sparse_url(name: &str) -> Result<String> {
     Ok(format!("https://index.crates.io/{path}"))
 }
 
+/// The download of one package version. Downloads are case-sensitive, so the
+/// name is spelled as the index spells it, as Cargo does.
 pub fn archive_url(name: &str, version: &Version) -> Result<String> {
-    let name = canonical_name(name)?;
+    let name = valid_name(name)?;
     Ok(format!(
         "https://static.crates.io/crates/{name}/{name}-{version}.crate"
     ))
 }
 
-fn canonical_name(name: &str) -> Result<String> {
-    if name.is_empty()
-        || name.len() > 64
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        || !name.bytes().any(|byte| byte.is_ascii_alphabetic())
-    {
+fn valid_name(name: &str) -> Result<&str> {
+    if !crate::manifest::valid_package_name(name) {
         return Err(Error::failure(format!(
             "cannot construct a crates.io URL for invalid package name `{name}`"
         )));
     }
-    Ok(name.to_ascii_lowercase())
+    Ok(name)
 }
 
 #[cfg(target_os = "motor")]
@@ -182,8 +180,6 @@ pub struct Metadata {
 #[derive(Debug)]
 pub struct Download {
     body: ResponseBody,
-    pub diagnostic: Vec<u8>,
-    pub metadata: Metadata,
 }
 
 impl Download {
@@ -222,7 +218,7 @@ impl ResponseBody {
             }
             match options.open(&path) {
                 Ok(file) => {
-                    if let Err(error) = crate::atomic::set_private_file(&file, &path) {
+                    if let Err(error) = crate::fs_check::set_file_mode(&file, &path, false) {
                         drop(file);
                         let _ = fs::remove_file(&path);
                         return Err(error);
@@ -266,7 +262,7 @@ where
     let mut redirects = 0;
     loop {
         let (body, destination) = ResponseBody::create(staging_parent)?;
-        let (diagnostic, metadata) = transfer(&current.request_url, destination, max_body_bytes)?;
+        let (_, metadata) = transfer(&current.request_url, destination, max_body_bytes)?;
         let effective = HttpsUrl::parse(&metadata.effective_url).map_err(|error| {
             Error::failure(format!("curl reported an invalid effective URL: {error}"))
         })?;
@@ -285,11 +281,7 @@ where
                     "curl reported a redirect URL for successful HTTP status 200",
                 ));
             }
-            return Ok(Download {
-                body,
-                diagnostic,
-                metadata,
-            });
+            return Ok(Download { body });
         }
         if !matches!(metadata.status, 301 | 302 | 303 | 307 | 308) {
             return Err(Error::failure(format!(
@@ -728,7 +720,7 @@ impl StderrSpill {
             }
             match options.open(&path) {
                 Ok(file) => {
-                    if let Err(error) = crate::atomic::set_private_file(&file, &path) {
+                    if let Err(error) = crate::fs_check::set_file_mode(&file, &path, false) {
                         drop(file);
                         let _ = fs::remove_file(&path);
                         return Err(std::io::Error::other(error.to_string()));
@@ -1183,7 +1175,7 @@ mod tests {
         );
         assert_eq!(
             archive_url("Serde", &Version::parse("1.2.3-alpha.1").unwrap()).unwrap(),
-            "https://static.crates.io/crates/serde/serde-1.2.3-alpha.1.crate"
+            "https://static.crates.io/crates/Serde/Serde-1.2.3-alpha.1.crate"
         );
         assert!(sparse_url("../bad").is_err());
         assert!(sparse_url("123").is_err());

@@ -1,18 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::fs;
 use std::io::{self, Write};
 
-use crate::admission_state::{CompactState, Context};
-use crate::atomic::AtomicDirectory;
-use crate::cargo_registry::CargoRegistry;
 use crate::cli::{Cli, TreeOptions, Verbosity};
 use crate::config::Config;
-use crate::dependency::{self, PreparedGraph};
+use crate::dependency::{self, LockedContext, RegistryAccess, workspace::PreparedSources};
 use crate::diagnostic::{Error, Result};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, SourceWorkspace};
 use crate::progress::Progress;
-use crate::repository::RepositorySet;
+use crate::resolver::workspace::{features::member_requests, resolve_selected_workspace};
 use crate::resolver::{
     CompileKind, FeatureContext, PackageKey, ResolvedEdge, ResolvedSource, TargetSelection,
 };
@@ -21,26 +17,46 @@ use crate::toolchain::Toolchain;
 use crate::validation::ValidationMode;
 
 pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
+    crate::cargo_registry::with_fallback(cli, |cli, notes| execute_with(cli, notes, options))
+}
+
+fn execute_with(cli: &Cli, notes: Verbosity, options: &TreeOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = Manifest::load_selected_or_manifest_path(
+    let mut workspace = SourceWorkspace::load(
         &current,
-        options.manifest_path.as_deref().map(std::path::Path::new),
-        cli.package.as_deref(),
-        true,
+        cli.manifest_path.as_deref().map(std::path::Path::new),
     )?;
-    let mut config = Config::load(&manifest.root)?;
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
-    crate::engine::check_rust_version(&manifest, &toolchain)?;
+    let (roots, warnings) = cli.selection.select(
+        workspace
+            .packages
+            .iter()
+            .map(|member| (member.name.as_str(), &member.version, member.root.as_path())),
+        workspace.default_members.iter().map(|root| root.as_path()),
+    )?;
+    if notes != Verbosity::Quiet {
+        for warning in warnings {
+            eprintln!("warning: {warning}");
+        }
+    }
+    workspace.load_locked_context()?;
+    let manifest = &workspace.packages[0];
+    let mut config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
+    config.report_ignored(notes);
+    let use_cargo_registry = crate::cargo_registry::selected(cli, &config);
+    if use_cargo_registry {
+        config.trust_cargo_cache();
+    }
+    Manifest::report_warnings(&workspace.packages, notes);
+    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let physical_target = config.selected_target(options.target.as_deref())?;
     let target = toolchain.target_info(physical_target.as_deref())?;
-    manifest.require_supported_target(&target)?;
     let host = if physical_target.is_some() {
         toolchain.target_info(None)?
     } else {
         target.clone()
     };
-    if cli.verbosity == Verbosity::Verbose {
+    if notes == Verbosity::Verbose {
         eprintln!(
             "Using {} (rustc {}, Cargo {:?} compatibility)",
             toolchain.rustc.display(),
@@ -49,90 +65,78 @@ pub fn execute(cli: &Cli, options: &TreeOptions) -> Result<i32> {
         );
     }
 
-    let compact_state = CompactState::load(&manifest.root)?;
-    if let Some(compact) = &compact_state {
-        compact.require_context(&host.triple, &target.triple)?;
-    }
-    let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-tree")?;
-    let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
-    progress.report("Verifying dependency state")?;
-    let repositories = if cli.use_cargo_registry {
-        None
-    } else {
-        Some(RepositorySet::open_with_validation(
-            &config.repositories,
-            crate::engine::repository_tree_limits(&config.policy.limits)?,
-            config.policy.limits.max_package_bytes,
-            ValidationMode::Trusted,
-        )?)
-    };
-    let cargo_registry = if cli.use_cargo_registry {
-        Some(CargoRegistry::discover_with_validation(
-            staging.path(),
-            &config.policy.limits,
-            ValidationMode::Trusted,
-            Some(&crate::engine::artifact_root(&manifest).join(".cargo-evidence")),
-        )?)
-    } else {
-        None
-    };
-    let source = match (&repositories, &cargo_registry) {
-        (Some(repositories), None) => dependency::RegistrySource::Lorry(repositories),
-        (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
-        _ => unreachable!("exactly one registry source is constructed"),
-    };
-    let direct = crate::git::load_locked_dependencies(&manifest, &config.policy.limits)?;
-    let resolver_options = dependency::resolver_options(&manifest, &config, &toolchain)?;
+    // Extraction for inspection creates its own private directories here.
+    let scratch = env::temp_dir();
+    Progress::new(notes != Verbosity::Quiet).report("Verifying dependency state")?;
+    let locked = LockedContext::open(
+        manifest,
+        &config,
+        &toolchain,
+        RegistryAccess {
+            use_cargo_registry,
+            validation: ValidationMode::Trusted,
+            staging_parent: &scratch,
+            evidence_root: &crate::engine::artifact_root(manifest).join(".cargo-evidence"),
+        },
+    )?;
     let selection = TargetSelection {
         target_triple: &target.triple,
         target_cfg: &target.cfg,
         host_triple: &host.triple,
         host_cfg: &host.cfg,
     };
-    let verified_resolution = if let Some(compact) = &compact_state {
-        let verified = dependency::verify_compact_admission(
-            &dependency::ReviewInputs {
-                manifest: &manifest,
-                config: &config,
-                source,
-                toolchain: &toolchain,
-                options: &resolver_options,
-                staging_parent: staging.path(),
-                direct: Some(&direct),
-                prepare_context: Some(Context {
-                    host: host.triple.clone(),
-                    target: target.triple.clone(),
-                }),
-            },
-            compact,
-        )?;
-        let (review, resolution) = verified.into_parts();
-        review.apply_to_policy(&mut config.policy, &manifest.root)?;
-        resolution
-    } else {
-        None
-    };
-    progress.report("Preparing dependency graph")?;
-    let prepared = dependency::prepare_locked_source(
-        &manifest,
+    let (complete, mut catalog) = dependency::workspace::resolve_locked(
+        &workspace,
         &config,
-        dependency::LockedSource {
-            registry: source,
-            direct: &direct,
-            verified_resolution,
-        },
-        &resolver_options,
-        selection,
-        staging.path(),
+        locked.source(),
+        &locked.direct,
+        &locked.options,
+        None,
     )?;
-    let rendered = render(&manifest, &prepared)?;
+    let requests = member_requests(
+        &workspace,
+        &roots.iter().cloned().collect(),
+        &cli.features,
+        false,
+    )?;
+    Progress::new(cli.verbosity != Verbosity::Quiet).report("Preparing dependency graph")?;
+    let prepared = dependency::workspace::inspect_selected(
+        &mut catalog,
+        &config,
+        locked.source(),
+        &scratch,
+        &locked.direct,
+        |catalog| {
+            resolve_selected_workspace(&complete, catalog, &locked.options, &requests, selection)
+        },
+    )?;
+    // Like Cargo, print the roots in package-id order.
+    let mut roots = prepared.resolution.root_edges.iter().collect::<Vec<_>>();
+    roots.sort_by(|left, right| left.package.cmp(&right.package));
+    let rendered = roots
+        .into_iter()
+        .map(|edge| {
+            let root = prepared
+                .resolution
+                .packages
+                .iter()
+                .find(|package| package.key == edge.package)
+                .ok_or_else(|| Error::failure("dependency tree omits a selected workspace root"))?;
+            render(root, edge.compile_kind, &prepared)
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join("\n");
     io::stdout()
         .write_all(rendered.as_bytes())
         .map_err(|error| Error::failure(format!("failed to write dependency tree: {error}")))?;
     Ok(0)
 }
 
-fn render(root: &Manifest, prepared: &PreparedGraph) -> Result<String> {
+fn render(
+    root: &crate::resolver::ResolvedPackage,
+    kind: CompileKind,
+    prepared: &PreparedSources,
+) -> Result<String> {
     let packages = prepared
         .resolution
         .packages
@@ -140,17 +144,15 @@ fn render(root: &Manifest, prepared: &PreparedGraph) -> Result<String> {
         .map(|package| (package.key.clone(), package))
         .collect::<BTreeMap<_, _>>();
     let mut output = format!(
-        "{} v{} ({})\n",
-        root.name,
-        root.version.original,
-        utf8(&fs::canonicalize(&root.root).map_err(path_error)?)?
+        "{}\n",
+        package_line(root, &prepared.packages[&root.key].manifest)?
     );
     let mut expanded = BTreeSet::new();
     render_children(
         &mut output,
         "",
-        &prepared.resolution.root_edges,
-        None,
+        &root.edges,
+        Some(kind),
         prepared,
         &packages,
         &mut expanded,
@@ -163,7 +165,7 @@ fn render_children(
     prefix: &str,
     edges: &[ResolvedEdge],
     parent_compile_kind: Option<CompileKind>,
-    prepared: &PreparedGraph,
+    prepared: &PreparedSources,
     packages: &BTreeMap<PackageKey, &crate::resolver::ResolvedPackage>,
     expanded: &mut BTreeSet<(PackageKey, CompileKind, FeatureContext)>,
 ) -> Result<()> {
@@ -273,10 +275,4 @@ fn utf8(path: &std::path::Path) -> Result<&str> {
             path.display()
         ))
     })
-}
-
-fn path_error(error: std::io::Error) -> Error {
-    Error::failure(format!(
-        "failed to canonicalize dependency tree path: {error}"
-    ))
 }

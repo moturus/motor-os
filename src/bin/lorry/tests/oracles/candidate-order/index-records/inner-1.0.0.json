@@ -1,0 +1,1 @@
+{"name":"inner","vers":"1.0.0","deps":[{"name":"wide","req":"^1","features":[],"optional":false,"default_features":true,"target":null,"kind":"normal"}],"cksum":"ba71bfde3e5ac04f922aa130b40a158b730ee2393079067ed3e4c724f544fcfe","features":{},"yanked":false}

@@ -82,6 +82,15 @@ MANIFEST="$(realpath "$PROJECT/Cargo.toml")"
 located="$(cd "$PROJECT" && HOME="$HOME_DIR" \
     "$LORRY" locate-project --workspace --manifest-path "$MANIFEST")"
 [ "$located" = "{\"root\":\"$MANIFEST\"}" ] || fail "wrong locate-project output: $located"
+for arguments in '' '--workspace' '--message-format=json'; do
+    located="$(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" locate-project $arguments)"
+    [ "$located" = "{\"root\":\"$MANIFEST\"}" ] || fail "wrong default locate-project output"
+done
+located="$(cd "$WORK" && HOME="$HOME_DIR" "$LORRY" locate-project \
+    --manifest-path "$MANIFEST" --message-format plain)"
+[ "$located" = "$MANIFEST" ] || fail "plain locate-project output is not the manifest path"
+located="$(cd "$PROJECT/src" && HOME="$HOME_DIR" "$LORRY" locate-project)"
+[ "$located" = "{\"root\":\"$MANIFEST\"}" ] || fail "subdirectory discovery did not locate its package"
 
 mkdir -p "$WORK/workspace/app/src"
 cat >"$WORK/workspace/Cargo.toml" <<'EOF'
@@ -99,14 +108,18 @@ cat >"$WORK/workspace/app/src/lib.rs" <<'EOF'
 pub fn selected() {}
 EOF
 MEMBER_MANIFEST="$(realpath "$WORK/workspace/app/Cargo.toml")"
+WORKSPACE_MANIFEST="$(realpath "$WORK/workspace/Cargo.toml")"
 located="$(cd "$WORK/workspace/app" && HOME="$HOME_DIR" \
     "$LORRY" locate-project --workspace --manifest-path "$MEMBER_MANIFEST")"
-[ "$located" = "{\"root\":\"$MEMBER_MANIFEST\"}" ] || \
-    fail "locate-project did not preserve the selected member"
-if (cd "$WORK/workspace" && HOME="$HOME_DIR" "$LORRY" locate-project \
-    --workspace --manifest-path "$WORK/workspace/Cargo.toml") >/dev/null 2>&1; then
-    fail "locate-project accepted a virtual workspace manifest"
-fi
+[ "$located" = "{\"root\":\"$WORKSPACE_MANIFEST\"}" ] || \
+    fail "locate-project --workspace did not identify the member's workspace"
+located="$(cd "$WORK/workspace/app" && HOME="$HOME_DIR" \
+    "$LORRY" locate-project --manifest-path "$MEMBER_MANIFEST" --message-format plain)"
+[ "$located" = "$MEMBER_MANIFEST" ] || fail "plain locate-project did not preserve the selected member"
+located="$(cd "$WORK/workspace" && HOME="$HOME_DIR" "$LORRY" locate-project \
+    --workspace --manifest-path "$WORKSPACE_MANIFEST")"
+[ "$located" = "{\"root\":\"$WORKSPACE_MANIFEST\"}" ] || \
+    fail "locate-project did not identify the virtual workspace"
 
 common_environment=(
     HOME="$HOME_DIR"
@@ -117,6 +130,23 @@ common_environment=(
     __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS=nightly
     RUSTC_BOOTSTRAP=ambient-bootstrap
 )
+# Virtual roots need no selected or buildable package for compiler queries.
+mkdir -p "$WORK/workspace/other/src" "$WORK/empty"
+printf '[package]\nname = "other"\nversion = "0.1.0"\nedition = "2024"\n' >"$WORK/workspace/other/Cargo.toml"
+printf 'pub fn other() {}\n' >"$WORK/workspace/other/src/lib.rs"
+printf '[workspace]\nmembers = ["app", "other"]\nresolver = "2"\n[profile.custom]\ninherits = "release"\n' \
+    >"$WORK/workspace/Cargo.toml"
+printf '[workspace]\n' >"$WORK/empty/Cargo.toml"
+for root in "$WORK/workspace" "$WORK/empty"; do
+    cfg="$(cd "$root" && env "${common_environment[@]}" "$LORRY" rustc \
+        -Z unstable-options --print cfg --target x86_64-unknown-motor -- -O)"
+    [ "$cfg" = query_cfg_output ] || fail "virtual-root cfg query needs a package"
+    target="$(cd "$WORK" && env "${common_environment[@]}" "$LORRY" rustc \
+        --manifest-path "$root/Cargo.toml" -Z unstable-options --print target-spec-json \
+        --target x86_64-unknown-motor -- -Z unstable-options)"
+    [ "$target" = '{"arch":"x86_64","os":"motor"}' ] || fail "virtual-root target query needs a package"
+    [ ! -e "$root/target" ] && [ ! -e "$root/Cargo.lock" ] && [ ! -e "$root/.lorry" ] || fail "virtual-root query mutated project state"
+done
 cfg="$(cd "$PROJECT" && env "${common_environment[@]}" "$LORRY" rustc \
     -Z unstable-options --print cfg --target x86_64-unknown-motor -- -O)"
 [ "$cfg" = query_cfg_output ] || fail "cfg query did not copy rustc stdout"
@@ -169,6 +199,7 @@ EOF
 chmod +x "$WORK/proxy/rustup"
 ln -s rustup "$WORK/proxy/rustc"
 : >"$WORK/rustup.log"
+before="$(wc -l <"$RUSTC_LOG")"
 (cd "$PROJECT" && env -u RUSTC HOME="$HOME_DIR" PATH="$WORK/proxy:$PATH" \
     DIRECT_RUSTC="$WORK/direct-rustc" RUSTC_LOG="$RUSTC_LOG" \
     RUSTUP_LOG="$WORK/rustup.log" RUSTUP_TOOLCHAIN=proxy-toolchain \
@@ -176,7 +207,10 @@ ln -s rustup "$WORK/proxy/rustc"
     --target x86_64-unknown-motor -- -O) >/dev/null
 grep -Fx 'which rustc|proxy-toolchain' "$WORK/rustup.log" >/dev/null || \
     fail "rustup proxy resolution did not receive RUSTUP_TOOLCHAIN"
-tail -n 3 "$RUSTC_LOG" | grep -v 'ENV:<unset>:<unset>:<unset>:<unset>$' >/dev/null && \
+# Version and cfg answers may come from Lorry's rustc query cache, so only
+# this command's own compiler runs are checked.
+[ "$(wc -l <"$RUSTC_LOG")" -gt "$before" ] || fail "the proxy query ran no compiler"
+tail -n "+$((before + 1))" "$RUSTC_LOG" | grep -v 'ENV:<unset>:<unset>:<unset>:<unset>$' >/dev/null && \
     fail "resolved direct compiler received rustup proxy environment"
 
 cmp "$WORK/Cargo.toml.before" "$PROJECT/Cargo.toml" || fail "query changed Cargo.toml"

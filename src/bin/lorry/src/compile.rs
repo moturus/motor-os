@@ -1,19 +1,18 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use crate::build_script::{Directive, Output as BuildScriptOutput};
+use crate::build_script::{Directive, LinkArgTarget, Output as BuildScriptOutput};
 use crate::diagnostic::{Error, Result};
 use crate::identity::{CargoDebugInfo, CargoPanicStrategy, CargoStrip, CargoUnitLto, Identity};
-use crate::manifest::{Edition, Manifest};
+use crate::manifest::{Edition, LibraryTarget, Manifest, TargetKind};
 use crate::resolver::{CompileKind, PackageKey, PackageSourceKey};
-use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind};
+use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind, UnitMode};
 
 pub struct CommandOptions<'a> {
     pub cargo: &'a Path,
     pub workspace_root: &'a Path,
+    pub selected_packages: &'a [PackageKey],
     pub host_profile: &'a Path,
     pub target_profile: &'a Path,
     pub host_incremental: &'a Path,
@@ -21,6 +20,8 @@ pub struct CommandOptions<'a> {
     pub physical_target: Option<&'a str>,
     pub host_linker: Option<&'a Path>,
     pub target_linker: Option<&'a Path>,
+    pub integration_binaries: Option<&'a BTreeMap<PackageKey, BTreeMap<String, PathBuf>>>,
+    pub integration_temp_dirs: Option<&'a BTreeMap<PackageKey, PathBuf>>,
     pub verbose: bool,
 }
 
@@ -34,9 +35,22 @@ pub struct RustcInvocation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RustcOutput {
+    StaticLibrary {
+        archive: PathBuf,
+        dep_info: PathBuf,
+    },
     Library {
         rlib: PathBuf,
         rmeta: PathBuf,
+        archive: Option<PathBuf>,
+        dep_info: PathBuf,
+    },
+    Binary {
+        executable: PathBuf,
+        dep_info: PathBuf,
+    },
+    Metadata {
+        metadata: PathBuf,
         dep_info: PathBuf,
     },
     ProcMacro {
@@ -55,27 +69,106 @@ pub struct BuildOutput<'a> {
     pub out_dir: &'a Path,
 }
 
+impl RustcOutput {
+    pub(crate) fn dep_info(&self) -> &Path {
+        match self {
+            Self::Library { dep_info, .. }
+            | Self::StaticLibrary { dep_info, .. }
+            | Self::Binary { dep_info, .. }
+            | Self::Metadata { dep_info, .. }
+            | Self::ProcMacro { dep_info, .. }
+            | Self::BuildScript { dep_info, .. } => dep_info,
+        }
+    }
+}
+
+impl RustcInvocation {
+    /// Keep rustc's output private until the unit has succeeded and its
+    /// complete directory can be published at the planned path.
+    pub fn with_output_directory(&self, directory: &Path) -> Result<Self> {
+        let mut staged = self.clone();
+        let mut positions = self
+            .arguments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument)| (argument == "--out-dir").then_some(index + 1));
+        let index = positions
+            .next()
+            .ok_or_else(|| Error::failure("rustc has no output directory"))?;
+        if positions.next().is_some() || index >= staged.arguments.len() {
+            return Err(Error::failure("rustc has an ambiguous output directory"));
+        }
+        let original = PathBuf::from(&staged.arguments[index]);
+        staged.arguments[index] = directory.as_os_str().to_owned();
+        let paths = match &mut staged.output {
+            RustcOutput::Library {
+                rlib,
+                rmeta,
+                dep_info,
+                archive,
+            } => {
+                let mut paths = vec![rlib, rmeta, dep_info];
+                paths.extend(archive.iter_mut());
+                paths
+            }
+            RustcOutput::Binary {
+                executable,
+                dep_info,
+            }
+            | RustcOutput::Metadata {
+                metadata: executable,
+                dep_info,
+            }
+            | RustcOutput::ProcMacro {
+                dynamic_library: executable,
+                dep_info,
+            }
+            | RustcOutput::StaticLibrary {
+                archive: executable,
+                dep_info,
+            } => vec![executable, dep_info],
+            RustcOutput::BuildScript {
+                executable,
+                unhashed_executable,
+                dep_info,
+            } => vec![executable, unhashed_executable, dep_info],
+        };
+        for path in paths {
+            let relative = path.strip_prefix(&original).map_err(|_| {
+                Error::failure("rustc output is outside its declared output directory")
+            })?;
+            *path = directory.join(relative);
+        }
+        Ok(staged)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DependencyDirectory {
     pub compile_kind: CompileKind,
     pub path: PathBuf,
 }
 
+#[cfg(test)]
 pub fn dependency_rustc_invocation(
     plan: &CompilationPlan,
     manifests: &BTreeMap<PackageKey, Manifest>,
     key: &UnitKey,
     options: &CommandOptions<'_>,
 ) -> Result<Option<RustcInvocation>> {
-    dependency_rustc_invocation_with_build_output(plan, manifests, key, options, None)
+    dependency_rustc_invocation_with_build_output(plan, manifests, key, options, None, &[])
 }
 
+/// `build_output` is the unit's own build-script output. `linked` holds the
+/// outputs of its linkable dependencies' scripts, whose link search paths
+/// also reach it, as in Cargo.
 pub fn dependency_rustc_invocation_with_build_output(
     plan: &CompilationPlan,
     manifests: &BTreeMap<PackageKey, Manifest>,
     key: &UnitKey,
     options: &CommandOptions<'_>,
     build_output: Option<BuildOutput<'_>>,
+    linked: &[BuildOutput<'_>],
 ) -> Result<Option<RustcInvocation>> {
     let planned = plan.units.get(key).ok_or_else(|| {
         Error::failure(format!(
@@ -86,15 +179,14 @@ pub fn dependency_rustc_invocation_with_build_output(
     if key.kind == UnitKind::BuildScriptRun {
         return Ok(None);
     }
-    let requires_build_output = matches!(key.kind, UnitKind::Library | UnitKind::ProcMacro)
-        && planned
-            .unit
-            .dependencies
-            .iter()
-            .any(|dependency| dependency.kind == UnitEdgeKind::BuildScriptOutput);
+    let requires_build_output = planned
+        .unit
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.kind == UnitEdgeKind::BuildScriptOutput);
     if requires_build_output && build_output.is_none() {
         return Err(Error::failure(format!(
-            "library unit for `{} {}` requires build-script output before its rustc command can be finalized",
+            "compiler unit for `{} {}` requires build-script output before its rustc command can be finalized",
             key.package.name, key.package.version
         )));
     }
@@ -111,7 +203,13 @@ pub fn dependency_rustc_invocation_with_build_output(
         ))
     })?;
     let output_dir = unit_output_directory(planned, options);
-    let (crate_name, source, crate_type, emit, output_dir) = match key.kind {
+    let binary_crate_name = if key.kind == UnitKind::BuildScriptCompile {
+        manifest.build_script_name()
+    } else {
+        key.target.clone()
+    }
+    .map(|name| name.replace('-', "_"));
+    let (crate_name, source, crate_type, mut emit, output_dir) = match key.kind {
         UnitKind::Library | UnitKind::ProcMacro => {
             let library = manifest.library.as_ref().ok_or_else(|| {
                 Error::failure(format!(
@@ -127,7 +225,46 @@ pub fn dependency_rustc_invocation_with_build_output(
                 } else {
                     "lib"
                 },
-                if key.kind == UnitKind::ProcMacro {
+                if library.requires_upstream_objects() {
+                    "dep-info,link"
+                } else {
+                    "dep-info,metadata,link"
+                },
+                output_dir,
+            )
+        }
+        UnitKind::LibraryHarness => {
+            let library = manifest
+                .library
+                .as_ref()
+                .ok_or_else(|| Error::failure("selected library harness has no library target"))?;
+            (
+                library.name.as_str(),
+                library.path.as_path(),
+                "bin",
+                "dep-info,link",
+                output_dir,
+            )
+        }
+        UnitKind::Binary
+        | UnitKind::BinaryHarness
+        | UnitKind::IntegrationHarness
+        | UnitKind::Example
+        | UnitKind::Bench => {
+            let target = key.manifest_target(manifest).ok_or_else(|| {
+                Error::failure(format!(
+                    "selected target `{}` is absent",
+                    key.target.as_deref().unwrap_or_default()
+                ))
+            })?;
+            (
+                binary_crate_name.as_deref().unwrap(),
+                target.path.as_path(),
+                "bin",
+                if key.is_harness()
+                    || target.crate_types == ["bin"]
+                    || target.crate_types.iter().any(|kind| kind == "staticlib")
+                {
                     "dep-info,link"
                 } else {
                     "dep-info,metadata,link"
@@ -136,44 +273,121 @@ pub fn dependency_rustc_invocation_with_build_output(
             )
         }
         UnitKind::BuildScriptCompile => {
-            let source = manifest.build_script.as_deref().ok_or_else(|| {
-                Error::failure(format!(
+            let (Some(source), Some(name)) = (
+                manifest.build_script.as_deref(),
+                binary_crate_name.as_deref(),
+            ) else {
+                return Err(Error::failure(format!(
                     "dependency `{} {}` has no build script",
                     key.package.name, key.package.version
-                ))
-            })?;
-            (
-                "build_script_build",
-                source,
-                "bin",
-                "dep-info,link",
-                output_dir,
-            )
+                )));
+            };
+            (name, source, "bin", "dep-info,link", output_dir)
         }
         UnitKind::BuildScriptRun => unreachable!(),
     };
+    if matches!(key.mode, UnitMode::Check | UnitMode::CheckTest) {
+        emit = "dep-info,metadata";
+    }
 
+    if key.kind == UnitKind::Library {
+        let library = manifest.library.as_ref().unwrap();
+        if library.dynamic() {
+            let motor = match key.compile_kind {
+                CompileKind::Host => cfg!(target_os = "motor"),
+                CompileKind::Target => options
+                    .physical_target
+                    .map_or(cfg!(target_os = "motor"), |target| {
+                        target == "x86_64-unknown-motor"
+                    }),
+            };
+            if !motor {
+                return Err(Error::failure(
+                    "Linux `cdylib` and `dylib` execution is not yet supported",
+                ));
+            }
+            if key.mode == UnitMode::Build
+                && !library
+                    .crate_types
+                    .iter()
+                    .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "staticlib"))
+            {
+                return Err(Error::failure(format!(
+                    "cannot produce {} for `{}` as the target `{}` does not support these crate types",
+                    library.crate_types.join(", "),
+                    manifest.name,
+                    "x86_64-unknown-motor"
+                )));
+            }
+        }
+    }
     let mut arguments = Vec::new();
     push(&mut arguments, "--crate-name");
     push(&mut arguments, crate_name);
     push(
         &mut arguments,
-        &format!("--edition={}", edition_name(manifest.edition)),
+        &format!(
+            "--edition={}",
+            edition_name(
+                key.manifest_target(manifest)
+                    .map_or(manifest.edition, |target| target.edition)
+            )
+        ),
     );
-    arguments.push(source.as_os_str().to_owned());
+    let source_argument = if matches!(key.package.source, PackageSourceKey::Path(_))
+        && planned.source_remap.is_none()
+    {
+        source
+            .strip_prefix(options.workspace_root)
+            .unwrap_or(source)
+    } else {
+        source
+    };
+    arguments.push(source_argument.as_os_str().to_owned());
     push(&mut arguments, "--error-format=json");
     push(
         &mut arguments,
         "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
     );
-    push(&mut arguments, "--crate-type");
-    push(&mut arguments, crate_type);
+    if key.is_harness() {
+        let harness = match key.kind {
+            UnitKind::LibraryHarness => manifest.library.as_ref().unwrap().harness,
+            _ => key.manifest_target(manifest).unwrap().harness,
+        };
+        if harness {
+            push(&mut arguments, "--test");
+        } else {
+            push(&mut arguments, "--cfg");
+            push(&mut arguments, "test");
+        }
+    } else if let Some(types) = key.library_types(manifest) {
+        for crate_type in types {
+            push(&mut arguments, "--crate-type");
+            push(&mut arguments, crate_type);
+        }
+    } else {
+        push(&mut arguments, "--crate-type");
+        push(&mut arguments, crate_type);
+    }
     push(&mut arguments, &format!("--emit={emit}"));
-    if key.kind == UnitKind::ProcMacro {
+    let proc_macro = key.kind == UnitKind::ProcMacro
+        || (key.kind == UnitKind::LibraryHarness
+            && manifest
+                .library
+                .as_ref()
+                .is_some_and(|library| library.proc_macro));
+    if proc_macro {
         codegen(&mut arguments, "prefer-dynamic");
     }
     profile_arguments(&mut arguments, planned, manifest);
-    identity_arguments(&mut arguments, &planned.identity);
+    if unhashed_library_output(key, manifest) {
+        codegen(
+            &mut arguments,
+            &format!("metadata={}", planned.identity.metadata),
+        );
+    } else {
+        identity_arguments(&mut arguments, &planned.identity);
+    }
     push(&mut arguments, "--out-dir");
     arguments.push(output_dir.as_os_str().to_owned());
     if key.compile_kind == CompileKind::Target
@@ -204,11 +418,14 @@ pub fn dependency_rustc_invocation_with_build_output(
     }
     let dependency_directories =
         dependency_arguments(&mut arguments, plan, manifests, planned, options)?;
-    if key.kind == UnitKind::ProcMacro {
+    if proc_macro {
         push(&mut arguments, "--extern");
         push(&mut arguments, "proc_macro");
     }
-    if matches!(key.package.source, PackageSourceKey::CratesIo) {
+    if matches!(
+        key.package.source,
+        PackageSourceKey::CratesIo | PackageSourceKey::Git(_)
+    ) {
         push(&mut arguments, "--cap-lints");
         push(
             &mut arguments,
@@ -222,14 +439,63 @@ pub fn dependency_rustc_invocation_with_build_output(
     }
     let mut environment =
         rustc_environment(options.cargo, manifest, crate_name, &dependency_directories)?;
-    if let Some(build_output) = build_output {
-        apply_build_output(&mut arguments, &mut environment, build_output);
+    if matches!(key.kind, UnitKind::Binary | UnitKind::BinaryHarness)
+        || key.kind == UnitKind::Example
+            && key.manifest_target(manifest).unwrap().crate_types == ["bin"]
+    {
+        value(
+            &mut environment,
+            "CARGO_BIN_NAME",
+            key.target.as_deref().unwrap(),
+        );
     }
+    if matches!(key.kind, UnitKind::IntegrationHarness | UnitKind::Bench) {
+        let binaries = options
+            .integration_binaries
+            .and_then(|packages| packages.get(&key.package))
+            .ok_or_else(|| Error::failure("integration harness has no program environment"))?;
+        for binary in manifest.targets_of(TargetKind::Bin) {
+            let path = binaries.get(&binary.name).ok_or_else(|| {
+                Error::failure(format!(
+                    "integration harness has no path for program `{}`",
+                    binary.name
+                ))
+            })?;
+            value(
+                &mut environment,
+                &format!("CARGO_BIN_EXE_{}", binary.name),
+                path,
+            );
+        }
+        value(
+            &mut environment,
+            "CARGO_TARGET_TMPDIR",
+            options
+                .integration_temp_dirs
+                .and_then(|packages| packages.get(&key.package))
+                .ok_or_else(|| Error::failure("integration harness has no temporary directory"))?,
+        );
+    }
+    if options.selected_packages.contains(&key.package) {
+        value(&mut environment, "CARGO_PRIMARY_PACKAGE", "1");
+    }
+    apply_build_outputs(
+        &mut arguments,
+        &mut environment,
+        build_output.as_ref(),
+        linked,
+        manifest.library.is_none()
+            || matches!(
+                key.kind,
+                UnitKind::Library | UnitKind::ProcMacro | UnitKind::LibraryHarness
+            ),
+        |target| link_arg_applies(target, key, manifest),
+    );
     if options.verbose {
         push(&mut arguments, "--verbose");
     }
 
-    let output = expected_output(key, crate_name, &planned.identity, &output_dir);
+    let output = expected_output(key, manifest, crate_name, &planned.identity, &output_dir);
     Ok(Some(RustcInvocation {
         arguments,
         environment,
@@ -238,27 +504,77 @@ pub fn dependency_rustc_invocation_with_build_output(
     }))
 }
 
-fn apply_build_output(
-    arguments: &mut Vec<OsString>,
-    environment: &mut BTreeMap<String, OsString>,
-    build: BuildOutput<'_>,
-) {
-    value(environment, "OUT_DIR", build.out_dir);
-    for directive in &build.output.directives {
-        if let Directive::RustcLinkSearch { kind, path } = directive {
-            push(arguments, "-L");
-            arguments.push(match kind {
-                Some(kind) => format!("{kind}={}", path.display()).into(),
-                None => path.as_os_str().to_owned(),
-            });
+/// Which units a `rustc-link-arg-*` argument reaches, as in Cargo.
+fn link_arg_applies(target: &LinkArgTarget, key: &UnitKey, manifest: &Manifest) -> bool {
+    let binary = matches!(key.kind, UnitKind::Binary | UnitKind::BinaryHarness);
+    match target {
+        LinkArgTarget::Cdylib => {
+            key.kind == UnitKind::Library
+                && manifest
+                    .library
+                    .as_ref()
+                    .is_some_and(|library| library.crate_types.iter().any(|kind| kind == "cdylib"))
+        }
+        LinkArgTarget::Bins => binary,
+        LinkArgTarget::Bin(name) => binary && key.target.as_deref() == Some(name.as_str()),
+        LinkArgTarget::Tests => key.kind == UnitKind::IntegrationHarness,
+        LinkArgTarget::Benches => key.kind == UnitKind::Bench,
+        LinkArgTarget::Examples => {
+            key.kind == UnitKind::Example
+                && manifest
+                    .target(
+                        TargetKind::Example,
+                        key.target.as_deref().unwrap_or_default(),
+                    )
+                    .is_some_and(|example| example.crate_types.iter().any(|kind| kind == "bin"))
         }
     }
+}
+
+/// Applies build-script outputs in Cargo's order: every link search path,
+/// then the unit's own libraries and link arguments, then `cdylib` link
+/// arguments from dependencies, then its own cfgs and environment.
+fn apply_build_outputs(
+    arguments: &mut Vec<OsString>,
+    environment: &mut BTreeMap<String, OsString>,
+    own: Option<&BuildOutput<'_>>,
+    linked: &[BuildOutput<'_>],
+    link_libs: bool,
+    link_arg_applies: impl Fn(&LinkArgTarget) -> bool,
+) {
+    for build in own.into_iter().chain(linked) {
+        for directive in &build.output.directives {
+            if let Directive::RustcLinkSearch { kind, path } = directive {
+                push(arguments, "-L");
+                arguments.push(match kind {
+                    Some(kind) => format!("{kind}={}", path.display()).into(),
+                    None => path.as_os_str().to_owned(),
+                });
+            }
+        }
+    }
+    let Some(build) = own else {
+        add_cdylib_link_arguments(arguments, linked, &link_arg_applies);
+        return;
+    };
+    value(environment, "OUT_DIR", build.out_dir);
     for directive in &build.output.directives {
-        if let Directive::RustcLinkLib(library) = directive {
+        if link_libs && let Directive::RustcLinkLib(library) = directive {
             push(arguments, "-l");
             push(arguments, library);
         }
     }
+    // Cargo's common link-arg instruction reaches every target of this
+    // package; the `rustc-link-arg-*` forms reach only the targets they name.
+    for directive in &build.output.directives {
+        let argument = match directive {
+            Directive::RustcLinkArg(argument) => argument,
+            Directive::RustcLinkArgFor { target, value } if link_arg_applies(target) => value,
+            _ => continue,
+        };
+        codegen(arguments, &format!("link-arg={argument}"));
+    }
+    add_cdylib_link_arguments(arguments, linked, &link_arg_applies);
     for directive in &build.output.directives {
         if let Directive::RustcCfg(cfg) = directive {
             push(arguments, "--cfg");
@@ -282,6 +598,26 @@ fn apply_build_output(
     }
 }
 
+/// Cargo still lets a dependency's `rustc-link-arg-cdylib` reach a cdylib.
+fn add_cdylib_link_arguments(
+    arguments: &mut Vec<OsString>,
+    linked: &[BuildOutput<'_>],
+    link_arg_applies: &impl Fn(&LinkArgTarget) -> bool,
+) {
+    for build in linked {
+        for directive in &build.output.directives {
+            if let Directive::RustcLinkArgFor {
+                target: target @ LinkArgTarget::Cdylib,
+                value,
+            } = directive
+                && link_arg_applies(target)
+            {
+                codegen(arguments, &format!("link-arg={value}"));
+            }
+        }
+    }
+}
+
 fn profile_arguments(arguments: &mut Vec<OsString>, planned: &PlannedUnit, manifest: &Manifest) {
     let profile = &planned.settings.profile;
     if profile.opt_level != "0" {
@@ -290,11 +626,6 @@ fn profile_arguments(arguments: &mut Vec<OsString>, planned: &PlannedUnit, manif
     match profile.panic {
         CargoPanicStrategy::Unwind => {}
         CargoPanicStrategy::Abort => codegen(arguments, "panic=abort"),
-        CargoPanicStrategy::ImmediateAbort => {
-            codegen(arguments, "panic=immediate-abort");
-            push(arguments, "-Z");
-            push(arguments, "unstable-options");
-        }
     }
     match planned.settings.lto {
         CargoUnitLto::Run(None) => codegen(arguments, "lto"),
@@ -400,20 +731,33 @@ fn dependency_arguments(
                 dependency.unit.package.name, dependency.unit.package.version
             ))
         })?;
+        if !child_library
+            .crate_types
+            .iter()
+            .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "dylib" | "proc-macro"))
+        {
+            continue;
+        }
         let alias = dependency
             .alias
             .as_deref()
             .unwrap_or(&dependency.unit.package.name)
             .replace('-', "_");
-        let stem = format!("{}{}", child_library.name, child.identity.extra_filename);
+        let stem = output_stem(
+            &dependency.unit,
+            child_manifest,
+            &child_library.name,
+            &child.identity,
+        );
         let filename = if dependency.unit.kind == UnitKind::ProcMacro {
             proc_macro_filename(&stem)
         } else {
-            let extension = if planned.unit.key.kind == UnitKind::Library {
-                "rmeta"
-            } else {
-                "rlib"
-            };
+            let extension =
+                if uses_dependency_metadata(manifests, planned, &dependency.unit, child_library) {
+                    "rmeta"
+                } else {
+                    "rlib"
+                };
             format!("lib{stem}.{extension}")
         };
         let path = unit_output_directory(child, options).join(filename);
@@ -421,6 +765,24 @@ fn dependency_arguments(
         arguments.push(format!("{alias}={}", path.display()).into());
     }
     Ok(directories)
+}
+
+/// Whether `parent` reads a library dependency's metadata alone, as when Cargo
+/// pipelines. Linking needs the full library.
+pub(crate) fn uses_dependency_metadata(
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    parent: &PlannedUnit,
+    dependency: &UnitKey,
+    library: &LibraryTarget,
+) -> bool {
+    let parent_links_objects = manifests[&parent.unit.key.package]
+        .library
+        .as_ref()
+        .is_some_and(|library| library.requires_upstream_objects());
+    matches!(dependency.mode, UnitMode::Check | UnitMode::CheckTest)
+        || ((matches!(parent.unit.key.mode, UnitMode::Check | UnitMode::CheckTest)
+            || (parent.unit.key.kind == UnitKind::Library && !parent_links_objects))
+            && !library.requires_upstream_objects())
 }
 
 pub(crate) fn dependency_directories(
@@ -478,23 +840,88 @@ pub(crate) fn unit_output_directory(
         .join(&planned.unit.key.package.name)
         .join(planned.identity.extra_filename.trim_start_matches('-'));
     match planned.unit.key.kind {
-        UnitKind::Library | UnitKind::ProcMacro => unit.join("deps"),
+        UnitKind::Library
+        | UnitKind::Binary
+        | UnitKind::LibraryHarness
+        | UnitKind::BinaryHarness
+        | UnitKind::IntegrationHarness
+        | UnitKind::Example
+        | UnitKind::Bench
+        | UnitKind::ProcMacro => unit.join("deps"),
         UnitKind::BuildScriptCompile => unit.join("build-script"),
         UnitKind::BuildScriptRun => unit.join("build-script-execution/out"),
     }
 }
 
+fn unhashed_library_output(key: &UnitKey, manifest: &Manifest) -> bool {
+    key.kind == UnitKind::Library
+        && key.mode == UnitMode::Build
+        && manifest.library.as_ref().unwrap().dynamic()
+}
+
+fn output_stem(key: &UnitKey, manifest: &Manifest, name: &str, identity: &Identity) -> String {
+    if unhashed_library_output(key, manifest) {
+        name.to_owned()
+    } else {
+        format!("{name}{}", identity.extra_filename)
+    }
+}
+
 fn expected_output(
     key: &UnitKey,
+    manifest: &Manifest,
     crate_name: &str,
     identity: &Identity,
     output_dir: &Path,
 ) -> RustcOutput {
-    let stem = format!("{crate_name}{}", identity.extra_filename);
-    match key.kind {
-        UnitKind::Library => RustcOutput::Library {
+    let stem = output_stem(key, manifest, crate_name, identity);
+    if matches!(key.mode, UnitMode::Check | UnitMode::CheckTest) {
+        return RustcOutput::Metadata {
+            metadata: output_dir.join(format!("lib{stem}.rmeta")),
+            dep_info: output_dir.join(format!("{stem}.d")),
+        };
+    }
+    if let Some(types) = key.library_types(manifest) {
+        if !types
+            .iter()
+            .any(|kind| matches!(kind.as_str(), "lib" | "rlib"))
+        {
+            return RustcOutput::StaticLibrary {
+                archive: output_dir.join(format!("lib{stem}.a")),
+                dep_info: output_dir.join(format!("{stem}.d")),
+            };
+        }
+        return RustcOutput::Library {
             rlib: output_dir.join(format!("lib{stem}.rlib")),
-            rmeta: output_dir.join(format!("lib{stem}.rmeta")),
+            rmeta: output_dir.join(format!(
+                "lib{stem}.{}",
+                if types.iter().any(|kind| {
+                    matches!(
+                        kind.as_str(),
+                        "staticlib" | "dylib" | "cdylib" | "proc-macro"
+                    )
+                }) {
+                    "rlib"
+                } else {
+                    "rmeta"
+                }
+            )),
+            archive: types
+                .iter()
+                .any(|kind| kind == "staticlib")
+                .then(|| output_dir.join(format!("lib{stem}.a"))),
+            dep_info: output_dir.join(format!("{stem}.d")),
+        };
+    }
+    match key.kind {
+        UnitKind::Library => unreachable!(),
+        UnitKind::Binary
+        | UnitKind::LibraryHarness
+        | UnitKind::BinaryHarness
+        | UnitKind::IntegrationHarness
+        | UnitKind::Example
+        | UnitKind::Bench => RustcOutput::Binary {
+            executable: output_dir.join(&stem),
             dep_info: output_dir.join(format!("{stem}.d")),
         },
         UnitKind::ProcMacro => RustcOutput::ProcMacro {
@@ -503,7 +930,7 @@ fn expected_output(
         },
         UnitKind::BuildScriptCompile => RustcOutput::BuildScript {
             executable: output_dir.join(&stem),
-            unhashed_executable: output_dir.join("build-script-build"),
+            unhashed_executable: output_dir.join(manifest.build_script_name().unwrap_or_default()),
             dep_info: output_dir.join(format!("{stem}.d")),
         },
         UnitKind::BuildScriptRun => unreachable!(),
@@ -533,9 +960,26 @@ fn rustc_environment(
     crate_name: &str,
     dependency_directories: &[DependencyDirectory],
 ) -> Result<BTreeMap<String, OsString>> {
+    let mut values = package_environment(cargo, manifest);
+    value(&mut values, "CARGO_CRATE_NAME", crate_name);
+    let dynamic = std::env::join_paths(
+        dependency_directories
+            .iter()
+            .filter(|directory| directory.compile_kind == CompileKind::Host)
+            .map(|directory| &directory.path),
+    )
+    .map_err(|error| {
+        Error::failure(format!(
+            "failed to construct rustc dynamic-library search path: {error}"
+        ))
+    })?;
+    value(&mut values, dynamic_library_path_variable(), dynamic);
+    Ok(values)
+}
+
+pub(crate) fn package_environment(cargo: &Path, manifest: &Manifest) -> BTreeMap<String, OsString> {
     let mut values = BTreeMap::new();
     value(&mut values, "CARGO", cargo.as_os_str());
-    value(&mut values, "CARGO_CRATE_NAME", crate_name);
     value(&mut values, "CARGO_MANIFEST_DIR", manifest.root.as_os_str());
     value(
         &mut values,
@@ -578,26 +1022,78 @@ fn rustc_environment(
         version.patch.to_string(),
     );
     value(&mut values, "CARGO_PKG_VERSION_PRE", &version.pre);
-    let dynamic = std::env::join_paths(
-        dependency_directories
+    values
+}
+
+pub(crate) fn runtime_environment(
+    cargo: &Path,
+    manifest: &Manifest,
+    library_paths: &[PathBuf],
+    build_output: Option<&BuildOutput<'_>>,
+) -> Result<BTreeMap<String, OsString>> {
+    let mut environment = BTreeMap::new();
+    if let Some(build_output) = build_output {
+        value(&mut environment, "OUT_DIR", build_output.out_dir);
+        for directive in &build_output.output.directives {
+            if let Directive::RustcEnv {
+                name,
+                value: contents,
+            } = directive
+            {
+                value(&mut environment, name, contents);
+            }
+        }
+    }
+    environment.extend(package_environment(cargo, manifest));
+    let variable = dynamic_library_path_variable();
+    let inherited = std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut paths = if inherited.starts_with(library_paths) {
+        inherited.clone()
+    } else {
+        library_paths
             .iter()
-            .filter(|directory| directory.compile_kind == CompileKind::Host)
-            .map(|directory| &directory.path),
-    )
-    .map_err(|error| {
-        Error::failure(format!(
-            "failed to construct rustc dynamic-library search path: {error}"
-        ))
-    })?;
-    value(&mut values, dynamic_library_path_variable(), dynamic);
-    Ok(values)
+            .cloned()
+            .chain(inherited.iter().cloned())
+            .collect()
+    };
+    if cfg!(target_os = "macos") && inherited.is_empty() {
+        if let Some(home) = std::env::var_os("HOME") {
+            paths.push(PathBuf::from(home).join("lib"));
+        }
+        paths.extend([PathBuf::from("/usr/local/lib"), PathBuf::from("/usr/lib")]);
+    }
+    environment.insert(
+        variable.to_owned(),
+        std::env::join_paths(paths).map_err(|error| {
+            Error::failure(format!(
+                "failed to construct runtime library search path: {error}"
+            ))
+        })?,
+    );
+    Ok(environment)
 }
 
 pub(crate) fn lint_arguments(manifest: &Manifest) -> Vec<OsString> {
     let mut lints = manifest
         .rust_lints
         .iter()
-        .map(|(name, lint)| {
+        .map(|(name, lint)| ("rust", name, lint))
+        .chain(
+            manifest
+                .clippy_lints
+                .iter()
+                .map(|(name, lint)| ("clippy", name, lint)),
+        )
+        .chain(
+            manifest
+                .rustdoc_lints
+                .iter()
+                .map(|(name, lint)| ("rustdoc", name, lint)),
+        )
+        .map(|(namespace, name, lint)| {
             let flag = match lint.level.as_str() {
                 "forbid" => "--forbid",
                 "deny" => "--deny",
@@ -605,10 +1101,15 @@ pub(crate) fn lint_arguments(manifest: &Manifest) -> Vec<OsString> {
                 "allow" => "--allow",
                 _ => unreachable!("manifest lint level was validated"),
             };
-            (lint.priority, name.as_str(), format!("{flag}={name}"))
+            let option = if namespace == "rust" {
+                format!("{flag}={name}")
+            } else {
+                format!("{flag}={namespace}::{name}")
+            };
+            (lint.priority, std::cmp::Reverse(name.as_str()), option)
         })
         .collect::<Vec<_>>();
-    lints.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(left.1)));
+    lints.sort();
     let mut arguments = lints
         .into_iter()
         .map(|(_, _, argument)| OsString::from(argument))
@@ -681,7 +1182,7 @@ fn codegen(arguments: &mut Vec<OsString>, value: &str) {
 mod tests {
     use super::*;
     use crate::config::CargoCompat;
-    use crate::manifest::{Lto, ReleaseProfile, Strip};
+    use crate::manifest::{Lto, Profile, Strip};
     use crate::resolver::{
         FeatureContext, PackageSourceKey, Resolution, ResolvedEdge, ResolvedPackage, ResolvedSource,
     };
@@ -723,9 +1224,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn runtime_script_environment_retains_owner_package_metadata() {
+        let fixture = Fixture::new();
+        fixture.package(
+            "owner",
+            "[package]\nname = \"owner\"\nversion = \"1.0.0\"\nedition = \"2024\"\n",
+            true,
+        );
+        let manifest = Manifest::load_path_dependency(&fixture.0.join("owner")).unwrap();
+        let output = BuildScriptOutput {
+            directives: vec![
+                Directive::RustcEnv {
+                    name: "SCRIPT_VALUE".into(),
+                    value: "generated".into(),
+                },
+                Directive::RustcEnv {
+                    name: "CARGO_PKG_NAME".into(),
+                    value: "foreign".into(),
+                },
+            ],
+            diagnostics: Vec::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            out_dir: crate::source_tree::Tree::scan(
+                &fixture.0,
+                crate::source_tree::DEFAULT_LIMITS,
+                crate::source_tree::Exclusions::None,
+            )
+            .unwrap(),
+        };
+        let out_dir = fixture.0.join("output");
+        let environment = runtime_environment(
+            Path::new("/lorry"),
+            &manifest,
+            &[],
+            Some(&BuildOutput {
+                output: &output,
+                out_dir: &out_dir,
+            }),
+        )
+        .unwrap();
+        assert_eq!(environment["OUT_DIR"], out_dir);
+        assert_eq!(environment["SCRIPT_VALUE"], "generated");
+        assert_eq!(environment["CARGO_PKG_NAME"], "owner");
+        assert_eq!(environment["CARGO_MANIFEST_DIR"], manifest.root);
+        let ordinary = runtime_environment(Path::new("/lorry"), &manifest, &[], None).unwrap();
+        assert!(!ordinary.contains_key("OUT_DIR"));
+        assert!(!ordinary.contains_key("SCRIPT_VALUE"));
+    }
+
     fn toolchain() -> Toolchain {
         Toolchain {
             rustc: "/rustc".into(),
+            clippy: None,
             verbose_version: "rustc 1.98.0-nightly (bc2112ed5 2026-06-18)\n\
                               binary: rustc\n\
                               commit-hash: bc2112ed56c99fa649e09ab3ab286afab3d9059a\n\
@@ -737,6 +1289,7 @@ mod tests {
             release: "1.98.0-nightly".to_owned(),
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
+            query_cache: None,
         }
     }
 
@@ -775,6 +1328,68 @@ mod tests {
     }
 
     #[test]
+    fn lint_priorities_apply_across_rust_and_clippy_namespaces() {
+        let manifest = Manifest::parse(
+            Path::new("/fixture"),
+            Path::new("/fixture/Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [lints.rust]\nwarnings = { level = \"deny\", priority = -1 }\n\
+             unused = \"warn\"\n\
+             [lints.clippy]\nall = { level = \"deny\", priority = -2 }\n\
+             unused = \"allow\"\nneedless_return = { level = \"allow\", priority = 1 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            lint_arguments(&manifest),
+            [
+                "--deny=clippy::all",
+                "--deny=warnings",
+                "--allow=clippy::unused",
+                "--warn=unused",
+                "--allow=clippy::needless_return",
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn staging_changes_only_the_compiler_unit_output() {
+        let final_dir = PathBuf::from("/target/build/package/hash/build-script");
+        let private_dir = PathBuf::from("/target/build/package/.hash.staging/build-script");
+        let invocation = RustcInvocation {
+            arguments: vec![
+                OsString::from("--out-dir"),
+                final_dir.as_os_str().to_owned(),
+                OsString::from("--extern"),
+                OsString::from("dep=/target/build/other/deps/libdep.rlib"),
+            ],
+            environment: BTreeMap::new(),
+            current_dir: PathBuf::from("/workspace"),
+            output: RustcOutput::BuildScript {
+                executable: final_dir.join("build_script_build-hash"),
+                unhashed_executable: final_dir.join("build-script-build"),
+                dep_info: final_dir.join("build_script_build-hash.d"),
+            },
+        };
+        let staged = invocation.with_output_directory(&private_dir).unwrap();
+        assert_eq!(staged.arguments[1], private_dir.as_os_str());
+        assert_eq!(staged.arguments[3], invocation.arguments[3]);
+        assert_eq!(
+            staged.output,
+            RustcOutput::BuildScript {
+                executable: private_dir.join("build_script_build-hash"),
+                unhashed_executable: private_dir.join("build-script-build"),
+                dep_info: private_dir.join("build_script_build-hash.d"),
+            }
+        );
+        assert_eq!(
+            invocation.arguments[1],
+            final_dir.as_os_str(),
+            "cache identity retains the planned published path"
+        );
+    }
+
+    #[test]
     fn renders_cargo_oracle_library_and_build_script_compile_commands() {
         let fixture = Fixture::new();
         fixture.package(
@@ -810,6 +1425,7 @@ mod tests {
                         ResolvedEdge {
                             dependency_index: 0,
                             alias: "typenum".to_owned(),
+                            target: None,
                             kind: DependencyKind::Normal,
                             parent_compile_kind: Some(CompileKind::Target),
                             compile_kind: CompileKind::Target,
@@ -819,6 +1435,7 @@ mod tests {
                         ResolvedEdge {
                             dependency_index: 1,
                             alias: "version_check".to_owned(),
+                            target: None,
                             kind: DependencyKind::Build,
                             parent_compile_kind: Some(CompileKind::Target),
                             compile_kind: CompileKind::Host,
@@ -847,16 +1464,17 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
-                test_profile: false,
                 panic_abort: true,
-                release_profile: &ReleaseProfile {
+                profile: &Profile {
                     panic_abort: true,
                     lto: Lto::Fat,
                     strip: Strip::Symbols,
                     codegen_units: Some(1),
+                    ..Profile::release()
                 },
                 rustc: &toolchain(),
                 logical_target: None,
+                physical_target: None,
                 rustflags: &[],
             },
         )
@@ -865,6 +1483,7 @@ mod tests {
         let command_options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
+            selected_packages: &[],
             host_profile: host,
             target_profile: host,
             host_incremental: Path::new("/incremental/host"),
@@ -872,6 +1491,8 @@ mod tests {
             physical_target: None,
             host_linker: None,
             target_linker: None,
+            integration_binaries: None,
+            integration_temp_dirs: None,
             verbose: true,
         };
 
@@ -880,6 +1501,35 @@ mod tests {
             .iter()
             .find(|key| key.package == version_check && key.kind == UnitKind::Library)
             .unwrap();
+        let selected = [version_check.clone(), typenum.clone()];
+        for selected_packages in [selected.as_slice(), &[]] {
+            let options = CommandOptions {
+                selected_packages,
+                ..command_options
+            };
+            for (package, kind) in [
+                (&version_check, UnitKind::Library),
+                (&typenum, UnitKind::Library),
+                (&generic_array, UnitKind::BuildScriptCompile),
+            ] {
+                let key = plan
+                    .order
+                    .iter()
+                    .find(|key| &key.package == package && key.kind == kind)
+                    .unwrap();
+                let invocation = dependency_rustc_invocation(&plan, &manifests, key, &options)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    invocation.environment.get("CARGO_PRIMARY_PACKAGE"),
+                    selected_packages
+                        .contains(package)
+                        .then_some(&OsString::from("1")),
+                    "primary-package environment for {}",
+                    package.name
+                );
+            }
+        }
         let invocation =
             dependency_rustc_invocation(&plan, &manifests, version_key, &command_options)
                 .unwrap()
@@ -1040,6 +1690,12 @@ mod tests {
                     value: "yes".to_owned(),
                 },
                 Directive::RustcLinkLib("static=fixture".to_owned()),
+                Directive::RustcLinkArg("-Wl,--gc-sections".to_owned()),
+                Directive::RustcLinkArgFor {
+                    target: LinkArgTarget::Bins,
+                    value: "-Wl,--bins-only".to_owned(),
+                },
+                Directive::RustcLinkArg("-Wl,--as-needed".to_owned()),
                 Directive::RustcCfg("generated_cfg".to_owned()),
                 Directive::RustcLinkSearch {
                     kind: Some("native".to_owned()),
@@ -1048,6 +1704,7 @@ mod tests {
                 Directive::RustcCheckCfg("cfg(generated_cfg)".to_owned()),
             ],
             diagnostics: Vec::new(),
+            stdout: String::new(),
             stderr: String::new(),
             out_dir: crate::source_tree::Tree {
                 entries: Vec::new(),
@@ -1066,6 +1723,7 @@ mod tests {
                 output: &output,
                 out_dir: &script_out,
             }),
+            &[],
         )
         .unwrap()
         .unwrap();
@@ -1075,6 +1733,10 @@ mod tests {
             format!("native={}", script_out.display()),
             "-l".to_owned(),
             "static=fixture".to_owned(),
+            "-C".to_owned(),
+            "link-arg=-Wl,--gc-sections".to_owned(),
+            "-C".to_owned(),
+            "link-arg=-Wl,--as-needed".to_owned(),
             "--cfg".to_owned(),
             "generated_cfg".to_owned(),
             "--check-cfg".to_owned(),
@@ -1083,6 +1745,97 @@ mod tests {
         ]));
         assert_eq!(invocation.environment["OUT_DIR"], script_out);
         assert_eq!(invocation.environment["GENERATED"], "yes");
+
+        // Linkable dependencies' link search paths follow the unit's own; their
+        // libraries and other link arguments stay with them.
+        let dependency_out = fixture.0.join("dependency-out");
+        fs::create_dir(&dependency_out).unwrap();
+        let dependency_output = crate::build_script::Output {
+            directives: vec![
+                Directive::RustcLinkSearch {
+                    kind: Some("native".to_owned()),
+                    path: dependency_out.clone(),
+                },
+                Directive::RustcLinkLib("static:-bundle=dependency".to_owned()),
+                Directive::RustcLinkArg("-Wl,--dependency-only".to_owned()),
+            ],
+            ..output.clone()
+        };
+        let invocation = dependency_rustc_invocation_with_build_output(
+            &plan,
+            &manifests,
+            library_key,
+            &command_options,
+            Some(BuildOutput {
+                output: &output,
+                out_dir: &script_out,
+            }),
+            &[BuildOutput {
+                output: &dependency_output,
+                out_dir: &dependency_out,
+            }],
+        )
+        .unwrap()
+        .unwrap();
+        let linked_arguments = string_arguments(&invocation);
+        let own = format!("native={}", script_out.display());
+        let start = linked_arguments
+            .iter()
+            .position(|argument| *argument == own)
+            .unwrap();
+        assert_eq!(
+            linked_arguments[start + 1..start + 3],
+            [
+                "-L".to_owned(),
+                format!("native={}", dependency_out.display())
+            ]
+        );
+        assert_eq!(linked_arguments.len(), arguments.len() + 2);
+        assert!(
+            !linked_arguments
+                .iter()
+                .any(|argument| argument.contains("dependency-only")
+                    || argument.contains("static:-bundle=dependency"))
+        );
+
+        // `rustc-link-arg-*` arguments reach only the targets they name.
+        let manifest = &manifests[&generic_array];
+        let unit = |kind, target: Option<&str>| UnitKey {
+            kind,
+            target: target.map(str::to_owned),
+            ..library_key.clone()
+        };
+        let applies = |target, key: &UnitKey| link_arg_applies(&target, key, manifest);
+        let binary = unit(UnitKind::Binary, Some("tool"));
+        assert!(applies(LinkArgTarget::Bins, &binary));
+        assert!(applies(LinkArgTarget::Bin("tool".to_owned()), &binary));
+        assert!(!applies(LinkArgTarget::Bin("other".to_owned()), &binary));
+        assert!(applies(
+            LinkArgTarget::Bins,
+            &unit(UnitKind::BinaryHarness, Some("tool"))
+        ));
+        assert!(!applies(LinkArgTarget::Tests, &binary));
+        assert!(applies(
+            LinkArgTarget::Tests,
+            &unit(UnitKind::IntegrationHarness, Some("it"))
+        ));
+        assert!(applies(
+            LinkArgTarget::Benches,
+            &unit(UnitKind::Bench, Some("speed"))
+        ));
+        assert!(!applies(LinkArgTarget::Cdylib, library_key));
+        let mut cdylib = manifest.clone();
+        cdylib.library.as_mut().unwrap().crate_types = vec!["cdylib".to_owned()];
+        assert!(link_arg_applies(
+            &LinkArgTarget::Cdylib,
+            library_key,
+            &cdylib
+        ));
+        assert!(!link_arg_applies(
+            &LinkArgTarget::Cdylib,
+            &unit(UnitKind::LibraryHarness, None),
+            &cdylib
+        ));
 
         let mut transitive_plan = plan.clone();
         let typenum_key = transitive_plan
@@ -1111,6 +1864,7 @@ mod tests {
                 output: &output,
                 out_dir: &script_out,
             }),
+            &[],
         )
         .unwrap()
         .unwrap();
@@ -1147,16 +1901,17 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
-                test_profile: false,
                 panic_abort: true,
-                release_profile: &ReleaseProfile {
+                profile: &Profile {
                     panic_abort: true,
                     lto: Lto::Fat,
                     strip: Strip::Symbols,
                     codegen_units: Some(1),
+                    ..Profile::release()
                 },
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
+                physical_target: Some("x86_64-unknown-motor"),
                 rustflags: &cross_flags,
             },
         )
@@ -1164,6 +1919,7 @@ mod tests {
         let cross_options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
+            selected_packages: &[],
             host_profile: Path::new("/target/release"),
             target_profile: Path::new("/target/x86_64-unknown-motor/release"),
             host_incremental: Path::new("/incremental/host"),
@@ -1171,6 +1927,8 @@ mod tests {
             physical_target: Some("x86_64-unknown-motor"),
             host_linker: Some(Path::new("/host-cc")),
             target_linker: Some(Path::new("/target-cc")),
+            integration_binaries: None,
+            integration_temp_dirs: None,
             verbose: true,
         };
         let target_key = cross_plan
@@ -1274,6 +2032,7 @@ mod tests {
                     vec![ResolvedEdge {
                         dependency_index: 0,
                         alias: "derive".to_owned(),
+                        target: None,
                         kind: DependencyKind::Normal,
                         parent_compile_kind: Some(CompileKind::Target),
                         compile_kind: CompileKind::Host,
@@ -1297,11 +2056,11 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: false,
-                test_profile: false,
                 panic_abort: false,
-                release_profile: &ReleaseProfile::default(),
+                profile: &Profile::default(),
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
+                physical_target: Some("x86_64-unknown-motor"),
                 rustflags: &[],
             },
         )
@@ -1309,6 +2068,7 @@ mod tests {
         let options = CommandOptions {
             cargo: Path::new("/cargo"),
             workspace_root: &fixture.0,
+            selected_packages: &[],
             host_profile: Path::new("/target/debug/.host"),
             target_profile: Path::new("/target/debug"),
             host_incremental: Path::new("/incremental/host"),
@@ -1316,6 +2076,8 @@ mod tests {
             physical_target: Some("x86_64-unknown-motor"),
             host_linker: None,
             target_linker: None,
+            integration_binaries: None,
+            integration_temp_dirs: None,
             verbose: false,
         };
         let derive_key = plan

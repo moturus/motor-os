@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -9,8 +7,10 @@ use semver::Version;
 
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::AtomicFile;
-use crate::config::PolicyLimits;
+use crate::cli::{Cli, Verbosity};
+use crate::config::{Config, PolicyLimits};
 use crate::diagnostic::{Error, Result};
+use crate::fs_check::{entry_exists, require_real_directory, require_real_file};
 use crate::hash::{decode_hex, hex};
 use crate::manifest::{DependencySource, Manifest};
 use crate::policy::PackageEvidence;
@@ -39,43 +39,85 @@ pub struct Package {
     _extracted: Option<ExtractedArchive>,
 }
 
-impl CargoRegistry {
-    pub fn discover(staging_parent: &Path, limits: &PolicyLimits) -> Result<Self> {
-        Self::discover_with_validation(staging_parent, limits, ValidationMode::Strict, None)
-    }
+/// Whether a build, check, run, test, metadata, or tree command reads
+/// crates.io sources from Cargo's cache. The command line wins over
+/// configuration. By default the mode is on whenever Cargo's cache exists.
+pub(crate) fn selected(cli: &Cli, config: &Config) -> bool {
+    selected_by(cli.use_cargo_registry, config)
+}
 
+/// The same choice, from the command line's explicit setting, if any.
+pub(crate) fn selected_by(explicit: Option<bool>, config: &Config) -> bool {
+    match explicit {
+        Some(explicit) => explicit,
+        None => config.use_cargo_registry.unwrap_or(true) && cache_exists(),
+    }
+}
+
+fn cache_exists() -> bool {
+    cargo_home().is_ok_and(|home| {
+        home.join("registry/src").is_dir() && home.join("registry/cache").is_dir()
+    })
+}
+
+fn cargo_home() -> Result<PathBuf> {
+    let home = match env::var_os("CARGO_HOME") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => env::var_os("HOME")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .map(|home| home.join(".cargo"))
+            .ok_or_else(|| {
+                Error::failure(
+                    "--use-cargo-registry needs CARGO_HOME or HOME to locate Cargo's cache",
+                )
+                .cargo_cache_miss()
+            })?,
+    };
+    if home.is_absolute() {
+        return Ok(home);
+    }
+    Ok(env::current_dir()
+        .map_err(|error| Error::failure(format!("failed to resolve relative CARGO_HOME: {error}")))?
+        .join(home))
+}
+
+/// Runs a command that may read Cargo's cache. Unless the command line asked
+/// for that cache, a command that finds it lacking runs again with Lorry
+/// repositories only, as if the mode were off. `run` also gets the verbosity
+/// for notes printed before dependency sources load. The second run gets
+/// `Quiet`, because the first run already printed them.
+pub(crate) fn with_fallback<T>(
+    cli: &Cli,
+    mut run: impl FnMut(&Cli, Verbosity) -> Result<T>,
+) -> Result<T> {
+    match run(cli, cli.verbosity) {
+        Err(error) if cli.use_cargo_registry.is_none() && error.is_cargo_cache_miss() => {
+            if cli.verbosity == Verbosity::Verbose {
+                eprintln!("Using Lorry repositories because Cargo's cache cannot be used: {error}");
+            }
+            let mut fallback = cli.clone();
+            fallback.use_cargo_registry = Some(false);
+            run(&fallback, Verbosity::Quiet)
+        }
+        result => result,
+    }
+}
+
+impl CargoRegistry {
     pub fn discover_with_validation(
         staging_parent: &Path,
         limits: &PolicyLimits,
         validation: ValidationMode,
         evidence_root: Option<&Path>,
     ) -> Result<Self> {
-        let home = match env::var_os("CARGO_HOME") {
-            Some(path) if !path.is_empty() => PathBuf::from(path),
-            _ => env::var_os("HOME")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
-                .map(|home| home.join(".cargo"))
-                .ok_or_else(|| {
-                    Error::failure(
-                        "--use-cargo-registry needs CARGO_HOME or HOME to locate Cargo's cache",
-                    )
-                })?,
-        };
-        let home = if home.is_absolute() {
-            home
-        } else {
-            env::current_dir()
-                .map_err(|error| {
-                    Error::failure(format!("failed to resolve relative CARGO_HOME: {error}"))
-                })?
-                .join(home)
-        };
-        Self::open_with_validation(&home, staging_parent, limits, validation, evidence_root)
-    }
-
-    pub fn open(home: &Path, staging_parent: &Path, limits: &PolicyLimits) -> Result<Self> {
-        Self::open_with_validation(home, staging_parent, limits, ValidationMode::Strict, None)
+        Self::open_with_validation(
+            &cargo_home()?,
+            staging_parent,
+            limits,
+            validation,
+            evidence_root,
+        )
     }
 
     pub fn open_with_validation(
@@ -108,6 +150,25 @@ impl CargoRegistry {
     }
 
     pub fn load(&self, name: &str, version: &Version, checksum: &str) -> Result<Package> {
+        self.load_package(name, version, checksum, false)
+    }
+
+    pub(crate) fn load_description(
+        &self,
+        name: &str,
+        version: &Version,
+        checksum: &str,
+    ) -> Result<Package> {
+        self.load_package(name, version, checksum, true)
+    }
+
+    fn load_package(
+        &self,
+        name: &str,
+        version: &Version,
+        checksum: &str,
+        describe: bool,
+    ) -> Result<Package> {
         let checksum = decode_hex::<32>(checksum).map_err(|error| {
             Error::failure(format!(
                 "Cargo.lock checksum for `{name} {version}` is invalid: {error}"
@@ -123,11 +184,13 @@ impl CargoRegistry {
                 .join("registry/cache")
                 .join(registry)
                 .join(format!("{leaf}.crate"));
-            let source_present = entry_exists(&source)?;
-            let archive_present = entry_exists(&archive)?;
+            let source_present = entry_exists(&source, "Cargo registry entry")?;
+            let archive_present = entry_exists(&archive, "Cargo registry entry")?;
             if source_present && archive_present {
-                require_real_directory(&source, "Cargo registry package source")?;
-                require_real_file(&archive, "Cargo registry package archive")?;
+                require_real_directory(&source, "Cargo registry package source")
+                    .map_err(Error::cargo_cache_miss)?;
+                require_real_file(&archive, "Cargo registry package archive")
+                    .map_err(Error::cargo_cache_miss)?;
                 candidates.push((registry, source, archive));
             } else if source_present || archive_present {
                 partial.push((registry, source_present, archive_present));
@@ -141,7 +204,8 @@ impl CargoRegistry {
                 .join(", ");
             return Err(Error::failure(format!(
                 "Cargo registry package `{name} {version}` is ambiguous across: {paths}"
-            )));
+            ))
+            .cargo_cache_miss());
         }
         let Some((registry, source, archive)) = candidates.pop() else {
             let detail = partial
@@ -163,11 +227,12 @@ impl CargoRegistry {
             return Err(Error::failure(format!(
                 "Cargo registry cache does not contain both the archive and extracted source for `{name} {version}`{detail}"
             ))
-            .with_help("run Cargo for this locked package first; Lorry does not fetch or repair Cargo's cache"));
+            .with_help("run Cargo for this locked package first; Lorry does not fetch or repair Cargo's cache")
+            .cargo_cache_miss());
         };
 
         verify_marker(&source.join(".cargo-ok"))?;
-        let manifest = Manifest::load_path_dependency(&source)?;
+        let manifest = Manifest::load_registry_dependency(&source, describe)?;
         let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
             Error::failure(format!(
                 "Cargo registry manifest has invalid version `{} {}`: {error}",
@@ -469,22 +534,10 @@ impl Package {
 }
 
 fn real_directory_names(root: &Path, description: &str) -> Result<Vec<String>> {
-    let metadata = match fs::symlink_metadata(root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(Error::failure(format!(
-                "failed to inspect {description} `{}`: {error}",
-                root.display()
-            )));
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::failure(format!(
-            "{description} `{}` is not a real directory",
-            root.display()
-        )));
+    if !entry_exists(root, description)? {
+        return Ok(Vec::new());
     }
+    require_real_directory(root, description).map_err(Error::cargo_cache_miss)?;
     let mut names = Vec::new();
     for entry in fs::read_dir(root).map_err(|error| {
         Error::failure(format!(
@@ -498,18 +551,8 @@ fn real_directory_names(root: &Path, description: &str) -> Result<Vec<String>> {
                 root.display()
             ))
         })?;
-        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
-            Error::failure(format!(
-                "failed to inspect Cargo registry directory `{}`: {error}",
-                entry.path().display()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(Error::failure(format!(
-                "Cargo registry entry `{}` is not a real directory",
-                entry.path().display()
-            )));
-        }
+        require_real_directory(&entry.path(), "Cargo registry entry")
+            .map_err(Error::cargo_cache_miss)?;
         let name = entry.file_name().into_string().map_err(|_| {
             Error::failure(format!(
                 "Cargo registry directory name is not valid UTF-8 under `{}`",
@@ -522,51 +565,17 @@ fn real_directory_names(root: &Path, description: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn entry_exists(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(Error::failure(format!(
-            "failed to inspect Cargo registry entry `{}`: {error}",
-            path.display()
-        ))),
-    }
-}
-
-fn require_real_directory(path: &Path, description: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect {description} `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::failure(format!(
-            "{description} `{}` is not a real directory",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-fn require_real_file(path: &Path, description: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::failure(format!(
-            "failed to inspect {description} `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(Error::failure(format!(
-            "{description} `{}` is not a real regular file",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
+/// An absent or unknown marker means Cargo has not finished extracting the
+/// package in a form Lorry reads.
 fn verify_marker(path: &Path) -> Result<()> {
-    require_real_file(path, "Cargo registry extraction marker")?;
+    if !entry_exists(path, "Cargo registry extraction marker")? {
+        return Err(Error::failure(format!(
+            "Cargo registry extraction marker `{}` is missing",
+            path.display()
+        ))
+        .cargo_cache_miss());
+    }
+    require_real_file(path, "Cargo registry extraction marker").map_err(Error::cargo_cache_miss)?;
     let bytes = fs::read(path).map_err(|error| {
         Error::failure(format!(
             "failed to read Cargo registry extraction marker `{}`: {error}",
@@ -577,7 +586,8 @@ fn verify_marker(path: &Path) -> Result<()> {
         return Err(Error::failure(format!(
             "Cargo registry extraction marker `{}` is invalid",
             path.display()
-        )));
+        ))
+        .cargo_cache_miss());
     }
     Ok(())
 }
@@ -599,6 +609,43 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn only_a_default_mode_cache_miss_falls_back_to_lorry_repositories() {
+        let parse = |arguments: &[&str]| {
+            Cli::parse(arguments.iter().map(|value| (*value).to_owned())).unwrap()
+        };
+        let miss = || Error::failure("Cargo's cache lacks a package").cargo_cache_miss();
+        let mut modes = Vec::new();
+        let result = with_fallback(&parse(&["build"]), |cli, notes| {
+            modes.push((cli.use_cargo_registry, notes));
+            if cli.use_cargo_registry.is_none() {
+                Err(miss())
+            } else {
+                Ok(0)
+            }
+        });
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(
+            modes,
+            [(None, Verbosity::Normal), (Some(false), Verbosity::Quiet)]
+        );
+
+        let mut runs = 0;
+        let result = with_fallback(&parse(&["--use-cargo-registry", "build"]), |_, _| {
+            runs += 1;
+            Err::<i32, _>(miss())
+        });
+        assert!(result.unwrap_err().is_cargo_cache_miss());
+        assert_eq!(runs, 1);
+
+        let result = with_fallback(&parse(&["build"]), |_, _| {
+            runs += 1;
+            Err::<i32, _>(Error::failure("Cargo archive and source differ"))
+        });
+        assert!(!result.unwrap_err().is_cargo_cache_miss());
+        assert_eq!(runs, 2);
+    }
 
     struct Fixture(PathBuf);
 
@@ -673,6 +720,152 @@ mod tests {
     }
 
     #[test]
+    fn describes_verified_cargo_sources_without_build_target_restrictions() {
+        let fixture = Fixture::new();
+        let (source, archive, _) = fixture.package("description-registry");
+        let manifest = "[package]\nname = \"demo\"\nversion = \"1.2.3\"\nedition = \"2021\"\nlicense = \"MIT\"\n\
+            [lib]\ncrate-type = [\"staticlib\"]\n\
+            [dev-dependencies]\nhelper = \"1\"\n";
+        fs::write(source.join("Cargo.toml"), manifest).unwrap();
+        fs::write(source.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(source.join("examples")).unwrap();
+        fs::write(source.join("examples/demo.rs"), "fn main() {}\n").unwrap();
+        write_crate(
+            &archive,
+            &[
+                ("demo-1.2.3/Cargo.toml", manifest.as_bytes().to_vec()),
+                (
+                    "demo-1.2.3/src/lib.rs",
+                    fs::read(source.join("src/lib.rs")).unwrap(),
+                ),
+                (
+                    "demo-1.2.3/src/main.rs",
+                    fs::read(source.join("src/main.rs")).unwrap(),
+                ),
+                (
+                    "demo-1.2.3/examples/demo.rs",
+                    fs::read(source.join("examples/demo.rs")).unwrap(),
+                ),
+            ],
+        );
+        let checksum = hex(&crate::hash::sha256_file(&archive).unwrap());
+        let registry = fixture.registry();
+        let version = Version::parse("1.2.3").unwrap();
+        let compiled = registry.load("demo", &version, &checksum).unwrap();
+        assert_eq!(
+            compiled.manifest.library.as_ref().unwrap().crate_types,
+            ["staticlib"]
+        );
+        assert!(compiled.manifest.dependencies.is_empty());
+        let described = registry
+            .load_description("demo", &version, &checksum)
+            .unwrap();
+        assert!(!described.manifest.editable);
+        assert_eq!(
+            described
+                .manifest
+                .targets
+                .iter()
+                .map(|target| target.kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::manifest::TargetKind::Bin,
+                crate::manifest::TargetKind::Example
+            ]
+        );
+        assert_eq!(
+            described.manifest.dependencies[0].kind,
+            crate::sparse::DependencyKind::Dev
+        );
+        assert_eq!(
+            described.manifest.library.as_ref().unwrap().crate_types,
+            ["staticlib"]
+        );
+        assert_eq!(
+            described.evidence.source_tree_sha256,
+            Tree::scan(
+                &source,
+                crate::source_tree::DEFAULT_LIMITS,
+                Exclusions::CargoRegistryMarker
+            )
+            .unwrap()
+            .sha256
+        );
+        let root = fixture.0.join("project");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"1.0.0\"\n\
+             [dependencies]\ndemo = \"=1.2.3\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("Cargo.lock"), format!(
+            "version = 4\n[[package]]\nname = \"root\"\nversion = \"1.0.0\"\ndependencies = [\"demo\"]\n\
+             [[package]]\nname = \"demo\"\nversion = \"1.2.3\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = {checksum:?}\n")).unwrap();
+        let mut workspace = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        let config = crate::config::Config::default();
+        let options = crate::resolver::Options {
+            resolver: workspace.packages[0].resolver,
+            incompatible_rust_versions: config.incompatible_rust_versions,
+            rust_versions: vec![Version::new(1, 99, 0)],
+            package_limit: crate::policy::PackageLimit::new(
+                &config.policy.limits,
+                &workspace.packages[0],
+            ),
+            max_depth: config.policy.limits.max_depth,
+        };
+        let direct = crate::git::DirectCatalog::default();
+        let registry_source = crate::dependency::RegistrySource::Cargo(&registry);
+        let (complete, _) = crate::dependency::workspace::resolve_locked(
+            &workspace,
+            &config,
+            registry_source,
+            &direct,
+            &options,
+            None,
+        )
+        .unwrap();
+        let prepared = crate::dependency::workspace::prepare_sources(
+            complete,
+            &config,
+            registry_source,
+            &root.join("staging"),
+            &direct,
+        )
+        .unwrap();
+        let dependency = prepared
+            .packages
+            .values()
+            .find(|package| package.manifest.name == "demo")
+            .unwrap();
+        assert_eq!(
+            dependency
+                .manifest
+                .targets
+                .iter()
+                .map(|target| target.kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::manifest::TargetKind::Bin,
+                crate::manifest::TargetKind::Example
+            ]
+        );
+        assert!(!root.join(".lorry").exists());
+        assert!(!root.join("target").exists());
+        fs::write(source.join("examples/demo.rs"), "fn changed() {}\n").unwrap();
+        assert!(
+            registry
+                .load_description("demo", &version, &checksum)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
+    }
+
+    #[test]
     fn verifies_and_uses_cargos_exact_source_directory() {
         let fixture = Fixture::new();
         let (source, _, checksum) = fixture.package("index.crates.io-fixture");
@@ -708,22 +901,24 @@ mod tests {
             ),
         )
         .unwrap();
-        let manifest = Manifest::load(&root).unwrap();
+        let manifest = Manifest::load_for_build(&root).unwrap();
         let mut config = Config::default();
         config.policy.default = PolicyDefault::Allow;
         let cfg = CfgSet::parse("unix\n").unwrap();
         let staging = fixture.0.join("graph-staging");
         fs::create_dir(&staging).unwrap();
-        let prepared = dependency::prepare_locked_cargo_registry(
-            &manifest,
+        let registry = fixture.registry();
+        let prepared = dependency::workspace::prepare_member(
+            &root,
             &config,
-            &fixture.registry(),
+            dependency::RegistrySource::Cargo(&registry),
+            &crate::git::DirectCatalog::default(),
             &Options {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
-                rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 16,
-                max_depth: 8,
+                rust_versions: vec![Version::parse("1.98.0").unwrap()],
+                package_limit: crate::policy::PackageLimit::with_max(16),
+                max_depth: Some(8),
             },
             TargetSelection {
                 target_triple: "x86_64-unknown-linux-gnu",
@@ -732,13 +927,17 @@ mod tests {
                 host_cfg: &cfg,
             },
             &staging,
+            false,
         )
         .unwrap();
-        assert_eq!(prepared.packages.len(), 1);
-        assert_eq!(
-            prepared.packages.values().next().unwrap().source_root(),
-            source
-        );
+        assert_eq!(prepared.packages.len(), 2);
+        let demo = prepared
+            .packages
+            .iter()
+            .find(|(key, _)| key.name == "demo")
+            .unwrap()
+            .1;
+        assert_eq!(demo.source_root(), source);
         fs::write(source.join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
         let error = prepared
             .revalidate_cargo_registry_sources(crate::source_tree::DEFAULT_LIMITS)
@@ -825,6 +1024,42 @@ mod tests {
             .load("demo", &Version::parse("1.2.3").unwrap(), &checksum)
             .unwrap_err();
         assert!(error.to_string().contains("marker"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symbolic_links_in_cargo_home_are_cache_misses() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        fixture.package("index.crates.io-fixture");
+        let cargo = fixture.0.join("cargo");
+        let staging = fixture.0.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        let open = || {
+            CargoRegistry::open_with_validation(
+                &cargo,
+                &staging,
+                &PolicyLimits::default(),
+                ValidationMode::Strict,
+                None,
+            )
+        };
+        let moved = fixture.0.join("moved-src");
+        fs::rename(cargo.join("registry/src"), &moved).unwrap();
+        symlink(&moved, cargo.join("registry/src")).unwrap();
+        let error = open().unwrap_err();
+        assert!(error.is_cargo_cache_miss(), "{error}");
+
+        fs::remove_file(cargo.join("registry/src")).unwrap();
+        fs::create_dir(cargo.join("registry/src")).unwrap();
+        symlink(
+            moved.join("index.crates.io-fixture"),
+            cargo.join("registry/src/index.crates.io-fixture"),
+        )
+        .unwrap();
+        let error = open().unwrap_err();
+        assert!(error.is_cargo_cache_miss(), "{error}");
     }
 
     fn write_crate(path: &Path, files: &[(&str, Vec<u8>)]) {

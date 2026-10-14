@@ -992,7 +992,7 @@ mod tests {
                 "wasmtime"
             ]
         );
-        assert_eq!(config.assembly_required_executables.len(), 14);
+        assert_eq!(config.assembly_required_executables.len(), 16);
         assert!(config
             .assembly_required_executables
             .iter()
@@ -1012,6 +1012,8 @@ mod tests {
         for path in [
             "rustc/devtools/bin/rustfmt",
             "rustc/devtools/rust/bin/rustfmt",
+            "rustc/devtools/bin/clippy-driver",
+            "rustc/devtools/rust/bin/clippy-driver",
         ] {
             assert!(config
                 .assembly_required_executables
@@ -1030,16 +1032,25 @@ mod tests {
             .assembly_required_executables
             .iter()
             .any(|path| path == "sed/devtools/bin/sed"));
-        assert!(config
-            .directories
-            .iter()
-            .any(|path| path == "/devtools/tmp"));
-        for path in [
-            "/devtools/lorry/cache",
-            "/devtools/lorry/vendor",
-            "/devtools/lorry/vendor/.staging",
-        ] {
+        // Scratch and configuration belong to the roles, not to /devtools.
+        for path in ["/devtools/tmp", "/devtools/cfg"] {
+            assert!(!config.directories.iter().any(|candidate| candidate == path));
+        }
+        for path in ["/none/tmp", "/devtools/llvm/cfg"] {
             assert!(config.directories.iter().any(|candidate| candidate == path));
+        }
+        // Each role has its own Lorry repository and cache.
+        for role in ["user", "none"] {
+            for path in ["cache", "vendor", "vendor/.staging"] {
+                let path = format!("/devtools/lorry/{role}/{path}");
+                assert!(config
+                    .directories
+                    .iter()
+                    .any(|candidate| *candidate == path));
+            }
+        }
+        for path in ["/devtools/lorry/cache", "/devtools/lorry/vendor"] {
+            assert!(!config.directories.iter().any(|candidate| candidate == path));
         }
         assert!(!config
             .directories

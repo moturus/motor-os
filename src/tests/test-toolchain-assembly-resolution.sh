@@ -38,6 +38,7 @@ write_assembly() {
 	printf llvm > "$root/images/llvm/devtools/llvm/bin/llvm"
 	printf rustc > "$root/images/rustc/devtools/rust/bin/rustc"
 	printf rustfmt > "$root/images/rustc/devtools/rust/bin/rustfmt"
+	printf clippy > "$root/images/rustc/devtools/rust/bin/clippy-driver"
 	printf rg > "$root/images/rg/system/bin/rg"
 	printf shells > "$root/images/libc/system/cfg/libc/shells"
 	manifest="$root/MOTOR-ASSEMBLY-MANIFEST"
@@ -59,6 +60,8 @@ write_assembly() {
 		printf 'native_rustc_sha256=%s\n' "$(sha256sum "$root/images/rustc/devtools/rust/bin/rustc" | awk '{print $1}')"
 		printf 'native_rustfmt_expected_version_base64=%s\n' "$(printf 'rustfmt test version' | base64 -w0)"
 		printf 'native_rustfmt_sha256=%s\n' "$(sha256sum "$root/images/rustc/devtools/rust/bin/rustfmt" | awk '{print $1}')"
+		printf 'native_clippy_recipe=motor-native-clippy-v1\n'
+		printf 'native_clippy_driver_sha256=%s\n' "$(sha256sum "$root/images/rustc/devtools/rust/bin/clippy-driver" | awk '{print $1}')"
 		printf 'native_llvm_sha256=%s\n' "$(sha256sum "$root/images/llvm/devtools/llvm/bin/llvm" | awk '{print $1}')"
 		printf 'libc_sha256=%s\n' "$(sha256sum "$root/sysroot/devtools/llvm/lib/libc.a" | awk '{print $1}')"
 		printf 'libcxx_sha256=%s\n' "$(sha256sum "$root/sysroot/devtools/llvm/lib/libc++.a" | awk '{print $1}')"

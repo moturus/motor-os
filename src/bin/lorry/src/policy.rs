@@ -1,16 +1,85 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use semver::Version;
 
-use crate::config::{NativeToolRole, Policy, PolicyAction, PolicyDefault, PolicyRule};
+use crate::config::{
+    LimitSource, NativeToolRole, Policy, PolicyAction, PolicyDefault, PolicyLimits, PolicyRule,
+};
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
 use crate::manifest::Manifest;
 use crate::repository::RegistryObject;
 use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedPackage, ResolvedSource};
 use crate::source_tree::{DEFAULT_LIMITS, Exclusions, Tree};
+
+/// Lorry's limit on the number of packages in one dependency graph. Workspace
+/// members are the user's own code, so only other packages count. Members are
+/// matched by canonical directory: another package may share a member's name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageLimit {
+    pub max: u64,
+    source: LimitSource,
+    members: BTreeSet<PathBuf>,
+}
+
+impl PackageLimit {
+    pub fn new(limits: &PolicyLimits, manifest: &Manifest) -> Self {
+        Self {
+            max: limits.max_packages,
+            source: limits.max_packages_source.clone(),
+            members: manifest.workspace_members.values().cloned().collect(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_max(max: u64) -> Self {
+        Self {
+            max,
+            source: LimitSource::Default,
+            members: BTreeSet::new(),
+        }
+    }
+
+    pub fn counts(&self, key: &PackageKey) -> bool {
+        !matches!(&key.source, PackageSourceKey::Path(path) if self.members.contains(path))
+    }
+
+    pub(crate) fn with_members(mut self, members: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.members = members.into_iter().collect();
+        self
+    }
+
+    pub fn check(&self, resolution: &Resolution) -> Result<()> {
+        let counted = resolution
+            .packages
+            .iter()
+            .filter(|package| self.counts(&package.key))
+            .count();
+        if counted as u64 > self.max {
+            return Err(self.error());
+        }
+        Ok(())
+    }
+
+    pub fn error(&self) -> Error {
+        let origin = match &self.source {
+            LimitSource::File(path) => format!("set in `{}`", path.display()),
+            LimitSource::CommandLine => "set by --max-packages".to_owned(),
+            LimitSource::Default => "Lorry's default".to_owned(),
+        };
+        let user = crate::config::user_config_hint();
+        Error::failure(format!(
+            "the dependency graph has more packages from outside the workspace than \
+             the limit of {} ({origin})",
+            self.max
+        ))
+        .with_help(format!(
+            "raise `max-packages` in the `[policy.limits]` table of `{user}`, \
+             or pass `--max-packages N` for this run"
+        ))
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Preflight {
@@ -38,12 +107,17 @@ pub struct PackageEvidence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Admission {
     pub packages: BTreeMap<PackageKey, PackageAdmission>,
+    /// Packages whose build-time code an interactive review must approve.
+    pub proposed: BTreeSet<PackageKey>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageAdmission {
-    pub matching_allow_rules: Vec<String>,
     pub native_tools: BTreeSet<NativeToolRole>,
+    /// A trusted or approved build script also gets every native tool
+    /// configured for its target.
+    pub configured_native_tools: bool,
+    pub caller_env: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,26 +145,20 @@ enum Fact {
 }
 
 struct Facts<'a> {
-    package: &'a ResolvedPackage,
+    package: &'a PackageKey,
     source: SourceKind,
     checksum: Fact,
     source_tree_sha256: Fact,
     license: Fact,
 }
 
-pub fn preflight(policy: &Policy, resolution: &Resolution) -> Result<Preflight> {
-    if resolution.packages.len() as u64 > policy.limits.max_packages {
+pub(crate) fn preflight_workspace(policy: &Policy, resolution: &Resolution) -> Result<Preflight> {
+    let depth = graph_depth(resolution)?;
+    if let Some(limit) = policy.limits.max_depth
+        && depth > limit
+    {
         return Err(Error::failure(format!(
-            "selected package count {} exceeds policy limit {}",
-            resolution.packages.len(),
-            policy.limits.max_packages
-        )));
-    }
-    let depth = selected_depth(resolution)?;
-    if depth > policy.limits.max_depth {
-        return Err(Error::failure(format!(
-            "selected dependency depth {depth} exceeds policy limit {}",
-            policy.limits.max_depth
+            "selected dependency depth {depth} exceeds policy limit {limit}"
         )));
     }
 
@@ -110,7 +178,7 @@ pub fn preflight(policy: &Policy, resolution: &Resolution) -> Result<Preflight> 
                 potential_rules.push(id.clone());
             }
             if rule.action == PolicyAction::Deny && rule_definitely_matches(rule, &facts) {
-                return Err(denied_by_rule(package, id, rule));
+                return Err(denied_by_rule(&package.key, id, rule));
             }
         }
 
@@ -124,14 +192,16 @@ pub fn preflight(policy: &Policy, resolution: &Resolution) -> Result<Preflight> 
                 .iter()
                 .any(|id| policy.rules[id].action == PolicyAction::Allow)
         {
-            return Err(not_admitted(package, &facts, None));
+            return Err(not_admitted(policy, package, &facts, None));
         }
         if known_build_script
+            && !policy.trusts_build_code()
+            && !policy.propose_missing
             && !potential_rules
                 .iter()
-                .any(|id| script_rule_authorizes(&policy.rules[id], facts.source))
+                .any(|id| script_rule_authorizes(&policy.rules[id], package))
         {
-            return Err(build_script_not_admitted(package, &facts, None));
+            return Err(build_script_not_admitted(policy, package, &facts, None));
         }
         let known_proc_macro = package.local_manifest.as_ref().is_some_and(|manifest| {
             manifest
@@ -140,11 +210,13 @@ pub fn preflight(policy: &Policy, resolution: &Resolution) -> Result<Preflight> 
                 .is_some_and(|library| library.proc_macro)
         });
         if known_proc_macro
+            && !policy.trusts_build_code()
+            && !policy.propose_missing
             && !potential_rules
                 .iter()
-                .any(|id| proc_macro_rule_authorizes(&policy.rules[id], facts.source))
+                .any(|id| proc_macro_rule_authorizes(&policy.rules[id], package))
         {
-            return Err(proc_macro_not_admitted(package, &facts, None));
+            return Err(proc_macro_not_admitted(policy, package, &facts, None));
         }
 
         packages.insert(package.key.clone(), PreliminaryPackage { potential_rules });
@@ -172,19 +244,270 @@ pub fn inspect(
             "resolved package graph changed between policy passes",
         ));
     }
-    if evidence.keys().cloned().collect::<BTreeSet<_>>() != selected {
+    inspect_evidence(&preflight.policy, resolution, evidence)?;
+    let mut admitted = BTreeMap::new();
+    let mut proposals = BTreeSet::new();
+    for package in &resolution.packages {
+        let evidence = &evidence[&package.key];
+        let source = source_kind(package);
+        let facts = complete_facts(package, evidence);
+        let preliminary = &preflight.packages[&package.key];
+        let matching = preliminary
+            .potential_rules
+            .iter()
+            .filter(|id| rule_matches(&preflight.policy.rules[id.as_str()], &facts))
+            .collect::<Vec<_>>();
+        if let Some(id) = matching
+            .iter()
+            .find(|id| preflight.policy.rules[id.as_str()].action == PolicyAction::Deny)
+        {
+            return Err(denied_by_rule(
+                &package.key,
+                id,
+                &preflight.policy.rules[id.as_str()],
+            ));
+        }
+        let allows = matching
+            .iter()
+            .filter(|id| preflight.policy.rules[id.as_str()].action == PolicyAction::Allow)
+            .copied()
+            .collect::<Vec<_>>();
+        if base_requires_allow(&preflight.policy, source) && allows.is_empty() {
+            return Err(not_admitted(
+                &preflight.policy,
+                package,
+                &facts,
+                Some(evidence),
+            ));
+        }
+
+        let script_allows = allows
+            .iter()
+            .filter(|id| script_rule_authorizes(&preflight.policy.rules[id.as_str()], package))
+            .copied()
+            .collect::<Vec<_>>();
+        let trusted = preflight.policy.trusts_build_code();
+        let propose = preflight.policy.propose_missing;
+        let mut proposed = false;
+        if evidence.build_script && script_allows.is_empty() && !trusted {
+            if !propose {
+                return Err(build_script_not_admitted(
+                    &preflight.policy,
+                    package,
+                    &facts,
+                    Some(evidence),
+                ));
+            }
+            proposed = true;
+        }
+        let proc_macro_allows = allows
+            .iter()
+            .filter(|id| proc_macro_rule_authorizes(&preflight.policy.rules[id.as_str()], package))
+            .copied()
+            .collect::<Vec<_>>();
+        if evidence.proc_macro && proc_macro_allows.is_empty() && !trusted {
+            if !propose {
+                return Err(proc_macro_not_admitted(
+                    &preflight.policy,
+                    package,
+                    &facts,
+                    Some(evidence),
+                ));
+            }
+            proposed = true;
+        }
+        if proposed {
+            proposals.insert(package.key.clone());
+        }
+        let configured = trusted
+            || proposed
+            || script_allows
+                .iter()
+                .any(|id| preflight.policy.rules[id.as_str()].configured_native_tools);
+        let native_tools = script_allows
+            .iter()
+            .flat_map(|id| {
+                preflight.policy.rules[id.as_str()]
+                    .native_tools
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        let caller_env = script_allows
+            .iter()
+            .flat_map(|id| {
+                preflight.policy.rules[id.as_str()]
+                    .caller_env
+                    .iter()
+                    .cloned()
+            })
+            .collect();
+        admitted.insert(
+            package.key.clone(),
+            PackageAdmission {
+                native_tools,
+                configured_native_tools: configured && evidence.build_script,
+                caller_env,
+            },
+        );
+    }
+
+    Ok(Admission {
+        packages: admitted,
+        proposed: proposals,
+    })
+}
+
+/// Veto known locked identities before any index or Git acquisition. Tree and
+/// license constraints remain unknown until verified sources can supply them.
+pub(crate) fn preflight_locked_sources(
+    policy: &Policy,
+    lock: &crate::manifest::Lockfile,
+) -> Result<()> {
+    for package in &lock.packages {
+        let Some(source) = &package.source else {
+            continue;
+        };
+        let (source_kind, source_key, checksum) =
+            if source == "registry+https://github.com/rust-lang/crates.io-index" {
+                (
+                    SourceKind::CratesIo,
+                    PackageSourceKey::CratesIo,
+                    package.checksum.clone().map_or(Fact::Absent, Fact::Value),
+                )
+            } else if source.starts_with("git+") {
+                crate::git::parse_locked_source(source)?;
+                (
+                    SourceKind::Git,
+                    PackageSourceKey::Git(source.clone()),
+                    Fact::Absent,
+                )
+            } else {
+                return Err(Error::failure(format!(
+                    "unsupported locked source `{source}`"
+                )));
+            };
+        let key = PackageKey {
+            name: package.name.clone(),
+            version: Version::parse(&package.version.original)
+                .map_err(|error| Error::failure(format!("invalid locked version: {error}")))?,
+            source: source_key,
+        };
+        let facts = Facts {
+            package: &key,
+            source: source_kind,
+            checksum,
+            source_tree_sha256: Fact::Unknown,
+            license: Fact::Unknown,
+        };
+        for (id, rule) in &policy.rules {
+            if rule.action == PolicyAction::Deny && rule_definitely_matches(rule, &facts) {
+                return Err(denied_by_rule(&key, id, rule));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Source preparation checks vetoes and resource limits without granting any
+/// capability to compile or execute a build script or procedural macro.
+pub(crate) fn preflight_sources(policy: &Policy, resolution: &Resolution) -> Result<()> {
+    PackageLimit {
+        max: policy.limits.max_packages,
+        source: policy.limits.max_packages_source.clone(),
+        members: resolution
+            .packages
+            .iter()
+            .filter_map(|package| {
+                let PackageSourceKey::Path(root) = &package.key.source else {
+                    return None;
+                };
+                package
+                    .local_manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.editable)
+                    .then(|| root.clone())
+            })
+            .collect(),
+    }
+    .check(resolution)?;
+    let depth = graph_depth(resolution)?;
+    if let Some(limit) = policy.limits.max_depth
+        && depth > limit
+    {
+        return Err(Error::failure(format!(
+            "complete dependency depth {depth} exceeds policy limit {limit}"
+        )));
+    }
+    let mut keys = BTreeSet::new();
+    for package in &resolution.packages {
+        if !keys.insert(&package.key) {
+            return Err(Error::failure(
+                "source graph contains a duplicate package identity",
+            ));
+        }
+        check_path_root(policy, package)?;
+        let facts = preliminary_facts(package);
+        check_denies(policy, package, &facts)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn inspect_sources(
+    policy: &Policy,
+    resolution: &Resolution,
+    evidence: &BTreeMap<PackageKey, PackageEvidence>,
+) -> Result<()> {
+    preflight_sources(policy, resolution)?;
+    inspect_evidence(policy, resolution, evidence)?;
+    for package in &resolution.packages {
+        check_denies(
+            policy,
+            package,
+            &complete_facts(package, &evidence[&package.key]),
+        )?;
+    }
+    Ok(())
+}
+
+fn check_denies(policy: &Policy, package: &ResolvedPackage, facts: &Facts<'_>) -> Result<()> {
+    for (id, rule) in &policy.rules {
+        if rule.action == PolicyAction::Deny && rule_definitely_matches(rule, facts) {
+            return Err(denied_by_rule(&package.key, id, rule));
+        }
+    }
+    Ok(())
+}
+
+fn inspect_evidence(
+    policy: &Policy,
+    resolution: &Resolution,
+    evidence: &BTreeMap<PackageKey, PackageEvidence>,
+) -> Result<()> {
+    let selected = resolution
+        .packages
+        .iter()
+        .map(|package| package.key.clone())
+        .collect::<BTreeSet<_>>();
+    if selected.len() != resolution.packages.len()
+        || evidence.keys().cloned().collect::<BTreeSet<_>>() != selected
+    {
         return Err(Error::failure(
             "second policy pass does not have exact evidence for every selected package",
         ));
     }
-
     let mut compressed_total = 0_u64;
     let mut extracted_total = 0_u64;
-    let mut admitted = BTreeMap::new();
     for package in &resolution.packages {
         let evidence = &evidence[&package.key];
         check_evidence_identity(package, evidence)?;
-        check_package_limits(&preflight.policy, package, evidence)?;
+        if !package
+            .local_manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.editable)
+        {
+            check_package_limits(policy, package, evidence)?;
+        }
         let source = source_kind(package);
         if source == SourceKind::CratesIo && evidence.newly_acquired {
             let archive_bytes = evidence.archive_bytes.ok_or_else(|| {
@@ -202,80 +525,20 @@ pub fn inspect(
                     Error::failure("vendor transaction extracted byte count overflowed")
                 })?;
         }
-
-        let facts = complete_facts(package, evidence);
-        let preliminary = &preflight.packages[&package.key];
-        let matching = preliminary
-            .potential_rules
-            .iter()
-            .filter(|id| rule_matches(&preflight.policy.rules[id.as_str()], &facts))
-            .collect::<Vec<_>>();
-        if let Some(id) = matching
-            .iter()
-            .find(|id| preflight.policy.rules[id.as_str()].action == PolicyAction::Deny)
-        {
-            return Err(denied_by_rule(
-                package,
-                id,
-                &preflight.policy.rules[id.as_str()],
-            ));
-        }
-        let allows = matching
-            .iter()
-            .filter(|id| preflight.policy.rules[id.as_str()].action == PolicyAction::Allow)
-            .copied()
-            .collect::<Vec<_>>();
-        if base_requires_allow(&preflight.policy, source) && allows.is_empty() {
-            return Err(not_admitted(package, &facts, Some(evidence)));
-        }
-
-        let script_allows = allows
-            .iter()
-            .filter(|id| script_rule_authorizes(&preflight.policy.rules[id.as_str()], source))
-            .copied()
-            .collect::<Vec<_>>();
-        if evidence.build_script && script_allows.is_empty() {
-            return Err(build_script_not_admitted(package, &facts, Some(evidence)));
-        }
-        let proc_macro_allows = allows
-            .iter()
-            .filter(|id| proc_macro_rule_authorizes(&preflight.policy.rules[id.as_str()], source))
-            .copied()
-            .collect::<Vec<_>>();
-        if evidence.proc_macro && proc_macro_allows.is_empty() {
-            return Err(proc_macro_not_admitted(package, &facts, Some(evidence)));
-        }
-        let native_tools = script_allows
-            .iter()
-            .flat_map(|id| {
-                preflight.policy.rules[id.as_str()]
-                    .native_tools
-                    .iter()
-                    .copied()
-            })
-            .collect();
-        admitted.insert(
-            package.key.clone(),
-            PackageAdmission {
-                matching_allow_rules: allows.into_iter().cloned().collect(),
-                native_tools,
-            },
-        );
     }
-
-    if compressed_total > preflight.policy.limits.max_transaction_bytes {
+    if compressed_total > policy.limits.max_transaction_bytes {
         return Err(Error::failure(format!(
             "selected crates.io archives total {compressed_total} bytes, exceeding policy transaction limit {}",
-            preflight.policy.limits.max_transaction_bytes
+            policy.limits.max_transaction_bytes
         )));
     }
-    if extracted_total > preflight.policy.limits.max_extracted_transaction_bytes {
+    if extracted_total > policy.limits.max_extracted_transaction_bytes {
         return Err(Error::failure(format!(
             "selected crates.io sources total {extracted_total} extracted bytes, exceeding policy transaction limit {}",
-            preflight.policy.limits.max_extracted_transaction_bytes
+            policy.limits.max_extracted_transaction_bytes
         )));
     }
-    Ok(Admission { packages: admitted })
+    Ok(())
 }
 
 impl PackageEvidence {
@@ -395,8 +658,14 @@ impl PackageEvidence {
                 package.key.name, package.key.version
             )));
         }
-        let tree = Tree::scan(physical_root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?;
-        if tree.sha256 != *source_tree_sha256 {
+        let (sha256, extracted_bytes, file_count) = if manifest.editable {
+            let snapshot = crate::member_source::snapshot(manifest, true)?;
+            (snapshot.sha256, snapshot.bytes, snapshot.files)
+        } else {
+            let tree = Tree::scan(physical_root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?;
+            (tree.sha256, tree.total_bytes, tree.file_count as u64)
+        };
+        if sha256 != *source_tree_sha256 {
             return Err(Error::failure(format!(
                 "path source for `{} {}` changed after resolution",
                 package.key.name, package.key.version
@@ -411,60 +680,17 @@ impl PackageEvidence {
                 .is_some_and(|library| library.proc_macro),
             newly_acquired: false,
             archive_bytes: None,
-            extracted_bytes: tree.total_bytes,
-            file_count: tree.file_count as u64,
-            source_tree_sha256: tree.sha256,
+            extracted_bytes,
+            file_count,
+            source_tree_sha256: sha256,
         })
-    }
-
-    pub fn from_git(package: &ResolvedPackage) -> Result<Self> {
-        let ResolvedSource::Git {
-            physical_root,
-            source_tree_sha256,
-            ..
-        } = &package.source
-        else {
-            return Err(Error::failure(format!(
-                "`{} {}` is not a Git package",
-                package.key.name, package.key.version
-            )));
-        };
-        let manifest = package.local_manifest.as_ref().ok_or_else(|| {
-            Error::failure(format!(
-                "resolved Git package `{} {}` has no inspected manifest",
-                package.key.name, package.key.version
-            ))
-        })?;
-        let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
-            Error::failure(format!(
-                "Git manifest has invalid version `{} {}`: {error}",
-                manifest.name, manifest.version.original
-            ))
-        })?;
-        if manifest.name != package.key.name
-            || manifest_version != package.key.version
-            || manifest.root != *physical_root
-        {
-            return Err(Error::failure(format!(
-                "Git manifest does not match resolved package `{} {}`",
-                package.key.name, package.key.version
-            )));
-        }
-        let tree = Tree::scan(physical_root, DEFAULT_LIMITS, Exclusions::None)?;
-        if tree.sha256 != *source_tree_sha256 {
-            return Err(Error::failure(format!(
-                "Git source for `{} {}` changed after resolution",
-                package.key.name, package.key.version
-            )));
-        }
-        Ok(Self::from_verified_git(manifest, &tree))
     }
 }
 
 fn preliminary_facts(package: &ResolvedPackage) -> Facts<'_> {
     match &package.source {
         ResolvedSource::CratesIo { checksum } => Facts {
-            package,
+            package: &package.key,
             source: SourceKind::CratesIo,
             checksum: Fact::Value(hex(checksum)),
             source_tree_sha256: Fact::Unknown,
@@ -473,7 +699,7 @@ fn preliminary_facts(package: &ResolvedPackage) -> Facts<'_> {
         ResolvedSource::Path {
             source_tree_sha256, ..
         } => Facts {
-            package,
+            package: &package.key,
             source: SourceKind::Path,
             checksum: Fact::Absent,
             source_tree_sha256: Fact::Value(hex(source_tree_sha256)),
@@ -487,7 +713,7 @@ fn preliminary_facts(package: &ResolvedPackage) -> Facts<'_> {
         ResolvedSource::Git {
             source_tree_sha256, ..
         } => Facts {
-            package,
+            package: &package.key,
             source: SourceKind::Git,
             checksum: Fact::Absent,
             source_tree_sha256: Fact::Value(hex(source_tree_sha256)),
@@ -508,7 +734,7 @@ fn complete_facts<'a>(package: &'a ResolvedPackage, evidence: &'a PackageEvidenc
         ResolvedSource::Path { .. } | ResolvedSource::Git { .. } => Fact::Absent,
     };
     Facts {
-        package,
+        package: &package.key,
         source,
         checksum,
         source_tree_sha256: Fact::Value(hex(&evidence.source_tree_sha256)),
@@ -525,7 +751,8 @@ fn source_kind(package: &ResolvedPackage) -> SourceKind {
 }
 
 fn base_requires_allow(policy: &Policy, source: SourceKind) -> bool {
-    matches!(source, SourceKind::CratesIo | SourceKind::Git)
+    !policy.trust_cargo_cache
+        && matches!(source, SourceKind::CratesIo | SourceKind::Git)
         && policy.default == PolicyDefault::Deny
 }
 
@@ -533,7 +760,11 @@ fn check_path_root(policy: &Policy, package: &ResolvedPackage) -> Result<()> {
     let ResolvedSource::Path { physical_root, .. } = &package.source else {
         return Ok(());
     };
-    if policy.path_roots.is_empty()
+    if package
+        .local_manifest
+        .as_ref()
+        .is_some_and(|manifest| manifest.editable)
+        || policy.path_roots.is_empty()
         || policy
             .path_roots
             .iter()
@@ -576,11 +807,11 @@ fn rule_matches(rule: &PolicyRule, facts: &Facts<'_>) -> bool {
 fn basic_rule_matches(rule: &PolicyRule, facts: &Facts<'_>) -> bool {
     rule.name
         .as_ref()
-        .is_none_or(|name| name == &facts.package.key.name)
+        .is_none_or(|name| name == &facts.package.name)
         && rule
             .version
             .as_ref()
-            .is_none_or(|version| version.matches(&facts.package.key.version))
+            .is_none_or(|version| version.matches(&facts.package.version))
         && rule
             .source
             .as_deref()
@@ -603,8 +834,19 @@ fn fact_definitely_matches(expected: Option<&str>, actual: &Fact) -> bool {
     }
 }
 
-fn script_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
-    if rule.action != PolicyAction::Allow || !rule.allow_build_script {
+fn script_rule_authorizes(rule: &PolicyRule, package: &ResolvedPackage) -> bool {
+    if rule.action != PolicyAction::Allow
+        || !rule.allow_build_script
+        || !member_grant_is_named(rule, package)
+    {
+        return false;
+    }
+    let source = source_kind(package);
+    if source == SourceKind::Path
+        && !rule.native_tools.is_empty()
+        && rule.source_tree_sha256.is_none()
+        && !is_editable_member(package)
+    {
         return false;
     }
     match source {
@@ -613,14 +855,30 @@ fn script_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
     }
 }
 
-fn proc_macro_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
-    if rule.action != PolicyAction::Allow || !rule.allow_proc_macro {
+fn proc_macro_rule_authorizes(rule: &PolicyRule, package: &ResolvedPackage) -> bool {
+    if rule.action != PolicyAction::Allow
+        || !rule.allow_proc_macro
+        || !member_grant_is_named(rule, package)
+    {
         return false;
     }
+    let source = source_kind(package);
     match source {
         SourceKind::CratesIo => true,
         SourceKind::Git | SourceKind::Path => rule.source.as_deref() == Some(source.policy_name()),
     }
+}
+
+fn is_editable_member(package: &ResolvedPackage) -> bool {
+    source_kind(package) == SourceKind::Path
+        && package
+            .local_manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.editable)
+}
+
+fn member_grant_is_named(rule: &PolicyRule, package: &ResolvedPackage) -> bool {
+    !is_editable_member(package) || rule.name.as_deref() == Some(&package.key.name)
 }
 
 pub(crate) fn check_evidence_identity(
@@ -689,7 +947,8 @@ fn check_package_limits(
     Ok(())
 }
 
-fn selected_depth(resolution: &Resolution) -> Result<u64> {
+/// Root edges point at workspace members, which do not count as a level.
+fn graph_depth(resolution: &Resolution) -> Result<u64> {
     let packages = resolution
         .packages
         .iter()
@@ -699,14 +958,30 @@ fn selected_depth(resolution: &Resolution) -> Result<u64> {
     let mut visiting = BTreeSet::new();
     let mut depth = 0;
     for edge in &resolution.root_edges {
-        depth = depth.max(tail_depth(
-            &edge.package,
-            &packages,
-            &mut memo,
-            &mut visiting,
-        )?);
+        let tail = tail_depth(&edge.package, &packages, &mut memo, &mut visiting, None)?;
+        depth = depth.max(tail.saturating_sub(1));
     }
-    if memo.len() != packages.len() {
+    let mut reachable = memo.keys().cloned().collect::<BTreeSet<_>>();
+    for edge in &resolution.root_edges {
+        for dev in packages[&edge.package]
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == crate::sparse::DependencyKind::Dev)
+        {
+            // A development dependency may depend back on this member.
+            // Its ordinary dependencies were already traversed above.
+            let mut dev_memo = BTreeMap::new();
+            depth = depth.max(tail_depth(
+                &dev.package,
+                &packages,
+                &mut dev_memo,
+                &mut visiting,
+                Some(&edge.package),
+            )?);
+            reachable.extend(dev_memo.into_keys());
+        }
+    }
+    if reachable.len() != packages.len() {
         return Err(Error::failure(
             "policy graph contains a selected package unreachable from the root",
         ));
@@ -719,7 +994,11 @@ fn tail_depth(
     packages: &BTreeMap<PackageKey, &ResolvedPackage>,
     memo: &mut BTreeMap<PackageKey, u64>,
     visiting: &mut BTreeSet<PackageKey>,
+    development_root: Option<&PackageKey>,
 ) -> Result<u64> {
+    if development_root == Some(key) {
+        return Ok(0);
+    }
     if let Some(depth) = memo.get(key) {
         return Ok(*depth);
     }
@@ -737,9 +1016,18 @@ fn tail_depth(
     }
     let mut depth = 1;
     for edge in &package.edges {
+        if edge.kind == crate::sparse::DependencyKind::Dev {
+            continue;
+        }
         depth = depth.max(
             1_u64
-                .checked_add(tail_depth(&edge.package, packages, memo, visiting)?)
+                .checked_add(tail_depth(
+                    &edge.package,
+                    packages,
+                    memo,
+                    visiting,
+                    development_root,
+                )?)
                 .ok_or_else(|| Error::failure("policy dependency depth overflowed"))?,
         );
     }
@@ -748,16 +1036,17 @@ fn tail_depth(
     Ok(depth)
 }
 
-fn denied_by_rule(package: &ResolvedPackage, id: &str, rule: &PolicyRule) -> Error {
+fn denied_by_rule(package: &PackageKey, id: &str, rule: &PolicyRule) -> Error {
     Error::failure(format!(
         "package `{} {}` is denied by policy rule `{id}` from `{}`",
-        package.key.name,
-        package.key.version,
+        package.name,
+        package.version,
         rule.provenance.display()
     ))
 }
 
 fn not_admitted(
+    policy: &Policy,
     package: &ResolvedPackage,
     facts: &Facts<'_>,
     evidence: Option<&PackageEvidence>,
@@ -766,10 +1055,13 @@ fn not_admitted(
         "package `{} {}` is not admitted by the effective dependency policy",
         package.key.name, package.key.version
     ))
-    .with_help(exact_allow_example(package, facts, evidence, false, false))
+    .with_help(exact_allow_example(
+        policy, package, facts, evidence, false, false,
+    ))
 }
 
 fn build_script_not_admitted(
+    policy: &Policy,
     package: &ResolvedPackage,
     facts: &Facts<'_>,
     evidence: Option<&PackageEvidence>,
@@ -778,10 +1070,13 @@ fn build_script_not_admitted(
         "package `{} {}` contains a build script without an explicit matching policy grant",
         package.key.name, package.key.version
     ))
-    .with_help(exact_allow_example(package, facts, evidence, true, false))
+    .with_help(exact_allow_example(
+        policy, package, facts, evidence, true, false,
+    ))
 }
 
 fn proc_macro_not_admitted(
+    policy: &Policy,
     package: &ResolvedPackage,
     facts: &Facts<'_>,
     evidence: Option<&PackageEvidence>,
@@ -790,10 +1085,13 @@ fn proc_macro_not_admitted(
         "package `{} {}` contains a procedural macro without an explicit matching policy grant",
         package.key.name, package.key.version
     ))
-    .with_help(exact_allow_example(package, facts, evidence, false, true))
+    .with_help(exact_allow_example(
+        policy, package, facts, evidence, false, true,
+    ))
 }
 
 fn exact_allow_example(
+    policy: &Policy,
     package: &ResolvedPackage,
     facts: &Facts<'_>,
     evidence: Option<&PackageEvidence>,
@@ -802,13 +1100,19 @@ fn exact_allow_example(
 ) -> String {
     let id_name = rule_id_component(&package.key.name);
     let id_version = rule_id_component(&package.key.version.to_string());
+    // A rule scoped to this workspace grants nothing to other checkouts.
+    let rules = match &policy.workspace {
+        Some(root) => format!("{}.policy.rules", crate::config::workspace_table_key(root)),
+        None => "policy.rules".to_owned(),
+    };
     let mut example = format!(
-        "review the package, then add an exact rule such as:\n\
-         [policy.rules.allow-{id_name}-{id_version}]\n\
+        "review the package, then add an exact rule to `{}` such as:\n\
+         [{rules}.allow-{id_name}-{id_version}]\n\
          action = \"allow\"\n\
          name = \"{}\"\n\
          version = \"={}\"\n\
          source = \"{}\"\n",
+        crate::config::user_config_hint(),
         package.key.name,
         package.key.version,
         facts.source.policy_name()
@@ -817,6 +1121,7 @@ fn exact_allow_example(
         example.push_str(&format!("checksum = \"{checksum}\"\n"));
     }
     if facts.source != SourceKind::CratesIo
+        && !is_editable_member(package)
         && let Fact::Value(digest) = &facts.source_tree_sha256
     {
         example.push_str(&format!("source-tree-sha256 = \"{digest}\"\n"));
@@ -832,7 +1137,10 @@ fn exact_allow_example(
     if allow_proc_macro {
         example.push_str("allow-proc-macro = true\n");
     }
-    example.push_str("`--accept-all` cannot bypass this policy");
+    example.push_str(
+        "or approve it in an interactive `lorry vendor` review, \
+         or trust this workspace's build-time code with `lorry vendor --accept-all`",
+    );
     example
 }
 
@@ -859,35 +1167,10 @@ fn safe_toml_string(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, PolicyLimits, PolicyRule};
-    use crate::repository::RepositorySet;
+    use crate::config::{PolicyLimits, PolicyRule};
     use crate::resolver::{FeatureContext, PackageSourceKey, ResolvedEdge};
     use semver::VersionReq;
-    use std::fs;
     use std::path::Path;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
-
-    struct Fixture(PathBuf);
-
-    impl Fixture {
-        fn new() -> Self {
-            let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("lorry-policy-{}-{id}", std::process::id()));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn checksum(byte: u8) -> [u8; 32] {
         [byte; 32]
@@ -957,6 +1240,90 @@ mod tests {
         }
     }
 
+    #[test]
+    fn path_root_allowlists_cover_outside_paths_while_member_vetoes_still_apply() {
+        let mut member = path_package(Path::new("/ws/member"), false, false);
+        member.local_manifest.as_mut().unwrap().editable = true;
+        let outside = path_package(Path::new("/allowed/outside"), false, false);
+        let unowned = path_package(Path::new("/ws/unowned"), false, false);
+        let mut policy = Policy {
+            default: PolicyDefault::Deny,
+            path_roots: vec![Path::new("/allowed").to_owned()],
+            limits: PolicyLimits::default(),
+            rules: BTreeMap::new(),
+            trust_cargo_cache: false,
+            workspace: None,
+            accept_all: false,
+            approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
+            propose_missing: false,
+        };
+        let resolution = make_resolution(vec![member.clone(), outside]);
+        preflight_sources(&policy, &resolution).unwrap();
+        preflight_workspace(&policy, &resolution).unwrap();
+        assert!(
+            preflight_sources(&policy, &make_resolution(vec![unowned]))
+                .unwrap_err()
+                .render()
+                .contains("path-roots")
+        );
+        let mut deny = rule(PolicyAction::Deny, None, None);
+        deny.name = Some(member.key.name.clone());
+        deny.source = Some("path".into());
+        policy.rules.insert("member-veto".into(), deny);
+        assert!(
+            preflight_sources(&policy, &make_resolution(vec![member]))
+                .unwrap_err()
+                .render()
+                .contains("member-veto")
+        );
+    }
+
+    #[test]
+    fn package_limit_counts_only_packages_outside_the_workspace() {
+        let mut manifest = Manifest::parse(
+            Path::new("/ws/app"),
+            Path::new("/ws/app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        manifest.workspace_root = Path::new("/ws").to_owned();
+        manifest.workspace_members = [("app", "/ws/app"), ("local-demo", "/ws/local-demo")]
+            .map(|(name, root)| (name.to_owned(), Path::new(root).to_owned()))
+            .into();
+        let limits = PolicyLimits {
+            max_packages: 1,
+            max_packages_source: LimitSource::File(Path::new("/user/cfg/lorry.toml").to_owned()),
+            ..PolicyLimits::default()
+        };
+        let limit = PackageLimit::new(&limits, &manifest);
+        let member = path_package(Path::new("/ws/local-demo"), false, false);
+        let outside = path_package(Path::new("/elsewhere/local-demo"), false, false);
+        // Below the root and named like a member, but not a member directory.
+        let namesake = path_package(Path::new("/ws/vendored/local-demo"), false, false);
+        let registry = registry_package("demo", "1.2.3", 4);
+
+        limit
+            .check(&make_resolution(vec![member.clone(), registry.clone()]))
+            .unwrap();
+        limit
+            .check(&make_resolution(vec![
+                member.clone(),
+                namesake,
+                registry.clone(),
+            ]))
+            .unwrap_err();
+        let error = limit
+            .check(&make_resolution(vec![member, outside, registry]))
+            .unwrap_err()
+            .render();
+        assert!(
+            error.contains("limit of 1 (set in `/user/cfg/lorry.toml`)"),
+            "{error}"
+        );
+        assert!(error.contains("raise `max-packages`"), "{error}");
+    }
+
     fn make_resolution(packages: Vec<ResolvedPackage>) -> Resolution {
         let root_edges = packages
             .iter()
@@ -964,6 +1331,7 @@ mod tests {
             .map(|(dependency_index, package)| ResolvedEdge {
                 dependency_index,
                 alias: package.key.name.clone(),
+                target: None,
                 kind: crate::sparse::DependencyKind::Normal,
                 parent_compile_kind: None,
                 compile_kind: crate::resolver::CompileKind::Target,
@@ -989,6 +1357,8 @@ mod tests {
             allow_build_script: false,
             allow_proc_macro: false,
             native_tools: BTreeSet::new(),
+            configured_native_tools: false,
+            caller_env: Default::default(),
             provenance: Path::new("/system/lorry.toml").to_owned(),
         }
     }
@@ -1014,6 +1384,171 @@ mod tests {
     }
 
     #[test]
+    fn locked_git_veto_uses_known_identity_without_inventing_source_evidence() {
+        let lock = crate::manifest::Lockfile {
+            format: crate::lockfile::Format::V4,
+            packages: vec![crate::manifest::LockedPackage {
+                name: "demo".into(),
+                version: crate::manifest::Version {
+                    original: "1.2.3".into(),
+                    major: 1,
+                    minor: 2,
+                    patch: 3,
+                    pre: String::new(),
+                    build: String::new(),
+                },
+                source: Some(format!("git+https://example.test/demo#{}", "1".repeat(40))),
+                checksum: None,
+                dependencies: vec![],
+            }],
+        };
+        let mut veto = rule(PolicyAction::Deny, None, None);
+        veto.source = Some("git".into());
+        let mut policy = Policy {
+            default: PolicyDefault::Deny,
+            path_roots: vec![],
+            limits: PolicyLimits::default(),
+            rules: BTreeMap::from([("veto".into(), veto)]),
+            trust_cargo_cache: false,
+            workspace: None,
+            accept_all: false,
+            approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
+            propose_missing: false,
+        };
+        assert!(
+            preflight_locked_sources(&policy, &lock)
+                .unwrap_err()
+                .render()
+                .contains("veto")
+        );
+        policy.rules.get_mut("veto").unwrap().source_tree_sha256 = Some("0".repeat(64));
+        preflight_locked_sources(&policy, &lock).unwrap();
+        policy.rules.get_mut("veto").unwrap().source_tree_sha256 = None;
+        policy.rules.get_mut("veto").unwrap().license = Some("MIT".into());
+        preflight_locked_sources(&policy, &lock).unwrap();
+    }
+
+    #[test]
+    fn source_inspection_needs_no_execution_grants_but_keeps_vetoes_and_limits() {
+        let package = registry_package("demo", "1.2.3", 4);
+        let resolution = make_resolution(vec![package.clone()]);
+        let mut policy = Policy {
+            default: PolicyDefault::Deny,
+            path_roots: Vec::new(),
+            limits: PolicyLimits::default(),
+            rules: BTreeMap::new(),
+            trust_cargo_cache: false,
+            workspace: None,
+            accept_all: false,
+            approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
+            propose_missing: false,
+        };
+        let mut inspected = evidence(&package, true);
+        inspected.proc_macro = true;
+        let evidence = BTreeMap::from([(package.key.clone(), inspected)]);
+        assert!(preflight_workspace(&policy, &resolution).is_err());
+        inspect_sources(&policy, &resolution, &evidence).unwrap();
+        policy.limits.max_package_bytes = 99;
+        assert!(
+            inspect_sources(&policy, &resolution, &evidence)
+                .unwrap_err()
+                .to_string()
+                .contains("package-byte")
+        );
+        policy.limits.max_package_bytes = 100;
+        policy.rules.insert(
+            "veto".to_owned(),
+            rule(PolicyAction::Deny, None, Some("MIT")),
+        );
+        preflight_sources(&policy, &resolution).unwrap();
+        assert!(
+            inspect_sources(&policy, &resolution, &evidence)
+                .unwrap_err()
+                .to_string()
+                .contains("veto")
+        );
+        policy.rules.get_mut("veto").unwrap().license = None;
+        assert!(
+            preflight_sources(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("veto")
+        );
+        policy.rules.clear();
+        assert!(inspect_sources(&policy, &resolution, &BTreeMap::new()).is_err());
+        policy.limits.max_packages = 0;
+        assert!(
+            preflight_sources(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("limit of 0")
+        );
+    }
+
+    #[test]
+    fn workspace_source_depth_excludes_member_roots_and_allows_development_cycles() {
+        let mut member = path_package(Path::new("/workspace/member"), false, false);
+        member.local_manifest.as_mut().unwrap().editable = true;
+        let child = registry_package("child", "1.0.0", 1);
+        let edge = |package, kind| ResolvedEdge {
+            dependency_index: 0,
+            alias: "dependency".to_owned(),
+            target: None,
+            kind,
+            parent_compile_kind: Some(crate::resolver::CompileKind::Target),
+            compile_kind: crate::resolver::CompileKind::Target,
+            context: FeatureContext::Unified,
+            package,
+        };
+        member
+            .edges
+            .push(edge(member.key.clone(), crate::sparse::DependencyKind::Dev));
+        member.edges.push(edge(
+            child.key.clone(),
+            crate::sparse::DependencyKind::Normal,
+        ));
+        let mut resolution = make_resolution(vec![member.clone()]);
+        resolution.packages.push(child);
+        let mut policy = Policy {
+            default: PolicyDefault::Deny,
+            path_roots: Vec::new(),
+            limits: PolicyLimits::default(),
+            rules: BTreeMap::new(),
+            trust_cargo_cache: false,
+            workspace: None,
+            accept_all: false,
+            approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
+            propose_missing: false,
+        };
+        policy.limits.max_depth = Some(1);
+        policy.limits.max_packages = 1;
+        preflight_sources(&policy, &resolution).unwrap();
+        policy.limits.max_depth = Some(0);
+        assert!(
+            preflight_sources(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("depth 1")
+        );
+        policy.limits.max_depth = Some(1);
+        policy.limits.max_packages = 0;
+        assert!(preflight_sources(&policy, &resolution).is_err());
+        resolution.packages.truncate(1);
+        resolution.packages[0].edges.truncate(1);
+        preflight_sources(&policy, &resolution).unwrap();
+        resolution.packages[0].edges[0].kind = crate::sparse::DependencyKind::Normal;
+        assert!(
+            preflight_sources(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("cycle")
+        );
+    }
+
+    #[test]
     fn two_pass_default_deny_waits_for_license_and_honors_vetoes() {
         let package = registry_package("demo", "1.2.3", 4);
         let resolution = make_resolution(vec![package.clone()]);
@@ -1022,19 +1557,16 @@ mod tests {
             "allow-demo".to_owned(),
             rule(PolicyAction::Allow, Some(hex(&checksum(4))), Some("MIT")),
         );
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, false))]);
         let admission = inspect(&pass, &resolution, &evidence).unwrap();
-        assert_eq!(
-            admission.packages[&package.key].matching_allow_rules,
-            ["allow-demo"]
-        );
+        assert!(admission.packages.contains_key(&package.key));
 
         policy.rules.insert(
             "deny-demo".to_owned(),
             rule(PolicyAction::Deny, Some(hex(&checksum(4))), Some("MIT")),
         );
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let error = inspect(&pass, &resolution, &evidence).unwrap_err();
         assert!(error.to_string().contains("deny-demo"));
         assert!(error.to_string().contains("/system/lorry.toml"));
@@ -1044,7 +1576,7 @@ mod tests {
     fn preflight_rejects_default_deny_without_a_possible_allow() {
         let package = registry_package("demo", "1.2.3", 4);
         let resolution = make_resolution(vec![package]);
-        let error = preflight(&Policy::default(), &resolution).unwrap_err();
+        let error = preflight_workspace(&Policy::default(), &resolution).unwrap_err();
         assert!(error.to_string().contains("not admitted"));
         assert!(error.render().contains("[policy.rules.allow-demo-1_2_3]"));
         assert!(error.render().contains(&hex(&checksum(4))));
@@ -1059,8 +1591,14 @@ mod tests {
             path_roots: Vec::new(),
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
+            trust_cargo_cache: false,
+            workspace: None,
+            accept_all: false,
+            approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
+            propose_missing: false,
         };
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
         let error = inspect(&pass, &resolution, &evidence).unwrap_err();
         assert!(error.to_string().contains("build script"));
@@ -1068,8 +1606,86 @@ mod tests {
         let mut allow = rule(PolicyAction::Allow, None, None);
         allow.allow_build_script = true;
         policy.rules.insert("allow-script".to_owned(), allow);
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         inspect(&pass, &resolution, &evidence).unwrap();
+    }
+
+    #[test]
+    fn cargo_cache_builds_need_no_allows_or_grants_but_keep_denies() {
+        let package = registry_package("demo", "1.2.3", 4);
+        let resolution = make_resolution(vec![package.clone()]);
+        let mut config = crate::config::Config::default();
+        config.trust_cargo_cache();
+        assert_eq!(config.policy.limits.max_packages, u64::MAX);
+        let mut policy = config.policy;
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
+        let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
+        let admission = inspect(&pass, &resolution, &evidence).unwrap();
+        assert!(admission.packages[&package.key].configured_native_tools);
+
+        let local = path_package(Path::new("/project/local-demo"), true, true);
+        preflight_workspace(&policy, &make_resolution(vec![local])).unwrap();
+
+        policy
+            .rules
+            .insert("deny-demo".to_owned(), rule(PolicyAction::Deny, None, None));
+        assert!(
+            preflight_workspace(&policy, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("deny-demo")
+        );
+    }
+
+    #[test]
+    fn accepted_and_reviewed_workspaces_grant_build_code_but_keep_admission() {
+        let package = registry_package("demo", "1.2.3", 4);
+        let resolution = make_resolution(vec![package.clone()]);
+        let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
+
+        // `--accept-all` covers build-time code, not default-deny admission.
+        let mut accepted = Policy {
+            accept_all: true,
+            ..Policy::default()
+        };
+        assert!(
+            preflight_workspace(&accepted, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("not admitted")
+        );
+        accepted.default = PolicyDefault::Allow;
+        let pass = preflight_workspace(&accepted, &resolution).unwrap();
+        let admission = inspect(&pass, &resolution, &evidence).unwrap();
+        assert!(admission.packages[&package.key].configured_native_tools);
+        assert!(admission.proposed.is_empty());
+
+        // An interactive review proposes the missing grant instead of failing.
+        let proposing = Policy {
+            default: PolicyDefault::Allow,
+            propose_missing: true,
+            ..Policy::default()
+        };
+        let pass = preflight_workspace(&proposing, &resolution).unwrap();
+        let admission = inspect(&pass, &resolution, &evidence).unwrap();
+        assert_eq!(admission.proposed, BTreeSet::from([package.key.clone()]));
+        assert!(admission.packages[&package.key].configured_native_tools);
+        let member = path_package(Path::new("/project/local-demo"), true, true);
+        preflight_workspace(&proposing, &make_resolution(vec![member])).unwrap();
+
+        // A recorded grant gives its script the configured tools.
+        let mut granted = Policy {
+            default: PolicyDefault::Allow,
+            ..Policy::default()
+        };
+        let mut allow = rule(PolicyAction::Allow, None, None);
+        allow.allow_build_script = true;
+        allow.configured_native_tools = true;
+        granted.rules.insert("lorry-grant-00000".to_owned(), allow);
+        let pass = preflight_workspace(&granted, &resolution).unwrap();
+        let admission = inspect(&pass, &resolution, &evidence).unwrap();
+        assert!(admission.packages[&package.key].configured_native_tools);
+        assert!(admission.proposed.is_empty());
     }
 
     #[test]
@@ -1079,7 +1695,7 @@ mod tests {
         let mut policy = Policy::default();
         policy.path_roots.push(Path::new("/allowed").to_owned());
         assert!(
-            preflight(&policy, &resolution)
+            preflight_workspace(&policy, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("procedural macro")
@@ -1098,10 +1714,12 @@ mod tests {
                 allow_build_script: false,
                 allow_proc_macro: true,
                 native_tools: BTreeSet::new(),
+                configured_native_tools: false,
+                caller_env: Default::default(),
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
         );
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(
             package.key.clone(),
             PackageEvidence {
@@ -1124,7 +1742,7 @@ mod tests {
         let resolution = make_resolution(vec![package.clone()]);
         let mut policy = Policy::default();
         policy.path_roots.push(Path::new("/allowed").to_owned());
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(
             package.key.clone(),
             PackageEvidence {
@@ -1142,7 +1760,7 @@ mod tests {
 
         policy.path_roots = vec![Path::new("/different-root").to_owned()];
         assert!(
-            preflight(&policy, &resolution)
+            preflight_workspace(&policy, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("path-roots")
@@ -1152,7 +1770,7 @@ mod tests {
         let resolution = make_resolution(vec![package.clone()]);
         policy.path_roots = vec![Path::new("/allowed").to_owned()];
         assert!(
-            preflight(&policy, &resolution)
+            preflight_workspace(&policy, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("build script")
@@ -1171,10 +1789,12 @@ mod tests {
                 allow_build_script: true,
                 allow_proc_macro: false,
                 native_tools: BTreeSet::from([NativeToolRole::CCompiler]),
+                configured_native_tools: false,
+                caller_env: Default::default(),
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
         );
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(
             package.key.clone(),
             PackageEvidence {
@@ -1196,12 +1816,91 @@ mod tests {
     }
 
     #[test]
+    fn member_build_time_grants_are_named_and_unpinned_tools_stay_with_members() {
+        let mut package = path_package(Path::new("/ws/local-demo"), true, true);
+        package.local_manifest.as_mut().unwrap().editable = true;
+        let evidence = BTreeMap::from([(
+            package.key.clone(),
+            PackageEvidence {
+                license: "MIT".to_owned(),
+                build_script: true,
+                proc_macro: true,
+                newly_acquired: false,
+                archive_bytes: None,
+                extracted_bytes: 10,
+                file_count: 1,
+                source_tree_sha256: checksum(7),
+            },
+        )]);
+        let mut grant = rule(PolicyAction::Allow, None, None);
+        grant.source = Some("path".into());
+        grant.name = Some(package.key.name.clone());
+        grant.allow_build_script = true;
+        grant.allow_proc_macro = true;
+        grant.native_tools.insert(NativeToolRole::CCompiler);
+        grant.caller_env.insert("PUBLIC".into());
+        let mut policy = Policy::default();
+        for name in [None, Some("other".to_owned()), grant.name.clone()] {
+            let mut candidate = grant.clone();
+            candidate.name = name.clone();
+            policy.rules.insert("member".into(), candidate);
+            let resolution = make_resolution(vec![package.clone()]);
+            let result = preflight_workspace(&policy, &resolution);
+            assert_eq!(result.is_ok(), name == grant.name);
+            if let Ok(pass) = result {
+                let admission = inspect(&pass, &resolution, &evidence).unwrap();
+                assert_eq!(
+                    admission.packages[&package.key].native_tools,
+                    grant.native_tools
+                );
+                assert_eq!(
+                    admission.packages[&package.key].caller_env,
+                    grant.caller_env
+                );
+            }
+            // Inspection must enforce the grants even when source-only
+            // preparation had not yet discovered build-time code.
+            let mut unknown = package.clone();
+            let manifest = unknown.local_manifest.as_mut().unwrap();
+            manifest.build_script = None;
+            manifest.library = None;
+            let unknown_resolution = make_resolution(vec![unknown]);
+            let pass = preflight_workspace(&policy, &unknown_resolution).unwrap();
+            assert_eq!(
+                inspect(&pass, &unknown_resolution, &evidence).is_ok(),
+                name == grant.name
+            );
+        }
+        let resolution = make_resolution(vec![package.clone()]);
+        policy.rules.get_mut("member").unwrap().allow_proc_macro = false;
+        assert!(
+            preflight_workspace(&policy, &resolution)
+                .unwrap_err()
+                .render()
+                .contains("procedural macro")
+        );
+        policy.rules.insert("member".into(), grant.clone());
+        package.local_manifest.as_mut().unwrap().editable = false;
+        let outside = make_resolution(vec![package]);
+        assert!(
+            preflight_workspace(&policy, &outside)
+                .unwrap_err()
+                .render()
+                .contains("build script")
+        );
+        policy.rules.get_mut("member").unwrap().source_tree_sha256 = Some(hex(&checksum(7)));
+        let pass = preflight_workspace(&policy, &outside).unwrap();
+        inspect(&pass, &outside, &evidence).unwrap();
+    }
+
+    #[test]
     fn graph_and_artifact_limits_are_enforced_in_their_earliest_pass() {
         let mut first = registry_package("demo", "1.2.3", 4);
         let second = registry_package("child", "2.0.0", 5);
         first.edges.push(ResolvedEdge {
             dependency_index: 0,
             alias: "child".to_owned(),
+            target: None,
             kind: crate::sparse::DependencyKind::Normal,
             parent_compile_kind: Some(crate::resolver::CompileKind::Target),
             compile_kind: crate::resolver::CompileKind::Target,
@@ -1212,6 +1911,7 @@ mod tests {
             root_edges: vec![ResolvedEdge {
                 dependency_index: 0,
                 alias: "demo".to_owned(),
+                target: None,
                 kind: crate::sparse::DependencyKind::Normal,
                 parent_compile_kind: None,
                 compile_kind: crate::resolver::CompileKind::Target,
@@ -1225,18 +1925,25 @@ mod tests {
             path_roots: Vec::new(),
             limits: PolicyLimits::default(),
             rules: BTreeMap::new(),
+            trust_cargo_cache: false,
+            workspace: None,
+            accept_all: false,
+            approved_review: None,
+            approved_cargo_configs: BTreeSet::new(),
+            propose_missing: false,
         };
-        policy.limits.max_depth = 1;
+        // The root edge points at a member, so `second` is at depth 1.
+        policy.limits.max_depth = Some(0);
         assert!(
-            preflight(&policy, &resolution)
+            preflight_workspace(&policy, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("depth")
         );
 
-        policy.limits.max_depth = 2;
+        policy.limits.max_depth = Some(1);
         policy.limits.max_package_bytes = 99;
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([
             (first.key.clone(), evidence(&first, false)),
             (second.key.clone(), evidence(&second, false)),
@@ -1250,7 +1957,7 @@ mod tests {
 
         policy.limits.max_package_bytes = 100;
         policy.limits.max_transaction_bytes = 150;
-        let pass = preflight(&policy, &resolution).unwrap();
+        let pass = preflight_workspace(&policy, &resolution).unwrap();
         assert!(
             inspect(&pass, &resolution, &evidence)
                 .unwrap_err()
@@ -1266,81 +1973,5 @@ mod tests {
             })
             .collect();
         inspect(&pass, &resolution, &existing).unwrap();
-    }
-
-    #[test]
-    fn admits_every_registry_object_with_the_external_policy_when_requested() {
-        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let repository = PathBuf::from(repository);
-        let generated = repository.parent().unwrap().join("lorry.toml");
-        assert!(generated.is_file());
-
-        let fixture = Fixture::new();
-        let home_config = fixture.0.join("home/.config/lorry");
-        fs::create_dir_all(&home_config).unwrap();
-        fs::copy(&generated, home_config.join("lorry.toml")).unwrap();
-        let config = Config::load_for_test(
-            Path::new("."),
-            &BTreeMap::from([(
-                "HOME".to_owned(),
-                fixture.0.join("home").display().to_string(),
-            )]),
-        )
-        .unwrap();
-        let repositories = RepositorySet::open(
-            &config.repositories,
-            DEFAULT_LIMITS,
-            config.policy.limits.max_package_bytes,
-        )
-        .unwrap();
-
-        let mut packages = Vec::new();
-        let mut evidence = BTreeMap::new();
-        let namespace = repository.join("objects/crates-io/sha256");
-        for prefix in fs::read_dir(namespace).unwrap() {
-            for entry in fs::read_dir(prefix.unwrap().path()).unwrap() {
-                let checksum = entry
-                    .unwrap()
-                    .file_name()
-                    .into_string()
-                    .expect("object address is UTF-8");
-                let object = repositories.lookup_registry(&checksum).unwrap().unwrap();
-                let manifest = Manifest::load_path_dependency(&object.root.join("source")).unwrap();
-                let package = ResolvedPackage {
-                    key: PackageKey {
-                        name: object.name.clone(),
-                        version: object.version.clone(),
-                        source: PackageSourceKey::CratesIo,
-                    },
-                    source: ResolvedSource::CratesIo {
-                        checksum: object.checksum,
-                    },
-                    local_manifest: None,
-                    feature_sets: BTreeMap::new(),
-                    compile_kinds: [crate::resolver::CompileKind::Target].into(),
-                    target_features: BTreeSet::new(),
-                    host_features: BTreeSet::new(),
-                    edges: Vec::new(),
-                    lock_edges: Vec::new(),
-                };
-                let tree = object
-                    .source_tree
-                    .clone()
-                    .expect("test repository retains sources");
-                let inspected =
-                    PackageEvidence::from_registry(&package, &object, &manifest, &tree, false)
-                        .unwrap();
-                evidence.insert(package.key.clone(), inspected);
-                packages.push(package);
-            }
-        }
-
-        packages.sort_by(|left, right| left.key.cmp(&right.key));
-        let resolution = make_resolution(packages);
-        let pass = preflight(&config.policy, &resolution).unwrap();
-        let admission = inspect(&pass, &resolution, &evidence).unwrap();
-        assert_eq!(admission.packages.len(), 45);
     }
 }

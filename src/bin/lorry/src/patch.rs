@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::fs;
 use std::path::Path;
 
@@ -9,16 +7,30 @@ use crate::resolver::Catalog;
 use crate::source_tree::{DEFAULT_LIMITS, Exclusions, Tree};
 
 pub fn configure(manifest: &Manifest, catalog: &mut Catalog) -> Result<()> {
+    configure_mode(manifest, catalog, false)
+}
+
+pub(crate) fn configure_sources(manifest: &Manifest, catalog: &mut Catalog) -> Result<()> {
+    configure_mode(manifest, catalog, true)
+}
+
+fn configure_mode(manifest: &Manifest, catalog: &mut Catalog, describe: bool) -> Result<()> {
     for patch in &manifest.patches {
         match &patch.source {
-            PatchSource::Path(path) => load_local_patch(patch, path, catalog)?,
+            PatchSource::Path(path) => load_local_patch(manifest, patch, path, catalog, describe)?,
             PatchSource::Git(_) => {}
         }
     }
     Ok(())
 }
 
-fn load_local_patch(patch: &Patch, path: &Path, catalog: &mut Catalog) -> Result<()> {
+fn load_local_patch(
+    workspace: &Manifest,
+    patch: &Patch,
+    path: &Path,
+    catalog: &mut Catalog,
+    describe: bool,
+) -> Result<()> {
     let physical_root = fs::canonicalize(path).map_err(|error| {
         Error::failure(format!(
             "failed to resolve local patch `{}` at `{}`: {error}",
@@ -26,21 +38,41 @@ fn load_local_patch(patch: &Patch, path: &Path, catalog: &mut Catalog) -> Result
             path.display()
         ))
     })?;
-    let manifest = Manifest::load_path_dependency(&physical_root)?;
+    let mut manifest = if describe {
+        Manifest::load_source_dependency(&physical_root)?
+    } else {
+        Manifest::load_path_dependency(&physical_root)?
+    };
+    manifest.editable = workspace
+        .workspace_members
+        .values()
+        .any(|member| *member == physical_root);
+    if manifest.editable {
+        manifest
+            .workspace_root
+            .clone_from(&workspace.workspace_root);
+        manifest
+            .workspace_members
+            .clone_from(&workspace.workspace_members);
+    }
     if manifest.name != patch.package {
         return Err(Error::failure(format!(
             "local patch `{}` declares package `{}`, expected `{}`",
             patch.alias, manifest.name, patch.package
         )));
     }
-    let tree = Tree::scan(&manifest.root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?;
-    catalog.insert_path_patch(manifest, physical_root.clone(), physical_root, tree.sha256)
+    let sha256 = if manifest.editable {
+        crate::member_source::snapshot(&manifest, true)?.sha256
+    } else {
+        Tree::scan(&manifest.root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?.sha256
+    };
+    catalog.insert_path_patch(manifest, physical_root.clone(), physical_root, sha256)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver::{Options, ResolvedSource, resolve};
+    use crate::resolver::{Options, ResolvedSource, resolve_member};
     use crate::sparse::Record;
     use semver::Version;
     use std::path::{Path, PathBuf};
@@ -95,7 +127,7 @@ mod tests {
             "version = 4\n\n[[package]]\nname = \"root\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        Manifest::load(root).unwrap()
+        Manifest::load_for_build(root).unwrap()
     }
 
     #[test]
@@ -120,11 +152,19 @@ mod tests {
         let options = Options {
             resolver: crate::manifest::Resolver::V2,
             incompatible_rust_versions: None,
-            rust_version: Version::parse("1.85.0").unwrap(),
-            max_packages: 16,
-            max_depth: 8,
+            rust_versions: vec![Version::parse("1.85.0").unwrap()],
+            package_limit: crate::policy::PackageLimit::with_max(16),
+            max_depth: Some(8),
         };
-        let resolution = resolve(&manifest, &catalog, &options, &[]).unwrap();
+        let resolution =
+            resolve_member(
+                &manifest,
+                &mut catalog,
+                &options,
+                &[],
+                &mut |_, _, _| Ok(()),
+            )
+            .unwrap();
         assert!(matches!(
             resolution.packages[0].source,
             ResolvedSource::Path {

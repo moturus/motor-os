@@ -38,7 +38,7 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = PathBuf::from(format!("/devtools/tmp/ra-{}-{nonce:x}", std::process::id()));
+    let root = PathBuf::from(format!("/user/tmp/ra-{}-{nonce:x}", std::process::id()));
     let second = root.with_file_name(format!("ra-{}-{nonce:x}-second", std::process::id()));
     let manifest = remote.run("/system/bin/cat /devtools/toolchain/manifest")?;
     fs::write(evidence.join("manifest"), &manifest.stdout)?;
@@ -95,6 +95,7 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         format!("put -r {} {}\n", quoted(&fixture)?, quoted(&second)?),
     )?;
     remote.upload(&batch)?;
+    let _grants = UserGrants::install(&remote, &evidence, &batch, &root, &[&root, &second])?;
     let mut sampler = ServerProcess::spawn(&mut remote.ssh(&guest_sampler.to_string_lossy())?)?;
     if sampler.read_until(remote.deadline)? != json!({"ready": true}) {
         return Err(io::Error::other(
@@ -108,7 +109,7 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         "check": {"targets": ["x86_64-unknown-motor"]}, "procMacro": {"enable": false},
         "files": {"watcher": "client"}
     });
-    let command = remote.ssh(&format!("CARGO=/devtools/bin/lorry PATH=/devtools/bin:/system/bin TMPDIR=/devtools/tmp RA_LOG=project_model=debug,rust_analyzer::flycheck=debug {SERVER}"))?;
+    let command = remote.ssh(&format!("CARGO=/devtools/bin/lorry PATH=/devtools/bin:/system/bin RA_LOG=project_model=debug,rust_analyzer::flycheck=debug {SERVER}"))?;
     let start = Instant::now();
     let mut case = SemanticCase::start_command(
         command,
@@ -266,4 +267,62 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         evidence.display()
     );
     Ok(())
+}
+
+/// Lorry takes path grants only from the user's configuration, keyed by
+/// workspace, so the fixture's grant goes into the guest's configuration
+/// for this run. Dropping the guard restores the original file.
+struct UserGrants {
+    repository: PathBuf,
+    saved: PathBuf,
+}
+
+impl UserGrants {
+    fn install(
+        remote: &Remote,
+        evidence: &Path,
+        batch: &Path,
+        staging: &Path,
+        roots: &[&Path],
+    ) -> io::Result<Self> {
+        let grants = evidence.join("grants.toml");
+        fs::write(&grants, crate::lorry::fixture_grants(roots))?;
+        let staged = staging.join("grants.toml");
+        fs::write(
+            batch,
+            format!("put {} {}\n", quoted(&grants)?, quoted(&staged)?),
+        )?;
+        remote.upload(batch)?;
+        let saved = staging.join("user-config.orig");
+        remote.run(&format!(
+            "/system/bin/cp /user/cfg/lorry.toml {}",
+            saved.display()
+        ))?;
+        let guard = Self {
+            repository: remote.repository.clone(),
+            saved,
+        };
+        remote.run(&format!(
+            "/system/bin/cat {} {} > /user/cfg/lorry.toml",
+            guard.saved.display(),
+            staged.display()
+        ))?;
+        Ok(guard)
+    }
+}
+
+impl Drop for UserGrants {
+    fn drop(&mut self) {
+        // The run's own deadline may have passed; the restore gets its own.
+        let remote = Remote {
+            repository: self.repository.clone(),
+            deadline: Instant::now() + Duration::from_secs(10),
+        };
+        if let Err(error) = remote.run(&format!(
+            "/system/bin/cat {} > /user/cfg/lorry.toml",
+            self.saved.display()
+        )) {
+            eprintln!("cannot restore the guest's /user/cfg/lorry.toml: {error}");
+        }
+    }
 }

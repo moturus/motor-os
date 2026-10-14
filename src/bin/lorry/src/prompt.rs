@@ -7,11 +7,26 @@
 //! which echoes and line-edits the reply itself wherever [`echo_required`]
 //! says the console will not.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The most input bytes one reply consumes, so an unattended stream cannot
 /// be read without bound.
 const REPLY_LIMIT: usize = 65;
+
+static MACHINE_MESSAGES: AtomicBool = AtomicBool::new(false);
+
+/// Records that a program reads Lorry's messages (`--lorry-messages`). A
+/// program cannot answer a text prompt, and the prompt would break its JSON.
+pub fn set_machine_messages(enabled: bool) {
+    MACHINE_MESSAGES.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether Lorry may ask the user: stdin is a terminal and no program is
+/// reading Lorry's messages.
+pub fn interactive() -> bool {
+    !MACHINE_MESSAGES.load(Ordering::Relaxed) && io::stdin().is_terminal()
+}
 
 /// Whether a prompt reading `terminal` input has to echo what is typed: a
 /// Motor OS console never does, and a Linux terminal does in cooked mode.

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -124,7 +124,7 @@ impl TrustStore {
 
     pub fn save(&mut self, site: Site, decision: Decision) -> Result<()> {
         ensure_store_parent(&self.path)?;
-        let _lock = TrustLock::acquire(&self.path)?;
+        let _lock = TrustLock::acquire(&self.path.with_file_name(".redirect-sites.lock"))?;
         let mut latest = Self::load(&self.path)?;
         let (selected, opposite) = match decision {
             Decision::Allow => (&mut latest.allow, &latest.deny),
@@ -227,14 +227,13 @@ fn render_sites(output: &mut String, sites: &BTreeSet<Site>) {
     }
 }
 
-struct TrustLock {
-    #[allow(dead_code)]
-    file: File,
+/// An exclusive lock on a file of user decisions, held while it is rewritten.
+pub(crate) struct TrustLock {
+    _file: File,
 }
 
 impl TrustLock {
-    fn acquire(store: &Path) -> Result<Self> {
-        let path = store.with_file_name(".redirect-sites.lock");
+    pub(crate) fn acquire(path: &Path) -> Result<Self> {
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true);
         #[cfg(unix)]
@@ -244,19 +243,16 @@ impl TrustLock {
             #[cfg(target_os = "linux")]
             options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
-        let file = options.open(&path).map_err(|error| {
+        let file = options.open(path).map_err(|error| {
             Error::failure(format!(
-                "failed to open redirect trust lock `{}`: {error}",
+                "failed to open trust lock `{}`: {error}",
                 path.display()
             ))
         })?;
         file.lock().map_err(|error| {
-            Error::failure(format!(
-                "failed to lock redirect trust file `{}`: {error}",
-                store.display()
-            ))
+            Error::failure(format!("failed to lock `{}`: {error}", path.display()))
         })?;
-        Ok(Self { file })
+        Ok(Self { _file: file })
     }
 }
 
@@ -286,7 +282,7 @@ impl TrustPolicy {
         self.authorize_with_io(
             source,
             destination,
-            stdin.is_terminal(),
+            crate::prompt::interactive(),
             &mut input,
             &mut output,
         )
@@ -366,7 +362,9 @@ impl TrustPolicy {
 
 fn default_trust_path() -> Result<PathBuf> {
     if cfg!(target_os = "motor") {
-        return Ok(PathBuf::from("/user/cfg/lorry-redirect-sites.toml"));
+        return Ok(crate::role::Role::current()
+            .config_directory()
+            .join("lorry-redirect-sites.toml"));
     }
     let home = std::env::var_os("HOME")
         .ok_or_else(|| Error::failure("HOME is required to locate redirect trust decisions"))?;

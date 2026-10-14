@@ -12,7 +12,7 @@ fn parse(document: &str) -> Metadata {
 fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     if let [command, path, metadata, success, ansi, fresh] = arguments.as_slice() {
-        assert_eq!(command, "messages");
+        assert!(matches!(command.as_str(), "messages" | "test-messages"));
         check_messages(
             Path::new(path),
             Path::new(metadata),
@@ -20,13 +20,53 @@ fn main() {
             ansi == "ansi",
             fresh == "fresh",
         );
+        if command == "test-messages" {
+            let harnesses = read_messages(Path::new(path))
+                .into_iter()
+                .filter_map(|message| match message {
+                    Message::CompilerArtifact(artifact) if artifact.profile.test => Some(artifact),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(!harnesses.is_empty(), "test stream omits harness artifacts");
+            for harness in harnesses {
+                let executable = harness.executable.expect("harness executable");
+                assert!(executable.is_file());
+                assert!(harness.filenames.contains(&executable));
+            }
+        }
         return;
     }
     if let [command, lorry, cargo] = arguments.as_slice() {
         match command.as_str() {
             "compare" => compare(Path::new(lorry), Path::new(cargo)),
             "compare-projection" => compare_projection(Path::new(lorry), Path::new(cargo)),
-            "differential-messages" => compare_messages(Path::new(lorry), Path::new(cargo)),
+            "differential-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), false, false, true, true)
+            }
+            "differential-success-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, false, true, true)
+            }
+            "differential-check-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, true, true, true)
+            }
+            "differential-workspace-messages" => compare_messages(
+                Path::new(lorry),
+                Path::new(cargo),
+                true,
+                false,
+                false,
+                false,
+            ),
+            "differential-workspace-check-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, true, false, false)
+            }
+            "differential-script-clean-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, false, true, false)
+            }
+            "differential-script-clean-check-messages" => {
+                compare_messages(Path::new(lorry), Path::new(cargo), true, true, true, false)
+            }
             _ => panic!("unknown comparison command `{command}`"),
         }
         return;
@@ -65,7 +105,14 @@ fn main() {
     assert_eq!(no_deps.workspace_packages().len(), 1);
 }
 
-fn compare_messages(lorry: &Path, cargo: &Path) {
+fn compare_messages(
+    lorry: &Path,
+    cargo: &Path,
+    success: bool,
+    checking: bool,
+    scripted: bool,
+    require_warnings: bool,
+) {
     let lorry = read_messages(lorry);
     let cargo = read_messages(cargo);
     for messages in [&lorry, &cargo] {
@@ -77,7 +124,7 @@ fn compare_messages(lorry: &Path, cargo: &Path) {
         );
         assert!(matches!(
             messages.last(),
-            Some(Message::BuildFinished(finished)) if !finished.success
+            Some(Message::BuildFinished(finished)) if finished.success == success
         ));
     }
 
@@ -110,8 +157,53 @@ fn compare_messages(lorry: &Path, cargo: &Path) {
             _ => None,
         })
         .collect::<BTreeSet<String>>();
-    assert!(levels.contains("warning"));
-    assert!(levels.contains("error"));
+    if require_warnings {
+        assert!(levels.contains("warning"));
+    } else {
+        assert!(
+            levels.is_empty(),
+            "ordinary workspace fixture must emit no diagnostics"
+        );
+    }
+    if success {
+        assert!(!levels.contains("error"));
+        let artifacts = |messages: &[Message]| {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::CompilerArtifact(artifact) => {
+                        let mut extensions = artifact
+                            .filenames
+                            .iter()
+                            .map(|path| path.extension())
+                            .collect::<BTreeSet<_>>();
+                        // The workspace plan defers metadata-only dependency
+                        // checking. Lorry still builds those libraries fully.
+                        if checking && extensions == BTreeSet::from([Some("rlib"), Some("rmeta")]) {
+                            extensions.remove(&Some("rlib"));
+                        }
+                        Some(
+                            serde_json::to_string(&(
+                                &artifact.package_id,
+                                &artifact.target,
+                                &artifact.profile,
+                                &artifact.features,
+                                artifact.executable.is_some(),
+                                extensions,
+                            ))
+                            .unwrap(),
+                        )
+                    }
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        // Locations differ by output layout, and a cold Cargo target can use
+        // artifacts that Lorry already has in its separate dependency cache.
+        assert_eq!(artifacts(&lorry), artifacts(&cargo));
+    } else {
+        assert!(levels.contains("error"));
+    }
 
     let scripts = |messages: &[Message]| {
         messages
@@ -129,7 +221,14 @@ fn compare_messages(lorry: &Path, cargo: &Path) {
             .collect::<BTreeSet<_>>()
     };
     let lorry_scripts = scripts(&lorry);
-    assert!(!lorry_scripts.is_empty());
+    if scripted {
+        assert!(!lorry_scripts.is_empty());
+    } else {
+        assert!(
+            lorry_scripts.is_empty(),
+            "ordinary workspace fixture must execute no scripts"
+        );
+    }
     assert_eq!(lorry_scripts, scripts(&cargo));
 }
 
@@ -240,12 +339,8 @@ fn compare(lorry: &Path, cargo: &Path) {
     let cargo = fs::read_to_string(cargo).expect("read Cargo metadata");
     let _: Metadata = parse(&lorry);
     let _: Metadata = parse(&cargo);
-    let mut lorry: Value = serde_json::from_str(&lorry).unwrap();
-    let mut cargo: Value = serde_json::from_str(&cargo).unwrap();
-    // Cargo omits an empty target required-features array while Lorry emits
-    // the schema field explicitly. No other field is normalized here.
-    add_empty_required_features(&mut lorry);
-    add_empty_required_features(&mut cargo);
+    let lorry: Value = serde_json::from_str(&lorry).unwrap();
+    let cargo: Value = serde_json::from_str(&cargo).unwrap();
     assert_eq!(lorry, cargo);
 }
 
@@ -293,11 +388,12 @@ fn normalize_projection(document: &mut Value) {
     if let Some(resolve) = document["resolve"].as_object_mut() {
         for node in resolve["nodes"].as_array_mut().unwrap() {
             sort_array(&mut node["dependencies"]);
-            sort_array(&mut node["deps"]);
             sort_array(&mut node["features"]);
             for dependency in node["deps"].as_array_mut().unwrap() {
                 sort_array(&mut dependency["dep_kinds"]);
             }
+            // Normalize nested sets before using their JSON as an outer key.
+            sort_array(&mut node["deps"]);
         }
         resolve["nodes"]
             .as_array_mut()

@@ -116,7 +116,8 @@ build_javy() {
 	[ -n "${RUSTUP_TOOLCHAIN:-}" ] || die "no Rust toolchain was selected for Javy"
 	(
 		cd "$MOTORH/javy"
-		cargo fetch --locked --target x86_64-unknown-motor
+		# Fetch the complete locked graph, including host build dependencies.
+		cargo fetch --locked
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" JOBS="$(wasm_addon_jobs)" \
 			JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" ./motor-build.sh
 	)
@@ -146,16 +147,9 @@ build_javy() {
 }
 
 build_javy_addon() {
-	JAVY_SOURCES=(javy:motor-9.1.0 wasmi:motor-1.1.0 wasmtime:motor-48.0.1)
 	JAVY_IMG="$ASSEMBLY_IMAGE_ROOT/javy"
 	JAVY_TESTS="$ASSEMBLY_ROOT/tests/javy"
-	[ "$(readlink -f "$MOTORH/motor-os")" = "$MOTOR" ] ||
-		die "Javy's sibling motor-os path must resolve to this checkout: $MOTORH/motor-os"
-	local spec repo branch source
-	for spec in "${JAVY_SOURCES[@]}"; do
-		repo=${spec%%:*}; branch=${spec#*:}
-		update_addon_source "$repo" "$MOTORH/$repo" "https://github.com/moturus/$repo.git" "$branch"
-	done
+	local source
 	JAVY_SOURCE_MANIFEST="$(javy_source_manifest)"
 	source="$(printf '%s\n' "$JAVY_SOURCE_MANIFEST" | sha256sum | cut -d' ' -f1)"
 	# All outputs must still match, not just the executable used by ensure_addon.

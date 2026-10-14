@@ -298,9 +298,10 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
     }
 
     let mut inline_handles = [0_u64; INLINE_WAIT_HANDLES];
-    let mut heap_handles = Vec::new();
+    // SAFETY: curr is the running thread, and this is its only borrow.
+    let heap_handles = unsafe { curr.wait_handle_spill() };
     let wait_handles =
-        match process_wait_handles(curr, args, next_arg, &mut inline_handles, &mut heap_handles) {
+        match process_wait_handles(curr, args, next_arg, &mut inline_handles, heap_handles) {
             Ok(handles) => handles,
             Err(result) => {
                 if let Some(next) = switch_to {

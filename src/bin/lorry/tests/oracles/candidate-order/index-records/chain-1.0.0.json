@@ -1,0 +1,1 @@
+{"name":"chain","vers":"1.0.0","deps":[{"name":"mid","req":"^1","features":[],"optional":false,"default_features":true,"target":null,"kind":"normal"}],"cksum":"6829205918b0fa0c260eb4c0158976f092283100e2288d56127457dfdae0439a","features":{},"yanked":false}

@@ -470,19 +470,19 @@ directories. The example and HTML documentation are part of <code>dev.img</code>
 <h2>Run the example</h2>
 <p>In the developer VM's shell:</p>
 <pre><code>cd /devtools/src/wasm
-MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /user/tmp/hello.wasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmi /user/tmp/hello.wasm</code></pre>
+MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm</code></pre>
 <p>Expected output:</p>
 <pre><code>Hello from WebAssembly on Motor OS!
 {"squares":[1,4,9,16],"total":30}</code></pre>
 <p>The masks launch the tools with role None: <code>0x200</code> grants Javy
 filesystem write access for its output, while Wasmi needs no capabilities for this
-example. <code>/user/tmp</code> is writable by role None. The default plugin is
+example. <code>/none/tmp</code> is writable by role None. The default plugin is
 embedded, and the example runs offline. Edit <code>hello.js</code> and repeat the
 commands to try changes.</p>
 <p>See <a href="build.html">Building Motor OS</a> for image construction and
 <a href="capabilities.html">Capabilities</a> for the masks. The host-side
-<code>src/tests/test-javy.sh</code> checks the installed tools;
+<code>src/tests/test-wasm.sh</code> checks the installed tools;
 <code>src/tests/full-test-dev.sh --release</code> includes those checks.</p>
 <nav class="pager">
 <a class="pager-prev" href="c-cpp.html"><span>Previous</span>C/C++ on Motor OS</a>

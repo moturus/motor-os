@@ -1,6 +1,4 @@
-#![allow(dead_code)]
-
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
@@ -11,8 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::diagnostic::{Error, Result};
+use crate::hash::{FieldDigest, modified_time, sha256_file};
 use crate::identity::CargoDebugInfo;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, Target, TargetKind};
 use crate::sandbox::{Executable, NetworkAccess, Policy, Sandbox};
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::TargetInfo;
@@ -22,6 +21,8 @@ use crate::unit::{Unit, UnitKind, UnitSettings};
 pub struct Output {
     pub directives: Vec<Directive>,
     pub diagnostics: Vec<String>,
+    /// The raw output, kept so a fresh run can replay it.
+    pub stdout: String,
     pub stderr: String,
     pub out_dir: Tree,
 }
@@ -35,6 +36,12 @@ pub enum Directive {
         value: String,
     },
     RustcLinkLib(String),
+    RustcLinkArg(String),
+    /// A `rustc-link-arg-*` argument for some targets of the package.
+    RustcLinkArgFor {
+        target: LinkArgTarget,
+        value: String,
+    },
     RustcLinkSearch {
         kind: Option<String>,
         path: PathBuf,
@@ -45,10 +52,66 @@ pub enum Directive {
         value: Option<OsString>,
     },
     Warning(String),
+    /// `KEY=VALUE` metadata, passed to the build scripts of dependents as
+    /// `DEP_<LINKS>_<KEY>` when this package has `links`.
+    Metadata {
+        key: String,
+        value: String,
+    },
+}
+
+/// The directive names that the old `cargo:` syntax reserves. Any other name
+/// there is metadata, as in Cargo.
+const RESERVED_DIRECTIVES: &[&str] = &[
+    "rustc-flags",
+    "rustc-link-lib",
+    "rustc-link-search",
+    "rustc-link-arg-cdylib",
+    "rustc-cdylib-link-arg",
+    "rustc-link-arg-bins",
+    "rustc-link-arg-bin",
+    "rustc-link-arg-tests",
+    "rustc-link-arg-benches",
+    "rustc-link-arg-examples",
+    "rustc-link-arg",
+    "rustc-cfg",
+    "rustc-check-cfg",
+    "rustc-env",
+    "warning",
+    "rerun-if-changed",
+    "rerun-if-env-changed",
+];
+
+/// The targets a `rustc-link-arg-*` directive names, as in Cargo.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkArgTarget {
+    Cdylib,
+    Bins,
+    Bin(String),
+    Tests,
+    Benches,
+    Examples,
+}
+
+impl LinkArgTarget {
+    pub(crate) fn name(&self) -> String {
+        match self {
+            Self::Cdylib => "cdylib".to_owned(),
+            Self::Bins => "bins".to_owned(),
+            Self::Bin(name) => format!("bin={name}"),
+            Self::Tests => "tests".to_owned(),
+            Self::Benches => "benches".to_owned(),
+            Self::Examples => "examples".to_owned(),
+        }
+    }
 }
 
 pub struct ParseOptions<'a> {
     pub package_root: &'a Path,
+    /// The package's non-library targets, which `rustc-link-arg-*` must name.
+    pub targets: &'a [Target],
+    pub workspace_root: Option<&'a Path>,
+    pub workspace_lock: Option<&'a Path>,
     pub out_dir: &'a Path,
     /// The complete environment supplied after `env_clear`. A valid name not
     /// present in this map is an explicitly tracked absent value.
@@ -58,10 +121,14 @@ pub struct ParseOptions<'a> {
 }
 
 pub struct RunOptions<'a> {
+    pub child_lease_fd: Option<i32>,
+    pub targets: &'a [Target],
     pub executable: &'a Path,
     pub arguments: &'a [OsString],
     pub environment: &'a BTreeMap<String, OsString>,
     pub package_root: &'a Path,
+    pub workspace_root: Option<&'a Path>,
+    pub workspace_lock: Option<&'a Path>,
     pub out_dir: &'a Path,
     pub temp_dir: &'a Path,
     pub read_only: &'a [PathBuf],
@@ -81,7 +148,7 @@ pub struct EnvironmentOptions<'a> {
     pub out_dir: &'a Path,
     pub temp_dir: &'a Path,
     pub release: bool,
-    pub num_jobs: u32,
+    pub num_jobs: usize,
     pub primary_package: bool,
 }
 
@@ -229,6 +296,89 @@ pub fn environment(
     Ok(values)
 }
 
+pub(crate) fn validate_caller_environment_name(name: &str) -> Result<()> {
+    validate_environment_name(name, "caller-env")?;
+    let tool = name
+        .strip_prefix("HOST_")
+        .or_else(|| name.strip_prefix("TARGET_"))
+        .unwrap_or(name);
+    let reserved = [
+        "CC",
+        "CFLAGS",
+        "CXX",
+        "CXXFLAGS",
+        "CXXSTDLIB",
+        "AR",
+        "ARFLAGS",
+        "RANLIB",
+    ]
+    .iter()
+    .any(|variable| tool == *variable || tool.starts_with(&format!("{variable}_")));
+    if reserved
+        || [
+            "CARGO", "RUSTC", "RUSTDOC", "RUSTUP", "LORRY", "DEP", "LD", "DYLD",
+        ]
+        .iter()
+        .any(|prefix| name == *prefix || name.starts_with(&format!("{prefix}_")))
+        || matches!(
+            name,
+            "RUSTFLAGS"
+                | "RUSTDOCFLAGS"
+                | "PATH"
+                | "HOST"
+                | "TARGET"
+                | "OUT_DIR"
+                | "NUM_JOBS"
+                | "PROFILE"
+                | "DEBUG"
+                | "OPT_LEVEL"
+                | "TMPDIR"
+                | "TMP"
+                | "TEMP"
+        )
+    {
+        return Err(Error::failure(format!(
+            "caller-env cannot override controlled environment variable `{name}`"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn add_caller_environment(
+    environment: &mut BTreeMap<String, OsString>,
+    granted: &BTreeSet<String>,
+    caller: &BTreeMap<String, OsString>,
+) -> Result<()> {
+    for name in granted {
+        validate_caller_environment_name(name)?;
+        if environment.contains_key(name) {
+            return Err(Error::failure(format!(
+                "caller-env cannot replace build-script environment variable `{name}`"
+            )));
+        }
+        if let Some(value) = caller.get(name) {
+            environment.insert(name.clone(), value.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Passes a `links` dependency's script metadata as `DEP_<LINKS>_<KEY>`.
+pub(crate) fn add_dependency_metadata(
+    environment: &mut BTreeMap<String, OsString>,
+    links: &str,
+    output: &Output,
+) {
+    for directive in &output.directives {
+        if let Directive::Metadata { key, value } = directive {
+            environment.insert(
+                format!("DEP_{}_{}", envify(links), envify(key)),
+                value.into(),
+            );
+        }
+    }
+}
+
 fn envify(value: &str) -> String {
     value
         .chars()
@@ -276,6 +426,13 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
 
     let mut read_only = options.read_only.to_vec();
     read_only.push(package_root.clone());
+    let workspace_root = options
+        .workspace_root
+        .map(|root| canonical_directory(root, "workspace root"))
+        .transpose()?;
+    read_only.extend(workspace_root.iter().cloned());
+    let workspace_lock = canonical_workspace_lock(options.workspace_lock)?;
+    read_only.extend(workspace_lock.iter().cloned());
     let policy = Policy {
         read_only,
         writable: vec![out_dir.clone(), temp_dir, PathBuf::from("/dev/null")],
@@ -292,6 +449,7 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::sandbox::platform().apply(&mut command, &policy)?;
+    crate::artifact_lock::configure_child_lease(&mut command, options.child_lease_fd);
     if options.verbose {
         eprintln!(
             "Running sandboxed {}",
@@ -302,38 +460,115 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
     if !captured.status.success() {
         let stdout = String::from_utf8_lossy(&captured.stdout);
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(Error::failure(format!(
-            "build script `{}` failed{}{}{}",
-            options.executable.display(),
-            captured.status.code().map_or_else(
-                || " after being terminated by a signal".to_owned(),
-                |code| { format!(" with status {code}") }
+        return Err(crate::process::command_failure(
+            captured.status,
+            format!(
+                "build script `{}` failed{}{}{}",
+                options.executable.display(),
+                captured.status.code().map_or_else(
+                    || " after being terminated by a signal".to_owned(),
+                    |code| { format!(" with status {code}") }
+                ),
+                if stdout.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("; stdout: {}", stdout.trim())
+                },
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("; stderr: {}", stderr.trim())
+                }
             ),
-            if stdout.trim().is_empty() {
-                String::new()
-            } else {
-                format!("; stdout: {}", stdout.trim())
-            },
-            if stderr.trim().is_empty() {
-                String::new()
-            } else {
-                format!("; stderr: {}", stderr.trim())
-            }
-        )));
+        ));
     }
 
-    let mut output = parse(
+    replay(
+        options,
         &captured.stdout,
+        String::from_utf8_lossy(&captured.stderr).into_owned(),
+    )
+}
+
+/// Parses the recorded output of an earlier run as `run` parses a new one.
+pub fn replay(options: &RunOptions<'_>, stdout: &[u8], stderr: String) -> Result<Output> {
+    let workspace_root = options
+        .workspace_root
+        .map(|root| canonical_directory(root, "workspace root"))
+        .transpose()?;
+    let workspace_lock = canonical_workspace_lock(options.workspace_lock)?;
+    let mut output = parse(
+        stdout,
         &ParseOptions {
-            package_root: &package_root,
-            out_dir: &out_dir,
+            package_root: options.package_root,
+            targets: options.targets,
+            workspace_root: workspace_root.as_deref(),
+            workspace_lock: workspace_lock.as_deref(),
+            out_dir: options.out_dir,
             environment: options.environment,
             max_bytes: options.max_output_bytes,
             out_dir_limits: options.out_dir_limits,
         },
     )?;
-    output.stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
+    output.stderr = stderr;
     Ok(output)
+}
+
+/// Digests declared script inputs, following directories recursively, and
+/// returns the newest modification time among them.
+pub(crate) fn input_digest(inputs: &[PathBuf]) -> Result<([u8; 32], Duration)> {
+    let mut digest = FieldDigest::new();
+    let mut newest = Duration::ZERO;
+    let mut pending = inputs.to_vec();
+    let mut directories = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        let canonical = fs::canonicalize(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to resolve build-script input `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        digest.bytes("script-input-path", path.as_os_str().as_encoded_bytes());
+        digest.bytes(
+            "script-input-resolved",
+            canonical.as_os_str().as_encoded_bytes(),
+        );
+        let metadata = fs::metadata(&canonical).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect build-script input `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        newest = newest.max(modified_time(&canonical, &metadata)?);
+        if metadata.is_file() {
+            digest.bytes(
+                "script-input-file-path",
+                canonical.as_os_str().as_encoded_bytes(),
+            );
+            digest.bytes("script-input-file", &sha256_file(&canonical)?);
+        } else if metadata.is_dir() {
+            digest.bytes("script-input-kind", b"directory");
+            // Canonical identities prevent loops without hiding link retargets.
+            if directories.insert(canonical) {
+                let mut children = fs::read_dir(&path)
+                    .map_err(|error| Error::failure(error.to_string()))?
+                    .map(|entry| {
+                        entry
+                            .map(|entry| entry.path())
+                            .map_err(|error| Error::failure(error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                children.sort();
+                pending.extend(children);
+            }
+        } else {
+            return Err(Error::failure(format!(
+                "build-script input `{}` is not a regular file or directory",
+                path.display()
+            )));
+        }
+    }
+    Ok((digest.finish(), newest))
 }
 
 struct Captured {
@@ -450,6 +685,14 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
         .map_err(|_| Error::failure("build-script stdout is not valid UTF-8"))?;
     let package_root = canonical_directory(options.package_root, "package root")?;
     let out_dir = canonical_directory(options.out_dir, "OUT_DIR")?;
+    let workspace_root = options
+        .workspace_root
+        .map(|root| canonical_directory(root, "workspace root"))
+        .transpose()?;
+    let mut input_roots = vec![package_root.as_path(), out_dir.as_path()];
+    input_roots.extend(workspace_root.as_deref());
+    let workspace_lock = canonical_workspace_lock(options.workspace_lock)?;
+    input_roots.extend(workspace_lock.as_deref());
     if !out_dir.starts_with(&package_root) && package_root.starts_with(&out_dir) {
         return Err(Error::failure(
             "build-script package root may not be nested inside OUT_DIR",
@@ -459,19 +702,23 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
     let mut output = Output {
         directives: Vec::new(),
         diagnostics: Vec::new(),
+        stdout: stdout.to_owned(),
         stderr: String::new(),
         out_dir: Tree::scan(&out_dir, options.out_dir_limits, Exclusions::None)?,
     };
     for (index, raw_line) in stdout.split('\n').enumerate() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        let directive = line
-            .strip_prefix("cargo::")
-            .or_else(|| line.strip_prefix("cargo:"));
-        let Some(directive) = directive else {
-            if !line.is_empty() {
-                output.diagnostics.push(line.to_owned());
-            }
-            continue;
+        let (directive, old_syntax) = match line.strip_prefix("cargo::") {
+            Some(directive) => (directive, false),
+            None => match line.strip_prefix("cargo:") {
+                Some(directive) => (directive, true),
+                None => {
+                    if !line.is_empty() {
+                        output.diagnostics.push(line.to_owned());
+                    }
+                    continue;
+                }
+            },
         };
         let (name, value) = directive.split_once('=').ok_or_else(|| {
             Error::failure(format!(
@@ -479,6 +726,24 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                 index + 1
             ))
         })?;
+        if old_syntax && !RESERVED_DIRECTIVES.contains(&name) || !old_syntax && name == "metadata" {
+            let (key, value) = if old_syntax {
+                (name, value)
+            } else {
+                value.split_once('=').ok_or_else(|| {
+                    Error::failure(format!(
+                        "build-script metadata directive on line {} must be KEY=VALUE",
+                        index + 1
+                    ))
+                })?
+            };
+            validate_metadata(key, value, index + 1)?;
+            output.directives.push(Directive::Metadata {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            });
+            continue;
+        }
         validate_directive_value(name, value, index + 1)?;
         let parsed = match name {
             "rustc-cfg" => Directive::RustcCfg(value.to_owned()),
@@ -497,6 +762,74 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                 }
             }
             "rustc-link-lib" => Directive::RustcLinkLib(value.to_owned()),
+            "rustc-flags" => {
+                for (flag, value) in rustc_flags(value)? {
+                    output.directives.push(if flag == "-l" {
+                        Directive::RustcLinkLib(value.to_owned())
+                    } else {
+                        let (kind, path) = split_link_search(value)?;
+                        Directive::RustcLinkSearch {
+                            kind: kind.map(str::to_owned),
+                            path: resolve_existing(
+                                path,
+                                &package_root,
+                                &[&out_dir],
+                                "rustc-flags",
+                            )?,
+                        }
+                    });
+                }
+                continue;
+            }
+            "rustc-link-arg" => Directive::RustcLinkArg(value.to_owned()),
+            "rustc-link-arg-cdylib" | "rustc-cdylib-link-arg" => Directive::RustcLinkArgFor {
+                target: LinkArgTarget::Cdylib,
+                value: value.to_owned(),
+            },
+            "rustc-link-arg-bins"
+            | "rustc-link-arg-tests"
+            | "rustc-link-arg-benches"
+            | "rustc-link-arg-examples" => {
+                let (target, kind) = match name {
+                    "rustc-link-arg-bins" => (LinkArgTarget::Bins, TargetKind::Bin),
+                    "rustc-link-arg-tests" => (LinkArgTarget::Tests, TargetKind::Test),
+                    "rustc-link-arg-benches" => (LinkArgTarget::Benches, TargetKind::Bench),
+                    _ => (LinkArgTarget::Examples, TargetKind::Example),
+                };
+                if !options.targets.iter().any(|target| target.kind == kind) {
+                    return Err(Error::failure(format!(
+                        "build-script directive `{name}` on line {} names no {} target of this package",
+                        index + 1,
+                        kind.as_str()
+                    )));
+                }
+                Directive::RustcLinkArgFor {
+                    target,
+                    value: value.to_owned(),
+                }
+            }
+            "rustc-link-arg-bin" => {
+                let (binary, value) = value.split_once('=').ok_or_else(|| {
+                    Error::failure(format!(
+                        "build-script rustc-link-arg-bin directive on line {} must be BIN=ARG",
+                        index + 1
+                    ))
+                })?;
+                if !options
+                    .targets
+                    .iter()
+                    .any(|target| target.kind == TargetKind::Bin && target.name == binary)
+                {
+                    return Err(Error::failure(format!(
+                        "build-script directive `rustc-link-arg-bin` on line {} names no bin target `{binary}`",
+                        index + 1
+                    )));
+                }
+                Directive::RustcLinkArgFor {
+                    target: LinkArgTarget::Bin(binary.to_owned()),
+                    value: value.to_owned(),
+                }
+            }
             "rustc-link-search" => {
                 let (kind, path) = split_link_search(value)?;
                 Directive::RustcLinkSearch {
@@ -504,12 +837,11 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                     path: resolve_existing(path, &package_root, &[&out_dir], "rustc-link-search")?,
                 }
             }
-            "rerun-if-changed" => Directive::RerunIfChanged(resolve_existing(
-                value,
-                &package_root,
-                &[&package_root, &out_dir],
-                "rerun-if-changed",
-            )?),
+            "rerun-if-changed" => {
+                resolve_input(value, &package_root, &input_roots)?;
+                // Preserve the declared path so freshness detects symlink retargets.
+                Directive::RerunIfChanged(package_root.join(value))
+            }
             "rerun-if-env-changed" => {
                 validate_rerun_environment_name(value)?;
                 Directive::RerunIfEnvChanged {
@@ -552,6 +884,30 @@ fn canonical_directory(path: &Path, description: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+fn canonical_workspace_lock(path: Option<&Path>) -> Result<Option<PathBuf>> {
+    path.map(|path| {
+        let root = canonical_directory(
+            path.parent()
+                .ok_or_else(|| Error::failure("workspace lock has no parent directory"))?,
+            "workspace lock parent",
+        )?;
+        let canonical = fs::canonicalize(path).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize workspace lock `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if !canonical.is_file() || !canonical.starts_with(&root) {
+            return Err(Error::failure(format!(
+                "workspace lock `{}` is not a file within its workspace",
+                path.display()
+            )));
+        }
+        Ok(canonical)
+    })
+    .transpose()
+}
+
 fn resolve_existing(
     value: &str,
     package_root: &Path,
@@ -577,6 +933,65 @@ fn resolve_existing(
         )));
     }
     Ok(canonical)
+}
+
+/// Checks a `rerun-if-changed` path. As in Cargo, a path that does not exist
+/// makes the script run again on every build. Its nearest existing ancestor
+/// must still be inside a permitted root.
+fn resolve_input(value: &str, package_root: &Path, allowed_roots: &[&Path]) -> Result<()> {
+    let path = package_root.join(value);
+    let missing = matches!(
+        fs::symlink_metadata(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    if !missing {
+        return resolve_existing(value, package_root, allowed_roots, "rerun-if-changed").map(drop);
+    }
+    let escapes = || {
+        Error::failure(format!(
+            "build-script rerun-if-changed path `{}` escapes its permitted roots",
+            path.display()
+        ))
+    };
+    for ancestor in path.ancestors().skip(1) {
+        let Ok(canonical) = fs::canonicalize(ancestor) else {
+            continue;
+        };
+        let rest = path.strip_prefix(ancestor).map_err(|_| escapes())?;
+        if rest
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            || !allowed_roots.iter().any(|root| canonical.starts_with(root))
+        {
+            return Err(escapes());
+        }
+        return Ok(());
+    }
+    Err(escapes())
+}
+
+/// Splits `rustc-flags` as Cargo does: only `-l` and `-L`, each with its
+/// value attached or as the next word.
+fn rustc_flags(value: &str) -> Result<Vec<(&str, &str)>> {
+    let mut words = value.split_whitespace();
+    let mut flags = Vec::new();
+    while let Some(word) = words.next() {
+        let (flag, attached) = word.split_at_checked(2).unwrap_or((word, ""));
+        if !matches!(flag, "-l" | "-L") {
+            return Err(Error::failure(format!(
+                "only `-l` and `-L` flags are allowed in rustc-flags: `{value}`"
+            )));
+        }
+        let value = if attached.is_empty() {
+            words
+                .next()
+                .ok_or_else(|| Error::failure(format!("rustc-flags `{flag}` has no value")))?
+        } else {
+            attached
+        };
+        flags.push((flag, value));
+    }
+    Ok(flags)
 }
 
 fn split_link_search(value: &str) -> Result<(Option<&str>, &str)> {
@@ -614,6 +1029,24 @@ fn validate_directive_value(name: &str, value: &str, line: usize) -> Result<()> 
     {
         return Err(Error::failure(format!(
             "build-script directive on line {line} contains invalid control or name characters"
+        )));
+    }
+    Ok(())
+}
+
+/// Metadata keys become parts of environment names, so they are limited to
+/// ASCII letters, digits, `_`, and `-`.
+fn validate_metadata(key: &str, value: &str, line: usize) -> Result<()> {
+    if key.is_empty()
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || value
+            .chars()
+            .any(|character| character == '\0' || character.is_control())
+    {
+        return Err(Error::failure(format!(
+            "build-script metadata on line {line} has an invalid key or value"
         )));
     }
     Ok(())
@@ -691,7 +1124,10 @@ mod tests {
 
         fn options(&self) -> ParseOptions<'_> {
             ParseOptions {
+                targets: &[],
                 package_root: &self.root,
+                workspace_root: None,
+                workspace_lock: None,
                 out_dir: &self.out,
                 environment: &self.environment,
                 max_bytes: 1024,
@@ -707,6 +1143,130 @@ mod tests {
     }
 
     #[test]
+    fn parses_target_specific_link_arguments_for_existing_targets() {
+        let fixture = Fixture::new();
+        let target = |kind, name: &str| Target {
+            kind,
+            name: name.to_owned(),
+            path: fixture.root.join("src/main.rs"),
+            crate_types: vec!["bin".to_owned()],
+            required_features: None,
+            edition: crate::manifest::Edition::E2021,
+            test: true,
+            bench: true,
+            doc: true,
+            harness: true,
+        };
+        let targets = [
+            target(TargetKind::Bin, "tool"),
+            target(TargetKind::Test, "it"),
+        ];
+        let options = ParseOptions {
+            targets: &targets,
+            ..fixture.options()
+        };
+        let output = parse(
+            b"cargo:rustc-link-arg-bins=-Wl,-a\n\
+              cargo::rustc-link-arg-bin=tool=-Wl,-b\n\
+              cargo:rustc-link-arg-tests=-Wl,-c\n\
+              cargo:rustc-cdylib-link-arg=-Wl,-d\n",
+            &options,
+        )
+        .unwrap();
+        let link = |target, value: &str| Directive::RustcLinkArgFor {
+            target,
+            value: value.to_owned(),
+        };
+        assert_eq!(
+            output.directives,
+            [
+                link(LinkArgTarget::Bins, "-Wl,-a"),
+                link(LinkArgTarget::Bin("tool".to_owned()), "-Wl,-b"),
+                link(LinkArgTarget::Tests, "-Wl,-c"),
+                link(LinkArgTarget::Cdylib, "-Wl,-d"),
+            ]
+        );
+        for invalid in [
+            b"cargo:rustc-link-arg-benches=-Wl,-e\n".as_slice(),
+            b"cargo:rustc-link-arg-examples=-Wl,-e\n",
+            b"cargo:rustc-link-arg-bin=other=-Wl,-e\n",
+            b"cargo:rustc-link-arg-bin=-Wl,-e\n",
+        ] {
+            assert!(parse(invalid, &options).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn parses_metadata_in_both_syntaxes_as_cargo_does() {
+        let fixture = Fixture::new();
+        let output = parse(
+            b"cargo:root=/opt/demo\n\
+              cargo::metadata=include=/opt/demo/include\n\
+              cargo:version_number=30000\n\
+              cargo:error=not an error in the old syntax\n\
+              cargo:empty=\n",
+            &fixture.options(),
+        )
+        .unwrap();
+        let metadata = |key: &str, value: &str| Directive::Metadata {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        };
+        assert_eq!(
+            output.directives,
+            [
+                metadata("root", "/opt/demo"),
+                metadata("include", "/opt/demo/include"),
+                metadata("version_number", "30000"),
+                metadata("error", "not an error in the old syntax"),
+                metadata("empty", ""),
+            ]
+        );
+        let mut environment = BTreeMap::new();
+        add_dependency_metadata(&mut environment, "demo-sys", &output);
+        assert_eq!(environment["DEP_DEMO_SYS_ROOT"], "/opt/demo");
+        assert_eq!(environment["DEP_DEMO_SYS_VERSION_NUMBER"], "30000");
+        assert_eq!(environment.len(), 5);
+    }
+
+    #[test]
+    fn parses_rustc_flags_as_link_libraries_and_searches() {
+        let fixture = Fixture::new();
+        let out = fs::canonicalize(&fixture.out).unwrap();
+        let source = format!(
+            "cargo:rustc-flags=-lz -L native={} -l static=native -L{}\n",
+            out.display(),
+            out.display()
+        );
+        let output = parse(source.as_bytes(), &fixture.options()).unwrap();
+        assert_eq!(
+            output.directives,
+            [
+                Directive::RustcLinkLib("z".to_owned()),
+                Directive::RustcLinkSearch {
+                    kind: Some("native".to_owned()),
+                    path: out.clone(),
+                },
+                Directive::RustcLinkLib("static=native".to_owned()),
+                Directive::RustcLinkSearch {
+                    kind: None,
+                    path: out,
+                },
+            ]
+        );
+        for invalid in [
+            "cargo:rustc-flags=-Wl,--as-needed\n".to_owned(),
+            "cargo:rustc-flags=-lz -l\n".to_owned(),
+            format!("cargo:rustc-flags=-L {}\n", fixture.root.display()),
+        ] {
+            assert!(
+                parse(invalid.as_bytes(), &fixture.options()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn parses_the_approved_ordered_protocol() {
         let fixture = Fixture::new();
         let source = format!(
@@ -718,6 +1278,7 @@ mod tests {
              cargo:rustc-env=GENERATED=value=with=equals\n\
              cargo:rustc-link-search=native={}\n\
              cargo:rustc-link-lib=static=native\n\
+             cargo::rustc-link-arg=-Wl,--gc-sections\n\
              cargo::warning=reviewed warning\n",
             fixture.out.display()
         );
@@ -744,6 +1305,7 @@ mod tests {
                     path: fixture.out.clone(),
                 },
                 Directive::RustcLinkLib("static=native".to_owned()),
+                Directive::RustcLinkArg("-Wl,--gc-sections".to_owned()),
                 Directive::Warning("reviewed warning".to_owned()),
             ]
         );
@@ -753,7 +1315,10 @@ mod tests {
     fn rejects_unknown_errors_limits_and_invalid_environment_names() {
         let fixture = Fixture::new();
         for (source, expected) in [
-            ("cargo:metadata=value\n", "unsupported"),
+            ("cargo::root=value\n", "unsupported"),
+            ("cargo:include.dir=value\n", "invalid key"),
+            ("cargo::metadata=value\n", "KEY=VALUE"),
+            ("cargo:rustc-link-arg-bins=-s\n", "no bin target"),
             ("cargo::error=bad input\n", "reported an error"),
             ("cargo:rerun-if-env-changed=9BAD\n", "invalid environment"),
             ("cargo:rustc-env=9BAD=value\n", "invalid environment"),
@@ -776,6 +1341,41 @@ mod tests {
                 .contains("limit")
         );
         assert!(parse(&[0xff], &fixture.options()).is_err());
+    }
+
+    #[test]
+    fn caller_environment_is_explicit_and_preserves_absent_and_empty_values() {
+        let caller = BTreeMap::from([
+            ("PUBLIC".into(), "chosen".into()),
+            ("EMPTY".into(), OsString::new()),
+            ("HIDDEN".into(), "secret".into()),
+        ]);
+        let mut environment = BTreeMap::new();
+        add_caller_environment(&mut environment, &BTreeSet::new(), &caller).unwrap();
+        assert!(environment.is_empty());
+        let grant = ["PUBLIC", "EMPTY", "ABSENT"].map(str::to_owned).into();
+        add_caller_environment(&mut environment, &grant, &caller).unwrap();
+        assert_eq!(environment["PUBLIC"], "chosen");
+        assert_eq!(environment["EMPTY"], OsString::new());
+        assert!(!environment.contains_key("ABSENT"));
+        assert!(!environment.contains_key("HIDDEN"));
+        let fixture = Fixture::new();
+        let mut options = fixture.options();
+        options.environment = &environment;
+        let output = parse(
+            b"cargo:rerun-if-env-changed=EMPTY\ncargo:rerun-if-env-changed=ABSENT\n",
+            &options,
+        )
+        .unwrap();
+        assert!(output.directives.contains(&Directive::RerunIfEnvChanged {
+            name: "EMPTY".into(),
+            value: Some(OsString::new())
+        }));
+        assert!(output.directives.contains(&Directive::RerunIfEnvChanged {
+            name: "ABSENT".into(),
+            value: None
+        }));
+        assert!(add_caller_environment(&mut environment, &grant, &caller).is_err());
     }
 
     #[test]
@@ -818,10 +1418,11 @@ mod tests {
                 "cargo:rustc-link-search=native={}\n",
                 fixture.root.display()
             ),
-            "cargo:rerun-if-changed=missing\n".to_owned(),
+            "cargo:rustc-link-search=native=missing\n".to_owned(),
         ] {
             assert!(parse(source.as_bytes(), &fixture.options()).is_err());
         }
+        assert!(parse(b"cargo:rerun-if-changed=missing\n", &fixture.options()).is_ok());
         fs::remove_file(outside).unwrap();
     }
 
@@ -857,7 +1458,10 @@ mod tests {
                 source: PackageSourceKey::Path(manifest.root.clone()),
             },
             kind: UnitKind::BuildScriptRun,
+            mode: crate::unit::UnitMode::Build,
+            target: None,
             compile_kind: CompileKind::Target,
+            profile: crate::unit::ProfileContext::Normal,
             features: BTreeSet::from(["default".to_owned(), "fancy-feature".to_owned()]),
         };
         let unit = Unit {
@@ -1014,10 +1618,14 @@ mod tests {
 
         fn options(&self, timeout: Duration, max_output_bytes: u64) -> RunOptions<'_> {
             RunOptions {
+                targets: &[],
+                child_lease_fd: None,
                 executable: &self.executable,
                 arguments: &self.arguments,
                 environment: &self.environment,
                 package_root: &self.package,
+                workspace_root: None,
+                workspace_lock: None,
                 out_dir: &self.out,
                 temp_dir: &self.temp,
                 read_only: &self.read_only,
@@ -1068,6 +1676,143 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn dependency_scripts_can_read_and_track_only_the_workspace_lock() {
+        let fixture = RunFixture::new("workspace-lock");
+        let lock = fixture.root.join("Cargo.lock");
+        fs::write(&lock, b"version = 4\n").unwrap();
+        let mut options = fixture.options(Duration::from_secs(5), 64 * 1024);
+        assert!(run(&options).is_err());
+        options.workspace_lock = Some(&lock);
+        let output = run(&options).unwrap();
+        assert!(
+            output
+                .directives
+                .contains(&Directive::RerunIfChanged(lock.clone()))
+        );
+        assert_eq!(fs::read(&lock).unwrap(), b"version = 4\n");
+        assert_eq!(
+            fs::read(fixture.out.join("generated")).unwrap(),
+            b"version = 4\n"
+        );
+
+        let parse_options = ParseOptions {
+            targets: &[],
+            package_root: &fixture.package,
+            workspace_root: None,
+            workspace_lock: Some(&lock),
+            out_dir: &fixture.out,
+            environment: &fixture.environment,
+            max_bytes: 1024,
+            out_dir_limits: crate::source_tree::DEFAULT_LIMITS,
+        };
+        for path in [
+            &fixture.root,
+            &fixture.outside,
+            &fixture.outside.join("secret"),
+        ] {
+            let input = format!("cargo:rerun-if-changed={}\n", path.display());
+            assert!(parse(input.as_bytes(), &parse_options).is_err());
+        }
+        let link = format!("cargo:rustc-link-search={}\n", lock.display());
+        assert!(parse(link.as_bytes(), &parse_options).is_err());
+
+        use std::os::unix::fs::symlink;
+        let outside = Fixture::new();
+        fs::remove_file(&lock).unwrap();
+        symlink(outside.root.join("build.rs"), &lock).unwrap();
+        assert!(
+            run(&options)
+                .unwrap_err()
+                .render()
+                .contains("within its workspace")
+        );
+        assert!(parse(b"cargo:rerun-if-changed=../Cargo.lock\n", &parse_options).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn member_scripts_can_read_workspace_inputs_without_writing_them() {
+        let fixture = RunFixture::new("workspace-read");
+        let mut options = fixture.options(Duration::from_secs(5), 64 * 1024);
+        // A dependency receives no workspace capability.
+        assert!(run(&options).is_err());
+        options.workspace_root = Some(&fixture.root);
+        let output = run(&options).unwrap();
+        assert!(
+            output
+                .directives
+                .contains(&Directive::RerunIfChanged(fixture.outside.join("secret")))
+        );
+        assert_eq!(fs::read(fixture.outside.join("secret")).unwrap(), b"secret");
+        assert_eq!(fs::read(fixture.out.join("generated")).unwrap(), b"secret");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_rerun_inputs_reject_symlink_escape_and_keep_link_search_private() {
+        use std::os::unix::fs::symlink;
+        let fixture = RunFixture::new("success");
+        let outside = Fixture::new();
+        symlink(
+            outside.root.join("build.rs"),
+            fixture.package.join("escape"),
+        )
+        .unwrap();
+        let mut options = ParseOptions {
+            targets: &[],
+            package_root: &fixture.package,
+            workspace_root: Some(&fixture.root),
+            workspace_lock: None,
+            out_dir: &fixture.out,
+            environment: &fixture.environment,
+            max_bytes: 1024,
+            out_dir_limits: crate::source_tree::DEFAULT_LIMITS,
+        };
+        assert!(
+            parse(b"cargo:rerun-if-changed=escape\n", &options)
+                .unwrap_err()
+                .render()
+                .contains("escapes")
+        );
+        let input = format!("cargo:rerun-if-changed={}\n", fixture.outside.display());
+        assert!(
+            parse(input.as_bytes(), &options)
+                .unwrap()
+                .directives
+                .contains(&Directive::RerunIfChanged(fixture.outside.clone()))
+        );
+        options.workspace_root = None;
+        assert!(parse(input.as_bytes(), &options).is_err());
+        options.workspace_root = Some(&fixture.root);
+        // A missing input reruns the script each build; it still may not escape.
+        let missing = parse(b"cargo:rerun-if-changed=generated/missing.h\n", &options).unwrap();
+        assert_eq!(
+            missing.directives,
+            [Directive::RerunIfChanged(
+                fixture.package.join("generated/missing.h")
+            )]
+        );
+        let missing_outside = format!(
+            "cargo:rerun-if-changed={}\n",
+            outside.root.join("missing").display()
+        );
+        for input in [
+            missing_outside.as_bytes(),
+            b"cargo:rerun-if-changed=missing/../../outside\n",
+            b"cargo:rerun-if-changed=escape/missing\n",
+        ] {
+            assert!(parse(input, &options).is_err(), "{input:?}");
+        }
+        assert!(crate::build_script::input_digest(&[fixture.package.join("missing")]).is_err());
+        let link = format!(
+            "cargo:rustc-link-search=native={}\n",
+            fixture.outside.display()
+        );
+        assert!(parse(link.as_bytes(), &options).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn kills_timeouts_and_rejects_combined_output_and_failures() {
         let timeout = RunFixture::new("timeout");
         assert!(
@@ -1099,12 +1844,12 @@ mod tests {
         let Ok(action) = std::env::var("LORRY_BUILD_SCRIPT_CHILD") else {
             return;
         };
+        let package = std::env::current_dir().unwrap();
+        let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+        let outside = package.parent().unwrap().join("outside/secret");
         match action.as_str() {
             "success" => {
-                let package = std::env::current_dir().unwrap();
-                let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
                 let temp = PathBuf::from(std::env::var_os("TMPDIR").unwrap());
-                let outside = package.parent().unwrap().join("outside/secret");
                 assert!(std::env::var_os("HOME").is_none());
                 assert_eq!(fs::read(package.join("build.rs")).unwrap(), b"input");
                 fs::write(out.join("generated"), b"output").unwrap();
@@ -1124,6 +1869,21 @@ mod tests {
                 eprintln!("sandbox stderr");
             }
             "timeout" => std::thread::sleep(Duration::from_secs(5)),
+            "workspace-read" => {
+                let bytes = fs::read(&outside).unwrap();
+                assert!(fs::write(&outside, b"bad").is_err());
+                assert!(fs::write(package.parent().unwrap().join("new-file"), b"bad").is_err());
+                fs::write(out.join("generated"), bytes).unwrap();
+                println!("cargo:rerun-if-changed={}", outside.display());
+            }
+            "workspace-lock" => {
+                let lock = package.parent().unwrap().join("Cargo.lock");
+                let bytes = fs::read(&lock).unwrap();
+                assert!(fs::write(&lock, b"bad").is_err());
+                assert!(fs::read(&outside).is_err());
+                fs::write(out.join("generated"), bytes).unwrap();
+                println!("cargo:rerun-if-changed={}", lock.display());
+            }
             "excess-output" => println!("{}", "x".repeat(4096)),
             "failure" => {
                 println!("failure stdout");

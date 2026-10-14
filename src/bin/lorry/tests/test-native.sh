@@ -14,7 +14,10 @@ fi
 MOTOR_TOOLCHAIN="$LORRY_MOTOR_TOOLCHAIN"
 MOTOR_LINKER="$LORRY_MOTOR_LINKER"
 MOTOR_SYSROOT="$LORRY_MOTOR_SYSROOT"
-REMOTE_BASE="/devtools/tmp/lorry-self"
+REMOTE_BASE="/user/tmp/lorry-self"
+NONE_REMOTE_ROOT="/none/tmp/lorry-self-none"
+# CAP_SPAWN and CAP_FS_WRITE without CAP_INTERACTIVE: a None-role process.
+NONE_CAPS=0x204
 
 IMAGE_NAME="motor-os-dev.qcow2"
 # Native rustc builds need enough parallel memory for the VM's vCPU count.
@@ -121,11 +124,151 @@ copy_native_fixture() {
     local source="$SCRIPT_DIR/native-fixture"
     rm -rf "$destination"
     mkdir -p "$destination"
-    cp "$source/Cargo.toml" "$source/Cargo.lock" "$source/lorry.toml" \
-        "$destination/"
+    cp "$source/Cargo.toml" "$source/Cargo.lock" "$destination/"
     cp -R "$source/.lorry" "$source/src" "$source/tests" \
         "$source/fixture-generated-dependency" \
         "$source/fixture-motor-target-dependency" "$destination/"
+}
+
+# The same ordinary workspace backs Cargo and cross/native byte comparisons.
+workspace_selection() {
+    case "$1" in
+        default) WORKSPACE_ARGUMENTS=() ;;
+        packages) WORKSPACE_ARGUMENTS=(-p app -p second) ;;
+        all) WORKSPACE_ARGUMENTS=(--workspace) ;;
+        exclude) WORKSPACE_ARGUMENTS=(--workspace --exclude second) ;;
+        *) fail "unknown workspace selection '$1'" ;;
+    esac
+}
+
+write_workspace_config() {
+    local fixture="$1"
+    mkdir -p "$fixture/.cargo"
+    printf '[target.%s]\nrustflags = ["-Clink-self-contained=no", "-Cdefault-linker-libraries=yes"]\n' \
+        "$MOTOR_TARGET" >"$fixture/.cargo/config.toml"
+    if [ "$#" -eq 2 ]; then
+        printf 'linker = "%s"\n' "$2" >>"$fixture/.cargo/config.toml"
+    fi
+}
+
+prepare_workspace_identity() {
+    local host_home="$1" rustc="$2" selection command member
+    local fixture="$WORK/workspace-cross"
+    local -a WORKSPACE_ARGUMENTS
+    rm -rf "$WORK/workspace-fixture" "$fixture"
+    cp -R "$SCRIPT_DIR/fixtures/cargo-identity-workspace" "$WORK/workspace-fixture"
+    write_workspace_config "$WORK/workspace-fixture"
+    cp -R "$WORK/workspace-fixture" "$fixture"
+    write_workspace_config "$fixture" "$MOTOR_LINKER"
+    (
+        cd "$fixture"
+        HOME="$host_home" RUSTC="$rustc" "$WORK/lorry-seed" vendor \
+            --workspace --locked --offline --accept-all
+        for selection in default packages all exclude; do
+            workspace_selection "$selection"
+            for command in build check; do
+                # Compare cold check sessions on both filesystems; Motor's
+                # expected incremental hard-link fallback differs from Linux.
+                local -a profile_arguments=(--target-dir "$fixture/check-target-$selection")
+                if [ "$command" = build ]; then profile_arguments=(--release); fi
+                HOME="$host_home" RUSTC="$rustc" "$WORK/lorry-seed" "$command" \
+                    "${profile_arguments[@]}" "${WORKSPACE_ARGUMENTS[@]}" --target "$MOTOR_TARGET" \
+                    --message-format=json >"$WORK/equivalence-workspace-$selection-$command.host"
+            done
+            for member in app second; do
+                if [ "$selection" = exclude ] && [ "$member" = second ]; then continue; fi
+                cp "$fixture/target/lorry/$MOTOR_TARGET/release/$member" \
+                    "$WORK/workspace-$selection-$member.cross"
+            done
+        done
+    )
+}
+
+run_workspace_identity() {
+    local fixture="$REMOTE_ROOT/workspace-fixture"
+    local selection command member arguments profile_arguments
+    local -a WORKSPACE_ARGUMENTS
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native vendor --workspace --locked --offline --accept-all"
+    for selection in default packages all exclude; do
+        workspace_selection "$selection"
+        arguments="${WORKSPACE_ARGUMENTS[*]}"
+        for command in build check; do
+            profile_arguments="--target-dir $fixture/check-target-$selection"
+            if [ "$command" = build ]; then profile_arguments="--release"; fi
+            remote_command "cd $fixture && $REMOTE_ROOT/lorry-native $command $profile_arguments $arguments --target $MOTOR_TARGET --message-format=json > $REMOTE_ROOT/equivalence-workspace-$selection-$command.native"
+            download_file "$REMOTE_ROOT/equivalence-workspace-$selection-$command.native" \
+                "$WORK/equivalence-workspace-$selection-$command.native"
+            compare_equivalence_output "workspace-$selection-$command" set
+        done
+        for member in app second; do
+            if [ "$selection" = exclude ] && [ "$member" = second ]; then continue; fi
+            download_file "$fixture/target/lorry/$MOTOR_TARGET/release/$member" \
+                "$WORK/workspace-$selection-$member.native"
+            cmp "$WORK/workspace-$selection-$member.cross" "$WORK/workspace-$selection-$member.native" ||
+                fail "cross/native workspace '$selection' executable '$member' differs"
+        done
+    done
+    remote_command "$fixture/target/lorry/$MOTOR_TARGET/release/second > $REMOTE_ROOT/workspace-features.out"
+    download_file "$REMOTE_ROOT/workspace-features.out" "$WORK/workspace-features.out"
+    [ "$(cat "$WORK/workspace-features.out")" = "second/src/main.rs shared/src/lib.rs true true" ] ||
+        fail "native workspace dependency feature union is incorrect"
+}
+
+# Lorry takes path grants only from the user's configuration, keyed by
+# workspace. The marker lets a later run drop grants a crashed run left.
+FIXTURE_POLICY_MARKER='# test-native fixture grants'
+fixture_policy() {
+    local root="$1"
+    local case
+    printf '%s\n' "$FIXTURE_POLICY_MARKER" \
+        "[workspaces.\"$root/native-fixture\".policy.rules.allow-fixture-generated-dependency]" \
+        'action = "allow"' 'name = "fixture-generated-dependency"' 'version = "=0.1.0"' \
+        'source = "path"' 'license = "MIT"' 'allow-build-script = true' \
+        "[workspaces.\"$root/proc-macro-fixture\".policy.rules.allow-derive-answer]" \
+        'action = "allow"' 'name = "derive-answer"' 'version = "=0.1.0"' \
+        'source = "path"' 'allow-proc-macro = true'
+    for case in default custom member; do
+        printf '%s\n' \
+            "[workspaces.\"$root/editor-evidence/$case/project\".policy.rules.generated]" \
+            'action = "allow"' 'source = "path"' 'name = "generated"' 'allow-build-script = true'
+    done
+}
+
+# Lorry's decisions file name for a workspace root (see workspace_trust.rs).
+decisions_name() {
+    printf '%s' "$1" | sha256sum | cut -c1-32
+}
+
+# Approves the native fixture's committed admission record without recording
+# `--accept-all`, so its grant rules stay under test.
+fixture_approval() {
+    local root="$1"
+    local review
+    review="$(sed -n 's/^review-sha256 = "\([0-9a-f]*\)"$/\1/p' \
+        "$SCRIPT_DIR/native-fixture/.lorry/dependencies-v2.toml")"
+    printf '%s\n' 'format-version = 1' "workspace = \"$root\"" \
+        "approved-review-sha256 = \"$review\""
+}
+
+# Workspaces whose decisions this run leaves in the guest's configuration.
+remote_decision_roots() {
+    printf '%s\n' "$REMOTE_ROOT/lorry-first/src/bin/lorry" "$REMOTE_ROOT/native-fixture" \
+        "$REMOTE_ROOT/proc-macro-fixture" "$REMOTE_ROOT/clippy-native-fixture" \
+        "$REMOTE_ROOT/workspace-fixture" "$REMOTE_ROOT/editor-evidence/default/project" \
+        "$REMOTE_ROOT/editor-evidence/custom/project" "$REMOTE_ROOT/editor-evidence/member/project"
+}
+
+# Motor has no per-run HOME configuration: the grants go into the guest's
+# user configuration for this run, and cleanup restores the original.
+install_remote_policy() {
+    download_file /user/cfg/lorry.toml "$WORK/user-config.remote" ||
+        fail "cannot read the guest's /user/cfg/lorry.toml"
+    sed "/^$FIXTURE_POLICY_MARKER\$/,\$d" "$WORK/user-config.remote" >"$WORK/user-config.orig"
+    { cat "$WORK/user-config.orig"; fixture_policy "$REMOTE_ROOT"; } >"$WORK/user-config.test"
+    upload_file "$WORK/user-config.orig" "$REMOTE_ROOT/user-config.orig"
+    upload_file "$WORK/user-config.test" "$REMOTE_ROOT/user-config.test"
+    REMOTE_POLICY=1
+    remote_command "/system/bin/cat $REMOTE_ROOT/user-config.test > /user/cfg/lorry.toml"
 }
 
 write_host_config() {
@@ -134,7 +277,7 @@ write_host_config() {
     local host_ca_bundle="$3"
     mkdir -p "$host_home/.config/lorry"
     printf '%s\n' \
-        'config-version = 1' \
+        'config-version = 1' 'use-cargo-registry = false' \
         'cargo-compat-version = "1.99"' \
         '' \
         '[repositories]' \
@@ -155,8 +298,7 @@ write_host_config() {
         'path-roots = []' \
         '' \
         '[policy.limits]' \
-        'max-packages = 192' \
-        'max-depth = 16' \
+        'max-packages = 384' \
         'max-package-bytes = 16777216' \
         'max-extracted-package-bytes = 134217728' \
         'max-package-files = 20000' \
@@ -165,13 +307,19 @@ write_host_config() {
         'build-script-seconds = 300' \
         'build-script-output-bytes = 8388608' \
         >"$host_home/.config/lorry/lorry.toml"
+    # Cross and native self-builds use the same exact execution grants.
+    # Default allow admits ordinary sources, not build-time capabilities.
+    awk '/^\[policy\.rules\./ { rules = 1 } rules { print }' \
+        "$ROOT_DIR/img_files/motor-os-dev/user/cfg/lorry.toml" \
+        >>"$host_home/.config/lorry/lorry.toml"
+    fixture_policy "$WORK" >>"$host_home/.config/lorry/lorry.toml"
 }
 
 remote_command() {
     local remaining=$((PHASE_DEADLINE_MS - $(timing_now_ms)))
     [ "$remaining" -gt 0 ] || fail "native self phase exceeded ${PHASE_BUDGET}s"
     timeout "$(awk -v ms="$remaining" 'BEGIN { printf "%.3f", ms / 1000 }')" \
-        "${SSH[@]}" "TMPDIR=/devtools/tmp $*" 2>&1 | tee -a "$NATIVE_LOG"
+        "${SSH[@]}" "$*" 2>&1 | tee -a "$NATIVE_LOG"
 }
 
 remote_command_expect_failure() {
@@ -214,12 +362,14 @@ normalize_equivalence_output() {
     local line
     : >"$output"
     while IFS= read -r line || [ -n "$line" ]; do
+        line="${line//"$WORK/workspace-cross"/<workspace>}"
+        line="${line//"$REMOTE_ROOT/workspace-fixture"/<workspace>}"
         line="${line//"$WORK/native-fixture"/<fixture>}"
         line="${line//"$REMOTE_ROOT/native-fixture"/<fixture>}"
         line="${line//"$WORK/native-equivalence-target"/<target>}"
         line="${line//"$REMOTE_ROOT/native-equivalence-target"/<target>}"
         line="${line//"$WORK/host-home/.cache/lorry"/<cache>}"
-        line="${line//\/devtools\/lorry\/cache/<cache>}"
+        line="${line//\/devtools\/lorry\/user\/cache/<cache>}"
         line="${line//"$HOST_TOOLCHAIN_SYSROOT"/<sysroot>}"
         line="${line//\/devtools\/rust/<sysroot>}"
         printf '%s\n' "$line" >>"$output"
@@ -278,6 +428,14 @@ prepare_host() {
     [ -f "$host_ca_bundle" ] || fail "host CA bundle '$host_ca_bundle' is absent"
     [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
         fail "Motor sysroot '$MOTOR_SYSROOT' is incomplete"
+    "$motor_rustc" --edition=2024 --target "$MOTOR_TARGET" \
+        -C linker="$MOTOR_LINKER" -Clink-self-contained=no \
+        -Cdefault-linker-libraries=yes -C panic=abort \
+        "$SCRIPT_DIR/helpers/cancel-probe.rs" -o "$WORK/cancel-probe"
+    "$motor_rustc" --edition=2024 --target "$MOTOR_TARGET" \
+        -C linker="$MOTOR_LINKER" -Clink-self-contained=no \
+        -Cdefault-linker-libraries=yes -C panic=abort \
+        "$SCRIPT_DIR/helpers/recovery-probe.rs" -o "$WORK/recovery-probe"
     diff -qr "$motor_toolchain_sysroot/lib/rustlib/$MOTOR_TARGET" \
         "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" >"$WORK/sysroot-diff" || {
         cat "$WORK/sysroot-diff" >&2
@@ -290,6 +448,19 @@ prepare_host() {
         --locked --offline --release
     cp "$LORRY_DIR/target/release/lorry" "$WORK/lorry-seed"
     write_host_config "$host_home" "$host_curl" "$host_ca_bundle"
+    CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$motor_rustc" \
+        RUSTFLAGS='-Clink-self-contained=no -Cdefault-linker-libraries=yes' \
+        "$cargo" build --manifest-path "$SCRIPT_DIR/editor-workspace/Cargo.toml" \
+        --locked --offline --release --target "$MOTOR_TARGET" \
+        --target-dir "$WORK/editor-target" \
+        --config "target.$MOTOR_TARGET.linker=\"$MOTOR_LINKER\""
+    cp "$WORK/editor-target/$MOTOR_TARGET/release/lorry-editor-workspace" "$WORK/editor-workspace"
+    python3 - "$ROOT_DIR" "$WORK/editor-config.json" <<'PY'
+import json, pathlib, sys, tomllib
+source = pathlib.Path(sys.argv[1]) / 'img_files/motor-os-dev/user/cfg/helix/languages.toml'
+config = tomllib.loads(source.read_text())['language-server']['rust-analyzer']['config']
+pathlib.Path(sys.argv[2]).write_text(json.dumps(config))
+PY
 
     for tree in "$host_tree" "$guest_tree"; do
         copy_package "$LORRY_DIR" "$tree/src/bin/lorry"
@@ -301,8 +472,14 @@ prepare_host() {
             "$tree/src/sys/lib/moto-rt/src"
     done
     copy_native_fixture "$WORK/native-fixture"
+    mkdir -p "$host_home/.config/lorry/workspaces"
+    fixture_approval "$(realpath "$WORK/native-fixture")" >"$host_home/.config/lorry/workspaces/$(
+        decisions_name "$(realpath "$WORK/native-fixture")"
+    ).toml"
     rm -rf "$WORK/proc-macro-fixture"
     cp -R "$SCRIPT_DIR/proc-macro-fixture" "$WORK/proc-macro-fixture"
+    rm -rf "$WORK/clippy-native-fixture"
+    cp -R "$SCRIPT_DIR/clippy-native-fixture" "$WORK/clippy-native-fixture"
     rm -rf "$guest_tree/src/bin/lorry/target"
     mkdir -p "$source/.cargo"
     printf '[target.%s]\nlinker = "%s"\nrustflags = ["-Clink-self-contained=no", "-Cdefault-linker-libraries=yes"]\n' \
@@ -357,6 +534,7 @@ prepare_host() {
             --target-dir "$target" --manifest-path "$fixture/Cargo.toml" \
             >"$WORK/equivalence-messages.host"
     )
+    prepare_workspace_identity "$host_home" "$motor_rustc"
 }
 
 start_vm() {
@@ -389,17 +567,23 @@ run_native() {
     local first="$REMOTE_ROOT/lorry-first/src/bin/lorry"
     local fixture="$REMOTE_ROOT/native-fixture"
     local proc_macro_fixture="$REMOTE_ROOT/proc-macro-fixture"
+    local clippy_fixture="$REMOTE_ROOT/clippy-native-fixture"
     local destination="$REMOTE_ROOT/lorry-first"
 
     remote_command "[ -d $REMOTE_BASE ] || /system/bin/mkdir $REMOTE_BASE"
     remote_command "[ -d $REMOTE_ROOT ] || /system/bin/mkdir $REMOTE_ROOT"
     REMOTE_CREATED=1
+    install_remote_policy
     if [ "$WARM" -eq 1 ]; then
-        for executable in lorry-cross lorry-native; do
+        for executable in lorry-cross lorry-native cancel-probe recovery-probe; do
             remote_command "[ ! -f $REMOTE_ROOT/$executable ] || /system/bin/rm $REMOTE_ROOT/$executable"
         done
     fi
     upload_file "$WORK/lorry-cross" "$REMOTE_ROOT/lorry-cross"
+    upload_file "$WORK/cancel-probe" "$REMOTE_ROOT/cancel-probe"
+    upload_file "$WORK/recovery-probe" "$REMOTE_ROOT/recovery-probe"
+    upload_file "$WORK/editor-workspace" "$REMOTE_ROOT/editor-workspace"
+    upload_file "$WORK/editor-config.json" "$REMOTE_ROOT/editor-config.json"
 
     remote_command "$REMOTE_ROOT/lorry-cross --version"
     remote_command "[ -d $destination ] || /system/bin/mkdir $destination"
@@ -417,8 +601,19 @@ run_native() {
         done
     fi
     upload_tree "$WORK/native-fixture" "$fixture"
+    fixture_approval "$fixture" >"$WORK/fixture-approval.toml"
+    upload_file "$WORK/fixture-approval.toml" "$REMOTE_ROOT/fixture-approval.toml"
+    remote_command "[ -d /user/cfg/lorry-workspaces ] || /system/bin/mkdir /user/cfg/lorry-workspaces"
+    remote_command "/system/bin/cat $REMOTE_ROOT/fixture-approval.toml > /user/cfg/lorry-workspaces/$(decisions_name "$fixture").toml"
+    if [ "$WARM" -eq 1 ]; then
+        remote_command "[ ! -d $REMOTE_ROOT/workspace-fixture ] || /system/bin/rm -r $REMOTE_ROOT/workspace-fixture"
+    fi
+    remote_command "[ -d $REMOTE_ROOT/workspace-fixture ] || /system/bin/mkdir $REMOTE_ROOT/workspace-fixture"
+    upload_tree "$WORK/workspace-fixture" "$REMOTE_ROOT/workspace-fixture"
     remote_command "[ -d $proc_macro_fixture ] || /system/bin/mkdir $proc_macro_fixture"
     upload_tree "$WORK/proc-macro-fixture" "$proc_macro_fixture"
+    remote_command "[ -d $clippy_fixture ] || /system/bin/mkdir $clippy_fixture"
+    upload_tree "$WORK/clippy-native-fixture" "$clippy_fixture"
 
     if [ "$WARM" -eq 1 ] && [ "$CROSS_CHANGED" -eq 1 ]; then
         remote_command "$REMOTE_ROOT/lorry-cross cache clean"
@@ -431,6 +626,43 @@ run_native() {
     download_file "$first/target/lorry/release/lorry" "$WORK/lorry-native"
     cmp "$WORK/lorry-cross" "$WORK/lorry-native" ||
         fail "Linux-to-Motor and Motor-native Lorry executables differ"
+    remote_command "/devtools/bin/rustc -vV > $REMOTE_ROOT/clippy-rustc.version"
+    remote_command "/devtools/bin/clippy-driver --rustc -vV > $REMOTE_ROOT/clippy-driver.version"
+    download_file "$REMOTE_ROOT/clippy-rustc.version" "$WORK/clippy-rustc.version"
+    download_file "$REMOTE_ROOT/clippy-driver.version" "$WORK/clippy-driver.version"
+    cmp "$WORK/clippy-rustc.version" "$WORK/clippy-driver.version" ||
+        fail "native Clippy embeds a different rustc"
+    remote_command "cd $clippy_fixture && $REMOTE_ROOT/lorry-native vendor --accept-all"
+    remote_command "cd $clippy_fixture && $REMOTE_ROOT/lorry-native clippy --lib > $REMOTE_ROOT/clippy.human.out 2> $REMOTE_ROOT/clippy.human.err"
+    remote_command "cd $clippy_fixture && $REMOTE_ROOT/lorry-native clippy --lib --message-format=json > $REMOTE_ROOT/clippy.json"
+    remote_command "cd $clippy_fixture && $REMOTE_ROOT/lorry-native clippy --lib --message-format=json -- -W clippy::cargo_common_metadata > $REMOTE_ROOT/clippy.metadata.json"
+    remote_command_expect_failure "cd $clippy_fixture && $REMOTE_ROOT/lorry-native -q --lorry-messages clippy --lib --no-deps --message-format=json -- -D clippy::needless_return > $REMOTE_ROOT/clippy-deny.json 2> $REMOTE_ROOT/clippy-deny.errors"
+    for output in human.out human.err json metadata.json deny.json deny.errors; do
+        local remote_name="$REMOTE_ROOT/clippy.$output"
+        case "$output" in deny.*) remote_name="$REMOTE_ROOT/clippy-$output" ;; esac
+        download_file "$remote_name" "$WORK/clippy.$output"
+    done
+    [ ! -s "$WORK/clippy.human.out" ] || fail "native human Clippy wrote compiler output to stdout"
+    grep -F 'unneeded `return` statement' "$WORK/clippy.human.err" >/dev/null ||
+        fail "native Clippy omitted the known lint"
+    python3 - "$WORK/clippy.json" "$WORK/clippy.deny.json" "$WORK/clippy.deny.errors" "$WORK/clippy.metadata.json" <<'PY'
+import json, sys
+success, failure, own, metadata = ([json.loads(line) for line in open(path)] for path in sys.argv[1:])
+assert success[-1] == {'reason': 'build-finished', 'success': True}
+assert any(event['reason'] == 'compiler-message'
+           and (event['message'].get('code') or {}).get('code') == 'clippy::needless_return'
+           for event in success)
+assert failure[-1] == {'reason': 'build-finished', 'success': False}
+assert any(event['reason'] == 'compiler-message' and event['message']['level'] == 'error'
+           and (event['message'].get('code') or {}).get('code') == 'clippy::needless_return'
+           for event in failure)
+assert len(own) == 1 and own[0]['reason'] == 'lorry-error' and own[0]['exit_code'] == 101, own
+assert metadata[-1] == {'reason': 'build-finished', 'success': True}
+messages = [event['message'] for event in metadata if event['reason'] == 'compiler-message']
+assert any((message.get('code') or {}).get('code') == 'clippy::cargo_common_metadata'
+           and 'is missing' in message['message'] for message in messages)
+assert not any('could not read cargo metadata' in message['message'] for message in messages)
+PY
     local equivalence_target="$REMOTE_ROOT/native-equivalence-target"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native locate-project --workspace --manifest-path $fixture/Cargo.toml > $REMOTE_ROOT/equivalence-locate.native"
     remote_command "cd $fixture && __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS=nightly $REMOTE_ROOT/lorry-native rustc -Z unstable-options --print cfg --target $MOTOR_TARGET -- -O > $REMOTE_ROOT/equivalence-cfg.native"
@@ -448,9 +680,19 @@ run_native() {
         compare_equivalence_output "$output"
     done
     compare_equivalence_output messages set
+    run_workspace_identity
+    download_file /user/cfg/helix/languages.toml "$WORK/native-editor-config.toml"
+    cmp "$ROOT_DIR/img_files/motor-os-dev/user/cfg/helix/languages.toml" "$WORK/native-editor-config.toml" ||
+        fail "native editor configuration differs from the tested shipped configuration"
+    remote_command "[ ! -d $REMOTE_ROOT/editor-evidence ] || /system/bin/rm -r $REMOTE_ROOT/editor-evidence"
+    remote_command "/system/bin/mkdir $REMOTE_ROOT/editor-evidence && $REMOTE_ROOT/editor-workspace $REMOTE_ROOT/lorry-native $REMOTE_ROOT $REMOTE_ROOT/editor-evidence $REMOTE_ROOT/editor-config.json"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
+    # The committed record already reviews the whole workspace; an offline
+    # locked re-review must still succeed without changing the lock.
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native vendor --workspace --locked --offline --accept-all"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release -- --quiet"
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release --bundle -- --quiet"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
     grep -F -- "-C panic=abort" "$NATIVE_LOG" >/dev/null ||
         fail "Motor dev profile did not pass panic=abort to rustc"
@@ -480,6 +722,61 @@ run_native() {
         fail "Motor debug rustc commands did not use persistent incremental state"
     [ "$(wc -l <"$incremental_lines")" -ge 2 ] ||
         fail "two Motor debug compilations did not reuse the same incremental root"
+    remote_command "$REMOTE_ROOT/cancel-probe $REMOTE_ROOT/lorry-native $REMOTE_ROOT/cancel-fixture"
+    remote_command "$REMOTE_ROOT/recovery-probe $REMOTE_ROOT/lorry-native $REMOTE_ROOT/recovery-fixture"
+    run_none_role
+}
+
+# Lorry as None keeps its own state: configuration and decisions in /none/cfg,
+# cache in /devtools/lorry/none, scratch in /none/tmp. None cannot reach
+# Interactive's /user/cfg at all. The fixture has no dependencies, so this
+# needs no network; the build's rustc answers are what land in the cache.
+run_none_role() {
+    local root="$NONE_REMOTE_ROOT"
+    local none="MOTOR_OS_CAPS=$NONE_CAPS"
+    local decisions output
+    decisions="$(decisions_name "$root/fixture").toml"
+    mkdir -p "$WORK/none-fixture/src"
+    printf '%s\n' '[package]' 'name = "none-role"' 'version = "0.1.0"' 'edition = "2021"' \
+        >"$WORK/none-fixture/Cargo.toml"
+    printf '%s\n' 'fn main() {' '    println!("none-role ok");' '}' \
+        >"$WORK/none-fixture/src/main.rs"
+    remote_command "[ ! -e $root ] || /system/bin/rm -r $root"
+    # None creates the directories it writes in; Interactive's would be
+    # read-only to it. Plain puts: `put -p` would also copy the host's mode
+    # onto them.
+    remote_command "$none /system/bin/mkdir $root && $none /system/bin/mkdir $root/fixture && $none /system/bin/mkdir $root/fixture/src"
+    NONE_CREATED=1
+    printf 'put %s %s\nput %s %s\n' \
+        "$WORK/none-fixture/Cargo.toml" "$root/fixture/Cargo.toml" \
+        "$WORK/none-fixture/src/main.rs" "$root/fixture/src/main.rs" >"$WORK/none-upload.batch"
+    timeout 60 sftp "${SFTP_OPTIONS[@]}" -b "$WORK/none-upload.batch" motor@192.168.4.2 \
+        >>"$NATIVE_LOG" 2>&1 || fail "cannot upload the None-role fixture"
+    remote_command "/system/bin/cp $REMOTE_ROOT/lorry-native $root/lorry"
+    remote_command_expect_failure "$none /system/bin/ls /user/cfg"
+
+    remote_command "cd $root && $none $root/lorry cache clean"
+    remote_command "[ ! -e /devtools/lorry/none/cache ] && [ -d /devtools/lorry/user/cache ]" ||
+        fail "None's cache clean did not remove exactly /devtools/lorry/none/cache"
+    remote_command "cd $root/fixture && $none $root/lorry vendor --accept-all"
+    remote_command "[ -f /none/cfg/lorry-workspaces/$decisions ] && [ ! -e /user/cfg/lorry-workspaces/$decisions ]" ||
+        fail "None's workspace decisions are not in /none/cfg/lorry-workspaces"
+    output="$(remote_command "cd $root/fixture && $none $root/lorry run")" ||
+        fail "None could not build and run a package"
+    [[ "$output" == *"none-role ok"* ]] || fail "None's package did not run: $output"
+    remote_command "[ -d /devtools/lorry/none/cache/rustc-queries ]" ||
+        fail "None's build did not use /devtools/lorry/none/cache"
+
+    remote_command "/system/bin/cp /none/cfg/lorry.toml $root/lorry.toml.orig"
+    NONE_CONFIG_SAVED=1
+    remote_command "echo 'not-a-setting = 1' >> /none/cfg/lorry.toml"
+    if output="$(remote_command "cd $root/fixture && $none $root/lorry build")"; then
+        fail "None's Lorry ignored an invalid /none/cfg/lorry.toml"
+    fi
+    [[ "$output" == *"/none/cfg/lorry.toml"* ]] ||
+        fail "None's Lorry did not report its own configuration file: $output"
+    remote_command "/system/bin/cat $root/lorry.toml.orig > /none/cfg/lorry.toml"
+    NONE_CONFIG_SAVED=0
 }
 
 cleanup() {
@@ -487,6 +784,27 @@ cleanup() {
     trap - EXIT
     set +e
     timing_finish "$status"
+    if [ "$REMOTE_POLICY" -eq 1 ]; then
+        timeout 5 "${SSH[@]}" "/system/bin/cat $REMOTE_ROOT/user-config.orig > /user/cfg/lorry.toml" \
+            >/dev/null 2>&1 || echo "test-native: could not restore the guest's /user/cfg/lorry.toml" >&2
+        local root file removals=""
+        while read -r root; do
+            file="/user/cfg/lorry-workspaces/$(decisions_name "$root").toml"
+            removals="$removals[ ! -f $file ] || /system/bin/rm $file; "
+        done < <(remote_decision_roots)
+        timeout 10 "${SSH[@]}" "$removals" >/dev/null 2>&1 ||
+            echo "test-native: could not remove this run's guest workspace decisions" >&2
+    fi
+    if [ "$NONE_CONFIG_SAVED" -eq 1 ]; then
+        timeout 5 "${SSH[@]}" "/system/bin/cat $NONE_REMOTE_ROOT/lorry.toml.orig > /none/cfg/lorry.toml" \
+            >/dev/null 2>&1 || echo "test-native: could not restore the guest's /none/cfg/lorry.toml" >&2
+    fi
+    if [ "$NONE_CREATED" -eq 1 ]; then
+        local none_decisions
+        none_decisions="/none/cfg/lorry-workspaces/$(decisions_name "$NONE_REMOTE_ROOT/fixture").toml"
+        timeout 10 "${SSH[@]}" "[ ! -f $none_decisions ] || /system/bin/rm $none_decisions; /system/bin/rm -r $NONE_REMOTE_ROOT" \
+            >/dev/null 2>&1 || echo "test-native: could not remove the None-role fixture" >&2
+    fi
     if [ "$REMOTE_CREATED" -eq 1 ] && [ "$WARM" -eq 0 ]; then
         case "$REMOTE_ROOT" in
             "$REMOTE_BASE"/*) timeout 5 "${SSH[@]}" "/system/bin/rm -r $REMOTE_ROOT" >/dev/null 2>&1 ;;
@@ -508,6 +826,9 @@ cleanup() {
         cat "$TIMING_LOG"
     } >"$SUMMARY"
     if [ "$status" -ne 0 ]; then
+        for artifact in "$WORK"/equivalence-workspace-* "$WORK"/workspace-*.cross "$WORK"/workspace-*.native; do
+            [ ! -f "$artifact" ] || cp "$artifact" "$EVIDENCE_DIR/"
+        done
         for artifact in lorry-cross lorry-native; do
             [ ! -f "$WORK/$artifact" ] ||
                 cp "$WORK/$artifact" "$EVIDENCE_DIR/$artifact"
@@ -530,6 +851,9 @@ cleanup() {
 VM_PID=""
 VM_STARTED=0
 REMOTE_CREATED=0
+REMOTE_POLICY=0
+NONE_CREATED=0
+NONE_CONFIG_SAVED=0
 PHASE_BUDGET="${LORRY_NATIVE_SELF_TIMEOUT:-1200}"
 PHASE_DEADLINE_MS=0
 case "$PHASE_BUDGET" in

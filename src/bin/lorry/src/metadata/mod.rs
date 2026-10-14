@@ -8,176 +8,164 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::admission_state::{CompactState, Context};
-use crate::atomic::AtomicDirectory;
-use crate::cargo_registry::CargoRegistry;
 use crate::cli::{Cli, MetadataOptions, Verbosity};
-use crate::config::{Config, effective_rustflags};
-use crate::dependency::{self, PreparedGraph};
+use crate::config::Config;
+use crate::dependency::{self, PreparedGraph, PreparedPackage};
 use crate::diagnostic::{Error, Result};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, SourceWorkspace};
 use crate::progress::Progress;
-use crate::repository::RepositorySet;
-use crate::resolver::{PackageKey, ResolvedSource, TargetSelection};
+use crate::resolver::{PackageKey, Resolution, ResolvedSource};
 use crate::source_tree::Exclusions;
 use crate::toolchain::Toolchain;
-use crate::unit::PlanOptions;
 use crate::validation::ValidationMode;
 
-const MOTOR_TARGET: &str = "x86_64-unknown-motor";
-
 pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
+    crate::cargo_registry::with_fallback(cli, |cli, notes| execute_with(cli, notes, options))
+}
+
+fn execute_with(cli: &Cli, notes: Verbosity, options: &MetadataOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = Manifest::load_selected_or_manifest_path(
+    let mut workspace = SourceWorkspace::load(
         &current,
-        options.manifest_path.as_deref().map(std::path::Path::new),
-        cli.package.as_deref(),
+        cli.manifest_path.as_deref().map(std::path::Path::new),
+    )?;
+    warn_default_format(notes, options);
+    Manifest::report_warnings(&workspace.packages, notes);
+    let mut config = Config::load_source_workspace(&current, &workspace, cli.max_packages)?;
+    config.report_ignored(notes);
+    let use_cargo_registry = crate::cargo_registry::selected(cli, &config);
+    if use_cargo_registry {
+        config.trust_cargo_cache();
+    }
+    let target_directory = package::path_utf8(
+        &config.target_directory(&current, &workspace.root, None),
+        "metadata target directory",
+    )?;
+    let set_target_directory = |document: &mut wire::Metadata| {
+        document.target_directory.clone_from(&target_directory);
+        document
+            .build_directory
+            .clone_from(&document.target_directory);
+    };
+    if options.no_deps {
+        let mut document = graph::no_dependencies(&workspace)?;
+        set_target_directory(&mut document);
+        return write_document(&document);
+    }
+    if workspace.packages.is_empty() {
+        return Err(Error::failure(
+            "the manifest is virtual, and the workspace contains no package",
+        ));
+    }
+    workspace.load_locked_context().map_err(|error| {
+        error.with_help(
+        "provide a current Cargo.lock, then run `lorry fetch` to acquire missing locked sources")
+    })?;
+    let manifest = &workspace.packages[0];
+    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
+    // Cargo's build.target does not filter metadata; only --filter-platform
+    // limits its nodes. Feature requests are still resolved across platforms.
+    let platform = options
+        .filter_platform
+        .as_deref()
+        .map(|triple| toolchain.target_info(Some(triple)))
+        .transpose()?;
+    // Extraction for inspection creates its own private directories here.
+    let scratch = env::temp_dir();
+    Progress::new(notes != Verbosity::Quiet).report("Verifying dependency state")?;
+    let locked = dependency::LockedContext::open(
+        manifest,
+        &config,
+        &toolchain,
+        dependency::RegistryAccess {
+            use_cargo_registry,
+            validation: ValidationMode::Trusted,
+            staging_parent: &scratch,
+            evidence_root: &crate::engine::artifact_root(manifest).join(".cargo-evidence"),
+        },
+    )?;
+    let (complete, catalog) = dependency::workspace::resolve_locked(
+        &workspace,
+        &config,
+        locked.source(),
+        &locked.direct,
+        &locked.options,
+        None,
+    )?;
+    let members = crate::resolver::workspace::features::member_requests(
+        &workspace,
+        &workspace
+            .packages
+            .iter()
+            .map(|member| member.root.clone())
+            .collect(),
+        &cli.features,
         true,
     )?;
-    let mut config = Config::load(&manifest.root)?;
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
-    crate::engine::check_rust_version(&manifest, &toolchain)?;
-    let physical_target = config.selected_target(options.filter_platform.as_deref())?;
-    let target = toolchain.target_info(physical_target.as_deref())?;
-    manifest.require_supported_target(&target)?;
-    let host = if physical_target.is_some() {
-        toolchain.target_info(None)?
-    } else {
-        target.clone()
-    };
-    if cli.verbosity == Verbosity::Verbose {
+    let resolution = crate::resolver::workspace::resolve_metadata_workspace(
+        &complete,
+        &catalog,
+        &locked.options,
+        &members,
+    )?;
+    let prepared = dependency::workspace::prepare_sources(
+        resolution,
+        &config,
+        locked.source(),
+        &scratch,
+        &locked.direct,
+    )?;
+    let cache_root = config.cache_directory()?;
+    let roots = publish_source_parts(
+        &cache_root,
+        &config,
+        &prepared.resolution,
+        &prepared.packages,
+        ValidationMode::Trusted,
+    )?;
+    let mut document =
+        graph::workspace::resolved(&workspace, &prepared, &roots, platform.as_ref())?;
+    set_target_directory(&mut document);
+    write_document(&document)
+}
+
+fn warn_default_format(notes: Verbosity, options: &MetadataOptions) {
+    if !options.format_version_explicit && notes != Verbosity::Quiet {
         eprintln!(
-            "Using {} (rustc {}, Cargo {:?} compatibility)",
-            toolchain.rustc.display(),
-            toolchain.release,
-            toolchain.compatibility
+            "warning: please specify `--format-version` flag explicitly to avoid compatibility problems"
         );
     }
-
-    if options.no_deps {
-        return write_document(&graph::no_dependencies(&manifest)?);
-    }
-    let compact_state = CompactState::load(&manifest.root)?;
-    if let Some(compact) = &compact_state {
-        compact.require_context(&host.triple, &target.triple)?;
-    }
-
-    let staging = AtomicDirectory::new(&env::temp_dir(), "lorry-metadata")?;
-    let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
-    progress.report("Verifying dependency state")?;
-    let repositories = if cli.use_cargo_registry {
-        None
-    } else {
-        Some(RepositorySet::open_with_validation(
-            &config.repositories,
-            crate::engine::repository_tree_limits(&config.policy.limits)?,
-            config.policy.limits.max_package_bytes,
-            ValidationMode::Trusted,
-        )?)
-    };
-    let cargo_registry = if cli.use_cargo_registry {
-        Some(CargoRegistry::discover_with_validation(
-            staging.path(),
-            &config.policy.limits,
-            ValidationMode::Trusted,
-            Some(&crate::engine::artifact_root(&manifest).join(".cargo-evidence")),
-        )?)
-    } else {
-        None
-    };
-    let source = match (&repositories, &cargo_registry) {
-        (Some(repositories), None) => dependency::RegistrySource::Lorry(repositories),
-        (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
-        _ => unreachable!("exactly one registry source is constructed"),
-    };
-    let direct = crate::git::load_locked_dependencies(&manifest, &config.policy.limits)?;
-    let resolver_options = dependency::resolver_options(&manifest, &config, &toolchain)?;
-    let selection = TargetSelection {
-        target_triple: &target.triple,
-        target_cfg: &target.cfg,
-        host_triple: &host.triple,
-        host_cfg: &host.cfg,
-    };
-    let verified_resolution = if let Some(compact) = &compact_state {
-        let verified = dependency::verify_compact_admission(
-            &dependency::ReviewInputs {
-                manifest: &manifest,
-                config: &config,
-                source,
-                toolchain: &toolchain,
-                options: &resolver_options,
-                staging_parent: staging.path(),
-                direct: Some(&direct),
-                prepare_context: Some(Context {
-                    host: host.triple.clone(),
-                    target: target.triple.clone(),
-                }),
-            },
-            compact,
-        )?;
-        let (review, resolution) = verified.into_parts();
-        review.apply_to_policy(&mut config.policy, &manifest.root)?;
-        resolution
-    } else {
-        None
-    };
-    progress.report("Preparing dependency graph")?;
-    let prepared = dependency::prepare_locked_source(
-        &manifest,
-        &config,
-        dependency::LockedSource {
-            registry: source,
-            direct: &direct,
-            verified_resolution,
-        },
-        &resolver_options,
-        selection,
-        staging.path(),
-    )?;
-    let target_cfgs = crate::engine::matching_cfgs(&config, &target)?;
-    let target_options = config.target_options(&target.triple, &target_cfgs)?;
-    let rustflags = effective_rustflags(&config, &target_options)?;
-    let logical_target = if physical_target.is_some() {
-        physical_target.as_deref()
-    } else if cfg!(target_os = "motor") {
-        Some(MOTOR_TARGET)
-    } else {
-        None
-    };
-    let plan = prepared.dependency_plan(&PlanOptions {
-        workspace_root: &manifest.workspace_root,
-        release: false,
-        test_profile: false,
-        panic_abort: manifest.panic_abort(false),
-        release_profile: &manifest.release,
-        rustc: &toolchain,
-        logical_target,
-        rustflags: &rustflags,
-    })?;
-    let cache_root = config.cache_directory()?;
-    let roots = publish_sources(&cache_root, &config, &prepared)?;
-    write_document(&graph::resolved(
-        &manifest,
-        &prepared,
-        &plan,
-        &roots,
-        config.policy.limits.max_packages,
-    )?)
 }
 
 pub(crate) fn publish_sources(
     cache_root: &std::path::Path,
     config: &Config,
     prepared: &PreparedGraph,
+    validation: ValidationMode,
+) -> Result<BTreeMap<PackageKey, PathBuf>> {
+    publish_source_parts(
+        cache_root,
+        config,
+        &prepared.resolution,
+        &prepared.packages,
+        validation,
+    )
+}
+
+fn publish_source_parts(
+    cache_root: &std::path::Path,
+    config: &Config,
+    resolution: &Resolution,
+    packages: &BTreeMap<PackageKey, PreparedPackage>,
+    validation: ValidationMode,
 ) -> Result<BTreeMap<PackageKey, PathBuf>> {
     let limits = crate::engine::repository_tree_limits(&config.policy.limits)?;
-    prepared
-        .resolution
+    resolution
         .packages
         .iter()
         .map(|package| {
-            let prepared_package = &prepared.packages[&package.key];
+            let prepared_package = &packages[&package.key];
             let root = match &package.source {
                 ResolvedSource::Path { physical_root, .. } => fs::canonicalize(physical_root)
                     .map_err(|error| {
@@ -186,6 +174,11 @@ pub(crate) fn publish_sources(
                             physical_root.display()
                         ))
                     })?,
+                // Builds compile Cargo's own extraction, so messages and
+                // metadata name it, as Cargo does, instead of a copy.
+                ResolvedSource::CratesIo { .. } if prepared_package.in_cargo_registry() => {
+                    prepared_package.source_root().to_owned()
+                }
                 ResolvedSource::CratesIo { .. } | ResolvedSource::Git { .. } => {
                     crate::source_view::publish_package(
                         cache_root,
@@ -199,6 +192,7 @@ pub(crate) fn publish_sources(
                         } else {
                             Exclusions::None
                         },
+                        validation,
                     )?
                 }
             };

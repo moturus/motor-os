@@ -193,7 +193,7 @@ httpd:
 
 httpd-axum:
 	mkdir -p $(BIN_DIR)
-	cd src/bin/httpd-axum && CARGO_TARGET_DIR="$(OBJ_DIR)/httpd-axum" $(DO_BUILD)
+	cd src/bin/httpd-axum && CARGO_TARGET_DIR="$(OBJ_DIR)/httpd-axum" $(DO_BUILD) --locked
 	strip -o "$(BIN_DIR)/httpd-axum" "$(OBJ_DIR)/httpd-axum/$(SUB_DIR)/httpd-axum"
 
 kibim:
@@ -234,6 +234,13 @@ gears-mock-provider:
 
 lorry: assembly-resolved
 	mkdir -p $(BIN_DIR)
+	# Prepare the exact cc-rs archive used by the offline C++ contract.
+	mkdir -p "$(OBJ_DIR)/lorry-cxx-deps/src"
+	printf '%s\n' '[package]' 'name = "lorry-cxx-deps"' 'version = "0.0.0"' \
+		'edition = "2024"' '[workspace]' '[dependencies]' 'cc = "=1.2.29"' \
+		> "$(OBJ_DIR)/lorry-cxx-deps/Cargo.toml"
+	touch "$(OBJ_DIR)/lorry-cxx-deps/src/lib.rs"
+	cargo fetch --manifest-path "$(OBJ_DIR)/lorry-cxx-deps/Cargo.toml"
 	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/lorry && \
@@ -380,7 +387,7 @@ clippy: vdso
 	cd src/bin/rush && $(DO_CLIPPY)
 	cd src/bin/russhd && $(DO_CLIPPY)
 	cd src/bin/httpd && $(DO_CLIPPY)
-	cd src/bin/httpd-axum && $(DO_CLIPPY)
+	cd src/bin/httpd-axum && $(DO_CLIPPY) --locked
 	cd src/bin/kibim && $(DO_CLIPPY)
 	cd src/bin/red && $(DO_CLIPPY)
 	cd src/bin/rmux && $(DO_CLIPPY)

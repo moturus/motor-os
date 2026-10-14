@@ -560,8 +560,9 @@ server survived the kill (any other session still open). Killing the *last*
 session hid it: the server exits, and the socket closing looked like an answer.
 `ToClient::Done` is that answer now.
 
-The port file needs a writable path. Motor defaults to its `/user/tmp`
-convention and, like the Linux host, honors `$TMPDIR` when a test needs a
+The port file needs a writable path. Motor gives each process its role's
+`TMPDIR` (`/user/tmp` for Interactive) and, like the Linux host, honors
+`$TMPDIR` when a test needs a
 private server — one `sys::` function. **Correction, measured in M4:**
 `/user/tmp` is an explicit image-manifest directory, so it exists even when it
 contains no tracked files. Rmux only chooses the port-file path; image
@@ -1260,9 +1261,10 @@ exits when the last one goes. Two consequences worth keeping:
 
 ### 9.4 On the real thing
 
-`tests/vm-console-check.py` in rush's mold: boot the image under qemu on a pty,
-drive rmux on the actual Motor console through actual sys-tty, replay the stream,
-assert the picture and the byte costs. This is where §3.3's byte mangling and
+`src/tests/test-terminal-size.sh` boots the image under qemu with the console
+on a fifo, drives rmux on the actual Motor console through actual sys-tty,
+replays the stream, and asserts the picture and the byte costs. This is where
+§3.3's byte mangling and
 §3.4's CRLF are actually proven.
 
 **TRAP: `C-a` is doubled under qemu.** `run-qemu.sh` passes `-nographic`, which
@@ -1270,9 +1272,9 @@ implies `-serial mon:stdio` and makes **`Ctrl-A` qemu's monitor escape prefix**
 (`Ctrl-A x` quits, `Ctrl-A c` switches to the monitor). The config's prefix *is*
 `C-a`, so the two collide.
 
-This is a nuisance, not a blocker, and the correction matters because rush's
-harness overstates it (`rush/tests/vm-console-check.py:15-23` says `C-a` "never
-reaches the guest" — that is true only of a *single* press). qemu's own escape
+This is a nuisance, not a blocker, and the correction matters because it is
+easy to overstate: `C-a` "never reaches the guest" is true only of a *single*
+press. qemu's own escape
 hatch is documented: **`Ctrl-A Ctrl-A` sends the escape character to the
 frontend**, i.e. one literal `C-a` to the guest. So interactively, tmux and rmux
 with a `C-a` prefix work fine under `-nographic` — you type the prefix twice —
@@ -1909,13 +1911,12 @@ second is the half worth having — a resize clips rather than reflows, so colum
 taken off a background window are gone — and it is the half that falsifies, with
 `aggressive-resize = false` failing on exactly that.
 
-**On the real thing** (§9.4), `tests/vm-console-check.py` boots the image under
-qemu on a pty and drives rmux on the Motor console through sys-tty: eleven
-checks then and thirteen now, three of which no host test can make — one
-keypress is one Enter although
+**On the real thing** (§9.4), a console harness, since replaced, booted the
+image under qemu on a pty and drove rmux on the Motor console through sys-tty:
+three of its checks no host test can make — one keypress is one Enter although
 sys-tty sends CRLF (§3.4), a program's `\n` starts a new line although Motor has
 no line discipline (§3.1), and **a keystroke costs one byte on the console that
-cost is for** (§6.3). It uses `run-qemu-echr.sh`, since `-nographic` keeps
+cost is for** (§6.3). It used `run-qemu-echr.sh`, since `-nographic` keeps
 `Ctrl-A` for qemu (§9.4). Two traps, both measured:
 
 1. **Use a release image.** A debug one logs sys-io's every TCP message to this
@@ -1931,8 +1932,8 @@ cost is for** (§6.3). It uses `run-qemu-echr.sh`, since `-nographic` keeps
    right, and it makes the first `rmux` of a run pay for the last one, so the
    harness clears the rendezvous first.
 
-Not wired into `full-test.sh`, which already boots a VM of its own; rush's
-equivalent is standalone for the same reason.
+That harness was run by hand. Its checks now run in
+`src/tests/test-terminal-size.sh`, part of `full-test.sh` (§9.4).
 
 **M10 — The console changes shape. Done.** The gap M3 named and every phase
 since walked past: rmux learned its size once and believed it for ever. Reported
@@ -1971,8 +1972,8 @@ Three things it had to get right, and each is a test:
 
 The host tests drive it through `TIOCSWINSZ` on the pty, `tests/m1.rs` drives
 the Motor shape — a console that is a pipe, where the probe is the only channel
-there is — and `tests/vm-console-check.py` is now a terminal that changes what
-it answers, which is exactly what a dragged window looks like from inside the
+there is — and `src/tests/test-terminal-size.sh` is a terminal that reports a
+new size, which is exactly what a dragged window looks like from inside the
 guest. Both halves of the report are pinned, the second by asserting the status
 line has *left* the row it was on.
 
@@ -2043,8 +2044,8 @@ happened to each is the shortest account of where the effort actually went.
    built in M8: a line that scrolls off stops being cells and becomes text plus
    style runs.
 5. **sys-tty and SSH are two different terminals** (§3.3). Still true, and it
-   is why M1 was verified on both and why `tests/vm-console-check.py` (§9.4)
-   drives the serial console specifically — the host tests are all the other
+   is why M1 was verified on both and why `src/tests/test-terminal-size.sh`
+   (§9.4) drives the serial console specifically — the host tests are all the other
    terminal.
 
 ---

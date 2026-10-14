@@ -564,27 +564,36 @@ impl ThreadControlBlock {
 
     // W7: direct switch — save this thread's kernel context exactly like
     // pause() and install `next`'s exactly like resume(), without bouncing
-    // through the sched-loop stack. `next` must have been claimed via a
-    // *_for_switch wake: Runnable, off-CPU, parked in wait()'s pause,
-    // with no resume job posted anywhere. The caller
-    // (wait_and_switch) parks `self` from the other side of the switch
-    // (finish_direct_switch), mirroring how on_thread_paused() runs after
-    // pause() has saved the context.
+    // through the sched-loop stack. The caller (wait_and_switch) parks
+    // `self` from the other side of the switch (finish_direct_switch),
+    // mirroring how on_thread_paused() runs after pause() has saved the
+    // context.
+    /// # Safety
+    ///
+    /// `next` must have been claimed via a *_for_switch wake: Runnable,
+    /// off-CPU, parked in wait() or wait_and_switch(), with no resume job
+    /// posted anywhere. It must be kept alive until the incoming context
+    /// begins. That context may release it before this call returns, so only
+    /// a raw pointer, not a Rust reference, can cross the switch.
     #[inline(never)]
-    pub fn switch_to(&self, next: &ThreadControlBlock) {
+    pub unsafe fn switch_to(&self, next: *const ThreadControlBlock) {
         // Mirror pause() for self...
         self.owner().process_stats.stop_cpu_usage_kernel();
         debug_assert!(self.in_syscall.load(Ordering::Relaxed));
-        self.owner().trace("tcb::switch_to", next.to_addr(), 0);
+        self.owner()
+            .trace("tcb::switch_to", next as usize as u64, 0);
         self.save_fp_env();
-        // ...and resume() for next.
-        next.owner().process_stats.start_cpu_usage_kernel();
-        crate::sched::ensure_preemption_timer();
-        next.validate_rsp();
-        next.check_sti();
-        debug_assert!(next.in_syscall.load(Ordering::Relaxed));
-        super::install_page_table(next.user_page_table);
-        next.restore_fp_env();
+        // ...and resume() for next. End this borrow before switching.
+        {
+            let next = unsafe { next.as_ref() }.unwrap();
+            next.owner().process_stats.start_cpu_usage_kernel();
+            crate::sched::ensure_preemption_timer();
+            next.validate_rsp();
+            next.check_sti();
+            debug_assert!(next.in_syscall.load(Ordering::Relaxed));
+            super::install_page_table(next.user_page_table);
+            next.restore_fp_env();
+        }
 
         crate::util::full_fence();
         self.validate_gs();
@@ -592,7 +601,7 @@ impl ThreadControlBlock {
             asm!(
                 "call rax",
                 in("rax") syscall_switch_asm,
-                in("rdi") next.to_addr(),
+                in("rdi") next as usize as u64,
                 clobber_abi("C"),
             )
         };

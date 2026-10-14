@@ -1,0 +1,9 @@
+[package]
+name = "wide"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+bar = { version = ">=0.52, <0.60" }
+foo = { version = ">=1, <3" }

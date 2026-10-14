@@ -1,6 +1,6 @@
 use crate::diagnostic::{Error, Result};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,6 +22,62 @@ pub struct AtomicFile {
 }
 
 impl AtomicFile {
+    /// Stages a completed executable without opening a new Linux writer.
+    pub fn from_executable(source: &Path, destination: &Path) -> Result<Self> {
+        let metadata = fs::symlink_metadata(source).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect executable `{}`: {error}",
+                source.display()
+            ))
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(Error::failure(format!(
+                "executable source `{}` is not a regular file",
+                source.display()
+            )));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let parent = destination
+                .parent()
+                .ok_or_else(|| Error::failure("executable destination has no parent"))?;
+            let label = destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("file");
+            for _ in 0..100 {
+                let path = parent.join(unique_name(label, "staging"));
+                match fs::hard_link(source, &path) {
+                    Ok(()) => {
+                        let staging = Self {
+                            path,
+                            destination: destination.to_owned(),
+                            file: None,
+                            committed: false,
+                        };
+                        // A read-only descriptor can persist the completed inode
+                        // without blocking exec if another fork inherits it.
+                        File::open(&staging.path)
+                            .and_then(|file| file.sync_all())
+                            .map_err(|error| {
+                                Error::failure(format!(
+                                    "failed to persist executable `{}`: {error}",
+                                    staging.path.display()
+                                ))
+                            })?;
+                        return Ok(staging);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    // Cargo also copies when the filesystem cannot hard-link.
+                    Err(_) => break,
+                }
+            }
+        }
+        let mut staging = Self::new(destination)?;
+        staging.copy_executable_from(source)?;
+        Ok(staging)
+    }
+
     pub fn new(destination: &Path) -> Result<Self> {
         let parent = destination.parent().ok_or_else(|| {
             Error::failure(format!(
@@ -44,7 +100,7 @@ impl AtomicFile {
             }
             match options.open(&path) {
                 Ok(file) => {
-                    if let Err(error) = set_private_file(&file, &path) {
+                    if let Err(error) = crate::fs_check::set_file_mode(&file, &path, false) {
                         drop(file);
                         let _ = fs::remove_file(&path);
                         return Err(error);
@@ -82,6 +138,56 @@ impl AtomicFile {
                     self.path.display()
                 ))
             })
+    }
+
+    pub fn copy_executable_from(&mut self, source: &Path) -> Result<()> {
+        let mut input = File::open(source).map_err(|error| {
+            Error::failure(format!(
+                "failed to open source file `{}`: {error}",
+                source.display()
+            ))
+        })?;
+        io::copy(
+            &mut input,
+            self.file
+                .as_mut()
+                .ok_or_else(|| Error::failure("atomic file staging is already closed"))?,
+        )
+        .map_err(|error| {
+            Error::failure(format!(
+                "failed to copy `{}` into atomic staging: {error}",
+                source.display()
+            ))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    Error::failure(format!(
+                        "failed to make copied executable `{}` runnable: {error}",
+                        self.path.display()
+                    ))
+                },
+            )?;
+        }
+        #[cfg(target_os = "motor")]
+        {
+            use std::os::fd::AsRawFd;
+            let file = self.file.as_ref().unwrap();
+            // Motor permits the transition from writable staging to read/execute.
+            moto_rt::fs::set_file_perm(
+                file.as_raw_fd(),
+                moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
+            )
+            .map_err(|error| {
+                Error::failure(format!(
+                    "failed to make copied executable `{}` runnable: {error}",
+                    self.path.display()
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     /// Persists and closes the staged file without making it visible.
@@ -138,8 +244,151 @@ impl Drop for AtomicFile {
 }
 
 impl AtomicDirectory {
+    /// Restores a completed unit left between the two renames of a replacement.
+    /// Staging directories are intentionally untouched: a child may still own
+    /// one after its parent was killed.
+    pub fn recover_previous(destination: &Path) -> Result<()> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| Error::failure("output destination has no parent"))?;
+        match fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(Error::failure("output parent is not a real directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to inspect output parent `{}`: {error}",
+                    parent.display()
+                )));
+            }
+        }
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::failure("output destination has no UTF-8 name"))?;
+        let prefix = unique_prefix(name, "previous");
+        let mut backups = Vec::new();
+        for entry in fs::read_dir(parent)
+            .map_err(|error| Error::failure(format!("failed to list output parent: {error}")))?
+        {
+            let entry = entry.map_err(|error| {
+                Error::failure(format!("failed to read output parent: {error}"))
+            })?;
+            if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                Error::failure(format!("failed to inspect previous output: {error}"))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(Error::failure(format!(
+                    "previous output `{}` is not a real directory",
+                    path.display()
+                )));
+            }
+            backups.push(path);
+        }
+        if backups.is_empty() {
+            return Ok(());
+        }
+        backups.sort();
+        match fs::symlink_metadata(destination) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(Error::failure("published output is not a real directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let previous = backups.pop().unwrap();
+                fs::rename(&previous, destination).map_err(|error| {
+                    Error::failure(format!(
+                        "failed to recover previous output `{}`: {error}",
+                        destination.display()
+                    ))
+                })?;
+            }
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to inspect published output `{}`: {error}",
+                    destination.display()
+                )));
+            }
+        }
+        for backup in backups {
+            fs::remove_dir_all(&backup).map_err(|error| {
+                Error::failure(format!(
+                    "failed to remove obsolete output `{}`: {error}",
+                    backup.display()
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Removes staging for one unit after the artifact lock has established
+    /// that no child of an interrupted writer can still use it.
+    pub fn discard_abandoned_staging(destination: &Path) -> Result<()> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| Error::failure("output destination has no parent"))?;
+        match fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(Error::failure("output parent is not a real directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to inspect output parent: {error}"
+                )));
+            }
+        }
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::failure("output destination has no UTF-8 name"))?;
+        let prefix = unique_prefix(name, "staging");
+        for entry in fs::read_dir(parent).map_err(|error| {
+            Error::failure(format!(
+                "failed to list output parent `{}`: {error}",
+                parent.display()
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                Error::failure(format!("failed to read output parent: {error}"))
+            })?;
+            if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                Error::failure(format!(
+                    "failed to inspect abandoned staging `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(Error::failure(format!(
+                    "abandoned staging `{}` is not a real directory",
+                    path.display()
+                )));
+            }
+            fs::remove_dir_all(&path).map_err(|error| {
+                Error::failure(format!(
+                    "failed to discard abandoned staging `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn new(parent: &Path, label: &str) -> Result<Self> {
         Self::create(parent, || unique_name(label, "staging"))
+    }
+
+    /// Stages a compiler unit under the same name in every build: rustc's
+    /// incremental cache is discarded when its output directory changes. The
+    /// artifact lock admits one writer, which first discards abandoned staging.
+    pub fn new_stable(parent: &Path, label: &str) -> Result<Self> {
+        let name = format!("{}unit", unique_prefix(label, "staging"));
+        Self::create(parent, || name.clone())
     }
 
     pub fn new_compact(parent: &Path) -> Result<Self> {
@@ -159,7 +408,7 @@ impl AtomicDirectory {
             let path = parent.join(next_name());
             match create_private_directory(&path) {
                 Ok(()) => {
-                    set_private(&path)?;
+                    crate::fs_check::set_directory_private(&path)?;
                     return Ok(Self {
                         path,
                         committed: false,
@@ -360,7 +609,15 @@ pub(crate) fn move_no_replace(_source: &Path, destination: &Path) -> Result<bool
 }
 
 fn unique_name(label: &str, role: &str) -> String {
-    format!(".{label}.lorry-{role}-{}", unique_suffix())
+    format!("{}{}", unique_prefix(label, role), unique_suffix())
+}
+
+fn unique_prefix(label: &str, role: &str) -> String {
+    // Motor rejects names beginning with `..`, including staging for a
+    // published hidden file such as `.lorry-shared-layout-v1`.
+    let label = label.trim_start_matches('.');
+    let label = if label.is_empty() { "output" } else { label };
+    format!(".{label}.lorry-{role}-")
 }
 
 fn compact_unique_name() -> String {
@@ -375,67 +632,6 @@ fn unique_suffix() -> String {
     format!("{:x}-{time:x}-{sequence:x}", std::process::id())
 }
 
-fn set_private(_path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(_path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            Error::failure(format!(
-                "failed to make staging `{}` private: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    #[cfg(target_os = "motor")]
-    {
-        let path = _path.to_str().ok_or_else(|| {
-            Error::failure(format!(
-                "private staging path is not UTF-8: `{}`",
-                _path.display()
-            ))
-        })?;
-        moto_rt::fs::set_perm(
-            path,
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC,
-        )
-        .map_err(|error| {
-            Error::failure(format!(
-                "failed to make staging `{}` private: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    Ok(())
-}
-
-pub(crate) fn set_private_file(_file: &File, _path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(_path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-            Error::failure(format!(
-                "failed to make staged file `{}` private: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    #[cfg(target_os = "motor")]
-    {
-        use std::os::fd::AsRawFd;
-        moto_rt::fs::set_file_perm(
-            _file.as_raw_fd(),
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE,
-        )
-        .map_err(|error| {
-            Error::failure(format!(
-                "failed to make staged file `{}` private: {error}",
-                _path.display()
-            ))
-        })?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +643,115 @@ mod tests {
         let root = std::env::temp_dir().join(unique_name(label, "test"));
         fs::create_dir(&root).unwrap();
         root
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn completed_executable_fixture_child() {
+        let Some(path) = std::env::var_os("LORRY_TEST_COMPLETED_EXECUTABLE") else {
+            return;
+        };
+        fs::copy("/bin/true", path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn completed_executable(path: &Path) {
+        // Other parallel tests can fork and inherit a fixture writer. Create
+        // the completed source in a child whose descriptors cannot leak there.
+        assert!(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "atomic::tests::completed_executable_fixture_child"
+                ])
+                .env("LORRY_TEST_COMPLETED_EXECUTABLE", path)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linked_executable_runs_while_a_fork_child_is_held_before_exec() {
+        struct HeldChild(libc::pid_t);
+        impl Drop for HeldChild {
+            fn drop(&mut self) {
+                // Reap the held child even if publication or launch fails.
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                    libc::waitpid(self.0, std::ptr::null_mut(), 0);
+                }
+            }
+        }
+
+        let root = temp_root("inherited-writer");
+        let source = root.join("completed");
+        let destination = root.join("program");
+        completed_executable(&source);
+        let staging = AtomicFile::from_executable(&source, &destination).unwrap();
+        // Sandbox and child-lease pre-exec hooks use this same fork window.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            // The fork child must only use async-signal-safe calls.
+            unsafe {
+                libc::raise(libc::SIGSTOP);
+                libc::_exit(0);
+            }
+        }
+        let held = HeldChild(child);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child, &mut status, libc::WUNTRACED) },
+            child
+        );
+        assert!(libc::WIFSTOPPED(status));
+        staging.commit().unwrap();
+        assert!(Command::new(&destination).status().unwrap().success());
+        drop(held);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_links_replace_atomically_and_reject_symlinks() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let root = temp_root("executable-link");
+        let source = root.join("completed");
+        let destination = root.join("program");
+        completed_executable(&source);
+        fs::write(&destination, b"old").unwrap();
+        {
+            let staging = AtomicFile::from_executable(&source, &destination).unwrap();
+            assert_eq!(fs::read(&destination).unwrap(), b"old");
+            drop(staging);
+        }
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        AtomicFile::from_executable(&source, &destination)
+            .unwrap()
+            .commit()
+            .unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+        let installed = fs::metadata(&destination).unwrap();
+        assert_eq!(metadata.ino(), installed.ino());
+        assert_eq!(metadata.mode(), installed.mode());
+        assert!(Command::new(&destination).status().unwrap().success());
+
+        let alias = root.join("alias");
+        symlink(&source, &alias).unwrap();
+        assert!(AtomicFile::from_executable(&alias, &destination).is_err());
+        assert!(
+            AtomicFile::from_executable(&source, &alias)
+                .unwrap()
+                .commit()
+                .is_err()
+        );
+        assert!(fs::symlink_metadata(&alias).unwrap().is_symlink());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 3);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -469,6 +774,52 @@ mod tests {
                 .count(),
             1
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovers_previous_output_before_discarding_its_staging() {
+        let root = temp_root("recover");
+        let destination = root.join("unit");
+        let previous = root.join(".unit.lorry-previous-dead");
+        let staging = root.join(".unit.lorry-staging-live");
+        let unrelated = root.join(".other.lorry-staging-live");
+        fs::create_dir(&previous).unwrap();
+        fs::create_dir(&staging).unwrap();
+        fs::create_dir(&unrelated).unwrap();
+        fs::write(previous.join("complete"), b"old").unwrap();
+        fs::write(staging.join("partial"), b"in progress").unwrap();
+
+        AtomicDirectory::recover_previous(&destination).unwrap();
+        assert_eq!(fs::read(destination.join("complete")).unwrap(), b"old");
+        assert!(staging.join("partial").is_file());
+
+        let obsolete = root.join(".unit.lorry-previous-obsolete");
+        fs::create_dir(&obsolete).unwrap();
+        AtomicDirectory::recover_previous(&destination).unwrap();
+        assert!(!obsolete.exists());
+        AtomicDirectory::discard_abandoned_staging(&destination).unwrap();
+        assert!(!staging.exists());
+        assert!(unrelated.is_dir());
+        assert_eq!(fs::read(destination.join("complete")).unwrap(), b"old");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stable_staging_reuses_its_path_and_is_discarded_when_abandoned() {
+        let root = temp_root("stable");
+        let destination = root.join("unit");
+        let first = AtomicDirectory::new_stable(&root, "unit").unwrap();
+        let path = first.path().to_owned();
+        first.commit(&destination).unwrap();
+        let second = AtomicDirectory::new_stable(&root, "unit").unwrap();
+        assert_eq!(second.path(), path);
+        // A killed writer leaves its staging behind.
+        std::mem::forget(second);
+        assert!(AtomicDirectory::new_stable(&root, "unit").is_err());
+        AtomicDirectory::discard_abandoned_staging(&destination).unwrap();
+        assert!(!path.exists());
+        assert!(AtomicDirectory::new_stable(&root, "unit").is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -516,6 +867,34 @@ mod tests {
         assert!(!second.commit_no_replace(&destination).unwrap());
         assert_eq!(fs::read(destination.join("value")).unwrap(), b"first");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copied_file_replaces_only_after_commit() {
+        let root = temp_root("copied-file");
+        let source = root.join("source");
+        let destination = root.join("artifact");
+        fs::write(&source, b"replacement").unwrap();
+        fs::write(&destination, b"previous").unwrap();
+
+        let mut abandoned = AtomicFile::new(&destination).unwrap();
+        abandoned.copy_executable_from(&source).unwrap();
+        drop(abandoned);
+        assert_eq!(fs::read(&destination).unwrap(), b"previous");
+
+        let mut committed = AtomicFile::new(&destination).unwrap();
+        committed.copy_executable_from(&source).unwrap();
+        committed.commit().unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"replacement");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                fs::metadata(&destination).unwrap().permissions().mode() & 0o100,
+                0
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -631,6 +1010,25 @@ mod tests {
         staging.commit().unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"new");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hidden_destination_uses_motor_compatible_staging_name() {
+        let root = temp_root("hidden-file");
+        let destination = root.join(".lorry-layout");
+        let mut staged = AtomicFile::new(&destination).unwrap();
+        assert!(
+            staged
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".lorry-layout.lorry-staging-")
+        );
+        staged.write_all(b"complete").unwrap();
+        staged.commit().unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"complete");
         fs::remove_dir_all(root).unwrap();
     }
 

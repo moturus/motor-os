@@ -25,7 +25,7 @@ TEST_HOME="$WORK/home"
 PROJECT="$WORK/metadata-fixture"
 DEPENDENCY="$WORK/dep"
 mkdir -p "$TEST_HOME/.config/lorry" "$PROJECT/src" "$PROJECT/tests" "$DEPENDENCY/src"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
+printf 'config-version = 1\nuse-cargo-registry = false\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$TEST_HOME/.config/lorry/lorry.toml"
 
 printf '%s\n' \
@@ -70,6 +70,9 @@ printf '%s\n' \
     '' \
     '[features]' \
     'extra = []' >"$DEPENDENCY/Cargo.toml"
+printf '\n[package.metadata.editor]\ncommands = ["build", "check"]\n[workspace.metadata]\nname = "resolved fixture"\n' \
+    >>"$PROJECT/Cargo.toml"
+printf '\n[package.metadata.source]\nrole = "dependency"\n' >>"$DEPENDENCY/Cargo.toml"
 printf '%s\n' \
     'version = 4' \
     '[[package]]' \
@@ -92,18 +95,38 @@ printf 'pub fn answer() -> u8 { 42 }\n' >"$DEPENDENCY/src/lib.rs"
 export RUSTC="$LORRY_TEST_RUSTC"
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 export HOME="$TEST_HOME"
-(
-    cd "$PROJECT"
-    "$LORRY" vendor --accept-all
-)
+# Source metadata must ignore execution admission, even for a member script.
+# Retain an invalid record as evidence that metadata never reconstructs it.
+mkdir -p "$PROJECT/.lorry" "$PROJECT/target"
+printf 'not an admission record\n' >"$PROJECT/.lorry/dependencies-v2.toml"
 "$LORRY" metadata --format-version 1 --no-deps \
     --manifest-path "$PROJECT/Cargo.toml" >"$WORK/no-deps.json"
 [ ! -e "$WORK/cache/sources" ]
+mv "$PROJECT/.lorry" "$WORK/admission-backup"
+cp -R "$PROJECT/target" "$WORK/target-before"
 "$LORRY" metadata --format-version 1 --filter-platform x86_64-unknown-linux-gnu \
-    --locked --manifest-path "$PROJECT/Cargo.toml" >"$WORK/lorry.json"
+    --locked --offline --frozen --manifest-path "$PROJECT/Cargo.toml" >"$WORK/lorry.json"
 "$LORRY" metadata --format-version 1 --filter-platform x86_64-unknown-linux-gnu \
     --locked --manifest-path "$PROJECT/Cargo.toml" >"$WORK/lorry-again.json"
 cmp "$WORK/lorry.json" "$WORK/lorry-again.json"
+[ ! -e "$PROJECT/.lorry" ] || fail "metadata created admission state"
+diff -r "$WORK/target-before" "$PROJECT/target" || fail "metadata changed compilation outputs"
+mv "$WORK/admission-backup" "$PROJECT/.lorry"
+cp "$PROJECT/Cargo.lock" "$WORK/lock-before"
+"$LORRY" metadata --offline --frozen --locked --no-deps \
+    --manifest-path "$PROJECT/Cargo.toml" >"$WORK/default.json" 2>"$WORK/default.err"
+cmp "$WORK/no-deps.json" "$WORK/default.json"
+cmp "$WORK/lock-before" "$PROJECT/Cargo.lock"
+"$LORRY_TEST_CARGO" metadata --offline --frozen --locked --no-deps \
+    --manifest-path "$PROJECT/Cargo.toml" >"$WORK/cargo-default.json" \
+    2>"$WORK/cargo-default.err"
+cmp "$WORK/default.err" "$WORK/cargo-default.err"
+grep -F 'please specify `--format-version` flag explicitly' "$WORK/default.err" >/dev/null
+"$LORRY" metadata -q --no-deps --frozen \
+    --manifest-path "$PROJECT/Cargo.toml" >"$WORK/default-quiet.json" \
+    2>"$WORK/default-quiet.err"
+cmp "$WORK/no-deps.json" "$WORK/default-quiet.json"
+[ ! -s "$WORK/default-quiet.err" ] || fail "quiet metadata emitted the format warning"
 "$LORRY_TEST_CARGO" metadata --format-version 1 \
     --filter-platform x86_64-unknown-linux-gnu --locked \
     --manifest-path "$PROJECT/Cargo.toml" >"$WORK/cargo.json"
@@ -116,30 +139,66 @@ CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
     --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" \
     --locked --offline -- compare "$WORK/no-deps.json" "$WORK/cargo-no-deps.json"
 
+# The package limit counts packages from outside the workspace, never the
+# root. With two path dependencies, a limit of 1 fails and 2 succeeds.
+LIMITED="$WORK/limited"
+mkdir -p "$LIMITED/app/src" "$LIMITED/one/src" "$LIMITED/two/src"
+printf '%s\n' '[package]' 'name = "app"' 'version = "0.1.0"' 'edition = "2021"' \
+    '[dependencies]' 'one = { path = "../one" }' 'two = { path = "../two" }' \
+    >"$LIMITED/app/Cargo.toml"
+for package in one two; do
+    printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' "$package" \
+        >"$LIMITED/$package/Cargo.toml"
+    printf 'pub fn answer() {}\n' >"$LIMITED/$package/src/lib.rs"
+done
+printf 'pub fn app() {}\n' >"$LIMITED/app/src/lib.rs"
+printf '%s\n' 'version = 4' '[[package]]' 'name = "app"' 'version = "0.1.0"' \
+    'dependencies = [' ' "one",' ' "two",' ']' '[[package]]' 'name = "one"' \
+    'version = "0.1.0"' '[[package]]' 'name = "two"' 'version = "0.1.0"' \
+    >"$LIMITED/app/Cargo.lock"
 cp "$TEST_HOME/.config/lorry/lorry.toml" "$WORK/config.backup"
-printf '%s\n' '' '[policy.limits]' 'max-packages = 1' \
-    >>"$TEST_HOME/.config/lorry/lorry.toml"
-if "$LORRY" metadata --format-version 1 \
-    --filter-platform x86_64-unknown-linux-gnu --locked \
-    --manifest-path "$PROJECT/Cargo.toml" >"$WORK/limited.out" 2>"$WORK/limited.err"; then
+limited_metadata() {
+    cp "$WORK/config.backup" "$TEST_HOME/.config/lorry/lorry.toml"
+    printf '%s\n' '' '[policy.limits]' "max-packages = $1" \
+        >>"$TEST_HOME/.config/lorry/lorry.toml"
+    "$LORRY" metadata --format-version 1 --locked \
+        --manifest-path "$LIMITED/app/Cargo.toml" >"$WORK/limited.out" 2>"$WORK/limited.err"
+}
+if limited_metadata 1; then
     fail "metadata accepted a graph above the configured package limit"
 fi
-if ! grep -F 'package' "$WORK/limited.err" >/dev/null; then
+if ! grep -F "limit of 1 (set in \`$TEST_HOME/.config/lorry/lorry.toml\`)" \
+    "$WORK/limited.err" >/dev/null ||
+    ! grep -F 'raise `max-packages` in the `[policy.limits]` table' \
+        "$WORK/limited.err" >/dev/null; then
     cat "$WORK/limited.err" >&2
-    fail "package-limit rejection omitted its cause"
+    fail "package-limit rejection omitted its cause, setting, or source"
 fi
+cp "$TEST_HOME/.config/lorry/lorry.toml" "$WORK/limit-config-before"
+"$LORRY" metadata --format-version 1 --locked --max-packages 2 \
+    --manifest-path "$LIMITED/app/Cargo.toml" >"$WORK/limit-override.json"
+cmp "$TEST_HOME/.config/lorry/lorry.toml" "$WORK/limit-config-before"
+if "$LORRY" metadata --format-version 1 --locked --max-packages 1 \
+    --manifest-path "$LIMITED/app/Cargo.toml" >"$WORK/limit-override.out" 2>"$WORK/limit-override.err"; then
+    fail "metadata accepted a graph above the one-run package limit"
+fi
+grep -F 'limit of 1 (set by --max-packages)' "$WORK/limit-override.err" >/dev/null
+limited_metadata 2 || {
+    cat "$WORK/limited.err" >&2
+    fail "the package limit counted the root package"
+}
 cp "$WORK/config.backup" "$TEST_HOME/.config/lorry/lorry.toml"
 
 cp -R "$PROJECT" "$WORK/unsupported-target"
 sed -i '/^\[lib\]$/a crate-type = ["cdylib"]' \
     "$WORK/unsupported-target/Cargo.toml"
-if "$LORRY" metadata --format-version 1 --no-deps \
+"$LORRY" metadata --format-version 1 \
     --manifest-path "$WORK/unsupported-target/Cargo.toml" \
-    >"$WORK/unsupported.out" 2>"$WORK/unsupported.err"; then
-    fail "metadata accepted an unsupported custom target"
-fi
-grep -F 'custom library crate types are not supported' \
-    "$WORK/unsupported.err" >/dev/null ||
-    fail "custom-target rejection omitted its cause"
+    >"$WORK/unsupported.out" 2>"$WORK/unsupported.err"
+"$LORRY_TEST_CARGO" metadata --offline --format-version 1 \
+    --manifest-path "$WORK/unsupported-target/Cargo.toml" >"$WORK/unsupported-cargo.json"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
+    --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline -- \
+    compare "$WORK/unsupported.out" "$WORK/unsupported-cargo.json"
 
 echo "PASS: metadata is deterministic and matches Cargo for a complete path graph"

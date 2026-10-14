@@ -20,7 +20,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "$VMM" in qemu|chv) ;; *) usage ;; esac
 if [ "$motor" = 0 ]; then
-  exec cargo test --offline --manifest-path "$COMPONENT_DIR/Cargo.toml" "${profile[@]}" --tests
+  exec cargo test --locked --offline --manifest-path "$COMPONENT_DIR/Cargo.toml" "${profile[@]}" --tests
 fi
 
 WD="$ROOT_DIR/src/tests"
@@ -47,7 +47,7 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-cargo test --offline --manifest-path "$COMPONENT_DIR/Cargo.toml" "${profile[@]}" \
+cargo test --locked --offline --manifest-path "$COMPONENT_DIR/Cargo.toml" "${profile[@]}" \
   --target x86_64-unknown-motor --tests --no-run --message-format=json > "$temporary/build.jsonl"
 python3 - "$temporary/build.jsonl" > "$temporary/executables.tsv" <<'PY'
 import json, sys

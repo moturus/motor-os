@@ -32,6 +32,7 @@ fail() {
 
 cat >"$HOME_DIR/.config/lorry/lorry.toml" <<EOF
 config-version = 1
+use-cargo-registry = false
 cargo-compat-version = "1.99"
 [cache]
 directory = "$WORK/cache"

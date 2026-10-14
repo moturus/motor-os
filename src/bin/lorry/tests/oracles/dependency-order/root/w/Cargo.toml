@@ -1,0 +1,10 @@
+[package]
+name = "w"
+version = "0.1.0"
+edition = "2021"
+
+[target.'cfg(windows)'.dependencies]
+win = "1"
+
+[target.'cfg(unix)'.dependencies]
+nix = "1"

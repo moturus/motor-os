@@ -27,7 +27,6 @@ pub struct Limits {
     pub max_nodes: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,
@@ -38,7 +37,6 @@ pub enum Value {
     Object(BTreeMap<String, Value>),
 }
 
-#[allow(dead_code)]
 impl Value {
     pub fn load(path: &Path, context: &str) -> Result<Self> {
         let mut file = File::open(path).map_err(|error| {
@@ -131,6 +129,7 @@ impl Value {
         }
     }
 
+    #[cfg(test)]
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.as_object()?.get(key)
     }

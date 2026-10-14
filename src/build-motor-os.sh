@@ -19,7 +19,7 @@
 # the LLVM, rustc, Helix, Lua, sed, and rust-analyzer/rust-src roots.
 #
 # On-image layout (see docs/libc.md): C/C++ headers + libraries
-# live under /devtools/llvm, the clang driver config under /devtools/cfg/llvm,
+# live under /devtools/llvm, the clang driver config under /devtools/llvm/cfg,
 # mlibc's config files under /system/cfg/libc, and the Rust toolchain at
 # /devtools/rust — not the classic /usr and /etc.
 #
@@ -124,6 +124,7 @@ MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/toolchain-patched-crates.sh"
 . "$SCRIPT_DIR/toolchain-rust-analyzer.sh"
 . "$SCRIPT_DIR/patches/crates.sh"
+. "$SCRIPT_DIR/build-addon-sources.sh"
 . "$SCRIPT_DIR/build-javy.sh"
 . "$SCRIPT_DIR/build-wasmtime.sh"
 toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
@@ -146,11 +147,8 @@ CROSS_FILE="$MOTORH/motor.cross-file"
 # Userspace add-ons. They are built with the finished toolchain and are no part
 # of its identity: Lua is a release, ripgrep, Helix, and sed follow a fork branch.
 LUA_VER=5.4.8
-RIPGREP_REPOSITORY=https://github.com/moturus/ripgrep.git
 RIPGREP_BRANCH=master
-HELIX_REPOSITORY=https://github.com/moturus/helix.git
 HELIX_BRANCH=helix-motor-25.7.1_2026-08-31
-SED_REPOSITORY=https://github.com/moturus/sed.git
 SED_BRANCH=main
 CLANG_MAJOR=""                      # detected after the host toolchain is built
 
@@ -272,7 +270,7 @@ EOF
 # On-image directory prefixes (mirrored inside the cross sysroot). Keep these in
 # sync with clang/lib/Driver/ToolChains/Motor.cpp and mlibc's MLIBC_SYSCONFDIR.
 TOOLS="devtools/llvm"              # headers + libraries
-CFG_LLVM="devtools/cfg/llvm"       # clang <triple>.cfg
+CFG_LLVM="devtools/llvm/cfg"       # clang <triple>.cfg
 CFG_LIBC="system/cfg/libc"         # mlibc config files (resolv.conf, ...)
 
 # ============================================================================
@@ -626,7 +624,7 @@ llvm_stage_image() {
 
 	# The on-image LLVM multicall lives under /devtools/llvm/bin, mirroring the
 	# Rust toolchain at /devtools/rust/bin (build-rustc.md). Its clang config and
-	# resource dir are pinned by absolute path (the /devtools/cfg/llvm .cfg + the baked
+	# resource dir are pinned by absolute path (the /devtools/llvm/cfg .cfg + the baked
 	# CLANG_CONFIG_FILE_SYSTEM_DIR), and its ld.lld self-dispatch uses the running
 	# exe's own path, so the binary works wherever it is placed.
 	"$B/llvm-strip" -o "$img/$TOOLS/bin/llvm" "$NATIVE_LLVM_BUILD/bin/llvm"
@@ -648,7 +646,6 @@ llvm_stage_image() {
 # cc — Motor OS's system C compiler / linker driver. See docs/build-llvm.md.
 # A pass-through: clang's Motor ToolChain owns the link recipe and honors
 # -nostartfiles/-nodefaultlibs (rustc's pure-Rust links stay mlibc-free).
-export TMPDIR=/devtools/tmp
 exec /devtools/llvm/bin/llvm clang "$@"
 EOF
 
@@ -658,14 +655,13 @@ EOF
 	cat > "$img/devtools/bin/c++" << 'EOF'
 #!/system/bin/rush
 # c++ — Motor OS's system C++ compiler / linker driver. See docs/build-llvm.md.
-export TMPDIR=/devtools/tmp
 exec /devtools/llvm/bin/llvm clang --driver-mode=g++ "$@"
 EOF
 	chmod +x "$img/devtools/bin/cc" "$img/devtools/bin/c++"
 
 	# The image driver config: only the resource dir needs pinning (the full
 	# link/include recipe lives in the Motor ToolChain now). Clang auto-loads it
-	# from /devtools/cfg/llvm (CLANG_CONFIG_FILE_SYSTEM_DIR, stage 6).
+	# from /devtools/llvm/cfg (CLANG_CONFIG_FILE_SYSTEM_DIR, stage 6).
 	cat > "$img/$CFG_LLVM/x86_64-unknown-motor.cfg" << EOF
 -resource-dir /$TOOLS/lib/clang/$CLANG_MAJOR
 EOF
@@ -736,7 +732,6 @@ rustc_stage_image() {
 		die "staged rustc ELF validation failed"
 	cat > "$RUSTC_IMG/devtools/bin/rustc" << 'EOF'
 #!/system/bin/rush
-export TMPDIR=/devtools/tmp
 exec /devtools/rust/bin/rustc "$@"
 EOF
 	chmod +x "$RUSTC_IMG/devtools/bin/rustc"
@@ -745,10 +740,17 @@ EOF
 		die "staged rustfmt ELF validation failed"
 	cat > "$RUSTC_IMG/devtools/bin/rustfmt" << 'EOF'
 #!/system/bin/rush
-export TMPDIR=/devtools/tmp
 exec /devtools/rust/bin/rustfmt "$@"
 EOF
 	chmod +x "$RUSTC_IMG/devtools/bin/rustfmt"
+	"$B/llvm-strip" -o "$rust_img/bin/clippy-driver" "$CLIPPY_DRIVER_MAIN"
+	toolchain_validate_native_clippy_driver "$rust_img/bin/clippy-driver" "$CLIPPY_DRIVER_MAIN" ||
+		die "staged clippy-driver validation failed"
+	cat > "$RUSTC_IMG/devtools/bin/clippy-driver" << 'EOF'
+#!/system/bin/rush
+exec /devtools/rust/bin/clippy-driver "$@"
+EOF
+	chmod +x "$RUSTC_IMG/devtools/bin/clippy-driver"
 	# A binary that still carries mlibc's operator-delete panic stub would
 	# abort at runtime; the stub guard must have taken effect.
 	if grep -aq 'operator delete called! delete expressions' "$rust_img/bin/rustc"; then
@@ -901,13 +903,10 @@ ensure_wasi_sdk() {
 build_addons() {
 	configure_exact_cross_driver
 	ensure_addon lua "$LUA_VER" "$LUA_IMG" devtools/bin/lua build_lua
-	update_addon_source ripgrep "$RIPGREP" "$RIPGREP_REPOSITORY" "$RIPGREP_BRANCH"
 	ensure_addon ripgrep "$(git -C "$RIPGREP" rev-parse HEAD)" \
 		"$RG_IMG" system/bin/rg build_ripgrep
-	update_addon_source helix "$HELIX" "$HELIX_REPOSITORY" "$HELIX_BRANCH"
 	ensure_addon helix "$(git -C "$HELIX" rev-parse HEAD)" \
 		"$HELIX_IMG" devtools/helix/hx build_helix
-	update_addon_source sed "$SED" "$SED_REPOSITORY" "$SED_BRANCH"
 	ensure_addon sed "$(git -C "$SED" rev-parse HEAD)" \
 		"$SED_IMG" devtools/bin/sed build_sed
 	ensure_wasm_guest_toolchain
@@ -925,7 +924,7 @@ build_helix() {
 		env \
 			RUSTC="$MOTOR_RUSTC" \
 			RUSTDOC="$MOTOR_RUSTDOC" \
-			CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-rust-cc" \
+			CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-clang" \
 			CC_x86_64_unknown_motor="$SYSROOT/bin/motor-clang" \
 			CXX_x86_64_unknown_motor="$SYSROOT/bin/motor-clang++" \
 			CXXSTDLIB_x86_64_unknown_motor=c++ \
@@ -935,7 +934,7 @@ build_helix() {
 			HELIX_DEFAULT_RUNTIME=/devtools/helix/runtime \
 			HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 \
 			"$MOTOR_CARGO" build --target "$TARGET" --release --locked \
-				--offline --no-default-features -p helix-term --bin hx
+				--offline -p helix-term --bin hx
 	)
 	stage_helix
 }
@@ -971,6 +970,12 @@ main() {
 			[ -n "$RUSTUP_TOOLCHAIN" ] || die "no Rust channel in $MOTOR/rust-toolchain.toml"
 		fi
 		export RUSTUP_TOOLCHAIN
+		local selection=wasm
+		if [ "$WASMTIME_ONLY" = false ]; then selection=javy
+		elif [ "$JAVY_ONLY" = false ]; then selection=wasmtime; fi
+		select_addon_workspaces "$selection"
+		prepare_addon_sources
+		check_addon_lockfiles || die "add-on preflight failed; see $MOTOR/build/addon-lockfiles.log"
 		ASSEMBLY_IMAGE_ROOT="$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)"
 		ASSEMBLY_ROOT="${ASSEMBLY_IMAGE_ROOT%/images}"
 		ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
@@ -1012,6 +1017,9 @@ main() {
 		"$MOTOR/src/sys/lib/moto-rt" "$TOOLCHAIN_SRC_ROOT/rust/build/cache"
 	log "host toolchain: $MOTOR_RUSTUP_TOOLCHAIN"
 	export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"
+	select_addon_workspaces all
+	prepare_addon_sources
+	check_addon_lockfiles || die "add-on preflight failed; see $MOTOR/build/addon-lockfiles.log"
 	export PYTHONDONTWRITEBYTECODE=1
 	export PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache"
 
@@ -1058,6 +1066,7 @@ main() {
 		"$LLVM_IMG/devtools/llvm/bin/llvm"
 		"$RUSTC_IMG/devtools/rust/bin/rustc"
 		"$RUSTC_IMG/devtools/rust/bin/rustfmt"
+		"$RUSTC_IMG/devtools/rust/bin/clippy-driver"
 		"$RG_IMG/system/bin/rg"
 		"$HELIX_IMG/devtools/helix/hx"
 		"$SED_IMG/devtools/bin/sed"

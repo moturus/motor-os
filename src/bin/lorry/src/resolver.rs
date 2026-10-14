@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
@@ -14,20 +12,35 @@ use crate::hash::{decode_hex, hex};
 use crate::manifest::{
     DependencySource, GitDependency, Lockfile, Manifest, Resolver as ResolverVersion,
 };
+use crate::policy::PackageLimit;
 use crate::repository::RepositorySet;
 use crate::source_tree::{DEFAULT_LIMITS as DEFAULT_TREE_LIMITS, Exclusions, Tree};
 use crate::sparse::{Dependency, DependencyKind, Record, RustVersion};
 use crate::toolchain::CfgSet;
 
+mod locked;
+mod search;
+use search::solve;
+pub(crate) mod workspace;
+#[cfg(test)]
+use workspace::resolve_complete_workspace;
+
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
-    records: BTreeMap<String, Vec<Candidate>>,
+    fetch_hint: bool,
+    descriptive_sources: bool,
+    records: BTreeMap<String, Vec<Arc<Candidate>>>,
     paths: BTreeMap<PathBuf, PackageKey>,
     locked_repository: Option<LockedRepository>,
     proc_macros: BTreeSet<PackageKey>,
+    workspace_members: BTreeMap<String, PathBuf>,
+    workspace_root: PathBuf,
 }
 
 impl Catalog {
+    pub(crate) fn use_fetch_hint(&mut self) {
+        self.fetch_hint = true;
+    }
     pub fn from_locked_repository(
         manifest: &Manifest,
         repositories: &RepositorySet,
@@ -39,10 +52,6 @@ impl Catalog {
             }),
             ..Self::default()
         })
-    }
-
-    pub fn allow_unlocked_registry_candidates(&mut self) {
-        self.locked_repository = None;
     }
 
     pub fn from_locked_cargo_registry(
@@ -74,7 +83,7 @@ impl Catalog {
             version: record.version.clone(),
             source: PackageSourceKey::CratesIo,
         };
-        records.push(Candidate {
+        records.push(Arc::new(Candidate {
             dependencies: record
                 .dependencies
                 .iter()
@@ -82,6 +91,7 @@ impl Catalog {
                 .map(|dependency| CandidateDependency {
                     dependency,
                     source: RequirementSource::CratesIo,
+                    any_version: false,
                 })
                 .collect(),
             source: ResolvedSource::CratesIo {
@@ -90,7 +100,7 @@ impl Catalog {
             local_manifest: None,
             proc_macro: self.proc_macros.contains(&key),
             record,
-        });
+        }));
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
@@ -105,13 +115,13 @@ impl Catalog {
         for candidate in self.records.get_mut(&key.name).into_iter().flatten() {
             if candidate.record.version == key.version && candidate.source.key() == key.source {
                 previous = candidate.proc_macro;
-                candidate.proc_macro = proc_macro;
+                Arc::make_mut(candidate).proc_macro = proc_macro;
             }
         }
         Ok(previous != proc_macro)
     }
 
-    fn records(&self, name: &str) -> &[Candidate] {
+    fn records(&self, name: &str) -> &[Arc<Candidate>] {
         self.records.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
@@ -172,7 +182,7 @@ impl Catalog {
                 candidate.name, candidate.version
             )));
         }
-        records.push(candidate);
+        records.push(Arc::new(candidate));
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
@@ -212,7 +222,7 @@ impl Catalog {
                 candidate.name, candidate.version
             )));
         }
-        records.push(candidate);
+        records.push(Arc::new(candidate));
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
@@ -239,13 +249,13 @@ impl Catalog {
             RequirementSource::CratesIo => return self.prepare_registry(dependency),
             RequirementSource::Git(git) => {
                 if self.records(&dependency.package).iter().any(|candidate| {
-                    dependency.requirement.matches(&candidate.version)
+                    dependency.matches_version(&candidate.version)
                         && source_matches(&candidate.source, &dependency.source)
                 }) {
                     return Ok(());
                 }
                 return Err(Error::failure(format!(
-                    "locked Git dependency `{}` from `{}` is unavailable; run `lorry vendor [--accept-all]`",
+                    "locked Git dependency `{}` from `{}` is unavailable; run `lorry fetch`",
                     dependency.package, git.url
                 )));
             }
@@ -265,14 +275,32 @@ impl Catalog {
             return Ok(());
         }
 
-        let manifest = Manifest::load_path_dependency(&canonical)?;
+        let mut manifest = if self.descriptive_sources {
+            Manifest::load_source_dependency(&canonical)?
+        } else {
+            Manifest::load_path_dependency(&canonical)?
+        };
+        manifest.editable = self
+            .workspace_members
+            .values()
+            .any(|member| *member == canonical);
+        if manifest.editable {
+            manifest.workspace_root.clone_from(&self.workspace_root);
+            manifest
+                .workspace_members
+                .clone_from(&self.workspace_members);
+        }
         let version = Version::parse(&manifest.version.original).map_err(|error| {
             Error::failure(format!(
                 "invalid local package version `{} {}`: {error}",
                 manifest.name, manifest.version.original
             ))
         })?;
-        let tree = Tree::scan(&canonical, DEFAULT_TREE_LIMITS, Exclusions::GitAndTarget)?;
+        let sha256 = if manifest.editable {
+            crate::member_source::snapshot(&manifest, true)?.sha256
+        } else {
+            Tree::scan(&canonical, DEFAULT_TREE_LIMITS, Exclusions::GitAndTarget)?.sha256
+        };
         let key = PackageKey {
             name: manifest.name.clone(),
             version: version.clone(),
@@ -281,11 +309,10 @@ impl Catalog {
         if self.paths.insert(canonical.clone(), key.clone()).is_some() {
             return Ok(());
         }
-        let candidate =
-            local_candidate(manifest, canonical.clone(), canonical, tree.sha256, false)?;
+        let candidate = local_candidate(manifest, canonical.clone(), canonical, sha256, false)?;
         debug_assert_eq!(candidate.version, version);
         let records = self.records.entry(candidate.name.clone()).or_default();
-        records.push(candidate);
+        records.push(Arc::new(candidate));
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
@@ -299,13 +326,13 @@ impl Catalog {
             .get(&dependency.package)
             .into_iter()
             .flatten()
-            .filter(|package| dependency.requirement.matches(&package.version))
+            .filter(|package| dependency.matches_version(&package.version))
             .cloned()
             .collect::<Vec<_>>();
         let source = repository.source.clone();
 
         let has_patch_candidate = self.records(&dependency.package).iter().any(|candidate| {
-            dependency.requirement.matches(&candidate.version)
+            dependency.matches_version(&candidate.version)
                 && matches!(
                     candidate.source,
                     ResolvedSource::Path {
@@ -341,25 +368,35 @@ impl Catalog {
             }
             let record = match &source {
                 LockedRegistrySource::Lorry(repositories) => {
-                    let Some(object) = repositories.lookup_registry(&package.checksum)? else {
+                    let Some(record) = repositories.lookup_registry_record(&package.checksum)?
+                    else {
                         missing.push(package);
                         continue;
                     };
-                    if object.name != dependency.package || object.version != package.version {
+                    if record.name != dependency.package || record.version != package.version {
                         return Err(Error::failure(format!(
                             "repository object `{}` identifies `{} {}`, but Cargo.lock selects `{} {}`",
                             package.checksum,
-                            object.name,
-                            object.version,
+                            record.name,
+                            record.version,
                             dependency.package,
                             package.version
                         )));
                     }
-                    object.index
+                    record
                 }
-                LockedRegistrySource::Cargo(registry) => registry
-                    .load(&dependency.package, &package.version, &package.checksum)?
-                    .record()?,
+                LockedRegistrySource::Cargo(registry) => {
+                    let package = if self.descriptive_sources {
+                        registry.load_description(
+                            &dependency.package,
+                            &package.version,
+                            &package.checksum,
+                        )?
+                    } else {
+                        registry.load(&dependency.package, &package.version, &package.checksum)?
+                    };
+                    package.record()?
+                }
             };
             self.insert(record)?;
             available = true;
@@ -379,6 +416,10 @@ impl Catalog {
             .collect::<Vec<_>>()
             .join(", ");
         let (location, action) = match source {
+            LockedRegistrySource::Lorry(_) if self.fetch_hint => (
+                "the configured Lorry repositories",
+                "; run `lorry fetch` to acquire the missing locked package",
+            ),
             LockedRegistrySource::Lorry(_) => (
                 "the configured Lorry repositories",
                 "; run `lorry vendor [--accept-all]` to acquire the missing package",
@@ -467,6 +508,7 @@ fn local_candidate(
         .iter()
         .map(|dependency| {
             Ok(CandidateDependency {
+                any_version: !dependency.version_specified,
                 dependency: Dependency {
                     alias: dependency.alias.clone(),
                     package: dependency.package.clone(),
@@ -548,6 +590,13 @@ impl std::ops::Deref for Candidate {
 struct CandidateDependency {
     dependency: Dependency,
     source: RequirementSource,
+    any_version: bool,
+}
+
+impl CandidateDependency {
+    fn matches_version(&self, version: &Version) -> bool {
+        self.any_version || self.requirement.matches(version)
+    }
 }
 
 impl std::ops::Deref for CandidateDependency {
@@ -643,9 +692,9 @@ impl LockedPreference {
 pub struct Options {
     pub resolver: ResolverVersion,
     pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
-    pub rust_version: Version,
-    pub max_packages: u64,
-    pub max_depth: u64,
+    pub rust_versions: Vec<Version>,
+    pub package_limit: PackageLimit,
+    pub max_depth: Option<u64>,
 }
 
 impl Options {
@@ -728,6 +777,8 @@ pub struct ResolvedEdge {
     pub dependency_index: usize,
     pub alias: String,
     pub kind: DependencyKind,
+    /// The declaration's platform condition; sparse and manifest indexes differ.
+    pub target: Option<String>,
     /// Compilation context of the package declaring this dependency.
     /// This differs from `compile_kind` when a target library uses a host
     /// procedural macro.
@@ -807,101 +858,98 @@ pub fn merge_resolutions(resolutions: impl IntoIterator<Item = Resolution>) -> R
     })
 }
 
-pub fn resolve(
-    manifest: &Manifest,
-    catalog: &Catalog,
-    options: &Options,
-    locked: &[LockedPreference],
-) -> Result<Resolution> {
-    let mut catalog = catalog.clone();
-    resolve_with_scope(
-        manifest,
-        &mut catalog,
-        options,
-        locked,
-        Scope::Complete,
-        &mut |_, _, _| Ok(()),
-    )
+#[cfg(test)]
+fn single_member_workspace(manifest: &Manifest) -> crate::manifest::SourceWorkspace {
+    crate::manifest::SourceWorkspace {
+        manifest_path: manifest.path.clone(),
+        root: manifest.workspace_root.clone(),
+        packages: vec![manifest.clone()],
+        default_members: vec![manifest.root.clone()],
+        metadata: serde_json::Value::Null,
+        virtual_root: false,
+        documents: Default::default(),
+    }
 }
 
-pub fn resolve_selected(
-    manifest: &Manifest,
-    catalog: &Catalog,
-    options: &Options,
-    locked: &[LockedPreference],
-    selection: TargetSelection<'_>,
-) -> Result<Resolution> {
-    let mut catalog = catalog.clone();
-    resolve_with_scope(
-        manifest,
-        &mut catalog,
-        options,
-        locked,
-        Scope::Selected(selection),
-        &mut |_, _, _| Ok(()),
-    )
+/// Moves the member at `root` out of `resolution`; its edges become the root
+/// edges.
+#[cfg(test)]
+fn without_member(mut resolution: Resolution, root: &std::path::Path) -> Resolution {
+    let member = PackageSourceKey::Path(root.to_owned());
+    let index = resolution
+        .packages
+        .iter()
+        .position(|package| package.key.source == member)
+        .unwrap();
+    resolution.root_edges = resolution.packages.remove(index).edges;
+    resolution
 }
 
-pub fn resolve_dynamic(
+/// Resolves `manifest` as the only member of a complete workspace. The
+/// member's own edges become the root edges and its package is dropped.
+#[cfg(test)]
+pub(crate) fn resolve_member(
     manifest: &Manifest,
     catalog: &mut Catalog,
     options: &Options,
     locked: &[LockedPreference],
     loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
-    resolve_with_scope(manifest, catalog, options, locked, Scope::Complete, loader)
+    let workspace = single_member_workspace(manifest);
+    let resolution = resolve_complete_workspace(&workspace, catalog, options, locked, loader)?;
+    Ok(without_member(resolution, &manifest.root))
 }
 
-pub fn resolve_selected_dynamic(
+/// Selects `manifest` with default features as the only member of its
+/// workspace, as a build does. The member's non-dev edges become the root
+/// edges and its package is dropped.
+#[cfg(test)]
+pub(crate) fn resolve_selected(
     manifest: &Manifest,
-    catalog: &mut Catalog,
+    catalog: &Catalog,
     options: &Options,
     locked: &[LockedPreference],
     selection: TargetSelection<'_>,
-    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
-    resolve_with_scope(
-        manifest,
-        catalog,
-        options,
-        locked,
-        Scope::Selected(selection),
-        loader,
-    )
+    let workspace = single_member_workspace(manifest);
+    let mut catalog = catalog.clone();
+    let complete =
+        resolve_complete_workspace(&workspace, &mut catalog, options, locked, &mut |_, _, _| {
+            Ok(())
+        })?;
+    let request = workspace::MemberRequest {
+        root: manifest.root.clone(),
+        features: BTreeSet::new(),
+        default_features: true,
+        dev: false,
+        selected: true,
+        target_units: false,
+    };
+    let selected =
+        workspace::resolve_selected_workspace(&complete, &catalog, options, &[request], selection)?;
+    let mut selected = without_member(selected, &manifest.root);
+    selected
+        .root_edges
+        .retain(|edge| edge.kind != DependencyKind::Dev);
+    for edge in &mut selected.root_edges {
+        edge.parent_compile_kind = None;
+    }
+    Ok(selected)
 }
 
-fn resolve_with_scope(
-    manifest: &Manifest,
+fn solve_request(
+    roots: Vec<Event>,
     catalog: &mut Catalog,
     options: &Options,
     locked: &[LockedPreference],
     scope: Scope<'_>,
     loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
-    validate_locked_checksums(catalog, locked)?;
-    let requirements = root_requirements(manifest, matches!(scope, Scope::Complete))?;
-    let mut queue = VecDeque::new();
-    for requirement in requirements {
-        if !scope.matches(
-            CompileKind::Target,
-            requirement.dependency.target.as_deref(),
-        )? {
-            continue;
-        }
-        queue.push_back(Event {
-            parent: None,
-            parent_compile_kind: None,
-            dependency_index: requirement.index,
-            context: root_context(options.resolver, scope, &requirement.dependency),
-            compile_kind: CompileKind::Target,
-            dependency: requirement.dependency,
-            depth: 1,
-            ancestors: BTreeSet::new(),
-        });
-    }
+    let mut pending = search::Pending::default();
+    pending.push_group(roots);
     let state = solve(
         State::default(),
-        queue,
+        pending,
         catalog,
         options,
         locked,
@@ -909,24 +957,69 @@ fn resolve_with_scope(
         loader,
     )
     .map_err(|failure| {
-        Error::failure(format!("dependency resolution failed: {}", failure.message))
+        if failure.package_limit {
+            options.package_limit.error()
+        } else if let Some(error) = failure.diagnostic {
+            error.with_context("dependency resolution failed")
+        } else {
+            Error::failure(format!("dependency resolution failed: {}", failure.message))
+        }
     })?;
-    Ok(state.into_resolution(manifest))
+    Ok(state.into_resolution())
 }
 
 #[derive(Clone, Copy)]
 enum Scope<'a> {
-    Complete,
-    Selected(TargetSelection<'a>),
+    Complete {
+        locked: Option<&'a locked::Edges>,
+        exact: bool,
+    },
+    Selected {
+        selection: TargetSelection<'a>,
+        complete: &'a Resolution,
+        dev_members: &'a BTreeSet<PathBuf>,
+    },
+    Metadata {
+        complete: &'a Resolution,
+    },
 }
 
-impl Scope<'_> {
+impl<'a> Scope<'a> {
+    fn locked_dependencies(
+        self,
+        event: &Event,
+    ) -> std::result::Result<Option<&'a BTreeSet<locked::Identity>>, Failure> {
+        match (self, &event.parent) {
+            (
+                Self::Complete {
+                    locked: Some(edges),
+                    exact: true,
+                },
+                Some(parent),
+            ) => edges.dependencies(parent).map(Some),
+            _ => Ok(None),
+        }
+    }
+    fn dependency_preferences(self, event: &Event) -> Option<&'a BTreeSet<locked::Identity>> {
+        match (self, &event.parent) {
+            (
+                Self::Complete {
+                    locked: Some(edges),
+                    exact: false,
+                },
+                Some(parent),
+            ) => edges.get(parent),
+            _ => None,
+        }
+    }
+
     fn matches(self, compile_kind: CompileKind, selector: Option<&str>) -> Result<bool> {
         let Some(selector) = selector else {
             return Ok(true);
         };
-        let Self::Selected(selection) = self else {
-            return Ok(true);
+        let selection = match self {
+            Self::Selected { selection, .. } => selection,
+            _ => return Ok(true),
         };
         let (triple, cfg) = match compile_kind {
             CompileKind::Target => (selection.target_triple, selection.target_cfg),
@@ -938,6 +1031,39 @@ impl Scope<'_> {
             Ok(selector == triple)
         }
     }
+
+    fn locked_package(self, event: &Event) -> std::result::Result<Option<&'a PackageKey>, Failure> {
+        let complete = match self {
+            Self::Selected { complete, .. } | Self::Metadata { complete } => complete,
+            _ => return Ok(None),
+        };
+        let Some(parent) = &event.parent else {
+            return Ok(None);
+        };
+        let package = complete
+            .packages
+            .iter()
+            .find(|package| &package.key == parent)
+            .ok_or_else(|| {
+                Failure::fatal("selected dependency parent is absent from the complete resolution")
+            })?;
+        let mut matching = package
+            .lock_edges
+            .iter()
+            .filter(|edge| edge.dependency_index == event.dependency_index);
+        let edge = matching.next().ok_or_else(|| {
+            Failure::fatal(format!(
+                "complete resolution omits dependency `{}` of `{}`",
+                event.dependency.alias, parent.name,
+            ))
+        })?;
+        if matching.any(|other| other.package != edge.package) {
+            return Err(Failure::fatal(
+                "complete resolution has conflicting dependency identities",
+            ));
+        }
+        Ok(Some(&edge.package))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -946,51 +1072,14 @@ pub enum CompileKind {
     Host,
 }
 
-#[derive(Clone)]
-struct RootRequirement {
-    index: usize,
-    dependency: CandidateDependency,
-}
-
-fn root_requirements(manifest: &Manifest, all_features: bool) -> Result<Vec<RootRequirement>> {
-    root_requirements_and_features(manifest, all_features).map(|(requirements, _)| requirements)
-}
-
+/// The features that a selected package enables by default, expanded as
+/// Cargo expands them.
 pub fn selected_root_features(manifest: &Manifest) -> Result<BTreeSet<String>> {
-    root_requirements_and_features(manifest, false).map(|(_, features)| features)
-}
-
-fn root_requirements_and_features(
-    manifest: &Manifest,
-    all_features: bool,
-) -> Result<(Vec<RootRequirement>, BTreeSet<String>)> {
-    let mut enabled = BTreeSet::new();
-    for (index, dependency) in manifest.dependencies.iter().enumerate() {
-        if !dependency.optional {
-            enabled.insert(index);
-        }
-    }
-
-    let namespaced = manifest
-        .features
-        .values()
-        .flatten()
-        .filter_map(|reference| reference.strip_prefix("dep:"))
-        .collect::<BTreeSet<_>>();
     let mut active = BTreeSet::new();
-    if all_features {
-        active.extend(manifest.features.keys().cloned());
-        for dependency in &manifest.dependencies {
-            if dependency.optional && !namespaced.contains(dependency.alias.as_str()) {
-                active.insert(dependency.alias.clone());
-            }
-        }
-    } else if manifest.features.contains_key("default") {
+    if manifest.features.contains_key("default") {
         active.insert("default".to_owned());
     }
-
     let mut expanded = BTreeSet::new();
-    let mut dependency_features: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     while let Some(feature) = active
         .iter()
         .find(|feature| !expanded.contains(*feature))
@@ -999,109 +1088,55 @@ fn root_requirements_and_features(
         expanded.insert(feature.clone());
         if let Some(references) = manifest.features.get(&feature) {
             for reference in references {
-                expand_root_reference(
-                    manifest,
-                    reference,
-                    &mut active,
-                    &mut enabled,
-                    &mut dependency_features,
-                )?;
+                expand_root_reference(manifest, reference, &mut active)?;
             }
         } else {
-            enable_root_alias(manifest, &feature, &mut enabled)?;
+            require_optional_alias(manifest, &feature)?;
         }
     }
-
-    let weak = manifest
-        .features
-        .iter()
-        .filter(|(feature, _)| active.contains(*feature))
-        .flat_map(|(_, references)| references)
-        .filter_map(|reference| {
-            let (dependency, feature) = reference.split_once('/')?;
-            dependency
-                .strip_suffix('?')
-                .map(|dependency| (dependency, feature))
-        })
-        .collect::<Vec<_>>();
-    for (dependency, feature) in weak {
-        if manifest
-            .dependencies
-            .iter()
-            .enumerate()
-            .any(|(index, value)| value.alias == dependency && enabled.contains(&index))
-        {
-            dependency_features
-                .entry(dependency.to_owned())
-                .or_default()
-                .insert(feature.to_owned());
-        }
-    }
-
-    let mut output = Vec::new();
-    for (index, dependency) in manifest.dependencies.iter().enumerate() {
-        if !enabled.contains(&index) {
-            continue;
-        }
-        let mut features = dependency.features.clone();
-        if let Some(additional) = dependency_features.get(&dependency.alias) {
-            for feature in additional {
-                if !features.contains(feature) {
-                    features.push(feature.clone());
-                }
-            }
-        }
-        output.push(RootRequirement {
-            index,
-            dependency: CandidateDependency {
-                dependency: Dependency {
-                    alias: dependency.alias.clone(),
-                    package: dependency.package.clone(),
-                    requirement: dependency.requirement.clone(),
-                    features,
-                    optional: false,
-                    default_features: dependency.default_features,
-                    target: dependency.target.clone(),
-                    kind: DependencyKind::Normal,
-                },
-                source: match &dependency.source {
-                    DependencySource::CratesIo => RequirementSource::CratesIo,
-                    DependencySource::Path(path) => RequirementSource::Path(path.clone()),
-                    DependencySource::Git(git) => RequirementSource::Git(git.clone()),
-                },
-            },
-        });
-    }
-    Ok((output, active))
+    Ok(active)
 }
 
 fn expand_root_reference(
     manifest: &Manifest,
     reference: &str,
     active: &mut BTreeSet<String>,
-    enabled: &mut BTreeSet<usize>,
-    dependency_features: &mut BTreeMap<String, BTreeSet<String>>,
 ) -> Result<()> {
     if let Some(dependency) = reference.strip_prefix("dep:") {
-        return enable_root_alias(manifest, dependency, enabled);
+        return require_optional_alias(manifest, dependency);
     }
-    if let Some((dependency, feature)) = reference.split_once('/') {
+    if let Some((dependency, _)) = reference.split_once('/') {
         if let Some(dependency) = dependency.strip_suffix('?') {
             return require_root_dependency_alias(manifest, dependency);
         }
-        enable_root_dependency(manifest, dependency, enabled)?;
-        dependency_features
-            .entry(dependency.to_owned())
-            .or_default()
-            .insert(feature.to_owned());
+        require_root_dependency_alias(manifest, dependency)?;
+        // As in Cargo, `dep/feature` also activates the dependency's implicit
+        // feature.
+        if implicit_root_feature(manifest, dependency) {
+            active.insert(dependency.to_owned());
+        }
         return Ok(());
     }
-    if manifest.features.contains_key(reference) {
+    if manifest.features.contains_key(reference) || implicit_root_feature(manifest, reference) {
         active.insert(reference.to_owned());
         Ok(())
     } else {
-        enable_root_alias(manifest, reference, enabled)
+        require_optional_alias(manifest, reference)
     }
+}
+
+/// Whether an optional dependency has an implicit feature of its name: no
+/// feature names it with `dep:`, as in `defines_feature`.
+fn implicit_root_feature(manifest: &Manifest, alias: &str) -> bool {
+    manifest
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.optional && dependency.alias == alias)
+        && !manifest
+            .features
+            .values()
+            .flatten()
+            .any(|reference| reference.strip_prefix("dep:") == Some(alias))
 }
 
 fn require_root_dependency_alias(manifest: &Manifest, alias: &str) -> Result<()> {
@@ -1118,33 +1153,12 @@ fn require_root_dependency_alias(manifest: &Manifest, alias: &str) -> Result<()>
     }
 }
 
-fn enable_root_dependency(
-    manifest: &Manifest,
-    alias: &str,
-    enabled: &mut BTreeSet<usize>,
-) -> Result<()> {
-    require_root_dependency_alias(manifest, alias)?;
-    for (index, dependency) in manifest.dependencies.iter().enumerate() {
-        if dependency.alias == alias && dependency.optional {
-            enabled.insert(index);
-        }
-    }
-    Ok(())
-}
-
-fn enable_root_alias(
-    manifest: &Manifest,
-    alias: &str,
-    enabled: &mut BTreeSet<usize>,
-) -> Result<()> {
-    let mut found = false;
-    for (index, dependency) in manifest.dependencies.iter().enumerate() {
-        if dependency.alias == alias && dependency.optional {
-            enabled.insert(index);
-            found = true;
-        }
-    }
-    if found {
+fn require_optional_alias(manifest: &Manifest, alias: &str) -> Result<()> {
+    if manifest
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.alias == alias && dependency.optional)
+    {
         Ok(())
     } else {
         Err(Error::failure(format!(
@@ -1168,6 +1182,7 @@ struct Event {
 #[derive(Clone, Debug, Default)]
 struct Activation {
     active: BTreeSet<String>,
+    requested_dependencies: BTreeSet<String>,
     enabled_optional: BTreeSet<String>,
     dependency_features: BTreeMap<String, BTreeSet<String>>,
     weak_dependencies: BTreeSet<usize>,
@@ -1191,13 +1206,15 @@ struct Node {
 
 #[derive(Clone, Default)]
 struct State {
-    nodes: BTreeMap<PackageKey, Node>,
+    // Search copies the state at every step; shared nodes keep that cheap.
+    nodes: BTreeMap<PackageKey, Arc<Node>>,
     links: BTreeMap<String, PackageKey>,
     root_edges: BTreeMap<(CompileKind, FeatureContext, usize), PackageKey>,
+    root_declarations: BTreeMap<usize, CandidateDependency>,
 }
 
 impl State {
-    fn into_resolution(self, manifest: &Manifest) -> Resolution {
+    fn into_resolution(self) -> Resolution {
         let selected = self
             .nodes
             .iter()
@@ -1205,6 +1222,7 @@ impl State {
             .collect::<Vec<_>>();
         let mut packages = Vec::with_capacity(self.nodes.len());
         for (key, node) in self.nodes {
+            let node = Arc::unwrap_or_clone(node);
             let feature_sets = node
                 .activations
                 .iter()
@@ -1233,6 +1251,7 @@ impl State {
                             dependency_index: *dependency_index,
                             alias: dependency.alias.clone(),
                             kind: dependency.kind,
+                            target: dependency.target.clone(),
                             parent_compile_kind: Some(*parent_kind),
                             compile_kind: *compile_kind,
                             context: context.clone(),
@@ -1249,7 +1268,7 @@ impl State {
                         .iter()
                         .filter(|(key, source)| {
                             key.name == dependency.package
-                                && dependency.requirement.matches(&key.version)
+                                && dependency.matches_version(&key.version)
                                 && source_matches(source, &dependency.source)
                         })
                         .max_by(|left, right| left.0.version.cmp(&right.0.version))
@@ -1274,6 +1293,7 @@ impl State {
                             dependency_index,
                             alias: dependency.alias.clone(),
                             kind: dependency.kind,
+                            target: dependency.target.clone(),
                             parent_compile_kind: Some(parent_kind),
                             compile_kind,
                             context,
@@ -1299,11 +1319,12 @@ impl State {
             .root_edges
             .into_iter()
             .map(|((compile_kind, context, dependency_index), package)| {
-                let dependency = &manifest.dependencies[dependency_index];
+                let dependency = &self.root_declarations[&dependency_index];
                 ResolvedEdge {
                     dependency_index,
                     alias: dependency.alias.clone(),
                     kind: dependency.kind,
+                    target: dependency.target.clone(),
                     parent_compile_kind: None,
                     compile_kind,
                     context,
@@ -1322,6 +1343,8 @@ impl State {
 struct Failure {
     message: String,
     fatal: bool,
+    package_limit: bool,
+    diagnostic: Option<Error>,
 }
 
 impl Failure {
@@ -1329,6 +1352,8 @@ impl Failure {
         Self {
             message: message.into(),
             fatal: false,
+            package_limit: false,
+            diagnostic: None,
         }
     }
 
@@ -1336,177 +1361,55 @@ impl Failure {
         Self {
             message: message.into(),
             fatal: true,
-        }
-    }
-}
-
-fn solve(
-    state: State,
-    mut queue: VecDeque<Event>,
-    catalog: &mut Catalog,
-    options: &Options,
-    locked: &[LockedPreference],
-    scope: Scope<'_>,
-    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
-) -> std::result::Result<State, Failure> {
-    let Some(mut event) = queue.pop_front() else {
-        return Ok(state);
-    };
-    if event.dependency.source == RequirementSource::CratesIo {
-        loader(
-            &event.dependency.package,
-            &event.dependency.requirement,
-            catalog,
-        )
-        .map_err(|error| Failure::fatal(error.to_string()))?;
-    }
-    catalog
-        .prepare(&mut event.dependency)
-        .map_err(|error| Failure::new(error.to_string()))?;
-    if event.depth > options.max_depth {
-        return Err(Failure::new(format!(
-            "`{}` exceeds dependency depth {}",
-            event.dependency.package, options.max_depth
-        )));
-    }
-    let matching_selected = state
-        .nodes
-        .iter()
-        .filter(|(key, node)| {
-            key.name == event.dependency.package
-                && event.dependency.requirement.matches(&key.version)
-                && source_matches(&node.record.source, &event.dependency.source)
-        })
-        .map(|(key, _)| key.clone())
-        .collect::<Vec<_>>();
-    let mut last_failure = None;
-    for key in matching_selected {
-        let mut candidate_state = state.clone();
-        let mut candidate_queue = queue.clone();
-        match fulfill(
-            &mut candidate_state,
-            &mut candidate_queue,
-            &event,
-            &key,
-            options,
-            scope,
-        )
-        .and_then(|()| {
-            solve(
-                candidate_state,
-                candidate_queue,
-                catalog,
-                options,
-                locked,
-                scope,
-                loader,
-            )
-        }) {
-            Ok(state) => return Ok(state),
-            Err(failure) if failure.fatal => return Err(failure),
-            Err(failure) => last_failure = Some(failure),
+            package_limit: false,
+            diagnostic: None,
         }
     }
 
-    let candidates = candidates(catalog, &event, options, locked);
-    for record in candidates {
-        if state.nodes.iter().any(|(key, node)| {
-            key.name == record.name
-                && source_matches(&node.record.source, &event.dependency.source)
-                && semver_compatible(&key.version, &record.version)
-        }) {
-            if last_failure.is_none() {
-                last_failure = Some(Failure::new(format!(
-                    "compatible requirements for `{}` cannot be unified",
-                    record.name
-                )));
-            }
-            continue;
-        }
-        if state.nodes.len() as u64 >= options.max_packages {
-            last_failure = Some(Failure::new(format!(
-                "selected package count exceeds {}",
-                options.max_packages
-            )));
-            continue;
-        }
-
-        let key = PackageKey {
-            name: record.name.clone(),
-            version: record.version.clone(),
-            source: record.source.key(),
-        };
-        let mut candidate_state = state.clone();
-        if let Some(links) = &record.links {
-            if let Some(existing) = candidate_state.links.get(links) {
-                last_failure = Some(Failure::new(format!(
-                    "packages `{}` and `{}` both link native library `{links}`",
-                    existing.name, key.name
-                )));
-                continue;
-            }
-            candidate_state.links.insert(links.clone(), key.clone());
-        }
-        candidate_state.nodes.insert(
-            key.clone(),
-            Node {
-                record: Arc::new(record),
-                activations: BTreeMap::new(),
-                compile_kinds: BTreeSet::new(),
-                edges: BTreeMap::new(),
-            },
-        );
-        let mut candidate_queue = queue.clone();
-        match fulfill(
-            &mut candidate_state,
-            &mut candidate_queue,
-            &event,
-            &key,
-            options,
-            scope,
-        )
-        .and_then(|()| {
-            solve(
-                candidate_state,
-                candidate_queue,
-                catalog,
-                options,
-                locked,
-                scope,
-                loader,
-            )
-        }) {
-            Ok(state) => return Ok(state),
-            Err(failure) if failure.fatal => return Err(failure),
-            Err(failure) => last_failure = Some(failure),
+    // The limit is policy, not a constraint: backtracking to a smaller graph
+    // would silently choose different versions than Cargo.
+    fn package_limit() -> Self {
+        Self {
+            message: String::new(),
+            fatal: true,
+            package_limit: true,
+            diagnostic: None,
         }
     }
 
-    Err(last_failure.unwrap_or_else(|| {
-        Failure::new(format!(
-            "no version of `{}` matches `{}`",
-            event.dependency.package, event.dependency.requirement
-        ))
-    }))
+    fn from_error(error: Error, fatal: bool) -> Self {
+        Self {
+            message: error.to_string(),
+            fatal,
+            package_limit: false,
+            diagnostic: Some(error),
+        }
+    }
 }
 
 fn fulfill(
     state: &mut State,
-    queue: &mut VecDeque<Event>,
+    pending: &mut search::Pending,
     event: &Event,
     key: &PackageKey,
     options: &Options,
     scope: Scope<'_>,
 ) -> std::result::Result<(), Failure> {
     let mut event = event.clone();
-    if event.dependency.kind == DependencyKind::Normal
-        && state
-            .nodes
-            .get(key)
-            .is_some_and(|node| node.record.proc_macro)
+    // Macros execute in rustc even when a test's dev-dependency selects them.
+    if state
+        .nodes
+        .get(key)
+        .is_some_and(|node| node.record.proc_macro)
     {
+        if event.parent.is_none() && matches!(scope, Scope::Selected { .. }) {
+            // Cargo also activates a selected macro's normal feature context.
+            // Its library stays on the host; selected auxiliary targets may
+            // also compile the dependencies activated in the target context.
+            activate(state, pending, key, &event, options, scope)?;
+        }
         event.compile_kind = CompileKind::Host;
-        event.context = normalize_context(options.resolver, FeatureContext::Host);
+        event.context = normalize_scope_context(options.resolver, scope, FeatureContext::Host);
     }
     if event.ancestors.contains(key) {
         return Err(Failure::new(format!(
@@ -1518,6 +1421,7 @@ fn fulfill(
         let node = state
             .nodes
             .get_mut(parent)
+            .map(Arc::make_mut)
             .ok_or_else(|| Failure::new("dependency parent disappeared during resolution"))?;
         let edge = (
             event.parent_compile_kind.ok_or_else(|| {
@@ -1538,6 +1442,12 @@ fn fulfill(
             )));
         }
     } else {
+        // Root declarations belong to the resolution request, so package
+        // projection does not depend on one privileged selected manifest.
+        state
+            .root_declarations
+            .entry(event.dependency_index)
+            .or_insert_with(|| event.dependency.clone());
         let edge = (
             event.compile_kind,
             event.context.clone(),
@@ -1553,12 +1463,12 @@ fn fulfill(
             ));
         }
     }
-    activate(state, queue, key, &event, options, scope)
+    activate(state, pending, key, &event, options, scope)
 }
 
 fn activate(
     state: &mut State,
-    queue: &mut VecDeque<Event>,
+    pending: &mut search::Pending,
     key: &PackageKey,
     event: &Event,
     options: &Options,
@@ -1570,7 +1480,7 @@ fn activate(
         .ok_or_else(|| Failure::new("selected package disappeared during activation"))?
         .record
         .clone();
-    let node = state.nodes.get_mut(key).unwrap();
+    let node = Arc::make_mut(state.nodes.get_mut(key).unwrap());
     node.compile_kinds.insert(event.compile_kind);
     let activation = node.activations.entry(event.context.clone()).or_default();
 
@@ -1578,23 +1488,23 @@ fn activate(
         activation.active.insert("default".to_owned());
     }
     for feature in &event.dependency.features {
-        if record.features.contains_key(feature)
-            || record
-                .dependencies
-                .iter()
-                .any(|dependency| dependency.optional && dependency.alias == *feature)
-        {
+        if event.parent.is_none() && feature.contains('/') {
+            activation.requested_dependencies.insert(feature.clone());
+        } else if defines_feature(&record, feature) {
             activation.active.insert(feature.clone());
         } else {
             return Err(Failure::new(format!(
                 "`{}` {} does not define requested feature `{feature}`",
-                record.name, record.version
+                record.name, record.version,
             )));
         }
     }
 
     let mut expanded = BTreeSet::new();
     let mut weak = Vec::new();
+    for reference in activation.requested_dependencies.clone() {
+        expand_feature_reference(&record, activation, &reference, &reference, &mut weak)?;
+    }
     while let Some(feature) = activation
         .active
         .iter()
@@ -1607,66 +1517,21 @@ fn activate(
             continue;
         };
         for reference in references {
-            if let Some(dependency) = reference.strip_prefix("dep:") {
-                if !record
-                    .dependencies
-                    .iter()
-                    .any(|candidate| candidate.optional && candidate.alias == dependency)
-                {
-                    return Err(Failure::new(format!(
-                        "`{}` {} feature `{feature}` references unknown optional dependency `{dependency}`",
-                        record.name, record.version
-                    )));
-                }
-                activation.enabled_optional.insert(dependency.to_owned());
-            } else if let Some((dependency, dependency_feature)) = reference.split_once('/') {
-                if let Some(dependency) = dependency.strip_suffix('?') {
-                    if !record
-                        .dependencies
-                        .iter()
-                        .any(|candidate| candidate.alias == dependency)
-                    {
-                        return Err(Failure::new(format!(
-                            "`{}` {} feature `{feature}` references unknown dependency `{dependency}`",
-                            record.name, record.version
-                        )));
-                    }
-                    weak.push((dependency.to_owned(), dependency_feature.to_owned()));
-                } else {
-                    if !record
-                        .dependencies
-                        .iter()
-                        .any(|candidate| candidate.alias == dependency)
-                    {
-                        return Err(Failure::new(format!(
-                            "`{}` {} feature `{feature}` references unknown dependency `{dependency}`",
-                            record.name, record.version
-                        )));
-                    }
-                    activation.enabled_optional.insert(dependency.to_owned());
-                    activation
-                        .dependency_features
-                        .entry(dependency.to_owned())
-                        .or_default()
-                        .insert(dependency_feature.to_owned());
-                }
-            } else if record.features.contains_key(reference)
-                || record
-                    .dependencies
-                    .iter()
-                    .any(|dependency| dependency.optional && dependency.alias == *reference)
-            {
-                activation.active.insert(reference.to_owned());
-            } else {
-                return Err(Failure::new(format!(
-                    "`{}` {} feature `{feature}` references unknown `{reference}`",
-                    record.name, record.version
-                )));
-            }
+            expand_feature_reference(&record, activation, reference, &feature, &mut weak)?;
         }
     }
     for (dependency, dependency_feature) in weak {
-        if activation.enabled_optional.contains(&dependency) {
+        // Cargo's package resolver follows weak references too. Only the
+        // compilation feature resolver defers inactive optional dependencies.
+        if matches!(scope, Scope::Complete { .. } | Scope::Metadata { .. }) {
+            activation.enabled_optional.insert(dependency.clone());
+        }
+        if activation.enabled_optional.contains(&dependency)
+            || record
+                .dependencies
+                .iter()
+                .any(|candidate| candidate.alias == dependency && !candidate.optional)
+        {
             activation
                 .dependency_features
                 .entry(dependency)
@@ -1681,31 +1546,50 @@ fn activate(
         }
     }
 
-    for (index, dependency) in record.dependencies.iter().enumerate() {
-        if dependency.kind == DependencyKind::Dev
+    let mut group = Vec::new();
+    // Unified feature changes must reach dependencies of every already active
+    // compilation kind, even when the new request arrived in only one kind.
+    let compile_kinds = if event.context == FeatureContext::Unified {
+        node.compile_kinds.clone()
+    } else {
+        BTreeSet::from([event.compile_kind])
+    };
+    for (parent_kind, (index, dependency)) in compile_kinds.iter().flat_map(|kind| {
+        record
+            .dependencies
+            .iter()
+            .enumerate()
+            .map(move |dependency| (*kind, dependency))
+    }) {
+        let include_dev = record
+            .local_manifest
+            .as_ref()
+            .is_some_and(|manifest| match scope {
+                Scope::Complete { .. } | Scope::Metadata { .. } => manifest.editable,
+                Scope::Selected { dev_members, .. } => dev_members.contains(&manifest.root),
+            });
+        if (dependency.kind == DependencyKind::Dev && !include_dev)
             || (dependency.optional && !activation.enabled_optional.contains(&dependency.alias))
-        {
-            continue;
-        }
-        if !scope
-            .matches(event.compile_kind, dependency.target.as_deref())
-            .map_err(|error| Failure::new(error.to_string()))?
         {
             continue;
         }
         let child_compile_kind = match dependency.kind {
             DependencyKind::Build => CompileKind::Host,
-            DependencyKind::Normal => event.compile_kind,
-            DependencyKind::Dev => unreachable!(),
+            DependencyKind::Normal | DependencyKind::Dev => parent_kind,
         };
+        if !scope
+            .matches(child_compile_kind, dependency.target.as_deref())
+            .map_err(|error| Failure::new(error.to_string()))?
+        {
+            continue;
+        }
         let child_context = match options.resolver {
             ResolverVersion::V1 => FeatureContext::Unified,
             ResolverVersion::V2 | ResolverVersion::V3 => match dependency.kind {
                 DependencyKind::Build => FeatureContext::Host,
-                DependencyKind::Normal => {
+                DependencyKind::Normal | DependencyKind::Dev => {
                     child_target_context(scope, event.context.clone(), dependency.target.as_deref())
                 }
-                DependencyKind::Dev => unreachable!(),
             },
         };
         let mut features = dependency.features.iter().cloned().collect::<BTreeSet<_>>();
@@ -1716,40 +1600,148 @@ fn activate(
             features,
             default_features: dependency.default_features,
         };
-        let sent_key = (event.compile_kind, index);
+        let sent_key = (parent_kind, index);
         if activation.sent.get(&sent_key) == Some(&sent) {
             continue;
         }
         activation.sent.insert(sent_key, sent.clone());
         let mut dependency = dependency.clone();
         dependency.dependency.features = sent.features.into_iter().collect();
-        let mut ancestors = event.ancestors.clone();
-        ancestors.insert(key.clone());
-        queue.push_back(Event {
+        // Cargo's package-cycle prohibition excludes development edges.
+        let ancestors = if dependency.kind == DependencyKind::Dev {
+            BTreeSet::new()
+        } else {
+            let mut ancestors = event.ancestors.clone();
+            ancestors.insert(key.clone());
+            ancestors
+        };
+        group.push(Event {
             parent: Some(key.clone()),
-            parent_compile_kind: Some(event.compile_kind),
+            parent_compile_kind: Some(parent_kind),
             dependency_index: index,
             dependency,
-            context: normalize_context(options.resolver, child_context),
+            context: normalize_scope_context(options.resolver, scope, child_context),
             compile_kind: child_compile_kind,
             depth: event.depth.saturating_add(1),
             ancestors,
         });
     }
+    // A registry package keeps its index order.
+    if record.local_manifest.is_some() {
+        group.sort_by(|left, right| {
+            manifest_order(&left.dependency).cmp(&manifest_order(&right.dependency))
+        });
+    }
+    pending.push_group(group);
+    Ok(())
+}
+
+/// Cargo's order of a path or Git package's dependencies: `[dependencies]`,
+/// `[dev-dependencies]` and `[build-dependencies]`, then each target table in
+/// name order with dependencies, build-dependencies and dev-dependencies.
+/// Names are sorted within each table.
+fn manifest_order(dependency: &Dependency) -> (Option<&str>, u8, &str) {
+    let table = match (dependency.target.is_some(), dependency.kind) {
+        (_, DependencyKind::Normal) => 0,
+        (false, DependencyKind::Dev) | (true, DependencyKind::Build) => 1,
+        (false, DependencyKind::Build) | (true, DependencyKind::Dev) => 2,
+    };
+    (dependency.target.as_deref(), table, &dependency.alias)
+}
+
+fn defines_feature(record: &Candidate, feature: &str) -> bool {
+    record.features.contains_key(feature)
+        || (record
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.optional && dependency.alias == feature)
+            && !record
+                .features
+                .values()
+                .flatten()
+                .any(|reference| reference.strip_prefix("dep:") == Some(feature)))
+}
+
+fn expand_feature_reference(
+    record: &Candidate,
+    activation: &mut Activation,
+    reference: &str,
+    feature: &str,
+    weak: &mut Vec<(String, String)>,
+) -> std::result::Result<(), Failure> {
+    if let Some(dependency) = reference.strip_prefix("dep:") {
+        if !record
+            .dependencies
+            .iter()
+            .any(|candidate| candidate.optional && candidate.alias == dependency)
+        {
+            return Err(Failure::new(format!(
+                "`{}` {} feature `{feature}` references unknown optional dependency `{dependency}`",
+                record.name, record.version
+            )));
+        }
+        activation.enabled_optional.insert(dependency.to_owned());
+    } else if let Some((dependency, dependency_feature)) = reference.split_once('/') {
+        if let Some(dependency) = dependency.strip_suffix('?') {
+            if !record
+                .dependencies
+                .iter()
+                .any(|candidate| candidate.alias == dependency)
+            {
+                return Err(Failure::new(format!(
+                    "`{}` {} feature `{feature}` references unknown dependency `{dependency}`",
+                    record.name, record.version
+                )));
+            }
+            weak.push((dependency.to_owned(), dependency_feature.to_owned()));
+        } else {
+            if !record
+                .dependencies
+                .iter()
+                .any(|candidate| candidate.alias == dependency)
+            {
+                return Err(Failure::new(format!(
+                    "`{}` {} feature `{feature}` references unknown dependency `{dependency}`",
+                    record.name, record.version
+                )));
+            }
+            activation.enabled_optional.insert(dependency.to_owned());
+            if record
+                .dependencies
+                .iter()
+                .any(|candidate| candidate.alias == dependency && candidate.optional)
+                && defines_feature(record, dependency)
+            {
+                activation.active.insert(dependency.to_owned());
+            }
+            activation
+                .dependency_features
+                .entry(dependency.to_owned())
+                .or_default()
+                .insert(dependency_feature.to_owned());
+        }
+    } else if defines_feature(record, reference) {
+        activation.active.insert(reference.to_owned());
+    } else {
+        return Err(Failure::new(format!(
+            "`{}` {} feature `{feature}` references unknown `{reference}`",
+            record.name, record.version
+        )));
+    }
+
     Ok(())
 }
 
 fn candidates(
     catalog: &Catalog,
     event: &Event,
-    options: &Options,
     locked: &[LockedPreference],
-) -> Vec<Candidate> {
-    let mut candidates = catalog
+) -> Vec<Arc<Candidate>> {
+    catalog
         .records(&event.dependency.package)
         .iter()
         .filter(|candidate| source_matches(&candidate.source, &event.dependency.source))
-        .filter(|record| event.dependency.requirement.matches(&record.version))
+        .filter(|record| event.dependency.matches_version(&record.version))
         .filter(|candidate| !registry_candidate_is_patched(catalog, event, candidate))
         .filter(|record| {
             !record.yanked
@@ -1765,27 +1757,28 @@ fn candidates(
                 })
         })
         .cloned()
-        .collect::<Vec<_>>();
-    let rust_policy = options.rust_policy();
-    candidates.sort_unstable_by(|left, right| {
-        let left_locked = lock_rank(left, locked);
-        let right_locked = lock_rank(right, locked);
-        right_locked.cmp(&left_locked).then_with(|| {
-            if rust_policy == IncompatibleRustVersions::Fallback
-                && left_locked == 0
-                && right_locked == 0
-            {
-                let left_compatible = rust_compatible(left, &options.rust_version);
-                let right_compatible = rust_compatible(right, &options.rust_version);
-                right_compatible
-                    .cmp(&left_compatible)
-                    .then_with(|| right.version.cmp(&left.version))
+        .collect()
+}
+
+/// Cargo's candidate order: locked versions, then Rust-version compatibility
+/// under the fallback policy, then the highest version.
+fn candidate_order(
+    left: &Candidate,
+    right: &Candidate,
+    options: &Options,
+    locked: &[LockedPreference],
+) -> std::cmp::Ordering {
+    lock_rank(right, locked)
+        .cmp(&lock_rank(left, locked))
+        .then_with(|| {
+            if options.rust_policy() == IncompatibleRustVersions::Fallback {
+                rust_compatibility_count(right, &options.rust_versions)
+                    .cmp(&rust_compatibility_count(left, &options.rust_versions))
             } else {
-                right.version.cmp(&left.version)
+                std::cmp::Ordering::Equal
             }
         })
-    });
-    candidates
+        .then_with(|| right.version.cmp(&left.version))
 }
 
 fn registry_candidate_is_patched(catalog: &Catalog, event: &Event, candidate: &Candidate) -> bool {
@@ -1824,11 +1817,20 @@ fn lock_rank(record: &Candidate, locked: &[LockedPreference]) -> u8 {
         .into()
 }
 
-fn rust_compatible(record: &Candidate, rust_version: &Version) -> bool {
-    record
-        .rust_version
-        .as_ref()
-        .is_none_or(|required| required.version <= *rust_version)
+fn rust_compatibility_count(record: &Candidate, rust_versions: &[Version]) -> usize {
+    let Some(required) = &record.rust_version else {
+        return rust_versions.len();
+    };
+    let requirement = VersionReq::parse(&format!("^{}", required.original));
+    rust_versions
+        .iter()
+        .filter(|version| {
+            let stable = Version::new(version.major, version.minor, version.patch);
+            requirement
+                .as_ref()
+                .is_ok_and(|required| required.matches(&stable))
+        })
+        .count()
 }
 
 fn validate_locked_checksums(catalog: &Catalog, locked: &[LockedPreference]) -> Result<()> {
@@ -1906,16 +1908,8 @@ fn target_dependency_context(parent: FeatureContext, selector: Option<&str>) -> 
     }
 }
 
-fn root_context(
-    resolver: ResolverVersion,
-    scope: Scope<'_>,
-    dependency: &CandidateDependency,
-) -> FeatureContext {
-    let context = match scope {
-        Scope::Complete => FeatureContext::Target(dependency.target.clone().unwrap_or_default()),
-        Scope::Selected(_) => FeatureContext::Target(String::new()),
-    };
-    normalize_context(resolver, context)
+fn root_context(resolver: ResolverVersion, scope: Scope<'_>) -> FeatureContext {
+    normalize_scope_context(resolver, scope, FeatureContext::Target(String::new()))
 }
 
 fn child_target_context(
@@ -1924,8 +1918,22 @@ fn child_target_context(
     selector: Option<&str>,
 ) -> FeatureContext {
     match scope {
-        Scope::Complete => target_dependency_context(parent, selector),
-        Scope::Selected(_) => parent,
+        Scope::Complete { .. } => target_dependency_context(parent, selector),
+        Scope::Selected { .. } | Scope::Metadata { .. } => parent,
+    }
+}
+
+// Metadata reports resolver requests across platforms and dependency kinds;
+// those node lists differ from the per-unit host/target feature sets.
+fn normalize_scope_context(
+    resolver: ResolverVersion,
+    scope: Scope<'_>,
+    context: FeatureContext,
+) -> FeatureContext {
+    if matches!(scope, Scope::Metadata { .. }) {
+        FeatureContext::Unified
+    } else {
+        normalize_context(resolver, context)
     }
 }
 
@@ -1949,7 +1957,7 @@ fn same_semver_identity(left: &Version, right: &Version) -> bool {
         && left.pre == right.pre
 }
 
-fn parse_local_rust_version(package: &str, value: &str) -> Result<RustVersion> {
+pub(crate) fn parse_local_rust_version(package: &str, value: &str) -> Result<RustVersion> {
     if value.is_empty() || value.starts_with('v') || value.contains(['-', '+']) {
         return Err(Error::failure(format!(
             "local package `{package}` has invalid `rust-version` `{value}`"
@@ -1990,7 +1998,7 @@ mod tests {
 
     #[test]
     fn snapshots_share_candidates_but_keep_selection_state_independent() {
-        let manifest = manifest("", "extra = []", "2");
+        let (_dir, manifest) = manifest("child = \"1\"", "extra = []", "2");
         let candidate = local_candidate(
             manifest.clone(),
             PathBuf::from("/fixture"),
@@ -2007,16 +2015,16 @@ mod tests {
         let mut state = State::default();
         state.nodes.insert(
             key.clone(),
-            Node {
+            Arc::new(Node {
                 record: Arc::new(candidate),
                 activations: BTreeMap::from([(FeatureContext::Unified, Activation::default())]),
                 compile_kinds: BTreeSet::from([CompileKind::Target]),
                 edges: BTreeMap::new(),
-            },
+            }),
         );
         let mut branch = state.clone();
         let original = &state.nodes[&key];
-        let changed = branch.nodes.get_mut(&key).unwrap();
+        let changed = Arc::make_mut(branch.nodes.get_mut(&key).unwrap());
         assert!(Arc::ptr_eq(&original.record, &changed.record));
         assert!(original.record.local_manifest.is_some());
         let activation = changed
@@ -2051,6 +2059,9 @@ mod tests {
             (CompileKind::Target, FeatureContext::Unified, 0),
             key.clone(),
         );
+        branch
+            .root_declarations
+            .insert(0, changed.record.dependencies[0].clone());
         let activation = &original.activations[&FeatureContext::Unified];
         assert!(activation.active.is_empty());
         assert!(activation.enabled_optional.is_empty());
@@ -2064,12 +2075,13 @@ mod tests {
         assert!(original.edges.is_empty());
         assert!(state.links.is_empty());
         assert!(state.root_edges.is_empty());
+        assert!(state.root_declarations.is_empty());
 
         // Resolution must retain local source data with or without surviving snapshots.
-        let shared = state.clone().into_resolution(&manifest);
+        let shared = state.clone().into_resolution();
         drop(branch);
         assert_eq!(Arc::strong_count(&state.nodes[&key].record), 1);
-        let owned = state.into_resolution(&manifest);
+        let owned = state.into_resolution();
         for resolution in [shared, owned] {
             let package = &resolution.packages[0];
             assert_eq!(package.key, key);
@@ -2079,6 +2091,103 @@ mod tests {
             assert!(package.edges.is_empty());
             assert!(resolution.root_edges.is_empty());
         }
+    }
+
+    #[test]
+    fn wide_shallow_graph_does_not_grow_the_process_stack() {
+        let declarations = (0..320)
+            .map(|index| format!("parent{index} = \"1\"\n"))
+            .collect::<String>();
+        let (_dir, manifest) = manifest(&declarations, "", "2");
+        let mut catalog = Catalog::default();
+        for index in 0..320 {
+            catalog
+                .insert(record(
+                    &format!("parent{index}"),
+                    "1.0.0",
+                    &format!("[{}]", dependency("shared", "1")),
+                    "{}",
+                    "",
+                ))
+                .unwrap();
+        }
+        catalog
+            .insert(record("shared", "1.0.0", "[]", "{}", ""))
+            .unwrap();
+        let mut limits = options(ResolverVersion::V2);
+        limits.package_limit = PackageLimit::with_max(384);
+        limits.max_depth = Some(2);
+        let graph =
+            resolve_member(&manifest, &mut catalog, &limits, &[], &mut |_, _, _| Ok(())).unwrap();
+        assert_eq!(graph.packages.len(), 321);
+        assert_eq!(graph.root_edges.len(), 320);
+        assert_eq!(
+            graph
+                .packages
+                .iter()
+                .filter(|package| package.key.name == "shared")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_reuse_considers_candidates_loaded_by_its_children() {
+        let (_dir, manifest) = manifest("a = \"*\"\nb = \"1\"", "", "2");
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record(
+                "a",
+                "1.0.0",
+                &format!("[{}]", dependency_with("d", "d", "1", &[], true, "normal")),
+                r#"{"extra":["dep:d"]}"#,
+                "",
+            ))
+            .unwrap();
+        catalog
+            .insert(record(
+                "b",
+                "1.0.0",
+                &format!(
+                    "[{}]",
+                    dependency_with("a", "a", "*", &["extra"], false, "normal")
+                ),
+                "{}",
+                "",
+            ))
+            .unwrap();
+        catalog
+            .insert(record(
+                "d",
+                "1.0.0",
+                &format!(
+                    "[{},{}]",
+                    dependency("a", ">=2"),
+                    dependency("missing", "1")
+                ),
+                "{}",
+                "",
+            ))
+            .unwrap();
+        let graph = resolve_member(
+            &manifest,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |name, requirement, catalog| {
+                if name == "a" && !catalog.contains_crates_io_candidate(name, requirement) {
+                    catalog.insert(record("a", "2.0.0", "[]", r#"{"extra":[]}"#, ""))?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(graph.packages.len(), 3);
+        assert_eq!(
+            selected(&graph, "a"),
+            [&Version::new(1, 0, 0), &Version::new(2, 0, 0)]
+        );
+        assert!(graph.packages.iter().all(|package| package.key.name != "d"));
     }
 
     struct LocalFixture(PathBuf);
@@ -2104,6 +2213,1097 @@ mod tests {
     impl Drop for LocalFixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn default_dependency_depth_matches_cargo_and_explicit_limits_still_apply() {
+        let fixture = LocalFixture::new();
+        fixture.package("app", "[package]\nname = \"app\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[dependencies]\nnode0 = { path = \"../node0\" }\n");
+        for index in 0..32 {
+            let dependency = if index < 31 {
+                format!(
+                    "[dependencies]\nnode{} = {{ path = \"../node{}\" }}\n",
+                    index + 1,
+                    index + 1
+                )
+            } else {
+                String::new()
+            };
+            fixture.package(
+                &format!("node{index}"),
+                &format!("[package]\nname = \"node{index}\"\nversion = \"1.0.0\"\nedition = \"2024\"\n{dependency}"),
+            );
+        }
+        let root = fixture.0.join("app");
+        let cargo = std::process::Command::new(env!("CARGO"))
+            .args(["generate-lockfile", "--offline"])
+            .env("CARGO_HOME", fixture.0.join("cargo-home"))
+            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            cargo.status.success(),
+            "{}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+        let source = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        let lock = Lockfile::load(&root.join("Cargo.lock")).unwrap();
+        let policy = crate::config::Policy {
+            default: crate::config::PolicyDefault::Allow,
+            path_roots: vec![fixture.0.clone()],
+            ..Default::default()
+        };
+        let mut limits = options(ResolverVersion::V3);
+        limits.max_depth = policy.limits.max_depth;
+        let mut catalog = Catalog::default();
+        let complete = workspace::resolve_locked_workspace(
+            &source,
+            &mut catalog,
+            &limits,
+            &lock,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(complete.packages.len(), 33);
+        assert_eq!(
+            crate::lockfile::render_workspace(&complete, crate::lockfile::Format::V4).unwrap(),
+            fs::read(root.join("Cargo.lock")).unwrap()
+        );
+        crate::policy::preflight_sources(&policy, &complete).unwrap();
+        crate::policy::preflight_workspace(&policy, &complete).unwrap();
+
+        let mut capped = policy.clone();
+        capped.limits.max_depth = Some(16);
+        for error in [
+            crate::policy::preflight_sources(&capped, &complete).unwrap_err(),
+            crate::policy::preflight_workspace(&capped, &complete).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("dependency depth 32 exceeds policy limit 16")
+            );
+        }
+        limits.max_depth = capped.limits.max_depth;
+        assert!(
+            workspace::resolve_locked_workspace(
+                &source,
+                &mut catalog,
+                &limits,
+                &lock,
+                &mut |_, _, _| Ok(())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds dependency depth 16")
+        );
+    }
+
+    #[test]
+    fn complete_workspace_resolves_unselected_constraints_and_optional_members_once() {
+        let fixture = LocalFixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fixture.package("a", "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nshared = \"1\"\noptional = { version = \"1\", optional = true }\n[features]\nextra = [\"dep:optional\"]\n");
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nshared = \"=1.0.0\"\n");
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let mut catalog = Catalog::default();
+        for (name, version) in [
+            ("shared", "1.0.0"),
+            ("shared", "1.1.0"),
+            ("optional", "1.0.0"),
+        ] {
+            catalog
+                .insert(record(name, version, "[]", "{}", ""))
+                .unwrap();
+        }
+        let mut limits = options(ResolverVersion::V2);
+        limits.package_limit = PackageLimit::with_max(2);
+        let complete =
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(complete.root_edges.len(), 2);
+        assert_eq!(complete.packages.len(), 4);
+        let shared = complete
+            .packages
+            .iter()
+            .filter(|package| package.key.name == "shared")
+            .collect::<Vec<_>>();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].key.version, Version::parse("1.0.0").unwrap());
+        let a = complete
+            .packages
+            .iter()
+            .find(|package| package.key.name == "a")
+            .unwrap();
+        assert!(a.target_features.contains("extra"));
+        assert!(a.edges.iter().any(|edge| edge.package.name == "optional"));
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let selection = TargetSelection {
+            host_triple: "x86_64-unknown-linux-gnu",
+            host_cfg: &cfg,
+            target_triple: "x86_64-unknown-linux-gnu",
+            target_cfg: &cfg,
+        };
+        let mut member = workspace::MemberRequest {
+            root: fixture.0.join("a"),
+            features: BTreeSet::new(),
+            default_features: false,
+            dev: false,
+            selected: true,
+            target_units: false,
+        };
+        // A completed locked identity remains usable if the index marks it yanked.
+        Arc::make_mut(
+            catalog
+                .records
+                .get_mut("shared")
+                .unwrap()
+                .iter_mut()
+                .find(|candidate| candidate.version == Version::new(1, 0, 0))
+                .unwrap(),
+        )
+        .record
+        .yanked = true;
+        let selected_graph = workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &limits,
+            std::slice::from_ref(&member),
+            selection,
+        )
+        .unwrap();
+        assert_eq!(selected(&selected_graph, "shared")[0].to_string(), "1.0.0");
+        assert_eq!(selected_graph.packages.len(), 2);
+        assert!(
+            selected_graph
+                .packages
+                .iter()
+                .all(|package| !matches!(package.key.name.as_str(), "b" | "optional"))
+        );
+        member.features.insert("extra".to_owned());
+        let selected_graph = workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &limits,
+            &[member],
+            selection,
+        )
+        .unwrap();
+        assert_eq!(selected_graph.packages.len(), 3);
+        assert_eq!(selected(&selected_graph, "shared")[0].to_string(), "1.0.0");
+        assert!(
+            selected_graph
+                .packages
+                .iter()
+                .any(|package| package.key.name == "optional")
+        );
+        limits.package_limit = PackageLimit::with_max(1);
+        // Restore the yanked version so the only failure is the limit; an
+        // unmatched `=1.0.0` would be resolved first and fail first.
+        Arc::make_mut(
+            catalog
+                .records
+                .get_mut("shared")
+                .unwrap()
+                .iter_mut()
+                .find(|candidate| candidate.version == Version::new(1, 0, 0))
+                .unwrap(),
+        )
+        .record
+        .yanked = false;
+        limits.package_limit = PackageLimit::with_max(1);
+        assert!(
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| Ok(
+                ()
+            ))
+            .unwrap_err()
+            .to_string()
+            .contains("limit of 1")
+        );
+    }
+
+    #[test]
+    fn complete_workspace_includes_development_edges_but_rejects_normal_cycles() {
+        let fixture = LocalFixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        let a = "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dev-dependencies]\nb = { path = \"../b\" }\n";
+        fixture.package("a", a);
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\na = { path = \"../a\" }\n");
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let limits = options(ResolverVersion::V2);
+        let complete = resolve_complete_workspace(
+            &workspace,
+            &mut Catalog::default(),
+            &limits,
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let a_node = complete
+            .packages
+            .iter()
+            .find(|package| package.key.name == "a")
+            .unwrap();
+        assert_eq!(a_node.edges[0].kind, DependencyKind::Dev);
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let selection = TargetSelection {
+            host_triple: "x86_64-unknown-linux-gnu",
+            host_cfg: &cfg,
+            target_triple: "x86_64-unknown-linux-gnu",
+            target_cfg: &cfg,
+        };
+        let mut catalog = Catalog::default();
+        let complete =
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        let member = workspace::MemberRequest {
+            root: fixture.0.join("a"),
+            features: BTreeSet::new(),
+            default_features: true,
+            dev: true,
+            selected: true,
+            target_units: false,
+        };
+        let selected_graph = workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &limits,
+            &[member],
+            selection,
+        )
+        .unwrap();
+        assert_eq!(selected_graph.packages.len(), 2);
+        assert_eq!(
+            selected_graph
+                .packages
+                .iter()
+                .find(|package| package.key.name == "a")
+                .unwrap()
+                .edges[0]
+                .kind,
+            DependencyKind::Dev
+        );
+        fs::write(
+            fixture.0.join("a/Cargo.toml"),
+            a.replace("dev-dependencies", "dependencies"),
+        )
+        .unwrap();
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        assert!(
+            resolve_complete_workspace(
+                &workspace,
+                &mut Catalog::default(),
+                &limits,
+                &[],
+                &mut |_, _, _| Ok(())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("dependency cycle")
+        );
+    }
+
+    #[test]
+    fn prerelease_path_requirements_match_cargo() {
+        let fixture = LocalFixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fixture.package(
+            "b",
+            "[package]\nname = \"b\"\nversion = \"1.0.0-pre.1\"\nedition = \"2021\"\n",
+        );
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        for requirement in ["", ", version = \"*\"", ", version = \"=1.0.0-pre.1\""] {
+            fixture.package(
+                "a",
+                &format!(
+                    "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                 [dependencies]\nb = {{ path = \"../b\"{requirement} }}\n"
+                ),
+            );
+            let _ = fs::remove_file(fixture.0.join("Cargo.lock"));
+            let cargo = std::process::Command::new(env!("CARGO"))
+                .args(["generate-lockfile", "--offline"])
+                .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                .current_dir(&fixture.0)
+                .output()
+                .unwrap();
+            let source = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+            let mut catalog = Catalog::default();
+            let limits = options(ResolverVersion::V2);
+            let complete =
+                resolve_complete_workspace(&source, &mut catalog, &limits, &[], &mut |_, _, _| {
+                    Ok(())
+                });
+            assert_eq!(
+                complete.is_ok(),
+                cargo.status.success(),
+                "requirement {requirement:?}: {complete:?}; {}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+            if let Ok(complete) = complete {
+                assert_eq!(
+                    crate::lockfile::render_workspace(&complete, crate::lockfile::Format::V4)
+                        .unwrap(),
+                    fs::read(fixture.0.join("Cargo.lock")).unwrap()
+                );
+                let member = workspace::MemberRequest {
+                    root: fixture.0.join("a"),
+                    features: BTreeSet::new(),
+                    default_features: true,
+                    dev: false,
+                    selected: true,
+                    target_units: false,
+                };
+                let selected = workspace::resolve_selected_workspace(
+                    &complete,
+                    &catalog,
+                    &limits,
+                    &[member],
+                    TargetSelection {
+                        host_triple: "x86_64-unknown-linux-gnu",
+                        host_cfg: &cfg,
+                        target_triple: "x86_64-unknown-linux-gnu",
+                        target_cfg: &cfg,
+                    },
+                )
+                .unwrap();
+                assert_eq!(selected.packages.len(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn locked_parent_edges_match_cargo_after_broadening_a_requirement() {
+        let fixture = LocalFixture::new();
+        let root = fixture.0.join("ws");
+        fixture.package("ws/a", "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\ndemo = \"1\"\n");
+        let b = "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\ndemo = \"2\"\n";
+        fixture.package("ws/b", b);
+        for (directory, version) in [("one", "1.0.0"), ("two", "2.0.0")] {
+            fixture.package(directory, &format!("[package]\nname = \"demo\"\nversion = \"{version}\"\nedition = \"2021\"\n[workspace]\n"));
+        }
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n\
+            [patch.crates-io]\none = { package = \"demo\", path = \"../one\" }\ntwo = { package = \"demo\", path = \"../two\" }\n").unwrap();
+        let cargo = |args: &[&str]| {
+            std::process::Command::new(env!("CARGO"))
+                .args(args)
+                .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(&root)
+                .output()
+                .unwrap()
+        };
+        let generated = cargo(&["generate-lockfile", "--offline"]);
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let original = fs::read(root.join("Cargo.lock")).unwrap();
+        fs::write(
+            root.join("b/Cargo.toml"),
+            b.replace("demo = \"2\"", "demo = \"*\""),
+        )
+        .unwrap();
+        let metadata = cargo(&["metadata", "--locked", "--offline", "--format-version=1"]);
+        assert!(
+            metadata.status.success(),
+            "{}",
+            String::from_utf8_lossy(&metadata.stderr)
+        );
+        assert_eq!(fs::read(root.join("Cargo.lock")).unwrap(), original);
+        let mut source = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        let lock = Lockfile::load(&root.join("Cargo.lock")).unwrap();
+        for member in &mut source.packages {
+            member.lock = Some(lock.clone());
+        }
+        let mut catalog = Catalog::default();
+        for directory in ["one", "two"] {
+            let path = fixture.0.join(directory);
+            let manifest = Manifest::load_path_dependency(&path).unwrap();
+            let digest = Tree::scan(&path, DEFAULT_TREE_LIMITS, Exclusions::GitAndTarget)
+                .unwrap()
+                .sha256;
+            catalog
+                .insert_path_patch(manifest, path.clone(), path, digest)
+                .unwrap();
+        }
+        let complete = workspace::resolve_locked_workspace(
+            &source,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &lock,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        crate::offline::validate_workspace_resolution(&lock, &complete).unwrap();
+        assert_eq!(complete.packages.len(), 4);
+        let b = complete
+            .packages
+            .iter()
+            .find(|package| package.key.name == "b")
+            .unwrap();
+        assert_eq!(b.lock_edges[0].package.version, Version::new(2, 0, 0));
+        let ordinary = resolve_complete_workspace(
+            &source,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &LockedPreference::from_lockfile(Some(&lock)).unwrap(),
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        crate::offline::validate_workspace_resolution(&lock, &ordinary).unwrap();
+        // A changed requirement may legitimately require a new parent edge.
+        fs::write(root.join("b/Cargo.toml"), "[package]\nname=\"b\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[dependencies]\ndemo=\"1\"\n").unwrap();
+        let mut changed = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        for member in &mut changed.packages {
+            member.lock = Some(lock.clone());
+        }
+        let repaired = resolve_complete_workspace(
+            &changed,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        let b = repaired
+            .packages
+            .iter()
+            .find(|package| package.key.name == "b")
+            .unwrap();
+        assert_eq!(b.lock_edges[0].package.version, Version::new(1, 0, 0));
+    }
+
+    fn cargo_unit_features(output: &[u8]) -> BTreeMap<String, BTreeSet<String>> {
+        let graph: serde_json::Value = serde_json::from_slice(output).unwrap();
+        graph["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|unit| {
+                let id = unit["pkg_id"].as_str().unwrap();
+                let (source, fragment) = id.rsplit_once('#').unwrap();
+                let name = fragment
+                    .split_once('@')
+                    .map_or_else(|| source.rsplit('/').next().unwrap(), |(name, _)| name)
+                    .to_owned();
+                let features = unit["features"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|feature| feature.as_str().unwrap().to_owned())
+                    .collect::<BTreeSet<_>>();
+                (name, features)
+            })
+            .collect::<BTreeMap<_, _>>()
+    }
+
+    #[test]
+    fn qualified_and_weak_member_features_match_cargo_unit_features() {
+        let fixture = LocalFixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        let source = "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nrenamed = { package = \"b\", path = \"../b\", optional = true, default-features = false }\n[features]\nenable = [\"dep:renamed\"]\n";
+        fixture.package("a", source);
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\nextra = []\n");
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let selection = TargetSelection {
+            host_triple: "x86_64-unknown-linux-gnu",
+            host_cfg: &cfg,
+            target_triple: "x86_64-unknown-linux-gnu",
+            target_cfg: &cfg,
+        };
+        let limits = options(ResolverVersion::V2);
+        for (source, features, succeeds) in [
+            (source.to_owned(), "renamed?/extra", true),
+            (source.to_owned(), "renamed/extra", true),
+            (source.to_owned(), "enable,renamed?/extra", true),
+            (source.to_owned(), "renamed", false),
+            (
+                source.replace("[features]\nenable = [\"dep:renamed\"]\n", ""),
+                "renamed/extra",
+                true,
+            ),
+            (
+                source
+                    .replace(", optional = true", "")
+                    .replace("[features]\nenable = [\"dep:renamed\"]\n", ""),
+                "renamed?/extra",
+                true,
+            ),
+        ] {
+            fs::write(fixture.0.join("a/Cargo.toml"), source).unwrap();
+            let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+            let mut catalog = Catalog::default();
+            let complete = resolve_complete_workspace(
+                &workspace,
+                &mut catalog,
+                &limits,
+                &[],
+                &mut |_, _, _| Ok(()),
+            )
+            .unwrap();
+            let roots = BTreeSet::from([fixture.0.join("a")]);
+            let requests = workspace::features::member_requests(
+                &workspace,
+                &roots,
+                &crate::cli::FeatureSelection {
+                    features: features.split(',').map(str::to_owned).collect(),
+                    all: false,
+                    no_default: true,
+                },
+                false,
+            );
+            let resolved = requests.and_then(|requests| {
+                workspace::resolve_selected_workspace(
+                    &complete, &catalog, &limits, &requests, selection,
+                )
+            });
+            let output = std::process::Command::new(env!("CARGO"))
+                .env(
+                    "RUSTC",
+                    Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+                )
+                .args([
+                    "build",
+                    "--offline",
+                    "-p",
+                    "a",
+                    "--no-default-features",
+                    "--features",
+                    features,
+                    "-Z",
+                    "unstable-options",
+                    "--unit-graph",
+                    "--manifest-path",
+                ])
+                .arg(fixture.0.join("Cargo.toml"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                succeeds,
+                "{features}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(resolved.is_ok(), succeeds, "{features}: {resolved:?}");
+            if !succeeds {
+                continue;
+            }
+            let cargo_features = cargo_unit_features(&output.stdout);
+            let lorry_features = resolved
+                .unwrap()
+                .packages
+                .into_iter()
+                .map(|package| (package.key.name, package.target_features))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(lorry_features, cargo_features, "{features}");
+        }
+    }
+
+    #[test]
+    fn resolver_one_current_package_features_do_not_compile_an_unselected_root() {
+        let fixture = LocalFixture::new();
+        fixture.package("", "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\nmembers = [\"b\", \"shared\"]\nresolver = \"1\"\n[dependencies]\nshared = { path = \"shared\", default-features = false }\n[features]\nextra = [\"shared/extra\"]\n");
+        fixture.package("b", "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nshared = { path = \"../shared\", default-features = false }\n");
+        fixture.package("shared", "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\nextra = []\n");
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let mut catalog = Catalog::default();
+        let limits = options(ResolverVersion::V1);
+        let complete =
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let selection = TargetSelection {
+            host_triple: "x86_64-unknown-linux-gnu",
+            host_cfg: &cfg,
+            target_triple: "x86_64-unknown-linux-gnu",
+            target_cfg: &cfg,
+        };
+        let requests = workspace::features::member_requests(
+            &workspace,
+            &BTreeSet::from([fixture.0.join("b")]),
+            &crate::cli::FeatureSelection {
+                features: BTreeSet::from(["extra".to_owned()]),
+                all: false,
+                no_default: false,
+            },
+            false,
+        )
+        .unwrap();
+        let selected = workspace::resolve_selected_workspace(
+            &complete, &catalog, &limits, &requests, selection,
+        )
+        .unwrap();
+        assert_eq!(selected.root_edges.len(), 1);
+        assert_eq!(selected.root_edges[0].package.name, "b");
+        let features = selected
+            .packages
+            .into_iter()
+            .map(|package| (package.key.name, package.target_features))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            features.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["b", "shared"]
+        );
+        assert_eq!(features["shared"], BTreeSet::from(["extra".to_owned()]));
+        let output = std::process::Command::new(env!("CARGO"))
+            .env(
+                "RUSTC",
+                Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+            )
+            .args([
+                "build",
+                "--offline",
+                "-p",
+                "b",
+                "--features",
+                "extra",
+                "-Z",
+                "unstable-options",
+                "--unit-graph",
+                "--manifest-path",
+            ])
+            .arg(fixture.0.join("Cargo.toml"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(features, cargo_unit_features(&output.stdout));
+
+        let root_source = fs::read_to_string(fixture.0.join("Cargo.toml")).unwrap();
+        fixture.package(
+            "a",
+            &root_source
+                .replace(
+                    "[workspace]\nmembers = [\"b\", \"shared\"]\nresolver = \"1\"\n",
+                    "",
+                )
+                .replace("path = \"shared\"", "path = \"../shared\""),
+        );
+        let b_source = fs::read_to_string(fixture.0.join("b/Cargo.toml")).unwrap();
+        fs::write(
+            fixture.0.join("b/Cargo.toml"),
+            format!("{b_source}[features]\ndefault = [\"extra\"]\nextra = [\"shared/other\"]\n"),
+        )
+        .unwrap();
+        let shared = fs::read_to_string(fixture.0.join("shared/Cargo.toml")).unwrap();
+        fs::write(
+            fixture.0.join("shared/Cargo.toml"),
+            format!("{shared}other = []\n"),
+        )
+        .unwrap();
+        for (version, resolver) in [
+            ("1", ResolverVersion::V1),
+            ("2", ResolverVersion::V2),
+            ("3", ResolverVersion::V3),
+        ] {
+            for virtual_root in [false, true] {
+                let source = if virtual_root {
+                    format!(
+                        "[workspace]\nmembers = [\"a\", \"b\", \"shared\"]\nresolver = \"{version}\"\n"
+                    )
+                } else {
+                    root_source.replace("resolver = \"1\"", &format!("resolver = \"{version}\""))
+                };
+                fs::write(fixture.0.join("Cargo.toml"), source).unwrap();
+                let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+                let mut catalog = Catalog::default();
+                let limits = options(resolver);
+                let complete = resolve_complete_workspace(
+                    &workspace,
+                    &mut catalog,
+                    &limits,
+                    &[],
+                    &mut |_, _, _| Ok(()),
+                )
+                .unwrap();
+                for (named, no_default, all) in [
+                    ("extra", false, false),
+                    ("extra", true, false),
+                    ("b/extra", true, false),
+                    ("b?/extra", true, false),
+                    ("", true, false),
+                    ("", false, true),
+                    ("", true, true),
+                    ("absent", false, false),
+                ] {
+                    let flags = crate::cli::FeatureSelection {
+                        features: if named.is_empty() {
+                            BTreeSet::new()
+                        } else {
+                            BTreeSet::from([named.to_owned()])
+                        },
+                        all,
+                        no_default,
+                    };
+                    let requests = workspace::features::member_requests(
+                        &workspace,
+                        &BTreeSet::from([fixture.0.join("b")]),
+                        &flags,
+                        false,
+                    );
+                    let lorry = requests.and_then(|requests| {
+                        workspace::resolve_selected_workspace(
+                            &complete, &catalog, &limits, &requests, selection,
+                        )
+                    });
+                    let mut command = std::process::Command::new(env!("CARGO"));
+                    command
+                        .env(
+                            "RUSTC",
+                            Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+                        )
+                        .args([
+                            "build",
+                            "--offline",
+                            "-p",
+                            "b",
+                            "-Z",
+                            "unstable-options",
+                            "--unit-graph",
+                            "--manifest-path",
+                        ])
+                        .arg(fixture.0.join("Cargo.toml"));
+                    if !named.is_empty() {
+                        command.args(["--features", named]);
+                    }
+                    if no_default {
+                        command.arg("--no-default-features");
+                    }
+                    if all {
+                        command.arg("--all-features");
+                    }
+                    let output = command.output().unwrap();
+                    assert_eq!(
+                        lorry.is_ok(),
+                        output.status.success(),
+                        "resolver {version}, virtual {virtual_root}, {flags:?}: {lorry:?}; {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    if let Ok(lorry) = lorry {
+                        let features = lorry
+                            .packages
+                            .into_iter()
+                            .map(|package| (package.key.name, package.target_features))
+                            .collect::<BTreeMap<_, _>>();
+                        assert_eq!(
+                            features,
+                            cargo_unit_features(&output.stdout),
+                            "resolver {version}, virtual {virtual_root}, {flags:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_features_match_cargo_across_platforms_and_dependency_kinds() {
+        let fixture = LocalFixture::new();
+        fs::write(fixture.0.join("Cargo.toml"), "[workspace]\nmembers = [\"app\", \"shared\"]\nexclude = [\"leaf\", \"win-only\", \"host-only\"]\nresolver = \"2\"\n").unwrap();
+        fixture.package("app", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nshared = { path = \"../shared\", default-features = false }\n[target.'cfg(windows)'.dependencies]\nwin-only = { path = \"../win-only\", features = [\"win\"] }\nshared = { path = \"../shared\", features = [\"windows\"] }\n[build-dependencies]\nshared = { path = \"../shared\", features = [\"host\"] }\n[dev-dependencies]\nshared = { path = \"../shared\", features = [\"dev\"] }\n");
+        fixture.package("shared", "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nleaf = { path = \"../leaf\", optional = true }\nhost-only = { path = \"../host-only\", optional = true }\n[features]\nwindows = [\"dep:leaf\"]\nhost = [\"dep:host-only\"]\ndev = [\"dep:leaf\"]\n");
+        for name in ["leaf", "win-only", "host-only"] {
+            fixture.package(name, &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\nwin = []\n"));
+        }
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let mut catalog = Catalog::default();
+        let limits = options(ResolverVersion::V2);
+        let complete =
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        let roots = workspace
+            .packages
+            .iter()
+            .map(|member| member.root.clone())
+            .collect();
+        let requests = workspace::features::member_requests(
+            &workspace,
+            &roots,
+            &crate::cli::FeatureSelection::default(),
+            true,
+        )
+        .unwrap();
+        let metadata =
+            workspace::resolve_metadata_workspace(&complete, &catalog, &limits, &requests).unwrap();
+        let features = metadata
+            .packages
+            .iter()
+            .map(|package| {
+                (
+                    package.key.name.clone(),
+                    package
+                        .feature_sets
+                        .values()
+                        .flatten()
+                        .cloned()
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            features["shared"],
+            BTreeSet::from(["dev".to_owned(), "host".to_owned(), "windows".to_owned()])
+        );
+        assert!(features.contains_key("leaf") && features.contains_key("host-only"));
+        for platform in [
+            None,
+            Some("x86_64-unknown-linux-gnu"),
+            Some("x86_64-pc-windows-msvc"),
+        ] {
+            let mut command = std::process::Command::new(env!("CARGO"));
+            command
+                .env(
+                    "RUSTC",
+                    Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+                )
+                .args([
+                    "metadata",
+                    "--offline",
+                    "--format-version=1",
+                    "--manifest-path",
+                ])
+                .arg(fixture.0.join("Cargo.toml"));
+            if let Some(platform) = platform {
+                command.args(["--filter-platform", platform]);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let cargo: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let names = cargo["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|package| {
+                    (
+                        package["id"].as_str().unwrap(),
+                        package["name"].as_str().unwrap(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let nodes = cargo["resolve"]["nodes"].as_array().unwrap();
+            for node in nodes {
+                let name = names[node["id"].as_str().unwrap()];
+                let cargo_features = node["features"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|feature| feature.as_str().unwrap().to_owned())
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(features[name], cargo_features, "{name}, {platform:?}");
+            }
+            if platform.is_none() {
+                assert_eq!(features.len(), nodes.len());
+            }
+            if platform == Some("x86_64-unknown-linux-gnu") {
+                assert!(!names.values().any(|name| *name == "win-only"));
+            }
+        }
+    }
+
+    #[test]
+    fn selected_workspace_contexts_match_cargo_for_all_resolvers() {
+        let fixture = LocalFixture::new();
+        fixture.package(
+            "app",
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+shared = { path = "../shared", features = ["normal"] }
+[build-dependencies]
+shared = { path = "../shared", features = ["host"] }
+[dev-dependencies]
+shared = { path = "../shared", features = ["dev"] }
+[target.'cfg(windows)'.dependencies]
+shared = { path = "../shared", features = ["windows"] }
+windows-only = { path = "../windows-only" }
+[target.'cfg(unix)'.build-dependencies]
+shared = { path = "../shared", features = ["linux-host"] }
+[target.'cfg(windows)'.build-dependencies]
+shared = { path = "../shared", features = ["windows-host"] }
+"#,
+        );
+        fs::write(fixture.0.join("app/build.rs"), "fn main() {}\n").unwrap();
+        fixture.package(
+            "shared",
+            r#"[package]
+name = "shared"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+leaf = { path = "../leaf", optional = true }
+[features]
+normal = []
+host = []
+linux-host = []
+windows-host = []
+windows = ["dep:leaf"]
+dev = ["dep:leaf"]
+"#,
+        );
+        for package in ["leaf", "windows-only"] {
+            fixture.package(
+                package,
+                &format!(
+                    "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+                ),
+            );
+        }
+        let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let windows = CfgSet::parse("windows\ntarget_os=\"windows\"\n").unwrap();
+        let selections = [
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+            },
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-pc-windows-msvc",
+                target_cfg: &windows,
+            },
+        ];
+        for (version, resolver) in [
+            (1, ResolverVersion::V1),
+            (2, ResolverVersion::V2),
+            (3, ResolverVersion::V3),
+        ] {
+            fs::write(fixture.0.join("Cargo.toml"), format!(
+                "[workspace]\nmembers = [\"app\", \"shared\"]\nexclude = [\"leaf\", \"windows-only\"]\nresolver = \"{version}\"\n"
+            )).unwrap();
+            let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+            let mut catalog = Catalog::default();
+            let limits = options(resolver);
+            let complete = resolve_complete_workspace(
+                &workspace,
+                &mut catalog,
+                &limits,
+                &[],
+                &mut |_, _, _| Ok(()),
+            )
+            .unwrap();
+            for (selection, mode) in selections
+                .iter()
+                .flat_map(|selection| ["build", "check", "test"].map(|mode| (*selection, mode)))
+            {
+                let requests = workspace::features::member_requests(
+                    &workspace,
+                    &BTreeSet::from([fixture.0.join("app")]),
+                    &crate::cli::FeatureSelection::default(),
+                    mode == "test",
+                )
+                .unwrap();
+                let resolution = workspace::resolve_selected_workspace(
+                    &complete, &catalog, &limits, &requests, selection,
+                )
+                .unwrap();
+                let actual = resolution
+                    .packages
+                    .iter()
+                    .flat_map(|package| {
+                        package.compile_kinds.iter().map(|kind| {
+                            let host = *kind == CompileKind::Host;
+                            let features = if host {
+                                &package.host_features
+                            } else {
+                                &package.target_features
+                            };
+                            ((package.key.name.clone(), host), features.clone())
+                        })
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let output = std::process::Command::new(env!("CARGO"))
+                    .env(
+                        "RUSTC",
+                        Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
+                    )
+                    .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                    .args([
+                        mode,
+                        "--offline",
+                        "-p",
+                        "app",
+                        "--lib",
+                        "--target",
+                        selection.target_triple,
+                        "-Z",
+                        "unstable-options",
+                        "--unit-graph",
+                        "--manifest-path",
+                    ])
+                    .arg(fixture.0.join("Cargo.toml"))
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let graph: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                let expected = graph["units"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|unit| unit["target"]["kind"] == serde_json::json!(["lib"]))
+                    .map(|unit| {
+                        let id = unit["pkg_id"].as_str().unwrap();
+                        let (source, fragment) = id.rsplit_once('#').unwrap();
+                        let name = fragment
+                            .split_once('@')
+                            .map_or_else(|| source.rsplit('/').next().unwrap(), |(name, _)| name);
+                        let features = unit["features"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|value| value.as_str().unwrap().to_owned())
+                            .collect::<BTreeSet<_>>();
+                        ((name.to_owned(), unit["platform"].is_null()), features)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(
+                    actual, expected,
+                    "resolver {version}, {mode}, {}",
+                    selection.target_triple
+                );
+            }
         }
     }
 
@@ -2168,10 +3368,12 @@ mod tests {
         )
     }
 
-    fn manifest(dependencies: &str, features: &str, resolver: &str) -> Manifest {
-        Manifest::parse(
-            Path::new("/fixture"),
-            Path::new("/fixture/Cargo.toml"),
+    // Workspace resolution reads the member directory, so each manifest owns one.
+    fn manifest(dependencies: &str, features: &str, resolver: &str) -> (LocalFixture, Manifest) {
+        let fixture = LocalFixture::new();
+        let manifest = Manifest::parse(
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
             &format!(
                 "[package]\nname = \"root\"\nversion = \"0.1.0\"\n\
                  edition = \"2021\"\nresolver = \"{resolver}\"\n\
@@ -2179,13 +3381,40 @@ mod tests {
                  [features]\n{features}\n"
             ),
         )
-        .unwrap()
+        .unwrap();
+        (fixture, manifest)
     }
 
-    fn target_manifest(resolver: &str) -> Manifest {
-        Manifest::parse(
-            Path::new("/fixture"),
-            Path::new("/fixture/Cargo.toml"),
+    #[test]
+    fn root_features_include_implicit_optional_dependency_features() {
+        let selected = |features: &str| {
+            let (_fixture, manifest) = manifest(
+                "a = { version = \"1\", optional = true }\n\
+                 b = { version = \"1\", optional = true }",
+                features,
+                "2",
+            );
+            selected_root_features(&manifest).unwrap()
+        };
+        let names = |names: &[&str]| names.iter().map(|name| name.to_string()).collect();
+        // As in Cargo, naming an optional dependency activates its implicit
+        // feature, and so does `dep/feature`.
+        assert_eq!(
+            selected("default = [\"a\", \"b/x\"]"),
+            names(&["a", "b", "default"])
+        );
+        // A `dep:` reference removes the implicit feature.
+        assert_eq!(
+            selected("default = [\"dep:a\", \"b/x\"]\nuses-a = [\"dep:a\"]"),
+            names(&["b", "default"])
+        );
+    }
+
+    fn target_manifest(resolver: &str) -> (LocalFixture, Manifest) {
+        let fixture = LocalFixture::new();
+        let manifest = Manifest::parse(
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
             &format!(
                 "[package]\nname = \"root\"\nversion = \"0.1.0\"\n\
                  edition = \"2021\"\nresolver = \"{resolver}\"\n\
@@ -2195,16 +3424,17 @@ mod tests {
                  windows-shared = {{ package = \"shared\", version = \"1\", features = [\"windows\"] }}\n"
             ),
         )
-        .unwrap()
+        .unwrap();
+        (fixture, manifest)
     }
 
     fn options(resolver: ResolverVersion) -> Options {
         Options {
             resolver,
             incompatible_rust_versions: None,
-            rust_version: Version::parse("1.70.0").unwrap(),
-            max_packages: 64,
-            max_depth: 16,
+            rust_versions: vec![Version::parse("1.70.0").unwrap()],
+            package_limit: PackageLimit::with_max(64),
+            max_depth: Some(16),
         }
     }
 
@@ -2253,8 +3483,15 @@ mod tests {
         catalog
             .insert(record("shared", "1.0.0", "[]", "{}", ""))
             .unwrap();
-        let root = manifest("a = \"1\"\nb = \"1\"", "", "2");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let (_dir, root) = manifest("a = \"1\"\nb = \"1\"", "", "2");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&resolution, "a"),
             [&Version::parse("1.0.0").unwrap()]
@@ -2267,7 +3504,7 @@ mod tests {
 
     #[test]
     fn dynamically_loads_only_names_reached_by_resolution() {
-        let root = manifest("a = \"1\"", "", "2");
+        let (_dir, root) = manifest("a = \"1\"", "", "2");
         let mut catalog = Catalog::default();
         let mut loaded = Vec::new();
         let mut loader = |name: &str, _requirement: &VersionReq, catalog: &mut Catalog| {
@@ -2285,7 +3522,7 @@ mod tests {
             }
         };
 
-        let resolution = resolve_dynamic(
+        let resolution = resolve_member(
             &root,
             &mut catalog,
             &options(ResolverVersion::V2),
@@ -2302,7 +3539,7 @@ mod tests {
 
     #[test]
     fn git_patch_satisfies_crates_io_without_losing_git_identity() {
-        let root = manifest("demo = \"=1.2.3\"", "", "2");
+        let (_dir, root) = manifest("demo = \"=1.2.3\"", "", "2");
         let patched = Manifest::parse(
             Path::new("/git/demo"),
             Path::new("/git/demo/Cargo.toml"),
@@ -2344,7 +3581,14 @@ mod tests {
             packages: BTreeMap::new(),
         });
 
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         let [package] = resolution.packages.as_slice() else {
             panic!("expected one patched package");
         };
@@ -2363,7 +3607,7 @@ mod tests {
 
     #[test]
     fn loader_failures_are_not_retried_during_backtracking() {
-        let root = manifest("a = \"1\"", "", "2");
+        let (_dir, root) = manifest("a = \"1\"", "", "2");
         let mut catalog = Catalog::default();
         let mut loaded = Vec::new();
         let mut loader = |name: &str, _requirement: &VersionReq, catalog: &mut Catalog| {
@@ -2379,7 +3623,7 @@ mod tests {
             }
         };
 
-        let error = resolve_dynamic(
+        let error = resolve_member(
             &root,
             &mut catalog,
             &options(ResolverVersion::V2),
@@ -2404,7 +3648,7 @@ mod tests {
                 "",
             ))
             .unwrap();
-        let root = target_manifest("2");
+        let (_dir, root) = target_manifest("2");
         let host_cfg = CfgSet::parse("unix\n").unwrap();
         let unix = CfgSet::parse("unix\n").unwrap();
         let windows = CfgSet::parse("windows\n").unwrap();
@@ -2457,13 +3701,20 @@ mod tests {
         catalog
             .insert(record("demo", "0.1.9", "[]", "{}", ""))
             .unwrap();
-        let root = manifest(
+        let (_dir, root) = manifest(
             "old = { package = \"demo\", version = \"0.1\" }\n\
              new = { package = \"demo\", version = \"0.2\" }",
             "",
             "2",
         );
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(selected(&resolution, "demo").len(), 2);
     }
 
@@ -2477,9 +3728,16 @@ mod tests {
         catalog
             .insert(record("demo", "1.1.0", "[]", "{}", ""))
             .unwrap();
-        let root = manifest("demo = \"1\"", "", "2");
+        let (_dir, root) = manifest("demo = \"1\"", "", "2");
 
-        let unlocked = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let unlocked = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&unlocked, "demo"),
             [&Version::parse("1.1.0").unwrap()]
@@ -2489,7 +3747,14 @@ mod tests {
             version: Version::parse("1.2.0").unwrap(),
             checksum: Some(yanked_checksum),
         }];
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &locked).unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &locked,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&resolution, "demo"),
             [&Version::parse("1.2.0").unwrap()]
@@ -2500,10 +3765,16 @@ mod tests {
             ..locked[0].clone()
         }];
         assert!(
-            resolve(&root, &catalog, &options(ResolverVersion::V2), &corrupt)
-                .unwrap_err()
-                .to_string()
-                .contains("checksum")
+            resolve_member(
+                &root,
+                &mut catalog,
+                &options(ResolverVersion::V2),
+                &corrupt,
+                &mut |_, _, _| Ok(())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("checksum")
         );
     }
 
@@ -2522,7 +3793,7 @@ mod tests {
         ] {
             catalog.insert(candidate).unwrap();
         }
-        let root = manifest("demo = \"1\"\nother = \"1\"", "", "2");
+        let (_dir, root) = manifest("demo = \"1\"\nother = \"1\"", "", "2");
         let demo_version = Version::parse("1.1.0").unwrap();
         let mut preferences = vec![
             LockedPreference {
@@ -2542,8 +3813,14 @@ mod tests {
             Some(&demo_version),
             Version::parse("1.2.0").unwrap(),
         );
-        let resolution =
-            resolve(&root, &catalog, &options(ResolverVersion::V2), &preferences).unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &preferences,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(selected(&resolution, "demo")[0].to_string(), "1.2.0");
         assert_eq!(selected(&resolution, "other")[0].to_string(), "1.1.0");
     }
@@ -2569,8 +3846,15 @@ mod tests {
                 ",\"rust_version\":\"1.60\"",
             ))
             .unwrap();
-        let root = manifest("demo = \"1\"", "", "3");
-        let fallback = resolve(&root, &catalog, &options(ResolverVersion::V3), &[]).unwrap();
+        let (_dir, root) = manifest("demo = \"1\"", "", "3");
+        let fallback = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V3),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&fallback, "demo"),
             [&Version::parse("1.1.0").unwrap()]
@@ -2578,11 +3862,158 @@ mod tests {
 
         let mut allow = options(ResolverVersion::V3);
         allow.incompatible_rust_versions = Some(IncompatibleRustVersions::Allow);
-        let allow = resolve(&root, &catalog, &allow, &[]).unwrap();
+        let allow =
+            resolve_member(&root, &mut catalog, &allow, &[], &mut |_, _, _| Ok(())).unwrap();
         assert_eq!(
             selected(&allow, "demo"),
             [&Version::parse("1.2.0").unwrap()]
         );
+    }
+
+    #[test]
+    fn workspace_rust_versions_rank_compatibility_counts_before_versions() {
+        let fixture = LocalFixture::new();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"3\"\n",
+        )
+        .unwrap();
+        for (name, rust) in [("a", "1.70"), ("b", "1.80")] {
+            fixture.package(name, &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\nrust-version = \"{rust}\"\n[dependencies]\ndemo = \"1\"\n"));
+        }
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let mut catalog = Catalog::default();
+        for (version, rust) in [("1.1.0", "1.75"), ("1.2.0", "1.85")] {
+            catalog
+                .insert(record(
+                    "demo",
+                    version,
+                    "[]",
+                    "{}",
+                    &format!(",\"rust_version\":\"{rust}\""),
+                ))
+                .unwrap();
+        }
+        let mut limits = options(ResolverVersion::V3);
+        // A declared workspace MSRV replaces the newer compiler fallback.
+        limits.rust_versions = vec![Version::parse("1.99.0-dev").unwrap()];
+        let solve = |catalog: &mut Catalog, locked: &[LockedPreference]| {
+            resolve_complete_workspace(&workspace, catalog, &limits, locked, &mut |_, _, _| Ok(()))
+                .unwrap()
+        };
+        assert_eq!(
+            selected(&solve(&mut catalog, &[]), "demo")[0].to_string(),
+            "1.1.0"
+        );
+        catalog
+            .insert(record(
+                "demo",
+                "1.0.0",
+                "[]",
+                "{}",
+                ",\"rust_version\":\"1.65\"",
+            ))
+            .unwrap();
+        assert_eq!(
+            selected(&solve(&mut catalog, &[]), "demo")[0].to_string(),
+            "1.0.0"
+        );
+        let preferred = record("demo", "1.2.0", "[]", "{}", ",\"rust_version\":\"1.85\"");
+        let locked = [LockedPreference {
+            name: preferred.name,
+            version: preferred.version,
+            checksum: Some(preferred.checksum),
+        }];
+        assert_eq!(
+            selected(&solve(&mut catalog, &locked), "demo")[0].to_string(),
+            "1.2.0"
+        );
+    }
+
+    #[test]
+    fn workspace_without_msrv_uses_the_stable_compiler_release_as_fallback() {
+        let fixture = LocalFixture::new();
+        fixture.package("", "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\nresolver = \"3\"\n[dependencies]\ndemo = \"1\"\n");
+        let workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let mut catalog = Catalog::default();
+        for (version, rust) in [("1.1.0", "1.69"), ("1.2.0", "1.70")] {
+            catalog
+                .insert(record(
+                    "demo",
+                    version,
+                    "[]",
+                    "{}",
+                    &format!(",\"rust_version\":\"{rust}\""),
+                ))
+                .unwrap();
+        }
+        let mut limits = options(ResolverVersion::V3);
+        limits.rust_versions = vec![Version::parse("1.70.0-dev").unwrap()];
+        let resolution =
+            resolve_complete_workspace(&workspace, &mut catalog, &limits, &[], &mut |_, _, _| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(selected(&resolution, "demo")[0].to_string(), "1.2.0");
+    }
+
+    #[test]
+    fn equal_lock_preferences_still_rank_msrv_compatibility() {
+        let (_dir, root) = manifest("demo = \"1\"\n", "", "3");
+        let mut catalog = Catalog::default();
+        let mut locked = Vec::new();
+        for (version, rust_version) in [("1.1.0", "1.60"), ("1.2.0", "1.85")] {
+            let candidate = record(
+                "demo",
+                version,
+                "[]",
+                "{}",
+                &format!(",\"rust_version\":\"{rust_version}\""),
+            );
+            locked.push(LockedPreference {
+                name: candidate.name.clone(),
+                version: candidate.version.clone(),
+                checksum: Some(candidate.checksum),
+            });
+            catalog.insert(candidate).unwrap();
+        }
+        let resolved = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V3),
+            &locked,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            selected(&resolved, "demo"),
+            [&Version::parse("1.1.0").unwrap()]
+        );
+    }
+
+    #[test]
+    fn acquisition_errors_retain_help_locations_and_exit_codes() {
+        let (_dir, root) = manifest("demo = \"1\"\n", "", "3");
+        let error = resolve_member(
+            &root,
+            &mut Catalog::default(),
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| {
+                Err(Error::at(
+                    std::path::Path::new("Cargo.lock"),
+                    7,
+                    "missing verified index",
+                    "run `lorry fetch`",
+                ))
+            },
+        )
+        .unwrap_err();
+        let message: serde_json::Value = serde_json::from_str(&error.render_json()).unwrap();
+        assert_eq!(message["file"], "Cargo.lock");
+        assert_eq!(message["line"], 7);
+        assert_eq!(message["help"], "run `lorry fetch`");
+        assert_eq!(message["exit_code"], 101);
     }
 
     #[test]
@@ -2594,12 +4025,19 @@ mod tests {
         catalog
             .insert(record("demo", "1.1.0", "[]", "{\"needed\":[]}", ""))
             .unwrap();
-        let root = manifest(
+        let (_dir, root) = manifest(
             "demo = { version = \"1\", features = [\"needed\"] }",
             "",
             "2",
         );
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(
             selected(&resolution, "demo"),
             [&Version::parse("1.1.0").unwrap()]
@@ -2641,11 +4079,19 @@ mod tests {
                 .insert(record(name, "1.0.0", "[]", "{\"feature\":[]}", ""))
                 .unwrap();
         }
-        let root = manifest("a = { version = \"1\", features = [\"full\"] }", "", "2");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let (_dir, root) = manifest("a = { version = \"1\", features = [\"full\"] }", "", "2");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(selected(&resolution, "optional").len(), 1);
         assert_eq!(selected(&resolution, "defaultdep").len(), 1);
-        assert!(selected(&resolution, "weak").is_empty());
+        // Cargo locks the optional target of an active `weak?/feature`.
+        assert_eq!(selected(&resolution, "weak").len(), 1);
         let shared = resolution
             .packages
             .iter()
@@ -2654,8 +4100,15 @@ mod tests {
         assert_eq!(shared.target_features, ["target".to_owned()].into());
         assert_eq!(shared.host_features, ["host".to_owned()].into());
 
-        let root = manifest("a = { version = \"1\", features = [\"full\"] }", "", "1");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V1), &[]).unwrap();
+        let (_dir, root) = manifest("a = { version = \"1\", features = [\"full\"] }", "", "1");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V1),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         let shared = resolution
             .packages
             .iter()
@@ -2706,8 +4159,15 @@ mod tests {
                 .unwrap();
         }
 
-        let root = manifest("a = \"1\"", "", "2");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let (_dir, root) = manifest("a = \"1\"", "", "2");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(selected(&resolution, "implicit").len(), 1);
         assert_eq!(selected(&resolution, "namespaced").len(), 1);
         let a = resolution
@@ -2734,8 +4194,15 @@ mod tests {
             ))
             .unwrap();
 
-        let root = target_manifest("2");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let (_dir, root) = target_manifest("2");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         let shared = resolution
             .packages
             .iter()
@@ -2754,8 +4221,15 @@ mod tests {
             Some(&["windows".to_owned()].into())
         );
 
-        let root = target_manifest("1");
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V1), &[]).unwrap();
+        let (_dir, root) = target_manifest("1");
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V1),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         let shared = resolution
             .packages
             .iter()
@@ -2785,9 +4259,12 @@ mod tests {
                 .insert(record(name, "1.0.0", "[]", "{}", ""))
                 .unwrap();
         }
+        let fixture = LocalFixture::new();
+        fs::create_dir(fixture.0.join("src")).unwrap();
+        fs::write(fixture.0.join("src/lib.rs"), "").unwrap();
         let root = Manifest::parse(
-            Path::new("/fixture"),
-            Path::new("/fixture/Cargo.toml"),
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
             "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
              [dependencies]\n\
              default-dep = { version = \"1\", optional = true }\n\
@@ -2844,8 +4321,8 @@ mod tests {
                 "1.0.0",
                 &format!(
                     "[{},{}]",
-                    dependency_for_target("host-build", "1", "cfg(unix)", "build"),
-                    dependency_for_target("inactive-build", "1", "cfg(windows)", "build"),
+                    dependency_for_target("host-build", "1", "cfg(windows)", "build"),
+                    dependency_for_target("inactive-build", "1", "cfg(unix)", "build"),
                 ),
                 "{}",
                 "",
@@ -2869,7 +4346,7 @@ mod tests {
                 .insert(record(name, "1.0.0", "[]", "{}", ""))
                 .unwrap();
         }
-        let root = manifest("target-package = \"1\"", "", "2");
+        let (_dir, root) = manifest("target-package = \"1\"", "", "2");
         let target_cfg = CfgSet::parse("unix\n").unwrap();
         let host_cfg = CfgSet::parse("windows\n").unwrap();
         let resolution = resolve_selected(
@@ -2899,6 +4376,7 @@ mod tests {
             .unwrap();
         assert_eq!(target.edges[0].alias, "host-build");
         assert_eq!(target.edges[0].kind, DependencyKind::Build);
+        assert_eq!(target.edges[0].target.as_deref(), Some("cfg(windows)"));
         let host = resolution
             .packages
             .iter()
@@ -2906,6 +4384,7 @@ mod tests {
             .unwrap();
         assert_eq!(host.edges[0].alias, "host-selected");
         assert_eq!(host.edges[0].kind, DependencyKind::Normal);
+        assert_eq!(host.edges[0].target.as_deref(), Some("cfg(windows)"));
         assert!(host.feature_sets.contains_key(&FeatureContext::Host));
     }
 
@@ -2940,7 +4419,7 @@ mod tests {
         };
         assert!(catalog.annotate_proc_macro(&key, true).unwrap());
         assert!(!catalog.annotate_proc_macro(&key, true).unwrap());
-        let root = manifest(
+        let (_dir, root) = manifest(
             "derive-example = \"1\"\nhelper = { version = \"1\", features = [\"target-context\"] }",
             "",
             "2",
@@ -2979,6 +4458,178 @@ mod tests {
     }
 
     #[test]
+    fn dev_only_proc_macro_uses_host_context() {
+        let fixture = LocalFixture::new();
+        fixture.package("app", "[package]\nname = \"app\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[workspace]\n[dev-dependencies]\nderive = { path = \"../derive\" }\n");
+        fixture.package("derive", "[package]\nname = \"derive\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[lib]\nproc-macro = true\n[target.'cfg(unix)'.dependencies]\nhelper = { path = \"../helper\", features = [\"host\"] }\n");
+        fixture.package("helper", "[package]\nname = \"helper\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[features]\nhost = []\n");
+        let root = fixture.0.join("app");
+        let source = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        let host_cfg = CfgSet::parse("unix\n").unwrap();
+        let target_cfg = CfgSet::parse("target_os=\"motor\"\n").unwrap();
+        for resolver in [
+            ResolverVersion::V1,
+            ResolverVersion::V2,
+            ResolverVersion::V3,
+        ] {
+            let options = options(resolver);
+            let mut catalog = Catalog::default();
+            let complete = workspace::resolve_complete_workspace(
+                &source,
+                &mut catalog,
+                &options,
+                &[],
+                &mut |_, _, _| Ok(()),
+            )
+            .unwrap();
+            for dev in [false, true] {
+                let resolution = workspace::resolve_selected_workspace(
+                    &complete,
+                    &catalog,
+                    &options,
+                    &[workspace::MemberRequest {
+                        root: root.clone(),
+                        features: BTreeSet::new(),
+                        default_features: true,
+                        dev,
+                        selected: true,
+                        target_units: false,
+                    }],
+                    TargetSelection {
+                        host_triple: "x86_64-unknown-linux-gnu",
+                        host_cfg: &host_cfg,
+                        target_triple: "x86_64-unknown-motor",
+                        target_cfg: &target_cfg,
+                    },
+                )
+                .unwrap();
+                let derive = resolution
+                    .packages
+                    .iter()
+                    .find(|package| package.key.name == "derive");
+                assert_eq!(derive.is_some(), dev);
+                if let Some(derive) = derive {
+                    assert_eq!(derive.compile_kinds, BTreeSet::from([CompileKind::Host]));
+                    let app = resolution
+                        .packages
+                        .iter()
+                        .find(|package| package.key.name == "app")
+                        .unwrap();
+                    let edge = app.edges.first().unwrap();
+                    assert_eq!(edge.kind, DependencyKind::Dev);
+                    assert_eq!(edge.compile_kind, CompileKind::Host);
+                    assert_eq!(edge.parent_compile_kind, Some(CompileKind::Target));
+                    let helper = resolution
+                        .packages
+                        .iter()
+                        .find(|package| package.key.name == "helper")
+                        .unwrap();
+                    assert_eq!(helper.compile_kinds, BTreeSet::from([CompileKind::Host]));
+                    assert_eq!(helper.host_features, BTreeSet::from(["host".to_owned()]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complete_weak_edges_match_cargo_and_stay_inactive_in_builds() {
+        let fixture = LocalFixture::new();
+        fixture.package(
+            "parent",
+            "[package]\nname = \"parent\"\nversion = \"1.0.0\"\nedition = \"2021\"\n[workspace]\n\
+            [dependencies]\nweak = { path = \"../weak\", optional = true }\n\
+            [dev-dependencies]\nweak = { path = \"../weak\" }\n\
+            [features]\nstd = [\"weak?/feature\"]\n",
+        );
+        fixture.package("weak", "[package]\nname = \"weak\"\nversion = \"1.0.0\"\nedition = \"2021\"\n[workspace]\n[features]\nfeature = []\n");
+        let root = fixture.0.join("ws");
+        for direct in ["", "weak = { path = \"../weak\" }\n"] {
+            fixture.package("ws", &format!("[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n\
+                [dependencies]\nparent = {{ path = \"../parent\", features = [\"std\"] }}\n{direct}"));
+            let _ = fs::remove_file(root.join("Cargo.lock"));
+            let cargo = std::process::Command::new(env!("CARGO"))
+                .args(["generate-lockfile", "--offline"])
+                .env("CARGO_HOME", fixture.0.join("cargo-home"))
+                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                cargo.status.success(),
+                "{}",
+                String::from_utf8_lossy(&cargo.stderr)
+            );
+            let source = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+            let lock = Lockfile::load(&root.join("Cargo.lock")).unwrap();
+            let mut catalog = Catalog::default();
+            let complete = workspace::resolve_locked_workspace(
+                &source,
+                &mut catalog,
+                &options(ResolverVersion::V2),
+                &lock,
+                &mut |_, _, _| Ok(()),
+            )
+            .unwrap();
+            crate::offline::validate_workspace_resolution(&lock, &complete).unwrap();
+            let parent = complete
+                .packages
+                .iter()
+                .find(|package| package.key.name == "parent")
+                .unwrap();
+            assert_eq!(parent.lock_edges.len(), 1);
+            let weak = complete
+                .packages
+                .iter()
+                .find(|package| package.key.name == "weak")
+                .unwrap();
+            assert!(weak.target_features.contains("feature"));
+            assert!(!parent.target_features.contains("weak"));
+            let cfg = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+            let members = [workspace::MemberRequest {
+                root: root.clone(),
+                features: BTreeSet::new(),
+                default_features: true,
+                dev: false,
+                selected: true,
+                target_units: false,
+            }];
+            let build = workspace::resolve_selected_workspace(
+                &complete,
+                &catalog,
+                &options(ResolverVersion::V2),
+                &members,
+                TargetSelection {
+                    host_triple: "x86_64-unknown-linux-gnu",
+                    host_cfg: &cfg,
+                    target_triple: "x86_64-unknown-linux-gnu",
+                    target_cfg: &cfg,
+                },
+            )
+            .unwrap();
+            let parent = build
+                .packages
+                .iter()
+                .find(|package| package.key.name == "parent")
+                .unwrap();
+            assert!(parent.edges.is_empty());
+            assert_eq!(
+                build
+                    .packages
+                    .iter()
+                    .any(|package| package.key.name == "weak"),
+                !direct.is_empty()
+            );
+            if let Some(weak) = build
+                .packages
+                .iter()
+                .find(|package| package.key.name == "weak")
+            {
+                assert!(!weak.target_features.contains("feature"));
+            }
+        }
+    }
+
+    #[test]
     fn records_weak_lock_edges_only_when_the_package_is_selected_elsewhere() {
         let mut catalog = Catalog::default();
         catalog
@@ -3005,12 +4656,39 @@ mod tests {
         catalog
             .insert(record("weak", "1.0.0", "[]", "{\"feature\":[]}", ""))
             .unwrap();
-        let root = manifest(
-            "a = { version = \"1\", features = [\"full\"] }\nother = \"1\"",
+        // Complete resolution activates the weak target; selected units do not.
+        let fixture = LocalFixture::new();
+        fixture.package(
             "",
-            "2",
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\na = { version = \"1\", features = [\"full\"] }\nother = \"1\"\n",
         );
-        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let source = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        let options = options(ResolverVersion::V2);
+        let complete =
+            resolve_complete_workspace(&source, &mut catalog, &options, &[], &mut |_, _, _| Ok(()))
+                .unwrap();
+        let cfg = CfgSet::parse("unix\n").unwrap();
+        let resolution = workspace::resolve_selected_workspace(
+            &complete,
+            &catalog,
+            &options,
+            &[workspace::MemberRequest {
+                root: source.packages[0].root.clone(),
+                features: BTreeSet::new(),
+                default_features: true,
+                dev: false,
+                selected: true,
+                target_units: false,
+            }],
+            TargetSelection {
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &cfg,
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &cfg,
+            },
+        )
+        .unwrap();
         let a = resolution
             .packages
             .iter()
@@ -3041,11 +4719,12 @@ mod tests {
              [dependencies]\na = { path = \"a\" }\n",
         )
         .unwrap();
-        let resolution = resolve(
+        let resolution = resolve_member(
             &root,
-            &Catalog::default(),
+            &mut Catalog::default(),
             &options(ResolverVersion::V2),
             &[],
+            &mut |_, _, _| Ok(()),
         )
         .unwrap();
         assert_eq!(selected(&resolution, "a").len(), 1);
@@ -3078,11 +4757,12 @@ mod tests {
         )
         .unwrap();
         assert!(
-            resolve(
+            resolve_member(
                 &constrained,
-                &Catalog::default(),
+                &mut Catalog::default(),
                 &options(ResolverVersion::V2),
                 &[],
+                &mut |_, _, _| Ok(()),
             )
             .unwrap_err()
             .to_string()
@@ -3101,7 +4781,14 @@ mod tests {
         catalog
             .insert(record("a", "1.2.3", "[]", "{}", ""))
             .unwrap();
-        let resolution = resolve(&mixed, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let resolution = resolve_member(
+            &mixed,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
         assert_eq!(selected(&resolution, "a").len(), 2);
         assert!(
             resolution
@@ -3118,7 +4805,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_repository_loading_skips_inactive_objects_and_reports_selected_missing_objects() {
+    fn locked_repository_loading_defers_missing_objects_to_resolution() {
         let fixture = LocalFixture::new();
         fixture.package(
             "local",
@@ -3146,35 +4833,23 @@ mod tests {
             ),
         )
         .unwrap();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let repositories = RepositorySet::open(
             &crate::config::Repositories::default(),
             DEFAULT_TREE_LIMITS,
             16 * 1024 * 1024,
         )
         .unwrap();
-        let catalog = Catalog::from_locked_repository(&manifest, &repositories).unwrap();
+        let mut catalog = Catalog::from_locked_repository(&manifest, &repositories).unwrap();
         let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
-        let unix = CfgSet::parse("unix\n").unwrap();
-        let selected = resolve_selected(
+        let error = resolve_member(
             &manifest,
-            &catalog,
+            &mut catalog,
             &options(ResolverVersion::V2),
             &locked,
-            TargetSelection {
-                target_triple: "x86_64-unknown-linux-musl",
-                target_cfg: &unix,
-                host_triple: "x86_64-unknown-linux-gnu",
-                host_cfg: &unix,
-            },
+            &mut |_, _, _| Ok(()),
         )
-        .unwrap();
-        crate::offline::validate_selected_resolution(&manifest, &selected).unwrap();
-        assert_eq!(selected.packages.len(), 1);
-        assert_eq!(selected.packages[0].key.name, "local");
-
-        let error =
-            resolve(&manifest, &catalog, &options(ResolverVersion::V2), &locked).unwrap_err();
+        .unwrap_err();
         assert!(error.to_string().contains("missing 2.0.0"));
         assert!(error.render().contains("lorry vendor"));
     }
@@ -3217,7 +4892,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let manifest = Manifest::load(&fixture.0).unwrap();
+        let manifest = Manifest::load_for_build(&fixture.0).unwrap();
         let libc = Record::parse(
             Path::new("/fixture/libc-index-record.json"),
             b"{\"name\":\"libc\",\"vers\":\"0.2.139\",\"deps\":[],\
@@ -3227,21 +4902,24 @@ mod tests {
         .unwrap();
         let mut catalog = Catalog::default();
         catalog.insert(libc).unwrap();
-        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
-        let resolution = resolve(
-            &manifest,
-            &catalog,
+        let mut workspace = crate::manifest::SourceWorkspace::load(&fixture.0, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        let lock = manifest.lock.as_ref().unwrap();
+        let resolution = resolve_complete_workspace(
+            &workspace,
+            &mut catalog,
             &Options {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: None,
-                rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 16,
-                max_depth: 8,
+                rust_versions: vec![Version::parse("1.98.0").unwrap()],
+                package_limit: PackageLimit::with_max(16),
+                max_depth: Some(8),
             },
-            &locked,
+            &LockedPreference::from_lockfile(Some(lock)).unwrap(),
+            &mut |_, _, _| Ok(()),
         )
         .unwrap();
-        crate::offline::validate_resolution(&manifest, &resolution).unwrap();
+        crate::offline::validate_workspace_resolution(lock, &resolution).unwrap();
         assert_eq!(selected(&resolution, "libc").len(), 1);
         assert_eq!(selected(&resolution, "moto-sys").len(), 1);
         assert_eq!(selected(&resolution, "moto-rt").len(), 1);
@@ -3261,6 +4939,44 @@ mod tests {
     }
 
     #[test]
+    fn reaching_the_package_limit_fails_instead_of_choosing_older_versions() {
+        let mut catalog = Catalog::default();
+        let dependencies = format!("[{},{}]", dependency("x", "1"), dependency("y", "1"));
+        catalog
+            .insert(record("a", "1.1.0", &dependencies, "{}", ""))
+            .unwrap();
+        catalog
+            .insert(record("a", "1.0.0", "[]", "{}", ""))
+            .unwrap();
+        catalog
+            .insert(record("x", "1.0.0", "[]", "{}", ""))
+            .unwrap();
+        catalog
+            .insert(record("y", "1.0.0", "[]", "{}", ""))
+            .unwrap();
+        let (_dir, root) = manifest("a = \"1\"", "", "2");
+        // `a 1.0.0` would fit in two packages, but Cargo selects `a 1.1.0`.
+        let mut limited = options(ResolverVersion::V2);
+        limited.package_limit = PackageLimit::with_max(2);
+        let error = resolve_member(&root, &mut catalog, &limited, &[], &mut |_, _, _| Ok(()))
+            .unwrap_err()
+            .render();
+        assert!(error.contains("limit of 2"), "{error}");
+        assert!(error.contains("`max-packages`"), "{error}");
+
+        limited.package_limit = PackageLimit::with_max(3);
+        let resolution =
+            resolve_member(&root, &mut catalog, &limited, &[], &mut |_, _, _| Ok(())).unwrap();
+        assert!(
+            resolution
+                .packages
+                .iter()
+                .any(|package| package.key.name == "a"
+                    && package.key.version == Version::new(1, 1, 0))
+        );
+    }
+
+    #[test]
     fn rejects_links_conflicts_and_graph_limits() {
         let mut catalog = Catalog::default();
         catalog
@@ -3269,21 +4985,27 @@ mod tests {
         catalog
             .insert(record("b", "1.0.0", "[]", "{}", ",\"links\":\"native\""))
             .unwrap();
-        let root = manifest("a = \"1\"\nb = \"1\"", "", "2");
+        let (_dir, root) = manifest("a = \"1\"\nb = \"1\"", "", "2");
         assert!(
-            resolve(&root, &catalog, &options(ResolverVersion::V2), &[])
-                .unwrap_err()
-                .to_string()
-                .contains("link")
+            resolve_member(
+                &root,
+                &mut catalog,
+                &options(ResolverVersion::V2),
+                &[],
+                &mut |_, _, _| Ok(())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("link")
         );
 
         let mut limits = options(ResolverVersion::V2);
-        limits.max_packages = 1;
+        limits.package_limit = PackageLimit::with_max(1);
         assert!(
-            resolve(&root, &catalog, &limits, &[])
+            resolve_member(&root, &mut catalog, &limits, &[], &mut |_, _, _| Ok(()))
                 .unwrap_err()
                 .to_string()
-                .contains("package count")
+                .contains("limit of 1")
         );
     }
 
@@ -3308,12 +5030,18 @@ mod tests {
                 "",
             ))
             .unwrap();
-        let root = manifest("a = \"1\"", "", "2");
+        let (_dir, root) = manifest("a = \"1\"", "", "2");
         assert!(
-            resolve(&root, &catalog, &options(ResolverVersion::V2), &[])
-                .unwrap_err()
-                .to_string()
-                .contains("cycle")
+            resolve_member(
+                &root,
+                &mut catalog,
+                &options(ResolverVersion::V2),
+                &[],
+                &mut |_, _, _| Ok(())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("cycle")
         );
 
         let mut catalog = Catalog::default();
@@ -3338,11 +5066,11 @@ mod tests {
         catalog
             .insert(record("shared", "1.0.0", "[]", "{}", ""))
             .unwrap();
-        let root = manifest("shared = \"1\"\na = \"1\"", "", "2");
+        let (_dir, root) = manifest("shared = \"1\"\na = \"1\"", "", "2");
         let mut limits = options(ResolverVersion::V2);
-        limits.max_depth = 2;
+        limits.max_depth = Some(2);
         assert!(
-            resolve(&root, &catalog, &limits, &[])
+            resolve_member(&root, &mut catalog, &limits, &[], &mut |_, _, _| Ok(()))
                 .unwrap_err()
                 .to_string()
                 .contains("dependency depth")
@@ -3352,7 +5080,9 @@ mod tests {
     #[test]
     fn matches_the_frozen_stage_two_cargo_resolution_oracle() {
         let root = Path::new("tests/oracles/stage2-resolution/root");
-        let manifest = Manifest::load(root).unwrap();
+        let manifest = Manifest::load_for_build(root).unwrap();
+        let mut workspace = crate::manifest::SourceWorkspace::load(root, None).unwrap();
+        workspace.load_locked_context().unwrap();
         let mut catalog = Catalog::default();
         for entry in fs::read_dir("tests/oracles/stage2-resolution/index-records").unwrap() {
             let path = entry.unwrap().path();
@@ -3360,18 +5090,26 @@ mod tests {
                 .insert(Record::parse(&path, &fs::read(&path).unwrap()).unwrap())
                 .unwrap();
         }
-        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
+        let lock = manifest.lock.as_ref().unwrap();
+        let locked = LockedPreference::from_lockfile(Some(lock)).unwrap();
         let options = Options {
             resolver: manifest.resolver,
             incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
-            rust_version: Version::parse("1.98.0").unwrap(),
-            max_packages: 64,
-            max_depth: 16,
+            rust_versions: vec![Version::parse("1.98.0").unwrap()],
+            package_limit: PackageLimit::with_max(64),
+            max_depth: Some(16),
         };
-        let complete = resolve(&manifest, &catalog, &options, &locked).unwrap();
-        crate::offline::validate_resolution(&manifest, &complete).unwrap();
+        let complete = resolve_complete_workspace(
+            &workspace,
+            &mut catalog.clone(),
+            &options,
+            &locked,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        crate::offline::validate_workspace_resolution(lock, &complete).unwrap();
         assert_eq!(
-            crate::lockfile::render(&manifest, &complete).unwrap(),
+            crate::lockfile::render_workspace(&complete, crate::lockfile::Format::V4).unwrap(),
             fs::read(root.join("Cargo.lock")).unwrap()
         );
 
@@ -3389,7 +5127,6 @@ mod tests {
             },
         )
         .unwrap();
-        crate::offline::validate_selected_resolution(&manifest, &selected).unwrap();
         assert_eq!(
             selected
                 .packages
@@ -3400,168 +5137,57 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolves_the_seeded_lorry_lock_graph_when_requested() {
-        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let mut catalog = Catalog::default();
-        let objects = PathBuf::from(repository).join("objects/crates-io/sha256");
-        for prefix in fs::read_dir(objects).unwrap() {
-            for object in fs::read_dir(prefix.unwrap().path()).unwrap() {
-                let path = object.unwrap().path().join("index-record.json");
-                catalog
-                    .insert(Record::parse(&path, &fs::read(&path).unwrap()).unwrap())
-                    .unwrap();
-            }
+    /// Resolves an oracle workspace without its lock and compares the result
+    /// with the lock Cargo generated for it.
+    fn assert_fresh_resolution_matches_cargo_oracle(oracle: &str) {
+        let fixture = Path::new("tests/oracles").join(oracle);
+        let root = fixture.join("root");
+        let mut workspace = crate::manifest::SourceWorkspace::load(&root, None).unwrap();
+        workspace.load_locked_context().unwrap();
+        for member in &mut workspace.packages {
+            member.lock = None;
         }
-
-        let manifest = Manifest::load(Path::new(".")).unwrap();
-        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
-        let lock = manifest.lock.as_ref().unwrap();
-        for package in &lock.packages {
-            if package.source.as_deref() != Some(SOURCE)
-                || catalog.contains_registry(
-                    &package.name,
-                    &Version::parse(&package.version.original).unwrap(),
-                )
-            {
-                continue;
-            }
-            let dependencies = package
-                .dependencies
-                .iter()
-                .map(|dependency| {
-                    let name = dependency.split_whitespace().next().unwrap();
-                    let matches = lock
-                        .packages
-                        .iter()
-                        .filter(|package| package.name == name)
-                        .collect::<Vec<_>>();
-                    assert_eq!(
-                        matches.len(),
-                        1,
-                        "test supplement needs an unambiguous lock dependency"
-                    );
-                    Dependency {
-                        alias: name.to_owned(),
-                        package: name.to_owned(),
-                        requirement: VersionReq::parse(&format!(
-                            "={}",
-                            matches[0].version.original
-                        ))
-                        .unwrap(),
-                        features: Vec::new(),
-                        optional: false,
-                        default_features: true,
-                        target: None,
-                        kind: DependencyKind::Normal,
-                    }
-                })
-                .collect();
+        let mut catalog = Catalog::default();
+        for entry in fs::read_dir(fixture.join("index-records")).unwrap() {
+            let path = entry.unwrap().path();
             catalog
-                .insert(Record {
-                    name: package.name.clone(),
-                    version: Version::parse(&package.version.original).unwrap(),
-                    dependencies,
-                    checksum: decode_hex(package.checksum.as_deref().unwrap()).unwrap(),
-                    features: BTreeMap::new(),
-                    features2: BTreeMap::new(),
-                    yanked: false,
-                    links: None,
-                    schema: 1,
-                    rust_version: None,
-                    published: None,
-                    exact_bytes: Vec::new(),
-                })
+                .insert(Record::parse(&path, &fs::read(&path).unwrap()).unwrap())
                 .unwrap();
         }
-        let resolution = resolve(
-            &manifest,
-            &catalog,
-            &Options {
-                resolver: manifest.resolver,
-                incompatible_rust_versions: None,
-                rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 64,
-                max_depth: 16,
-            },
-            &locked,
-        )
-        .unwrap();
-        crate::offline::validate_resolution(&manifest, &resolution).unwrap();
-        assert_eq!(
-            crate::lockfile::render(&manifest, &resolution).unwrap(),
-            fs::read("Cargo.lock").unwrap()
-        );
-        let expected = lock
-            .packages
-            .iter()
-            .filter(|package| package.source.as_deref() == Some(SOURCE))
-            .map(|package| {
-                (
-                    package.name.clone(),
-                    Version::parse(&package.version.original).unwrap(),
-                )
+        let options = Options {
+            resolver: ResolverVersion::V2,
+            incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
+            rust_versions: vec![Version::parse("1.98.0").unwrap()],
+            package_limit: PackageLimit::with_max(64),
+            max_depth: Some(16),
+        };
+        let complete =
+            resolve_complete_workspace(&workspace, &mut catalog, &options, &[], &mut |_, _, _| {
+                Ok(())
             })
-            .collect::<BTreeSet<_>>();
-        let actual = resolution
-            .packages
-            .iter()
-            .filter(|package| matches!(&package.source, ResolvedSource::CratesIo { .. }))
-            .map(|package| (package.key.name.clone(), package.key.version.clone()))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(actual, expected);
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(
+                crate::lockfile::render_workspace(&complete, crate::lockfile::Format::V4).unwrap()
+            )
+            .unwrap(),
+            fs::read_to_string(root.join("Cargo.lock")).unwrap()
+        );
     }
 
     #[test]
-    fn selected_lorry_graph_loads_objects_directly_from_the_seeded_repository() {
-        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let manifest = Manifest::load(Path::new(".")).unwrap();
-        let repositories = RepositorySet::open(
-            &crate::config::Repositories {
-                system: Some(PathBuf::from(repository)),
-                ..crate::config::Repositories::default()
-            },
-            DEFAULT_TREE_LIMITS,
-            16 * 1024 * 1024,
-        )
-        .unwrap();
-        let catalog = Catalog::from_locked_repository(&manifest, &repositories).unwrap();
-        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
-        let linux = CfgSet::parse(
-            "debug_assertions\npanic=\"unwind\"\ntarget_arch=\"x86_64\"\n\
-             target_endian=\"little\"\ntarget_env=\"gnu\"\ntarget_family=\"unix\"\n\
-             target_os=\"linux\"\ntarget_pointer_width=\"64\"\ntarget_vendor=\"unknown\"\nunix\n",
-        )
-        .unwrap();
-        let resolution = resolve_selected(
-            &manifest,
-            &catalog,
-            &Options {
-                resolver: manifest.resolver,
-                incompatible_rust_versions: None,
-                rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 64,
-                max_depth: 16,
-            },
-            &locked,
-            TargetSelection {
-                target_triple: "x86_64-unknown-linux-gnu",
-                target_cfg: &linux,
-                host_triple: "x86_64-unknown-linux-gnu",
-                host_cfg: &linux,
-            },
-        )
-        .unwrap();
-        crate::offline::validate_selected_resolution(&manifest, &resolution).unwrap();
-        assert!(
-            resolution
-                .packages
-                .iter()
-                .all(|package| package.key.name != "moto-rt")
-        );
+    fn fresh_resolution_matches_the_frozen_candidate_order_cargo_oracle() {
+        // Cargo tries the highest compatible version first, so a selected
+        // lower version does not capture a wider requirement. That also keeps
+        // one declaration on one version in host and target contexts.
+        assert_fresh_resolution_matches_cargo_oracle("candidate-order");
+    }
+
+    #[test]
+    fn fresh_resolution_matches_the_frozen_dependency_order_cargo_oracle() {
+        // Cargo resolves the dependency with the fewest candidates first, and
+        // breaks ties in its manifest order: dev before build dependencies,
+        // sorted names, and target tables sorted by name.
+        assert_fresh_resolution_matches_cargo_oracle("dependency-order");
     }
 }

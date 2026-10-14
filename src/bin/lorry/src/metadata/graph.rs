@@ -1,186 +1,66 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::dependency::PreparedGraph;
 use crate::diagnostic::{Error, Result};
-use crate::manifest::Manifest;
-use crate::resolver::{PackageKey, ResolvedEdge, selected_root_features};
+use crate::manifest::{Manifest, SourceWorkspace};
+use crate::resolver::{PackageKey, ResolvedEdge};
 use crate::sparse::DependencyKind;
-use crate::unit::CompilationPlan;
 
 use super::package::{self, Identity};
 use super::wire;
 
-pub(super) fn no_dependencies(manifest: &Manifest) -> Result<wire::Metadata> {
-    let root_id = package::package_id(manifest, Identity::Root)?;
-    finish(
-        manifest,
-        root_id,
-        vec![package::map(
-            manifest,
-            Identity::Root,
-            &manifest.root,
-            &BTreeMap::new(),
-        )?],
-        None,
-    )
-}
+pub(crate) mod workspace;
 
-pub(crate) fn resolved(
-    manifest: &Manifest,
-    prepared: &PreparedGraph,
-    plan: &CompilationPlan,
-    presented_roots: &BTreeMap<PackageKey, PathBuf>,
-    max_packages: u64,
-) -> Result<wire::Metadata> {
-    let package_count = prepared
-        .resolution
+pub(super) fn no_dependencies(workspace: &SourceWorkspace) -> Result<wire::Metadata> {
+    let mut packages = workspace
         .packages
-        .len()
-        .checked_add(1)
-        .ok_or_else(|| Error::failure("metadata package count overflowed"))?;
-    if u64::try_from(package_count).unwrap_or(u64::MAX) > max_packages {
-        return Err(Error::failure(format!(
-            "metadata graph exceeds the package-count limit of {max_packages}"
-        )));
-    }
-
-    let root_id = package::package_id(manifest, Identity::Root)?;
-    let mut ids = BTreeMap::new();
-    let mut dependency_roots = BTreeMap::new();
-    dependency_roots.insert(
-        fs::canonicalize(&manifest.root).map_err(path_error)?,
-        manifest.root.clone(),
-    );
-    for resolved in &prepared.resolution.packages {
-        let dependency = prepared.packages.get(&resolved.key).ok_or_else(|| {
-            Error::failure(format!(
-                "prepared graph omits resolved package `{} {}`",
-                resolved.key.name, resolved.key.version
-            ))
-        })?;
-        let root = presented_roots.get(&resolved.key).ok_or_else(|| {
-            Error::failure(format!(
-                "metadata source roots omit package `{} {}`",
-                resolved.key.name, resolved.key.version
-            ))
-        })?;
-        if ids
-            .insert(
-                resolved.key.clone(),
-                package::package_id(&dependency.manifest, Identity::Resolved(resolved))?,
-            )
-            .is_some()
-        {
-            return Err(Error::failure(
-                "metadata graph contains a duplicate package identity",
-            ));
-        }
-        dependency_roots.insert(
-            fs::canonicalize(&dependency.manifest.root).map_err(path_error)?,
-            fs::canonicalize(root).map_err(path_error)?,
-        );
-    }
-
-    let mut packages = vec![package::map(
-        manifest,
-        Identity::Root,
-        &manifest.root,
-        &dependency_roots,
-    )?];
-    for resolved in &prepared.resolution.packages {
-        let dependency = &prepared.packages[&resolved.key];
-        packages.push(package::map(
-            &dependency.manifest,
-            Identity::Resolved(resolved),
-            &presented_roots[&resolved.key],
-            &dependency_roots,
-        )?);
-    }
+        .iter()
+        .map(|manifest| package::map(manifest, Identity::Root, &manifest.root, &BTreeMap::new()))
+        .collect::<Result<Vec<_>>>()?;
     packages.sort_by(|left, right| left.id.cmp(&right.id));
-
-    let planned_features = planned_features(prepared, plan)?;
-    let mut nodes = vec![map_node(
-        &root_id,
-        &prepared.resolution.root_edges,
-        manifest,
-        selected_root_features(manifest)?,
-        &ids,
-    )?];
-    for resolved in &prepared.resolution.packages {
-        let dependency = &prepared.packages[&resolved.key];
-        nodes.push(map_node(
-            &ids[&resolved.key],
-            &resolved.edges,
-            &dependency.manifest,
-            planned_features[&resolved.key].clone(),
-            &ids,
-        )?);
-    }
-    nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    let members = packages
+        .iter()
+        .map(|package| package.id.clone())
+        .collect::<Vec<_>>();
+    let mut default_members = workspace
+        .packages
+        .iter()
+        .filter(|package| workspace.default_members.contains(&package.root))
+        .map(|package| package::package_id(package, Identity::Root))
+        .collect::<Result<Vec<_>>>()?;
+    default_members.sort();
     finish(
-        manifest,
-        root_id.clone(),
+        &workspace.root,
+        members,
+        default_members,
         packages,
-        Some(wire::Resolve {
-            nodes,
-            root: Some(root_id),
-        }),
+        None,
+        workspace.metadata.clone(),
     )
 }
 
 fn finish(
-    manifest: &Manifest,
-    root_id: String,
+    root: &Path,
+    workspace_members: Vec<String>,
+    workspace_default_members: Vec<String>,
     packages: Vec<wire::Package>,
     resolve: Option<wire::Resolve>,
+    workspace_metadata: serde_json::Value,
 ) -> Result<wire::Metadata> {
-    let workspace_root = package::path_utf8(&manifest.workspace_root, "workspace root")?;
-    let target_directory = package::path_utf8(
-        &manifest.workspace_root.join("target"),
-        "metadata target directory",
-    )?;
+    let workspace_root = package::path_utf8(root, "workspace root")?;
+    let target_directory = package::path_utf8(&root.join("target"), "metadata target directory")?;
     Ok(wire::Metadata {
         packages,
-        workspace_members: vec![root_id.clone()],
-        workspace_default_members: vec![root_id],
+        workspace_members,
+        workspace_default_members,
         resolve,
         workspace_root,
         target_directory: target_directory.clone(),
         build_directory: target_directory,
-        workspace_metadata: serde_json::Value::Null,
+        workspace_metadata,
         version: 1,
     })
-}
-
-fn planned_features(
-    prepared: &PreparedGraph,
-    plan: &CompilationPlan,
-) -> Result<BTreeMap<PackageKey, BTreeSet<String>>> {
-    let expected = prepared
-        .resolution
-        .packages
-        .iter()
-        .map(|package| {
-            let mut features = package.target_features.clone();
-            features.extend(package.host_features.iter().cloned());
-            (package.key.clone(), features)
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut actual = BTreeMap::<PackageKey, BTreeSet<String>>::new();
-    for key in plan.units.keys() {
-        actual
-            .entry(key.package.clone())
-            .or_default()
-            .extend(key.features.iter().cloned());
-    }
-    if actual != expected {
-        return Err(Error::failure(
-            "development compilation plan does not match resolved metadata features",
-        ));
-    }
-    Ok(actual)
 }
 
 fn map_node(
@@ -189,33 +69,41 @@ fn map_node(
     manifest: &Manifest,
     features: BTreeSet<String>,
     ids: &BTreeMap<PackageKey, String>,
+    crate_names: &BTreeMap<PackageKey, String>,
 ) -> Result<wire::Node> {
     let mut aliases = BTreeMap::<String, (String, String)>::new();
-    let mut dependencies = BTreeSet::new();
-    let mut grouped = BTreeMap::<(String, String), BTreeSet<(u8, Option<String>)>>::new();
+    let mut grouped =
+        BTreeMap::<(PackageOrder, String, String), BTreeSet<(u8, Option<String>)>>::new();
     for edge in edges {
         let dependency = manifest
             .dependencies
-            .get(edge.dependency_index)
+            .iter()
+            .find(|dependency| {
+                dependency.alias == edge.alias
+                    && dependency.package == edge.package.name
+                    && dependency.kind == edge.kind
+                    && dependency.target == edge.target
+            })
             .ok_or_else(|| {
                 Error::failure(format!(
                     "metadata edge from `{}` has no declaration",
                     manifest.name
                 ))
             })?;
-        if dependency.alias != edge.alias || dependency.kind != edge.kind {
-            return Err(Error::failure(format!(
-                "metadata edge from `{}` does not match its dependency declaration",
-                manifest.name
-            )));
-        }
         let package_id = ids.get(&edge.package).ok_or_else(|| {
             Error::failure(format!(
                 "metadata edge from `{}` references unresolved package `{} {}`",
                 manifest.name, edge.package.name, edge.package.version
             ))
         })?;
-        let name = edge.alias.replace('-', "_");
+        let name = if !dependency.renamed {
+            crate_names
+                .get(&edge.package)
+                .cloned()
+                .unwrap_or_else(|| edge.alias.replace('-', "_"))
+        } else {
+            edge.alias.replace('-', "_")
+        };
         if let Some((previous_alias, previous_package)) =
             aliases.insert(name.clone(), (edge.alias.clone(), package_id.clone()))
             && (previous_alias != edge.alias || previous_package != *package_id)
@@ -225,15 +113,21 @@ fn map_node(
                 edge.alias
             )));
         }
-        dependencies.insert(package_id.clone());
         grouped
-            .entry((name, package_id.clone()))
+            .entry((package_order(&edge.package)?, name, package_id.clone()))
             .or_default()
-            .insert((kind_order(edge.kind), dependency.target.clone()));
+            .insert((
+                kind_order(edge.kind),
+                dependency
+                    .target
+                    .as_deref()
+                    .map(crate::toolchain::canonical_selector)
+                    .transpose()?,
+            ));
     }
-    let deps = grouped
+    let deps: Vec<wire::NodeDep> = grouped
         .into_iter()
-        .map(|((name, pkg), kinds)| wire::NodeDep {
+        .map(|((_, name, pkg), kinds)| wire::NodeDep {
             name,
             pkg,
             dep_kinds: kinds
@@ -252,10 +146,51 @@ fn map_node(
         .collect();
     Ok(wire::Node {
         id: id.to_owned(),
+        dependencies: deps
+            .iter()
+            .map(|dep: &wire::NodeDep| dep.pkg.clone())
+            .collect(),
         deps,
-        dependencies: dependencies.into_iter().collect(),
         features: features.into_iter().collect(),
     })
+}
+
+// Cargo orders PackageId by name, semantic version, source kind, and URL.
+type PackageOrder = (String, semver::Version, u8, u8, String, String);
+
+fn package_order(key: &PackageKey) -> Result<PackageOrder> {
+    use crate::manifest::GitSelector;
+    use crate::resolver::PackageSourceKey;
+    let (kind, reference, value, source) = match &key.source {
+        PackageSourceKey::CratesIo => (1, 0, String::new(), String::new()),
+        PackageSourceKey::Path(root) => {
+            let id = package::path_package_id(root, &key.name, &key.version.to_string())?;
+            (
+                0,
+                0,
+                String::new(),
+                id.split('#').next().unwrap().to_owned(),
+            )
+        }
+        PackageSourceKey::Git(source) => {
+            let locked = crate::git::parse_locked_source(source)?;
+            let (reference, value) = match locked.selector {
+                GitSelector::Tag(value) => (0, value),
+                GitSelector::Branch(value) => (1, value),
+                GitSelector::Revision(value) => (2, value),
+                GitSelector::Head => (3, String::new()),
+            };
+            (2, reference, value, locked.url)
+        }
+    };
+    Ok((
+        key.name.clone(),
+        key.version.clone(),
+        kind,
+        reference,
+        value,
+        source,
+    ))
 }
 
 fn kind_order(kind: DependencyKind) -> u8 {
@@ -303,6 +238,7 @@ mod tests {
         ResolvedEdge {
             dependency_index: index,
             alias: alias.to_owned(),
+            target: None,
             kind: DependencyKind::Normal,
             parent_compile_kind: Some(CompileKind::Target),
             compile_kind: CompileKind::Target,
@@ -326,6 +262,7 @@ mod tests {
             &manifest,
             BTreeSet::new(),
             &ids,
+            &BTreeMap::new(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("collide as `foo_bar`"));
@@ -340,8 +277,65 @@ mod tests {
             &manifest,
             BTreeSet::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("references unresolved package"));
+    }
+
+    #[test]
+    fn matches_sparse_edges_independently_of_manifest_order() {
+        let manifest = Manifest::parse_dependency(
+            Path::new("/metadata-root"),
+            Path::new("/metadata-root/Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\n\
+             [dependencies]\none = \"1\"\n\
+             [target.'cfg(unix)'.dependencies]\none = \"1\"\n",
+        )
+        .unwrap();
+        let one = key("one");
+        let ids = BTreeMap::from([(one.clone(), "registry#one@1.0.0".to_owned())]);
+        // Sparse records may interleave dev dependencies omitted by this parser.
+        let ordinary = edge(4, "one", one.clone());
+        let mut conditional = edge(0, "one", one);
+        conditional.target = Some("cfg(unix)".to_owned());
+        let node = map_node(
+            "root",
+            &[ordinary, conditional.clone()],
+            &manifest,
+            BTreeSet::new(),
+            &ids,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(node.deps.len(), 1);
+        assert_eq!(node.deps[0].dep_kinds.len(), 2);
+        assert_eq!(node.deps[0].dep_kinds[0].target, None);
+        assert_eq!(
+            node.deps[0].dep_kinds[1].target.as_deref(),
+            Some("cfg(unix)")
+        );
+        for mismatch in ["target", "kind", "package"] {
+            let mut invalid = conditional.clone();
+            match mismatch {
+                "target" => invalid.target = Some("cfg(windows)".to_owned()),
+                "kind" => invalid.kind = DependencyKind::Build,
+                "package" => invalid.package.name = "another".to_owned(),
+                _ => unreachable!(),
+            }
+            let error = map_node(
+                "root",
+                &[invalid],
+                &manifest,
+                BTreeSet::new(),
+                &ids,
+                &BTreeMap::new(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("has no declaration"),
+                "{mismatch}: {error}"
+            );
+        }
     }
 }

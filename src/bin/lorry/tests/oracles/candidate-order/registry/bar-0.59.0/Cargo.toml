@@ -1,0 +1,5 @@
+[package]
+name = "bar"
+version = "0.59.0"
+edition = "2021"
+license = "MIT"

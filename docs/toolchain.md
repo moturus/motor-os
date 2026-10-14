@@ -234,7 +234,7 @@ entry paths, abort and fat-LTO builds, and Rust/C++ destructor propagation.
 
 Native rustfmt is built by Rust bootstrap with the compiler-private Motor
 rlibs, packaged at `/devtools/rust/bin/rustfmt`, and exposed through the
-`/devtools/bin/rustfmt` launcher. The launcher sets `TMPDIR=/devtools/tmp`.
+`/devtools/bin/rustfmt` launcher.
 Helix selects the binary through its server's `RUSTFMT` environment; see
 the [editor guide](helix.md#native-rust-integration).
 

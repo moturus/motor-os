@@ -104,8 +104,8 @@ if (validate_helix_elf "$temporary/tls-pie") 2>/dev/null; then
 fi
 
 case "$(declare -f build_helix)" in
-	*'fetch --locked'*'build --target "$TARGET" --release --locked'*\
-*'--offline --no-default-features -p helix-term --bin hx'*) ;;
+	*'fetch --locked'*'CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-clang"'*\
+*'build --target "$TARGET" --release --locked'*'--offline -p helix-term --bin hx'*) ;;
 	*) fail "Helix build is not an explicit fetch followed by an offline locked build" ;;
 esac
 # Add-ons are built for new and reused assemblies alike, outside the keyed
@@ -125,8 +125,8 @@ case "$(declare -f build_addons)" in
 	*'ensure_addon lua'*'ensure_addon ripgrep'*'ensure_addon helix'*'ensure_addon sed'*) ;;
 	*) fail "Lua, ripgrep, Helix, and sed are not all add-ons" ;;
 esac
-case "$(declare -f build_addons)" in
-	*'update_addon_source sed "$SED" "$SED_REPOSITORY" "$SED_BRANCH"'*'ensure_addon sed'*) ;;
+case "$(declare -f select_addon_workspaces)" in
+	*'"sed:$SED_BRANCH"'*) ;;
 	*) fail "sed does not follow its fork branch" ;;
 esac
 case "$(declare -f build_sed)" in
@@ -185,7 +185,7 @@ for selection in managed-probe authoring-probe; do
 		JAVY_PLUGIN_SHA=plugin JAVY_TYPESCRIPT_SHA=typescript JAVY_SOURCE_MANIFEST=manifest
 		WASMTIME_SOURCE_MANIFEST=manifest
 		javy_download() { : > "$3"; }
-		cargo() { printf 'fetch %s %s\n' "$RUSTUP_TOOLCHAIN" "${PWD##*/}" >> "$JAVY_TOOLCHAIN_LOG"; }
+		cargo() { printf 'cargo %s %s %s\n' "$RUSTUP_TOOLCHAIN" "${PWD##*/}" "$*" >> "$JAVY_TOOLCHAIN_LOG"; }
 		gzip() { :; }
 		tar() { :; }
 		install() { :; }
@@ -199,8 +199,8 @@ for selection in managed-probe authoring-probe; do
 done
 expected=""
 for selection in managed-probe authoring-probe; do
-	expected+="fetch $selection javy"$'\n'"build $selection "$'\n'
-	expected+="fetch $selection motor-runtime"$'\n'"fetch $selection motor-runtime"$'\n'
+	expected+="cargo $selection javy fetch --locked"$'\n'"build $selection "$'\n'
+	expected+="cargo $selection motor-runtime fetch --locked"$'\n'
 	expected+="build $selection runtime"$'\n'"fixtures $selection"$'\n'
 done
 [ "$(cat "$javy_log")"$'\n' = "$expected" ] ||
@@ -255,4 +255,5 @@ case "$managed_manifest" in
 	*) fail "the Javy manifest does not name the test plugin inputs" ;;
 esac
 
+bash "$ROOT_DIR/src/tests/test-wasm-addon-fetch.sh"
 echo "test-build-addons PASS"

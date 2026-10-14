@@ -1,0 +1,432 @@
+use super::{Manifest, Profile, SourceWorkspace, parse_profile, require_table};
+use crate::diagnostic::{Error, Result};
+use crate::identity::CargoDebugInfo;
+use crate::toml::Document;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::path::Path;
+use toml_edit::Table;
+mod environment;
+
+pub(crate) const KEYS: &[&str] = &[
+    "panic",
+    "debug",
+    "opt-level",
+    "lto",
+    "strip",
+    "codegen-units",
+    "debug-assertions",
+    "overflow-checks",
+    "incremental",
+];
+
+pub(crate) struct SelectedProfile {
+    name: String,
+    pub directory: String,
+    pub release: bool,
+    settings: Profile,
+    warnings: Vec<String>,
+}
+
+impl SelectedProfile {
+    pub fn load(workspace: &SourceWorkspace, name: &str) -> Result<Self> {
+        Self::load_checked(workspace, name, true)
+    }
+
+    pub fn directory_for_clean(workspace: &SourceWorkspace, name: &str) -> Result<String> {
+        Ok(Self::load_checked(workspace, name, false)?.directory)
+    }
+
+    fn load_checked(workspace: &SourceWorkspace, name: &str, building: bool) -> Result<Self> {
+        let (path, document) = workspace.root_document()?;
+        Self::parse(
+            &path,
+            &document,
+            name,
+            building,
+            &std::env::vars_os().collect(),
+        )
+    }
+
+    fn parse(
+        path: &Path,
+        document: &Document,
+        name: &str,
+        building: bool,
+        environment: &BTreeMap<OsString, OsString>,
+    ) -> Result<Self> {
+        validate_name(name)?;
+        let profiles = document
+            .root()
+            .get("profile")
+            .map(|item| require_table(path, document, item, "profile"))
+            .transpose()?;
+        let mut chain = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut current = name.to_owned();
+        let release = loop {
+            if !seen.insert(current.clone()) {
+                return Err(Error::failure(format!(
+                    "profile inheritance cycle involving `{current}`"
+                )));
+            }
+            let declared = profiles
+                .and_then(|profiles| profiles.get(&current))
+                .map(|item| require_table(path, document, item, &format!("profile.{current}")))
+                .transpose()?;
+            let overrides = environment::overrides(environment, &current, building)?;
+            let defined = declared.is_some() || !overrides.is_empty();
+            let mut table = declared.cloned().unwrap_or_default();
+            for (key, item) in overrides.iter() {
+                table.insert(key, item.clone());
+            }
+            chain.push((current.clone(), table));
+            let parent = chain.last().unwrap().1.get("inherits");
+            if matches!(current.as_str(), "dev" | "release") {
+                if let Some(parent) = parent {
+                    return Err(Error::at(
+                        path,
+                        document.line_of_item(parent),
+                        format!("`inherits` must not be specified in root profile `{current}`"),
+                        "only custom profiles may inherit",
+                    ));
+                }
+                break current == "release";
+            }
+            current = match parent {
+                Some(parent) => parent
+                    .as_str()
+                    .ok_or_else(|| Error::failure("profile.inherits must be a string"))?
+                    .to_owned(),
+                None => match current.as_str() {
+                    "test" | "debug" | "doc" => "dev".to_owned(),
+                    "bench" => "release".to_owned(),
+                    _ if !defined => {
+                        return Err(Error::failure(format!(
+                            "profile `{current}` is not defined"
+                        )));
+                    }
+                    _ => {
+                        return Err(Error::failure(format!(
+                            "profile `{current}` is missing an `inherits` directive"
+                        )));
+                    }
+                },
+            };
+        };
+        let mut merged = Table::new();
+        let mut warnings = Vec::new();
+        for (profile, table) in chain.into_iter().rev() {
+            for (key, item) in table.iter() {
+                if key == "inherits" {
+                    continue;
+                }
+                if key == "panic" && matches!(profile.as_str(), "test" | "bench") {
+                    super::parse_panic_abort(
+                        path,
+                        document,
+                        &table,
+                        &format!("profile.{profile}"),
+                    )?;
+                    warnings.push(format!(
+                        "`panic` setting is ignored for `{profile}` profile"
+                    ));
+                    continue;
+                }
+                if !KEYS.contains(&key) {
+                    if !building {
+                        continue;
+                    }
+                    return Err(Error::at(
+                        path,
+                        document.line_of_item(item),
+                        format!("unsupported selected profile key `profile.{profile}.{key}`"),
+                        format!("supported keys: {}", KEYS.join(", ")),
+                    ));
+                }
+                merged.insert(key, item.clone());
+            }
+        }
+        let mut settings = parse_profile(
+            path,
+            document,
+            &merged,
+            &format!("profile.{name}"),
+            if release { "3" } else { "0" },
+        )?;
+        // Resolve the inherited root default here; an inherited release
+        // profile may publish in debug.
+        settings.debug.get_or_insert(if release {
+            CargoDebugInfo::None
+        } else {
+            CargoDebugInfo::Full
+        });
+        Ok(Self {
+            name: name.to_owned(),
+            directory: match name {
+                "dev" | "test" | "debug" => "debug",
+                "bench" => "release",
+                _ => name,
+            }
+            .to_owned(),
+            release,
+            settings,
+            warnings,
+        })
+    }
+
+    pub fn apply(&self, manifest: &mut Manifest) {
+        manifest.profile = self.settings.clone();
+        manifest.profile_directory = Some(self.directory.clone());
+        manifest.profile_name = Some(self.name.clone());
+        manifest.warnings.extend(self.warnings.iter().cloned());
+    }
+}
+
+// Cargo rejects a malformed profile table, and malformed `dev` or `release`
+// settings, whichever profile a command selects.
+pub(super) fn validate(path: &Path, document: &Document) -> Result<()> {
+    let Some(item) = document.root().get("profile") else {
+        return Ok(());
+    };
+    let profiles = require_table(path, document, item, "profile")?;
+    for (key, item) in profiles.iter() {
+        require_table(path, document, item, &format!("profile.{key}"))?;
+    }
+    for (name, default_opt) in [("dev", "0"), ("release", "3")] {
+        if let Some(item) = profiles.get(name) {
+            let table = require_table(path, document, item, &format!("profile.{name}"))?;
+            parse_profile(
+                path,
+                document,
+                table,
+                &format!("profile.{name}"),
+                default_opt,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|ch| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+    {
+        return Err(Error::failure(format!("invalid profile name `{name}`")));
+    }
+    let lower = name.to_lowercase();
+    if lower.starts_with("cargo")
+        || matches!(
+            lower.as_str(),
+            "build-override"
+                | "build"
+                | "check"
+                | "clean"
+                | "config"
+                | "fetch"
+                | "fix"
+                | "install"
+                | "metadata"
+                | "package"
+                | "publish"
+                | "report"
+                | "root"
+                | "run"
+                | "rust"
+                | "rustc"
+                | "rustdoc"
+                | "target"
+                | "tmp"
+                | "uninstall"
+                | "doc"
+        )
+    {
+        return Err(Error::failure(format!(
+            "profile `{name}` is reserved and not allowed to be explicitly specified"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str, name: &str) -> Result<SelectedProfile> {
+        let path = Path::new("Cargo.toml");
+        SelectedProfile::parse(
+            path,
+            &Document::parse(path, "profiles", text.to_owned())?,
+            name,
+            true,
+            &BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn another_profiles_environment_is_ignored() {
+        let text = "[profile.release-lto]\ninherits = 'release'\n";
+        let path = Path::new("Cargo.toml");
+        let document = Document::parse(path, "profiles", text.to_owned()).unwrap();
+        let select = |variable: &str| {
+            let environment = BTreeMap::from([(variable.into(), "true".into())]);
+            SelectedProfile::parse(path, &document, "release", true, &environment)
+        };
+        // `release-lto`'s `lto` key, not a `release` key named `lto-lto`.
+        assert!(select("CARGO_PROFILE_RELEASE_LTO_LTO").is_ok());
+        let error = select("CARGO_PROFILE_RELEASE_RPATH")
+            .err()
+            .unwrap()
+            .render();
+        assert!(error.contains("unsupported selected profile environment variable"));
+    }
+
+    #[test]
+    fn inherits_settings_and_built_in_directories() {
+        let text = "[profile.release]\nlto = 'thin'\n[profile.opt]\ninherits = 'release'\nopt-level = 2\n[profile.small]\ninherits = 'opt'\nstrip = true\n[profile.test]\ninherits = 'small'\n";
+        let selected = parse(text, "test").unwrap();
+        assert!(selected.release);
+        assert_eq!(selected.directory, "debug");
+        assert_eq!(selected.settings.opt_level, "2");
+        assert_eq!(selected.settings.lto, super::super::Lto::Thin);
+        assert_eq!(selected.settings.strip, super::super::Strip::Symbols);
+        assert_eq!(selected.settings.debug, Some(CargoDebugInfo::None));
+        assert_eq!(parse(text, "small").unwrap().directory, "small");
+        let ignored = parse("[profile.test]\npanic = 'abort'", "test").unwrap();
+        assert!(!ignored.settings.panic_abort);
+        assert_eq!(
+            ignored.warnings,
+            ["`panic` setting is ignored for `test` profile"]
+        );
+    }
+
+    #[test]
+    fn root_profiles_accept_cargo_values() {
+        let text = "[profile.dev]\npanic = 'abort'\n[profile.release]\npanic = 'abort'\nlto = 'fat'\nstrip = true\ncodegen-units = 1\n";
+        assert!(parse(text, "dev").unwrap().settings.panic_abort);
+        let release = parse(text, "release").unwrap().settings;
+        assert!(release.panic_abort);
+        assert_eq!(release.lto, super::super::Lto::Fat);
+        assert_eq!(release.strip, super::super::Strip::Symbols);
+        assert_eq!(release.codegen_units, Some(1));
+        let path = Path::new("Cargo.toml");
+        for profile in ["dev", "release"] {
+            let source = |debug: &str, opt: &str| {
+                format!("[profile.{profile}]\ndebug={debug}\nopt-level={opt}\n")
+            };
+            for (debug, expected) in [
+                ("false", CargoDebugInfo::None),
+                ("true", CargoDebugInfo::Full),
+                ("0", CargoDebugInfo::None),
+                ("1", CargoDebugInfo::Limited),
+                ("2", CargoDebugInfo::Full),
+                ("\"none\"", CargoDebugInfo::None),
+                ("\"limited\"", CargoDebugInfo::Limited),
+                ("\"full\"", CargoDebugInfo::Full),
+                ("\"line-tables-only\"", CargoDebugInfo::LineTablesOnly),
+                (
+                    "\"line-directives-only\"",
+                    CargoDebugInfo::LineDirectivesOnly,
+                ),
+            ] {
+                for opt in ["0", "1", "2", "3", "\"s\"", "\"z\""] {
+                    let settings = parse(&source(debug, opt), profile).unwrap().settings;
+                    assert_eq!(settings.debug, Some(expected));
+                    assert_eq!(settings.opt_level, opt.trim_matches('"'));
+                }
+            }
+            let invalid = [
+                "-1", "4", "false", "\"fast\"", "\"0\"", "\"1\"", "\"2\"", "\"3\"", "[]",
+            ]
+            .map(|opt| source("false", opt))
+            .into_iter()
+            .chain(
+                ["-1", "3", "\"debug\"", "\"0\"", "\"1\"", "\"2\"", "[]"]
+                    .map(|debug| source(debug, "3")),
+            );
+            for text in invalid {
+                // Unselected `dev` and `release` tables are still validated.
+                let document = Document::parse(path, "profiles", text.clone()).unwrap();
+                assert!(validate(path, &document).is_err());
+                assert!(parse(&text, profile).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn environment_overrides_active_inheritance_layers() {
+        let path = Path::new("Cargo.toml");
+        let document = Document::parse(path, "profiles", "[profile.release]\nopt-level = 3\n[profile.custom]\ninherits = 'release'\nopt-level = 2\n".to_owned()).unwrap();
+        let environment = BTreeMap::from([
+            ("CARGO_PROFILE_RELEASE_OPT_LEVEL".into(), "1".into()),
+            ("CARGO_PROFILE_CUSTOM_OPT_LEVEL".into(), "z".into()),
+            ("CARGO_PROFILE_UNUSED_RPATH".into(), "true".into()),
+        ]);
+        let selected =
+            SelectedProfile::parse(path, &document, "custom", true, &environment).unwrap();
+        assert!(selected.release);
+        assert_eq!(selected.settings.opt_level, "z");
+        let environment = BTreeMap::from([
+            ("CARGO_PROFILE_ENV_PROFILE_INHERITS".into(), "dev".into()),
+            ("CARGO_PROFILE_ENV_PROFILE_OPT_LEVEL".into(), "1".into()),
+        ]);
+        let selected =
+            SelectedProfile::parse(path, &document, "env-profile", true, &environment).unwrap();
+        assert!(!selected.release);
+        assert_eq!(selected.settings.opt_level, "1");
+        let invalid = BTreeMap::from([("CARGO_PROFILE_CUSTOM_RPATH".into(), "true".into())]);
+        assert!(
+            SelectedProfile::parse(path, &document, "custom", true, &invalid)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("CARGO_PROFILE_CUSTOM_RPATH")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_active_inheritance_and_settings() {
+        for (text, name, expected) in [
+            (
+                "[profile.one]\ninherits = 'two'\n[profile.two]\ninherits = 'one'",
+                "one",
+                "cycle",
+            ),
+            (
+                "[profile.one]\nopt-level = 3",
+                "one",
+                "missing an `inherits`",
+            ),
+            ("[profile.one]\ninherits = 'absent'", "one", "not defined"),
+            ("[profile.dev]\ninherits = 'release'", "dev", "root profile"),
+            (
+                "[profile.one]\ninherits = 'release'\nrpath = true",
+                "one",
+                "profile.one.rpath",
+            ),
+        ] {
+            assert!(
+                parse(text, name)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+        assert!(parse("[profile.unused]\nrpath = true", "dev").is_ok());
+        for name in ["test", "bench"] {
+            for value in ["'invalid'", "true", "1"] {
+                assert!(
+                    parse(&format!("[profile.{name}]\npanic = {value}"), name)
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains(&format!("profile.{name}.panic"))
+                );
+            }
+        }
+        assert!(parse("", "../escape").is_err());
+    }
+}

@@ -1,7 +1,7 @@
 use crate::cli::{Cli, RustcQueryKind, RustcQueryOptions};
 use crate::config::{Config, TargetSelector, effective_rustflags};
 use crate::diagnostic::{Error, Result};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, SourceWorkspace};
 use crate::process;
 use crate::toolchain::Toolchain;
 use std::env;
@@ -9,29 +9,43 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-pub fn locate_project(manifest_path: &str) -> Result<i32> {
-    let manifest = Manifest::load_selected_or_manifest_path(
-        Path::new("."),
-        Some(Path::new(manifest_path)),
-        None,
-        false,
-    )?;
+pub fn locate_project(manifest_path: Option<&str>, workspace: bool, plain: bool) -> Result<i32> {
+    let source = SourceWorkspace::load(Path::new("."), manifest_path.map(Path::new))?;
+    let manifest = if workspace {
+        source.root.join("Cargo.toml")
+    } else {
+        source.manifest_path
+    };
     let path = manifest
-        .path
         .to_str()
         .ok_or_else(|| Error::failure("selected manifest path is not Unicode"))?;
-    println!("{}", serde_json::json!({ "root": path }));
+    if plain {
+        println!("{path}");
+    } else {
+        println!("{}", serde_json::json!({ "root": path }));
+    }
     Ok(0)
 }
 
 pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = Manifest::load_for_vendor_selected(&current, cli.package.as_deref())?;
-    let config = Config::load(&manifest.root)?;
-    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
+    let workspace = SourceWorkspace::load(&current, cli.manifest_path.as_deref().map(Path::new))?;
+    Manifest::report_warnings(&workspace.packages, cli.verbosity);
+    let config = Config::load_workspace(
+        &current,
+        &workspace.root,
+        workspace
+            .packages
+            .iter()
+            .map(|package| package.root.as_path()),
+    )?;
+    // The query runs rustc with the repository's rustflags.
+    if !crate::cargo_registry::selected(cli, &config) {
+        config.require_approved_cargo_configs()?;
+    }
+    let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
     let target = toolchain.target_info(Some(&options.target))?;
-    manifest.require_supported_target(&target)?;
     let selectors = config.targets.keys().filter_map(|selector| match selector {
         TargetSelector::Cfg(expression) => Some(expression.as_str()),
         TargetSelector::Triple(_) => None,
@@ -59,7 +73,7 @@ pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
     command
         .args(arguments)
         .env_remove("RUSTC_BOOTSTRAP")
-        .current_dir(&manifest.root)
+        .current_dir(&current)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());

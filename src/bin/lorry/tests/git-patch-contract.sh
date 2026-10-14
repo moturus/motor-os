@@ -24,6 +24,12 @@ GIT_URL="https://fixture.invalid/repository.git"
 mkdir -p "$WORK/bin" "$WORK/git" "$WORK/source" \
     "$PROJECT/app/src" "$HOME_DIR/.config/lorry" "$REPOSITORY"
 
+# Keep each approved review but not the standing `--accept-all`, as an
+# interactive approval would, so later Git movement still needs a review.
+forget_accept_all() {
+    sed -i '/^accept-all = true$/d' "$HOME_DIR"/.config/lorry/workspaces/*.toml
+}
+
 fail() {
     echo "git-patch-contract: $*" >&2
     exit 1
@@ -140,6 +146,7 @@ source = "$TAG_SOURCE"
 EOF
 cat >"$HOME_DIR/.config/lorry/lorry.toml" <<EOF
 config-version = 1
+use-cargo-registry = false
 
 [network]
 curl = "$WORK/bin/git-curl"
@@ -183,13 +190,14 @@ grep -F 'no interactive terminal is available' \
     fail "first-materialization rejection had the wrong diagnostic"
 [ "$(sha256sum "$PROJECT/Cargo.lock")" = "$INITIAL_LOCK_HASH" ] ||
     fail "unapproved first materialization changed Cargo.lock"
-[ ! -e "$PROJECT/app/.lorry/dependencies-v2.toml" ] ||
+[ ! -e "$PROJECT/.lorry/dependencies-v2.toml" ] ||
     fail "unapproved first materialization published admission state"
 [ "$(manifest_hashes)" = "$MANIFEST_HASHES" ] ||
     fail "unapproved first materialization changed an input manifest"
 
 echo "== Vendoring a Git patch without rewriting manifests =="
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor -p app --accept-all)
+forget_accept_all
 [ "$(manifest_hashes)" = "$MANIFEST_HASHES" ] || fail "vendor changed an input manifest"
 [ ! -e "$PROJECT/.lorry/vendor/renamed" ] || fail "vendor created the legacy patch path"
 OBJECT="$(printf %s "$CARGO_SOURCE" | sha256sum | cut -d' ' -f1)"
@@ -201,7 +209,7 @@ if grep -F 'checksum =' "$PROJECT/Cargo.lock" >/dev/null; then
     fail "Cargo.lock gave a Git package a registry checksum"
 fi
 LOCK_HASH="$(sha256sum "$PROJECT/Cargo.lock")"
-STATE_PATH="$PROJECT/app/.lorry/dependencies-v2.toml"
+STATE_PATH="$PROJECT/.lorry/dependencies-v2.toml"
 STATE_HASH="$(sha256sum "$STATE_PATH")"
 
 echo "== Reusing unchanged Git state non-interactively =="
@@ -222,6 +230,16 @@ EOF
 NEW_COMMIT="$(/usr/bin/git -C "$WORK/source" rev-parse HEAD)"
 /usr/bin/git -C "$WORK/source" push -q "$WORK/git/repository.git" main
 
+echo "== Keeping the locked commit after its branch advances =="
+chmod 000 "$WORK/bin/git-curl"
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --locked -p app </dev/null)
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --locked --offline -p app </dev/null)
+chmod 0700 "$WORK/bin/git-curl"
+[ "$(sha256sum "$PROJECT/Cargo.lock")" = "$LOCK_HASH" ] ||
+    fail "locked vendor moved a branch"
+[ "$(sha256sum "$STATE_PATH")" = "$STATE_HASH" ] ||
+    fail "locked vendor changed admission after a branch moved"
+
 if (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor -p app \
     </dev/null >"$WORK/unapproved.out" 2>&1); then
     fail "non-interactive vendor approved a moved branch"
@@ -241,6 +259,7 @@ grep -F 'no interactive terminal is available' "$WORK/unapproved.out" >/dev/null
 
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor -p app --accept-all \
     </dev/null >"$WORK/accepted.out" 2>&1)
+forget_accept_all
 [ "$(grep -c '^Git patch candidate:' "$WORK/accepted.out")" -eq 2 ] ||
     fail "moved branch and default HEAD were not both shown"
 if grep -F '[y/N]' "$WORK/accepted.out" >/dev/null; then
@@ -258,6 +277,8 @@ STATE_HASH="$(sha256sum "$STATE_PATH")"
 
 echo "== Batching branch, HEAD, tag, and named-rev movement =="
 cat >"$WORK/source/demo/src/lib.rs" <<'EOF'
+#![deny(dead_code)]
+fn intentionally_unused() {}
 pub fn answer() -> u32 { 44 }
 EOF
 /usr/bin/git -C "$WORK/source" add demo/src/lib.rs
@@ -289,6 +310,7 @@ grep -F '[WARNING: RETARGETED TAG]' "$WORK/declined.typescript" >/dev/null ||
 
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor -p app --accept-all \
     </dev/null >"$WORK/batch-accepted.out" 2>&1)
+forget_accept_all
 [ "$(grep -c '^Git patch candidate:' "$WORK/batch-accepted.out")" -eq 4 ] ||
     fail "automated multi-selector review did not show all candidates"
 grep -F "source = \"git+$GIT_URL#$BATCH_COMMIT\"" \
@@ -358,16 +380,17 @@ chmod 000 "$WORK/bin/git-curl"
     HOME="$HOME_DIR" "$LORRY" build -p app
     [ "$(HOME="$HOME_DIR" "$LORRY" run -p app)" = 44 ]
     HOME="$HOME_DIR" "$LORRY" test -p app -- --quiet
-    HOME="$HOME_DIR" "$LORRY" review -p app >"$WORK/review.toml"
-    HOME="$HOME_DIR" "$LORRY" metadata -p app --format-version 1 \
+    HOME="$HOME_DIR" "$LORRY" review >"$WORK/review.toml"
+    HOME="$HOME_DIR" "$LORRY" metadata --format-version 1 \
         --filter-platform x86_64-unknown-linux-gnu --locked >"$WORK/metadata.json"
     HOME="$HOME_DIR" "$LORRY" tree -p app \
         --target x86_64-unknown-linux-gnu >"$WORK/git.tree"
 )
 grep -F '[[locked-git]]' "$WORK/review.toml" >/dev/null ||
     fail "review omitted the locked Git identity"
-grep -F '[[crates-io-patch]]' "$WORK/review.toml" >/dev/null ||
-    fail "review omitted the patch alias and package identity"
+if grep -F '[[crates-io-patch]]' "$WORK/review.toml" >/dev/null; then
+    fail "workspace review retained raw member patch declarations"
+fi
 grep -F "source = \"$CARGO_SOURCE\"" "$WORK/review.toml" >/dev/null ||
     fail "review omitted the exact Cargo Git source"
 grep -F '[[git-source]]' "$WORK/review.toml" >/dev/null ||
