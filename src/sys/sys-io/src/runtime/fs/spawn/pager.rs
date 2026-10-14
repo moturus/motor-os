@@ -4,7 +4,7 @@
 //! released when the kernel retires the mapping.
 
 use super::elf;
-use super::{ExecLocks, SpawnStats, native, read_range};
+use super::{ExecLocks, RelocIndex, SpawnStats, native, read_range};
 use crate::runtime::fs::FsRuntime;
 use async_fs::{EntryId, Role};
 use moto_async::AsFuture;
@@ -24,6 +24,7 @@ pub(crate) struct Mapping {
     entry: EntryId,
     role: Role,
     segment: elf::Segment,
+    relocs: Option<RelocIndex>,
     /// Adaptive window: doubles while faults continue where the last
     /// window ended, and drops back to one page otherwise.
     next: Cell<u64>,
@@ -31,11 +32,17 @@ pub(crate) struct Mapping {
 }
 
 impl Mapping {
-    pub fn new(entry: EntryId, role: Role, segment: elf::Segment) -> Self {
+    pub fn new(
+        entry: EntryId,
+        role: Role,
+        segment: elf::Segment,
+        relocs: Option<RelocIndex>,
+    ) -> Self {
         Self {
             entry,
             role,
             segment,
+            relocs,
             next: Cell::new(u64::MAX),
             window: Cell::new(1),
         }
@@ -154,6 +161,7 @@ impl Drop for PageBuf {
 /// Reads a segment's file bytes into a zeroed page window; padding stays zero.
 async fn read_pages(
     runtime: &FsRuntime,
+    id: u64,
     mapping: &Mapping,
     start: u64,
     buf: &mut [u8],
@@ -162,12 +170,79 @@ async fn read_pages(
     let file_end = segment.vaddr + segment.filesz;
     let from = start.max(segment.vaddr);
     let to = (start + buf.len() as u64).min(file_end);
-    if from >= to {
-        return Ok(());
+    if from < to {
+        let offset = segment.offset + (from - segment.vaddr);
+        let dst = &mut buf[(from - start) as usize..(to - start) as usize];
+        let read = read_range(runtime, mapping.role, mapping.entry, offset, dst).await;
+        if !runtime.pager.is_live(id) {
+            return Ok(()); // The caller discards retired fills.
+        }
+        read?;
     }
-    let offset = segment.offset + (from - segment.vaddr);
-    let dst = &mut buf[(from - start) as usize..(to - start) as usize];
-    read_range(runtime, mapping.role, mapping.entry, offset, dst).await
+    if let Some(index) = &mapping.relocs {
+        relocate(runtime, id, mapping, index, start, buf).await?;
+    }
+    Ok(())
+}
+
+/// Applies every relocation that overlaps `buf` (the image bytes from
+/// `start`), clipped to it: a record that crosses into a neighbouring page is
+/// applied again, identically, when that page is filled.
+async fn relocate(
+    runtime: &FsRuntime,
+    id: u64,
+    mapping: &Mapping,
+    index: &RelocIndex,
+    start: u64,
+    buf: &mut [u8],
+) -> std::io::Result<()> {
+    let end = start + buf.len() as u64;
+    let base = mapping.segment.page_start();
+    let at = |page: usize| index.first.get(page).copied().unwrap_or(index.count) as u64;
+    let first = at(((start - base) / PAGE) as usize);
+    let last = at(((end - base) / PAGE) as usize + 1);
+    const CHUNK: u64 = 512;
+    let mut idx = first;
+    while idx < last {
+        let n = (last - idx).min(CHUNK);
+        if idx != first {
+            // A long run of records must not hold up other sys-io clients.
+            moto_async::yield_to_io().await;
+            if !runtime.pager.is_live(id) {
+                return Ok(());
+            }
+        }
+        let mut records = super::try_zeroed((n * elf::RELA_ENTRY_SIZE) as usize)?;
+        let read = read_range(
+            runtime,
+            mapping.role,
+            mapping.entry,
+            index.table_offset + idx * elf::RELA_ENTRY_SIZE,
+            &mut records,
+        )
+        .await;
+        if !runtime.pager.is_live(id) {
+            return Ok(());
+        }
+        read?;
+        for record in records.as_chunks::<{ elf::RELA_ENTRY_SIZE as usize }>().0 {
+            let (dst, kind, addend) = elf::rela_at(record);
+            if kind != elf::R_X86_64_RELATIVE {
+                continue;
+            }
+            let dst_end = dst.checked_add(8).ok_or(std::io::ErrorKind::InvalidData)?;
+            if dst_end <= start || dst >= end {
+                continue;
+            }
+            let value = addend.to_le_bytes();
+            let from = dst.max(start);
+            let to = dst_end.min(end);
+            buf[(from - start) as usize..(to - start) as usize]
+                .copy_from_slice(&value[(from - dst) as usize..(to - dst) as usize]);
+        }
+        idx += n;
+    }
+    Ok(())
 }
 
 async fn serve(runtime: FsRuntime, id: u64, page: u64) {
@@ -187,7 +262,7 @@ async fn serve(runtime: FsRuntime, id: u64, page: u64) {
     loop {
         let read: std::io::Result<_> = async {
             let mut buf = PageBuf::new(count as usize).ok_or(std::io::ErrorKind::OutOfMemory)?;
-            read_pages(&runtime, &mapping, page, buf.bytes()).await?;
+            read_pages(&runtime, id, &mapping, page, buf.bytes()).await?;
             Ok(buf)
         }
         .await;

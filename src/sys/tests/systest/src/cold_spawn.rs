@@ -8,13 +8,61 @@
 use moto_sys::stats::ProcessInfoV1;
 use moto_sys::{SysCpu, SysHandle, SysObj, SysRay};
 use moto_sys_io::api_fs::SpawnRequest;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 
 const CHILD: &str = "cold-spawn-child";
 const EXEC: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC;
+
+const VALUES: usize = 1024;
+static WORDS: [&str; 4] = ["alpha", "beta", "gamma", "delta"];
+static mut COUNTER: u64 = 7;
+static mut ZEROS: [u64; 4096] = [0; 4096];
+static NUMBERS: [u64; VALUES] = {
+    let mut values = [0; VALUES];
+    let mut idx = 0;
+    while idx < VALUES {
+        values[idx] = (idx as u64) * 2654435761;
+        idx += 1;
+    }
+    values
+};
+static POINTERS: [&u64; VALUES] = {
+    let mut pointers = [&NUMBERS[0]; VALUES];
+    let mut idx = 0;
+    while idx < VALUES {
+        pointers[idx] = &NUMBERS[VALUES - 1 - idx];
+        idx += 1;
+    }
+    pointers
+};
+
+// A 9-byte stride walks every page offset, so some relocated pointers cross
+// a page boundary and are written half by each page's fill.
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+struct Unaligned {
+    tag: u8,
+    target: &'static u64,
+}
+const UNALIGNED: usize = 4096 + 512;
+static CROSSING: [Unaligned; UNALIGNED] = {
+    let mut entries = [Unaligned {
+        tag: 0,
+        target: &NUMBERS[0],
+    }; UNALIGNED];
+    let mut idx = 0;
+    while idx < UNALIGNED {
+        entries[idx] = Unaligned {
+            tag: idx as u8,
+            target: &NUMBERS[idx % VALUES],
+        };
+        idx += 1;
+    }
+    entries
+};
 
 // Read-only bytes spanning many pages, which nothing reads unless asked, so
 // that a page of them lies untouched when a syscall is handed a slice of it.
@@ -25,14 +73,62 @@ const PROBE: &[u8; PROBE_PAGES * 4096] = &{
     bytes
 };
 
-/// Read-only bytes are checked against recomputed values, so a wrong file
-/// offset cannot pass by comparing two copies loaded by the same pager.
+// Read-only bytes nothing checks: where a test points a relocation.
+static RELOC_TARGET: [u8; 16] = [0; 16];
+static RELOC_SOURCE: &u64 = &NUMBERS[0];
+
+fn first() -> u64 {
+    11
+}
+fn second() -> u64 {
+    13
+}
+static FUNCTIONS: [fn() -> u64; 2] = [first, second];
+
+/// Checks the relocated, initialized, read-only, and zeroed data of this
+/// image against values computed here, and returns a digest that every
+/// launch of it must reproduce.
 fn image_digest() -> String {
     let mut digest = 0_u64;
-    for (idx, byte) in std::hint::black_box(PROBE).iter().enumerate() {
-        assert_eq!(*byte, if idx == 40960 { b'#' } else { b'p' });
-        digest = (digest ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+    let mut mix = |value: u64| digest = (digest ^ value).wrapping_mul(0x100000001b3);
+    // Contents are recomputed rather than compared with another copy of the
+    // same read-only data: a page filled from the wrong bytes is caught.
+    for (idx, value) in std::hint::black_box(&NUMBERS).iter().enumerate() {
+        assert_eq!(*value, (idx as u64) * 2654435761);
     }
+    let words = std::hint::black_box(&WORDS);
+    let word_bytes: u64 = words.iter().flat_map(|w| w.bytes()).map(u64::from).sum();
+    assert_eq!(word_bytes, 1967);
+    assert!(
+        std::hint::black_box(PROBE)
+            .iter()
+            .enumerate()
+            .all(|(idx, byte)| *byte == if idx == 40960 { b'#' } else { b'p' })
+    );
+    for word in words {
+        for byte in word.bytes() {
+            mix(byte as u64);
+        }
+    }
+    for (idx, pointer) in std::hint::black_box(&POINTERS).iter().enumerate() {
+        assert_eq!(**pointer, (VALUES - 1 - idx) as u64 * 2654435761);
+        mix(**pointer);
+    }
+    for (idx, entry) in std::hint::black_box(&CROSSING).iter().enumerate() {
+        let target = unsafe { core::ptr::addr_of!(entry.target).read_unaligned() };
+        assert_eq!(entry.tag, idx as u8);
+        assert_eq!(*target, (idx % VALUES) as u64 * 2654435761);
+    }
+    for function in std::hint::black_box(&FUNCTIONS) {
+        mix(function());
+    }
+    let zeros = unsafe { &mut *std::hint::black_box(core::ptr::addr_of_mut!(ZEROS)) };
+    assert!(zeros.iter().all(|word| *word == 0));
+    zeros[4095] = 1;
+    let counter = unsafe { &mut *std::hint::black_box(core::ptr::addr_of_mut!(COUNTER)) };
+    assert_eq!(*counter, 7);
+    *counter += 1;
+    mix(*counter);
     format!("image-ok {digest:x}")
 }
 
@@ -43,6 +139,27 @@ pub fn is_child(args: &[String]) -> bool {
 pub fn run_child(args: &[String]) -> ! {
     match args.get(2).map(String::as_str) {
         Some("digest") => println!("{}", image_digest()),
+        Some("bss-relocations") => {
+            let base: usize = args[3].parse().unwrap();
+            assert!(moto_sys::SysMem::virt_to_phys((base + 4096) as u64).is_err());
+            // Fault the upper half first, so read-ahead cannot hide a
+            // missing relocation on either side of the page boundary.
+            unsafe {
+                assert_eq!(((base + 4096) as *const u32).read_volatile(), 0x11223344);
+                assert!(moto_sys::SysMem::virt_to_phys(base as u64).is_err());
+                assert_eq!(((base + 4092) as *const u32).read_volatile(), 0x55667788);
+                assert_eq!(((base + 8208) as *const u64).read_volatile(), 0xabcdef);
+                let bytes = core::slice::from_raw_parts_mut(base as *mut u8, 4 * 4096);
+                for (idx, byte) in bytes.iter().enumerate() {
+                    if !(4092..4100).contains(&idx) && !(8208..8216).contains(&idx) {
+                        assert_eq!(*byte, 0, "BSS byte {idx}");
+                    }
+                }
+                bytes[4 * 4096 - 1] = 1;
+                assert_eq!(std::hint::black_box(bytes)[4 * 4096 - 1], 1);
+            }
+            println!("bss-relocations-ok");
+        }
         Some("syscall-buffer" | "syscall-zero") => {
             let address = if args[2] == "syscall-zero" {
                 // This image's first read-only segment starts at zero; its
@@ -78,14 +195,14 @@ pub fn run_child(args: &[String]) -> ! {
             while std::io::stdin().lock().read_line(&mut line).unwrap() > 0 {}
         }
         Some("exit-while-faulting") => {
-            // One thread faults in read-only pages one by one while the main
-            // thread exits: the exit must complete whether or not a thread
-            // is parked on a fault at that moment.
+            // One thread faults through relocated pages while the main
+            // thread exits; an in-flight relocation read may outlive it.
             std::thread::spawn(|| {
                 let mut sum = 0_u64;
                 loop {
-                    for page in std::hint::black_box(PROBE).chunks(4096) {
-                        sum = sum.wrapping_add(std::hint::black_box(page[7]) as u64);
+                    for entry in std::hint::black_box(&CROSSING).iter().step_by(455) {
+                        let target = unsafe { core::ptr::addr_of!(entry.target).read_unaligned() };
+                        sum = sum.wrapping_add(std::hint::black_box(*target));
                     }
                     std::hint::black_box(sum);
                 }
@@ -149,6 +266,10 @@ fn copy(dir: &Path, name: &str, perm: u64, patch: impl FnOnce(&mut Vec<u8>)) -> 
     let mut bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
     patch(&mut bytes);
     std::fs::write(&path, &bytes).unwrap();
+    if perm == EXEC | moto_rt::fs::PERM_WRITE {
+        // The own-role transitions are Rw -> Rx -> Rwx.
+        moto_rt::fs::set_perm(path.to_str().unwrap(), EXEC).unwrap();
+    }
     moto_rt::fs::set_perm(path.to_str().unwrap(), perm).unwrap();
     path
 }
@@ -238,7 +359,7 @@ fn test_concurrent_launches(dir: &Path) {
 }
 
 fn test_executable_lock(dir: &Path) {
-    let program = copy(dir, "locked", EXEC, |_| {});
+    let program = copy(dir, "locked", EXEC | moto_rt::fs::PERM_WRITE, |_| {});
     let other = copy(dir, "other", EXEC, |_| {});
     let first = hold(&program);
     let second = hold(&program);
@@ -266,6 +387,7 @@ fn test_executable_lock(dir: &Path) {
     release(first);
     assert_refused("delete with one child left", std::fs::remove_file(&program));
     release(second);
+    std::fs::write(&program, b"unlocked").unwrap();
     std::fs::remove_file(&program).unwrap();
     std::fs::remove_file(&other).unwrap();
 
@@ -314,13 +436,31 @@ fn test_kill_during_startup(dir: &Path) {
 
 /// A process exit completes while another of its threads is faulting.
 fn test_exit_while_faulting(dir: &Path) {
-    let program = copy(dir, "exit", EXEC, |_| {});
+    let program = copy(dir, "exit", EXEC | moto_rt::fs::PERM_WRITE, |_| {});
+    let bytes = std::fs::read(&program).unwrap();
+    let (table, size) = rela_table(&bytes);
+    let original = &bytes[table..table + size];
+    let mut changed = original.to_vec();
+    for record in changed.as_chunks_mut::<24>().0 {
+        record[..8].fill(0xff); // An old serve must not decode this destination.
+    }
     for _ in 0..20 {
         let status = child(&program, "exit-while-faulting")
             .stdout(Stdio::null())
             .status()
             .unwrap();
         assert_eq!(status.code(), Some(7), "{status:?}");
+        // Exit releases the executable lock even if a serve is still in
+        // flight. Overwrite its records, then restore them for the next child.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&program)
+            .unwrap();
+        for records in [&changed[..], original] {
+            file.seek(SeekFrom::Start(table as u64)).unwrap();
+            file.write_all(records).unwrap();
+            file.flush().unwrap();
+        }
     }
     std::fs::remove_file(&program).unwrap();
     println!("cold_spawn::test_exit_while_faulting PASS");
@@ -364,6 +504,7 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
+const PF_W: u32 = 2;
 
 /// (type, flags, file offset, address, file size, memory size) per program
 /// header.
@@ -421,14 +562,19 @@ fn rela_table(bytes: &[u8]) -> (usize, usize) {
     ((rela - vaddr + offset) as usize, relasz as usize)
 }
 
-/// Points the image's first relocation into read-only data. Images are
+/// Points an otherwise unused relocation into read-only data. Images are
 /// linked at their run address, so the parent's address of the target is the
 /// child's too. sys-io cannot demand-page a relocated read-only page and
 /// builds such an image eagerly.
 fn retarget_relocation_into_rodata(bytes: &mut [u8]) {
-    let (table, _) = rela_table(bytes);
-    let target = PROBE.as_ptr() as u64;
-    bytes[table..table + 8].copy_from_slice(&target.to_le_bytes());
+    let (table, size) = rela_table(bytes);
+    let source = core::ptr::addr_of!(RELOC_SOURCE) as u64;
+    let at = (table..table + size)
+        .step_by(24)
+        .find(|at| u64_at(bytes, *at) == source)
+        .expect("the unused pointer's relocation");
+    let target = RELOC_TARGET.as_ptr() as u64;
+    bytes[at..at + 8].copy_from_slice(&target.to_le_bytes());
 }
 
 /// The custom region supports eager mappings, but cannot be file-paged.
@@ -451,6 +597,107 @@ fn test_high_segment(dir: &Path) {
     );
     std::fs::remove_file(&path).unwrap();
     println!("cold_spawn::test_high_segment PASS");
+}
+
+/// Images the paged loader hands to a simpler plan still run correctly: a
+/// relocation table not sorted by address loads its writable segments
+/// eagerly, a relocation into read-only data loads the whole image eagerly.
+fn test_relocation_fallbacks(dir: &Path) {
+    const RECORD: usize = 24;
+    let program = std::env::current_exe().unwrap();
+    let expected = digest_of(&program);
+    let bytes = std::fs::read(&program).unwrap();
+    let (table, size) = rela_table(&bytes);
+    let writable: Vec<(u64, u64)> = program_headers(&bytes)
+        .iter()
+        .filter(|h| h.0 == PT_LOAD && h.1 & PF_W != 0)
+        .map(|h| (h.3, h.3 + h.5))
+        .collect();
+    let offsets: Vec<u64> = (0..size / RECORD)
+        .map(|idx| u64_at(&bytes, table + idx * RECORD))
+        .collect();
+    let in_one_segment = |a: u64, b: u64| {
+        writable
+            .iter()
+            .any(|(start, end)| (*start..*end).contains(&a) && (*start..*end).contains(&b))
+    };
+    let pair = (0..offsets.len().saturating_sub(1))
+        .find(|&idx| {
+            offsets[idx] < offsets[idx + 1] && in_one_segment(offsets[idx], offsets[idx + 1])
+        })
+        .expect("two ascending relocations in one writable segment");
+
+    let unsorted = copy(dir, "unsorted", EXEC, |b| {
+        let at = table + pair * RECORD;
+        let (first, second) = b[at..at + 2 * RECORD].split_at_mut(RECORD);
+        first.swap_with_slice(second);
+    });
+    assert_eq!(expected, digest_of(&unsorted));
+
+    let rodata = copy(dir, "rodata-reloc", EXEC, |b| {
+        retarget_relocation_into_rodata(b)
+    });
+    assert_eq!(expected, digest_of(&rodata));
+
+    std::fs::remove_file(&unsorted).unwrap();
+    std::fs::remove_file(&rodata).unwrap();
+    println!("cold_spawn::test_relocation_fallbacks PASS");
+}
+
+/// Add a writable segment with a copied relocation table and targets in
+/// its BSS. The final page has neither file bytes nor relocations.
+fn test_bss_relocations(dir: &Path) {
+    const ADDRESS: u64 = 1 << 30;
+    let mut bss = 0;
+    let path = copy(dir, "bss-relocations", EXEC, |bytes| {
+        let (table, size) = rela_table(bytes);
+        let offset = bytes.len().next_multiple_of(4096);
+        let filesz = size + 2 * 24;
+        bss = ADDRESS + filesz.next_multiple_of(4096) as u64;
+        bytes.resize(offset, 0);
+        bytes.extend_from_within(table..table + size);
+        for (target, value) in [(bss + 4092, 0x1122334455667788_u64), (bss + 8208, 0xabcdef)] {
+            bytes.extend_from_slice(&target.to_le_bytes());
+            bytes.extend_from_slice(&8_u64.to_le_bytes()); // R_X86_64_RELATIVE.
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let at = phdr(bytes, 4); // Replace PT_NOTE after the load headers.
+        bytes[at..at + 56].fill(0);
+        bytes[at..at + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        bytes[at + 4..at + 8].copy_from_slice(&6_u32.to_le_bytes()); // R+W.
+        for (field, value) in [
+            (8, offset as u64),
+            (16, ADDRESS),
+            (32, filesz as u64),
+            (40, bss - ADDRESS + 4 * 4096),
+            (48, 4096),
+        ] {
+            bytes[at + field..at + field + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        let dynamic = phdr(bytes, PT_DYNAMIC);
+        let start = u64_at(bytes, dynamic + 8) as usize;
+        let end = start + u64_at(bytes, dynamic + 32) as usize;
+        for entry in bytes[start..end].as_chunks_mut::<16>().0 {
+            let value = match u64_at(entry, 0) {
+                0 => break,
+                7 => ADDRESS,       // DT_RELA.
+                8 => filesz as u64, // DT_RELASZ.
+                _ => continue,
+            };
+            entry[8..].copy_from_slice(&value.to_le_bytes());
+        }
+    });
+    for _ in 0..2 {
+        let output = child(&path, "bss-relocations")
+            .arg(bss.to_string())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output.status);
+        assert_eq!(output.stdout, b"bss-relocations-ok\n");
+    }
+    std::fs::remove_file(&path).unwrap();
+    println!("cold_spawn::test_bss_relocations PASS");
 }
 
 /// Images the parser refuses are refused as requests, and as spawns through
@@ -696,6 +943,8 @@ pub fn run_all_tests() {
         test_syscall_buffer("syscall-zero");
     }
     test_high_segment(&dir);
+    test_relocation_fallbacks(&dir);
+    test_bss_relocations(&dir);
     let mut requester = Requester::new();
     test_malformed_images(&dir, &mut requester);
     test_direct_request(&dir, &mut requester);

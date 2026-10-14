@@ -120,6 +120,7 @@ mod ids {
     pub const PAGER_FAULTS: u32 = 1023;
     pub const PAGER_FILLED_PAGES: u32 = 1024;
     pub const PAGER_FAILED_FILLS: u32 = 1025;
+    pub const SPAWN_SCAN_US: u32 = 1026;
     pub const PAGER_SERVE_US: u32 = 1027;
 }
 
@@ -174,6 +175,7 @@ async fn entries(
         MetricEntry::global(ids::PAGER_FAULTS, pager.faults.get()),
         MetricEntry::global(ids::PAGER_FILLED_PAGES, pager.filled_pages.get()),
         MetricEntry::global(ids::PAGER_FAILED_FILLS, pager.failed_fills.get()),
+        MetricEntry::global(ids::SPAWN_SCAN_US, spawn.scan_us.get()),
         MetricEntry::global(ids::PAGER_SERVE_US, pager.serve_us.get()),
     ]
 }
@@ -212,6 +214,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::PAGER_FAULTS, "pager.faults"),
         MetricDescWire::new(ids::PAGER_FILLED_PAGES, "pager.filled_pages"),
         MetricDescWire::new(ids::PAGER_FAILED_FILLS, "pager.failed_fills"),
+        MetricDescWire::new(ids::SPAWN_SCAN_US, "spawn.scan_us"),
         MetricDescWire::new(ids::PAGER_SERVE_US, "pager.serve_us"),
     ]
 }

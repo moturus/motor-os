@@ -7,7 +7,7 @@ which has since been reshaped in the working tree into the production form
 this plan describes: the experimental modes, the shared page cache, the
 relocation search, and the mlibc emulation are gone, and the hardening
 items below are in. Section 3 is the order in which to carve that tree
-into reviewed patches. Progress (2026-10-13): step 0 (the syscall-exit
+into reviewed patches. Progress (2026-10-14): step 0 (the syscall-exit
 yield) is committed as cdba6480, step 1 as 16172957, step 2 as
 fbec3547 (simplified by a second reviewer, reviewed again and re-gated
 with three release and three debug full-test runs), step 3 as
@@ -15,9 +15,24 @@ with three release and three debug full-test runs), step 3 as
 move into systest later), step 4 as 33646420 and step 5 as 1c79579b
 (between them, e1b39bab is a test-only fix for a pre-existing systest
 race that step 5's first gate attempt exposed, and 43c7fcd1 adds an
-AGENTS.md rule); step 6 is staged: its reviewed version passed three
-release and three debug full-test runs and awaits the commit. The rest
-of the tree is uncommitted.
+AGENTS.md rule) and step 6 as 4207b96e. Step 7 was revised in small patches under
+[Pager review fixes](spawn-pager-review-fixes.md), which records current
+findings and validation results. The copy-out permission fix is committed
+as 8fd24a9c and the wait-array failure policy as 4b4b60b9; the independent
+page-fault owner guard is committed as de5bc724. The typed-copy-error and
+page-zero retry patch is committed as 00c36c6c. The pager mapping component
+and failure-page validation are committed as 2d819cff. The remote-resume
+preparation and shared posting helper are committed as 6b160164. At the user's
+request, both thread methods stay in `process.rs`, the pager host tests are
+removed, and pager behavior coverage is native. The remaining kernel pager
+is committed as 28d79a39 with address-space-owned mapping state, atomic
+publication/retirement and safe fault completion. Step 8 is committed as
+06f8d9e9: read-only demand paging and its native integration tests. Each
+passed one full release and one full debug gate against its staged patch.
+Step 9, lazy relocation, is staged for review on 06f8d9e9 and has passed one
+full release and one full debug gate; its details are recorded below.
+This plan is staged with every
+patch from step 9 onward (user request, 2026-10-14). Steps 10 and 11 remain.
 
 The goal is to read, allocate, and relocate only the executable pages a
 program needs. On the prototype's host (nested KVM, so absolute times are
@@ -36,9 +51,9 @@ earlier plan are in
 Settled by the prototype or by review:
 
 - **A running executable cannot be deleted, renamed, or replaced** (user
-  decision, 2026-10-08). `src/tests/test-tui.sh` now ends the guest child
-  that its non-pty Ctrl+C check used to leak; that fix is in the working
-  tree and lands first.
+  decision, 2026-10-08). `src/tests/test-tui.sh` ends the guest child
+  that its non-pty Ctrl+C check used to leak; that prerequisite was committed
+  first, as 16172957.
 - **The parent writes the startup data.** sys-io's part ends when the
   stopped child exists; the parent writes `ProcessData`, arguments,
   environment, and stdio through the child's process handle, as it does
@@ -70,9 +85,11 @@ Settled by the prototype or by review:
   the caller's own address space fails with the new `E_PAGE_ABSENT`, the
   page's address in the first result word; moto-sys's `do_syscall` reads
   that page, which faults it in, and repeats the syscall. Callers never see
-  the refusal. This holds because every operation copies its inputs before
-  any side effect (the wait syscall now reads its handle array before it
-  wakes anyone) and the only copy-outs belong to side-effect-free queries.
+  the refusal. Retryable operations copy their inputs before any side
+  effect, and retryable copy-outs belong to side-effect-free queries. The
+  wait syscall retains its original wake-before-validation order; a failed
+  handle-array copy kills the calling process instead of returning a paging
+  retry (user decision, 2026-10-13).
   Copies into another process's memory, such as a debugger's, keep failing
   as for lazy memory. `mem.file_paged_syscall_misses` counts the retries.
 - **No force-eager selector** (user decision, 2026-10-09). sys-io loads
@@ -232,9 +249,15 @@ descriptors open on success and failure.
   (`E_BAD_HANDLE`) and ignored by sys-io.
 
 Bound service work and memory: one request per parked thread, a fixed
-cap on concurrent serves (32 windows of at most 32 pages, 4 MiB of
-buffers), allocation failures reported as fill failures, and the FS
-channel budgets for requests. The pager registry lock is not held across
+cap on concurrent serves (32 windows of at most 32 pages, 4 MiB of page
+buffers, plus at most 12 KiB of relocation records per serve), allocation
+failures reported as fill failures, and the FS channel budgets for requests.
+Each writable segment's relocation index is capped at 65,536 page entries
+(256 KiB, covering a 256 MiB destination span). A larger index, allocation
+failure while indexing, or a record number that cannot fit its `u32` entries
+selects eager data. Each index owns its vector directly and ends at that
+segment's last relocation; sparse BSS beyond it needs no entries.
+The pager registry lock is not held across
 I/O or frame allocation; the address-space region lock covers the absence
 check, allocation, and installation so overlapping fills cannot spend the
 same commitment twice. Every
@@ -439,15 +462,29 @@ larger ones are marked.
    predates these fixes; the reviewed index then passed its own, on
    1c79579b, 2026-10-13: three release runs (11.7, 9.9 and 10.0 min) and
    three debug runs (15.8, 15.7 and 15.7 min), the overlap regression
-   passing in each; no commit was made. End-to-end fill and fault race
-   coverage still waits for the pager integration.
+   passing in each; committed as 4207b96e. End-to-end fill and fault
+   race coverage followed with the pager integration in step 8.
 7. **Kernel, pager:** `uspace/pager.rs` (parking and resumption,
    coalescing, zero fills outside the registry lock, retirement at exit,
    drop, and unmap), the `OP_PAGER` syscall family and moto-sys wrappers,
    `E_PAGE_ABSENT` from user copies with the retry in `do_syscall`, the
-   handle-array copy ahead of the wake in the wait syscall, and the miss
+   wait syscall retaining wake-before-validation and killing the process on
+   an unusable handle array (user decision replacing copy-before-wake), and the miss
    metric, a per-CPU kernel counter read under `PID_KERNEL` like the
-   scheduler's. Lands with step 8, which carries its tests.
+   scheduler's. Committed in the review-fix series ending at 28d79a39;
+   step 8 carries its positive integration tests. The final implementation
+   owns mappings per address space, uses a lifetime guard around reservation,
+   fill and retirement, and publishes faults atomically with retirement.
+   The registry remains a field of `KernelAddressSpace` (no new static),
+   with one lock order across syscall, fault and teardown paths.
+   One systest, `test_pager_ops_need_sys_io`, checks
+   that the `OP_PAGER` family is refused for any caller but sys-io; the
+   paging tests stay with step 8, since nothing reserves a file-paged
+   segment before it. The initial gate on 4207b96e plus the index, 2026-10-13: one
+   release run (11.9 min, build included) and one debug run (15.8 min),
+   both passing, the new test passing in each; no developer-image run.
+   Each review-fix patch was then gated separately; the final kernel pager
+   passed one full release and one full debug run before commit.
 8. **sys-io demand paging of read-only segments:** the pager task, drain
    before refusing, mapping references, the adaptive window, bounded
    serves, the failed-fill metric. Tests: lock refusals while mapped,
@@ -456,12 +493,79 @@ larger ones are marked.
    thread while one is parked, concurrent launches with ordinary I/O
    beside them, a syscall buffer in an untouched page (the miss metric
    must grow), image contents, spawn under the memory floor.
+   Committed as `06f8d9e9`: the read-only pager and native coverage,
+   including page-zero syscall retry and high/custom-region eager loading.
+   Optional read-ahead falls back once to one page; retirement is revalidated
+   after asynchronous reads; fallback is a typed outcome, with ordinary errors
+   propagated. The dequeue cap and normal user-region end are shared with the
+   kernel. Failed buffer allocations return without constructing a buffer;
+   the existing read-only wait-array fixture is made resident before its call.
+   Final validation passed with one full release run (1.0 minutes preparation,
+   9.8 minutes testing) and one full debug run (0.1 minutes preparation,
+   21.0 minutes testing) against only the staged patch. Lazy relocation remains
+   step 9. Details, diagnosed earlier failures, and native test limits:
+   [pager review fixes](spawn-pager-review-fixes.md), Patch progress.
 9. **Lazy relocation** (larger patch): the validating pass and per-page
    index, clipped application, the zero tail, and the fallbacks. Tests:
    digests over relocated tables with page-crossing pointers and zeroed
    BSS; a copy of the test binary with two relocation records swapped
    (falls back to eager data, same digest); a record retargeted into
    unused read-only data (falls back to an eager image, same digest).
+   Staged for review on `06f8d9e9`. Writable segments use the pager only after all
+   relocation records validate; typed fallback preserves eager data for
+   unsorted or oversized indexes and an eager image for read-only targets.
+   Ordinary read, allocation and kernel errors remain errors. The scan uses
+   a `u64` record counter, with checked conversion only for index entries,
+   so very large tables cannot wrap or truncate it. Targets in mapped page
+   padding retain the eager loader's behavior. `spawn.scan_us` measures
+   the validating passes.
+
+   Review findings fixed in this patch: pages beyond `p_filesz` still need
+   relocations (the prototype returned before applying them); retirement
+   can release the file lock during an asynchronous table read, so each
+   read/yield rechecks the mapping before decoding and each destination end
+   uses checked addition. The final fill also rechecks retirement. Each
+   mapping owns its index directly, without an extra `Rc`, and its last
+   record bounds reads instead of the whole table's count. The index cap
+   and fallbacks above keep this work bounded.
+
+   Native coverage also appends a writable ELF segment with relocated BSS,
+   reads the upper half of a page-crossing relocation before its lower
+   half, checks a later BSS relocation and every other zero byte, and writes
+   the zero tail in two independent children. Pointer, string and function
+   tables and initialized/BSS data use opaque addresses so optimization
+   cannot replace the loads with constants. The read-only fallback moves
+   an unused pointer's record, preserving all data the digest checks.
+   Test statics are permitted where they simplify fixtures (user decision,
+   2026-10-14); no production static is added. All coverage runs through
+   the default systest suite in `full-test.sh`; no host tests are added.
+   The exit stress worker now faults through relocated tables; after each
+   exit the parent overwrites their destinations with `u64::MAX` and restores
+   the file for the next child. This exercises retirement followed by file
+   mutation, without forcing an exact overlap with a table read. A preliminary
+   release gate was stopped to add this missing coverage; it is not counted.
+   The first release attempt reaching guest tests stopped here: its fixture had
+   only read/execute permission, so the intended post-exit write was refused.
+   The filesystem's `Need::Write` check confirmed the test error. Both the
+   mutation fixture and the existing executable-lock fixture now allow writes;
+   the latter also truncates and writes successfully after the last exit, so
+   its write-refusal assertions cannot pass solely because of file permissions.
+   A second attempt exposed the fixture's direct `Rw -> Rwx` permission
+   change, which the own-role policy refuses; the helper now uses the supported
+   `Rw -> Rx -> Rwx` sequence. A focused native `systest cold-spawn` run then
+   passed every case, including the new BSS and retirement/mutation coverage.
+   Its runner first needed the normal stats-provider readiness check (sys-io
+   deliberately delays registration by one second) and a fresh upload path
+   because the previous SFTP upload was read-only. These runner corrections
+   are temporary files outside the patch, with no test assertions changed.
+   Original failure and diagnostic logs are retained under
+   `/tmp/motor-lazy-reloc.CEotev`.
+   Validation: the final release full-test run passed (0.9 minutes preparation,
+   9.8 minutes testing), as did one debug full-test run (0.2 minutes preparation,
+   21.5 minutes testing), against the staged code alone. Every cold-spawn case
+   passed in both profiles. Formatting and clippy passed with only existing
+   warnings. No developer-image run was requested for this patch. The patch
+   and this plan are staged; no commit was made.
 10. **mlibc** in **`../toolchain-src/mlibc`, outside this repository:**
     remove the startup relocation walk on Motor OS, where the loader has
     always applied `R_X86_64_RELATIVE`, and relink the developer-image
@@ -497,8 +601,10 @@ spawn under the memory floor refused with `E_OUT_OF_MEMORY` and leaving
 no lock behind.
 The parser's own unit tests join systest later, natively (user decision,
 2026-10-12), in place of the host-side test step 3 was gated with.
-systest's `checked_copy_in`
-covers a raw syscall given an untouched read-only static. `raw_spawn.rs`
+systest's `checked_copy_in` makes its read-only wait array resident first:
+the wait syscall kills a caller whose array is absent. The cold-spawn tests
+cover retryable syscall buffers in untouched pages, including page zero.
+`raw_spawn.rs`
 (step 2) covers the kernel alone, through the raw `address_space:` and
 `process:` URLs: `requester=` refused to a caller other than sys-io, a
 never-woken child's kill completing its exit (the wait returns, the
@@ -525,11 +631,13 @@ fills (no hook; add one only if cheap), and unmapping an executable's own
 segment from inside the process.
 
 Follow [AGENTS.md](../../AGENTS.md): standard Rust and native APIs,
-repository formatting, no new warnings, and at least three debug plus
-three release full-test build/runs before committing each core patch; the
-developer-image gate `src/tests/full-test-dev.sh --release` for the
-series. The reshaped tree's gate results are in the prototype report's
-section 4. No commits unless asked.
+repository formatting and no new warnings. The user's current workflow
+overrides the usual three-per-profile gate: run one debug and one release
+`full-test.sh` per patch, stage it together with this plan, and stop for
+review with a suggested one-line commit message. No commits unless asked.
+The developer-image gate, when run for the series, is release-only:
+`src/tests/full-test-dev.sh --release`. The reshaped tree's earlier gate
+results are in the prototype report's section 4.
 
 Measurement follows the archive's method and the prototype report's
 section 2: 50 alternating baseline/candidate pairs of the normal rustc

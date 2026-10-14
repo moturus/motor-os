@@ -67,8 +67,10 @@ impl ExecLocks {
 #[derive(Default)]
 pub(crate) struct SpawnStats {
     pub requests: Cell<u64>,
-    /// Microseconds spent building children, and installing their vDSOs.
+    /// Microseconds spent building children, in their relocation passes, and
+    /// installing their vDSOs.
     pub build_us: Cell<u64>,
+    pub scan_us: Cell<u64>,
     pub vdso_us: Cell<u64>,
 }
 
@@ -170,7 +172,8 @@ async fn read_vec(
     Ok(bytes)
 }
 
-/// The local R+W aliases of the child's segments, in address order.
+/// The local R+W aliases of the child's eagerly loaded segments, in address
+/// order, and the segments left to the pager.
 struct Aliases {
     regions: Vec<(elf::Segment, u64)>,
     paged: Vec<elf::Segment>,
@@ -239,20 +242,83 @@ async fn load_segment(
     read_range(runtime, role, entry, segment.offset, dst).await
 }
 
-/// One pass over the RELA table: validates every record and applies the
-/// `R_X86_64_RELATIVE` ones through the segment aliases. Images are linked
-/// at their run address, so the addend is the value.
-/// Returns false if a paged segment needs relocation and must be loaded eagerly.
+/// How the pager finds a lazily relocated page's records, built by one
+/// validating pass over the table at load: `first[i]` is the first record
+/// that may overlap page `i` (destination at least the page start minus 7);
+/// pages past the end of `first` start at `count`.
+pub(crate) struct RelocIndex {
+    pub table_offset: u64,
+    pub first: Vec<u32>,
+    /// One past this segment's last record, not the whole table's end.
+    pub count: u32,
+}
+
+/// The most pages a relocation index spans (256 MiB of relocated data); a
+/// larger span is loaded eagerly rather than indexed.
+const MAX_INDEXED_PAGES: usize = 65536;
+
+/// A writable segment being prepared for the pager.
+struct LazyData {
+    segment: elf::Segment,
+    first: Vec<u32>,
+    count: u32,
+    last_dst: u64,
+    /// One past the last byte any relocation writes.
+    reloc_end: u64,
+}
+
+impl LazyData {
+    fn new(segment: elf::Segment) -> Self {
+        Self {
+            segment,
+            first: Vec::new(),
+            count: 0,
+            last_dst: 0,
+            reloc_end: 0,
+        }
+    }
+
+    /// Indexes record `idx`; false if the segment's records are unsorted or
+    /// span too many pages to index.
+    fn add(&mut self, idx: u64, dst: u64) -> bool {
+        let Ok(count) = u32::try_from(idx + 1) else {
+            return false;
+        };
+        if dst < self.last_dst {
+            return false;
+        }
+        self.last_dst = dst;
+        self.count = count;
+        self.reloc_end = self.reloc_end.max(dst + 8);
+        let pages = self.segment.num_pages() as usize;
+        while self.first.len() < pages
+            && (self.segment.page_start() + self.first.len() as u64 * PAGE).saturating_sub(7) <= dst
+        {
+            if self.first.len() == MAX_INDEXED_PAGES || self.first.try_reserve(1).is_err() {
+                return false;
+            }
+            self.first.push(count - 1);
+        }
+        true
+    }
+}
+
+/// One pass over the RELA table: validates every record, applies those that
+/// land in eagerly loaded segments, and indexes those for lazily relocated
+/// ones. Images are linked at their run address, so the addend is the value.
+/// Returns a fallback plan when a segment cannot be served lazily.
 async fn scan_relocations(
     runtime: &FsRuntime,
     role: Role,
     entry: EntryId,
     relocations: &elf::Relocations,
     aliases: &Aliases,
-) -> Result<bool> {
+    lazy: &mut [LazyData],
+) -> Result<Option<Plan>> {
     const CHUNK: u64 = 2730 * elf::RELA_ENTRY_SIZE;
     let mut buf = try_zeroed(relocations.size.min(CHUNK) as usize)?;
     let mut done = 0;
+    let mut idx = 0_u64;
     while done < relocations.size {
         let len = (relocations.size - done).min(CHUNK);
         read_range(
@@ -273,21 +339,33 @@ async fn scan_relocations(
                 elf::R_X86_64_RELATIVE => {
                     if let Some(local) = aliases.local(dst, 8) {
                         unsafe { (local as usize as *mut u64).write_unaligned(addend) };
+                    } else if let Some(data) = lazy.iter_mut().find(|d| {
+                        dst >= d.segment.page_start()
+                            && dst
+                                .checked_add(8)
+                                .is_some_and(|end| end <= d.segment.page_end())
+                    }) {
+                        if !data.add(idx, dst) {
+                            return Ok(Some(Plan::PagedText));
+                        }
                     } else if aliases.paged.iter().any(|s| {
                         dst >= s.page_start()
                             && dst.checked_add(8).is_some_and(|end| end <= s.page_end())
                     }) {
-                        return Ok(false);
+                        // A relocated read-only page cannot be demand-paged
+                        // from the file: the caller loads the image eagerly.
+                        return Ok(Some(Plan::Eager));
                     } else {
                         return Err(ErrorKind::InvalidInput.into());
                     }
                 }
                 _ => return Err(ErrorKind::InvalidInput.into()),
             }
+            idx += 1;
         }
         done += len;
     }
-    Ok(true)
+    Ok(None)
 }
 
 /// The file's size, once the requester's role is allowed to run it.
@@ -304,6 +382,10 @@ async fn executable_size(runtime: &FsRuntime, role: Role, entry: EntryId) -> Res
     }
     Ok(metadata.size)
 }
+
+/// Files below this size are loaded eagerly: a demand fault costs more than
+/// copying a few pages up front.
+const PAGED_MIN_FILE: u64 = 1 << 20;
 
 /// Builds the child; returns sys-io's own handle to it and the number of the
 /// handle in the requester's table.
@@ -332,22 +414,20 @@ async fn build(
         }
         None => elf::Relocations::default(),
     };
-    // Small files cost less to copy up front. A read-only relocation also
-    // requires an eager image; only that explicit outcome selects fallback.
-    let space = match load_image(
-        runtime,
-        role,
-        req,
-        &image,
-        &relocations,
-        file_size >= 1 << 20,
-    )
-    .await?
-    {
-        Some(space) => space,
-        None => load_image(runtime, role, req, &image, &relocations, false)
-            .await?
-            .expect("an eager load applies every supported relocation"),
+
+    let mut plan = if file_size < PAGED_MIN_FILE {
+        Plan::Eager
+    } else {
+        Plan::PagedAll
+    };
+    // Images the paged plans cannot serve are rebuilt with a simpler plan:
+    // unsorted relocations need eager data, relocated read-only pages an
+    // eager image.
+    let space = loop {
+        match load_image(runtime, role, req, &image, &relocations, plan).await? {
+            Load::Ready(space) => break space,
+            Load::Fallback(next) => plan = next,
+        }
     };
 
     let vdso_started = moto_rt::time::Instant::now();
@@ -365,16 +445,30 @@ async fn build(
     Ok((RaiiHandle::from(own), theirs))
 }
 
+/// How the image is loaded.
+#[derive(Clone, Copy, PartialEq)]
+enum Plan {
+    Eager,
+    /// Read-only segments paged, writable ones eager.
+    PagedText,
+    /// Writable segments paged and relocated on demand too.
+    PagedAll,
+}
+
+enum Load {
+    Ready(RaiiHandle),
+    Fallback(Plan),
+}
+
 /// Creates the child's address space and loads the image into it.
-/// None requests an eager rebuild because a read-only segment needs relocation.
 async fn load_image(
     runtime: &FsRuntime,
     role: Role,
     req: &api_fs::SpawnRequest,
     image: &elf::Image,
     relocations: &elf::Relocations,
-    paged: bool,
-) -> Result<Option<RaiiHandle>> {
+    plan: Plan,
+) -> Result<Load> {
     let entry = req.entry_id;
     let space = RaiiHandle::from(
         SysObj::create(
@@ -387,18 +481,25 @@ async fn load_image(
         )
         .map_err(native)?,
     );
+
     let mut aliases = Aliases {
         regions: Vec::with_capacity(image.segments.len()),
         paged: Vec::new(),
     };
+    let mut lazy = Vec::new();
     for segment in &image.segments {
-        if paged
-            && !segment.writable
+        if plan != Plan::Eager
             && segment.congruent()
             && segment.page_end() <= moto_sys::USERSPACE_REGION_END
         {
-            aliases.paged.push(*segment);
-            continue;
+            if !segment.writable {
+                aliases.paged.push(*segment);
+                continue;
+            }
+            if plan == Plan::PagedAll {
+                lazy.push(LazyData::new(*segment));
+                continue;
+            }
         }
         load_segment(
             runtime,
@@ -410,11 +511,16 @@ async fn load_image(
         )
         .await?;
     }
-    if !scan_relocations(runtime, role, entry, relocations, &aliases).await? {
-        return Ok(None);
+    let scan_started = moto_rt::time::Instant::now();
+    let fallback = scan_relocations(runtime, role, entry, relocations, &aliases, &mut lazy).await?;
+    SpawnStats::add_us(&runtime.spawn_stats.scan_us, scan_started);
+    if let Some(plan) = fallback {
+        return Ok(Load::Fallback(plan));
     }
-    // Register immediately: if a later reserve/build fails, dropping the
-    // address space retires every mapping and releases its executable lock.
+
+    // Reserve paged segments only now that the image is known to be
+    // loadable this way. Each is registered at once: if the build fails
+    // later, dropping the address space retires it and releases its lock.
     for segment in &aliases.paged {
         let id = SysMem::pager_reserve(
             space.syshandle(),
@@ -426,9 +532,34 @@ async fn load_image(
         .map_err(native)?;
         runtime
             .pager
-            .add(id, pager::Mapping::new(entry, role, *segment));
+            .add(id, pager::Mapping::new(entry, role, *segment, None));
     }
-    Ok(Some(space))
+    for data in lazy {
+        let segment = data.segment;
+        let id = SysMem::pager_reserve(
+            space.syshandle(),
+            segment.page_start(),
+            segment.num_pages(),
+            true,
+            false,
+        )
+        .map_err(native)?;
+        let index = RelocIndex {
+            table_offset: relocations.offset,
+            first: data.first,
+            count: data.count,
+        };
+        runtime
+            .pager
+            .add(id, pager::Mapping::new(entry, role, segment, Some(index)));
+        // Pages past both the file bytes and every relocation are zeros.
+        let file_end = (segment.vaddr + segment.filesz).next_multiple_of(PAGE);
+        let zero_from = file_end.max(data.reloc_end.next_multiple_of(PAGE));
+        if zero_from < segment.page_end() {
+            SysMem::pager_zero_from(id, zero_from).map_err(native)?;
+        }
+    }
+    Ok(Load::Ready(space))
 }
 
 pub(super) async fn on_cmd_spawn(
