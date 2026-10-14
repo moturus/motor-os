@@ -1,4 +1,5 @@
 //! This module handles SysObj syscalls. For SysObject, go to sysobject.rs.
+use crate::mm::user_copy::UserCopyError;
 use crate::mm::PageType;
 
 use super::syscall::*;
@@ -13,9 +14,9 @@ fn get_url(
     owner: &super::process::Process,
     bytes_addr: u64,
     bytes_len: u64,
-) -> Result<String, ErrorCode> {
+) -> Result<String, UserCopyError> {
     if bytes_len > crate::config::MAX_URL_SIZE {
-        return Err(moto_rt::E_INVALID_ARGUMENT);
+        return Err(moto_rt::E_INVALID_ARGUMENT.into());
     }
 
     let bytes = owner
@@ -402,9 +403,9 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
 
             let url = match get_url(thread.owner().as_ref(), args.args[1], args.args[2]) {
                 Ok(url) => url,
-                Err(_) => {
+                Err(err) => {
                     log::debug!("SysHandle::GET: failed to parse URL");
-                    return ResultBuilder::invalid_argument();
+                    return err.into_syscall_result(thread.owner().address_space());
                 }
             };
 
@@ -439,9 +440,12 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
                 return ResultBuilder::invalid_argument();
             }
 
-            let Ok(url) = get_url(thread.owner().as_ref(), args.args[1], args.args[2]) else {
-                log::debug!("SysHandle::GET: failed to parse URL");
-                return ResultBuilder::invalid_argument();
+            let url = match get_url(thread.owner().as_ref(), args.args[1], args.args[2]) {
+                Ok(url) => url,
+                Err(err) => {
+                    log::debug!("SysHandle::GET: failed to parse URL");
+                    return err.into_syscall_result(thread.owner().address_space());
+                }
             };
 
             match sys_handle_get(thread, parent, &url) {

@@ -138,11 +138,52 @@ pub(crate) fn pack_nr_ver(syscall_number: u8, operation: u8, flags: u32, version
         | (version as u64)
 }
 
+#[cfg(any(feature = "userspace", test))]
+const MAX_ABSENT_PAGE_RETRIES: u32 = 4096;
+
+#[cfg(any(feature = "userspace", test))]
+fn retry_absent_pages(
+    mut syscall: impl FnMut() -> SyscallResult,
+    mut fault_page: impl FnMut(u64),
+) -> SyscallResult {
+    let mut retries = 0;
+    loop {
+        let result = syscall();
+        if result.result != moto_rt::E_PAGE_ABSENT as u64 || retries == MAX_ABSENT_PAGE_RETRIES {
+            return result;
+        }
+        fault_page(result.data[0]);
+        retries += 1;
+    }
+}
+
+/// Fault in absent caller buffers and retry. The kernel issues this refusal
+/// only where retrying is safe. Return the last refusal if the bound is reached.
+#[cfg(feature = "userspace")]
+pub fn do_syscall(
+    nr_ver: u64,
+    arg0: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+) -> SyscallResult {
+    retry_absent_pages(
+        || raw_syscall(nr_ver, arg0, arg1, arg2, arg3, arg4, arg5),
+        |page| unsafe {
+            // A Rust pointer read requires a non-null pointer; page zero is a
+            // valid file mapping. Assembly also prevents eliding the access.
+            core::arch::asm!("test byte ptr [{page}], 0", page = in(reg) page, options(nostack, readonly));
+        },
+    )
+}
+
 // standard arguments: rdi, rsi, rdx, rcx, r8, r9
 // our syscall arguments: rdi, rsi, rdx, r10, r8, r9
 #[cfg(feature = "userspace")]
 #[inline(never)]
-pub fn do_syscall(
+fn raw_syscall(
     nr_ver: u64,
     arg0: u64,
     arg1: u64,
@@ -185,4 +226,66 @@ pub fn do_syscall(
     data[5] = val5;
 
     SyscallResult { result: rax, data }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_page_zero_is_touched_before_retry() {
+        let mut calls = 0;
+        let touched = core::cell::Cell::new(false);
+        let result = retry_absent_pages(
+            || {
+                calls += 1;
+                assert_eq!(touched.get(), calls > 1);
+                SyscallResult {
+                    result: if calls == 1 {
+                        moto_rt::E_PAGE_ABSENT as u64
+                    } else {
+                        0
+                    },
+                    data: [0; 6],
+                }
+            },
+            |page| {
+                assert_eq!(page, 0);
+                touched.set(true);
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn absent_page_retries_are_bounded() {
+        let mut calls = 0;
+        let mut touches = 0;
+        let result = retry_absent_pages(
+            || {
+                calls += 1;
+                SyscallResult {
+                    result: moto_rt::E_PAGE_ABSENT as u64,
+                    data: [4096; 6],
+                }
+            },
+            |page| {
+                assert_eq!(page, 4096);
+                touches += 1;
+            },
+        );
+        assert_eq!(result.error_code(), moto_rt::E_PAGE_ABSENT);
+        assert_eq!(calls, MAX_ABSENT_PAGE_RETRIES + 1);
+        assert_eq!(touches, MAX_ABSENT_PAGE_RETRIES);
+
+        let ordinary = retry_absent_pages(
+            || SyscallResult {
+                result: moto_rt::E_INVALID_ARGUMENT as u64,
+                data: [4096; 6],
+            },
+            |_| panic!("ordinary errors must not fault or retry"),
+        );
+        assert_eq!(ordinary.error_code(), moto_rt::E_INVALID_ARGUMENT);
+    }
 }

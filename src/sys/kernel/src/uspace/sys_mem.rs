@@ -408,7 +408,7 @@ fn copy_stats_to_user<T>(
         let src: &[u8] =
             core::slice::from_raw_parts(stats as *const _ as *const u8, core::mem::size_of::<T>());
         if let Err(err) = thread.owner().address_space().copy_to_user(src, user_ptr) {
-            return ResultBuilder::result(err);
+            return err.into_syscall_result(thread.owner().address_space());
         }
     }
 

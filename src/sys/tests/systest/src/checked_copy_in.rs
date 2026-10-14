@@ -191,6 +191,17 @@ pub fn run_all_tests() {
     }
     assert_copied(lazy.0, bad_handle);
     assert_eq!(SysMem::virt_to_phys(lazy.0 + PAGE_SIZE_SMALL), Err(invalid));
+    let absent = lazy.0 + PAGE_SIZE_SMALL;
+    // Anonymous lazy pages are ordinary copy errors, never pager retries.
+    assert_eq!(write_usage(absent).error_code(), invalid);
+    assert_eq!(SysCpu::get_percpu_stats_v1(absent), Err(invalid));
+    let get_object =
+        (u64::from(moto_sys::syscalls::SYS_OBJ) << 56) | (u64::from(SysObj::OP_GET) << 48);
+    assert_eq!(
+        do_syscall(get_object, SysHandle::SELF.as_u64(), absent, 1, 0, 0, 0).error_code(),
+        invalid
+    );
+    assert_eq!(SysMem::virt_to_phys(absent), Err(invalid));
     println!("checked_copy_in PASS");
     test_copy_out_permissions();
     test_bad_wait_arrays();

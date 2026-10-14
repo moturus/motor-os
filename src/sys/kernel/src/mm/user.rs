@@ -2,6 +2,7 @@ use core::sync::atomic::*;
 
 use alloc::sync::Arc;
 
+use super::user_copy::UserCopyError;
 use super::{virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 use crate::mm::{MappingOptions, PAGE_SIZE_MID};
 use crate::xray::stats::MemStats;
@@ -646,7 +647,7 @@ impl UserAddressSpace {
         self.inner.fix_pagefault(pf_addr, error_code)
     }
 
-    pub fn copy_to_user(&self, bytes: &[u8], user_vaddr_start: u64) -> Result<(), ErrorCode> {
+    pub fn copy_to_user(&self, bytes: &[u8], user_vaddr_start: u64) -> Result<(), UserCopyError> {
         self.copy_to_user_impl(bytes, user_vaddr_start, MappingOptions::WRITABLE)
     }
 
@@ -661,6 +662,7 @@ impl UserAddressSpace {
         user_vaddr_start: u64,
     ) -> Result<(), ErrorCode> {
         self.copy_to_user_impl(bytes, user_vaddr_start, MappingOptions::READABLE)
+            .map_err(Into::into)
     }
 
     fn copy_to_user_impl(
@@ -668,7 +670,7 @@ impl UserAddressSpace {
         bytes: &[u8],
         user_vaddr_start: u64,
         access: MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), UserCopyError> {
         let stats = crate::xray::stats::kernel_stats_ref();
         stats.adjust_metric(crate::xray::stats::MetricType::UserCopyWrite, 1);
         stats.adjust_metric(
@@ -706,11 +708,8 @@ impl UserAddressSpace {
         &self,
         addr: u64,
         access: MappingOptions,
-    ) -> Result<PinnedUserPage, ErrorCode> {
-        let (frame, offset) = self
-            .inner
-            .pin_user_page(addr, access)
-            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+    ) -> Result<PinnedUserPage, UserCopyError> {
+        let (frame, offset) = self.inner.pin_user_page(addr, access)?;
         Ok(PinnedUserPage { frame, offset })
     }
 
@@ -718,9 +717,9 @@ impl UserAddressSpace {
         &self,
         user_page_addr: u64,
         access: MappingOptions,
-    ) -> Result<PinnedUserPage, ErrorCode> {
+    ) -> Result<PinnedUserPage, UserCopyError> {
         if user_page_addr & (PAGE_SIZE_SMALL - 1) != 0 {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         self.pin_user_page(user_page_addr, access)
     }
@@ -729,13 +728,17 @@ impl UserAddressSpace {
         &self,
         vaddr_start: u64,
         count: u64,
-    ) -> Result<alloc::vec::Vec<u8>, ErrorCode> {
+    ) -> Result<alloc::vec::Vec<u8>, UserCopyError> {
         let mut result = alloc::vec![0; count as usize];
         self.read_from_user_into(vaddr_start, result.as_mut_slice())?;
         Ok(result)
     }
 
-    pub fn read_from_user_into(&self, vaddr_start: u64, buf: &mut [u8]) -> Result<(), ErrorCode> {
+    pub fn read_from_user_into(
+        &self,
+        vaddr_start: u64,
+        buf: &mut [u8],
+    ) -> Result<(), UserCopyError> {
         let stats = crate::xray::stats::kernel_stats_ref();
         stats.adjust_metric(crate::xray::stats::MetricType::UserCopyRead, 1);
         stats.adjust_metric(
@@ -744,6 +747,10 @@ impl UserAddressSpace {
         );
 
         self.inner.page_table_ref().copy_from_user(vaddr_start, buf)
+    }
+
+    pub(super) fn is_file_page(&self, addr: u64) -> bool {
+        self.inner.with_file_segment(addr, |_| Ok(())).is_ok()
     }
 
     pub fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {

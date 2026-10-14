@@ -3,6 +3,7 @@ use crate::util::UnsafeRef;
 use crate::{mm::phys::*, util::SpinLock};
 use core::{arch::asm, sync::atomic::AtomicBool};
 
+use crate::mm::user_copy::UserCopyError;
 use moto_sys::ErrorCode;
 
 // The full physical memory is mapped to [DIRECT_MAP_OFFSET, *)
@@ -199,28 +200,30 @@ struct PageTableImpl {
 }
 
 impl PageTableImpl {
-    fn user_phys_addr(&self, virt_addr: u64) -> Option<u64> {
+    fn user_phys_addr(&self, virt_addr: u64) -> Result<u64, UserCopyError> {
         let mut table = &*self.table_l4;
         for shift in [39, 30, 21, 12] {
             let pte = table.get((virt_addr >> shift) & 511);
-            let required = PTE::PRESENT | PTE::USER;
-            if pte.entry & required != required {
-                return None;
+            if !pte.is_present() {
+                return Err(UserCopyError::PageAbsent(virt_addr));
+            }
+            if pte.entry & PTE::USER == 0 {
+                return Err(moto_rt::E_INVALID_ARGUMENT.into());
             }
             if shift == 12 || (shift != 39 && pte.is_huge_page()) {
                 // Device mappings are not buffers for kernel copies.
                 if pte.entry & (PTE::WRITE_THROUGH | PTE::CACHE_DISABLE) != 0 {
-                    return None;
+                    return Err(moto_rt::E_INVALID_ARGUMENT.into());
                 }
                 let mask = (1 << shift) - 1;
-                return Some((pte.get_addr() & !mask) + (virt_addr & mask));
+                return Ok((pte.get_addr() & !mask) + (virt_addr & mask));
             }
             if pte.is_huge_page() {
-                return None; // No level-4 leaf in four-level paging.
+                return Err(moto_rt::E_INVALID_ARGUMENT.into()); // No level-4 leaf.
             }
             table = HwPageTable::from_pte(pte);
         }
-        None
+        Err(moto_rt::E_INVALID_ARGUMENT.into())
     }
 
     #[cfg(debug_assertions)]
@@ -929,7 +932,11 @@ impl PageTable {
         unsafe { self.inst.get().lock(line!()).leaf_kind(virt_addr) }
     }
 
-    pub fn copy_from_user(&self, mut virt_addr: u64, mut buf: &mut [u8]) -> Result<(), ErrorCode> {
+    pub fn copy_from_user(
+        &self,
+        mut virt_addr: u64,
+        mut buf: &mut [u8],
+    ) -> Result<(), UserCopyError> {
         if buf.is_empty() {
             return Ok(());
         }
@@ -938,13 +945,11 @@ impl PageTable {
             .checked_add(buf.len() as u64)
             .is_none_or(|end| end > (1 << 47))
         {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         while !buf.is_empty() {
             let page_table = unsafe { self.inst.get() }.lock(line!());
-            let phys_addr = page_table
-                .user_phys_addr(virt_addr)
-                .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+            let phys_addr = page_table.user_phys_addr(virt_addr)?;
             let size = buf
                 .len()
                 .min((PAGE_SIZE_SMALL - (virt_addr & (PAGE_SIZE_SMALL - 1))) as usize);

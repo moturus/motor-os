@@ -668,13 +668,8 @@ fn sys_cpu_usage_impl(curr: &super::process::Thread, args: &mut SyscallArgs) -> 
             usage.len() * core::mem::size_of::<f32>(),
         );
 
-        if curr
-            .owner()
-            .address_space()
-            .copy_to_user(bytes, addr)
-            .is_err()
-        {
-            return ResultBuilder::invalid_argument();
+        if let Err(err) = curr.owner().address_space().copy_to_user(bytes, addr) {
+            return err.into_syscall_result(curr.owner().address_space());
         }
     }
 
@@ -718,14 +713,13 @@ fn sys_query_percpu_stats(curr: &super::process::Thread, args: &mut SyscallArgs)
     }
 
     let user_page_addr = args.args[0];
-    let page_addr = if let Ok(addr) = curr
+    let page_addr = match curr
         .owner()
         .address_space()
         .get_user_page_as_kernel(user_page_addr, crate::mm::MappingOptions::WRITABLE)
     {
-        addr
-    } else {
-        return ResultBuilder::invalid_argument();
+        Ok(addr) => addr,
+        Err(err) => return err.into_syscall_result(curr.owner().address_space()),
     };
 
     let num_entries = crate::xray::stats::fill_percpu_stats_page(page_addr.kernel_addr() as usize);

@@ -184,8 +184,10 @@ pub enum MetricType {
     /// Syscalls that gave the CPU to the scheduler loop before returning,
     /// because a tick or a wake landed on the CPU while they ran.
     SchedSyscallExitYields = 77,
+    /// Syscall refusals naming an absent page in the caller's file mapping.
+    FilePagedSyscallMisses = 78,
 
-    TotalMetricTypes = 78,
+    TotalMetricTypes = 79,
 }
 
 impl MetricType {
@@ -286,6 +288,7 @@ impl MetricType {
             MetricType::MemHugeFallbacks => "mem.huge_fallbacks",
             MetricType::MemCommittedPages => "mem.committed_pages",
             MetricType::SchedSyscallExitYields => "sched.syscall_exit_yields",
+            MetricType::FilePagedSyscallMisses => "mem.file_paged_syscall_misses",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }

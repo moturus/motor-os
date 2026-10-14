@@ -299,9 +299,16 @@ impl VmemRegion {
         VaddrMapStatus::Unallocated
     }
 
-    fn pin_user_page(&self, addr: u64, access: MappingOptions) -> Option<(SlabArc<Frame>, u64)> {
+    fn pin_user_page(
+        &self,
+        addr: u64,
+        access: MappingOptions,
+    ) -> Result<(SlabArc<Frame>, u64), super::user_copy::UserCopyError> {
         let segments = self.used_segments.lock(line!());
-        segments.find(addr)?.pin_user_page(addr, access)
+        segments
+            .find(addr)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?
+            .pin_user_page(addr, access)
     }
 
     #[allow(unused)]
@@ -1007,13 +1014,13 @@ impl UserAddressSpaceBase {
         &self,
         addr: u64,
         access: MappingOptions,
-    ) -> Option<(SlabArc<Frame>, u64)> {
+    ) -> Result<(SlabArc<Frame>, u64), super::user_copy::UserCopyError> {
         match addr {
             0..=VMEM_USER_END => self.normal_memory.pin_user_page(addr, access),
             moto_sys::CUSTOM_USERSPACE_REGION_START..=moto_sys::CUSTOM_USERSPACE_REGION_END => {
                 self.custom_memory.pin_user_page(addr, access)
             }
-            _ => None,
+            _ => Err(moto_rt::E_INVALID_ARGUMENT.into()),
         }
     }
 

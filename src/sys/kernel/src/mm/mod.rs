@@ -10,6 +10,7 @@ pub mod phys;
 pub(crate) mod phys_blocks;
 mod slab;
 pub mod user;
+pub mod user_copy;
 pub mod virt;
 mod virt_intrusive;
 

@@ -15,6 +15,7 @@ use core::sync::atomic::Ordering;
 
 use super::phys::Frame;
 use super::slab::SlabArc;
+use super::user_copy::UserCopyError;
 use super::virt::VaddrMapStatus;
 use super::{MappingOptions, MemorySegment, PAGE_SIZE_SMALL};
 
@@ -335,23 +336,34 @@ impl VmemSegment {
         &self,
         vmem_addr: u64,
         access: MappingOptions,
-    ) -> Option<(SlabArc<Frame>, u64)> {
-        let page = self.find_page(vmem_addr)?;
+    ) -> Result<(SlabArc<Frame>, u64), UserCopyError> {
+        let Some(page) = self.find_page(vmem_addr) else {
+            if self
+                .mapping_options
+                .contains(access | MappingOptions::USER_ACCESSIBLE)
+            {
+                return Err(UserCopyError::PageAbsent(vmem_addr));
+            }
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
+        };
         // Direct-map accesses bypass PTE protection; check the page's rights
         // while the caller holds the region lock, before acquiring the pin.
         if !page
             .mapping_options
             .contains(access | MappingOptions::USER_ACCESSIBLE)
         {
-            return None;
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
-        let frame = page.frame.get()?;
+        let frame = page
+            .frame
+            .get()
+            .ok_or(UserCopyError::PageAbsent(vmem_addr))?;
         if frame.is_mmio() {
-            return None;
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         // The caller holds the region lock, so unmap cannot release the
         // mapping's last reference while this owning reference is acquired.
-        Some((page.frame.clone(), vmem_addr - page.start))
+        Ok((page.frame.clone(), vmem_addr - page.start))
     }
 
     pub(super) fn unmap(mut self) -> u64 {

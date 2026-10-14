@@ -107,7 +107,7 @@ pub(super) fn get_for_process(
         Ok(page) => page,
         Err(err) => {
             log::error!("The serial console control block is not mapped: {err:?}");
-            return Err(err);
+            return Err(err.into());
         }
     };
     // Use the logging lock order, and recheck ownership under the lock so
