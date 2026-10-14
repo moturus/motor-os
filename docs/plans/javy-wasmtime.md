@@ -2,22 +2,47 @@
 
 Promote the prototype into maintained forks in small, tested milestones.
 Preserve working engine/platform integrations and regressions; replace
-fixture-specific helpers with shared production code. Milestones 0 and 1 are
-delivered: the six maintained Motor branches are published, and Javy/Wasmi
-build through the normal add-on workflow, ship in the developer and small wasm
-images, and pass their installed-tool checks on both images at 256 and 224 MiB.
-Milestone 1 still needs the delivery/runner corrections found in the
-[2026-10-08 review](#review-findings-2026-10-08) and its specialized coverage.
-The toolchain correction (1j) precedes Wasmtime delivery because 2a copies the
-same build pattern; the evidence-directory lock (1l) precedes 2f, which reuses
-the test driver; the runner corrections (1k) are independent of Wasmtime.
-Wasmtime delivery, HTTP serving and native packaging are ahead.
+fixture-specific helpers with shared production code. Milestones 0–2 are
+delivered: the maintained Motor branches are published, and Javy/Wasmi and the
+runtime-only `wasmtime-rt` build through the normal add-on workflow, ship in
+the developer and small wasm images, and pass their installed-tool checks on
+both images at 256 and 224 MiB. HTTP serving (milestone 3) and the full
+compiler with native packaging (milestone 4) are ahead; see
+[Status and resume point](#status-and-resume-point-2026-10-14).
 
 This document records the requirements, the design contracts, a short account
 of the completed work and the detailed plan for the milestones ahead. The
 settled points of the earlier plan reviews are folded in. The
 [execution record](javy-wasi-prototype.md) retains diagnostics, failed
 experiments, source snapshots and reproduction details.
+
+## Status and resume point (2026-10-14)
+
+Everything needed to resume is published; evidence under `build/` is
+host-local and not required.
+
+- **Forks:** `moturus/javy` `motor-9.1.0` at `3dc8be1` and `moturus/wasmtime`
+  `motor-48.0.1` at `75d22026a`; the other Motor branches are unchanged since
+  milestone 2. Tree work is on the `wasm` branch.
+- **First step: gate the published heads.** The last gated add-on predates
+  Wasmtime `75d22026a`, whose lifecycle fixture export `ready-loop` the
+  `wasmtime-smoke` Ctrl-C and parent-exit checks (tree `68121417`) need; they
+  passed only against a hand-copied fixture. Run
+  `src/build-motor-os.sh --javy-only --wasmtime-only` (the Javy add-on's
+  source manifest names the Wasmtime head, so rebuild both), then
+  `make dev.img wasm.img BUILD=release`, `src/tests/test-wasm.sh --prepare`,
+  `src/tests/test-wasm.sh --vmm qemu`, `src/tests/test-wasm.sh --vmm chv` and
+  `src/tests/full-test-dev.sh --release`. The previous gate took 386 s (QEMU),
+  390 s (Cloud Hypervisor) and 1,798 s (`full-test-dev.sh`), with TypeScript
+  compile peaks of 200.6–204.2 MiB at 224 MiB.
+- **Then milestone 3**, starting with 3a. Its measurements, the decisions taken
+  and the one open decision are under
+  [Milestone 3](#milestone-3-httphttps-and-opt-in-p3). The kernel cost of lazy
+  reservations behind the memory limits is in [lazy-memory.md](lazy-memory.md).
+- **Working rules from the owner:** commit messages are one line with no
+  trailers, in this tree and in the forks; the owner pushes fork branches; the
+  `moturus/javy` fork takes code only; stop for review before any change under
+  `src/sys`, to moto-rt or to the toolchain; run `full-test-dev.sh` release-only.
 
 ## Deliverables and constraints
 
@@ -305,14 +330,17 @@ contract governs it and the later Wasmtime integration:
   reservation/guard contract and retain explicit bounds checks.
 - `F_LAZY` is a hint, and lazy mappings are already in production use:
   `moto_rt_vm_map` in `moto-rt-cabi` maps with `F_LAZY` for the C runtime, so
-  Binaryen depends on it and systest covers lazy admission. Descriptors require
-  roughly 1/32 of reserved size plus a fixed admission allowance, while the full
-  reservation counts against the process's accounted cap. These charges are not
-  RSS; a 256 MiB reservation needs about 8 MiB of descriptor allowance before
-  data faults. The native per-process cap (`DEFAULT_MAX_USER_MEMORY` in
-  `src/sys/kernel/src/config.rs`) is `u64::MAX`, so accounting is not an
-  effective quota; map-time admission and fault-time physical admission are the
-  binding native limits.
+  Binaryen depends on it and systest covers lazy admission. Mapping needs
+  roughly 1/32 of the reserved size free (plus a fixed allowance) while the call
+  runs, and the kernel creates a page descriptor per reserved page at map time:
+  a reservation holds about 1.8% of its size in kernel memory whether or not it
+  is touched (1.75 MiB per 96 MiB), and the process keeps those descriptors
+  until it exits, even after unmapping; measured in
+  [lazy-memory.md](lazy-memory.md). The full reservation also counts against
+  the process's accounted cap (`DEFAULT_MAX_USER_MEMORY` in
+  `src/sys/kernel/src/config.rs`), which is `u64::MAX` and so not an effective
+  quota; map-time admission and fault-time physical admission are the binding
+  native limits.
 - Fault-time physical exhaustion terminates the faulting thread and therefore
   its process (`src/sys/kernel/src/uspace/process.rs`); it cannot return a
   growth error. Test bounded-growth failure separately from fault
@@ -900,7 +928,9 @@ Status 2026-10-08: 2a is delivered; 2b, 2c, 2e and 2g are implemented as
 `moturus/wasmtime` commits `e0e9548fb..146853f2f`, published, and were
 qualified with locally built binaries on both images at 224 MiB (evidence in
 `build/wasm-milestone2/`). 2d is done and 2f is partly done (below); since
-2026-10-09 the delivered add-on passes the matrix under both VMMs.
+2026-10-09 the delivered add-on passes the matrix under both VMMs. Since
+2026-10-11 all items are done; only the gate of the published `75d22026a` in
+[the resume point](#status-and-resume-point-2026-10-14) remains.
 
 - **2b:** owned lazy reservations (96 MiB per memory, 128 MiB and four per
   process) back every memory; `memory-check` grew a memory to the limit in
@@ -1081,6 +1111,59 @@ pinned versions and untouched.
 Deliver `serve` on the runtime-only build, with bounded resources and the
 experimental p3 path behind `-S p3`.
 
+**Status 2026-10-14: measurements and decisions.** Nothing for milestone 3 is
+committed yet. The measurements used the published runtime on the wasm image
+at 224 MiB, upstream serve test programs precompiled like the 2d/2f fixtures
+(p2 `p2_cli_serve_hello_world`, `p2_cli_serve_sleep`, `p2_api_proxy_streaming`;
+p3 `p3_cli_serve_hello_world`, `p3_http_echo`, `p3_cli_serve_sleep`) and an
+out-of-tree load client that 3f's in-crate client replaces.
+
+- **Flags.** p2 serving needs `-Scli`; p3 needs
+  `-Wcomponent-model-async -Sp3,cli`.
+- **Memory limits block concurrency.** p2 creates an instance per request, and
+  a memory without a declared maximum reserves the full 96 MiB, counted in full
+  against the 128 MiB process total, so any second concurrent p2 request gets
+  HTTP 500 ("Wasm memory reservation limits reached"). p3 reuses an instance
+  for 128 requests (16 at once) and served 8 concurrent clients, but 7 of 400
+  requests failed while a retiring instance overlapped its replacement. Echoes
+  of 2 and 8 MiB work under p2 and p3 when the client writes and reads
+  concurrently. One p2 hello request costs about 4.5 MiB of VM memory.
+- **Prototype.** Counting the total against grown size (a new memory charged
+  its initial size, each growth its increase, a growth past the total failing
+  `memory.grow`, a drop returning the current size) with 16 memories served
+  8 concurrent p2 requests (+7–10 MiB), 8 × 2 MiB p2 echoes, 400 p3 requests
+  without failure and 32 staggered p3 echoes. It is about 15 lines in the
+  fork's `src/motor_memory.rs` and is not committed.
+- **Decided by the owner, 2026-10-14:** keep 96 MiB per memory and four
+  memories per process. Origins: 96 MiB is the prototype's TypeScript compile
+  (68.7 MiB final guest memory; 64 MiB was too small) plus headroom; 128 MiB
+  and four have no recorded derivation (Javy `779bb76`, copied in 2b) and suit
+  one large memory per process.
+- **Open: the 128 MiB total.** Either count it against grown size as in the
+  prototype (recommended: a guest that exceeds it fails one request) or drop
+  it (or cap each memory at the VM's RAM with no total), in which case a guest
+  that exhausts memory kills the server when a page fault is refused. Removing
+  every limit is not viable with today's kernel: a 4 GiB lazy reservation
+  holds 74.5 MiB ([lazy-memory.md](lazy-memory.md)). With four memories p2
+  serves at most four requests at once, assuming one memory per instance
+  (unverified), and a server keeps about 1.75 MiB of kernel descriptors per
+  memory of its busiest moment until it exits.
+- **Bound requests, not connections.** Upstream defaults both
+  `--max-concurrent-requests` and `--max-concurrent-connections` to 1,000. The
+  request bound makes extra requests wait after accept; the connection bound
+  holds accepts back, and below 256 MiB sys-io queues only 8 completed
+  connections per listener (`docs/networking.md`) and resets the rest. Upstream
+  `serve` accepts continuously, so only simultaneous connect bursts overflow:
+  16 clients connecting at once lost 6 to resets, while 16 or 32 spread 5 ms
+  apart lost none, and a native std server behaves the same. 3a bounds
+  requests; 3f's client spreads its connects or keeps bursts at 8 or fewer.
+- **Other inputs to 3a.** Fiber stacks are eight 2 MiB slots charged about
+  4 MiB each; their sizing for serving is open. Each closed connection holds
+  about 130 KiB in sys-io for 10 s (TIME-WAIT, a P2 in `future-work.md`), which
+  bounds sustained connection rates on small VMs. Drivers should let servers
+  inherit their stdio: a None child cannot write a file that rush redirected
+  for it without `CAP_FS_WRITE` (`docs/caps.md`).
+
 1. **3a — HTTP resource defaults.** Extend milestone 2's finite command defaults
    with request, body/buffer and serving-concurrency limits; size the stack pool
    for the intended concurrency and wire epoch deadlines. Measure aggregate
@@ -1164,18 +1247,18 @@ image and the developer image within the RAM and disk requirements.
 
 ### Order and prerequisites
 
-Recommended next steps: complete 1j, then start 2a/2b; do 1k and 1l alongside,
-publishing the fork fixes and qualifying the installed Javy/Wasmi matrix. Retain
-one image-matrix driver and use the common acceptance rules above for every
-milestone. Keep Wasmtime engine regressions in its fork; Javy/Wasmi regressions
-live in `javy-smoke`.
+Recommended next steps: gate the published fork heads as in
+[the resume point](#status-and-resume-point-2026-10-14), settle the 128 MiB
+total, then 3a, 3b and 3f, with 3c–3e after them; 4a and 4c can proceed in the
+fork alongside. Retain one image-matrix driver and use the common acceptance
+rules above for every milestone. Keep Wasmtime engine regressions in its fork;
+Javy/Wasmi regressions live in `javy-smoke`.
 
 | Milestone | Starts after |
 | --- | --- |
-| 1 review corrections (1j–1l) | Next work; small patches with regressions, followed by published-source delivery and the installed-tool matrix. 1k is independent of milestones 2–4. |
-| 1 remaining qualification (1f–1i) | Independent items; may proceed alongside milestones 2–4 after the review corrections. |
-| 2 | 2a after 1j; 2b–2e can proceed alongside 2a; 2g uses 2b/2e measurements; 2f needs 1l, and its acceptance requires 2b–2e, 2g and the Pulley disposition. |
-| 3 | Milestone 2 exit, including qualified stacks and the `run` lifecycle checks. |
+| 1 | Done 2026-10-09. |
+| 2 | Done; the gate of the published `75d22026a` remains. |
+| 3 | That gate and the decision on the 128 MiB total; 3a precedes 3f. |
 | 4 | 4a and 4c can start in the fork after 2a; 4b, 4d–4f need the milestone 3 host and the milestone 2 template. |
 
 Production changes follow [AGENTS.md](../../AGENTS.md). Application changes use
