@@ -52,12 +52,16 @@ fn process_wait_handles<'a>(
         };
         let dst_bytes =
             unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 8) };
-        if let Err(err) = curr
+        if curr
             .owner()
             .address_space()
             .read_from_user_into(h_ptr, dst_bytes)
+            .is_err()
         {
-            return Err(ResultBuilder::result(err));
+            // Do not retry a bad buffer after delivering the wake. Defer death
+            // to syscall exit so the caller can release its switch claim.
+            curr.owner().die();
+            return Err(ResultBuilder::invalid_argument());
         }
         dst
     } else {
@@ -181,10 +185,8 @@ fn process_wake_handles(
 
     // The whole array is written back (wakers, then zero fill) exactly as
     // before, but batched through a stack buffer — not one spinlocked page
-    // walk per 8-byte slot. A failed write (e.g. another thread of the
-    // process unmapped the array mid-wait) fails the call instead of
-    // panicking the kernel; the already-consumed wakes are lost, which is
-    // the caller's own contract violation.
+    // walk per 8-byte slot. If the caller unmapped the array mid-wait or
+    // supplied read-only memory, kill its process at syscall exit.
     const CHUNK: usize = 64;
     let mut chunk = [0_u64; CHUNK];
     let mut slot = 0_u64;
@@ -206,6 +208,7 @@ fn process_wake_handles(
             .copy_to_user(bytes, h_ptr + 8 * slot)
             .is_err()
         {
+            curr.owner().die();
             return ResultBuilder::invalid_argument();
         }
         slot += n as u64;
