@@ -860,6 +860,9 @@ impl Process {
         exited_thread.cleanup();
 
         if exited {
+            // Queue executable retirements before exit becomes visible.
+            super::pager::retire_space(&self.address_space);
+
             // Close existing IPC endpoints before completion becomes visible
             // to waiters or status queries; services may run cleanup later.
             let objects = core::mem::take(&mut *self.wait_objects.lock(line!()));
@@ -2308,16 +2311,19 @@ impl Thread {
         let mut resume_in_userspace = false;
         let mut call_on_exited = false;
         let mut killed_now = false;
+        let mut parked = false;
 
         {
             let mut status = self.status.lock(line!());
             match *status {
                 ThreadStatus::Live(LiveThreadStatus::Running) => {
-                    if owner
-                        .address_space
-                        .fix_pagefault(pf_addr, error_code)
-                        .is_ok()
-                    {
+                    let fixed = owner.address_space.fix_pagefault(pf_addr, error_code);
+                    if fixed == Err(moto_rt::E_NOT_READY) {
+                        // An absent file-paged page: parked without a resume
+                        // job until the pager fills it (see pager::on_fault).
+                        *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
+                        parked = true;
+                    } else if fixed.is_ok() {
                         log::trace!("#PF fixed!");
                         if owner.paused_debuggee.load(Ordering::Relaxed) {
                             *status = ThreadStatus::PausedDebuggee(LiveThreadStatus::Preempted);
@@ -2336,6 +2342,20 @@ impl Thread {
                 }
                 _ => panic!("Unexpected thread status {:?}", *status),
             }
+        }
+
+        if parked {
+            if !super::pager::on_fault(self, pf_addr) {
+                // Another CPU may already have reclaimed the user TCB.
+                log::info!(
+                    "#PF: {} 0x{:x}:0x{:x} killed: no pager for 0x{pf_addr:x}",
+                    owner.debug_name(),
+                    owner.pid().as_u64(),
+                    self.tid.as_u64()
+                );
+                self.post_kill(ThreadKilledReason::PageFault);
+            }
+            return;
         }
 
         if killed_now {
@@ -2373,6 +2393,23 @@ impl Thread {
             self.tid.as_u64(),
             cpu,
         ));
+    }
+
+    /// Resumes a parked file fault, or kills it if its page cannot be provided.
+    /// Only faults resolved in the fault handler itself use local placement.
+    pub(super) fn resume_file_fault(&self, this_cpu: bool, success: bool) {
+        if !success {
+            self.post_kill(ThreadKilledReason::PageFault);
+            return;
+        }
+        let mut status = self.status.lock(line!());
+        if *status == ThreadStatus::Live(LiveThreadStatus::Preempted) {
+            if self.owner().paused_debuggee.load(Ordering::Relaxed) {
+                *status = ThreadStatus::PausedDebuggee(LiveThreadStatus::Preempted);
+            } else {
+                self.post_resume_in_userspace(this_cpu);
+            }
+        }
     }
 
     fn on_thread_descheduled(&self, tocr: ThreadOffCpuReason) {

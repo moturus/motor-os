@@ -1,4 +1,4 @@
-use crate::mm::{admission::Commitment, user::UserAddressSpace, PAGE_SIZE_SMALL};
+use crate::mm::{admission::Commitment, PAGE_SIZE_SMALL};
 use crate::uspace::process::Thread;
 use alloc::collections::BTreeSet;
 use alloc::sync::Weak;
@@ -11,7 +11,7 @@ pub(super) struct Waiter {
 }
 
 pub(super) struct Mapping {
-    pub(super) space: Weak<UserAddressSpace>,
+    pub(super) id: u64,
     /// Admission for every page not yet filled.
     pub(super) reservation: Commitment,
     pub(super) start: u64,

@@ -747,6 +747,20 @@ fn test_fixed_memory_map_overlap() {
     println!("test_fixed_memory_map_overlap PASS");
 }
 
+fn test_pager_ops_need_sys_io() {
+    use moto_sys::SysMem;
+
+    // The executable pager is sys-io's: every operation is refused for any
+    // other caller before its arguments are looked at.
+    assert_eq!(SysMem::pager_init().err(), Some(moto_rt::E_NOT_ALLOWED));
+    let mut events = [(0_u64, 0_u64); 1];
+    assert_eq!(
+        SysMem::pager_dequeue(&mut events).err(),
+        Some(moto_rt::E_NOT_ALLOWED)
+    );
+    println!("test_pager_ops_need_sys_io PASS");
+}
+
 fn test_invalid_memory_map_options() {
     use moto_sys::*;
 
@@ -1733,6 +1747,7 @@ fn main() {
     pressure::run_all_tests();
     test_invalid_memory_map_options();
     test_fixed_memory_map_overlap();
+    test_pager_ops_need_sys_io();
     checked_copy_in::run_all_tests();
     test_lazy_memory_map_read();
     test_lazy_memory_map_write();

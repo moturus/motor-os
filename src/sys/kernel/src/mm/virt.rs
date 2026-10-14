@@ -674,6 +674,8 @@ pub struct KernelAddressSpace {
 
     static_shared_page: UnsafeRef<moto_sys::KernelStaticPage>,
     next_slabs_addr: AtomicU64,
+    /// The executable pager's registry; see `uspace::pager`.
+    pager: crate::uspace::pager::PagerRegistry,
 
     _pin: PhantomPinned,
 }
@@ -711,6 +713,7 @@ impl KernelAddressSpace {
 
             static_shared_page: UnsafeRef::const_default(),
             next_slabs_addr: AtomicU64::new(VMEM_K_SLABS_START),
+            pager: crate::uspace::pager::PagerRegistry::new(),
 
             _pin: PhantomPinned,
         }));
@@ -812,6 +815,10 @@ impl KernelAddressSpace {
 }
 
 pub(super) static KERNEL_ADDRESS_SPACE: StaticRef<KernelAddressSpace> = StaticRef::default_const();
+
+pub(crate) fn pager_registry() -> &'static crate::uspace::pager::PagerRegistry {
+    &KERNEL_ADDRESS_SPACE.pager
+}
 
 pub(super) struct UserAddressSpaceBase {
     base: AddressSpaceBase,

@@ -43,6 +43,7 @@ impl UserStack {
 
 pub struct UserAddressSpace {
     inner: UserAddressSpaceBase,
+    pub(crate) pager: crate::util::SpinLock<crate::uspace::pager::MappingState>,
 
     // The maximum amount of memory (phys, including the binary)
     // that the owner process is allowed to use.
@@ -66,6 +67,8 @@ unsafe impl Sync for UserAddressSpace {}
 
 impl Drop for UserAddressSpace {
     fn drop(&mut self) {
+        crate::uspace::pager::retire_space(self);
+
         // W6b: CPUs no longer leave a process's page table on syscall/
         // preempt, so this CPU (running the teardown) and idle remote CPUs
         // may still have it as CR3. Teardown mutates the table — including
@@ -98,6 +101,7 @@ impl UserAddressSpace {
 
         let self_ = Arc::new(Self {
             inner: UserAddressSpaceBase::new()?,
+            pager: crate::util::SpinLock::default(),
             max_memory: AtomicU64::new(
                 crate::config::get()
                     .default_max_user_memory
@@ -536,17 +540,19 @@ impl UserAddressSpace {
     }
 
     pub fn unmap(&self, addr: u64) -> Result<(), ErrorCode> {
-        self.inner.normal_memory.free(addr).map_or_else(
-            |_| {
-                self.inner.custom_memory.free(addr).map(|sz| {
+        crate::uspace::pager::unmap(self, addr, || {
+            self.inner.normal_memory.free(addr).map_or_else(
+                |_| {
+                    self.inner.custom_memory.free(addr).map(|sz| {
+                        self.stats_user_sub(sz);
+                    })
+                },
+                |sz| {
                     self.stats_user_sub(sz);
-                })
-            },
-            |sz| {
-                self.stats_user_sub(sz);
-                Ok(())
-            },
-        )
+                    Ok(())
+                },
+            )
+        })
     }
 
     pub fn mmio_map(&self, phys_addr: u64, num_pages: u64) -> Result<u64, ErrorCode> {
@@ -564,7 +570,8 @@ impl UserAddressSpace {
 
     /// Reserves a sparse segment whose pages the executable pager installs
     /// on demand. The whole segment is accounted now, like an eager one.
-    pub fn reserve_file(
+    /// The caller holds `pager` through reservation and publication.
+    pub(crate) fn reserve_file(
         &self,
         start: u64,
         num_pages: u64,
@@ -591,8 +598,13 @@ impl UserAddressSpace {
 
     /// Copies each source page into a fresh frame and installs the copies
     /// from `start` on, keeping pages that are already present. Returns the
-    /// number of pages installed.
-    pub fn fill_file(&self, start: u64, sources: &[PinnedUserPage]) -> Result<u64, ErrorCode> {
+    /// number of pages installed. The caller holds `pager` through
+    /// validation, installation and commitment accounting.
+    pub(crate) fn fill_file(
+        &self,
+        start: u64,
+        sources: &[PinnedUserPage],
+    ) -> Result<u64, ErrorCode> {
         // Admitted: the mapping's reservation covers these pages.
         self.inner.with_file_segment(start, |segment| {
             let end = (sources.len() as u64)
@@ -614,7 +626,8 @@ impl UserAddressSpace {
     }
 
     /// Installs a zeroed page in a file-paged segment unless one is present.
-    pub fn fill_file_zero(&self, page: u64) -> Result<bool, ErrorCode> {
+    /// The caller holds `pager`, as for `fill_file`.
+    pub(crate) fn fill_file_zero(&self, page: u64) -> Result<bool, ErrorCode> {
         self.inner
             .with_file_segment(page, |segment| segment.fill_file_page(page, None))
     }

@@ -459,6 +459,10 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
         return ResultBuilder::version_too_high();
     }
 
+    if args.operation == SysMem::OP_PAGER {
+        return super::pager::sys_pager(thread, args);
+    }
+
     let address_space_handle = SysHandle::from_u64(args.args[0]);
 
     if address_space_handle == SysHandle::NONE {
