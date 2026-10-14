@@ -375,6 +375,7 @@ impl AsyncFsClient {
                 input_relay: false,
                 output_relays: 0,
             }),
+            append: (opts & moto_rt::fs::O_APPEND) != 0,
             readable: (opts & moto_rt::fs::O_READ) != 0,
             // `O_APPEND` grants write access on its own: appending *is* writing,
             // and unlike POSIX's `open()` — where `O_APPEND` is a modifier on a
@@ -728,6 +729,11 @@ pub(crate) struct File {
     entry_id: moto_io::fs::EntryId,
     open_id: u64,
     pos: moto_rt::mutex::Mutex<PosState>,
+    // `O_APPEND`: every write through this handle starts at the current end
+    // of the file. Writes through one handle serialize on `pos`; other
+    // handles and processes can still race between the size lookup and the
+    // write.
+    append: bool,
     readable: bool,
     writable: bool,
     lock_state: AtomicU8,
@@ -769,6 +775,17 @@ impl File {
             .map_err(|err| err as moto_rt::ErrorCode)?;
         pos.pos += read as u64;
         Ok(read)
+    }
+
+    /// Position an append-mode handle at the end of the file before a write.
+    fn seek_append_end(&self, pos: &mut PosState) -> core::result::Result<(), moto_rt::ErrorCode> {
+        if self.append {
+            pos.pos = AsyncFsClient::get()
+                .and_then(|client| client.metadata(self.entry_id))
+                .map_err(|err| err as moto_rt::ErrorCode)?
+                .size;
+        }
+        Ok(())
     }
 
     fn write_locked(
@@ -902,6 +919,8 @@ impl File {
                 input_relay: false,
                 output_relays: 0,
             }),
+            // Stdio snapshots do not carry the append mode yet.
+            append: false,
             readable: snapshot.readable,
             writable: snapshot.writable,
             lock_state: AtomicU8::new(FILE_LOCK_UNLOCKED),
@@ -949,6 +968,7 @@ impl PosixFile for File {
         if !self.writable {
             return Err(moto_rt::E_NOT_ALLOWED);
         }
+        self.seek_append_end(&mut pos)?;
         self.write_locked(&mut pos, buf)
     }
 
@@ -997,6 +1017,7 @@ impl PosixFile for File {
         if !self.writable {
             return Err(moto_rt::E_NOT_ALLOWED);
         }
+        self.seek_append_end(&mut pos)?;
 
         let mut total = 0;
         for buf in bufs {

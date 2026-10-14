@@ -14,6 +14,7 @@ mod ctrl_c;
 mod descriptor_attr;
 mod diagnostics;
 mod execute_permissions;
+mod file_append;
 mod file_locking;
 mod fs;
 mod fs_permissions;
@@ -1820,6 +1821,7 @@ fn main() {
     stdio_file_direct::run_tests();
     stdio_file_input::run_tests();
     stdio_file_relay::run_tests();
+    file_append::run_tests();
     // fs::run_tests();
 
     assert_eq!(
