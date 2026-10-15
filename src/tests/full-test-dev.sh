@@ -8,6 +8,8 @@
 # by the OS image profile. Release runs also check the wasm tools on the small
 # wasm image at 224 MiB and the developer image at 256 MiB, and once that Javy's
 # output equals upstream Linux Javy's byte for byte.
+# --full also has Lorry natively build red, rush, gears, russhd and Helix, in
+# release mode with --release.
 #
 # Work that is not explicitly scoped to Lorry runs this suite only with
 # --release. If such work necessarily changes src/bin/lorry, ask before adding
@@ -26,6 +28,7 @@ SEEN_RELEASE=0
 SEEN_VMM=0
 SEEN_CPUS=0
 SEEN_MEMORY=0
+LORRY_ARGS=()
 positive_integer() { case "$1" in "" | *[!0-9]* | 0*) return 1 ;; esac; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -68,9 +71,15 @@ while [ "$#" -gt 0 ]; do
       esac
       SEEN_MEMORY=1
       ;;
-    *) echo "usage: $0 [--release] [--vmm qemu|chv] [--cpus N] [--memory MIB]" >&2; exit 2 ;;
+    --full)
+      [ "${#LORRY_ARGS[@]}" = 0 ] || { echo "full-test-dev: duplicate --full" >&2; exit 2; }
+      LORRY_ARGS=(--full)
+      shift
+      ;;
+    *) echo "usage: $0 [--release] [--vmm qemu|chv] [--cpus N] [--memory MIB] [--full]" >&2; exit 2 ;;
   esac
 done
+[ "${#LORRY_ARGS[@]}" = 0 ] || [ "$SEEN_RELEASE" = 0 ] || LORRY_ARGS+=(--release)
 positive_integer "${MOTO_SMP-4}" || { echo "full-test-dev: CPU count must be a positive integer" >&2; exit 2; }
 positive_integer "${MOTO_MEMORY_MIB-8192}" || { echo "full-test-dev: memory must be a positive integer (MiB)" >&2; exit 2; }
 export MOTO_SMP="${MOTO_SMP-4}"
@@ -110,7 +119,7 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
   TEST_DEV_SOURCES_GEARS_TESTS=1 \
   "$WD/test-dev-sources.sh" "${FORWARDED_ARGS[@]}"
 
-"$ROOT_DIR/src/bin/lorry/tests/test-all.sh"
+"$ROOT_DIR/src/bin/lorry/tests/test-all.sh" "${LORRY_ARGS[@]}"
 
 # The wasm tools run on two VMs; checks independent of the VM run on the first.
 if [ "$SEEN_RELEASE" = 1 ]; then

@@ -6,20 +6,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUDGET_SECONDS="${LORRY_TEST_BUDGET_SECONDS:-1800}"
 NATIVE_ARGUMENTS=()
+FULL=0
+PROJECT_ARGUMENTS=()
 
 usage() {
     cat <<'EOF'
-usage: test-all.sh [--warm] [--keep] [--reuse-running-vm]
+usage: test-all.sh [--warm] [--keep] [--reuse-running-vm] [--full [--release]]
 
 Runs the complete Lorry product suite once. The default invocation is bounded
 to 30 minutes; exceeding the budget is a test failure. --warm only preserves
 the native fixture's host and guest target directories for local iteration.
+--full then has the developer image's Lorry natively build red, rush, gears,
+russhd and Helix (test-native-projects.sh, with its own budget): debug
+builds, or release builds with --release.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --warm | --keep | --reuse-running-vm) NATIVE_ARGUMENTS+=("$1") ;;
+        --full) FULL=1 ;;
+        --release) PROJECT_ARGUMENTS=(--release) ;;
         -h | --help)
             usage
             exit 0
@@ -32,6 +39,11 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+if [ "${#PROJECT_ARGUMENTS[@]}" -ne 0 ] && [ "$FULL" -eq 0 ]; then
+    echo "test-all: --release requires --full" >&2
+    exit 1
+fi
 
 case "$BUDGET_SECONDS" in
     '' | *[!0-9]* | 0)
@@ -54,6 +66,7 @@ if [ "${LORRY_TEST_BUDGET_ACTIVE:-0}" -eq 0 ]; then
         echo "test-all: exceeded the ${BUDGET_SECONDS}s wall-clock budget" >&2
     fi
     echo "Lorry complete-suite wall time: ${elapsed}s"
+    [ "$status" -ne 0 ] || [ "$FULL" -eq 0 ] || "$SCRIPT_DIR/test-native-projects.sh" "${PROJECT_ARGUMENTS[@]}"
     exit "$status"
 fi
 
