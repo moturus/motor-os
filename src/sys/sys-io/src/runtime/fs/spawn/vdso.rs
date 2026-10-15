@@ -1,21 +1,16 @@
+//! Installs sys-io's vDSO into a child's address space: read-only segments
+//! are shared from sys-io's own mapping, and the writable segment is a fresh
+//! copy of the pristine ELF bytes, never of sys-io's live runtime state.
+
 use core::sync::atomic::Ordering;
 
-use alloc::collections::btree_map::BTreeMap;
 use elfloader::ElfBinary;
 use moto_sys::{ErrorCode, SysHandle, SysMem, sys_mem};
+use std::collections::BTreeMap;
 
-pub fn load_vdso(address_space: u64) -> ErrorCode {
-    let address_space = SysHandle::from_u64(address_space);
-
-    let entry_point = match load_binary(address_space) {
-        Ok(e) => e,
-        Err(err) => return err,
-    };
-
-    match init_remote_vdso(address_space, entry_point) {
-        Ok(()) => moto_rt::E_OK,
-        Err(err) => err,
-    }
+pub fn load(address_space: SysHandle) -> Result<(), ErrorCode> {
+    let entry_point = load_binary(address_space)?;
+    init_remote_vdso(address_space, entry_point)
 }
 
 fn init_remote_vdso(address_space: SysHandle, entry_point: u64) -> Result<(), ErrorCode> {
@@ -91,7 +86,6 @@ fn load_binary(address_space: SysHandle) -> Result<u64, ErrorCode> {
 
     let mut elf_loader = RemoteLoader {
         address_space,
-        relocated: false,
         offset: moto_rt::RT_VDSO_START,
         mapped_regions: BTreeMap::default(),
         shared_regions: BTreeMap::default(),
@@ -106,7 +100,6 @@ fn load_binary(address_space: SysHandle) -> Result<u64, ErrorCode> {
 
 struct RemoteLoader {
     address_space: SysHandle,
-    relocated: bool,
     offset: u64,
 
     // Copied (writable) segments: unoffset vaddr -> (local RW alias, num_pages).
@@ -252,8 +245,6 @@ impl elfloader::ElfLoader for RemoteLoader {
                     )
                 }
                 .map_err(|_| elfloader::ElfLoaderErr::UnsupportedRelocationEntry)?;
-
-                self.relocated = true;
 
                 Ok(())
             }

@@ -1426,7 +1426,6 @@ dependencies = [
 name = "rt"
 version = "0.1.0"
 dependencies = [
- "elfloader",
  "frusa",
  "futures",
  "log",

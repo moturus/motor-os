@@ -5,6 +5,9 @@
 
 mod admission;
 mod checked_copy_in;
+mod cold_spawn;
+mod raw_spawn;
+mod sched_fairness;
 // mod channel_test;
 mod alloc_bench;
 mod boot_identity;
@@ -700,6 +703,77 @@ fn test_concurrent_lazy_memory_map_write() {
     println!("test_concurrent_lazy_memory_map_write: done");
 }
 
+fn test_fixed_memory_map_overlap() {
+    use moto_sys::{SysHandle, SysMem, SysObj, sys_mem::PAGE_SIZE_SMALL};
+
+    let space = SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=map-overlap").unwrap();
+    const BASE: u64 = 0x10_0000;
+    let map = |offset, pages| {
+        SysMem::map2(
+            space,
+            SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE,
+            u64::MAX,
+            BASE + offset * PAGE_SIZE_SMALL,
+            PAGE_SIZE_SMALL,
+            pages,
+        )
+    };
+    let unmap = |(remote, local)| {
+        SysMem::unmap(space, 0, u64::MAX, remote).unwrap();
+        SysMem::free(local).unwrap();
+    };
+
+    // Two disjoint intervals, [2, 4) and [6, 8), in an otherwise empty space.
+    let mappings = [map(2, 2).unwrap(), map(6, 2).unwrap()];
+    for (_, local) in mappings {
+        unsafe { (local as *mut u64).write_volatile(0x1234_5678) };
+    }
+    for (offset, pages) in [
+        (1, 4), // Contains the first mapping.
+        (1, 2), // Overlaps its left edge.
+        (2, 2), // Identical.
+        (3, 2), // Overlaps its right edge.
+        (2, 1), // Contained in it.
+        (1, 8), // Contains both mappings.
+        (3, 3), // Ends at the next mapping's start; still overlaps the first.
+    ] {
+        assert!(
+            map(offset, pages).is_err(),
+            "overlap accepted: offset {offset}, pages {pages}"
+        );
+    }
+    // Half-open boundaries: touching on either side and an exact gap are valid.
+    for offset in [0, 4, 8] {
+        let mapping = map(offset, 2).unwrap();
+        assert_eq!(mapping.0, BASE + offset * PAGE_SIZE_SMALL);
+        unmap(mapping);
+    }
+    for mapping in mappings {
+        assert_eq!(
+            unsafe { (mapping.1 as *const u64).read_volatile() },
+            0x1234_5678
+        );
+        unmap(mapping);
+    }
+    unmap(map(0, 10).unwrap());
+    SysObj::put(space).unwrap();
+    println!("test_fixed_memory_map_overlap PASS");
+}
+
+fn test_pager_ops_need_sys_io() {
+    use moto_sys::SysMem;
+
+    // The executable pager is sys-io's: every operation is refused for any
+    // other caller before its arguments are looked at.
+    assert_eq!(SysMem::pager_init().err(), Some(moto_rt::E_NOT_ALLOWED));
+    let mut events = [(0_u64, 0_u64); 1];
+    assert_eq!(
+        SysMem::pager_dequeue(&mut events).err(),
+        Some(moto_rt::E_NOT_ALLOWED)
+    );
+    println!("test_pager_ops_need_sys_io PASS");
+}
+
 fn test_invalid_memory_map_options() {
     use moto_sys::*;
 
@@ -1224,6 +1298,21 @@ fn main() {
         println!("{:016x}", moto_sys::KernelStaticPage::get().boot_random_id);
         return;
     }
+    if cold_spawn::is_child(&args) {
+        cold_spawn::run_child(&args);
+    }
+    if args.len() == 2 && args[1] == "cold-spawn" {
+        cold_spawn::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "sched-fairness" {
+        sched_fairness::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "raw-spawn" {
+        raw_spawn::run_all_tests();
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("process-permissions-child") {
         process_permissions::run_child(&args);
         return;
@@ -1564,6 +1653,9 @@ fn main() {
     if spawn_wait_kill::is_thread_exit_race_child(&args) {
         spawn_wait_kill::run_thread_exit_race_child();
     }
+    if raw_spawn::is_child(&args) {
+        raw_spawn::run_child(&args);
+    }
     if ctrl_c::is_helper(&args) {
         ctrl_c::run_helper(&args);
     }
@@ -1706,6 +1798,8 @@ fn main() {
     mem_blocks::run_all_tests();
     pressure::run_all_tests();
     test_invalid_memory_map_options();
+    test_fixed_memory_map_overlap();
+    test_pager_ops_need_sys_io();
     checked_copy_in::run_all_tests();
     test_lazy_memory_map_read();
     test_lazy_memory_map_write();
@@ -1723,6 +1817,9 @@ fn main() {
     sysbox_cat::run_test();
     sysbox_chmod::run_all_tests();
     execute_permissions::run_all_tests();
+    sched_fairness::run_all_tests();
+    raw_spawn::run_all_tests();
+    cold_spawn::run_all_tests();
     descriptor_attr::run_all_tests();
     file_locking::run_tests();
     // return;

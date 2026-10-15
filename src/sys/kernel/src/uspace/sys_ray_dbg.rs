@@ -197,7 +197,7 @@ fn sys_dbg_list_threads(
                 .copy_to_user(tid_bytes, buf_start + (8 * idx as u64))
             {
                 // TODO: maybe just kill the debugger?
-                return ResultBuilder::result(err);
+                return err.into_syscall_result(debugger.address_space());
             }
         }
     }
@@ -243,7 +243,7 @@ fn sys_dbg_get_thread_data(
             );
             if let Err(err) = debugger.address_space().copy_to_user(bytes, args.args[2]) {
                 // TODO: maybe just kill the debugger?
-                return ResultBuilder::result(err);
+                return err.into_syscall_result(debugger.address_space());
             }
         }
         ResultBuilder::ok()
@@ -360,13 +360,13 @@ fn sys_dbg_get_mem(debugger: Arc<super::process::Process>, args: &SyscallArgs) -
         .read_from_user(start_addr, buf_len)
     {
         Ok(v) => v,
-        Err(err) => return ResultBuilder::result(err),
+        Err(err) => return ResultBuilder::result(err.into()),
     };
 
     // Write bytes to the debugger memory.
     match debugger.address_space().copy_to_user(&bytes, buf_addr) {
         Ok(_) => ResultBuilder::ok_1(bytes.len() as u64),
-        Err(err) => ResultBuilder::result(err),
+        Err(err) => err.into_syscall_result(debugger.address_space()),
     }
 }
 

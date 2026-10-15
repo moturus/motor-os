@@ -532,6 +532,11 @@ impl AsyncFsClient {
         self.metadata(entry_id)
     }
 
+    /// See `moto_io::fs::FsClient::spawn`.
+    pub(crate) fn spawn_child(&self, req: moto_sys_io::api_fs::SpawnRequest) -> Result<u64> {
+        self.blocking_run(move |fs_client| async move { fs_client.spawn(&req).await })
+    }
+
     fn metadata(&self, entry_id: EntryId) -> Result<moto_rt::fs::FileAttr> {
         let metadata =
             self.blocking_run(move |fs_client| async move { fs_client.metadata(entry_id).await })?;

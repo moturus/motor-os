@@ -338,6 +338,45 @@ wait_pty_output() {
   fail "$label did not print '$pattern': '$(printf '%s' "$PTY_OUTPUT" | tail -c 800)'"
 }
 
+# Like wait_pty_output, for an extended regex; BASH_REMATCH holds the match.
+wait_pty_regex() {
+  local regex="$1"
+  local label="$2"
+  local byte
+  local deadline=$((SECONDS + 20))
+  local remaining
+
+  until [[ "$PTY_OUTPUT" =~ $regex ]]; do
+    remaining=$((deadline - SECONDS))
+    if [ "$remaining" -le 0 ] ||
+      ! IFS= read -r -t "$remaining" -n 1 byte <&"$PTY_OUT_FD"; then
+      fail "$label did not print '$regex': '$(printf '%s' "$PTY_OUTPUT" | tail -c 800)'"
+    fi
+    PTY_OUTPUT+="$byte"
+  done
+}
+
+# Kills a guest process and returns once the guest no longer lists it. A
+# process's executable mappings retire before it leaves the list, so its
+# executable can be deleted afterwards.
+end_guest_process() {
+  local pid="$1"
+  local label="$2"
+  local deadline=$((SECONDS + 10))
+  local out
+
+  out="$(vm_ssh "/system/bin/rush -c 'kill $pid'" 2>&1)" ||
+    [[ "$out" == *"no such process"* ]] ||
+    fail "$label: cannot kill guest process $pid: '$out'"
+  while out="$(vm_ssh "/system/bin/rush -c 'kill -0 $pid'" 2>&1)"; do
+    [ "$SECONDS" -lt "$deadline" ] ||
+      fail "$label: guest process $pid is still running after kill"
+    sleep 0.1
+  done
+  [[ "$out" == *"no such process"* ]] ||
+    fail "$label: cannot check guest process $pid: '$out'"
+}
+
 finish_pty() {
   local expected="$1"
   local label="$2"
@@ -576,10 +615,15 @@ wait_pty_output "CTRL_C_DEFAULT_READY" "nested ssh pty Ctrl+C"
 printf '\003' >&"$PTY_IN_FD"
 finish_pty 130 "nested ssh pty Ctrl+C"
 
-start_pty "$GUEST_SSH -T motor@127.0.0.1 TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-default-child"
+# Without a pty, Ctrl+C ends only the local client: the guest-side child keeps
+# spinning and keeps systest locked against deletion, so end it explicitly.
+start_pty "$GUEST_SSH -T motor@127.0.0.1 'TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-default-child & echo CTRL_C_CHILD_PID=\$!; wait'"
 wait_pty_output "CTRL_C_DEFAULT_READY" "nested ssh non-pty Ctrl+C"
+wait_pty_regex 'CTRL_C_CHILD_PID=([0-9]+)[^0-9]' "nested ssh non-pty Ctrl+C"
+nested_child_pid="${BASH_REMATCH[1]}"
 printf '\003' >&"$PTY_IN_FD"
 finish_pty 130 "nested ssh non-pty Ctrl+C"
+end_guest_process "$nested_child_pid" "nested ssh non-pty Ctrl+C"
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   echo "-- Helix editor --"

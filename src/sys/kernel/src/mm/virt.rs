@@ -65,7 +65,7 @@ const VMEM_K_SLABS_END: u64 = VMEM_K_SLABS_START + 7 * ONE_GB; // 32 GB
 pub const VMEM_K_SYS_IO_START: u64 = VMEM_K_SLABS_END; // 32 GB
 
 // User virtual addresses start at zero and can go up to VMEM_USER_END.
-const VMEM_USER_END: u64 = PAGING_DIRECT_MAP_OFFSET >> 1; // 1 << 45 on x64.
+const VMEM_USER_END: u64 = moto_sys::USERSPACE_REGION_END;
 
 // Note: the address below must NOT be in the L4 region that is used by
 //       the kernel, as we will either have to give the userspace access
@@ -299,9 +299,16 @@ impl VmemRegion {
         VaddrMapStatus::Unallocated
     }
 
-    fn pin_user_page(&self, addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+    fn pin_user_page(
+        &self,
+        addr: u64,
+        access: MappingOptions,
+    ) -> Result<(SlabArc<Frame>, u64), super::user_copy::UserCopyError> {
         let segments = self.used_segments.lock(line!());
-        segments.find(addr)?.pin_user_page(addr)
+        segments
+            .find(addr)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?
+            .pin_user_page(addr, access)
     }
 
     #[allow(unused)]
@@ -581,6 +588,19 @@ impl VmemRegion {
         Ok(memory_segment)
     }
 
+    /// Runs `f` on the file-paged segment holding `addr`, under the region lock.
+    fn with_file_segment<R>(
+        &self,
+        addr: u64,
+        f: impl FnOnce(&mut super::virt_intrusive::VmemSegment) -> Result<R, ErrorCode>,
+    ) -> Result<R, ErrorCode> {
+        let mut segments = self.used_segments.lock(line!());
+        match segments.find_mut(addr) {
+            Some(segment) if segment.is_file_paged() => f(segment),
+            _ => Err(moto_rt::E_INVALID_ARGUMENT),
+        }
+    }
+
     fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         if !self.segment.contains(pf_addr) {
             return Err(moto_rt::E_INVALID_ARGUMENT);
@@ -654,6 +674,8 @@ pub struct KernelAddressSpace {
 
     static_shared_page: UnsafeRef<moto_sys::KernelStaticPage>,
     next_slabs_addr: AtomicU64,
+    /// The executable pager's registry; see `uspace::pager`.
+    pager: crate::uspace::pager::PagerRegistry,
 
     _pin: PhantomPinned,
 }
@@ -691,6 +713,7 @@ impl KernelAddressSpace {
 
             static_shared_page: UnsafeRef::const_default(),
             next_slabs_addr: AtomicU64::new(VMEM_K_SLABS_START),
+            pager: crate::uspace::pager::PagerRegistry::new(),
 
             _pin: PhantomPinned,
         }));
@@ -792,6 +815,10 @@ impl KernelAddressSpace {
 }
 
 pub(super) static KERNEL_ADDRESS_SPACE: StaticRef<KernelAddressSpace> = StaticRef::default_const();
+
+pub(crate) fn pager_registry() -> &'static crate::uspace::pager::PagerRegistry {
+    &KERNEL_ADDRESS_SPACE.pager
+}
 
 pub(super) struct UserAddressSpaceBase {
     base: AddressSpaceBase,
@@ -972,6 +999,12 @@ impl UserAddressSpaceBase {
         num_pages: u64,
         mapping_options: MappingOptions,
     ) -> Result<MemorySegment, ErrorCode> {
+        // File faults and fills are served only in the normal region.
+        if mapping_options.contains(MappingOptions::FILE_PAGED) {
+            return self
+                .normal_memory
+                .allocate_user_fixed(vaddr_start, num_pages, mapping_options);
+        }
         match vaddr_start {
             0..=VMEM_USER_END => {
                 self.normal_memory
@@ -984,13 +1017,17 @@ impl UserAddressSpaceBase {
         }
     }
 
-    pub(super) fn pin_user_page(&self, addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+    pub(super) fn pin_user_page(
+        &self,
+        addr: u64,
+        access: MappingOptions,
+    ) -> Result<(SlabArc<Frame>, u64), super::user_copy::UserCopyError> {
         match addr {
-            0..=VMEM_USER_END => self.normal_memory.pin_user_page(addr),
+            0..=VMEM_USER_END => self.normal_memory.pin_user_page(addr, access),
             moto_sys::CUSTOM_USERSPACE_REGION_START..=moto_sys::CUSTOM_USERSPACE_REGION_END => {
-                self.custom_memory.pin_user_page(addr)
+                self.custom_memory.pin_user_page(addr, access)
             }
-            _ => None,
+            _ => Err(moto_rt::E_INVALID_ARGUMENT.into()),
         }
     }
 
@@ -1160,6 +1197,18 @@ impl UserAddressSpaceBase {
 
     pub(super) fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         self.normal_memory.fix_pagefault(pf_addr, error_code)
+    }
+
+    /// See `VmemRegion::with_file_segment`; file mappings are ordinary memory.
+    pub(super) fn with_file_segment<R>(
+        &self,
+        addr: u64,
+        f: impl FnOnce(&mut super::virt_intrusive::VmemSegment) -> Result<R, ErrorCode>,
+    ) -> Result<R, ErrorCode> {
+        if !self.normal_memory.segment.contains(addr) {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        self.normal_memory.with_file_segment(addr, f)
     }
 
     /// Maps the kernel-static pages starting at `kernel_vaddr` into the
