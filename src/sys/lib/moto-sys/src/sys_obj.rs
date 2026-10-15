@@ -47,6 +47,18 @@ impl SysObj {
     //            - Later "multicast" connections will be added (server writes), multiple clients read.
     #[cfg(feature = "userspace")]
     pub fn create(parent: SysHandle, flags: u32, url: &str) -> Result<SysHandle, ErrorCode> {
+        Self::create_res1(parent, flags, url).map(|(handle, _)| handle)
+    }
+
+    /// `create`, returning the kernel's second result word as well: for a
+    /// process created on a requester's behalf (`requester=`), the number
+    /// of the requester's own handle to it.
+    #[cfg(feature = "userspace")]
+    pub fn create_res1(
+        parent: SysHandle,
+        flags: u32,
+        url: &str,
+    ) -> Result<(SysHandle, u64), ErrorCode> {
         let bytes = url.as_bytes();
 
         let result = do_syscall(
@@ -59,7 +71,7 @@ impl SysObj {
             0,
         );
         if result.is_ok() {
-            Ok(SysHandle::from(result.data[0]))
+            Ok((SysHandle::from(result.data[0]), result.data[1]))
         } else {
             Err(result.error_code())
         }
@@ -163,6 +175,14 @@ impl SysObj {
     pub fn put_remote(owner_process: SysHandle, handle: SysHandle) -> Result<(), ErrorCode> {
         Self::put_remote_1(owner_process, handle, 0)
     }
+
+    /// `put_remote_1`'s `arg` for sys-io to abandon a child it created on a
+    /// requester's behalf (`requester=`) but could not hand over: `owner` is
+    /// sys-io's handle to the child, `handle` the number of the requester's.
+    /// A child that was never woken is killed and the requester's handle
+    /// withdrawn; a child the requester has woken is left alone
+    /// (`E_ALREADY_IN_USE`).
+    pub const ABANDON_DELEGATED: u64 = 1;
 
     #[cfg(feature = "userspace")]
     pub fn put_remote_1(

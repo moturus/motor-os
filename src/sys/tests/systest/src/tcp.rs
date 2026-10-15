@@ -1063,7 +1063,10 @@ fn test_disconnect_before_rx_ready_releases_channels() {
     drop(client_connection);
     drop(listener_connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
-    wait_for_sys_io_metric("net.channels", |value| value == channels_before);
+    // A departed client's sockets keep its channel slot while they sit in
+    // TIME_WAIT, so slots left by earlier tests can expire during this wait:
+    // the count may end below the baseline, never above it.
+    wait_for_sys_io_metric("net.channels", |value| value <= channels_before);
 
     println!("test_disconnect_before_rx_ready_releases_channels() PASS");
 }

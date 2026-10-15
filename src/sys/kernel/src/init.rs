@@ -394,14 +394,15 @@ pub fn start_userspace_processes() {
         )
     };
 
-    let result = crate::util::loader::load_elf(sys_io_bytes, address_space.as_ref());
+    // The embedded ELF is trusted and this address space has not been published.
+    let result = unsafe { crate::util::loader::load_elf(sys_io_bytes, address_space.as_ref()) };
     if result.is_err() {
         core::mem::drop(address_space);
         panic!("failed to load sys-io");
     }
     let entry_point = result.unwrap();
 
-    let process = crate::uspace::Process::new(
+    let (process, _object) = crate::uspace::Process::new(
         crate::xray::stats::kernel_stats(),
         address_space,
         entry_point,

@@ -656,6 +656,16 @@ impl FsClient {
         api_fs::copy_file_range_resp_decode(resp)
     }
 
+    /// Ask sys-io to build a stopped child from an executable; returns the
+    /// child's process handle in this process's handle table.
+    pub async fn spawn(self: &Rc<Self>, req: &api_fs::SpawnRequest) -> Result<u64> {
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg = api_fs::spawn_msg_encode(req, io_page);
+        msg.id = self.new_request_id();
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::spawn_resp_decode(resp)
+    }
+
     /// The metadata of the directory entry.
     pub async fn metadata(self: &Rc<Self>, entry_id: EntryId) -> Result<Metadata> {
         let mut msg = api_fs::metadata_msg_encode(entry_id);

@@ -11,7 +11,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::phys;
 use crate::util::SpinLock;
-use moto_sys::ErrorCode;
+use crate::xray::stats::{self, MetricType};
+use moto_sys::{ErrorCode, KernelStaticPage};
 
 /// Which floor an operation must stay above. CAP_SYS and CAP_IO_MANAGER
 /// address spaces may use the reserve; ordinary processes may not.
@@ -36,18 +37,48 @@ pub const SYS_IO_FLOOR_PAGES: u64 = 128; // 512K.
 pub const PRESSURE_LOW_PAGES: u64 = 2 * USER_FLOOR_PAGES; // 2M.
 pub const PRESSURE_HIGH_PAGES: u64 = 3 * USER_FLOOR_PAGES; // 3M.
 
-/// Pages reserved by admitted operations that have not completed yet.
-static RESERVED_PAGES: AtomicU64 = AtomicU64::new(0);
 // Serializes sampling and publication, including frees while pressure is down.
 static PRESSURE_UPDATE: SpinLock<()> = SpinLock::new(());
-/// The lowest number of free small pages ever observed at an admission check.
-static LOW_WATER_PAGES: AtomicU64 = AtomicU64::new(u64::MAX);
 
-pub static REFUSED_USER: AtomicU64 = AtomicU64::new(0);
-pub static REFUSED_SYS_IO: AtomicU64 = AtomicU64::new(0);
+/// Admission's two "taken but not allocated" counters live on the shared
+/// static page beside the pressure flag: pages reserved by admitted operations
+/// that have not completed yet, and pages committed to demand-paged executable
+/// images and not yet filled (counted like reservations, so a running
+/// executable's own pages are never refused; see `commit`). `None` during
+/// early boot, before the kernel address space exists, like the flag.
+fn page_counter(
+    pick: fn(&'static KernelStaticPage) -> &'static AtomicU64,
+) -> Option<&'static AtomicU64> {
+    if !super::virt::KERNEL_ADDRESS_SPACE.is_set() {
+        return None;
+    }
+    Some(pick(super::virt::get_kernel_static_page_mut()))
+}
+
+fn reserved() -> Option<&'static AtomicU64> {
+    page_counter(|page| &page.reserved_pages)
+}
+
+fn committed() -> Option<&'static AtomicU64> {
+    page_counter(|page| &page.committed_pages)
+}
+
+fn load(counter: Option<&AtomicU64>, order: Ordering) -> u64 {
+    counter.map_or(0, |counter| counter.load(order))
+}
+
+/// Admissions and commitments are only ever taken from userspace, so the page
+/// exists by then.
+fn live(counter: Option<&'static AtomicU64>) -> &'static AtomicU64 {
+    counter.expect("admission before the kernel address space")
+}
 
 pub fn reserved_pages() -> u64 {
-    RESERVED_PAGES.load(Ordering::Relaxed)
+    load(reserved(), Ordering::Relaxed)
+}
+
+pub fn committed_pages() -> u64 {
+    load(committed(), Ordering::Relaxed)
 }
 
 /// The shared-page flag itself -- the only pressure state there is. `None`
@@ -69,7 +100,7 @@ fn update_pressure() {
     };
     x86_64::instructions::interrupts::without_interrupts(|| {
         let _guard = PRESSURE_UPDATE.lock(line!());
-        let reserved = RESERVED_PAGES.load(Ordering::Acquire);
+        let reserved = load(reserved(), Ordering::Acquire) + load(committed(), Ordering::Acquire);
         let free = phys::available_small_pages().saturating_sub(reserved);
         let pressure = flag.load(Ordering::Relaxed);
         let next = if free <= PRESSURE_LOW_PAGES {
@@ -85,26 +116,18 @@ fn update_pressure() {
     });
 }
 
-#[cfg(debug_assertions)]
-static FREE_NOTIFICATIONS: AtomicU64 = AtomicU64::new(0);
-
 /// How many times the free path has notified admission; a debug test oracle.
 #[cfg(debug_assertions)]
 pub fn free_notifications() -> u64 {
-    FREE_NOTIFICATIONS.load(Ordering::Relaxed)
+    stats::admission_free_notifications()
 }
 
 /// Frees outside admission windows must publish too. Skipping a clear flag
 /// would let a concurrent publisher raise pressure after recovery unnoticed.
 pub fn note_pages_freed() {
     #[cfg(debug_assertions)]
-    FREE_NOTIFICATIONS.fetch_add(1, Ordering::Relaxed);
+    stats::note_admission_free_notification();
     update_pressure();
-}
-
-/// `u64::MAX` until the first admission check.
-pub fn low_water_pages() -> u64 {
-    LOW_WATER_PAGES.load(Ordering::Relaxed)
 }
 
 /// An admitted reservation, released on drop. The pages the operation actually
@@ -116,9 +139,46 @@ pub struct Admission {
 
 impl Drop for Admission {
     fn drop(&mut self) {
-        RESERVED_PAGES.fetch_sub(self.pages, Ordering::AcqRel);
+        live(reserved()).fetch_sub(self.pages, Ordering::AcqRel);
         update_pressure();
     }
+}
+
+/// A standing commitment of pages to a demand-paged image, released page
+/// by page as the pages are filled, and in full on drop.
+pub struct Commitment {
+    pages: u64,
+}
+
+impl Commitment {
+    /// Gives back up to `pages`, as the pages it was held for are allocated.
+    pub fn release(&mut self, pages: u64) {
+        let pages = pages.min(self.pages);
+        if pages != 0 {
+            self.pages -= pages;
+            live(committed()).fetch_sub(pages, Ordering::AcqRel);
+            update_pressure();
+        }
+    }
+}
+
+impl Drop for Commitment {
+    fn drop(&mut self) {
+        live(committed()).fetch_sub(self.pages, Ordering::AcqRel);
+        update_pressure();
+    }
+}
+
+/// Admits `charge_pages` like `admit`, then holds them as a commitment that
+/// outlives the operation.
+pub fn commit(class: MemClass, charge_pages: u64) -> Result<Commitment, ErrorCode> {
+    let admission = admit(class, charge_pages)?;
+    // Counted as committed before the transient reservation goes.
+    live(committed()).fetch_add(charge_pages, Ordering::AcqRel);
+    drop(admission);
+    Ok(Commitment {
+        pages: charge_pages,
+    })
 }
 
 /// Reserve `charge_pages` small pages for a memory-growing operation on an
@@ -133,18 +193,20 @@ pub fn admit(class: MemClass, charge_pages: u64) -> Result<Admission, ErrorCode>
         MemClass::Privileged => SYS_IO_FLOOR_PAGES,
     };
 
-    let mut reserved = RESERVED_PAGES.load(Ordering::Relaxed);
+    let reserved_pages = live(reserved());
+    let mut reserved = reserved_pages.load(Ordering::Relaxed);
     loop {
         let available = phys::available_small_pages();
-        record_low_water(available);
+        stats::record_admission_low_water(available);
 
-        let free = available.saturating_sub(reserved);
+        let committed = load(committed(), Ordering::Relaxed);
+        let free = available.saturating_sub(reserved + committed);
         update_pressure();
         if free < charge_pages || (free - charge_pages) < floor {
             return Err(refuse(class));
         }
 
-        match RESERVED_PAGES.compare_exchange_weak(
+        match reserved_pages.compare_exchange_weak(
             reserved,
             reserved + charge_pages,
             Ordering::AcqRel,
@@ -168,9 +230,9 @@ pub fn admit(class: MemClass, charge_pages: u64) -> Result<Admission, ErrorCode>
     // `available` below, and operations still in flight have their full charge
     // counted in `reserved`. The re-check can doubly refuse racing requests
     // near the floor; it cannot admit too much.
-    let reserved = RESERVED_PAGES.load(Ordering::Acquire);
+    let reserved = reserved_pages.load(Ordering::Acquire) + load(committed(), Ordering::Acquire);
     let available = phys::available_small_pages();
-    record_low_water(available);
+    stats::record_admission_low_water(available);
     // `reserved` includes this operation's own charge.
     let free = available.saturating_sub(reserved);
     update_pressure();
@@ -183,26 +245,12 @@ pub fn admit(class: MemClass, charge_pages: u64) -> Result<Admission, ErrorCode>
 }
 
 fn refuse(class: MemClass) -> ErrorCode {
-    match class {
-        MemClass::User => REFUSED_USER.fetch_add(1, Ordering::Relaxed),
-        MemClass::Privileged => REFUSED_SYS_IO.fetch_add(1, Ordering::Relaxed),
+    let metric = match class {
+        MemClass::User => MetricType::AdmissionRefusedUser,
+        MemClass::Privileged => MetricType::AdmissionRefusedSysIo,
     };
+    stats::kernel_stats_ref().adjust_metric(metric, 1);
     moto_rt::E_OUT_OF_MEMORY
-}
-
-fn record_low_water(available: u64) {
-    let mut low = LOW_WATER_PAGES.load(Ordering::Relaxed);
-    while available < low {
-        match LOW_WATER_PAGES.compare_exchange_weak(
-            low,
-            available,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return,
-            Err(actual) => low = actual,
-        }
-    }
 }
 
 // Allocating N data pages also grows page descriptors, page tables and the

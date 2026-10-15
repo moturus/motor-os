@@ -115,8 +115,8 @@ impl elfloader::ElfLoader for Loader<'_> {
         if self.is_mapped(base, region.len() as u64) {
             return Ok(()); // Already there.
         }
-        self.address_space
-            .copy_to_user(region, base)
+        // Bootstrap pages are private and unexposed; shared segments were skipped.
+        unsafe { self.address_space.initialize_user_memory(region, base) }
             .map_err(|_| elfloader::ElfLoaderErr::UnsupportedElfFormat)
     }
 
@@ -147,8 +147,8 @@ impl elfloader::ElfLoader for Loader<'_> {
                         core::mem::size_of::<u64>(),
                     )
                 };
-                self.address_space
-                    .copy_to_user(buf, remote_addr)
+                // As in load(), only private, unexposed bootstrap pages are written.
+                unsafe { self.address_space.initialize_user_memory(buf, remote_addr) }
                     .map_err(|_| elfloader::ElfLoaderErr::UnsupportedRelocationEntry)
             }
             x86_64(R_AMD64_NONE) => Ok(()),
@@ -159,8 +159,11 @@ impl elfloader::ElfLoader for Loader<'_> {
     }
 }
 
-// Loads the elf file at zero offset; returns the entry point address.
-pub fn load_elf(
+/// Loads the bootstrap ELF at zero offset and returns its entry point.
+///
+/// # Safety
+/// The ELF must be trusted and the address space must not yet be published.
+pub unsafe fn load_elf(
     elf_bytes: &[u8],
     address_space: &crate::mm::user::UserAddressSpace,
 ) -> Result<u64, ErrorCode> {

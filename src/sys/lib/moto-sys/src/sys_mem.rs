@@ -29,6 +29,20 @@ impl SysMem {
     pub const OP_UNMAP: u8 = 2;
     pub const OP_QUERY: u8 = 3;
     pub const OP_RECLAIM: u8 = 4;
+    /// sys-io's executable pager; see `pager_*` below.
+    pub const OP_PAGER: u8 = 5;
+
+    // OP_PAGER sub-operations, passed as flags.
+    pub const F_PAGER_INIT: u32 = 0;
+    pub const F_PAGER_RESERVE: u32 = 1;
+    pub const F_PAGER_DEQUEUE: u32 = 2;
+    pub const F_PAGER_FILL: u32 = 3;
+    pub const F_PAGER_FAIL: u32 = 4;
+    pub const F_PAGER_ZERO_FROM: u32 = 5;
+    /// The page value of a dequeued event that retires its mapping.
+    pub const PAGER_RETIRED: u64 = u64::MAX;
+    /// Maximum events returned by one dequeue.
+    pub const PAGER_MAX_EVENTS: usize = 64;
 
     // Bit flags for create/map operations.
     pub const F_READABLE: u32 = 1;
@@ -264,5 +278,79 @@ impl SysMem {
         } else {
             Err(res.error_code())
         }
+    }
+}
+
+/// The executable pager (sys-io only). sys-io reserves sparse file-paged
+/// segments in a child's address space and fills pages on request.
+#[cfg(feature = "userspace")]
+impl SysMem {
+    fn pager_op(flags: u32, args: [u64; 5]) -> Result<(u64, u64), ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_MEM, Self::OP_PAGER, flags, 0),
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            args[4],
+            0,
+        );
+        if result.is_ok() {
+            Ok((result.data[0], result.data[1]))
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    /// Creates the pager's notification object; signalled when requests or
+    /// retirements are queued.
+    pub fn pager_init() -> Result<SysHandle, ErrorCode> {
+        Self::pager_op(Self::F_PAGER_INIT, [0; 5]).map(|(h, _)| SysHandle::from_u64(h))
+    }
+
+    /// Reserves a file-paged segment; returns the mapping id.
+    pub fn pager_reserve(
+        address_space: SysHandle,
+        start: u64,
+        num_pages: u64,
+        writable: bool,
+        executable: bool,
+    ) -> Result<u64, ErrorCode> {
+        let prot = u64::from(executable) | (u64::from(writable) << 1);
+        Self::pager_op(
+            Self::F_PAGER_RESERVE,
+            [address_space.as_u64(), start, num_pages, prot, 0],
+        )
+        .map(|(id, _)| id)
+    }
+
+    /// Moves queued (mapping id, page) events into `events`; returns how many.
+    pub fn pager_dequeue(events: &mut [(u64, u64)]) -> Result<usize, ErrorCode> {
+        Self::pager_op(
+            Self::F_PAGER_DEQUEUE,
+            [
+                0,
+                events.as_mut_ptr() as usize as u64,
+                events.len() as u64,
+                0,
+                0,
+            ],
+        )
+        .map(|(n, _)| n as usize)
+    }
+
+    /// Installs copies of `count` pages at `source` (in the caller) at `dest`.
+    pub fn pager_fill(id: u64, dest: u64, source: u64, count: u64) -> Result<u64, ErrorCode> {
+        Self::pager_op(Self::F_PAGER_FILL, [0, id, dest, source, count]).map(|(n, _)| n)
+    }
+
+    /// Fails the threads waiting for `page`.
+    pub fn pager_fail(id: u64, page: u64) -> Result<(), ErrorCode> {
+        Self::pager_op(Self::F_PAGER_FAIL, [0, id, page, 0, 0]).map(|_| ())
+    }
+
+    /// Pages from `start` on are zero-filled by the kernel without requests.
+    pub fn pager_zero_from(id: u64, start: u64) -> Result<(), ErrorCode> {
+        Self::pager_op(Self::F_PAGER_ZERO_FROM, [0, id, start, 0, 0]).map(|_| ())
     }
 }

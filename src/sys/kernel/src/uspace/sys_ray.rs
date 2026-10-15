@@ -72,7 +72,7 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
 
     let address_space = thread.owner().address_space().clone();
 
-    let mut error = moto_rt::E_OK;
+    let mut error = None;
     let error_ref = &mut error;
 
     let func = |val: &KProcessStats| -> bool {
@@ -86,7 +86,7 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
                 core::mem::size_of::<ProcessInfoV1>(),
             );
             if let Err(err) = address_space.copy_to_user(buf, dest_ptr as u64) {
-                *error_ref = err;
+                *error_ref = Some(err);
                 return false;
             }
         }
@@ -96,8 +96,8 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
 
     KProcessStats::iterate(pid, flat_list, func);
 
-    if error != moto_rt::E_OK {
-        return ResultBuilder::result(error);
+    if let Some(error) = error {
+        return error.into_syscall_result(&address_space);
     }
 
     ResultBuilder::ok_1(counter as u64)
@@ -137,7 +137,7 @@ fn sys_describe_stats(thread: &super::process::Thread, args: &SyscallArgs) -> Sy
                 .address_space()
                 .copy_to_user(src, dest_addr as u64)
             {
-                return ResultBuilder::result(err);
+                return err.into_syscall_result(thread.owner().address_space());
             }
         }
     }
@@ -191,7 +191,7 @@ fn sys_query_stats_values(thread: &super::process::Thread, args: &SyscallArgs) -
                 .address_space()
                 .copy_to_user(src, dest_addr as u64)
             {
-                return ResultBuilder::result(err);
+                return err.into_syscall_result(thread.owner().address_space());
             }
         }
     }
@@ -219,7 +219,7 @@ fn sys_log(
         Ok(bytes) => bytes,
         Err(err) => {
             log::debug!("sys_log: read from user failed: {err:?}");
-            return ResultBuilder::invalid_argument();
+            return err.into_syscall_result(&address_space);
         }
     };
 

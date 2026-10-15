@@ -1,5 +1,8 @@
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
+/// Exclusive end of the normal userspace region, including file-paged mappings.
+pub const USERSPACE_REGION_END: u64 = 1_u64 << 45;
+
 // Custom userspace region (1TB): the kernel will never allocate a vaddr in a userspace
 // address space in this region, it is used by lib/iort.
 pub const CUSTOM_USERSPACE_REGION_START: u64 = (1_u64 << 45) + (1_u64 << 40);
@@ -40,6 +43,13 @@ pub struct KernelStaticPage {
     // Nonzero random boot identity, initialized once before starting userspace.
     // Appended last: earlier field offsets are ABI.
     pub boot_random_id: u64,
+
+    // Admission's two "taken but not allocated" counts, appended after
+    // `boot_random_id` for the same reason: pages reserved by admitted
+    // operations that have not completed yet, and pages committed to
+    // demand-paged executable images and not yet filled.
+    pub committed_pages: AtomicU64,
+    pub reserved_pages: AtomicU64,
 }
 
 impl KernelStaticPage {

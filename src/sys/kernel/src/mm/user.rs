@@ -2,6 +2,7 @@ use core::sync::atomic::*;
 
 use alloc::sync::Arc;
 
+use super::user_copy::UserCopyError;
 use super::{virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 use crate::mm::{MappingOptions, PAGE_SIZE_MID};
 use crate::xray::stats::MemStats;
@@ -42,6 +43,7 @@ impl UserStack {
 
 pub struct UserAddressSpace {
     inner: UserAddressSpaceBase,
+    pub(crate) pager: crate::util::SpinLock<crate::uspace::pager::MappingState>,
 
     // The maximum amount of memory (phys, including the binary)
     // that the owner process is allowed to use.
@@ -65,6 +67,8 @@ unsafe impl Sync for UserAddressSpace {}
 
 impl Drop for UserAddressSpace {
     fn drop(&mut self) {
+        crate::uspace::pager::retire_space(self);
+
         // W6b: CPUs no longer leave a process's page table on syscall/
         // preempt, so this CPU (running the teardown) and idle remote CPUs
         // may still have it as CR3. Teardown mutates the table — including
@@ -97,6 +101,7 @@ impl UserAddressSpace {
 
         let self_ = Arc::new(Self {
             inner: UserAddressSpaceBase::new()?,
+            pager: crate::util::SpinLock::default(),
             max_memory: AtomicU64::new(
                 crate::config::get()
                     .default_max_user_memory
@@ -535,17 +540,19 @@ impl UserAddressSpace {
     }
 
     pub fn unmap(&self, addr: u64) -> Result<(), ErrorCode> {
-        self.inner.normal_memory.free(addr).map_or_else(
-            |_| {
-                self.inner.custom_memory.free(addr).map(|sz| {
+        crate::uspace::pager::unmap(self, addr, || {
+            self.inner.normal_memory.free(addr).map_or_else(
+                |_| {
+                    self.inner.custom_memory.free(addr).map(|sz| {
+                        self.stats_user_sub(sz);
+                    })
+                },
+                |sz| {
                     self.stats_user_sub(sz);
-                })
-            },
-            |sz| {
-                self.stats_user_sub(sz);
-                Ok(())
-            },
-        )
+                    Ok(())
+                },
+            )
+        })
     }
 
     pub fn mmio_map(&self, phys_addr: u64, num_pages: u64) -> Result<u64, ErrorCode> {
@@ -561,16 +568,122 @@ impl UserAddressSpace {
             })
     }
 
+    /// Reserves a sparse segment whose pages the executable pager installs
+    /// on demand. The whole segment is accounted now, like an eager one.
+    /// The caller holds `pager` through reservation and publication.
+    pub(crate) fn reserve_file(
+        &self,
+        start: u64,
+        num_pages: u64,
+        writable: bool,
+        executable: bool,
+    ) -> Result<(), ErrorCode> {
+        if writable && executable {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        let mut options =
+            MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE | MappingOptions::FILE_PAGED;
+        if writable {
+            options |= MappingOptions::WRITABLE;
+        }
+        if executable {
+            options |= MappingOptions::EXECUTABLE;
+        }
+        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
+        self.inner
+            .vmem_allocate_user_fixed(start, num_pages, options)
+            .map(|_| ())
+            .inspect_err(|_| self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2))
+    }
+
+    /// Copies each source page into a fresh frame and installs the copies
+    /// from `start` on, keeping pages that are already present. Returns the
+    /// number of pages installed. The caller holds `pager` through
+    /// validation, installation and commitment accounting.
+    pub(crate) fn fill_file(
+        &self,
+        start: u64,
+        sources: &[PinnedUserPage],
+    ) -> Result<u64, ErrorCode> {
+        // Admitted: the mapping's reservation covers these pages.
+        self.inner.with_file_segment(start, |segment| {
+            let end = (sources.len() as u64)
+                .checked_mul(PAGE_SIZE_SMALL)
+                .and_then(|bytes| start.checked_add(bytes))
+                .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+            if !start.is_multiple_of(PAGE_SIZE_SMALL) || end > segment.segment().end() {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
+            let mut installed = 0;
+            for (idx, source) in sources.iter().enumerate() {
+                let addr = start + ((idx as u64) << PAGE_SIZE_SMALL_LOG2);
+                if segment.fill_file_page(addr, Some(source))? {
+                    installed += 1;
+                }
+            }
+            Ok(installed)
+        })
+    }
+
+    /// Installs a zeroed page in a file-paged segment unless one is present.
+    /// The caller holds `pager`, as for `fill_file`.
+    pub(crate) fn fill_file_zero(&self, page: u64) -> Result<bool, ErrorCode> {
+        self.inner
+            .with_file_segment(page, |segment| segment.fill_file_page(page, None))
+    }
+
     pub fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         // A refused fault cannot be reported to the faulting instruction, so
         // the faulting thread is killed. Deliberate: there is no OOM killer,
         // and the victim is whoever faults below the floor.
-        let _admission =
-            super::admission::admit(self.mem_class(), super::admission::lazy_fault_charge())?;
+        //
+        // Admission comes first because it is cheaper than the segment lookup;
+        // a refusal is re-examined for file-paged segments, whose pages were
+        // committed when they were reserved (uspace::pager) and whose faults
+        // allocate nothing here.
+        let _admission = match super::admission::admit(
+            self.mem_class(),
+            super::admission::lazy_fault_charge(),
+        ) {
+            Ok(admission) => admission,
+            Err(err) => {
+                // Check and handle the same segment: unmap must not replace
+                // it with a lazy mapping after the admission bypass.
+                return self
+                    .inner
+                    .with_file_segment(pf_addr, |segment| {
+                        Ok(segment.fix_pagefault(pf_addr, error_code))
+                    })
+                    .unwrap_or(Err(err));
+            }
+        };
         self.inner.fix_pagefault(pf_addr, error_code)
     }
 
-    pub fn copy_to_user(&self, bytes: &[u8], user_vaddr_start: u64) -> Result<(), ErrorCode> {
+    pub fn copy_to_user(&self, bytes: &[u8], user_vaddr_start: u64) -> Result<(), UserCopyError> {
+        self.copy_to_user_impl(bytes, user_vaddr_start, MappingOptions::WRITABLE)
+    }
+
+    /// Initialize private ELF pages before the bootstrap process can run.
+    ///
+    /// # Safety
+    /// The destination pages must be private, never exposed to userspace, and
+    /// have no concurrent readers or writers. This bypasses user write protection.
+    pub unsafe fn initialize_user_memory(
+        &self,
+        bytes: &[u8],
+        user_vaddr_start: u64,
+    ) -> Result<(), ErrorCode> {
+        self.copy_to_user_impl(bytes, user_vaddr_start, MappingOptions::READABLE)
+            .map_err(Into::into)
+    }
+
+    fn copy_to_user_impl(
+        &self,
+        bytes: &[u8],
+        user_vaddr_start: u64,
+        access: MappingOptions,
+    ) -> Result<(), UserCopyError> {
         let stats = crate::xray::stats::kernel_stats_ref();
         stats.adjust_metric(crate::xray::stats::MetricType::UserCopyWrite, 1);
         stats.adjust_metric(
@@ -586,7 +699,7 @@ impl UserAddressSpace {
         while !source.is_empty() {
             // Pin under the region lock and retain ownership through the copy.
             // Frame-less zero/CoW pages and device mappings remain refused.
-            let page = self.pin_user_page(dst_start)?;
+            let page = self.pin_user_page(dst_start, access)?;
             let bytes_to_copy = source
                 .len()
                 .min((PAGE_SIZE_SMALL - (dst_start & (PAGE_SIZE_SMALL - 1))) as usize);
@@ -604,35 +717,41 @@ impl UserAddressSpace {
         Ok(())
     }
 
-    fn pin_user_page(&self, addr: u64) -> Result<PinnedUserPage, ErrorCode> {
-        let (frame, offset) = self
-            .inner
-            .pin_user_page(addr)
-            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+    fn pin_user_page(
+        &self,
+        addr: u64,
+        access: MappingOptions,
+    ) -> Result<PinnedUserPage, UserCopyError> {
+        let (frame, offset) = self.inner.pin_user_page(addr, access)?;
         Ok(PinnedUserPage { frame, offset })
     }
 
     pub fn get_user_page_as_kernel(
         &self,
         user_page_addr: u64,
-    ) -> Result<PinnedUserPage, ErrorCode> {
+        access: MappingOptions,
+    ) -> Result<PinnedUserPage, UserCopyError> {
         if user_page_addr & (PAGE_SIZE_SMALL - 1) != 0 {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
-        self.pin_user_page(user_page_addr)
+        self.pin_user_page(user_page_addr, access)
     }
 
     pub fn read_from_user(
         &self,
         vaddr_start: u64,
         count: u64,
-    ) -> Result<alloc::vec::Vec<u8>, ErrorCode> {
+    ) -> Result<alloc::vec::Vec<u8>, UserCopyError> {
         let mut result = alloc::vec![0; count as usize];
         self.read_from_user_into(vaddr_start, result.as_mut_slice())?;
         Ok(result)
     }
 
-    pub fn read_from_user_into(&self, vaddr_start: u64, buf: &mut [u8]) -> Result<(), ErrorCode> {
+    pub fn read_from_user_into(
+        &self,
+        vaddr_start: u64,
+        buf: &mut [u8],
+    ) -> Result<(), UserCopyError> {
         let stats = crate::xray::stats::kernel_stats_ref();
         stats.adjust_metric(crate::xray::stats::MetricType::UserCopyRead, 1);
         stats.adjust_metric(
@@ -641,6 +760,10 @@ impl UserAddressSpace {
         );
 
         self.inner.page_table_ref().copy_from_user(vaddr_start, buf)
+    }
+
+    pub(super) fn is_file_page(&self, addr: u64) -> bool {
+        self.inner.with_file_segment(addr, |_| Ok(())).is_ok()
     }
 
     pub fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {
@@ -811,7 +934,7 @@ pub fn huge_mapping_self_test() {
     );
     let (pinned, offset) = space
         .inner
-        .pin_user_page(huge.start + PAGE_SIZE_MID - 1)
+        .pin_user_page(huge.start + PAGE_SIZE_MID - 1, MappingOptions::READABLE)
         .unwrap();
     assert_eq!(pinned.get().unwrap().kind(), PageType::MidPage);
     assert_eq!(
@@ -893,7 +1016,10 @@ pub fn huge_mapping_self_test() {
     assert_eq!(table.leaf_kind(boundary), Some(PageType::SmallPage));
     space.copy_to_user(b"across", boundary - 3).unwrap();
     assert_eq!(space.read_from_user(boundary - 3, 6).unwrap(), b"across");
-    let (pinned, offset) = space.inner.pin_user_page(boundary + 5).unwrap();
+    let (pinned, offset) = space
+        .inner
+        .pin_user_page(boundary + 5, MappingOptions::READABLE)
+        .unwrap();
     assert_eq!(pinned.get().unwrap().kind(), PageType::SmallPage);
     assert_eq!(offset, 5);
     drop(pinned);

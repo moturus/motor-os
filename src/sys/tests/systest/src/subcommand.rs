@@ -63,6 +63,19 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
+    pub fn bad_wait_array(&mut self, case: usize) {
+        use std::io::{BufRead, BufReader, Write};
+        self.stdin
+            .write_all(format!("bad_wait_array {case}\n").as_bytes())
+            .unwrap();
+        self.stdin.flush().unwrap();
+        let mut line = String::new();
+        BufReader::new(self.inst.stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "bad_wait_array: armed");
+    }
+
     pub fn fault_storm(&mut self) {
         use std::io::Write;
         self.stdin.write_all(b"fault_storm\n").unwrap();
@@ -174,6 +187,10 @@ fn do_command(cmd: String) {
         "lazy_fault_at_floor" => {
             assert_eq!(1, words.len());
             crate::admission::run_lazy_fault_at_floor_child()
+        }
+        "bad_wait_array" => {
+            assert_eq!(2, words.len());
+            crate::checked_copy_in::bad_wait_array_child(words[1].parse().unwrap())
         }
         "fault_storm" => {
             assert_eq!(1, words.len());

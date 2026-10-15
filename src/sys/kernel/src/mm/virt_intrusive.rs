@@ -15,6 +15,7 @@ use core::sync::atomic::Ordering;
 
 use super::phys::Frame;
 use super::slab::SlabArc;
+use super::user_copy::UserCopyError;
 use super::virt::VaddrMapStatus;
 use super::{MappingOptions, MemorySegment, PAGE_SIZE_SMALL};
 
@@ -310,7 +311,9 @@ impl VmemSegment {
     pub(super) fn vaddr_map_status(&self, vmem_addr: u64) -> VaddrMapStatus {
         assert!(self.segment.contains(vmem_addr));
 
-        let page = self.find_page(vmem_addr).unwrap();
+        let Some(page) = self.find_page(vmem_addr) else {
+            return VaddrMapStatus::Unmapped; // An absent file-paged page.
+        };
 
         if let Some(frame) = page.frame.get() {
             if frame.is_mmio() {
@@ -329,15 +332,38 @@ impl VmemSegment {
         }
     }
 
-    pub(super) fn pin_user_page(&self, vmem_addr: u64) -> Option<(SlabArc<Frame>, u64)> {
-        let page = self.find_page(vmem_addr)?;
-        let frame = page.frame.get()?;
+    pub(super) fn pin_user_page(
+        &self,
+        vmem_addr: u64,
+        access: MappingOptions,
+    ) -> Result<(SlabArc<Frame>, u64), UserCopyError> {
+        let Some(page) = self.find_page(vmem_addr) else {
+            if self
+                .mapping_options
+                .contains(access | MappingOptions::USER_ACCESSIBLE)
+            {
+                return Err(UserCopyError::PageAbsent(vmem_addr));
+            }
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
+        };
+        // Direct-map accesses bypass PTE protection; check the page's rights
+        // while the caller holds the region lock, before acquiring the pin.
+        if !page
+            .mapping_options
+            .contains(access | MappingOptions::USER_ACCESSIBLE)
+        {
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
+        }
+        let frame = page
+            .frame
+            .get()
+            .ok_or(UserCopyError::PageAbsent(vmem_addr))?;
         if frame.is_mmio() {
-            return None;
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         // The caller holds the region lock, so unmap cannot release the
         // mapping's last reference while this owning reference is acquired.
-        Some((page.frame.clone(), vmem_addr - page.start))
+        Ok((page.frame.clone(), vmem_addr - page.start))
     }
 
     pub(super) fn unmap(mut self) -> u64 {
@@ -387,6 +413,10 @@ impl VmemSegment {
             page_mut.clear();
             self.address_space().page_allocator.free_page(page_ptr);
         }
+        // A file-paged segment was accounted in full when it was reserved.
+        if self.mapping_options.contains(MappingOptions::FILE_PAGED) {
+            sz = self.segment.size;
+        }
 
         self.segment = MemorySegment::empty_segment();
         self.owner.clear();
@@ -418,6 +448,10 @@ impl VmemSegment {
     pub(super) fn allocate_pages(&mut self) -> Result<(), ErrorCode> {
         assert!(self.segment.size > 0);
         assert!(self.pages.is_empty());
+
+        if self.mapping_options.contains(MappingOptions::FILE_PAGED) {
+            return Ok(()); // Sparse: the pager installs pages on demand.
+        }
 
         let num_pages = self.segment.size >> PAGE_SIZE_SMALL_LOG2;
         let huge = self.huge_candidates();
@@ -554,10 +588,67 @@ impl VmemSegment {
         Ok(())
     }
 
+    /// Installs a private copy of `source`, or a zeroed page with `None`.
+    /// The region lock covers the absence check through installation, so
+    /// overlapping fills never allocate twice against one page's commitment.
+    pub(super) fn fill_file_page(
+        &mut self,
+        addr: u64,
+        source: Option<&super::user::PinnedUserPage>,
+    ) -> Result<bool, ErrorCode> {
+        if !self.mapping_options.contains(MappingOptions::FILE_PAGED)
+            || !addr.is_multiple_of(PAGE_SIZE_SMALL)
+            || !self.segment.contains(addr)
+        {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        if self.find_page(addr).is_some() {
+            return Ok(false);
+        }
+        let mut options = self.mapping_options - MappingOptions::FILE_PAGED;
+        let frame = super::phys::allocate_frame(PageType::SmallPage)?;
+        if let Some(source) = source {
+            let dst = frame.get().unwrap().start() + super::PAGING_DIRECT_MAP_OFFSET;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    source.kernel_addr() as *const u8,
+                    dst as *mut u8,
+                    PAGE_SIZE_SMALL as usize,
+                );
+            }
+            options |= MappingOptions::DONT_ZERO;
+        }
+        self.map_frame(addr, frame, options)?;
+        Ok(true)
+    }
+
+    pub(super) fn is_file_paged(&self) -> bool {
+        self.mapping_options.contains(MappingOptions::FILE_PAGED)
+    }
+
     pub(super) fn fix_pagefault(&mut self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         debug_assert!(self.segment.contains(pf_addr));
 
         // Note: this is run under spinlock on self.
+
+        if self.mapping_options.contains(MappingOptions::FILE_PAGED) {
+            // Only not-present faults are served: user (4), plus write (2)
+            // where writable and instruction fetch (0x10) where executable.
+            let code = error_code & !4;
+            if error_code & 4 == 0
+                || code & !(2 | 0x10) != 0
+                || (code & 2 != 0 && !self.mapping_options.contains(MappingOptions::WRITABLE))
+                || (code & 0x10 != 0 && !self.mapping_options.contains(MappingOptions::EXECUTABLE))
+            {
+                log::debug!("#PF: file-paged protection violation: 0x{error_code:x}");
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
+            return if self.find_page(pf_addr).is_some() {
+                Ok(()) // A fill raced with the fault.
+            } else {
+                Err(moto_rt::E_NOT_READY)
+            };
+        }
 
         if (((pf_addr & !(PAGE_SIZE_SMALL - 1)) == self.segment.start)
             || (pf_addr >= (self.segment.end() - PAGE_SIZE_SMALL)))
@@ -671,8 +762,11 @@ impl VmemSegment {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         // Segment provenance decides, whatever the actual backing: a huge
-        // page must never reach the small-page replacement loop below.
-        if (self.mapping_options | other.mapping_options).contains(MappingOptions::HUGE_ELIGIBLE) {
+        // page must never reach the small-page replacement loop below, and
+        // a file-paged segment has no complete set of pages to share.
+        if (self.mapping_options | other.mapping_options)
+            .intersects(MappingOptions::HUGE_ELIGIBLE | MappingOptions::FILE_PAGED)
+        {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         debug_assert!(!self.pages.is_empty());
@@ -854,17 +948,12 @@ impl SegmentMap {
     }
 
     pub(super) fn intersects(&self, segment: &MemorySegment) -> bool {
-        if let Some(seg) = self
-            .segments
-            .upper_bound(intrusive_collections::Bound::Included(&segment.end()))
+        // Existing segments do not overlap. The last one starting before
+        // our end intersects exactly when it ends after our start.
+        self.segments
+            .upper_bound(Bound::Excluded(&segment.end()))
             .get()
-        {
-            if seg.vmem_segment.segment.contains(segment.start) {
-                return true;
-            }
-        }
-
-        false
+            .is_some_and(|seg| seg.vmem_segment.segment.end() > segment.start)
     }
 
     pub(super) fn get_mut(&mut self, addr: &u64) -> Option<&mut VmemSegment> {

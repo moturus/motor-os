@@ -50,6 +50,9 @@ General guidelines:
   outside of core Motor OS repo are tolerated (this file is in the root of the core Motor OS repo).
 * Format your changes with `cargo fmt` from the repository-selected toolchain.
 * Be careful not to introduce performance regressions.
+* If you want to add a static variable to a crate in src/sys/, first ask the user: statics are
+  frowned upon.
+* Python is frowned upon - use shell scripts for tests.
 * Regular tests must not go out to the Internet, as this introduces flakiness to our tests and
   potentially destabilize (DDOS) the external resource. Only rare integration tests for internet-facing
   services like DNS lookup or ping should include reaching out to the internet, and only after

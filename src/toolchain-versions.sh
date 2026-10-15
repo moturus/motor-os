@@ -44,7 +44,7 @@ UPSTREAM_CARGO_REV="eb98b54bc9f3c74519f43d066cb3fd02ebc88df0"
 
 MOTOR_MLIBC_REPOSITORY="https://github.com/moturus/mlibc.git"
 MOTOR_MLIBC_REF="refs/heads/motor-os-rustc"
-MOTOR_MLIBC_REV="7e228aab39cb262b3eacbad998d00883239798e2"
+MOTOR_MLIBC_REV="39d67d64bce3adf5903cc27da50d3017d5d8ba87"
 
 MOTOR_LLVM_TARGETS="X86"
 
