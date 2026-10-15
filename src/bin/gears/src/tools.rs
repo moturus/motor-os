@@ -969,15 +969,19 @@ mod tests {
         assert_eq!(registry.tools().len(), 14);
         assert_eq!(registry.enabled_tools().count(), 0);
         assert!(registry.tools().iter().all(|tool| !tool.enabled_by_default));
+        // Every shipped tool directory is offered by one of the two samples.
+        let batteries = Config::load_user(Some(&base.join("config/gears-batteries.toml"))).unwrap();
         let configured = config
             .tools
             .iter()
-            .map(|tool| &tool.directory)
+            .chain(&batteries.tools)
+            .map(|tool| tool.directory.clone())
             .collect::<HashSet<_>>();
         for directory in std::fs::read_dir(base.join("tools")).unwrap() {
             let directory = directory.unwrap();
             if directory.file_type().unwrap().is_dir() {
-                assert!(configured.contains(&PathBuf::from("tools").join(directory.file_name())));
+                let path = PathBuf::from("tools").join(directory.file_name());
+                assert!(configured.contains(&path), "{}", path.display());
             }
         }
         let cargo = registry

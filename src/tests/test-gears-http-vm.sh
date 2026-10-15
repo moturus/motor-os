@@ -11,7 +11,7 @@ case "${1:-}" in
   --release) PROFILE=release ;;
   *) echo "usage: test-gears-http-vm.sh [--release]" >&2; exit 2 ;;
 esac
-MOCK="$ROOT_DIR/src/bin/gears-mock-provider/target/$PROFILE/gears-mock-provider"
+MOCK="$ROOT_DIR/src/bin/gears/target/$PROFILE/examples/mock-provider"
 [ -x "$MOCK" ] || { echo "run test-gears-http.sh first to build $MOCK" >&2; exit 1; }
 chmod 600 "$WD/test.key"
 WORK="$(mktemp -d /tmp/gears-http-vm.XXXXXX)"

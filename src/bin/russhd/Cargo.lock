@@ -1748,7 +1748,7 @@ dependencies = [
 [[package]]
 name = "ring"
 version = "0.17.14"
-source = "git+https://github.com/moturus/ring.git?branch=motor-os-0.17.14#b1dad2579de791d0c31ad33300187e584ba6c268"
+source = "git+https://github.com/moturus/ring.git?branch=motor-os-0.17.14#e4de8c22c3279b76ffa5bdb1c46c780000aa1190"
 dependencies = [
  "cc",
  "cfg-if",

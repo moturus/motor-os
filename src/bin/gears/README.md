@@ -79,8 +79,8 @@ Important optional fields are:
 
 The optional batteries coding workflow has a separate sample configuration,
 [`config/gears-batteries.toml`](config/gears-batteries.toml). Install it in
-your Gears directory with the contents of both `gears/tools/` and
-`gears-batteries/tools/`, and install `gears-batteries` beside `gears`.
+your Gears directory with the contents of `tools/`, and install
+`gears-batteries` beside `gears`.
 The developer image supplies those files. Start from your workspace with:
 
 ```sh
@@ -101,7 +101,7 @@ batteries tools plus shell, Gix, Lorry and curl, and applies the batteries
 approval policy. Declare a literal check vector in the workspace's
 `.gears/batteries.toml`, for example `check = ["lorry", "test"]` on Motor OS
 or `check = ["cargo", "test", "--offline"]` on Linux.
-See the [batteries README](../gears-batteries/README.md) for check evidence,
+See the [batteries guide](batteries.md) for check evidence,
 file-read requirements and policy limits.
 
 Hooks are listed in execution order:
@@ -295,31 +295,32 @@ Automated tests never use an Internet provider:
     cargo fmt --manifest-path src/bin/gears/Cargo.toml -- --check
     cargo test --manifest-path src/bin/gears/Cargo.toml
     cargo clippy --manifest-path src/bin/gears/Cargo.toml --all-targets
-    cargo test --manifest-path src/bin/gears-mock-provider/Cargo.toml
+    cargo test --manifest-path src/bin/gears/Cargo.toml --example mock-provider
 
-The component gate runs the three crates' tests and selects the host build
-of Motor curl through `MOTOR_CURL_TEST_PROGRAM` for the provider regression;
-plain `cargo test` uses upstream curl there. The developer-image gate also
-runs guest curl and Gears against the host mock's HTTP endpoint on the TAP
-address:
+The component gate runs the package's tests and the mock provider's tests,
+and selects the host build of Motor curl through `MOTOR_CURL_TEST_PROGRAM` for
+the provider regression; plain `cargo test` uses upstream curl there. The
+developer-image gate also runs guest curl and Gears against the host mock's
+HTTP endpoint on the TAP address:
 
     src/tests/full-test-dev.sh --release
 
-Build both development-image binaries with:
+Build the development-image binaries and test programs, including the
+`gears-mock-provider` TLS backend (the `mock-provider` example), with:
 
     make gears
-    make gears-mock-provider
 
-For a manual Linux smoke test, start the standalone TLS backend with
+For a manual Linux smoke test, start that backend with
 src/bin/curl/tests/server-cert.pem and server-key.pem:
 
-    gears-mock-provider --addr 127.0.0.1:9443 --scenario streamed-text \
+    cargo run --manifest-path src/bin/gears/Cargo.toml --example mock-provider -- \
+      --addr 127.0.0.1:9443 --scenario streamed-text \
       --cert src/bin/curl/tests/server-cert.pem \
       --key src/bin/curl/tests/server-key.pem
 
 Point a temporary config at https://127.0.0.1:9443/v1, set provider.ca_cert to
 src/bin/curl/tests/test-ca.pem, allowlist 127.0.0.1, and run Gears with any
-non-empty test key. The same gears-mock-provider binary is installed in the
+non-empty test key. It is installed as gears-mock-provider in the
 Motor OS development image under /devtools/tests/gears/; copy the three test
 certificate files into the VM and repeat with /devtools/bin/gears.
 

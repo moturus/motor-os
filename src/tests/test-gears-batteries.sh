@@ -32,11 +32,12 @@ if [ "$PREPARE" = 1 ]; then
   exit 0
 fi
 
-GEARS_TARGET="$ROOT_DIR/src/bin/gears/target"
-WORKFLOW_TARGET="$ROOT_DIR/src/bin/gears-batteries/target"
-cargo build --quiet --locked --offline --manifest-path "$ROOT_DIR/src/bin/gears/Cargo.toml" \
-  --target-dir "$GEARS_TARGET" --bin gears "${PROFILE_ARGS[@]}"
-cargo test --quiet --locked --offline --manifest-path "$ROOT_DIR/src/bin/gears-batteries/Cargo.toml" \
-  --target-dir "$WORKFLOW_TARGET" "${PROFILE_ARGS[@]}"
-cargo run --quiet --locked --offline --target-dir "$WORKFLOW_TARGET" --manifest-path "$ROOT_DIR/src/bin/gears-batteries/Cargo.toml" --example workflow-smoke "${PROFILE_ARGS[@]}" -- "$WORKFLOW_TARGET/$WORKFLOW_PROFILE/gears-batteries" "$(rustup which rustc)" "$GEARS_TARGET/$WORKFLOW_PROFILE/gears"
+# test-gears-http.sh runs the package's tests; this gate runs the workflow.
+MANIFEST="$ROOT_DIR/src/bin/gears/Cargo.toml"
+TARGET="$ROOT_DIR/src/bin/gears/target"
+cargo build --quiet --locked --offline --manifest-path "$MANIFEST" --target-dir "$TARGET" \
+  --bins "${PROFILE_ARGS[@]}"
+cargo run --quiet --locked --offline --manifest-path "$MANIFEST" --target-dir "$TARGET" \
+  --example workflow-smoke "${PROFILE_ARGS[@]}" -- \
+  "$TARGET/$WORKFLOW_PROFILE/gears-batteries" "$(rustup which rustc)" "$TARGET/$WORKFLOW_PROFILE/gears"
 echo "test-gears-batteries.sh ALL PASS"

@@ -64,7 +64,7 @@ sys-base: strobe sys-io sys-init sys-tty
 sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
 user: user-base kibim httpd httpd-axum ssh
-user-dev: user curl gears gears-batteries gears-mock-provider gix lorry mdbg rnetbench crossbench \
+user-dev: user curl gears gix lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
@@ -72,7 +72,7 @@ user-dev: user curl gears gears-batteries gears-mock-provider gix lorry mdbg rne
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox sysbox-tests systest mio-test tokio-tests crossterm-smoke
-.PHONY: rush kibim red rmux russhd ssh httpd httpd-axum gears gears-batteries gears-mock-provider
+.PHONY: rush kibim red rmux russhd ssh httpd httpd-axum gears
 .PHONY: gix lorry curl
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy assembly-resolved
@@ -228,22 +228,11 @@ gears:
 	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" \
 		$(DO_BUILD) --bins --examples
 	strip -o "$(BIN_DIR)/gears" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears"
+	strip -o "$(BIN_DIR)/gears-batteries" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears-batteries"
+# Test programs, installed under /devtools/tests/gears.
 	strip -o "$(BIN_DIR)/gears-tool-smoke" "$(OBJ_DIR)/gears/$(SUB_DIR)/examples/tool-smoke"
-
-gears-batteries:
-	mkdir -p $(BIN_DIR)
-	cd src/bin/gears-batteries && CARGO_TARGET_DIR="$(OBJ_DIR)/gears-batteries" \
-		$(DO_BUILD) --bins --examples
-	strip -o "$(BIN_DIR)/gears-batteries" "$(OBJ_DIR)/gears-batteries/$(SUB_DIR)/gears-batteries"
-	strip -o "$(BIN_DIR)/gears-batteries-smoke" "$(OBJ_DIR)/gears-batteries/$(SUB_DIR)/examples/workflow-smoke"
-
-gears-mock-provider:
-	mkdir -p $(BIN_DIR)
-	cd src/bin/gears-mock-provider && \
-		CARGO_TARGET_DIR="$(OBJ_DIR)/gears-mock-provider" \
-		$(DO_BUILD)
-	strip -o "$(BIN_DIR)/gears-mock-provider" \
-		"$(OBJ_DIR)/gears-mock-provider/$(SUB_DIR)/gears-mock-provider"
+	strip -o "$(BIN_DIR)/gears-batteries-smoke" "$(OBJ_DIR)/gears/$(SUB_DIR)/examples/workflow-smoke"
+	strip -o "$(BIN_DIR)/gears-mock-provider" "$(OBJ_DIR)/gears/$(SUB_DIR)/examples/mock-provider"
 
 lorry: assembly-resolved
 	mkdir -p $(BIN_DIR)
@@ -405,9 +394,7 @@ clippy: vdso
 	cd src/bin/red && $(DO_CLIPPY)
 	cd src/bin/rmux && $(DO_CLIPPY)
 	cd src/bin/rnetbench && $(DO_CLIPPY)
-	cd src/bin/gears && $(DO_CLIPPY)
-	cd src/bin/gears-batteries && $(DO_CLIPPY)
-	cd src/bin/gears-mock-provider && $(DO_CLIPPY)
+	cd src/bin/gears && $(DO_CLIPPY) --bins --examples
 	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/gix && \

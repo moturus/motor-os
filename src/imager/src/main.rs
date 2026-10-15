@@ -1066,17 +1066,12 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/devtools/tests/gears"));
-        assert_eq!(config.source_dirs.len(), 7);
+        assert_eq!(config.source_dirs.len(), 5);
         for (source, destination) in [
             ("src/bin/red", "/devtools/src/motor-os/bin/red"),
             ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
             ("src/bin/gears", "/devtools/src/motor-os/bin/gears"),
-            (
-                "src/bin/gears-batteries",
-                "/devtools/src/motor-os/bin/gears-batteries",
-            ),
             ("src/bin/gears/tools", "/user/cfg/gears/tools"),
-            ("src/bin/gears-batteries/tools", "/user/cfg/gears/tools"),
             ("src/bin/gears/config", "/user/cfg/gears"),
         ] {
             assert!(config

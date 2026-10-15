@@ -1,4 +1,4 @@
-# Install this file and both crates' tools/ directories in your Gears directory.
+# Install this file and the tools/ directory in your Gears directory.
 # Use gears --config PATH/gears-batteries.toml --model MODEL from your workspace.
 version = 1
 default_provider = "openrouter"

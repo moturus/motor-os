@@ -143,11 +143,9 @@ Then run:
     cargo +nightly fmt --manifest-path src/bin/gears/Cargo.toml -- --check
     cargo test --manifest-path src/bin/gears/Cargo.toml
     cargo clippy --manifest-path src/bin/gears/Cargo.toml --all-targets
-    cargo test --manifest-path src/bin/gears-mock-provider/Cargo.toml
+    cargo test --manifest-path src/bin/gears/Cargo.toml --example mock-provider
     make gears
     make gears BUILD=release
-    make gears-mock-provider
-    make gears-mock-provider BUILD=release
 
 Finally, run the documented mock-backed smoke test on Linux and Motor OS in
 debug and release builds. The redesign is complete when both platforms can

@@ -1015,7 +1015,9 @@ fn declare(args: &[String], io: &mut Io, shell: &mut Shell, readonly: bool) -> i
             }
         } else {
             for (name, value) in shell.vars_sorted() {
-                if shell.is_exported(&name) {
+                // Like other shells, skip environment entries whose names are
+                // not variable names: `export` could not read them back.
+                if shell.is_exported(&name) && crate::is_valid_var_name(&name) {
                     io.outln(&format!("export {name}={}", sh_quote(&value)));
                 }
             }

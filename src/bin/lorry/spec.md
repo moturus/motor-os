@@ -2019,8 +2019,8 @@ surface.
 The pinned `ring` inputs are:
 
 - `https://github.com/moturus/ring.git` commit
-  `b1dad2579de791d0c31ad33300187e584ba6c268`, tree
-  `824d5b8e9755603070a8167e0c5529acb627d956`;
+  `e4de8c22c3279b76ffa5bdb1c46c780000aa1190`, tree
+  `53797fdef88e1bfed6e4884b768b2d7be20a1f98`;
 - Cargo.lock pins that commit for the reproducible host cross-build.
 
 New Lorry and Motor curl code uses `MIT OR Apache-2.0`.

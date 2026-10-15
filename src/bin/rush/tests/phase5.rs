@@ -59,6 +59,21 @@ fn export_p_lists_exports_in_reusable_form() {
 }
 
 #[test]
+fn export_p_skips_environment_names_that_are_not_variables() {
+    let out = Command::new(RUSH)
+        .args(["-c", "export -p"])
+        .env_clear()
+        .env("GOOD_NAME", "kept")
+        .env("BIN_EXE_my-tool", "/x")
+        .output()
+        .expect("failed to spawn rush");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("export GOOD_NAME='kept'\n"), "{stdout}");
+    assert!(!stdout.contains("my-tool"), "{stdout}");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
 fn export_rejects_invalid_identifier_fatally() {
     // A bad variable name is a special-builtin usage error: fatal (exit 2), and
     // the shell stops (`echo after` never runs) — matching dash.

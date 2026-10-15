@@ -52,8 +52,9 @@ their tool call ends.
 
 ## Retained decisions
 
-- Keep the names `gears` and `gears-batteries`. One new Rust crate,
-  `src/bin/gears-batteries`, builds one program whose first argument picks
+- Keep the names `gears` and `gears-batteries`. The `gears` package
+  (`src/bin/gears`) builds a second binary, `gears-batteries`, from its
+  `batteries` module; its first argument picks
   its role: `hook`, `tool NAME` and `review` for the roles Gears starts;
   `pending`, `history`, `status`, `cleanup`, `eval` and
   `orchestrate` for the user; `cron` and `gateway` for the optional
