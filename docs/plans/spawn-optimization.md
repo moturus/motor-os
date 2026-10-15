@@ -29,10 +29,16 @@ is committed as 28d79a39 with address-space-owned mapping state, atomic
 publication/retirement and safe fault completion. Step 8 is committed as
 06f8d9e9: read-only demand paging and its native integration tests. Each
 passed one full release and one full debug gate against its staged patch.
-Step 9, lazy relocation, is staged for review on 06f8d9e9 and has passed one
-full release and one full debug gate; its details are recorded below.
-This plan is staged with every
-patch from step 9 onward (user request, 2026-10-14). Steps 10 and 11 remain.
+Step 9, lazy relocation, is committed as f0763fbe and passed one full release
+and one full debug gate; its details are recorded below. Step 10's external
+mlibc patch is committed and published as 39d67d64. The staged integration
+patch selects that revision, rebuilds the compiler assembly and native tools,
+and includes the approved one-line fix for a pre-existing Helix linker
+configuration mismatch. The producer completed all release images; one
+release and one debug full-test gate and the release developer-image gate
+passed. Details and the original failure diagnosis are recorded below.
+This plan is staged with every patch from step 9 onward (user request,
+2026-10-14). Step 10 is ready for review; step 11 follows its commit.
 
 The goal is to read, allocate, and relocate only the executable pages a
 program needs. On the prototype's host (nested KVM, so absolute times are
@@ -511,7 +517,7 @@ larger ones are marked.
    BSS; a copy of the test binary with two relocation records swapped
    (falls back to eager data, same digest); a record retargeted into
    unused read-only data (falls back to an eager image, same digest).
-   Staged for review on `06f8d9e9`. Writable segments use the pager only after all
+   Committed as `f0763fbe`. Writable segments use the pager only after all
    relocation records validate; typed fallback preserves eager data for
    unsorted or oversized indexes and an eager image for read-only targets.
    Ordinary read, allocation and kernel errors remain errors. The scan uses
@@ -564,13 +570,98 @@ larger ones are marked.
    9.8 minutes testing), as did one debug full-test run (0.2 minutes preparation,
    21.5 minutes testing), against the staged code alone. Every cold-spawn case
    passed in both profiles. Formatting and clippy passed with only existing
-   warnings. No developer-image run was requested for this patch. The patch
-   and this plan are staged; no commit was made.
+   warnings. No developer-image run was requested for this patch. The user
+   committed the staged patch and plan before work on step 10 began.
 10. **mlibc** in **`../toolchain-src/mlibc`, outside this repository:**
     remove the startup relocation walk on Motor OS, where the loader has
     always applied `R_X86_64_RELATIVE`, and relink the developer-image
     tools. Expected gain on the prototype host: 563 ms to 463 ms. Say so
     explicitly in the patch; nothing in-tree emulates it any more.
+    The source patch is in
+    `/home/posk/motor-dev/toolchain-src/mlibc/options/rtld/generic/linker.cpp`,
+    outside the Motor OS repository. Committed and published as `39d67d64`
+    after rebasing onto remote `7e228aab`; the rebase left the 13-line patch
+    unchanged and also brings in the remote's `log2f` algorithm update since
+    the previously pinned `0cece7e5`. It skips both the
+    regular and late relocation passes for the main executable when built
+    with `__motor__` and `MLIBC_STATIC_BUILD`. The late pass otherwise scans
+    the same table again for copy and indirect relocations, which Motor's
+    executable loader rejects. The loader accepts only `R_X86_64_NONE` and
+    `R_X86_64_RELATIVE`; it applies relative relocations eagerly or when a
+    page is filled. TLS setup, constructors, shared-object relocation, and
+    other platforms retain their existing paths.
+    Integration constraint: `prepare_exact_sources` in
+    `src/build-motor-os.sh` requires a clean managed mlibc checkout even in
+    authoring mode. Its declared revision must be reachable from
+    `refs/heads/motor-os-rustc` on the mlibc remote. Ordinary consumers select
+    only the assembly for that committed revision and verify artifact hashes.
+    Step 10 is therefore split at the external commit (user approved): the
+    source patch is published first, then the integration patch updates
+    `MOTOR_MLIBC_REV`, rebuilds and relinks the tools, and is gated with one
+    release and one debug `full-test.sh` plus release-only `full-test-dev.sh`.
+    Source-patch validation: the changed translation unit compiles with the selected
+    production compiler and exact mlibc flags, without warnings. A temporary
+    copy of `libc.a`, containing the rebuilt object, passed the existing
+    `test-unwind.sh` native cases on the step-9 release image: abort, release,
+    and LTO profiles, plus the C++ constructor and cross-language unwind suites
+    in release and LTO. The temporary runner enabled those existing C++ suites
+    on the standard image; no assertions changed. Disassembly of the tested
+    binary confirms both main-executable guards. The installed archive's
+    hash is unchanged. Outputs, the exact patch, and logs are isolated under
+    `/tmp/motor-mlibc-reloc.IFzXXn`. These focused checks do not replace the
+    integration gates or validate relinked developer tools.
+    Integration: `MOTOR_MLIBC_REV` and `docs/build-llvm.md` select `39d67d64`.
+    The supported `src/build-motor-os.sh` producer built compiler assembly
+    `9e94e44dd119e8948c5b3aebb1c75a79a084a178c681a671539490c5ca1d8cad`
+    under `/home/posk/motor-dev/assemblies`, outside this repository, using
+    the published mlibc source. mlibc, native LLVM/Clang, rustc, rustfmt, and
+    rust-analyzer built and passed the producer's artifact checks; the normal
+    assembly resolver accepts the new manifest. The installed host Rust
+    toolchain and tracked Rust selector remain the same. Build concurrency
+    was limited to eight CPUs before native LLVM compilation on this 16-GiB
+    host. The producer also
+    follows the add-on branches: `/home/posk/motor-dev/helix`, outside this
+    repository, advances from `af99cdce` to `e2879a20` (the Motor cc-rs pin
+    and native/default-feature build support). Its packaged build still uses
+    `--no-default-features`; ripgrep and sed revisions are unchanged.
+    The producer stopped with status 101 while linking Helix, before building
+    images: `crt1.o` was included twice, producing duplicate `motor_start` and
+    `__dso_handle` symbols. Helix's new target rustflags enable default linker
+    libraries, but `build_helix` still selects `motor-rust-cc`, which appends
+    the startup object explicitly; Clang also adds it for those flags.
+    Driver dry runs confirm two startup objects with both the old and new
+    assemblies, one with the old no-default-library flags, and one with the
+    normal `motor-clang` driver. This is the already documented combination
+    to avoid in [build-rustc.md](../build-rustc.md), Native server build; the
+    failure is independent of the mlibc relocation change.
+    Approved prerequisite fix: change only the `build_helix` linker selection
+    in `src/build-motor-os.sh` from `motor-rust-cc` to `motor-clang`, using
+    Helix's declared flags and the driver's standard startup/runtime recipe.
+    The user approved this one-line producer fix after the failure diagnosis;
+    it is now applied. The original failure, driver diagnostics, and old/new
+    assembly manifests are preserved in `/tmp/motor-mlibc-integration.S8TWgV`.
+    The resumed producer reused the validated compiler assembly, rebuilt and
+    linked Helix successfully, and completed the base, standard, and developer
+    release images (status 0, `build-fixed.log`). The original failed run is
+    retained as `build.log` (status 101). Artifact hashes and the selected
+    assembly are recorded alongside both logs.
+    Integration validation: one release full-test run passed (0.1 minutes
+    preparation, 9.8 minutes testing), as did one debug full-test run (0.1
+    minutes preparation, 21.3 minutes testing), against only the staged code
+    in an isolated worktree. Every cold-spawn case and the native C-runtime
+    unwind cases passed in both profiles. One release `full-test-dev.sh` also
+    passed (51.8 minutes overall): its repository suite took 0.9 minutes
+    preparation and 21.6 minutes testing, followed by all eight native HTTP
+    component targets, packaged-source builds, and the complete bounded
+    Lorry suite (1065 seconds). Native C++ and LTO unwind, native compilation,
+    rustfmt, rust-analyzer, and Helix's analyzer integration all passed.
+    The final artifact hashes match the pre-gate snapshot, the staged code
+    matches the tested code, and shell syntax and staged whitespace checks
+    pass. Existing jobserver warnings also occur in the previous patch's
+    retained gate logs. All three integration gates exited with status 0;
+    logs and snapshots remain under the integration evidence directory above.
+    The revision, producer fix, build documentation, and this plan are staged
+    for review; no commit was made. Step 11 measurements remain after commit.
 11. **Measure** (section 4) and decide on RELR and on sharing with the
     new numbers.
 

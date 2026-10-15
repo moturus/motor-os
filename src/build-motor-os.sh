@@ -879,7 +879,7 @@ build_helix() {
 		env \
 			RUSTC="$MOTOR_RUSTC" \
 			RUSTDOC="$MOTOR_RUSTDOC" \
-			CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-rust-cc" \
+			CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-clang" \
 			CC_x86_64_unknown_motor="$SYSROOT/bin/motor-clang" \
 			CXX_x86_64_unknown_motor="$SYSROOT/bin/motor-clang++" \
 			CXXSTDLIB_x86_64_unknown_motor=c++ \
