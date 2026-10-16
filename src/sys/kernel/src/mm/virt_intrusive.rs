@@ -511,14 +511,17 @@ impl VmemSegment {
         self.map_frame(start, frame, options)
     }
 
-    // A page descriptor at `start` with `options`, or the segment torn down.
+    // Eager construction rolls back the segment on failure. A file-paged
+    // segment is already published: its pages, bounds and owner must survive.
     fn new_page(&mut self, start: u64, options: MappingOptions) -> Result<*mut Page, ErrorCode> {
         let page = self
             .address_space()
             .page_allocator
             .alloc_page()
             .inspect_err(|_| {
-                self.clear();
+                if !self.is_file_paged() {
+                    self.clear();
+                }
                 log::error!("failed to allocate a page descriptor");
             })?;
         let page_mut = unsafe { page.as_mut() }.unwrap();
@@ -546,7 +549,9 @@ impl VmemSegment {
         {
             page_mut.clear();
             self.address_space().page_allocator.free_page(page);
-            self.clear();
+            if !self.is_file_paged() {
+                self.clear();
+            }
             return Err(err);
         }
         page_mut.frame = frame;

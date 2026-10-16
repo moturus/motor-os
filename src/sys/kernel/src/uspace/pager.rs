@@ -231,8 +231,10 @@ fn fill(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, UserCop
         if dest < mapping.start || dest_end > mapping.end {
             return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
-        let installed = space.fill_file(dest, &sources)?;
+        let (installed, result) = space.fill_file(dest, &sources);
+        // A failed fill may still have installed a prefix of the window.
         mapping.reservation.release(installed);
+        result?;
         (installed, mapping.take_waiters(dest, dest_end))
     };
     resume(waiters, true);
