@@ -89,7 +89,7 @@ impl Pager {
     /// now. Retirements are queued before an exit becomes visible, so a
     /// drain lets a mutation that follows a waited-for exit proceed.
     pub fn drain(&self) {
-        let mut events = [(0_u64, 0_u64); SysMem::PAGER_MAX_EVENTS];
+        let mut events = [[0_u64; 2]; SysMem::PAGER_MAX_EVENTS];
         loop {
             let count = match SysMem::pager_dequeue(&mut events) {
                 Ok(count) => count,
@@ -98,7 +98,7 @@ impl Pager {
                     return;
                 }
             };
-            for &(id, page) in &events[..count] {
+            for &[id, page] in &events[..count] {
                 if page == SysMem::PAGER_RETIRED {
                     if let Some(mapping) = self.mappings.borrow_mut().remove(&id) {
                         self.exec_locks.borrow_mut().release(mapping.entry);

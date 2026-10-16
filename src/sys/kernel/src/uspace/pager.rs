@@ -171,21 +171,27 @@ fn reserve(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, Erro
 }
 
 fn dequeue(caller: &Arc<super::Process>, buf: u64, capacity: u64) -> Result<u64, UserCopyError> {
-    let mut batch = [(0_u64, 0_u64); SysMem::PAGER_MAX_EVENTS];
+    let mut batch = [[0_u64; 2]; SysMem::PAGER_MAX_EVENTS];
     let count = {
         let mut pager = registry().lock(line!());
         let count = (capacity as usize).min(batch.len()).min(pager.events.len());
         for slot in batch.iter_mut().take(count) {
-            *slot = pager.events.pop_front().unwrap();
+            let (id, page) = pager.events.pop_front().unwrap();
+            *slot = [id, page];
         }
         count
     };
-    let bytes = unsafe { core::slice::from_raw_parts(batch.as_ptr() as *const u8, count * 16) };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            batch.as_ptr() as *const u8,
+            core::mem::size_of_val(&batch[..count]),
+        )
+    };
     if let Err(err) = caller.address_space().copy_to_user(bytes, buf) {
         // Requeue, so a bad buffer loses nothing.
         let mut pager = registry().lock(line!());
-        for event in batch[..count].iter().rev() {
-            pager.events.push_front(*event);
+        for &[id, page] in batch[..count].iter().rev() {
+            pager.events.push_front((id, page));
         }
         return Err(err);
     }

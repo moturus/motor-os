@@ -762,7 +762,7 @@ fn test_pager_ops_need_sys_io() {
     // The executable pager is sys-io's: every operation is refused for any
     // other caller before its arguments are looked at.
     assert_eq!(SysMem::pager_init().err(), Some(moto_rt::E_NOT_ALLOWED));
-    let mut events = [(0_u64, 0_u64); 1];
+    let mut events = [[0_u64; 2]; 1];
     assert_eq!(
         SysMem::pager_dequeue(&mut events).err(),
         Some(moto_rt::E_NOT_ALLOWED)
