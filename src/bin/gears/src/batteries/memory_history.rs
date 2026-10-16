@@ -1,83 +1,100 @@
-//! Bounded pages of decision history and a compact view of implemented features.
+//! Pages of the change log and a one-screen status; a bad log line is counted, not fatal.
+
+use std::collections::VecDeque;
+use std::path::Path;
 
 use serde_json::{Value, json};
-use std::path::Path;
 
 use crate::batteries::memory_format::Target;
 use crate::batteries::paths::ToolContext;
+
+const LOG: &str = "batteries/changes.jsonl";
 
 pub fn history(context: &ToolContext, offset: usize, limit: usize) -> Result<Value, String> {
     if !(1..=100).contains(&limit) {
         return Err("history limit must be 1–100".into());
     }
     let mut total = 0_usize;
+    let mut unreadable = 0_usize;
     let mut records = Vec::new();
-    crate::batteries::journal::visit(
-        &context.state,
-        Path::new("batteries/changes.jsonl"),
-        |value| {
-            if value["version"] != 1
-                || !matches!(value["decision"].as_str(), Some("approve" | "deny"))
-            {
-                return Err("unsupported or malformed memory decision record".into());
+    crate::batteries::journal::visit_lenient(&context.state, Path::new(LOG), |record| {
+        match record {
+            Ok(value) => {
+                if total >= offset && records.len() < limit {
+                    records.push(value);
+                }
+                total += 1;
             }
-            if total >= offset && records.len() < limit {
-                records.push(value);
-            }
-            total = total.checked_add(1).ok_or("too many memory decisions")?;
-            Ok(())
-        },
-    )?;
+            Err(_) => unreadable += 1,
+        }
+        Ok(())
+    })?;
     let next = offset.saturating_add(records.len());
-    Ok(json!({"version": 1, "records": records, "total": total,
-        "next_offset": (next < total).then_some(next)}))
+    Ok(
+        json!({"version": 2, "records": records, "total": total, "unreadable": unreadable,
+        "next_offset": (next < total).then_some(next)}),
+    )
+}
+
+/// The texts of the last `count` declined changes, each cut to 120 characters.
+pub fn declines(context: &ToolContext, count: usize) -> Result<Vec<String>, String> {
+    let mut texts = VecDeque::new();
+    crate::batteries::journal::visit_lenient(&context.state, Path::new(LOG), |record| {
+        if let Ok(value) = record
+            && value["version"] == 2
+            && value["decision"] == "no"
+            && let Some(text) = value["text"].as_str()
+        {
+            texts.push_back(text.chars().take(120).collect::<String>());
+            if texts.len() > count {
+                texts.pop_front();
+            }
+        }
+        Ok(())
+    })?;
+    Ok(texts.into())
 }
 
 pub fn status(context: &ToolContext) -> Value {
-    let count = |target| match crate::batteries::pending::list(context, target) {
-        Ok(items) if target == Target::Global => {
-            match crate::batteries::skill_pending::list(context) {
-                Ok(skills) => {
-                    json!({"count": items.len() + skills.len(), "memory": items.len(), "skills": skills.len()})
-                }
-                Err(error) => json!({"unavailable": error}),
-            }
-        }
-        Ok(items) => json!({"count": items.len()}),
+    let offers = crate::batteries::memory_config::load(&context.state)
+        .map(|limits| json!(limits.offer_lessons))
+        .unwrap_or_else(|error| json!({"unavailable": error}));
+    let count = |target| match crate::batteries::memory::load(context, target) {
+        Ok(document) => json!(document.entries.len()),
         Err(error) => json!({"unavailable": error}),
     };
-    let workspace = crate::batteries::workspace_memory::current(context)
-        .and_then(|current| {
-            current
-                .map(|(hash, _)| {
-                    crate::batteries::workspace_memory::approved(context, &hash)
-                        .map(|approved| json!({"hash": hash, "approved": approved}))
-                })
-                .transpose()
-                .map(|memory| memory.unwrap_or_else(|| json!({"present": false})))
+    let (catalog, notices) =
+        crate::batteries::skill_catalog::load(context, crate::batteries::skill_catalog::platform());
+    let mut yes = 0;
+    let mut no = 0;
+    let mut unreadable = 0;
+    let decisions =
+        crate::batteries::journal::visit_lenient(&context.state, Path::new(LOG), |record| {
+            match record.map(|value| value["decision"].as_str().map(str::to_string)) {
+                Ok(Some(decision)) if matches!(decision.as_str(), "yes" | "approve") => yes += 1,
+                Ok(Some(decision)) if matches!(decision.as_str(), "no" | "deny") => no += 1,
+                _ => unreadable += 1,
+            }
+            Ok(())
         })
+        .map(|()| json!({"yes": yes, "no": no, "unreadable": unreadable}))
         .unwrap_or_else(|error| json!({"unavailable": error}));
-    let reviews = crate::batteries::review_config::load(&context.state)
-        .map(|settings| json!(settings))
-        .unwrap_or_else(|error| json!({"unavailable": error}));
-    let last_review = crate::batteries::review_status::latest(&context.state)
-        .map(|record| record.unwrap_or(Value::Null))
-        .unwrap_or_else(|error| json!({"unavailable": error}));
-    let last_eval = crate::batteries::eval_status::latest(&context.state)
-        .map(|record| record.unwrap_or(Value::Null))
-        .unwrap_or_else(|error| json!({"unavailable":error}));
-    json!({"version": 1, "reviews": "experimental", "review_settings": reviews,
-        "pending_global": count(Target::Global), "pending_workspace": count(Target::Workspace),
-        "workspace_memory": workspace, "last_review": last_review, "last_eval": last_eval})
+    let mut status = json!({"version": 2, "offer_lessons": offers,
+        "entries": {"user": count(Target::User), "global": count(Target::Global), "workspace": count(Target::Workspace)},
+        "skills": catalog.iter().map(|skill| skill.name.clone()).collect::<Vec<_>>(),
+        "decisions": decisions});
+    if !notices.is_empty() {
+        status["skill_notices"] = json!(notices);
+    }
+    status
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batteries::pending::Decision;
 
     #[test]
-    fn history_pages_decisions_ignores_a_crash_tail_and_reports_optional_status_failures() {
+    fn history_pages_decisions_counts_bad_lines_and_status_reports_what_is_there() {
         let path =
             std::env::temp_dir().join(format!("batteries-memory-history-{}", std::process::id()));
         std::fs::create_dir_all(path.join("workspace")).unwrap();
@@ -88,55 +105,45 @@ mod tests {
             None,
         )
         .unwrap();
-        let log = context
-            .state
-            .file(Path::new("batteries/changes.jsonl"))
-            .unwrap();
-        for (number, decision) in [Decision::Approve, Decision::Deny, Decision::Approve]
-            .into_iter()
-            .enumerate()
-        {
+        let log = context.state.file(Path::new(LOG)).unwrap();
+        for (number, decision) in ["yes", "no", "yes"].into_iter().enumerate() {
             crate::batteries::journal::append_at(
                 &context.state,
                 &log,
-                &json!({"version": 1, "number": number, "decision": decision}),
+                &json!({"version": 2, "number": number, "decision": decision, "text": format!("entry {number}")}),
             )
             .unwrap();
         }
         use std::io::Write;
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&log)
-            .unwrap()
-            .write_all(b"{unfinished")
+        let mut file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        file.write_all(b"{broken}\n{\"version\":1,\"decision\":\"approve\"}\n{unfinished")
             .unwrap();
         let page = history(&context, 1, 1).unwrap();
-        assert_eq!(page["total"], 3);
+        assert_eq!(page["total"], 4);
+        assert_eq!(page["unreadable"], 1);
         assert_eq!(page["next_offset"], 2);
-        assert_eq!(page["records"][0]["decision"], "deny");
+        assert_eq!(page["records"][0]["decision"], "no");
         assert!(
-            history(&context, 3, 20).unwrap()["records"]
+            history(&context, 4, 20).unwrap()["records"]
                 .as_array()
                 .unwrap()
                 .is_empty()
         );
         assert!(history(&context, 0, 0).is_err());
+        assert_eq!(declines(&context, 5).unwrap(), ["entry 1"]);
         let status = status(&context);
-        assert_eq!(status["pending_global"]["count"], 0);
-        assert_eq!(status["reviews"], "experimental");
-        let pending = context
-            .state
-            .directory(Path::new("batteries/pending"))
-            .unwrap();
-        std::fs::write(pending.join("broken.json"), "{}").unwrap();
-        assert!(super::status(&context)["pending_global"]["unavailable"].is_string());
-        assert_eq!(super::status(&context)["pending_workspace"]["count"], 0);
-        std::fs::write(&log, b"{broken}\n").unwrap();
-        assert!(
-            history(&context, 0, 20)
-                .unwrap_err()
-                .contains("invalid journal record")
+        assert_eq!(status["offer_lessons"], false);
+        assert_eq!(status["entries"]["user"], 0);
+        assert_eq!(status["skills"], json!([]));
+        assert_eq!(
+            status["decisions"],
+            json!({"yes": 3, "no": 1, "unreadable": 1})
         );
+        context
+            .state
+            .replace_file(Target::Global.relative(), b"not a memory file")
+            .unwrap();
+        assert!(super::status(&context)["entries"]["global"]["unavailable"].is_string());
         std::fs::remove_dir_all(path).unwrap();
     }
 }

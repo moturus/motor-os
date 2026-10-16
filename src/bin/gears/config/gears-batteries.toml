@@ -16,14 +16,11 @@ key_file = "local.key"
 egress_allowlist = ["127.0.0.1", "openrouter.ai"]
 plain_http_allowlist = ["127.0.0.1"]
 
-[after_turn]
-command = ["gears-batteries", "review"]
-
 [[hooks]]
 name = "batteries"
 command = ["gears-batteries", "hook"]
 events = ["initialize", "permission", "tool_execute", "tool_result",
-          "turn_start", "entry", "before_stop", "turn_end", "answer", "context", "command", "before_compact"]
+          "turn_start", "entry", "before_stop", "turn_end", "answer"]
 timeout_seconds = 30
 max_output_bytes = 1048576
 

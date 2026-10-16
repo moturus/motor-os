@@ -29,10 +29,8 @@ pub fn observe(event: &Event, context: &ToolContext) -> Result<Value, String> {
                 .map_err(|error| error.to_string())?;
             let outcome: ToolOutcome = serde_json::from_value(event.payload["outcome"].clone())
                 .map_err(|error| error.to_string())?;
-            if !matches!(
-                call.name.as_str(),
-                "todo" | "memory" | "skill_view" | "skill_manage"
-            ) && event.payload["tool"]["read_only"] != true
+            if !matches!(call.name.as_str(), "todo" | "memory" | "skill_view")
+                && event.payload["tool"]["read_only"] != true
             {
                 if let Some(mut latest) = latest(&state)? {
                     latest.current = false;
@@ -65,10 +63,7 @@ pub fn observe(event: &Event, context: &ToolContext) -> Result<Value, String> {
             }
         }
         "before_stop" => {
-            if matches!(
-                state["run_kind"].as_str(),
-                Some("review" | "worker" | "job")
-            ) || state["workspace_changed"] != true
+            if state["workspace_changed"] != true
                 || latest(&state)?.is_some_and(|latest| latest.current && latest.receipt.passed)
                 || crate::batteries::check_config::load(
                     context,
@@ -113,17 +108,6 @@ fn latest(state: &Value) -> Result<Option<Latest>, String> {
         return Err("unsupported check-state version".into());
     }
     Ok(Some(latest))
-}
-
-pub fn turn_receipt(state: &Value, entry: &str) -> Option<Value> {
-    let check = latest(state)
-        .ok()
-        .flatten()
-        .filter(|latest| latest.entry_id == entry)?;
-    Some(
-        json!({"entry_id": check.entry_id, "argv": check.receipt.argv, "system": check.receipt.system,
-        "exit_status": check.receipt.exit_status, "duration_ms": check.receipt.duration_ms, "passed": check.receipt.passed}),
-    )
 }
 
 #[cfg(test)]
@@ -174,19 +158,7 @@ mod tests {
             event.session.state = Some(response["state"].clone());
         }
         assert!(observe(&event, &context).unwrap().get("message").is_none());
-        for kind in ["review", "worker", "job"] {
-            event.session.state.as_mut().unwrap()["run_kind"] = json!(kind);
-            event.session.state.as_mut().unwrap()["check_reminders"] = json!(0);
-            assert!(observe(&event, &context).unwrap().get("message").is_none());
-        }
-        event
-            .session
-            .state
-            .as_mut()
-            .unwrap()
-            .as_object_mut()
-            .unwrap()
-            .remove("run_kind");
+        event.session.state.as_mut().unwrap()["check_reminders"] = json!(0);
         let mut receipt = Receipt {
             version: 1,
             kind: "check".into(),
@@ -217,13 +189,9 @@ mod tests {
             );
         }
         event.event = "entry".into();
-        assert_eq!(
-            turn_receipt(event.session.state.as_ref().unwrap(), "check1").unwrap()["exit_status"],
-            0
-        );
         event.payload = json!({"id": "r1", "role": "tool", "tool_call": ToolCall::new("c3", "read_file", "{}"), "outcome": "completed", "tool": {"read_only": true}});
         assert!(observe(&event, &context).unwrap().get("state").is_none());
-        for name in ["memory", "skill_view", "skill_manage"] {
+        for name in ["memory", "skill_view"] {
             event.event = "entry".into();
             event.payload = json!({"id": "state-call", "role": "tool", "tool_call": ToolCall::new("state-caller", name, "{}"), "outcome": "completed"});
             assert!(

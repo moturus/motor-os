@@ -1,25 +1,10 @@
 //! Optional coding workflows using Gears' command-hook protocol.
 
-pub mod acceptance;
 pub mod check;
 pub mod check_approval;
 pub mod check_config;
 pub mod check_state;
 pub mod command_policy;
-pub mod eval_actor;
-pub mod eval_binary;
-pub mod eval_cli;
-pub mod eval_command;
-pub mod eval_config;
-pub mod eval_copy;
-pub mod eval_options;
-pub mod eval_policy;
-pub mod eval_prepare;
-pub mod eval_report;
-pub mod eval_state;
-pub mod eval_status;
-pub mod eval_suite;
-pub mod eval_task;
 pub mod file_patch;
 pub mod file_read;
 pub mod file_record;
@@ -29,52 +14,26 @@ pub mod journal;
 pub mod memory;
 pub mod memory_cli;
 pub mod memory_config;
-pub mod memory_context;
 pub mod memory_format;
 pub mod memory_history;
 pub mod memory_options;
 pub mod memory_question;
-pub mod memory_snapshot;
-pub mod memory_sources;
 pub mod memory_tool;
 pub mod patch_match;
 pub mod paths;
-pub mod pending;
-pub mod pending_files;
 pub mod policy;
 pub mod provenance;
-pub mod review_config;
-pub mod review_instructions;
-pub mod review_launch;
-pub mod review_marks;
-pub mod review_proposals;
-pub mod review_resume;
-pub mod review_runner;
-pub mod review_status;
-pub mod review_triggers;
 pub mod search;
 pub mod session_search;
 pub mod shell_words;
-pub mod skill_archive;
 pub mod skill_catalog;
-pub mod skill_cleanup;
 pub mod skill_config;
-pub mod skill_context;
 pub mod skill_format;
-pub mod skill_loads;
-pub mod skill_manage;
-pub mod skill_observation;
-pub mod skill_pending;
-pub mod skill_snapshot;
-pub mod skill_sources;
 pub mod skill_store;
-pub mod skill_usage;
 pub mod skill_view;
 pub mod snapshot;
 pub mod todo;
 pub mod tool;
-pub mod turns;
-pub mod workspace_memory;
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -129,7 +88,7 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
     }
 }
 
-/// Historical resources are separate from current permissions and run metadata.
+/// The hook state saved with a historical request, when a fork preserves its prefix.
 pub(crate) fn prefix_state(event: &Event) -> Result<Option<&Value>, String> {
     if event.payload["preserve_prefix"] != true {
         return Ok(None);
@@ -142,202 +101,74 @@ pub(crate) fn prefix_state(event: &Event) -> Result<Option<&Value>, String> {
 }
 
 pub fn hook(event: Event) -> Result<Value, String> {
-    if event.event == "command" {
-        return if event.payload["name"] == "review" {
-            paths::ToolContext::for_event(&event)
-                .and_then(|context| review_triggers::record(&event, &context))
-        } else {
-            acceptance::execute(&event)
-        };
-    }
-    if event.event == "before_compact" {
-        let mut response = json!({});
-        merge_optional(
-            &mut response,
-            paths::ToolContext::for_event(&event)
-                .and_then(|context| review_triggers::record(&event, &context)),
-        );
-        return Ok(response);
-    }
-    if event.event == "tool_result" {
-        let mut response = provenance::transform(&event).unwrap_or_else(
-            |error| json!({"notice": format!("output provenance unavailable: {error}")}),
-        );
-        if event.payload["tool_call"]["name"] == "memory" {
+    let context = || paths::ToolContext::for_event(&event);
+    match event.event.as_str() {
+        "tool_result" => {
+            let mut response = provenance::transform(&event).unwrap_or_else(
+                |error| json!({"notice": format!("output provenance unavailable: {error}")}),
+            );
+            if event.payload["tool_call"]["name"] == "memory" {
+                merge_optional(
+                    &mut response,
+                    context().and_then(|context| memory_question::after_result(&event, &context)),
+                );
+            }
+            Ok(response)
+        }
+        "answer" => context().and_then(|context| memory_question::answer(&event, &context)),
+        "turn_start" | "entry" | "turn_end" | "before_stop" => {
+            let mut response = json!({});
             merge_optional(
                 &mut response,
-                paths::ToolContext::for_event(&event)
-                    .and_then(|context| memory_question::after_result(&event, &context)),
+                context().and_then(|context| check_state::observe(&event, &context)),
             );
+            Ok(response)
         }
-        return Ok(response);
-    }
-    if event.event == "context" {
-        let context = paths::ToolContext::for_event(&event)?;
-        return Ok(context_at(event, &context));
-    }
-    if event.event == "answer" {
-        return paths::ToolContext::for_event(&event).and_then(|context| {
-            if event.session.state.as_ref().is_some_and(|state| {
-                state["awaiting_workspace_memory"] == event.payload["id"]
-                    && event.payload["id"].is_string()
-            }) {
-                let mut response = workspace_memory::answer(&event, &context)?;
-                if let Some(state) = response.get("state") {
-                    let question = review_resume::question(&context, state);
-                    merge_optional(&mut response, question);
-                }
-                Ok(response)
-            } else if review_resume::owns_answer(&event, &context) {
-                review_resume::answer(&event, &context)
-            } else {
-                memory_question::answer(&event, &context)
+        "tool_execute" => match event.payload["tool_call"]["name"].as_str() {
+            Some("memory") => context().and_then(|context| memory_tool::execute(&event, &context)),
+            Some("skill_view") => {
+                context().and_then(|context| skill_view::execute(&event, &context))
             }
-        });
-    }
-    if matches!(
-        event.event.as_str(),
-        "turn_start" | "entry" | "turn_end" | "before_stop"
-    ) {
-        return Ok(observe_features(event));
-    }
-    if event.event == "tool_execute" {
-        return if event.payload["tool_call"]["name"] == "memory" {
-            paths::ToolContext::for_event(&event)
-                .and_then(|context| memory_tool::execute(&event, &context))
-        } else if event.payload["tool_call"]["name"] == "skill_manage" {
-            paths::ToolContext::for_event(&event)
-                .and_then(|context| skill_manage::execute(&event, &context))
-        } else if event.payload["tool_call"]["name"] == "skill_view" {
-            paths::ToolContext::for_event(&event)
-                .and_then(|context| skill_view::execute(&event, &context))
-        } else {
-            todo::execute(&event)
-        };
-    }
-    if event.event == "initialize" {
-        let result = default_root().and_then(crate::state::StateRoot::new);
-        return Ok(match result {
-            Ok(root) => initialize_at(&event, &root),
-            Err(error) => with_tools(&event, initialization_notice(error)),
-        });
-    }
-    Ok(if event.event == "permission" {
-        policy::permission(&event)
-    } else {
-        json!({})
-    })
-}
-
-type Feature = fn(&Event, &paths::ToolContext) -> Result<Value, String>;
-
-/// Run features in order; each sees the hook state the previous one returned.
-fn run_features(mut event: Event, context: &paths::ToolContext, features: &[Feature]) -> Value {
-    let mut response = json!({});
-    for feature in features {
-        let result = feature(&event, context);
-        if let Some(state) = result.as_ref().ok().and_then(|value| value.get("state")) {
-            event.session.state = Some(state.clone());
-        }
-        merge_optional(&mut response, result);
-    }
-    response
-}
-
-pub fn context_at(event: Event, context: &paths::ToolContext) -> Value {
-    run_features(
-        event,
-        context,
-        &[memory_context::observe, skill_context::observe],
-    )
-}
-
-fn observe_features(event: Event) -> Value {
-    match paths::ToolContext::for_event(&event) {
-        Ok(context) => run_features(
-            event,
-            &context,
-            &[
-                check_state::observe,
-                skill_observation::observe,
-                turns::observe,
-            ],
+            _ => todo::execute(&event),
+        },
+        "initialize" => Ok(
+            match default_root().and_then(crate::state::StateRoot::new) {
+                Ok(root) => initialize_at(&event, &root),
+                Err(error) => with_tools(initialization_notice(error)),
+            },
         ),
-        Err(error) => json!({"notice": format!("batteries observations unavailable: {error}")}),
+        "permission" => Ok(policy::permission(&event)),
+        _ => Ok(json!({})),
     }
 }
 
 pub fn initialize_at(event: &Event, root: &crate::state::StateRoot) -> Value {
     let mut response = snapshot::initialize(event, root).unwrap_or_else(initialization_notice);
-    let context = paths::ToolContext::new(
+    let cleanup = paths::ToolContext::new(
         event.workspace.clone(),
         root.path().to_path_buf(),
         event.session.id.clone(),
         event.session.path.as_deref(),
-    );
-    let context = || context.as_ref().map_err(Clone::clone);
-    let state = |response: &Value| {
-        response
-            .get("state")
-            .cloned()
-            .or_else(|| event.session.state.clone())
-    };
-    let current = state(&response).unwrap_or_else(|| json!({}));
-    if current.is_object() {
-        let feature = context().and_then(|context| {
-            let workspace_state = crate::state::StateRoot::new(context.workspace.join(".gears"))?;
-            let discarded = workspace_state.cleanup_temporary_files()?;
-            let mut feature = workspace_memory::question(event, context, &current)?;
-            if discarded != 0 {
-                let notice = format!("discarded {discarded} temporary batteries workspace files");
-                merge_optional(&mut feature, Ok(json!({"notice": notice})));
-            }
-            Ok(feature)
-        });
-        merge_optional(&mut response, feature);
-    }
-    if response.get("prompt_fragments").is_some() {
-        let mut skill_event = event.clone();
-        skill_event.session.state = state(&response);
-        let skills = context().and_then(|context| skill_context::initialize(&skill_event, context));
-        merge_optional(&mut response, skills);
-    }
-    let current = state(&response).unwrap_or_else(|| json!({}));
-    if current.is_object() {
-        let defer = response.get("question").is_some();
-        let reviews = context()
-            .and_then(|context| review_resume::initialize(event, context, &current, defer));
-        merge_optional(&mut response, reviews);
-    }
-    with_tools(event, response)
+    )
+    .and_then(|context| {
+        let workspace_state = crate::state::StateRoot::new(context.workspace.join(".gears"))?;
+        let discarded = workspace_state.cleanup_temporary_files()?;
+        Ok(if discarded == 0 {
+            json!({})
+        } else {
+            json!({"notice": format!("discarded {discarded} temporary batteries workspace files")})
+        })
+    });
+    merge_optional(&mut response, cleanup);
+    with_tools(response)
 }
 
-fn with_tools(event: &Event, mut response: Value) -> Value {
-    let events = event.payload.get("subscribed_events");
-    let commands = match events {
-        Some(Value::Null) => true,
-        Some(Value::Array(events)) => events.iter().any(|event| event == "command"),
-        _ => false,
-    };
-    response["commands"] = if commands {
-        json!([
-            acceptance::specification(),
-            review_triggers::specification()
-        ])
-    } else {
-        let notice = if matches!(events, Some(Value::Array(_))) {
-            "The batteries' /accept command is disabled; add \"command\" to this hook's events to enable it."
-        } else {
-            "Update Gears to enable the batteries' /accept command."
-        };
-        merge_optional(&mut response, Ok(json!({"notice": notice})));
-        json!([])
-    };
+fn with_tools(mut response: Value) -> Value {
+    response["commands"] = json!([]);
     response["tools"] = json!([
         todo::specification(),
         memory_tool::specification(),
-        skill_view::specification(),
-        skill_manage::specification()
+        skill_view::specification()
     ]);
     response
 }
@@ -350,6 +181,7 @@ pub fn default_root() -> Result<PathBuf, String> {
     crate::directory::default_root()
 }
 
+/// A failed optional feature becomes a notice; the other fields are merged.
 fn merge_optional(response: &mut Value, feature: Result<Value, String>) {
     let feature = feature.unwrap_or_else(
         |error| json!({"notice": format!("batteries feature unavailable: {error}")}),
@@ -361,11 +193,6 @@ fn merge_optional(response: &mut Value, feature: Result<Value, String>) {
                 response["notice"].as_str().unwrap(),
                 value.as_str().unwrap()
             ));
-        } else if name == "prompt_fragments" && response[name].is_array() {
-            response[name]
-                .as_array_mut()
-                .unwrap()
-                .extend(value.as_array().unwrap().iter().cloned());
         } else if name == "context" && response.get(name).is_some() {
             let previous: crate::provider::Message =
                 serde_json::from_value(response[name].clone()).expect("internal context message");
@@ -387,44 +214,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn commands_require_reported_subscriptions_and_preserve_other_features() {
-        for (payload, enabled) in [
-            (json!({}), false),
-            (json!({"subscribed_events": null}), true),
-            (json!({"subscribed_events": []}), false),
-            (json!({"subscribed_events": ["initialize"]}), false),
-            (
-                json!({"subscribed_events": ["initialize", "command"]}),
-                true,
-            ),
-            (json!({"subscribed_events": "invalid"}), false),
-        ] {
-            let event = read_event(
-                json!({"protocol_version": 1, "event": "initialize",
-                "workspace": "/work", "session": {"id": "fixture"}, "payload": payload})
-                .to_string()
-                .as_bytes(),
-            )
-            .unwrap();
-            let previous = json!({"tasks": ["keep me"]});
-            let response = with_tools(
-                &event,
-                json!({"state": previous, "notice": "previous notice"}),
-            );
-            assert_eq!(
-                response["commands"].as_array().unwrap().len(),
-                2 * usize::from(enabled),
-                "{payload}"
-            );
-            assert_eq!(response["tools"].as_array().unwrap().len(), 4);
-            assert_eq!(response["state"], previous);
-            assert!(
-                response["notice"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("previous notice")
-            );
-        }
+    fn setup_registers_the_hook_tools_and_preserves_other_features() {
+        let previous = json!({"tasks": ["keep me"]});
+        let response = with_tools(json!({"state": previous, "notice": "previous notice"}));
+        assert_eq!(response["commands"], json!([]));
+        assert_eq!(response["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(response["state"], previous);
+        assert_eq!(response["notice"], "previous notice");
     }
 
     #[test]

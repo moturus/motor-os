@@ -1,17 +1,17 @@
-//! The memory tool proposes entry changes; it never writes live memory itself.
+//! The memory tool proposes one entry change; the hook asks the user before writing.
 
 use crate::provider::ToolCall;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::batteries::Event;
-use crate::batteries::memory_format::{Entry, Kind, Metadata, Source, Target};
+use crate::batteries::memory::{Action, Change};
+use crate::batteries::memory_format::{Entry, Target};
 use crate::batteries::paths::ToolContext;
-use crate::batteries::pending::Proposal;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum Action {
+enum Requested {
     List,
     Add,
     Replace,
@@ -21,25 +21,19 @@ enum Action {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Arguments {
-    action: Action,
+    action: Requested,
     target: Target,
     id: Option<String>,
-    kind: Option<Kind>,
     text: Option<String>,
-    applies_to: Option<String>,
-    source_entries: Option<Vec<String>>,
 }
 
 pub fn specification() -> Value {
-    json!({"name": "memory", "description": "List memory entries or propose adding, replacing or removing one entry by id. Every change requires user approval; unattended proposals stay pending. Workspace facts use workspace memory and relative paths, facts true on one system name it, and machine facts use global memory. Kind records whether the user said it, a tool outcome shows it, or it was inferred; approval does not prove usefulness. source_entries can cite saved evidence ids; the proposal also records its calling entry. Whole-file replacement is refused.",
+    json!({"name": "memory", "description": "List memory entries, or propose adding, replacing or removing one entry. The user is asked to approve every change and nothing is written otherwise. Facts about the user go to user memory, facts about this computer to global memory, and facts about this project to workspace memory with paths relative to the workspace. A fact true on one system should name it.",
         "parameters": {"type": "object", "additionalProperties": false, "required": ["action", "target"],
         "properties": {"action": {"type": "string", "enum": ["list", "add", "replace", "remove"]},
         "target": {"type": "string", "enum": ["user", "global", "workspace"]},
-        "id": {"type": "string", "description": "Required existing entry id for replace/remove; optional ASCII id for add."},
-        "kind": {"type": "string", "enum": ["user", "observed", "inferred"], "description": "Defaults to user for USER.md, inferred otherwise."},
-        "text": {"type": "string", "description": "Required entry body for add/replace."},
-        "applies_to": {"type": "string", "description": "Relevant project/tool versions or system."},
-        "source_entries": {"type": "array", "maxItems": 31, "items": {"type": "string"}}}}})
+        "id": {"type": "string", "description": "The entry to replace or remove."},
+        "text": {"type": "string", "description": "The entry text for add or replace."}}}})
 }
 
 pub fn execute(event: &Event, context: &ToolContext) -> Result<Value, String> {
@@ -50,41 +44,21 @@ pub fn execute(event: &Event, context: &ToolContext) -> Result<Value, String> {
     }
     let arguments: Arguments = serde_json::from_str(&call.arguments)
         .map_err(|error| format!("invalid memory arguments: {error}"))?;
-    if arguments.target == Target::Workspace {
-        crate::batteries::workspace_memory::require_approved(context)?;
-    }
     let document = crate::batteries::memory::load(context, arguments.target)?;
-    if arguments.action == Action::List {
-        if arguments.id.is_some()
-            || arguments.kind.is_some()
-            || arguments.text.is_some()
-            || arguments.applies_to.is_some()
-            || arguments.source_entries.is_some()
-        {
-            return Err("memory list takes only action and target".into());
+    let action = match arguments.action {
+        Requested::List => {
+            if arguments.id.is_some() || arguments.text.is_some() {
+                return Err("memory list takes only action and target".into());
+            }
+            return Ok(result(json!({"version": 2, "entries": document.entries})));
         }
-        return Ok(result(json!({"version": 1, "entries": document.entries})));
-    }
-    if arguments.action == Action::Remove
-        && (arguments.kind.is_some() || arguments.text.is_some() || arguments.applies_to.is_some())
-    {
-        return Err("memory remove takes an id, without replacement text or metadata".into());
-    }
-    let mut state = crate::batteries::hook_state(event)?;
-    let caller = state["turn_record"]["last_entry_id"].as_str().ok_or(
-        "memory proposal has no saved calling entry; enable the entry and turn_start hooks",
-    )?;
-    let mut entries = vec![caller.to_string()];
-    entries.extend(arguments.source_entries.unwrap_or_default());
-    entries.dedup();
-    let source = Source {
-        review: None,
-        session: context.session.clone(),
-        entries,
+        Requested::Add => Action::Add,
+        Requested::Replace => Action::Replace,
+        Requested::Remove => Action::Remove,
     };
-    let source = crate::batteries::review_proposals::source(event, context, source)?;
-    let date_ms = crate::batteries::pending::now_ms()?;
-    let before = if matches!(arguments.action, Action::Replace | Action::Remove) {
+    let before = if action == Action::Add {
+        None
+    } else {
         let id = arguments
             .id
             .as_ref()
@@ -92,59 +66,57 @@ pub fn execute(event: &Event, context: &ToolContext) -> Result<Value, String> {
         Some(
             document
                 .entries
-                .into_iter()
-                .find(|entry| entry.metadata.id == *id)
+                .iter()
+                .find(|entry| entry.id == *id)
+                .cloned()
                 .ok_or("memory entry id does not exist")?,
         )
-    } else {
-        None
     };
-    let after = if arguments.action != Action::Remove {
-        let id = arguments.id.unwrap_or_else(|| {
-            crate::batteries::snapshot::digest(
-                json!([context.session, caller, call.id, date_ms])
-                    .to_string()
-                    .as_bytes(),
-            )
-        });
-        let kind = arguments
-            .kind
-            .unwrap_or(if arguments.target == Target::User {
-                Kind::User
-            } else {
-                Kind::Inferred
-            });
+    let after = if action == Action::Remove {
+        if arguments.text.is_some() {
+            return Err("memory remove takes an id, without replacement text".into());
+        }
+        None
+    } else {
+        let text = arguments
+            .text
+            .ok_or("memory add/replace requires entry text")?
+            .trim_end_matches('\n')
+            .to_string();
+        let (date, time_ms) = crate::batteries::memory_format::today()?;
+        let id = match (&before, arguments.id) {
+            (Some(before), _) => before.id.clone(),
+            (None, Some(id)) => id,
+            (None, None) => crate::batteries::memory::new_id(
+                &document,
+                &format!("{}:{}:{time_ms}", context.session, call.id),
+            ),
+        };
         Some(Entry {
-            metadata: Metadata {
-                id,
-                kind,
-                scope: arguments.target.scope(),
-                source: source.clone(),
-                date_ms,
-                applies_to: arguments.applies_to,
-            },
-            text: arguments
-                .text
-                .ok_or("memory add/replace requires entry text")?
-                .trim_end_matches('\n')
-                .to_string(),
+            id,
+            date,
+            session: context.session.clone(),
+            text,
         })
-    } else {
-        None
     };
-    let proposal = Proposal {
-        version: 1,
+    let change = Change {
+        version: 2,
         target: arguments.target,
+        action,
         before,
         after,
-        source,
-        date_ms,
     };
-    let Some(id) = crate::batteries::memory::propose(context, &proposal)? else {
-        return Ok(result(json!({"version": 1, "status": "duplicate_ignored"})));
-    };
-    state["awaiting_memory"] = json!({"version": 1, "id": id, "target": arguments.target});
-    let mut response = result(json!({"version": 1, "status": "pending", "proposal_id": id}));
+    if !crate::batteries::memory::propose(context, &change)? {
+        return Ok(result(
+            json!({"version": 2, "status": "already_remembered"}),
+        ));
+    }
+    let mut state = crate::batteries::hook_state(event)?;
+    state["awaiting_memory"] =
+        json!({"version": 2, "question": format!("memory-{}", call.id), "change": change});
+    let mut response = result(
+        json!({"version": 2, "status": "proposed", "note": "The user is being asked; the answer follows."}),
+    );
     response["state"] = state;
     Ok(response)
 }
@@ -158,7 +130,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proposals_record_calling_entry_preserve_branch_state_and_refuse_whole_files() {
+    fn proposals_wait_in_hook_state_and_malformed_calls_are_refused() {
         let path =
             std::env::temp_dir().join(format!("batteries-memory-tool-{}", std::process::id()));
         std::fs::create_dir_all(path.join("workspace")).unwrap();
@@ -176,33 +148,52 @@ mod tests {
             session: crate::batteries::Session {
                 id: "s1".into(),
                 path: None,
-                state: Some(
-                    json!({"tasks": ["keep"], "prompt_snapshot": "unchanged", "turn_record": {"last_entry_id": "e-call"}}),
-                ),
+                state: Some(json!({"tasks": ["keep"], "prompt_snapshot": "unchanged"})),
             },
-            payload: json!({"tool_call": ToolCall::new("c1", "memory", json!({"action": "add", "target": "user", "text": "Prefer Rust.\n", "source_entries": ["e-user"]}).to_string())}),
+            payload: json!({"tool_call": ToolCall::new("c1", "memory", json!({"action": "add", "target": "user", "text": "Prefer Rust.\n"}).to_string())}),
         };
         let response = execute(&event, &context).unwrap();
         assert_eq!(response["state"]["tasks"], json!(["keep"]));
         assert_eq!(response["state"]["prompt_snapshot"], "unchanged");
-        let id = response["state"]["awaiting_memory"]["id"].as_str().unwrap();
-        let proposal = crate::batteries::pending::load(&context, Target::User, id).unwrap();
-        assert_eq!(proposal.source.entries, ["e-call", "e-user"]);
-        assert_eq!(proposal.after.as_ref().unwrap().metadata.kind, Kind::User);
-        assert_eq!(proposal.after.as_ref().unwrap().text, "Prefer Rust.");
+        assert_eq!(
+            response["state"]["awaiting_memory"]["question"],
+            "memory-c1"
+        );
+        let change: Change =
+            serde_json::from_value(response["state"]["awaiting_memory"]["change"].clone()).unwrap();
+        assert_eq!(change.action, Action::Add);
+        let after = change.after.unwrap();
+        assert_eq!(
+            (after.text.as_str(), after.session.as_str(), after.id.len()),
+            ("Prefer Rust.", "s1", 4)
+        );
         assert!(
             crate::batteries::memory::load(&context, Target::User)
                 .unwrap()
                 .entries
                 .is_empty()
         );
+        event.payload["tool_call"] = json!(ToolCall::new(
+            "c2",
+            "memory",
+            json!({"action": "list", "target": "user"}).to_string()
+        ));
+        assert!(
+            execute(&event, &context).unwrap()["tool_result"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("\"entries\":[]")
+        );
         for bad in [
             json!({"action": "replace", "target": "user", "text": "whole file"}),
+            json!({"action": "replace", "target": "user", "id": "absent", "text": "x"}),
             json!({"action": "add", "target": "user", "file": "USER.md", "text": "whole file"}),
+            json!({"action": "add", "target": "user", "kind": "user", "text": "old field"}),
             json!({"action": "remove", "target": "user", "id": "one", "text": "replacement"}),
+            json!({"action": "list", "target": "user", "text": "extra"}),
         ] {
             event.payload["tool_call"] = json!(ToolCall::new("bad", "memory", bad.to_string()));
-            assert!(execute(&event, &context).is_err());
+            assert!(execute(&event, &context).is_err(), "{bad}");
         }
         std::fs::remove_dir_all(path).unwrap();
     }

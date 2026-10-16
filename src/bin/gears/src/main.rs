@@ -48,13 +48,6 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
-    if let Some(directory) = &args.gears_dir {
-        // SAFETY: startup has not spawned threads; hooks inherit this selected root.
-        if let Err(error) = unsafe { DirectoryLock::select_directory(directory) } {
-            diagnostic(&format!("directory: {error}"));
-            return ExitCode::FAILURE;
-        }
-    }
     let config = match Config::load_user(args.config.as_deref()) {
         Ok(config) => config,
         Err(error) => {

@@ -1,4 +1,4 @@
-//! Content-addressed prompt fragments that follow session branches.
+//! Content-addressed prompt fragments, frozen for the life of a session.
 
 use std::io::Read;
 use std::path::Path;
@@ -9,20 +9,20 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::batteries::Event;
-use crate::batteries::memory_snapshot::Stored;
+use crate::batteries::memory_format::Target;
 use crate::batteries::paths::ToolContext;
 
 const MAX_BYTES: usize = 1024 * 1024;
+const VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Snapshot {
     pub version: u32,
     pub fragments: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub memory: Vec<Stored>,
 }
 
-pub(crate) fn load(root: &StateRoot, hash: &str) -> Result<Snapshot, String> {
+/// `Ok(None)` for a snapshot in an older format, which is replaced by a fresh one.
+pub(crate) fn load(root: &StateRoot, hash: &str) -> Result<Option<Snapshot>, String> {
     if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid prompt snapshot hash".into());
     }
@@ -41,12 +41,7 @@ pub(crate) fn load(root: &StateRoot, hash: &str) -> Result<Snapshot, String> {
     }
     let snapshot: Snapshot = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid prompt snapshot: {error}"))?;
-    if !matches!(snapshot.version, 1 | 2) || (snapshot.version == 1 && !snapshot.memory.is_empty())
-    {
-        return Err("unsupported prompt snapshot version".into());
-    }
-    crate::batteries::memory_snapshot::changes(&snapshot.memory, &snapshot.memory)?;
-    Ok(snapshot)
+    Ok((snapshot.version == VERSION).then_some(snapshot))
 }
 
 pub(crate) fn save(root: &StateRoot, snapshot: &Snapshot) -> Result<String, String> {
@@ -62,112 +57,90 @@ pub(crate) fn save(root: &StateRoot, snapshot: &Snapshot) -> Result<String, Stri
     Ok(hash)
 }
 
+/// Project instructions, the memory files, the skill list and, when offers
+/// are on, the offer instruction with recently declined entries.
+fn fragments(context: &ToolContext, notices: &mut Vec<String>) -> Vec<String> {
+    let mut fragments = Vec::new();
+    match crate::batteries::instructions::load(&context.workspace) {
+        Ok(fragment) => fragments.extend(fragment),
+        Err(error) => notices.push(format!("project instructions unavailable: {error}")),
+    }
+    for target in [Target::User, Target::Global, Target::Workspace] {
+        match crate::batteries::memory::load(context, target) {
+            Ok(document) if document.entries.is_empty() => {}
+            Ok(document) => fragments.push(document.prompt(target)),
+            Err(error) => notices.push(format!(
+                "{} unavailable: {error}",
+                target.title().to_lowercase()
+            )),
+        }
+    }
+    let (catalog, skill_notices) =
+        crate::batteries::skill_catalog::load(context, crate::batteries::skill_catalog::platform());
+    notices.extend(skill_notices);
+    if !catalog.is_empty() {
+        match crate::batteries::skill_catalog::prompt(&catalog) {
+            Ok(prompt) => fragments.push(prompt),
+            Err(error) => notices.push(format!("skill list unavailable: {error}")),
+        }
+    }
+    match crate::batteries::memory_config::load(&context.state) {
+        Ok(limits) if limits.offer_lessons => fragments.push(offer(context, notices)),
+        Ok(_) => {}
+        Err(error) => notices.push(format!("batteries.toml unavailable: {error}")),
+    }
+    fragments
+}
+
+fn offer(context: &ToolContext, notices: &mut Vec<String>) -> String {
+    let mut text = "After finishing a task whose check passed, you may offer at most one thing worth remembering next time: a mistake and its fix, or a procedure that ran and worked. Propose it with the memory tool; the user decides. Otherwise offer nothing.".to_string();
+    match crate::batteries::memory_history::declines(context, 5) {
+        Ok(declined) if !declined.is_empty() => {
+            text.push_str("\nThe user declined these; do not offer them again:");
+            for entry in declined {
+                text.push_str("\n- ");
+                text.push_str(&entry);
+            }
+        }
+        Ok(_) => {}
+        Err(error) => notices.push(format!("declined changes unavailable: {error}")),
+    }
+    text
+}
+
 pub fn initialize(event: &Event, root: &StateRoot) -> Result<Value, String> {
     let mut state = crate::batteries::hook_state(event)?;
-    if let Some(prefix) = crate::batteries::prefix_state(event)? {
-        let hash = match prefix.get("prompt_snapshot") {
-            Some(hash) => hash
-                .as_str()
-                .ok_or("invalid historical prompt reference")?
-                .to_string(),
-            None => save(
-                root,
-                &Snapshot {
-                    version: 2,
-                    fragments: Vec::new(),
-                    memory: Vec::new(),
-                },
-            )?,
-        };
-        if state["prompt_snapshot"] != hash {
-            state
-                .as_object_mut()
-                .unwrap()
-                .remove("memory_view_snapshot");
-        }
-        state["prompt_snapshot"] = json!(hash);
+    if let Some(prefix) = crate::batteries::prefix_state(event)?
+        && let Some(hash) = prefix.get("prompt_snapshot")
+    {
+        // A historical fork keeps the prompt its saved request used.
+        state["prompt_snapshot"] = hash.clone();
     }
-    let saved = state
-        .get("prompt_snapshot")
-        .map(|hash| load(root, hash.as_str().ok_or("invalid prompt snapshot hash")?))
-        .transpose()?;
-    let context = ToolContext::new(
-        event.workspace.clone(),
-        root.path().to_path_buf(),
-        event.session.id.clone(),
-        event.session.path.as_deref(),
-    )?;
-    let (live, mut notices) = crate::batteries::memory_snapshot::load(&context);
-    let preserve = event.payload["preserve_prefix"] == true;
+    let saved = match state.get("prompt_snapshot") {
+        None => None,
+        Some(hash) => load(root, hash.as_str().ok_or("invalid prompt snapshot hash")?)?,
+    };
     let compacted = event.payload["reason"] == "compaction";
-    let refresh = (!preserve && compacted) || saved.is_none();
-    let mut rewrite = refresh;
-    let snapshot = if refresh {
-        let fragments = match crate::batteries::instructions::load(&event.workspace) {
-            Ok(fragment) => fragment.into_iter().collect(),
-            Err(error) => {
-                notices.push(format!("project instructions unavailable: {error}"));
-                saved
-                    .as_ref()
-                    .map(|snapshot| snapshot.fragments.clone())
-                    .unwrap_or_default()
-            }
-        };
-        Snapshot {
-            version: 2,
-            fragments,
-            memory: live,
+    let preserve = event.payload["preserve_prefix"] == true;
+    let mut notices = Vec::new();
+    let snapshot = match saved {
+        Some(saved) if preserve || !compacted => saved,
+        _ => {
+            let context = ToolContext::new(
+                event.workspace.clone(),
+                root.path().to_path_buf(),
+                event.session.id.clone(),
+                event.session.path.as_deref(),
+            )?;
+            let snapshot = Snapshot {
+                version: VERSION,
+                fragments: fragments(&context, &mut notices),
+            };
+            state["prompt_snapshot"] = json!(save(root, &snapshot)?);
+            snapshot
         }
-    } else if preserve {
-        saved.unwrap()
-    } else {
-        let mut saved = saved.unwrap();
-        let memory = crate::batteries::memory_snapshot::reconcile(&saved.memory, &live)?;
-        rewrite = saved.memory != memory;
-        saved.memory = memory;
-        saved
     };
-    let hash = if rewrite {
-        save(root, &snapshot)?
-    } else {
-        state["prompt_snapshot"].as_str().unwrap().to_string()
-    };
-    if state["prompt_snapshot"] != hash || refresh || (preserve && compacted) {
-        state
-            .as_object_mut()
-            .unwrap()
-            .remove("memory_view_snapshot");
-    }
-    state["prompt_snapshot"] = json!(hash);
-    let correction = if preserve {
-        match crate::batteries::instructions::load(&event.workspace) {
-            Ok(current) => {
-                let current: Vec<_> = current.into_iter().collect();
-                (current != snapshot.fragments).then(|| {
-                    crate::provider::Message::user(format!(
-                        "Current project instructions supersede the historical prefix.\n{}",
-                        if current.is_empty() {
-                            "The previous project instructions were removed.".into()
-                        } else {
-                            current.join("\n\n")
-                        }
-                    ))
-                })
-            }
-            Err(error) => {
-                notices.push(format!("current project instructions unavailable: {error}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let mut fragments = snapshot.fragments;
-    fragments.extend(snapshot.memory.iter().map(Stored::prompt));
-    let mut response = json!({"prompt_fragments": fragments});
-    if let Some(correction) = correction {
-        response["context"] = json!(correction);
-    }
+    let mut response = json!({"prompt_fragments": snapshot.fragments});
     if event.session.state.as_ref() != Some(&state) {
         response["state"] = state;
     }
@@ -208,9 +181,23 @@ mod tests {
     fn keeps_the_snapshot_until_compaction_or_a_new_session() {
         let (root, mut event, state) = fixture("lifecycle");
         std::fs::write(event.workspace.join("AGENTS.md"), "first instructions").unwrap();
+        state
+            .replace_file(
+                Target::Global.relative(),
+                "# Gears memory v2\n§ g1 2026-10-15 s0\nFirst fact.\n".as_bytes(),
+            )
+            .unwrap();
         let first = initialize(&event, &state).unwrap();
+        assert_eq!(first["prompt_fragments"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            first["prompt_fragments"][1],
+            "Global memory:\n[g1] First fact."
+        );
         event.session.state = Some(first["state"].clone());
         std::fs::write(event.workspace.join("AGENTS.md"), "new instructions").unwrap();
+        state
+            .replace_file(Target::Global.relative(), b"# Gears memory v2\n")
+            .unwrap();
         for reason in [
             "startup",
             "resume",
@@ -226,6 +213,7 @@ mod tests {
         }
         event.payload["reason"] = json!("compaction");
         let compacted = initialize(&event, &state).unwrap();
+        assert_eq!(compacted["prompt_fragments"].as_array().unwrap().len(), 1);
         assert!(
             compacted["prompt_fragments"][0]
                 .as_str()
@@ -242,6 +230,42 @@ mod tests {
             initialize(&event, &state).unwrap()["prompt_fragments"],
             compacted["prompt_fragments"]
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn offers_are_listed_only_when_turned_on_and_name_declined_entries() {
+        let (root, event, state) = fixture("offers");
+        assert!(initialize(&event, &state).unwrap()["prompt_fragments"] == json!([]));
+        state
+            .replace_file(
+                Path::new("batteries.toml"),
+                b"version = 1\n[memory]\noffer_lessons = true",
+            )
+            .unwrap();
+        let context = ToolContext::new(
+            event.workspace.clone(),
+            state.path().to_path_buf(),
+            "fixture".into(),
+            None,
+        )
+        .unwrap();
+        let change = crate::batteries::memory::Change {
+            version: 2,
+            target: Target::Global,
+            action: crate::batteries::memory::Action::Add,
+            before: None,
+            after: Some(crate::batteries::memory_format::Entry {
+                id: "d1".into(),
+                date: "2026-10-15".into(),
+                session: "fixture".into(),
+                text: "Declined lesson.".into(),
+            }),
+        };
+        crate::batteries::memory::log(&context, &change, false).unwrap();
+        let fragments = initialize(&event, &state).unwrap()["prompt_fragments"].to_string();
+        assert!(fragments.contains("you may offer at most one thing"));
+        assert!(fragments.contains("do not offer them again:\\n- Declined lesson."));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -271,10 +295,12 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
     #[test]
-    fn legacy_project_only_snapshots_keep_their_hash_and_prompt() {
+    fn snapshots_in_an_older_format_are_replaced() {
         let (root, mut event, state) = fixture("legacy");
-        let bytes = br#"{"version":1,"fragments":["legacy project text"]}"#;
+        std::fs::write(event.workspace.join("AGENTS.md"), "current instructions").unwrap();
+        let bytes = br#"{"version":2,"fragments":["legacy project text"],"memory":[]}"#;
         let hash = digest(bytes);
         state
             .replace_file(
@@ -284,17 +310,13 @@ mod tests {
             .unwrap();
         event.session.state = Some(json!({"prompt_snapshot": hash}));
         let response = initialize(&event, &state).unwrap();
-        assert_eq!(response["prompt_fragments"], json!(["legacy project text"]));
-        assert!(response.get("state").is_none());
-        assert_eq!(
-            std::fs::read(
-                state
-                    .path()
-                    .join(format!("batteries/snapshots/{hash}.json"))
-            )
-            .unwrap(),
-            bytes
+        assert!(
+            response["prompt_fragments"][0]
+                .as_str()
+                .unwrap()
+                .ends_with("current instructions")
         );
+        assert_ne!(response["state"]["prompt_snapshot"], hash);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

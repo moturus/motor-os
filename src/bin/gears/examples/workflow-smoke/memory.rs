@@ -1,11 +1,11 @@
-//! Run memory commands and prompt transitions on both Linux and Motor OS.
+//! Memory files, frozen prompts and the history/status commands on both systems.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use gears::batteries::memory_format::{Document, Entry, Target};
+use gears::batteries::memory::{self, Action, Change};
+use gears::batteries::memory_format::{Entry, Target};
 use gears::batteries::paths::ToolContext;
-use gears::batteries::pending::Proposal;
 use serde_json::{Value, json};
 
 pub fn run(binary: &Path, base: &Path) -> Result<(), String> {
@@ -43,102 +43,92 @@ pub fn run(binary: &Path, base: &Path) -> Result<(), String> {
         },
         payload: json!({}),
     };
-    let old = gears::batteries::snapshot::initialize(&event(None), &context.state)?;
-    let entry: Entry = serde_json::from_value(json!({"metadata": {"id": "native-fact", "kind": "observed", "scope": "global",
-        "source": {"session": "source", "entries": ["evidence"]}, "date_ms": 1}, "text": "Use literal check arguments."})).unwrap();
-    let proposal = Proposal {
-        version: 1,
-        target: Target::Global,
-        before: None,
-        after: Some(entry.clone()),
-        source: entry.metadata.source.clone(),
-        date_ms: 2,
+    let entry = |id: &str, date: &str, text: &str| Entry {
+        id: id.into(),
+        date: date.into(),
+        session: "source".into(),
+        text: text.into(),
     };
-    let id = gears::batteries::memory::propose(&context, &proposal)?.unwrap();
-    assert!(cli(&["pending"])?.contains("postpone"));
-    assert!(cli(&["pending", "--list"])?.contains("Use literal check arguments."));
-    assert!(
-        gears::batteries::memory::load(&context, Target::Global)?
-            .entries
-            .is_empty()
+    let old = gears::batteries::snapshot::initialize(&event(None), &context.state)?;
+    // A file in the previous format is still read and rewritten on the first change.
+    context.state.replace_file(
+        Target::Global.relative(),
+        "# Gears memory v1\n§ {\"id\":\"old\",\"kind\":\"observed\",\"scope\":\"global\",\"source\":{\"session\":\"source\",\"entries\":[\"evidence\"]},\"date_ms\":1}\nUse literal check arguments.\n".as_bytes(),
+    )?;
+    let add = Change {
+        version: 2,
+        target: Target::Global,
+        action: Action::Add,
+        before: None,
+        after: Some(entry("fact", "2026-10-15", "Prefer native APIs.")),
+    };
+    assert!(memory::propose(&context, &add)?);
+    memory::apply(&context, &add)?;
+    memory::log(&context, &add, true)?;
+    let text = std::fs::read_to_string(context.state.path().join(Target::Global.relative()))
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        text,
+        "# Gears memory v2\n§ old 1970-01-01 source\nUse literal check arguments.\n§ fact 2026-10-15 source\nPrefer native APIs.\n"
     );
-    cli(&["pending", "--approve", &id])?;
+    // The running session keeps its prompt; a new session sees both entries.
     let still_old =
         gears::batteries::snapshot::initialize(&event(Some(old["state"].clone())), &context.state)?;
     assert!(
         !still_old["prompt_fragments"]
             .to_string()
-            .contains("Use literal check arguments.")
+            .contains("Prefer native APIs.")
     );
     let fresh = gears::batteries::snapshot::initialize(&event(None), &context.state)?;
-    assert!(
-        fresh["prompt_fragments"]
-            .to_string()
-            .contains("Use literal check arguments.")
-    );
-    let removal = Proposal {
-        version: 1,
+    let fragments = fresh["prompt_fragments"].to_string();
+    assert!(fragments.contains("[old] Use literal check arguments."));
+    assert!(fragments.contains("[fact] Prefer native APIs."));
+    assert!(!fragments.contains("you may offer"));
+    // A declined change is named in the offer instruction once offers are on.
+    let remove = Change {
+        version: 2,
         target: Target::Global,
-        before: Some(entry.clone()),
+        action: Action::Remove,
+        before: Some(entry("old", "1970-01-01", "Use literal check arguments.")),
         after: None,
-        source: entry.metadata.source.clone(),
-        date_ms: 3,
     };
-    let id = gears::batteries::memory::propose(&context, &removal)?.unwrap();
-    cli(&["pending", "--approve", &id])?;
-    let mut running = event(Some(fresh["state"].clone()));
-    running.event = "context".into();
-    let note = gears::batteries::memory_context::observe(&running, &context)?;
-    assert!(
-        note["context"]
-            .to_string()
-            .contains("Withdraw Global memory entry native-fact")
-    );
-    running.session.state = Some(note["state"].clone());
-    assert!(
-        gears::batteries::memory_context::observe(&running, &context)?
-            .get("context")
-            .is_none()
-    );
-    let resumed = gears::batteries::snapshot::initialize(
-        &event(Some(fresh["state"].clone())),
-        &context.state,
+    memory::log(&context, &remove, false)?;
+    context.state.replace_file(
+        Path::new("batteries.toml"),
+        b"version = 1\n[memory]\noffer_lessons = true\n",
     )?;
-    assert!(
-        !resumed["prompt_fragments"]
-            .to_string()
-            .contains("Use literal check arguments.")
-    );
-    // A cloned workspace file is displayed to the user but excluded from prompts.
-    let mut local = entry;
-    local.metadata.scope = Target::Workspace.scope();
-    local.text = "Workspace facts use relative paths.".into();
-    let document = Document {
-        entries: vec![local],
-    }
-    .encode(Target::Workspace, 2200)?;
+    let offered = gears::batteries::snapshot::initialize(&event(None), &context.state)?;
+    let fragments = offered["prompt_fragments"].to_string();
+    assert!(fragments.contains("you may offer at most one thing"));
+    assert!(fragments.contains("do not offer them again:\\n- Use literal check arguments."));
+    // Workspace memory from a clone is used as it is, like the clone's AGENTS.md.
     let root = gears::state::StateRoot::new(workspace.clone())?;
-    root.replace_file(Target::Workspace.relative(), document.as_bytes())?;
+    root.replace_file(
+        Target::Workspace.relative(),
+        "# Gears memory v2\n§ w1\nWorkspace facts use relative paths.\n".as_bytes(),
+    )?;
     let imported = gears::batteries::initialize_at(&event(None), &context.state);
-    assert!(imported["question"]["id"].is_string());
+    assert!(imported.get("question").is_none());
     assert!(
-        !imported["prompt_fragments"]
+        imported["prompt_fragments"]
             .to_string()
-            .contains("Workspace facts use relative paths.")
+            .contains("Workspace memory:\\n[w1] Workspace facts use relative paths.")
     );
-    let hash = imported["question"]["id"].as_str().unwrap();
-    cli(&["pending", "--approve", hash])?;
-    let approved = gears::batteries::snapshot::initialize(&event(None), &context.state)?;
-    assert!(
-        approved["prompt_fragments"]
-            .to_string()
-            .contains("Workspace facts use relative paths.")
-    );
-    let history: Value = serde_json::from_str(&cli(&["history", "--limit", "2"])?).unwrap();
-    assert_eq!(history["total"], 3);
-    assert_eq!(history["next_offset"], 2);
+    let history: Value = serde_json::from_str(&cli(&["history", "--limit", "1"])?).unwrap();
+    assert_eq!(history["total"], 2);
+    assert_eq!(history["next_offset"], 1);
+    assert_eq!(history["records"][0]["decision"], "yes");
     let status: Value = serde_json::from_str(&cli(&["status"])?).unwrap();
-    assert_eq!(status["pending_global"]["count"], 0);
-    assert_eq!(status["workspace_memory"]["approved"], true);
+    assert_eq!(status["offer_lessons"], true);
+    assert_eq!(
+        status["entries"],
+        json!({"user": 0, "global": 2, "workspace": 1})
+    );
+    assert_eq!(
+        status["decisions"],
+        json!({"yes": 1, "no": 1, "unreadable": 0})
+    );
+    assert!(cli(&["pending"]).is_err());
+    println!("gears batteries memory ALL PASS");
     Ok(())
 }

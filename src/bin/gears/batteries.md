@@ -6,18 +6,15 @@ the `gears` package and its `gears-batteries` binary. Install that binary
 beside `gears`; the Motor OS developer image installs both in `/devtools/bin`.
 The hook reads `AGENTS.md` (or `.gears.md`) only at the selected workspace
 root. Instructions are limited to 20,000 characters; oversized files retain
-their beginning and end. Prompt fragments are saved by content hash and
-reused on resume, fork, provider changes and other setup, until compaction
-or a new session takes a fresh snapshot. A failed optional setup is reported
-and leaves the previous hook state unchanged.
+their beginning and end. Prompt fragments (instructions, memory, the skill
+list) are saved by content hash when a session starts and reused on resume,
+fork, provider changes and other setup, until compaction or a new session
+takes a fresh snapshot. A failed optional setup is reported and leaves the
+previous hook state unchanged.
 
 The file tools read numbered pages, search with `rg`, and write or patch
 atomically after complete reads of the current file. The `todo` hook tool
-keeps tasks in branch-aware session state. Turn records keep saved entry
-ids, tool outcomes, failures, repeated calls, written paths, compactions
-and interruptions in `batteries/sessions/SESSION/turns.jsonl`. A partial
-record supports up to 512 tool calls; exceeding this limit reports that
-tracking is unavailable without granting or changing tool authority.
+keeps tasks in branch-aware session state.
 
 The hook automatically allows workspace reads and its task list. Writes
 and ordinary commands use Gears' grants and prompts. Its short static
@@ -38,35 +35,28 @@ On Linux, install that sample and the `tools` directories in `~/.gears`,
 with `gears-batteries` beside `gears`. Use `~/.gears/gears-batteries.toml` as
 the config path. See [Gears setup](README.md) for provider selection
 and explicit key files. The bare batteries program name resolves beside the
-Gears executable for tools, hooks and after-turn commands.
+Gears executable for tools and hooks. The shipped hook subscribes to
+`initialize`, `permission`, `tool_execute`, `tool_result`, `turn_start`,
+`entry`, `before_stop`, `turn_end` and `answer`; it registers no slash
+commands and needs no after-turn command.
 
 Run `src/tests/test-gears-batteries.sh` from the Motor OS repository root for
-the hermetic workflow gate; `test-gears-http.sh` runs the package's tests. It builds Linux `rg` offline from the sibling
-`../ripgrep` checkout into `build/gears-batteries-host-rg`, then supplies it
-to the tests and workflow through their PATH. A system-installed `rg` is not
-required for this gate. `--prepare` builds that dependency without running
-tests; the full-test preparation phase invokes it before timing the suite.
-Direct `cargo test` and ordinary Linux use still need `rg` on PATH.
+the hermetic workflow gate; `test-gears-http.sh` runs the package's tests. It
+builds Linux `rg` offline from the sibling `../ripgrep` checkout into
+`build/gears-batteries-host-rg`, then supplies it to the tests and workflow
+through their PATH. A system-installed `rg` is not required for this gate.
+`--prepare` builds that dependency without running tests; the full-test
+preparation phase invokes it before timing the suite. Direct `cargo test`
+and ordinary Linux use still need `rg` on PATH.
 
 The release developer-image gate exercises the installed binary and rebuilds
 the packaged source with Lorry. The portable workflow fixture uses a scripted
-provider to drive real file tools, a Rust
-compiler check, task branching and the bounded missing-check reminder.
-It also verifies saved approval details, the mechanical turn journal, pending
-memory, frozen prompts, removal notes, imported workspace admission, and
-approved skill loading, notes corrections and noncausal check observations.
+provider to drive real file tools, a Rust compiler check, task branching, the
+bounded missing-check reminder, the memory question, frozen prompts, memory
+files in both formats, the `history` and `status` commands and skill loading.
 The host and native workflow tests make no provider or Internet requests.
 
-Use `/accept` to accept the current task's result. It takes no arguments,
-saves your signal in the session and replies "Task accepted." The session
-stays open, and the signal survives resume and follows the session branch.
-The command makes no model request, requires no check or repository, and
-does not schedule a review. Ordinary conversation does not count as this
-explicit signal. Copy the updated sample configuration or add `command`
-to your batteries hook's event list to enable the command. `/help` lists it
-when enabled. An older event list keeps the other batteries features working
-and shows an enabling notice. Update both sibling binaries when upgrading;
-an older Gears sender keeps commands disabled with an upgrade notice.
+## The check
 
 Declare one check at the workspace root in `.gears/batteries.toml`:
 
@@ -92,116 +82,96 @@ changed declaration require fresh confirmation; a denied call does not
 record approval. Only a completed check receipt matching that request
 establishes evidence. Later calls to tools that may write make it stale.
 After workspace work, a missing, failed or stale check gets at most three
-`before_stop` reminders per turn. Review, worker and job runs are excluded.
+`before_stop` reminders per turn. A passing check is development evidence;
+whether the task is done is the user's call, in conversation.
 
-The batteries hook registers `memory`, `skill_view` and `skill_manage`
-alongside `todo`.
-`batteries/USER.md`, `batteries/MEMORY.md` and workspace
-`.gears/MEMORY.md` use `# Gears memory v1` followed by entries. Each entry
-starts with `§ ` and a one-line JSON header containing `id`, `kind`
-(`user`, `observed`, `inferred`), `scope`, `source` (session and entry ids),
-`date_ms` (Unix epoch milliseconds) and optional `applies_to`. Plain Markdown
-follows the header. A body line beginning with `§ ` is reserved. USER entries
-must have kind `user`; all headers and bodies count toward the file's
-character limit. Invalid or oversized optional memory is reported and skipped.
+## Memory
 
-User-wide limits come from `batteries.toml` in the Gears directory (distinct
-from the workspace's `.gears/batteries.toml` check declaration):
+The batteries hook registers `memory`, `skill_view` and `todo`. Memory
+lives in three plain text files the user may edit by hand:
+`batteries/USER.md` (facts about the user) and `batteries/MEMORY.md` (facts
+about this computer) in the Gears directory, and `.gears/MEMORY.md` in the
+workspace (facts about this project, with paths relative to the workspace).
+
+```
+# Gears memory v2
+§ k7f2 2026-10-15 01J9Q3M8R6W2Z4
+In red, run `cargo test --offline`; the VM has no network.
+§ m3a8
+Written by hand; the date and session are optional.
+```
+
+Each entry starts with a `§ ` line holding its id, its date and the session
+that proposed it (`-` or nothing for an entry written by hand), then its
+text. A text line may not start with `§ `. Files in the previous
+`# Gears memory v1` format with JSON headers are still read; the first
+change rewrites them in the current format. An unreadable or oversized file
+is reported as a notice and left out of the prompt.
+
+The `memory` tool takes `action = list | add | replace | remove` and
+`target = user | global | workspace`, with `id` for replace and remove and
+`text` for add and replace. It changes one entry at a time. When the model
+proposes a change, Gears shows the exact entry and asks one question with
+two answers, yes and no:
+
+```
+Proposed workspace memory entry:
+In red, run `cargo test --offline`; the VM has no network.
+Remember this? [yes/no]
+```
+
+Yes writes the file at once; no does not. Both answers are appended to
+`batteries/changes.jsonl` and reported back to the model. When nobody can
+answer (a `-p` run, or a cancelled question) nothing is written or logged
+and the model is told so. A replacement or removal fails with a message if
+the entry changed meanwhile, and an entry that already exists is reported
+as already remembered without a question. The file tools refuse the Gears
+directory and the workspace's `.gears/` directory, so the tool is the only
+way the agent writes memory.
+
+Memory and skill changes of every kind appear in the next session, after
+`/new` or after a compaction; a running session keeps the prompt it started
+with. A workspace `.gears/MEMORY.md` that arrives with a clone is used as it
+is, like the clone's `AGENTS.md`.
+
+User-wide settings come from `batteries.toml` in the Gears directory
+(distinct from the workspace's `.gears/batteries.toml` check declaration):
 
 ```toml
 version = 1
 [memory]
 user_chars = 1375
 memory_chars = 2200
+offer_lessons = false
 [skills]
 skill_chars = 20000
 notes_chars = 4000
 ```
 
-Each limit must be 1–65,536 characters. Missing settings use the shown
-defaults; `memory_chars` applies separately to global and workspace memory.
+Each limit must be 1–65,536 characters and counts entry text only;
+`memory_chars` applies separately to global and workspace memory. With
+`offer_lessons = true`, the prompt tells the model that after finishing a
+task whose check passed it may offer at most one thing worth remembering
+next time, a mistake and its fix or a procedure that ran and worked, and
+otherwise offers nothing. The instruction lists the last five declined
+entries so they are not offered again. With offers off, the model proposes
+memory only when the user asks it to remember something.
 
-`memory` accepts `action = list | add | replace | remove` and
-`target = user | global | workspace`. Add/replace take entry `text`, optional
-`kind`, `applies_to` and `source_entries`; replace/remove require an existing
-`id`. Every change is staged first and shown with approve/deny/postpone.
-One-shot runs leave it pending. The calling entry is recorded along with
-any cited source ids; the kind is a provenance claim for the user to review.
-The user's answer is sent back to the model. Copy the updated sample config,
-or add `answer` and `context` to the batteries hook's event list, to receive
-questions and memory correction notes.
+## Skills
 
-
-New sessions and compaction include approved memory in their saved prompt
-snapshot. Additions approved during a session appear at the next new session
-or compaction. Resume, fork and provider changes keep the frozen entries,
-while replacing or removing entries that have changed since the snapshot.
-A running branch receives one context note for each correction or removal;
-its original system prefix stays unchanged. Past text remains in history.
-Current user and project instructions take precedence over memory, and
-approval does not establish that an entry is true or useful.
-
-Workspace `.gears/MEMORY.md` is used only when its exact content hash has a
-local approval in `batteries/changes.jsonl`. Cloned or hand-edited contents
-are shown to the user at initialization and excluded from the model prompt
-until approved. A changed file requires another approval. USER and global
-memory are local user files; valid hand edits are read directly.
-
-Review postponed changes from the workspace root:
-
-```sh
-gears-batteries pending
-gears-batteries pending --list
-gears-batteries pending --approve FULL_CONTENT_HASH
-gears-batteries history --offset 0 --limit 20
-gears-batteries status
-```
-
-`pending` shows the full before/after entry, its cited evidence (up to 512
-characters per message), unavailable sources, and saved sessions whose
-snapshots contain the old entry. Snapshot membership does not prove that a
-model used it. Each item asks for `approve`, `deny` or `postpone`; empty or
-closed input postpones. `--list` makes no decisions. Explicit `--deny ID`
-and `--postpone ID` are also available. The same command displays and admits
-imported workspace files by their complete content hash. Memory changes
-made by the tool always edit individual entries.
-
-All three commands accept `--workspace PATH` and `--root PATH`; defaults are
-the current directory and the Gears directory. Global pending changes and
-the selected workspace's changes are included. History is oldest first,
-with pages of 1–100 decisions and `next_offset` for the next page. Status
-reports pending counts, workspace approval and experimental review settings.
-`last_review` contains the latest completed mark, executor/reviewer pair, answer
-and provider-reported usage; an absent cost remains unknown. Corrupt optional
-review data is reported independently. Evaluation remains unimplemented.
-
-Approval validates the captured entry against the current file before
-writing any decision. It then appends the decision, replaces the memory
-file atomically, and removes pending. Denial appends its decision and removes
-pending; postponement changes nothing. A write failure stops the operation.
-A crash can leave a logged approval unapplied or an applied change still
-pending. There is no automatic replay or transaction across these files.
-As specified by the plan, standalone commands assume one writer; run them
-when Gears is idle.
-
-
-Skills live in `batteries/skills/NAME/SKILL.md`, with optional `NOTES.md` in
-that directory. The [Agent Skills standard](https://agentskills.io/specification)
-requires YAML `name` and `description`. Its optional fields are `license`,
-`compatibility`, `metadata` (a string-to-string mapping), and experimental
-`allowed-tools`. The implementation uses `yaml_serde` 0.10.7 and preserves
-the raw Markdown and frontmatter. Unknown extension fields remain in the
-file. `allowed-tools` does not change Gears permissions.
-
-For Motor OS listing, explicitly include `motor` in `metadata.platforms`;
-this is a standard metadata extension, with whitespace-separated names:
+Skills are directories the user writes under `batteries/skills/NAME/` in
+the Gears directory, with a `SKILL.md` in the
+[Agent Skills](https://agentskills.io/specification) format and an optional
+`NOTES.md` beside it. `SKILL.md` needs YAML `name` and `description`; the
+optional fields are `license`, `compatibility`, `metadata` (a
+string-to-string mapping) and `allowed-tools`, which grants no permissions.
+On Motor OS, only skills whose `metadata.platforms` names `motor` are listed:
 
 ```markdown
 ---
 name: rust-checks
 description: >-
   Run the project's declared Rust check after a code change.
-compatibility: Motor OS or Linux with the project toolchain installed.
 metadata:
   platforms: motor linux
 ---
@@ -212,255 +182,27 @@ Read the check declaration and finish the intended edits.
 ## How to check
 Run the check tool and inspect its receipt.
 ## Pitfalls
-A passing check is development evidence; the user decides task acceptance.
+A passing check is development evidence; the user decides whether the task is done.
 ```
 
-New or rewritten skills proposed by `skill_manage` must contain those four
-literal headings. Imported skills and notes-only edits may retain an
-existing standard-conforming body. The configured skill limit includes
-frontmatter and headings; notes have a separate limit. Files use UTF-8 and
-LF endings. Invalid, oversized or symlinked files are reported and skipped.
+The prompt lists the available names and descriptions. `skill_view` loads
+one skill and its notes by name, or lists them when called without a name,
+and refuses a fourth distinct skill in one session. Files use UTF-8 and LF
+endings; an invalid, oversized or symlinked skill is reported and skipped.
+The skill size limit includes the front matter; notes have their own limit.
+There is no approval step: add, edit and remove skill files directly.
 
-`skill_manage` takes `action = add | replace | remove`, `name`, and
-`skill_md` / `notes_md` contents for additions or replacements. Omitted
-replacement fields preserve their previous contents; `notes_md = null`
-removes the notes. All proposals wait for `gears-batteries pending` and show
-complete before/after contents and saved source evidence. Approval checks
-both captured files before writing. The same command admits hand-edited or
-imported skills by a hash of the exact `SKILL.md` and `NOTES.md` bytes.
-Changing either file requires new approval.
-
-The prompt lists approved names and descriptions; `skill_view` loads one
-skill and its notes, or lists the catalog when called without a name. At
-most three distinct skills may be loaded per session. New sessions and
-compaction refresh the catalog; resume and running branches retain their
-original catalog membership. New approvals become available on refresh.
-Changed or removed versions are withdrawn; approved corrections to loaded
-skills arrive once per branch as context notes, including corrected notes.
-The running session's system prefix stays unchanged. Past text remains in
-history. Auxiliary scripts and resources are not loaded by `skill_view`.
-
-A passing check records which skill versions were loaded at that check's
-result, alongside actual saved load and check entry ids in `turns.jsonl`.
-Loading, proposing or approving skills does not stale a workspace check.
-These observations make no causal claim and do not record user acceptance.
-They are evidence of co-occurrence, not proof that a skill improves results.
-
-
-`gears-batteries cleanup --since 2026-09-01` stages archival proposals for
-approved agent-written current versions with no recorded loads or loaded
-snapshots on or after that date, at midnight UTC. Choose the cutoff explicitly;
-there is no automatic retention period. User-managed versions, recent approvals,
-unavailable evidence or damaged history are retained. A prior archival denial
-protects that exact version. The report lists inspected history and its limits:
-deleted sessions and older ephemeral runs cannot be reconstructed, and recorded
-activity does not establish usefulness. Identical normalized `When it applies`
-sections produce inspection hints without automatically merging anything.
-
-Cleanup leaves live files intact. Inspect `gears-batteries pending --list`, then
-use `pending --approve ID`, `--deny ID` or `--postpone ID`. Approval validates the
-captured version and preserves both files under `batteries/archived-skills/`
-before withdrawing them. The pending item shows its cutoff and archive path.
-
-For an evaluation copy, `gears --config EVAL --gears-dir COPY --ephemeral -p
-PROMPT` selects the directory used by Gears and its batteries hooks. Memory,
-skills, snapshots, journals and pending changes stay in that copy. Use the
-batteries CLI's `--root COPY` option to inspect it from your ordinary shell.
-This flag selects state; workspace copying and paired evaluation are separate
-measurement steps.
-
-Measurement task inputs use `batteries/eval/tasks/<name>.toml`. Names use the
-same lowercase naming rules as skills. The first source format copies a
-workspace; relative source paths resolve beside the task file.
-
-```toml
-version = 1
-workspace = "/user/project"
-prompt = "Fix the parser's handling of empty records."
-exclude = ["target", ".git"]
-check = ["cargo", "test", "--offline"]
-acceptance = [["./tests/check-empty-records"]]
-regressions = [["./tests/check-existing-records"]]
-```
-
-Commands are literal argument vectors. Acceptance and regression commands are
-required and separate from the prompt and the agent's declared check. Task
-loading rejects unknown fields, traversal exclusions, symlinks and oversized
-inputs, and records the SHA-256 of the exact file. The workspace-copy API now creates a fresh destination and records an ordered
-content identity. It preserves literal filenames, empty directories and
-executable access, applies the declared exclusions, and refuses linked or
-special entries. Bounds are 64 directory levels, 100,000 entries and 512 MiB;
-add explicit exclusions for build artifacts. A failed copy removes only its own
-incomplete destination and reports cleanup failure. Freeze source workspaces
-before copying. Loading or copying alone does not run a model or enable reviews; the
-manual `eval` command below runs paired trials.
-
-`/review [focus]` records a due review mark at the current saved conversation
-entry. Reviews are disabled by default; user-wide `batteries.toml` must set
-`version = 1`, `[reviews] enabled = true`, and both `[reviews.executor]` and
-`[reviews.reviewer]` provider/model pairs. The executor pair must match the
-session exactly. Subscribe the hook to `before_compact` to record compaction
-marks too. Recording does not call a model or change the conversation.
-On startup or `/resume`, unfinished reviews ask whether to run or dismiss them.
-An unanswered question keeps them paused. Dismissal affects only the displayed
-marks; other sessions do not consume them. Workspace-memory admission is asked
-first if it is pending. The sample after-turn command runs due reviews in
-ephemeral forks and stops them before the next foreground turn or on exit.
-Copy the updated sample or add `[after_turn] command = ["gears-batteries", "review"]`
-to your Gears configuration. The batteries hook must directly invoke the
-`gears-batteries hook` command and include its policy and context subscriptions.
-Reviews keep the marked system/tool prefix while compacting oversized history.
-Historical hook checkpoints keep withdrawal corrections tied to that prefix,
-even after normal resume has reconciled the current resource snapshots. Only
-prompt and skill references are restored; permissions and review metadata remain
-current. If batteries was absent at the saved request, current project
-instructions follow the preserved prefix as context.
-User focus, denied changes and mechanical evidence follow that prefix; evidence
-over 64 KiB is refused explicitly, leaving the mark due. Failed or interrupted
-reviews stay due; successful marks are handled once. Nothing to save is normal.
-Bounded child diagnostics are displayed and saved with the result, including the
-explicit fallback notice when an older session lacks a saved request prefix.
-
-`gears-batteries status` shows the configured review pair and proposal limit
-under `review_settings`, marks execution experimental and shows `last_review`.
-
-Review proposals share `max_proposals` across memory and skills, including
-proposals already approved or denied. Their optional source `review` hash
-links them to the mark, and their session/entry citations refer to the saved
-parent history. Interrupting a review does not reset its proposal budget.
-
-Evaluation state capture keeps `user` entries and manual memory curation in
-both arms. Non-user entries are classified as learning only when their exact
-current contents match an approved entry proposal. Curated approved skills
-remain in both arms; current approved agent skill versions join the learning
-arm. Explicit manual workspace-memory admission supersedes agent provenance.
-Capture validates complete decision history and workspace admission, freezes
-these versions in memory, and turns reviews off in the captured settings without
-changing live settings. Installation requires a separate workspace copy and a
-fresh state destination. It writes only selected memory/skill versions and the
-minimal approval records needed to use them, records their content hashes, and
-copies no source sessions, review history or pending proposals. Paired execution
-and reports follow.
-
-Trial copies can install `batteries/eval-policy.json` to grant unattended
-file-tool reads and edits within their exact workspace, plus the task's literal
-check. It applies only to ephemeral sessions. Instructions and `.gears/` files
-are protected from edits; outside paths, shell/publishing calls, session search
-and learning changes are denied. A substituted check declaration fails before
-execution. Checks still produce the ordinary approval signature and receipts.
-These hook decisions scope file tools; project check programs retain the user's
-process authority, as with ordinary batteries checks. Live directories have no
-evaluation authority file and keep their existing policy.
-
-Evaluation configuration pinning requires one direct batteries hook with its
-permission, execution and bookkeeping subscriptions. It resolves provider key
-and certificate paths beside the original configuration, copies the selected
-file/check tool definitions, and records their content identities. The copied
-configuration uses the exact batteries executable and removes after-turn work
-and live tracing. Source configuration/tool edits cannot change the pinned copy.
-Symbolic configuration paths are refused before normalization or output creation.
-
-Trial preparation freezes one workspace template, then creates a fresh workspace
-and batteries directory for each run. In addition to task exclusions, it omits
-`.git`, `.gears`, the task file itself and an embedded live Gears directory.
-The selected workspace memory and check declaration are installed separately.
-Old worktree pointers and pending/history artifacts do not enter the copies.
-Each trial has a neutral numeric name, its own authority, and a manifest of its
-installed versions. The output directory must be fresh and outside the source
-workspace. Neither later source edits nor an earlier trial's files enter the
-next trial. Workspace-copy evaluation does not provide repository metadata.
-
-The evaluation actor API starts an owned Gears process with explicit provider,
-model and deadline, a fresh ephemeral session and JSONL output. Use the installed
-sibling `gears`/`gears-batteries` layout. Events and diagnostics remain outside
-the model workspace. Completion, tool failures, check receipts, time, truncation
-and provider usage are recorded; a model saying "Done" does not erase tool
-failures. Missing or partially reported prices remain uncertain. Cleanup
-uncertainty prevents subsequent trials.
-
-Acceptance and regression programs run as literal argument vectors, with the
-trial workspace as their working directory and `GEARS_EVAL_WORKSPACE` set to
-that path. Relative program paths containing `/` resolve against the original
-workspace; bare names use PATH. Their original program files are omitted from
-model copies. Keep judge dependencies and expected answers outside those copies
-too, using task exclusions where necessary. These trusted programs retain normal
-user process authority. Outcomes include exit status, deadline/cancellation,
-bounded output and elapsed time; a missing program is a failed criterion.
-
-Evaluation reports separate each arm's accepted outcomes, regressions, actor
-failures, elapsed time, tool calls and reported model cost. Acceptance requires
-a completed actor and all acceptance/regression programs to pass. Reports retain
-partial cost flags; unrecorded tool/review costs and human time remain unknown.
-Source approval/denial counts cover all recorded history and may include unrelated
-work. The report stays descriptive (`insufficient_evidence`) until the user
-applies the stated criterion to representative held-out coverage and costs.
-It never enables reviews. Equal observed rates do not establish equivalence.
-
-The paired suite runs starting regressions in a separate fresh preflight copy
-before model calls. It then repeats both arms 2–16 times, alternating their
-order. Each trial gets a fresh frozen workspace/state. `report.json` is replaced
-after each actor and criterion result; failed actors, acceptance failures and
-cancellation remain visible. Failed preflight starts no models. An uncertain
-process cleanup stops further work rather than rerunning the trial.
-
-Executable pinning copies Gears and batteries together into a fresh `bin/`
-inside evaluation output and records their content hashes/lengths. Both use the
-shared bounded file copier, preserving execute access without copying build
-caches or consulting mutable binaries again during trials.
-
-Criterion stdout/stderr are retained as separate bounded artifacts beside the
-trial workspace; reports contain at most 1,024 characters per stream plus paths
-and saved byte counts. Gears JSONL retains full recorded check content while
-summaries identify it by hash. Truncated/malformed event streams leave tool
-counts unknown. Unchecked regressions are distinct from observed failures.
-
-Run a held-out suite from a shell outside Gears tools after choosing its quality/cost criterion:
+## Commands
 
 ```sh
-gears-batteries eval --task /user/cfg/gears/batteries/eval/tasks/empty-records.toml \
-  --task /user/cfg/gears/batteries/eval/tasks/binary-records.toml \
-  --config /user/cfg/gears/gears-batteries.toml --provider openrouter \
-  --model YOUR_MODEL --trials 3 --seconds 120 --command-seconds 60 \
-  --criterion 'More accepted tasks, no new regressions, within my stated review budget.' \
-  --output /user/tmp/held-out-run
+gears-batteries history --offset 0 --limit 20
+gears-batteries status
 ```
 
-Use the provider name actually declared in your configuration. `--trials` is
-per arm per task; the example schedules 12 actors. The task list is explicit
-(1–32 files with distinct names). All templates, learning and tool definitions
-are captured before the first model request, and the executable pair is pinned
-once. Source workspaces, learning and configuration remain unchanged. Freeze the source
-workspaces and settings while preparing the run. Key files come from the
-configuration or Gears' usual API-key location; child checks receive no API-key
-environment variable.
-
-The output directory must be fresh and separate from every source workspace;
-relative root/output paths resolve from the invoking directory. `--root DIR`
-selects the source learning directory; `--gears PROGRAM` selects the Gears
-executable (otherwise its sibling beside batteries). Output includes `inputs.json`,
-aggregate `report.json`, per-task reports under `tasks/<name>/`, and trial event,
-error and criterion artifacts. Aggregate rows include their artifact base path.
-Approval/denial acquisition counts are reported once for the source directory,
-with the currently configured review pair distinguished from historical pairing.
-
-A failed preflight, preparation or cancellation exits nonzero and retains the
-reports already written. An acceptance failure is an experimental outcome and
-remains in a completed report. The command never retries a trial or enables
-reviews. Its free-text criterion is recorded for the user's assessment; it does
-not parse a statistical decision rule or fabricate missing review costs/human
-seconds. Real-model runs are manual and outside regular tests, whose providers
-are loopback mocks. Keep held-out answers/judge assets out of source learning and
-model-visible copies.
-
-Each task output also preserves `task.json`: the normalized input, original
-file hash/path and selected source directory. Its hash is included in the input
-manifest. This keeps the prompt/check/criterion vectors available for inspection
-after the original task file changes; the model template never receives it.
-
-`status` shows a small last-result index stored in the source Gears directory
-after evaluation, including model, outcome, arm totals and report path. It does
-not contain task prompts or judge output. A broken optional index appears as
-`unavailable` without hiding pending work; an index-write failure is retained
-in the report as `status_record_warning`. The evaluator rejects Gears tool
-context (`GEARS_SESSION_ID` present) before side effects, so judge output does
-not enter a saved parent chat or its later reviews.
+`history` lists the yes and no answers oldest first, with `total`,
+`next_offset` and the number of log lines it could not read. `status` shows
+whether offers are on, how many entries each memory file holds, which
+skills are available and how many decisions the log holds. Both accept
+`--workspace PATH` and `--root PATH` (the Gears directory); the defaults are
+the current directory and the usual Gears directory. The commands are read
+only and may run while Gears is open.

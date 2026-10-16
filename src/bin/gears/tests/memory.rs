@@ -48,7 +48,7 @@ struct Answers {
 
 impl Approver for Answers {
     fn approve(&mut self, _: &Permission) -> Approval {
-        panic!("memory tool authority must use its admission question");
+        panic!("the memory tool must use its own question, not a permission prompt");
     }
     fn attended(&self) -> bool {
         self.choice.is_some()
@@ -61,16 +61,17 @@ impl Approver for Answers {
                 .iter()
                 .map(|choice| choice.value.as_str())
                 .collect::<Vec<_>>(),
-            ["approve", "deny", "postpone"]
+            ["yes", "no"]
         );
+        assert_eq!(question.text, "Remember this?");
         self.asked += 1;
         Ok(Some(choice.into()))
     }
 }
 
 #[test]
-fn the_real_hook_delivers_all_admission_answers_without_asking_in_unattended_runs() {
-    for choice in [Some("approve"), Some("deny"), Some("postpone"), None] {
+fn the_real_hook_writes_memory_only_on_yes_and_never_asks_unattended() {
+    for choice in [Some("yes"), Some("no"), None] {
         let label = choice.unwrap_or("unattended");
         let path = std::env::temp_dir().join(format!(
             "batteries-memory-runtime-{label}-{}",
@@ -113,6 +114,7 @@ fn the_real_hook_delivers_all_admission_answers_without_asking_in_unattended_run
             "fixture/model".into(),
         )
         .unwrap();
+        let original_id = runtime.session().id().to_string();
         let mut answers = Answers { choice, asked: 0 };
         let mut notices = Vec::new();
         runtime
@@ -131,11 +133,11 @@ fn the_real_hook_delivers_all_admission_answers_without_asking_in_unattended_run
         assert_eq!(notices.len(), 2, "{notices:?}");
         assert!(notices[0].contains("Prefer small Rust patches."));
         let outcome = match choice {
-            Some("approve") => "approved",
-            Some("deny") => "denied",
-            _ => "postponed; still pending",
+            Some("yes") => "remembered in user memory",
+            Some("no") => "declined",
+            _ => "nobody answered",
         };
-        assert!(notices[1].contains(outcome));
+        assert!(notices[1].contains(outcome), "{notices:?}");
         let requests = provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(
@@ -151,8 +153,6 @@ fn the_real_hook_delivers_all_admission_answers_without_asking_in_unattended_run
                 .any(|text| text.contains("Prefer small Rust patches."))
         );
         drop(requests);
-        let original_entries = runtime.session().entries().to_vec();
-        let original_id = runtime.session().id().to_string();
         runtime.new_session(false, None).unwrap();
         runtime
             .turn("Start another session.".into(), &mut answers, &mut |_| {
@@ -165,91 +165,63 @@ fn the_real_hook_delivers_all_admission_answers_without_asking_in_unattended_run
             requests[2]
                 .system
                 .iter()
-                .any(|text| text.contains("Prefer small Rust patches.")),
-            choice == Some("approve")
+                .any(|text| text.contains("[preference] Prefer small Rust patches.")),
+            choice == Some("yes")
         );
         drop(requests);
         let live = gears::batteries::memory::load(&context, Target::User).unwrap();
-        assert_eq!(live.entries.len(), usize::from(choice == Some("approve")));
-        let pending = gears::batteries::pending::list(&context, Target::User).unwrap();
-        assert_eq!(
-            pending.len(),
-            usize::from(matches!(choice, Some("postpone") | None))
-        );
-        let mut decisions = 0;
+        assert_eq!(live.entries.len(), usize::from(choice == Some("yes")));
+        if let Some(entry) = live.entries.first() {
+            assert_eq!(entry.session, original_id);
+            assert_eq!(entry.date.len(), 10);
+        }
+        let mut decisions = Vec::new();
         gears::batteries::journal::visit(
             &context.state,
             Path::new("batteries/changes.jsonl"),
             |value| {
-                assert_eq!(value["decision"], choice.unwrap());
-                decisions += 1;
+                decisions.push(value);
                 Ok(())
             },
         )
         .unwrap();
-        assert_eq!(
-            decisions,
-            usize::from(matches!(choice, Some("approve" | "deny")))
-        );
-        let entries = &original_entries;
-        let source = live
-            .entries
-            .first()
-            .map(|entry| &entry.metadata.source)
-            .or_else(|| pending.first().map(|(_, proposal)| &proposal.source));
-        if let Some(source) = source {
-            assert_eq!(source.session, original_id);
-            assert!(
-                source
-                    .entries
-                    .iter()
-                    .all(|id| entries.iter().any(|entry| entry.id == *id))
-            );
+        assert_eq!(decisions.len(), usize::from(choice.is_some()));
+        if let Some(record) = decisions.first() {
+            assert_eq!(record["decision"], choice.unwrap());
+            assert_eq!(record["text"], "Prefer small Rust patches.");
+            assert_eq!(record["session"], original_id);
         }
-        if choice == Some("approve") {
-            let with_memory = runtime.session().id().to_string();
+        if choice == Some("yes") {
+            // A hand edit shows up in the next session, not in the running one.
             let hash =
                 runtime.session().hook_state("batteries").unwrap()["prompt_snapshot"].clone();
             context
                 .state
-                .replace_file(Target::User.relative(), b"# Gears memory v1\n")
+                .replace_file(Target::User.relative(), b"# Gears memory v2\n")
                 .unwrap();
-            for prompt in ["Use the current memory.", "Check it again."] {
-                runtime
-                    .turn(prompt.into(), &mut answers, &mut |_| Ok(()))
-                    .unwrap();
-            }
+            runtime
+                .turn("Use the current memory.".into(), &mut answers, &mut |_| {
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                runtime.session().hook_state("batteries").unwrap()["prompt_snapshot"],
+                hash
+            );
+            runtime.new_session(false, None).unwrap();
+            runtime
+                .turn("Check it again.".into(), &mut answers, &mut |_| Ok(()))
+                .unwrap();
             let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 5);
             assert!(
                 requests[3]
                     .system
                     .iter()
                     .any(|text| text.contains("Prefer small Rust patches."))
             );
-            for request in &requests[3..5] {
-                assert_eq!(
-                    request
-                        .messages
-                        .iter()
-                        .filter(|message| message
-                            .text_content()
-                            .contains("Withdraw User memory entry preference"))
-                        .count(),
-                    1
-                );
-            }
-            assert_eq!(
-                runtime.session().hook_state("batteries").unwrap()["prompt_snapshot"],
-                hash
-            );
-            drop(requests);
-            runtime.resume(&with_memory).unwrap();
-            runtime
-                .turn("Use resumed memory.".into(), &mut answers, &mut |_| Ok(()))
-                .unwrap();
-            let requests = provider.requests.lock().unwrap();
             assert!(
-                !requests[5]
+                !requests[4]
                     .system
                     .iter()
                     .any(|text| text.contains("Prefer small Rust patches."))

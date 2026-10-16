@@ -1,10 +1,9 @@
-use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
-use gears::batteries::memory_format::{Document, Entry, Target};
+use gears::batteries::memory::{Action, Change};
+use gears::batteries::memory_format::{Entry, Target};
 use gears::batteries::paths::ToolContext;
-use gears::batteries::pending::Proposal;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 struct Fixture {
     path: std::path::PathBuf,
@@ -26,34 +25,28 @@ impl Fixture {
         Self { path, context }
     }
 
-    fn run(&self, args: &[&str], input: &[u8]) -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_gears-batteries"))
+    fn run(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_gears-batteries"))
             .args(args)
             .arg("--root")
             .arg(self.context.state.path())
             .arg("--workspace")
             .arg(&self.context.workspace)
-            .stdin(Stdio::piped())
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(input).unwrap();
-        child.wait_with_output().unwrap()
+            .output()
+            .unwrap()
     }
 
-    fn success(&self, args: &[&str], input: &[u8]) -> String {
-        let output = self.run(args, input);
+    fn json(&self, args: &[&str]) -> Value {
+        let output = self.run(args);
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        String::from_utf8(output.stdout).unwrap()
-    }
-
-    fn history(&self, args: &[&str]) -> Value {
-        serde_json::from_str(&self.success(args, b"")).unwrap()
+        serde_json::from_slice(&output.stdout).unwrap()
     }
 }
 
@@ -63,157 +56,85 @@ impl Drop for Fixture {
     }
 }
 
-fn entry(target: Target, text: &str) -> Entry {
-    serde_json::from_value(
-        json!({"metadata": {"id": "preference", "kind": "user", "scope": target.scope(),
-        "source": {"session": "source", "entries": ["evidence"]}, "date_ms": 1}, "text": text}),
-    )
-    .unwrap()
-}
-
-#[test]
-fn the_binary_reviews_postponed_changes_and_refuses_stale_approvals_without_logging_them() {
-    let fixture = Fixture::new("pending");
-    let entry = entry(Target::User, "Prefer Rust.");
-    let mut proposal = Proposal {
-        version: 1,
-        target: Target::User,
+fn add(target: Target, id: &str, text: &str) -> Change {
+    Change {
+        version: 2,
+        target,
+        action: Action::Add,
         before: None,
-        after: Some(entry.clone()),
-        source: entry.metadata.source.clone(),
-        date_ms: 2,
-    };
-    let id = gears::batteries::memory::propose(&fixture.context, &proposal)
-        .unwrap()
-        .unwrap();
-    let listing = fixture.success(&["pending", "--list"], b"approve\n");
-    for expected in [
-        &id,
-        "Prefer Rust.",
-        "evidence",
-        "sessions_with_old_snapshot",
-        "list_only",
-    ] {
-        assert!(listing.contains(expected), "{listing}");
+        after: Some(Entry {
+            id: id.into(),
+            date: "2026-10-15".into(),
+            session: "cli".into(),
+            text: text.into(),
+        }),
     }
-    assert!(
-        gears::batteries::memory::load(&fixture.context, Target::User)
-            .unwrap()
-            .entries
-            .is_empty()
-    );
-    assert!(fixture.success(&["pending"], b"").contains("postpone"));
-    fixture.success(&["pending", "--postpone", &id], b"");
-    let invalid = fixture.run(&["pending"], b"yes\n");
-    assert!(!invalid.status.success());
-    assert!(
-        String::from_utf8(invalid.stderr)
-            .unwrap()
-            .contains("item remains pending")
-    );
-    assert_eq!(fixture.history(&["history"])["total"], 0);
-    fixture.success(&["pending"], b"approve\n");
-    assert_eq!(
-        gears::batteries::memory::load(&fixture.context, Target::User)
-            .unwrap()
-            .entries
-            .as_slice(),
-        std::slice::from_ref(&entry)
-    );
-    let status: Value = serde_json::from_str(&fixture.success(&["status"], b"")).unwrap();
-    assert_eq!(status["pending_global"]["count"], 0);
-    assert_eq!(status["reviews"], "experimental");
-    proposal.before = Some(entry);
-    proposal.after.as_mut().unwrap().text = "Prefer native Rust.".into();
-    let stale = gears::batteries::memory::propose(&fixture.context, &proposal)
-        .unwrap()
-        .unwrap();
-    fixture
-        .context
-        .state
-        .replace_file(Target::User.relative(), b"# Gears memory v1\n")
-        .unwrap();
-    let failed = fixture.run(&["pending", "--approve", &stale], b"");
-    assert!(!failed.status.success());
-    assert!(
-        String::from_utf8(failed.stderr)
-            .unwrap()
-            .contains("removed since")
-    );
-    assert_eq!(fixture.history(&["history"])["total"], 1);
-    assert_eq!(
-        gears::batteries::pending::list(&fixture.context, Target::User)
-            .unwrap()
-            .len(),
-        1
-    );
-    fixture.success(&["pending", "--deny", &stale], b"");
-    let page = fixture.history(&["history", "--offset", "1", "--limit", "1"]);
-    assert_eq!(page["total"], 2);
-    assert_eq!(page["records"][0]["decision"], "deny");
-    assert!(page["next_offset"].is_null());
 }
 
 #[test]
-fn imported_workspace_approval_is_bound_to_the_bytes_listed_by_the_binary() {
-    let fixture = Fixture::new("import");
-    let root = gears::state::StateRoot::new(fixture.context.workspace.clone()).unwrap();
-    let mut document = Document {
-        entries: vec![entry(Target::Workspace, "This project uses Rust.")],
-    };
-    let bytes = document.encode(Target::Workspace, 2200).unwrap();
-    root.replace_file(Target::Workspace.relative(), bytes.as_bytes())
-        .unwrap();
-    let (hash, _) = gears::batteries::workspace_memory::current(&fixture.context)
-        .unwrap()
-        .unwrap();
-    assert!(fixture.success(&["pending", "--list"], b"").contains(&hash));
-    assert!(!gears::batteries::workspace_memory::approved(&fixture.context, &hash).unwrap());
-    fixture.success(&["pending", "--approve", &hash], b"");
-    assert!(gears::batteries::workspace_memory::approved(&fixture.context, &hash).unwrap());
-    assert_eq!(fixture.history(&["history"])["records"][0]["memory"], bytes);
-    document.entries[0].text = "This project also uses C.".into();
-    root.replace_file(
-        Target::Workspace.relative(),
-        document.encode(Target::Workspace, 2200).unwrap().as_bytes(),
+fn history_pages_the_log_and_status_describes_the_files() {
+    let fixture = Fixture::new("history");
+    let first = add(Target::User, "u1", "Prefer small patches.");
+    let second = add(Target::Workspace, "w1", "Paths are relative.");
+    for (change, yes) in [(&first, true), (&second, true)] {
+        gears::batteries::memory::apply(&fixture.context, change).unwrap();
+        gears::batteries::memory::log(&fixture.context, change, yes).unwrap();
+    }
+    gears::batteries::memory::log(
+        &fixture.context,
+        &add(Target::Global, "g1", "Declined."),
+        false,
     )
     .unwrap();
-    assert!(
-        !fixture
-            .run(&["pending", "--approve", &hash], b"")
-            .status
-            .success()
+    let page = fixture.json(&["history", "--limit", "2"]);
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["unreadable"], 0);
+    assert_eq!(page["next_offset"], 2);
+    assert_eq!(page["records"][1]["id"], "w1");
+    let rest = fixture.json(&["history", "--offset", "2"]);
+    assert_eq!(rest["records"][0]["decision"], "no");
+    assert!(rest["next_offset"].is_null());
+    let status = fixture.json(&["status"]);
+    assert_eq!(status["offer_lessons"], false);
+    assert_eq!(
+        status["entries"],
+        serde_json::json!({"user": 1, "global": 0, "workspace": 1})
     );
-    assert_eq!(fixture.history(&["history"])["total"], 1);
-    let status: Value = serde_json::from_str(&fixture.success(&["status"], b"")).unwrap();
-    assert_eq!(status["workspace_memory"]["approved"], false);
+    assert_eq!(
+        status["decisions"],
+        serde_json::json!({"yes": 2, "no": 1, "unreadable": 0})
+    );
+    assert_eq!(status["skills"], serde_json::json!([]));
+    use std::io::Write;
+    let log = fixture
+        .context
+        .state
+        .file(std::path::Path::new("batteries/changes.jsonl"))
+        .unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(log)
+        .unwrap()
+        .write_all(b"{broken}\n")
+        .unwrap();
+    assert_eq!(fixture.json(&["history"])["unreadable"], 1);
+    assert_eq!(fixture.json(&["status"])["decisions"]["unreadable"], 1);
 }
 
 #[test]
-fn status_reports_model_pairs_and_invalid_optional_configuration() {
-    let fixture = Fixture::new("review-status");
-    let settings = std::path::Path::new("batteries.toml");
-    fixture.context.state.replace_file(settings, b"version=1\n[reviews]\nenabled=true\nmax_proposals=2\n[reviews.executor]\nprovider='local'\nmodel='executor'\n[reviews.reviewer]\nprovider='openrouter'\nmodel='vendor/reviewer'\n").unwrap();
-    let status = fixture.history(&["status"]);
-    assert_eq!(status["reviews"], "experimental");
-    assert_eq!(status["review_settings"]["enabled"], true);
-    assert_eq!(status["review_settings"]["max_proposals"], 2);
-    assert_eq!(status["review_settings"]["executor"]["provider"], "local");
-    assert_eq!(
-        status["review_settings"]["reviewer"]["model"],
-        "vendor/reviewer"
-    );
-    fixture
-        .context
-        .state
-        .replace_file(settings, b"version=2")
-        .unwrap();
-    let status = fixture.history(&["status"]);
-    assert!(
-        status["review_settings"]["unavailable"]
-            .as_str()
-            .unwrap()
-            .contains("unsupported")
-    );
-    assert_eq!(status["pending_global"]["count"], 0);
+fn removed_commands_and_bad_options_fail_without_output() {
+    let fixture = Fixture::new("usage");
+    for args in [
+        vec!["pending"],
+        vec!["cleanup", "--since", "2026-01-01"],
+        vec!["review"],
+        vec!["eval"],
+        vec!["history", "--limit", "0"],
+        vec!["status", "--offset", "1"],
+    ] {
+        let output = fixture.run(&args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(!output.stderr.is_empty(), "{args:?}");
+    }
 }

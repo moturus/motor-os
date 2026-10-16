@@ -20,6 +20,8 @@ struct Configuration {
 pub struct Limits {
     pub user_chars: usize,
     pub memory_chars: usize,
+    /// Whether the model may offer one lesson after a task; off by default.
+    pub offer_lessons: bool,
 }
 
 impl Default for Limits {
@@ -27,6 +29,7 @@ impl Default for Limits {
         Self {
             user_chars: 1375,
             memory_chars: 2200,
+            offer_lessons: false,
         }
     }
 }
@@ -88,13 +91,15 @@ mod tests {
         assert_eq!(load(&root).unwrap().for_target(Target::User), 1375);
         assert_eq!(load(&root).unwrap().for_target(Target::Workspace), 2200);
         let config = Path::new("batteries.toml");
+        assert!(!load(&root).unwrap().offer_lessons);
         root.replace_file(
             config,
-            b"version = 1\n[memory]\nuser_chars = 500\nmemory_chars = 1200",
+            b"version = 1\n[memory]\nuser_chars = 500\nmemory_chars = 1200\noffer_lessons = true",
         )
         .unwrap();
         assert_eq!(load(&root).unwrap().for_target(Target::User), 500);
         assert_eq!(load(&root).unwrap().for_target(Target::Global), 1200);
+        assert!(load(&root).unwrap().offer_lessons);
         for invalid in [
             "version = 2",
             "[memory]\nuser_chars = 10",

@@ -11,13 +11,7 @@ use serde_json::{Value, json};
 use crate::batteries::{Event, paths::ToolContext};
 
 pub fn permission(event: &Event) -> Value {
-    if !review_tool_allowed(event) {
-        return json!({"decision": "deny"});
-    }
     let decision = ToolContext::for_event(event).and_then(|context| {
-        if let Some(response) = crate::batteries::eval_policy::permission(event, &context)? {
-            return Ok(response);
-        }
         if event.payload["tool_call"]["name"] == "check" {
             let call: ToolCall = serde_json::from_value(event.payload["tool_call"].clone())
                 .map_err(|error| error.to_string())?;
@@ -36,22 +30,6 @@ pub fn permission(event: &Event) -> Value {
         Err(error) => {
             json!({"decision": "deny", "notice": format!("approval policy denied the call: {error}")})
         }
-    }
-}
-
-fn review_tool_allowed(event: &Event) -> bool {
-    if event
-        .session
-        .state
-        .as_ref()
-        .is_none_or(|state| state["run_kind"] != "review")
-    {
-        return true;
-    }
-    match event.payload["tool_call"]["name"].as_str() {
-        Some("memory" | "skill_manage" | "skill_view" | "session_search") => true,
-        Some("sh" | "check" | "todo" | "write_file" | "patch") => false,
-        _ => event.payload["tool"]["read_only"] == true,
     }
 }
 

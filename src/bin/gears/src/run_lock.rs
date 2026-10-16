@@ -18,31 +18,6 @@ pub struct DirectoryLock {
 }
 
 impl DirectoryLock {
-    /// # Safety
-    /// Call only while process startup is single-threaded.
-    pub unsafe fn select_directory(directory: &Path) -> Result<(), String> {
-        let previous = crate::directory::default_root()
-            .ok()
-            .and_then(|root| root.canonicalize().ok());
-        let directory = if directory.is_absolute() {
-            directory.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map_err(|e| e.to_string())?
-                .join(directory)
-        };
-        let selected = StateRoot::new(directory)?
-            .directory(Path::new(""))?
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
-        // A different directory needs its own owner; the ancestor still owns its root.
-        if previous.as_ref() != Some(&selected) {
-            unsafe { std::env::remove_var(OWNER_ENV) };
-        }
-        unsafe { std::env::set_var(crate::directory::ENV, selected) };
-        Ok(())
-    }
-
     pub fn acquire_default() -> Result<Self, String> {
         Self::acquire_at(&crate::directory::default_root()?)
     }

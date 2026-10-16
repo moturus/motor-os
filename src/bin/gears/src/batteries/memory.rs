@@ -1,10 +1,94 @@
-//! Memory proposals validate against current entries before any decision is written.
+//! One memory change at a time, written only after the user says yes.
+
+use std::path::Path;
 
 use crate::state::StateRoot;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::batteries::memory_format::{Document, Entry, Target};
 use crate::batteries::paths::ToolContext;
-use crate::batteries::pending::{Decision, Proposal};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    Add,
+    Replace,
+    Remove,
+}
+
+/// A proposed change, kept in hook state while the user is asked.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Change {
+    pub version: u32,
+    pub target: Target,
+    pub action: Action,
+    pub before: Option<Entry>,
+    pub after: Option<Entry>,
+}
+
+impl Change {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != 2 {
+            return Err("unsupported memory change version".into());
+        }
+        let shape = match self.action {
+            Action::Add => self.before.is_none() && self.after.is_some(),
+            Action::Replace => {
+                self.before.is_some()
+                    && self.after.is_some()
+                    && self.before.as_ref().map(|entry| &entry.id)
+                        == self.after.as_ref().map(|entry| &entry.id)
+            }
+            Action::Remove => self.before.is_some() && self.after.is_none(),
+        };
+        if !shape {
+            return Err("memory change does not match its action".into());
+        }
+        for entry in self.before.iter().chain(&self.after) {
+            entry.validate()?;
+        }
+        Ok(())
+    }
+
+    /// The entry the user is asked about.
+    pub fn subject(&self) -> &Entry {
+        self.after.as_ref().or(self.before.as_ref()).unwrap()
+    }
+
+    /// Applies the change to the current file's entries; the entry it replaces
+    /// or removes must still read as it did when the change was proposed.
+    fn apply_to(&self, document: &mut Document) -> Result<(), String> {
+        match self.action {
+            Action::Add => {
+                let after = self.after.as_ref().unwrap();
+                if document.entries.iter().any(|entry| entry.id == after.id) {
+                    return Err("memory entry id already exists".into());
+                }
+                document.entries.push(after.clone());
+            }
+            Action::Replace | Action::Remove => {
+                let before = self.before.as_ref().unwrap();
+                let index = document
+                    .entries
+                    .iter()
+                    .position(|entry| entry.id == before.id)
+                    .ok_or("memory entry was removed since the change was proposed")?;
+                if document.entries[index].text != before.text {
+                    return Err("memory entry changed since the change was proposed".into());
+                }
+                match &self.after {
+                    Some(after) => document.entries[index] = after.clone(),
+                    None => {
+                        document.entries.remove(index);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 pub fn root(context: &ToolContext, target: Target) -> Result<StateRoot, String> {
     if target == Target::Workspace {
@@ -14,122 +98,74 @@ pub fn root(context: &ToolContext, target: Target) -> Result<StateRoot, String> 
     }
 }
 
+fn limit(context: &ToolContext, target: Target) -> Result<usize, String> {
+    Ok(crate::batteries::memory_config::load(&context.state)?.for_target(target))
+}
+
 pub fn load(context: &ToolContext, target: Target) -> Result<Document, String> {
-    let limit = crate::batteries::memory_config::load(&context.state)?.for_target(target);
-    crate::batteries::memory_format::load(&root(context, target)?, target, limit)
+    crate::batteries::memory_format::load(&root(context, target)?, target, limit(context, target)?)
 }
 
-fn same_memory(a: &Entry, b: &Entry) -> bool {
-    a.text == b.text
-        && a.metadata.kind == b.metadata.kind
-        && a.metadata.scope == b.metadata.scope
-        && a.metadata.applies_to == b.metadata.applies_to
-}
-
-fn preview(context: &ToolContext, proposal: &Proposal) -> Result<String, String> {
-    proposal.validate()?;
-    if proposal.target == Target::Workspace {
-        crate::batteries::workspace_memory::require_approved(context)?;
-    }
-    let mut document = load(context, proposal.target)?;
-    if let Some(before) = &proposal.before {
-        let index = document
+/// Checks a change against the current file without writing anything.
+/// `Ok(false)` means the entry to add is already there.
+pub fn propose(context: &ToolContext, change: &Change) -> Result<bool, String> {
+    change.validate()?;
+    let mut document = load(context, change.target)?;
+    if change.action == Action::Add
+        && document
             .entries
             .iter()
-            .position(|entry| entry.metadata.id == before.metadata.id)
-            .ok_or("memory entry was removed since the proposal was made")?;
-        if document.entries[index] != *before {
-            return Err("memory entry changed since the proposal was made".into());
-        }
-        if let Some(after) = &proposal.after {
-            document.entries[index] = after.clone();
-        } else {
-            document.entries.remove(index);
-        }
-    } else if let Some(after) = &proposal.after {
-        if document
-            .entries
-            .iter()
-            .any(|entry| entry.metadata.id == after.metadata.id)
-        {
-            return Err("memory entry id already exists".into());
-        }
-        document.entries.push(after.clone());
-    }
-    let limit = crate::batteries::memory_config::load(&context.state)?.for_target(proposal.target);
-    document.encode(proposal.target, limit)
-}
-
-/// None means the requested entry already exists, without a new proposal.
-pub fn propose(context: &ToolContext, proposal: &Proposal) -> Result<Option<String>, String> {
-    proposal.validate()?;
-    if proposal.target == Target::Workspace {
-        crate::batteries::workspace_memory::require_approved(context)?;
-    }
-    let document = load(context, proposal.target)?;
-    if let Some(before) = &proposal.before
-        && !document.entries.iter().any(|entry| entry == before)
+            .any(|entry| entry.text == change.after.as_ref().unwrap().text)
     {
-        return Err("memory entry changed or was removed since the proposal was made".into());
+        return Ok(false);
     }
-    if proposal.after.as_ref().is_some_and(|after| {
-        document
-            .entries
-            .iter()
-            .any(|entry| same_memory(entry, after))
-    }) {
-        return Ok(None);
-    }
-    preview(context, proposal)?;
-    for (id, existing) in crate::batteries::pending::list(context, proposal.target)? {
-        if existing.target == proposal.target
-            && existing.before == proposal.before
-            && match (&existing.after, &proposal.after) {
-                (Some(a), Some(b)) => same_memory(a, b),
-                (None, None) => true,
-                _ => false,
-            }
-        {
-            return Ok(Some(id));
-        }
-    }
-    crate::batteries::pending::stage(context, proposal).map(Some)
+    change.apply_to(&mut document)?;
+    document.encode(limit(context, change.target)?)?;
+    Ok(true)
 }
 
-pub fn decide(
-    context: &ToolContext,
-    target: Target,
-    id: &str,
-    decision: Decision,
-) -> Result<(), String> {
-    let proposal = crate::batteries::pending::load(context, target, id)?;
-    if decision == Decision::Postpone {
-        return Ok(());
-    }
-    let encoded = if decision == Decision::Approve {
-        Some(preview(context, &proposal)?)
-    } else {
-        None
-    };
-    let hash = encoded
+pub fn apply(context: &ToolContext, change: &Change) -> Result<(), String> {
+    change.validate()?;
+    let mut document = load(context, change.target)?;
+    change.apply_to(&mut document)?;
+    let text = document.encode(limit(context, change.target)?)?;
+    root(context, change.target)?.replace_file(change.target.relative(), text.as_bytes())
+}
+
+/// Appends the user's answer to `changes.jsonl`.
+pub fn log(context: &ToolContext, change: &Change, yes: bool) -> Result<(), String> {
+    let (date, time_ms) = crate::batteries::memory_format::today()?;
+    let subject = change.subject();
+    let before = change
+        .before
         .as_ref()
-        .filter(|_| proposal.target == Target::Workspace)
-        .map(|text| crate::batteries::snapshot::digest(text.as_bytes()));
-    // Deliberately no transaction or replay: stop at the first failed write.
-    crate::batteries::pending::record(context, id, proposal.clone(), decision, hash)?;
-    if let Some(text) = encoded {
-        root(context, proposal.target)?
-            .replace_file(proposal.target.relative(), text.as_bytes())?;
+        .filter(|_| change.action == Action::Replace)
+        .map(|entry| entry.text.clone());
+    let record = json!({"version": 2, "date": date, "time_ms": time_ms,
+        "decision": if yes { "yes" } else { "no" }, "target": change.target, "action": change.action,
+        "id": subject.id, "text": subject.text, "before": before, "session": subject.session});
+    let path = context.state.file(Path::new("batteries/changes.jsonl"))?;
+    crate::batteries::journal::append_at(&context.state, &path, &record)
+}
+
+/// A short id that no current entry uses.
+pub fn new_id(document: &Document, seed: &str) -> String {
+    let digest = crate::batteries::snapshot::digest(seed.as_bytes());
+    let mut length = 4;
+    loop {
+        let id = &digest[..length];
+        if !document.entries.iter().any(|entry| entry.id == id) || length == digest.len() {
+            return id.to_string();
+        }
+        length += 2;
     }
-    crate::batteries::pending::remove(context, proposal.target, id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batteries::memory_format::{Kind, Metadata, Source};
 
-    fn fixture(label: &str) -> (std::path::PathBuf, ToolContext, Proposal) {
+    fn fixture(label: &str) -> (std::path::PathBuf, ToolContext) {
         let path =
             std::env::temp_dir().join(format!("batteries-memory-{label}-{}", std::process::id()));
         std::fs::create_dir_all(path.join("workspace")).unwrap();
@@ -140,145 +176,159 @@ mod tests {
             None,
         )
         .unwrap();
-        let source = Source {
-            review: None,
+        (path, context)
+    }
+
+    fn entry(id: &str, text: &str) -> Entry {
+        Entry {
+            id: id.into(),
+            date: "2026-10-15".into(),
             session: "s1".into(),
-            entries: vec!["e1".into()],
-        };
-        let proposal = Proposal {
-            version: 1,
-            target: Target::Global,
-            before: None,
-            date_ms: 1,
-            source: source.clone(),
-            after: Some(Entry {
-                metadata: Metadata {
-                    id: "entry-1".into(),
-                    kind: Kind::User,
-                    scope: Target::Global.scope(),
-                    source,
-                    date_ms: 1,
-                    applies_to: None,
-                },
-                text: "Prefer Rust.".into(),
-            }),
-        };
-        (path, context, proposal)
+            text: text.into(),
+        }
+    }
+
+    fn change(
+        target: Target,
+        action: Action,
+        before: Option<Entry>,
+        after: Option<Entry>,
+    ) -> Change {
+        Change {
+            version: 2,
+            target,
+            action,
+            before,
+            after,
+        }
     }
 
     #[test]
-    fn admission_postpones_denies_and_ignores_duplicates_without_changing_live_memory() {
-        let (path, context, mut proposal) = fixture("admission");
-        let id = propose(&context, &proposal).unwrap().unwrap();
-        proposal.date_ms = 2;
-        assert_eq!(propose(&context, &proposal).unwrap(), Some(id.clone()));
-        assert!(load(&context, Target::Global).unwrap().entries.is_empty());
-        decide(&context, Target::Global, &id, Decision::Postpone).unwrap();
-        assert_eq!(
-            crate::batteries::pending::list(&context, Target::Global)
-                .unwrap()
-                .len(),
-            1
+    fn changes_apply_once_detect_duplicates_and_refuse_stale_entries() {
+        let (path, context) = fixture("apply");
+        let add = change(
+            Target::Global,
+            Action::Add,
+            None,
+            Some(entry("a1", "Prefer Rust.")),
         );
-        decide(&context, Target::Global, &id, Decision::Deny).unwrap();
+        assert!(propose(&context, &add).unwrap());
         assert!(load(&context, Target::Global).unwrap().entries.is_empty());
-        assert!(
-            crate::batteries::pending::list(&context, Target::Global)
-                .unwrap()
-                .is_empty()
-        );
-        let id = propose(&context, &proposal).unwrap().unwrap();
-        decide(&context, Target::Global, &id, Decision::Approve).unwrap();
+        apply(&context, &add).unwrap();
         assert_eq!(
             load(&context, Target::Global).unwrap().entries,
-            [proposal.after.clone().unwrap()]
+            [entry("a1", "Prefer Rust.")]
         );
-        proposal.after.as_mut().unwrap().metadata.id = "duplicate".into();
-        assert!(propose(&context, &proposal).unwrap().is_none());
-        std::fs::remove_dir_all(path).unwrap();
-    }
-
-    #[test]
-    fn stale_entries_and_failed_history_writes_leave_memory_and_pending_untouched() {
-        let (path, context, mut proposal) = fixture("stale");
-        let id = propose(&context, &proposal).unwrap().unwrap();
-        let history = context.state.path().join("batteries/changes.jsonl");
-        std::fs::create_dir(&history).unwrap();
-        assert!(decide(&context, Target::Global, &id, Decision::Approve).is_err());
-        assert!(load(&context, Target::Global).unwrap().entries.is_empty());
-        assert!(crate::batteries::pending::load(&context, Target::Global, &id).is_ok());
-        std::fs::remove_dir(&history).unwrap();
-        decide(&context, Target::Global, &id, Decision::Approve).unwrap();
-        proposal.before = proposal.after.clone();
-        proposal.after.as_mut().unwrap().text = "Prefer native APIs.".into();
-        let id = propose(&context, &proposal).unwrap().unwrap();
-        let unchanged = std::fs::read(&history).unwrap();
-        context
-            .state
-            .replace_file(Target::Global.relative(), b"# Gears memory v1\n")
-            .unwrap();
         assert!(
-            decide(&context, Target::Global, &id, Decision::Approve)
-                .unwrap_err()
-                .contains("removed")
+            !propose(
+                &context,
+                &change(
+                    Target::Global,
+                    Action::Add,
+                    None,
+                    Some(entry("a2", "Prefer Rust."))
+                )
+            )
+            .unwrap()
         );
-        assert_eq!(std::fs::read(&history).unwrap(), unchanged);
-        let mut changed = Document {
-            entries: vec![proposal.before.unwrap()],
-        };
-        changed.entries[0].text = "A hand correction.".into();
+        assert!(
+            apply(&context, &add)
+                .unwrap_err()
+                .contains("already exists")
+        );
+        let replace = change(
+            Target::Global,
+            Action::Replace,
+            Some(entry("a1", "Prefer Rust.")),
+            Some(entry("a1", "Prefer native APIs.")),
+        );
+        assert!(propose(&context, &replace).unwrap());
         context
             .state
             .replace_file(
                 Target::Global.relative(),
-                changed.encode(Target::Global, 2200).unwrap().as_bytes(),
+                b"# Gears memory v2\n\xc2\xa7 a1 2026-10-15 s1\nA hand correction.\n",
             )
             .unwrap();
         assert!(
-            decide(&context, Target::Global, &id, Decision::Approve)
+            apply(&context, &replace)
                 .unwrap_err()
-                .contains("changed")
+                .contains("changed since")
         );
-        assert_eq!(load(&context, Target::Global).unwrap(), changed);
-        assert!(crate::batteries::pending::load(&context, Target::Global, &id).is_ok());
-        let removal = Proposal {
-            before: changed.entries.first().cloned(),
-            after: None,
-            ..proposal
-        };
-        let remove_id = propose(&context, &removal).unwrap().unwrap();
-        decide(&context, Target::Global, &remove_id, Decision::Approve).unwrap();
+        let remove = change(
+            Target::Global,
+            Action::Remove,
+            Some(entry("a1", "A hand correction.")),
+            None,
+        );
+        apply(&context, &remove).unwrap();
         assert!(load(&context, Target::Global).unwrap().entries.is_empty());
-        assert!(crate::batteries::pending::load(&context, Target::Global, &id).is_ok());
+        assert!(
+            apply(&context, &remove)
+                .unwrap_err()
+                .contains("removed since")
+        );
+        for bad in [
+            change(
+                Target::Global,
+                Action::Add,
+                Some(entry("a1", "x")),
+                Some(entry("a1", "y")),
+            ),
+            change(Target::Global, Action::Remove, None, None),
+            change(
+                Target::Global,
+                Action::Replace,
+                Some(entry("a1", "x")),
+                Some(entry("a2", "y")),
+            ),
+            Change {
+                version: 1,
+                ..add.clone()
+            },
+        ] {
+            assert!(propose(&context, &bad).is_err());
+        }
         std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
-    fn approving_one_workspace_entry_does_not_admit_an_unreviewed_import() {
-        let (path, context, mut proposal) = fixture("workspace");
-        proposal.target = Target::Workspace;
-        proposal.after.as_mut().unwrap().metadata.scope = Target::Workspace.scope();
-        let id = propose(&context, &proposal).unwrap().unwrap();
-        let document = Document {
-            entries: vec![proposal.after.clone().unwrap()],
-        };
-        let text = document.encode(Target::Workspace, 2200).unwrap();
-        root(&context, Target::Workspace)
-            .unwrap()
-            .replace_file(Target::Workspace.relative(), text.as_bytes())
-            .unwrap();
-        assert!(
-            decide(&context, Target::Workspace, &id, Decision::Approve)
-                .unwrap_err()
-                .contains("not been approved")
+    fn decisions_are_logged_and_workspace_memory_lives_in_the_workspace() {
+        let (path, context) = fixture("log");
+        let add = change(
+            Target::Workspace,
+            Action::Add,
+            None,
+            Some(entry("w1", "Paths are relative.")),
         );
-        let hash = crate::batteries::snapshot::digest(text.as_bytes());
-        crate::batteries::workspace_memory::decide(&context, &hash, Decision::Approve).unwrap();
-        proposal.before = proposal.after.clone();
-        proposal.after.as_mut().unwrap().text = "Corrected project fact.".into();
-        let id = propose(&context, &proposal).unwrap().unwrap();
-        decide(&context, Target::Workspace, &id, Decision::Approve).unwrap();
-        crate::batteries::workspace_memory::require_approved(&context).unwrap();
+        apply(&context, &add).unwrap();
+        assert!(context.workspace.join(".gears/MEMORY.md").is_file());
+        log(&context, &add, true).unwrap();
+        let remove = change(
+            Target::Workspace,
+            Action::Remove,
+            Some(entry("w1", "Paths are relative.")),
+            None,
+        );
+        log(&context, &remove, false).unwrap();
+        let history = crate::batteries::memory_history::history(&context, 0, 10).unwrap();
+        assert_eq!(history["total"], 2);
+        assert_eq!(history["records"][0]["decision"], "yes");
+        assert_eq!(history["records"][1]["action"], "remove");
+        assert_eq!(history["records"][1]["text"], "Paths are relative.");
+        let document = load(&context, Target::Workspace).unwrap();
+        let id = new_id(&document, "seed");
+        assert_eq!(id.len(), 4);
+        assert_ne!(
+            new_id(
+                &Document {
+                    entries: vec![entry(&id, "taken")]
+                },
+                "seed"
+            )
+            .len(),
+            4
+        );
         std::fs::remove_dir_all(path).unwrap();
     }
 }

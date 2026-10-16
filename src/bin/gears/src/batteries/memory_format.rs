@@ -1,4 +1,4 @@
-//! Inspectable entry-based memory. Headers are JSON; bodies are plain Markdown.
+//! Plain-text memory files: a `§` header line per entry, then the entry's text.
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -7,7 +7,8 @@ use std::path::Path;
 use crate::state::StateRoot;
 use serde::{Deserialize, Serialize};
 
-const HEADER: &str = "# Gears memory v1\n";
+const HEADER_V1: &str = "# Gears memory v1\n";
+const HEADER_V2: &str = "# Gears memory v2\n";
 pub const MAX_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,66 +28,25 @@ impl Target {
         })
     }
 
-    pub fn scope(self) -> Scope {
-        if self == Self::Workspace {
-            Scope::Workspace
-        } else {
-            Scope::Global
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::User => "User memory",
+            Self::Global => "Global memory",
+            Self::Workspace => "Workspace memory",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Kind {
-    User,
-    Observed,
-    Inferred,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Scope {
-    Global,
-    Workspace,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Source {
-    pub session: String,
-    pub entries: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review: Option<String>,
-}
-
-impl Source {
-    pub(crate) fn valid_review(&self) -> bool {
-        self.review.as_ref().is_none_or(|id| {
-            id.len() == 64
-                && id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Metadata {
-    pub id: String,
-    pub kind: Kind,
-    pub scope: Scope,
-    pub source: Source,
-    pub date_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applies_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
-    pub metadata: Metadata,
+    pub id: String,
+    /// `YYYY-MM-DD`, or empty when a hand-written entry gave none.
+    #[serde(default)]
+    pub date: String,
+    /// The id of the session that proposed the entry; empty when hand-written.
+    #[serde(default)]
+    pub session: String,
     pub text: String,
 }
 
@@ -103,92 +63,188 @@ pub fn identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+fn valid_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+}
+
 impl Entry {
-    pub fn validate(&self, target: Target) -> Result<(), String> {
-        let metadata = &self.metadata;
-        if !metadata.source.valid_review()
-            || !identifier(&metadata.id)
-            || !identifier(&metadata.source.session)
-            || metadata.source.entries.is_empty()
-            || metadata.source.entries.len() > 32
-            || metadata.source.entries.iter().any(|id| !identifier(id))
-        {
-            return Err("memory needs ASCII ids and 1–32 source entry ids".into());
+    pub fn validate(&self) -> Result<(), String> {
+        if !identifier(&self.id) || self.id.len() > 32 {
+            return Err("memory entry ids are 1–32 ASCII letters, digits, - or _".into());
         }
-        if metadata.scope != target.scope()
-            || (target == Target::User && metadata.kind != Kind::User)
-        {
-            return Err("memory kind or scope does not match the target file".into());
+        if !self.date.is_empty() && !valid_date(&self.date) {
+            return Err("memory entry dates are written YYYY-MM-DD".into());
+        }
+        if !self.session.is_empty() && !identifier(&self.session) {
+            return Err("invalid memory entry session id".into());
         }
         if self.text.trim().is_empty()
-            || self.text.lines().any(|line| line.starts_with("§ "))
+            || self
+                .text
+                .lines()
+                .any(|line| line == "§" || line.starts_with("§ "))
             || self
                 .text
                 .chars()
                 .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\t'))
-            || metadata
-                .applies_to
-                .as_ref()
-                .is_some_and(|text| text.len() > 2048 || text.chars().any(char::is_control))
         {
-            return Err("invalid memory text, reserved § header, or applies_to value".into());
+            return Err(
+                "memory text is empty, starts a line with §, or contains control characters".into(),
+            );
         }
         Ok(())
+    }
+
+    fn header(&self) -> String {
+        let mut header = format!("§ {}", self.id);
+        if !self.date.is_empty() || !self.session.is_empty() {
+            header.push(' ');
+            header.push_str(if self.date.is_empty() {
+                "-"
+            } else {
+                &self.date
+            });
+        }
+        if !self.session.is_empty() {
+            header.push(' ');
+            header.push_str(&self.session);
+        }
+        header
     }
 }
 
 impl Document {
-    pub fn parse(text: &str, target: Target, limit: usize) -> Result<Self, String> {
-        if text.len() > MAX_BYTES || text.chars().count() > limit {
-            return Err(format!("memory file exceeds its {limit} character limit"));
+    /// Reads the current format and the previous one with JSON headers.
+    pub fn parse(text: &str, limit: usize) -> Result<Self, String> {
+        if text.len() > MAX_BYTES {
+            return Err("memory file exceeds 256 KiB".into());
         }
-        let body = text
-            .strip_prefix(HEADER)
-            .ok_or("unsupported memory file format/version")?;
-        let mut entries = Vec::new();
-        let sections = if body.is_empty() {
-            None
+        let (body, v1) = if let Some(body) = text.strip_prefix(HEADER_V2) {
+            (body, false)
+        } else if let Some(body) = text.strip_prefix(HEADER_V1) {
+            (body, true)
         } else {
-            Some(
-                body.strip_prefix("§ ")
-                    .ok_or("memory entry is missing its § header")?,
-            )
+            return Err("unsupported memory file format/version".into());
         };
-        for section in sections.into_iter().flat_map(|body| body.split("\n§ ")) {
-            let (header, text) = section.split_once('\n').ok_or("memory entry has no body")?;
-            let metadata = serde_json::from_str(header)
-                .map_err(|error| format!("invalid memory header: {error}"))?;
-            entries.push(Entry {
-                metadata,
-                text: text.trim_end_matches('\n').to_string(),
-            });
+        let mut entries = Vec::new();
+        if !body.is_empty() {
+            let body = body
+                .strip_prefix("§ ")
+                .ok_or("memory entry is missing its § header")?;
+            for section in body.split("\n§ ") {
+                let (header, text) = section.split_once('\n').ok_or("memory entry has no body")?;
+                let text = text.trim_end_matches('\n').to_string();
+                entries.push(if v1 {
+                    v1_entry(header, text)?
+                } else {
+                    v2_entry(header, text)?
+                });
+            }
         }
         let document = Self { entries };
-        document.encode(target, limit)?;
+        document.encode(limit)?;
         Ok(document)
     }
 
-    pub fn encode(&self, target: Target, limit: usize) -> Result<String, String> {
-        let mut text = HEADER.to_string();
+    /// Only entry text counts toward the character limit.
+    pub fn encode(&self, limit: usize) -> Result<String, String> {
+        let mut text = HEADER_V2.to_string();
         let mut ids = HashSet::new();
+        let mut chars = 0;
         for entry in &self.entries {
-            entry.validate(target)?;
-            if !ids.insert(&entry.metadata.id) {
+            entry.validate()?;
+            if !ids.insert(&entry.id) {
                 return Err("duplicate memory entry id".into());
             }
-            text.push_str("§ ");
-            text.push_str(
-                &serde_json::to_string(&entry.metadata).map_err(|error| error.to_string())?,
-            );
+            chars += entry.text.chars().count();
+            text.push_str(&entry.header());
             text.push('\n');
             text.push_str(entry.text.trim_end_matches('\n'));
             text.push('\n');
         }
-        if text.len() > MAX_BYTES || text.chars().count() > limit {
+        if text.len() > MAX_BYTES || chars > limit {
             return Err(format!("memory file exceeds its {limit} character limit"));
         }
         Ok(text)
     }
+
+    pub fn prompt(&self, target: Target) -> String {
+        let mut prompt = format!("{}:", target.title());
+        for entry in &self.entries {
+            prompt.push_str(&format!("\n[{}] {}", entry.id, entry.text));
+        }
+        prompt
+    }
+}
+
+fn v2_entry(header: &str, text: String) -> Result<Entry, String> {
+    let mut fields = header.split_whitespace();
+    let id = fields.next().ok_or("memory entry has no id")?;
+    let date = fields.next().unwrap_or("-");
+    let session = fields.next().unwrap_or("-");
+    if fields.next().is_some() {
+        return Err("memory entry header has more than id, date and session".into());
+    }
+    let field = |value: &str| {
+        if value == "-" {
+            String::new()
+        } else {
+            value.to_string()
+        }
+    };
+    Ok(Entry {
+        id: id.to_string(),
+        date: field(date),
+        session: field(session),
+        text,
+    })
+}
+
+fn v1_entry(header: &str, text: String) -> Result<Entry, String> {
+    let metadata: serde_json::Value =
+        serde_json::from_str(header).map_err(|error| format!("invalid memory header: {error}"))?;
+    let id = metadata["id"].as_str().ok_or("memory entry has no id")?;
+    Ok(Entry {
+        id: id.to_string(),
+        date: metadata["date_ms"]
+            .as_u64()
+            .map(date_from_ms)
+            .unwrap_or_default(),
+        session: metadata["source"]["session"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        text,
+    })
+}
+
+/// `YYYY-MM-DD` in UTC for a Unix time in milliseconds.
+pub fn date_from_ms(ms: u64) -> String {
+    // Howard Hinnant's civil_from_days.
+    let z = (ms / 86_400_000) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Today's date and the current Unix time in milliseconds.
+pub fn today() -> Result<(String, u64), String> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("cannot date memory change: {error}"))?;
+    let ms = u64::try_from(duration.as_millis()).map_err(|_| "memory date is out of range")?;
+    Ok((date_from_ms(ms), ms))
 }
 
 pub fn load(root: &StateRoot, target: Target, limit: usize) -> Result<Document, String> {
@@ -202,7 +258,7 @@ pub fn load(root: &StateRoot, target: Target, limit: usize) -> Result<Document, 
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     let text = std::str::from_utf8(&bytes).map_err(|_| "memory file is not UTF-8")?;
-    Document::parse(text, target, limit)
+    Document::parse(text, limit)
 }
 
 #[cfg(test)]
@@ -211,69 +267,104 @@ mod tests {
 
     fn entry(id: &str, text: &str) -> Entry {
         Entry {
-            metadata: Metadata {
-                id: id.into(),
-                kind: Kind::User,
-                scope: Scope::Global,
-                source: Source {
-                    review: None,
-                    session: "session-1".into(),
-                    entries: vec!["entry-2".into()],
-                },
-                date_ms: 1,
-                applies_to: Some("Motor OS".into()),
-            },
+            id: id.into(),
+            date: "2026-10-15".into(),
+            session: "s1".into(),
             text: text.into(),
         }
     }
 
     #[test]
-    fn markdown_round_trip_preserves_kind_source_scope_and_unicode() {
+    fn both_formats_parse_and_the_current_one_round_trips() {
         let document = Document {
             entries: vec![
-                entry("one", "Prefer Rust.\n\nAn inline § is ordinary text 🦀"),
-                entry("two", "Run checks."),
+                entry(
+                    "k7f2",
+                    "Run `cargo test --offline`;\nthe VM has no network.",
+                ),
+                Entry {
+                    id: "hand".into(),
+                    date: String::new(),
+                    session: String::new(),
+                    text: "Written by hand.".into(),
+                },
+                Entry {
+                    id: "dated".into(),
+                    date: "2026-01-02".into(),
+                    session: String::new(),
+                    text: "Dated by hand.".into(),
+                },
             ],
         };
-        let encoded = document.encode(Target::User, 1375).unwrap();
+        let text = document.encode(2200).unwrap();
         assert_eq!(
-            Document::parse(&encoded, Target::User, 1375).unwrap(),
-            document
+            text,
+            "# Gears memory v2\n§ k7f2 2026-10-15 s1\nRun `cargo test --offline`;\nthe VM has no network.\n§ hand\nWritten by hand.\n§ dated 2026-01-02\nDated by hand.\n"
         );
-        assert!(Document::parse(&encoded, Target::Workspace, 2200).is_err());
-        assert!(Document::parse(&encoded.replace("v1", "v2"), Target::User, 1375).is_err());
-        assert!(Document::parse(&encoded, Target::User, encoded.chars().count() - 1).is_err());
-        assert!(Document::parse(&format!("{HEADER}§ "), Target::Global, 2200).is_err());
-        assert!(Document::parse(&encoded.replacen("§ ", "", 1), Target::User, 1375).is_err());
+        assert_eq!(Document::parse(&text, 2200).unwrap(), document);
         assert_eq!(
-            Document::parse(HEADER, Target::Global, 2200).unwrap(),
+            Document::parse("# Gears memory v2\n", 10).unwrap(),
             Document::default()
         );
+        let v1 = "# Gears memory v1\n§ {\"id\":\"old\",\"kind\":\"user\",\"scope\":\"global\",\"source\":{\"session\":\"s0\",\"entries\":[\"e1\"]},\"date_ms\":1792022400000}\nOld fact.\n";
+        assert_eq!(
+            Document::parse(v1, 2200).unwrap().entries,
+            [Entry {
+                id: "old".into(),
+                date: "2026-10-15".into(),
+                session: "s0".into(),
+                text: "Old fact.".into(),
+            }]
+        );
+        assert_eq!(
+            document.prompt(Target::Workspace),
+            "Workspace memory:\n[k7f2] Run `cargo test --offline`;\nthe VM has no network.\n[hand] Written by hand.\n[dated] Dated by hand."
+        );
+        assert_eq!(date_from_ms(0), "1970-01-01");
+        assert_eq!(date_from_ms(951_782_400_000), "2000-02-29");
     }
 
     #[test]
-    fn ambiguous_ids_headers_controls_and_non_user_preferences_are_rejected() {
-        for bad in [
-            entry("../escape", "text"),
-            entry("one", "text\n§ {}\nbody"),
-            entry("one", "bad\rtext"),
-        ] {
-            assert!(
-                Document { entries: vec![bad] }
-                    .encode(Target::Global, 2200)
-                    .is_err()
-            );
-        }
-        let mut document = Document {
-            entries: vec![entry("same", "first"), entry("same", "second")],
+    fn limits_count_text_only_and_bad_entries_are_refused() {
+        let document = Document {
+            entries: vec![entry("a", &"x".repeat(100)), entry("b", &"y".repeat(100))],
         };
-        assert!(document.encode(Target::Global, 2200).is_err());
-        document.entries.pop();
-        document.entries[0].metadata.kind = Kind::Inferred;
-        assert!(document.encode(Target::User, 1375).is_err());
-        assert!(document.encode(Target::Global, 2200).is_ok());
-        document.entries[0].metadata.source.entries.clear();
-        assert!(document.encode(Target::Global, 2200).is_err());
+        assert!(document.encode(200).is_ok());
+        assert!(document.encode(199).is_err());
+        for bad in [
+            Document {
+                entries: vec![entry("same", "first"), entry("same", "second")],
+            },
+            Document {
+                entries: vec![entry("bad id!", "text")],
+            },
+            Document {
+                entries: vec![entry("a", "   ")],
+            },
+            Document {
+                entries: vec![entry("a", "line\n§ header")],
+            },
+            Document {
+                entries: vec![entry("a", "bell\u{7}")],
+            },
+            Document {
+                entries: vec![Entry {
+                    date: "15-10-2026".into(),
+                    ..entry("a", "text")
+                }],
+            },
+        ] {
+            assert!(bad.encode(2200).is_err());
+        }
+        for bad in [
+            "no header\n",
+            "# Gears memory v2\nno § header\n",
+            "# Gears memory v2\n§ id 2026-10-15 s1 extra\ntext\n",
+            "# Gears memory v2\n§ id\n",
+            "# Gears memory v1\n§ not json\ntext\n",
+        ] {
+            assert!(Document::parse(bad, 2200).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -281,22 +372,20 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("batteries-memory-format-{}", std::process::id()));
         let root = StateRoot::new(path.clone()).unwrap();
-        assert_eq!(
-            load(&root, Target::Global, 2200).unwrap(),
-            Document::default()
-        );
-        root.replace_file(Target::Global.relative(), &[255])
-            .unwrap();
         assert!(
             load(&root, Target::Global, 2200)
-                .unwrap_err()
-                .contains("UTF-8")
+                .unwrap()
+                .entries
+                .is_empty()
         );
+        root.replace_file(Target::Global.relative(), b"# Gears memory v2\n\xff")
+            .unwrap();
+        assert!(load(&root, Target::Global, 2200).is_err());
         #[cfg(unix)]
         {
-            let file = root.file(Target::Global.relative()).unwrap();
+            let file = path.join(Target::Global.relative());
             std::fs::remove_file(&file).unwrap();
-            std::os::unix::fs::symlink(path.join("outside"), file).unwrap();
+            std::os::unix::fs::symlink(path.join("elsewhere"), &file).unwrap();
             assert!(load(&root, Target::Global, 2200).is_err());
         }
         std::fs::remove_dir_all(path).unwrap();

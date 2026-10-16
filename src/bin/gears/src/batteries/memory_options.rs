@@ -1,31 +1,16 @@
-//! Explicit user decisions; listing and history options never imply approval.
+//! Options of the user-facing batteries commands.
 
 use std::path::PathBuf;
 
-use crate::batteries::pending::Decision;
-
 pub const USAGE: &str = "usage: gears-batteries hook | tool NAME
-       gears-batteries pending [--list | --approve ID | --deny ID | --postpone ID]
        gears-batteries history [--offset N] [--limit N]
        gears-batteries status
-       gears-batteries cleanup --since YYYY-MM-DD (midnight UTC)
-       gears-batteries review (Gears after-turn context)
-Memory and skill commands accept --workspace PATH and --root PATH (the Gears directory).";
+Both commands accept --workspace PATH and --root PATH (the Gears directory).";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    Pending {
-        list: bool,
-        decision: Option<(String, Decision)>,
-    },
-    History {
-        offset: usize,
-        limit: usize,
-    },
+    History { offset: usize, limit: usize },
     Status,
-    Cleanup {
-        since_ms: u64,
-    },
 }
 
 #[derive(Debug)]
@@ -38,30 +23,17 @@ pub struct Options {
 impl Options {
     pub fn parse(args: &[String]) -> Result<Self, String> {
         let role = args.first().map(String::as_str).ok_or(USAGE)?;
-        if !matches!(role, "pending" | "history" | "status" | "cleanup") {
+        if !matches!(role, "history" | "status") {
             return Err(USAGE.into());
         }
         let mut workspace = None;
         let mut root = None;
-        let mut list = false;
-        let mut decision = None;
         let mut offset = None;
         let mut limit = None;
-        let mut since = None;
         let mut rest = args.iter().skip(1);
         while let Some(flag) = rest.next() {
-            if role == "pending" && flag == "--list" {
-                if list || decision.is_some() {
-                    return Err("choose one pending operation".into());
-                }
-                list = true;
-                continue;
-            }
             match (role, flag.as_str()) {
-                (_, "--workspace" | "--root")
-                | ("pending", "--approve" | "--deny" | "--postpone")
-                | ("history", "--offset" | "--limit")
-                | ("cleanup", "--since") => {}
+                (_, "--workspace" | "--root") | ("history", "--offset" | "--limit") => {}
                 _ => return Err(format!("unknown {role} option: {flag}")),
             }
             let value = rest
@@ -72,48 +44,20 @@ impl Options {
                 "--workspace" => set(&mut workspace, PathBuf::from(value), flag)?,
                 "--root" => set(&mut root, PathBuf::from(value), flag)?,
                 "--offset" => set(&mut offset, number(value, flag)?, flag)?,
-                "--limit" => set(&mut limit, number(value, flag)?, flag)?,
-                "--since" => set(
-                    &mut since,
-                    crate::batteries::skill_cleanup::cutoff(value)?,
-                    flag,
-                )?,
-                _ => {
-                    if list || decision.is_some() {
-                        return Err("choose one pending operation".into());
-                    }
-                    if value.len() != 64
-                        || !value
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                    {
-                        return Err("pending id must be a complete lowercase content hash".into());
-                    }
-                    let choice = match flag.as_str() {
-                        "--approve" => Decision::Approve,
-                        "--deny" => Decision::Deny,
-                        _ => Decision::Postpone,
-                    };
-                    decision = Some((value.clone(), choice));
-                }
+                _ => set(&mut limit, number(value, flag)?, flag)?,
             }
         }
-        let command = match role {
-            "pending" => Command::Pending { list, decision },
-            "history" => {
-                let limit = limit.unwrap_or(20);
-                if !(1..=100).contains(&limit) {
-                    return Err("history limit must be 1–100".into());
-                }
-                Command::History {
-                    offset: offset.unwrap_or(0),
-                    limit,
-                }
+        let command = if role == "history" {
+            let limit = limit.unwrap_or(20);
+            if !(1..=100).contains(&limit) {
+                return Err("history limit must be 1–100".into());
             }
-            "cleanup" => Command::Cleanup {
-                since_ms: since.ok_or("cleanup requires --since YYYY-MM-DD")?,
-            },
-            _ => Command::Status,
+            Command::History {
+                offset: offset.unwrap_or(0),
+                limit,
+            }
+        } else {
+            Command::Status
         };
         let current = std::env::current_dir().map_err(|error| error.to_string())?;
         let absolute = |path: PathBuf| {
@@ -162,65 +106,47 @@ mod tests {
     }
 
     #[test]
-    fn pending_never_defaults_to_approval_and_rejects_ambiguous_options() {
-        let root = ["--root", "/tmp/state"];
-        let options = parse(&["pending", root[0], root[1]]).unwrap();
-        assert_eq!(
-            options.command,
-            Command::Pending {
-                list: false,
-                decision: None
-            }
-        );
-        assert_eq!(options.root, PathBuf::from(root[1]));
-        let id = "a".repeat(64);
-        assert_eq!(
-            parse(&["pending", "--approve", &id, root[0], root[1]])
-                .unwrap()
-                .command,
-            Command::Pending {
-                list: false,
-                decision: Some((id.clone(), Decision::Approve))
-            }
-        );
-        for values in [
-            vec!["pending", "--list", "--approve", &id],
-            vec!["pending", "--deny", &id, "--postpone", &id],
-            vec!["pending", "--approve", "short"],
-            vec!["pending", "--list", "--list"],
-            vec!["status", "--approve", &id],
-            vec!["history", "--limit", "0"],
-            vec!["history", "--limit", "101"],
-            vec!["history", "--offset", "-1"],
-            vec!["history", "--offset", "1", "--offset", "2"],
-            vec!["history", "--workspace"],
-            vec!["status", "--root", "one", "--root", "two"],
-            vec!["status", "unknown"],
-        ] {
-            assert!(parse(&values).is_err(), "{values:?}");
-        }
+    fn commands_take_their_own_options_once() {
         let options = parse(&[
             "history",
             "--offset",
             "3",
             "--limit",
-            "1",
+            "5",
             "--root",
-            "state",
-            "--workspace",
-            "project",
+            "/tmp/state",
         ])
         .unwrap();
         assert_eq!(
             options.command,
             Command::History {
                 offset: 3,
-                limit: 1
+                limit: 5
+            }
+        );
+        assert_eq!(options.root, PathBuf::from("/tmp/state"));
+        assert_eq!(
+            parse(&["history"]).unwrap().command,
+            Command::History {
+                offset: 0,
+                limit: 20
             }
         );
         assert_eq!(
-            options.workspace,
-            std::env::current_dir().unwrap().join("project")
+            parse(&["status", "--workspace", "/tmp/w"]).unwrap().command,
+            Command::Status
         );
+        for bad in [
+            vec!["pending"],
+            vec!["cleanup", "--since", "2026-01-01"],
+            vec!["status", "--limit", "5"],
+            vec!["history", "--limit", "0"],
+            vec!["history", "--limit", "x"],
+            vec!["history", "--offset", "1", "--offset", "2"],
+            vec!["history", "--root"],
+            vec!["history", "--root", ""],
+        ] {
+            assert!(parse(&bad).is_err(), "{bad:?}");
+        }
     }
 }

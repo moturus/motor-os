@@ -39,5 +39,5 @@ cargo build --quiet --locked --offline --manifest-path "$MANIFEST" --target-dir 
   --bins "${PROFILE_ARGS[@]}"
 cargo run --quiet --locked --offline --manifest-path "$MANIFEST" --target-dir "$TARGET" \
   --example workflow-smoke "${PROFILE_ARGS[@]}" -- \
-  "$TARGET/$WORKFLOW_PROFILE/gears-batteries" "$(rustup which rustc)" "$TARGET/$WORKFLOW_PROFILE/gears"
+  "$TARGET/$WORKFLOW_PROFILE/gears-batteries" "$(rustup which rustc)"
 echo "test-gears-batteries.sh ALL PASS"

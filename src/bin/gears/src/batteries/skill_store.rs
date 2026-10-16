@@ -1,12 +1,9 @@
-//! Approved skill versions bind both SKILL.md and optional NOTES.md bytes.
+//! The user's skill directories: SKILL.md with an optional NOTES.md beside it.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
-
 use crate::batteries::paths::ToolContext;
-use crate::batteries::pending::Decision;
 use crate::batteries::skill_format::{Content, MAX_BYTES, Metadata};
 
 pub fn relative(name: &str, file: &str) -> Result<PathBuf, String> {
@@ -51,59 +48,6 @@ pub fn current(context: &ToolContext, name: &str) -> Result<Option<Content>, Str
 pub fn parse(context: &ToolContext, name: &str, content: &Content) -> Result<Metadata, String> {
     let limits = crate::batteries::skill_config::load(&context.state)?;
     content.parse(name, limits.skill_chars, limits.notes_chars)
-}
-
-pub fn approved(context: &ToolContext, name: &str, hash: &str) -> Result<bool, String> {
-    let mut versions = vec![(name.to_string(), hash.to_string(), false)];
-    approvals(context, &mut versions)?;
-    Ok(versions[0].2)
-}
-
-pub fn approvals(
-    context: &ToolContext,
-    versions: &mut [(String, String, bool)],
-) -> Result<(), String> {
-    crate::batteries::journal::visit(
-        &context.state,
-        Path::new("batteries/changes.jsonl"),
-        |record| {
-            if record["version"] != 1
-                || !matches!(record["decision"].as_str(), Some("approve" | "deny"))
-            {
-                return Err("unsupported or malformed decision record".into());
-            }
-            if record["kind"] == "skill" && record["decision"] == "approve" {
-                for (name, hash, approved) in &mut *versions {
-                    *approved |= record["name"] == *name && record["content_hash"] == *hash;
-                }
-            }
-            Ok(())
-        },
-    )
-}
-
-pub fn admit(
-    context: &ToolContext,
-    name: &str,
-    hash: &str,
-    decision: Decision,
-) -> Result<(), String> {
-    if decision == Decision::Postpone {
-        return Ok(());
-    }
-    let content = current(context, name)?.ok_or("skill is unavailable")?;
-    if content.hash() != hash {
-        return Err("skill changed since it was shown".into());
-    }
-    parse(context, name, &content)?;
-    let path = context.state.file(Path::new("batteries/changes.jsonl"))?;
-    crate::batteries::journal::append_at(
-        &context.state,
-        &path,
-        &json!({"version": 1, "kind": "skill", "name": name,
-        "content_hash": hash, "content": content, "decision": decision, "date_ms": crate::batteries::pending::now_ms()?,
-        "source": {"path": format!("batteries/skills/{name}")}}),
-    )
 }
 
 pub fn names(context: &ToolContext) -> Result<Vec<String>, String> {
@@ -158,7 +102,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_notes_edit_hides_the_version_and_a_stale_file_admission_cannot_bless_it() {
+    fn skills_are_read_back_as_written_and_bad_paths_are_refused() {
         let path =
             std::env::temp_dir().join(format!("batteries-skill-store-{}", std::process::id()));
         std::fs::create_dir_all(path.join("workspace")).unwrap();
@@ -171,24 +115,11 @@ mod tests {
         .unwrap();
         let mut content = Content { skill_md: "---\nname: checks\ndescription: Run checks.\nmetadata:\n  platforms: motor\n---\nInstructions.\n".into(), notes_md: Some("Original note.\n".into()) };
         write(&context, "checks", Some(&content)).unwrap();
-        let hash = content.hash();
-        assert!(!approved(&context, "checks", &hash).unwrap());
-        admit(&context, "checks", &hash, Decision::Postpone).unwrap();
-        assert!(!approved(&context, "checks", &hash).unwrap());
-        admit(&context, "checks", &hash, Decision::Approve).unwrap();
-        assert!(approved(&context, "checks", &hash).unwrap());
+        assert_eq!(current(&context, "checks").unwrap().unwrap(), content);
         content.notes_md = Some("Changed note.\n".into());
         write(&context, "checks", Some(&content)).unwrap();
-        assert!(!approved(&context, "checks", &content.hash()).unwrap());
-        assert!(
-            admit(&context, "checks", &hash, Decision::Approve)
-                .unwrap_err()
-                .contains("changed since")
-        );
-        assert_eq!(
-            crate::batteries::memory_history::history(&context, 0, 20).unwrap()["total"],
-            1
-        );
+        assert_eq!(current(&context, "checks").unwrap().unwrap(), content);
+        assert!(current(&context, "absent").unwrap().is_none());
         assert_eq!(names(&context).unwrap(), ["checks"]);
         assert!(relative("../escape", "SKILL.md").is_err());
         #[cfg(unix)]

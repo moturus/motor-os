@@ -18,20 +18,6 @@ fn run() -> Result<(), String> {
             println!();
             Ok(())
         }
-        [role, flag] if role == "eval" && matches!(flag.as_str(), "--help" | "-h") => {
-            println!("{}", gears::batteries::eval_options::USAGE);
-            Ok(())
-        }
-        [role, ..] if role == "eval" => {
-            gears::batteries::eval_cli::run(&args, std::io::stdout().lock())
-        }
-        [role] if role == "review" => {
-            let completed = gears::batteries::review_runner::from_env()?;
-            if completed != 0 {
-                println!("Completed {completed} review(s).");
-            }
-            Ok(())
-        }
         [role] if role == "hook" => {
             let event = gears::batteries::read_event(std::io::stdin().lock())?;
             let response = gears::batteries::hook(event)?;
@@ -39,19 +25,11 @@ fn run() -> Result<(), String> {
             serde_json::to_writer(&mut stdout, &response).map_err(|error| error.to_string())?;
             stdout.write_all(b"\n").map_err(|error| error.to_string())
         }
-        [role, ..] if matches!(role.as_str(), "pending" | "history" | "status" | "cleanup") => {
-            gears::batteries::memory_cli::run(
-                &args,
-                std::io::stdin().lock(),
-                std::io::stdout().lock(),
-            )
+        [role, ..] if matches!(role.as_str(), "history" | "status") => {
+            gears::batteries::memory_cli::run(&args, std::io::stdout().lock())
         }
         [flag] if flag == "--help" || flag == "-h" => {
-            println!(
-                "{}\n{}",
-                gears::batteries::memory_options::USAGE,
-                gears::batteries::eval_options::USAGE
-            );
+            println!("{}", gears::batteries::memory_options::USAGE);
             Ok(())
         }
         _ => Err(gears::batteries::memory_options::USAGE.into()),

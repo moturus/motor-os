@@ -48,6 +48,16 @@ pub fn visit(
     relative: &Path,
     mut record: impl FnMut(serde_json::Value) -> Result<(), String>,
 ) -> Result<(), String> {
+    visit_lenient(root, relative, |value| record(value?))
+}
+
+/// Like `visit`, but a malformed record is passed on as an error for the
+/// caller to count or skip, and the visit continues.
+pub fn visit_lenient(
+    root: &StateRoot,
+    relative: &Path,
+    mut record: impl FnMut(Result<serde_json::Value, String>) -> Result<(), String>,
+) -> Result<(), String> {
     let Some(path) = root.existing_file(relative)? else {
         return Ok(());
     };
@@ -80,7 +90,7 @@ pub fn visit(
                 "{}:{number}: invalid journal record: {error}",
                 path.display()
             )
-        })?;
+        });
         record(value)?;
     }
 }

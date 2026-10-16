@@ -129,7 +129,7 @@ An optional command runs in the background after a completed interactive turn,
 after its `turn_end` hooks:
 
     [after_turn]
-    command = ["gears-batteries", "review"]
+    command = ["/user/bin/after-turn.sh"]
     timeout_seconds = 3600
     max_output_bytes = 1048576
 
@@ -172,7 +172,7 @@ while the owning process writes. The immutable snapshot includes the usable
 complete prefix, omits unfinished records and tool rounds, and leaves the
 source file and writer lock untouched. `Store::clone_active_with_options`
 can copy that snapshot into a saved or ephemeral child session.
-The CLI accepts `--fork ID --ephemeral -p 'review this work'` to read a live
+The CLI accepts `--fork ID --ephemeral -p 'summarize this work'` to read a live
 parent's usable history and run a child without saving its conversation.
 Add `--fork-entry ENTRY` to end the copy at an exact saved entry, including
 one from before a later compaction. An unknown entry or unfinished tool round
