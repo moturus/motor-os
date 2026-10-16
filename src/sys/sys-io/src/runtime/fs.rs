@@ -29,7 +29,10 @@ mod virtio_partition;
 /// The fs runtime's self-tests, gathered here because the module holding them
 /// is private to this one. See [`crate::self_test`].
 #[cfg(debug_assertions)]
-pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[lock_manager::self_test::TESTS];
+pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
+    lock_manager::self_test::TESTS,
+    &[("fs::spawn::queued_mutations", stats::test_executable_locks)],
+];
 
 /// The max number of "requests" in flight per connection.
 const MAX_IN_FLIGHT: usize = 64;
@@ -318,6 +321,8 @@ pub(crate) struct FsRuntime {
 
 /// Every mutation of an executable that is being loaded or is mapped for
 /// demand paging is refused; see `spawn::ExecLocks`.
+/// Call with the FS write guard held: a writer queued behind spawn's metadata
+/// reader must observe the construction lock acquired when that reader finishes.
 fn refuse_if_executing(runtime: &FsRuntime, entry: EntryId) -> Result<()> {
     if !runtime.exec_locks.borrow().is_locked(entry) {
         return Ok(());
@@ -1005,7 +1010,6 @@ async fn on_cmd_write(
 
     let (file_id, offset, len, io_page) =
         api_fs::write_msg_decode(msg, sender).map_err(map_native_error)?;
-    refuse_if_executing(&runtime, file_id)?;
 
     // `len` comes from the (untrusted) client; reject anything that does not
     // fit into an io_page instead of panicking on the slice below.
@@ -1014,6 +1018,7 @@ async fn on_cmd_write(
     }
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, file_id)?;
     let written = fs
         .write(role, file_id, offset, &io_page.bytes()[..(len as usize)])
         .await?;
@@ -1044,13 +1049,13 @@ async fn on_cmd_write_multi(
 ) -> Result<()> {
     let (file_id, offset, len, pages) =
         api_fs::write_multi_msg_decode(msg, sender).map_err(map_native_error)?;
-    refuse_if_executing(&runtime, file_id)?;
 
     // One FS lock acquire for the whole message. The decode above recovered
     // every page, so all paths below free them on drop.
     let mut total = 0_u32;
     {
         let mut fs_guard = runtime.fs.write().await;
+        refuse_if_executing(&runtime, file_id)?;
         let mut chunk_offset = offset;
         for (io_page, size) in pages.iter().zip(api_fs::io_chunks(offset, len)) {
             match fs_guard
@@ -1299,10 +1304,10 @@ async fn on_cmd_set_permissions(
     role: Role,
 ) -> Result<()> {
     let (entry_id, raw_access) = api_fs::set_permissions_msg_decode(msg);
-    refuse_if_executing(&runtime, entry_id)?;
     let access = AccessPermissions::try_from(raw_access)?;
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, entry_id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.set_permissions(role, entry_id, role, access)
@@ -1322,7 +1327,6 @@ async fn on_cmd_set_all_permissions(
     role: Role,
 ) -> Result<()> {
     let (entry_id, raw_permissions) = api_fs::set_all_permissions_msg_decode(msg);
-    refuse_if_executing(&runtime, entry_id)?;
     let permissions = RolePermissions::new(
         raw_permissions[0].try_into()?,
         raw_permissions[1].try_into()?,
@@ -1330,6 +1334,7 @@ async fn on_cmd_set_all_permissions(
     );
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, entry_id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.set_all_permissions(role, entry_id, permissions)
@@ -1349,9 +1354,9 @@ async fn on_cmd_resize(
     role: Role,
 ) -> Result<()> {
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
-    refuse_if_executing(&runtime, file_id)?;
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, file_id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.resize(role, file_id, new_size)
@@ -1371,9 +1376,9 @@ async fn on_cmd_delete_entry(
     role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::delete_entry_msg_decode(msg);
-    refuse_if_executing(&runtime, entry_id)?;
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, entry_id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.delete_entry(role, entry_id)
@@ -1464,9 +1469,9 @@ async fn on_cmd_move_entry(
 ) -> Result<()> {
     let (entry_id, new_parent_id, fname) =
         api_fs::move_entry_req_decode(msg, sender).map_err(map_native_error)?;
-    refuse_if_executing(&runtime, entry_id)?;
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, entry_id)?;
     // A rename onto an executing file would delete it.
     if replace
         && let Ok(Some((replaced, _))) = fs.stat(Role::System, new_parent_id, fname.as_str()).await
@@ -1494,9 +1499,9 @@ async fn on_cmd_copy_file_range(
     role: Role,
 ) -> Result<()> {
     let (from, to, offset, size) = api_fs::copy_file_range_req_decode(msg);
-    refuse_if_executing(&runtime, to)?;
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, to)?;
 
     // In this implementation, from_offset == to_offset.
     let copied = fs

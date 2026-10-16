@@ -1301,6 +1301,11 @@ fn main() {
         cold_spawn::run_all_tests();
         return;
     }
+    #[cfg(debug_assertions)]
+    if args.len() == 2 && args[1] == "sys-io-self-test" {
+        sys_io_self_test::run_all_tests();
+        return;
+    }
     if args.len() == 2 && args[1] == "sched-fairness" {
         sched_fairness::run_all_tests();
         return;
