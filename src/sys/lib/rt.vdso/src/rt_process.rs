@@ -407,6 +407,12 @@ fn debug_name(exe_plus: &Vec<&[u8]>, args: &Vec<&[u8]>) -> String {
 
 struct KillUnstarted(Option<moto_sys::SysHandle>);
 
+impl KillUnstarted {
+    fn disarm(mut self) {
+        self.0.take();
+    }
+}
+
 impl Drop for KillUnstarted {
     fn drop(&mut self) {
         if let Some(child) = self.0.take() {
@@ -535,7 +541,7 @@ fn run_elf(
     // not be put(), this is a cross-process thread handle, and so it must be.
     moto_sys::SysObj::put(main_thread).unwrap();
     if wake_result.is_ok() {
-        core::mem::forget(unstarted);
+        unstarted.disarm();
         // The spawner gets the child's pid; the handle is still held here.
         let pid = moto_sys::SysRay::process_pid(process.syshandle())
             .expect("pid query on a held process handle");
