@@ -31,7 +31,10 @@ mod virtio_partition;
 #[cfg(debug_assertions)]
 pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     lock_manager::self_test::TESTS,
-    &[("fs::spawn::queued_mutations", stats::test_executable_locks)],
+    &[
+        ("fs::spawn::queued_mutations", stats::test_executable_locks),
+        ("fs::pager::coalesced_windows", stats::test_pager_windows),
+    ],
 ];
 
 /// The max number of "requests" in flight per connection.
