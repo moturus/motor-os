@@ -114,15 +114,20 @@ impl Pager {
     }
 
     fn is_live(&self, id: u64) -> bool {
-        self.drain();
+        // Explicit drains apply retirements; the kernel rejects stale fills.
         self.mappings.borrow().contains_key(&id)
     }
 
-    fn fill_failed(&self, id: u64, page: u64) {
+    fn fill_failed(&self, id: u64, page: u64, error: std::io::Error) {
         match SysMem::pager_fail(id, page) {
-            Ok(()) => self.failed_fills.set(self.failed_fills.get() + 1),
+            Ok(()) => {
+                log::warn!("pager: fill failed for page 0x{page:x}: {error}");
+                self.failed_fills.set(self.failed_fills.get() + 1);
+            }
             Err(moto_rt::E_BAD_HANDLE) => {} // Retired meanwhile.
-            Err(err) => log::error!("pager_fail({id}, 0x{page:x}) failed: {err}"),
+            Err(err) => {
+                log::error!("pager_fail({id}, 0x{page:x}) failed: {err}; fill error: {error}")
+            }
         }
     }
 }
@@ -292,8 +297,7 @@ async fn serve(runtime: FsRuntime, id: u64, page: u64) {
                 count = 1;
             }
             Err(err) => {
-                log::warn!("pager: fill failed for page 0x{page:x}: {err}");
-                pager.fill_failed(id, page);
+                pager.fill_failed(id, page, err);
                 return;
             }
         }
