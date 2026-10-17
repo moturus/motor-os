@@ -393,7 +393,7 @@ fn convert_qcow2_to_raw(qcow2: &Path, raw: &Path) -> io::Result<()> {
 }
 
 fn add_dir(
-    files: &mut BTreeMap<PathBuf, String>,
+    files: &mut BTreeMap<String, PathBuf>,
     dir_to_add: PathBuf,
     dest_path: &Path,
     excluded_dirs: &[&str],
@@ -417,15 +417,15 @@ fn add_dir(
             }
             add_dir(files, key, value.as_path(), excluded_dirs);
         } else if entry.file_type().unwrap().is_file() {
+            // A later source for the same destination replaces the earlier one.
             let destination = value.as_os_str().to_str().unwrap().to_owned();
-            files.retain(|_, existing_destination| existing_destination != &destination);
-            files.insert(key, destination);
+            files.insert(destination, key);
         }
     }
 }
 
 #[cfg(test)]
-fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
+fn add_static_dir(files: &mut BTreeMap<String, PathBuf>, dir_to_add: PathBuf, dest_path: &Path) {
     add_dir(files, dir_to_add, dest_path, &[]);
 }
 
@@ -445,17 +445,23 @@ fn static_overlay_exclusions(directories: &[String]) -> &'static [&'static str] 
     }
 }
 
-fn add_source_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
+fn add_source_dir(files: &mut BTreeMap<String, PathBuf>, dir_to_add: PathBuf, dest_path: &Path) {
     add_dir(files, dir_to_add, dest_path, &SOURCE_TREE_EXCLUDED_DIRS);
 }
 
 fn resolve_image_files(
-    files: &BTreeMap<PathBuf, String>,
+    files: &BTreeMap<String, PathBuf>,
     directories: &[String],
     policy: &permissions::PermissionPolicy,
 ) -> Result<Vec<ImageFile>, String> {
+    // Files are written in source order, as before destinations became the key.
+    let mut ordered: Vec<_> = files
+        .iter()
+        .map(|(destination, source)| (source, destination))
+        .collect();
+    ordered.sort();
     let mut resolved = Vec::with_capacity(files.len());
-    for (source, destination) in files {
+    for (source, destination) in ordered {
         validate_directories(std::slice::from_ref(destination))?;
         let destination = PathBuf::from(destination);
         let class = permissions::classify_source(source).map_err(|error| {
@@ -758,7 +764,8 @@ fn main() {
         print_usage_and_exit()
     }
 
-    let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
+    // Keyed by destination: one source file may be staged at several destinations.
+    let mut files: BTreeMap<String, PathBuf> = BTreeMap::new();
 
     for executable in &config.required_executables {
         let path = motorh.join(executable);
@@ -772,7 +779,7 @@ fn main() {
 
     for prog in &config.input_files {
         let filename = Path::new(prog).file_name().unwrap();
-        files.insert(bin_dir.join(filename), (*prog).clone());
+        files.insert((*prog).clone(), bin_dir.join(filename));
     }
 
     let static_exclusions = static_overlay_exclusions(&config.directories);
@@ -1251,7 +1258,7 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(
-            files.keys().next().unwrap(),
+            files.get("/system/cfg/rush.cfg").unwrap(),
             &root.join("second/system/cfg/rush.cfg")
         );
 
@@ -1353,9 +1360,9 @@ entries: []
         }
 
         let raw_files = BTreeMap::from([
-            (system_script, "/system/bin/script".to_owned()),
-            (user_elf, "/user/bin/elf".to_owned()),
-            (dev_script, "/devtools/bin/script".to_owned()),
+            ("/system/bin/script".to_owned(), system_script),
+            ("/user/bin/elf".to_owned(), user_elf),
+            ("/devtools/bin/script".to_owned(), dev_script),
         ]);
         let directories = vec![
             "/system/bin".to_owned(),
@@ -1435,12 +1442,27 @@ entries: []
         let mut files = BTreeMap::new();
         add_source_dir(&mut files, root.clone(), Path::new("/devtools/src/example"));
 
-        let destinations: Vec<_> = files.values().map(String::as_str).collect();
+        let destinations: Vec<_> = files.keys().map(String::as_str).collect();
         assert_eq!(
             destinations,
             [
                 "/devtools/src/example/Cargo.toml",
                 "/devtools/src/example/src/main.rs"
+            ]
+        );
+
+        // A nested directory staged again elsewhere stays in the source tree too.
+        add_source_dir(&mut files, root.join("src"), Path::new("/user/cfg/example"));
+        let staged: Vec<_> = files
+            .iter()
+            .filter(|(_, source)| **source == root.join("src/main.rs"))
+            .map(|(destination, _)| destination.as_str())
+            .collect();
+        assert_eq!(
+            staged,
+            [
+                "/devtools/src/example/src/main.rs",
+                "/user/cfg/example/main.rs"
             ]
         );
         fs::remove_dir_all(root).unwrap();
