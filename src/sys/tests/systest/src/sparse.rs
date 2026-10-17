@@ -226,6 +226,14 @@ fn test_shared_alloc_rollback_race() {
     SysObj::put(target).unwrap();
     assert!(rounds > 0, "the mapper never mapped");
     assert!(refused > 0, "no shared allocation was ever undone");
+    // The hole is taken at the mapper's map only by what a stray success
+    // left there, once each. A rollback that reaches the mapper's
+    // half-built mapping, as it could when the locks were released in
+    // between, fails that map too, and shows as misses beyond that.
+    assert!(
+        misses <= stray_count as u64,
+        "{misses} misses against {stray_count} stray gaps: a rollback took the mapper's mapping"
+    );
     assert_recovered(used_before, DRIFT_TOLERANCE_PAGES, "the rollback race");
     println!(
         "test_sparse_shared_alloc_rollback_race PASS: {rounds} maps and {misses} misses \
@@ -339,11 +347,20 @@ pub fn run_fault_at_floor_child() -> ! {
 /// The first pressure event of a boot grows the pool once, by about a
 /// thousand pages, and the floor test expects it to be steady afterwards.
 /// An OOM child, like `test_oom` in the full suite, absorbs it, cheaply
-/// when it has happened already.
+/// when it has happened already; the tests then start once the pressure
+/// it caused has cleared.
 fn warm_up_pool() {
     let mut child = crate::subcommand::spawn();
     child.oom();
     assert!(!child.wait().unwrap().success());
+    drop(child);
+    for _ in 0..300 {
+        if !moto_sys::memory_pressure() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("memory pressure did not clear after the warm-up child died");
 }
 
 pub fn run_all_tests() {
