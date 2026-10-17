@@ -16,6 +16,7 @@ mod command_output;
 mod ctrl_c;
 mod descriptor_attr;
 mod diagnostics;
+mod environment;
 mod execute_permissions;
 mod file_locking;
 mod fs;
@@ -1287,6 +1288,9 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if environment::run_command(&args) {
+        return;
+    }
     if swap_cancel::run_command(&args) {
         return;
     }
@@ -1809,6 +1813,7 @@ fn main() {
 
     unsafe { std::env::set_var("foo", "bar") };
     assert_eq!(std::env::var("foo").unwrap(), "bar");
+    environment::run_all_tests();
 
     // We should never be allowed to shut down the sytem.
     assert_eq!(
