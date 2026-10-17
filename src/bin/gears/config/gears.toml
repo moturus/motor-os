@@ -4,7 +4,7 @@ version = 1
 
 [provider]
 base_url = "https://openrouter.ai/api/v1"
-key_file = "openrouter.key"
+api_key_file = "openrouter.key"
 
 [[tools]]
 directory = "tools/sh"

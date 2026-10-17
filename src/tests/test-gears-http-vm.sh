@@ -98,7 +98,7 @@ version = 1
 [provider]
 base_url = "$BASE_URL"
 model = "test/model"
-key_file = "$GUEST_DIR/local.key"
+api_key_file = "$GUEST_DIR/local.key"
 [net]
 egress_allowlist = ["192.168.4.1"]
 EOT
@@ -133,7 +133,7 @@ version = 1
 [provider]
 base_url = "$BASE_URL"
 model = "test/model"
-key_file = "$GUEST_DIR/local.key"
+api_key_file = "$GUEST_DIR/local.key"
 [net]
 egress_allowlist = ["192.168.4.1"]
 plain_http_allowlist = ["192.168.4.1"]

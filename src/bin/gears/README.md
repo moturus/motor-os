@@ -69,7 +69,7 @@ Important optional fields are:
     egress_allowlist = ["openrouter.ai"]
 
     [provider]
-    key_file = "/absolute/path/to/key"
+    api_key_file = "/absolute/path/to/key"
     ca_cert = "/absolute/path/to/ca.pem"
 
     [runtime]
@@ -79,6 +79,9 @@ Important optional fields are:
     window_tokens = 128000
     output_reserve_tokens = 16384
     recent_tail_tokens = 20000
+
+An unknown key anywhere in the file is an error, so a typo is reported at
+startup instead of being ignored.
 
 The optional batteries coding workflow has a separate sample configuration,
 [`config/gears-batteries.toml`](config/gears-batteries.toml). Install it in
@@ -224,7 +227,7 @@ local server and clear any inherited cloud credential:
     echo local-llama > /user/cfg/gears/local-llama.key
     unset OPENROUTER_API_KEY
 
-Save this as `/user/cfg/gears.toml`:
+Save this as `/user/cfg/gears/gears.toml`:
 
 ```toml
 version = 1
@@ -232,7 +235,7 @@ version = 1
 [provider]
 base_url = "http://192.168.4.1:8080/v1"
 model = "local"
-key_file = "/user/cfg/gears/local-llama.key"
+api_key_file = "/user/cfg/gears/local-llama.key"
 
 [net]
 egress_allowlist = ["192.168.4.1"]

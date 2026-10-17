@@ -873,7 +873,7 @@ fn http_refuses_implicit_credentials_and_preserves_explicit_precedence() {
         let config_path = config(&root, &server);
         if let Some(path) = key_file {
             let mut text = std::fs::read_to_string(&config_path).unwrap();
-            text.push_str(&format!("key_file = {:?}\n", path.to_str().unwrap()));
+            text.push_str(&format!("api_key_file = {:?}\n", path.to_str().unwrap()));
             std::fs::write(&config_path, text).unwrap();
         }
         let mut command = Command::new(env!("CARGO_BIN_EXE_gears"));

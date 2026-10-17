@@ -370,11 +370,9 @@ enabled = false
 on Motor OS and `~/.gears` on Linux. Phase 2.1 moves `gears.toml` into that
 directory; phase 3's tool registry reads it there. The directory also holds
 `tools.toml`, `permissions.toml`, the tool directories under `tools/`, the
-sessions and the batteries' data. Gears reads `gears.toml` from there first
-and from the earlier locations, `/user/cfg/gears.toml` and
-`~/.config/gears.toml`, when it is absent; `api_key_file` (renamed from
-`key_file`, which stays accepted) and
-`ca_cert` in it may be relative to the directory as well. `enabled` is the
+sessions and the batteries' data. Gears reads `gears.toml` only from there
+(or from `--config PATH`); `api_key_file` and `ca_cert` in it may be
+relative to the directory as well. `enabled` is the
 default when no later override exists. Gears loads and validates every listed
 directory at startup, including disabled tools and
 tools absent on this system, so a typo or duplicate name is found before a

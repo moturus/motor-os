@@ -95,6 +95,7 @@ impl Default for Config {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     version: u32,
     default_provider: Option<String>,
@@ -120,45 +121,50 @@ struct RawConfig {
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawNet {
     egress_allowlist: Option<Vec<String>>,
     plain_http_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawProvider {
     base_url: Option<String>,
     model: Option<String>,
-    #[serde(alias = "api_key_file")]
-    key_file: Option<PathBuf>,
+    api_key_file: Option<PathBuf>,
     ca_cert: Option<PathBuf>,
     reasoning_echo: Option<bool>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawToolDirectory {
     directory: PathBuf,
     enabled: bool,
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawModels {
     used: Option<Vec<String>>,
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawTrace {
     file: Option<PathBuf>,
     level: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRuntime {
-    sh_timeout_seconds: Option<u64>,
     max_tool_rounds: Option<usize>,
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawContext {
     window_tokens: Option<u64>,
     output_reserve_tokens: Option<u64>,
@@ -166,6 +172,7 @@ struct RawContext {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawHook {
     name: String,
     command: Vec<String>,
@@ -196,41 +203,15 @@ impl Config {
             .map(|root| root.join("gears.toml"))
     }
 
-    fn legacy_path() -> Option<PathBuf> {
-        if std::env::var_os(crate::directory::ENV).is_some() {
-            return None;
-        }
-        #[cfg(target_os = "motor")]
-        {
-            Some(PathBuf::from("/user/cfg/gears.toml"))
-        }
-        #[cfg(all(unix, not(target_os = "motor")))]
-        {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".config/gears.toml"))
-        }
-        #[cfg(not(any(target_os = "motor", unix)))]
-        {
-            None
-        }
-    }
-
     pub fn load_user(explicit: Option<&Path>) -> Result<Self, String> {
         if let Some(path) = explicit {
             return Self::read_config(path)?
                 .ok_or_else(|| format!("{}: not found", path.display()));
         }
-        Self::load_candidates([Self::default_path(), Self::legacy_path()])
-    }
-
-    fn load_candidates(paths: [Option<PathBuf>; 2]) -> Result<Self, String> {
-        for path in paths.into_iter().flatten() {
-            if let Some(config) = Self::read_config(&path)? {
-                return Ok(config);
-            }
+        match Self::default_path() {
+            Some(path) => Ok(Self::read_config(&path)?.unwrap_or_default()),
+            None => Ok(Self::default()),
         }
-        Ok(Self::default())
     }
 
     fn read_config(path: &Path) -> Result<Option<Self>, String> {
@@ -301,7 +282,7 @@ impl Config {
                     )
                 })?;
         }
-        let key_file = provider_path(raw.provider.key_file, base)?;
+        let key_file = provider_path(raw.provider.api_key_file, base)?;
         let ca_cert = provider_path(raw.provider.ca_cert, base)?;
         let mut providers = BTreeMap::new();
         for (name, provider) in raw.providers {
@@ -326,7 +307,7 @@ impl Config {
                     base_url,
                     plain_http,
                     model: provider.model.filter(|model| !model.trim().is_empty()),
-                    key_file: provider_path(provider.key_file, base)?,
+                    key_file: provider_path(provider.api_key_file, base)?,
                     ca_cert: provider_path(provider.ca_cert, base)?,
                     reasoning_echo: provider.reasoning_echo,
                 },
@@ -365,9 +346,6 @@ impl Config {
                 .ok_or_else(|| format!("unknown trace level {level:?}"))?,
             None => defaults.log_level,
         };
-        if raw.runtime.sh_timeout_seconds.is_some() {
-            return Err("runtime.sh_timeout_seconds moved to the sh tool manifest".to_string());
-        }
         let max_tool_rounds = raw.runtime.max_tool_rounds.unwrap_or(32);
         if !(1..=256).contains(&max_tool_rounds) {
             return Err("runtime.max_tool_rounds must be between 1 and 256".to_string());
@@ -601,28 +579,17 @@ plain_http_allowlist = ["192.168.4.1"]"#,
     }
 
     #[test]
-    fn new_config_path_precedes_legacy_and_resolves_provider_files() {
+    fn provider_files_resolve_beside_the_config_file() {
         let root = std::env::temp_dir().join(format!("gears-config-path-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("new")).unwrap();
-        let current = root.join("new/gears.toml");
-        let legacy = root.join("legacy.toml");
-        std::fs::write(&legacy, "version = 1\n[provider]\nmodel = 'legacy'\n").unwrap();
-        let paths = [Some(current.clone()), Some(legacy.clone())];
-        assert_eq!(
-            Config::load_candidates(paths.clone())
-                .unwrap()
-                .model
-                .as_deref(),
-            Some("legacy")
-        );
-
+        let path = root.join("new/gears.toml");
         std::fs::write(
-            &current,
+            &path,
             "version = 1\n[provider]\nmodel = 'current'\napi_key_file = 'secrets/key'\nca_cert = 'ca.pem'\n",
         )
         .unwrap();
-        let config = Config::load_candidates(paths).unwrap();
+        let config = Config::load_user(Some(&path)).unwrap();
         assert_eq!(config.model.as_deref(), Some("current"));
         assert_eq!(config.key_file, Some(root.join("new/secrets/key")));
         assert_eq!(config.ca_cert, Some(root.join("new/ca.pem")));
@@ -630,9 +597,20 @@ plain_http_allowlist = ["192.168.4.1"]"#,
     }
 
     #[test]
-    fn old_key_file_name_remains_accepted() {
-        let config = Config::parse("version = 1\n[provider]\nkey_file = '/secret/key'\n").unwrap();
-        assert_eq!(config.key_file, Some(PathBuf::from("/secret/key")));
+    fn unknown_keys_are_refused_in_every_section() {
+        for text in [
+            "version = 1\nunknown = 1",
+            "version = 1\n[after_turn]\ncommand = ['/review']",
+            "version = 1\n[provider]\nkey_file = '/secret/key'",
+            "version = 1\n[providers.local]\nbase_url = 'https://local.test/v1'\nmodle = 'm'",
+            "version = 1\n[runtime]\nsh_timeout_seconds = 5",
+            "version = 1\n[net]\negress = ['a.test']",
+            "version = 1\n[[tools]]\ndirectory = 'tools/sh'\nenabled = true\nname = 'sh'",
+            "version = 1\n[[hooks]]\nname = 'h'\ncommand = ['/h']\nevent = ['initialize']",
+        ] {
+            let error = Config::parse(text).unwrap_err();
+            assert!(error.contains("unknown field"), "{text}: {error}");
+        }
     }
 
     #[test]
