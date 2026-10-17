@@ -426,9 +426,9 @@ proposal waiting for an answer.
 | `turn_start`, `entry`, `turn_end` | keeps the check result current or stale and resets the reminder count |
 | `before_stop` | reminds the model to run the check (see "Evidence") |
 | `answer` | applies the user's yes or no |
+| `command` | runs `/remember` and `/remember-host`, which write the user's text to workspace or host memory at once |
 
-The shipped configuration subscribes the hook to exactly these events. It
-registers no slash commands.
+The shipped configuration subscribes the hook to exactly these events.
 
 **Project instructions** come only from `AGENTS.md` at the selected
 workspace root, or `.gears.md` there in its place, limited to 20,000
@@ -531,6 +531,11 @@ run, or a cancelled question) nothing is written or logged and the model is
 told so. An identical entry that already exists is reported as a duplicate
 without a question. A replacement or removal whose entry changed meanwhile
 fails with a message.
+
+**The user's own entries.** `/remember TEXT` adds an entry to workspace
+memory and `/remember-host TEXT` to `batteries/MEMORY.md` in the Gears
+directory, at once and without a model call (added 2026-10-17). They are
+logged as yes answers.
 
 **Offers.** `batteries.toml` may set `[memory] offer_lessons = true`
 (default false). When it is on, the prompt snapshot includes an
@@ -636,7 +641,6 @@ back, and `--hook-state`. Sessions written earlier keep their
 | Work | Status and next step |
 | --- | --- |
 | Hands-on validation | Finish the Linux and Motor OS interactive checklist: tool enablement, approvals, revocation, resume, screen rendering and the memory question in both UIs. No live local-model result has been reported. |
-| Optional `/remember TEXT` | A hook command that writes the user's own words into memory with no model call. Not built; add it if the question flow proves tedious. |
 | Shell state of killed runs | An ephemeral session keeps its `sh` state in `/tmp/gears-sh-*`. A killed Gears cannot remove it, and startup cleanup covers only the Gears directory, so each kill leaves an empty directory behind (two tests kill Gears on purpose). Keeping that state under the Gears directory would let startup remove it. |
 
 ## Decisions

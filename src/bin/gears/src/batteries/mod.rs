@@ -23,6 +23,7 @@ pub mod patch_match;
 pub mod paths;
 pub mod policy;
 pub mod provenance;
+pub mod remember;
 pub mod search;
 pub mod session_search;
 pub mod shell_words;
@@ -104,6 +105,7 @@ pub fn hook(event: Event) -> Result<Value, String> {
             Ok(response)
         }
         "answer" => context().and_then(|context| memory_question::answer(&event, &context)),
+        "command" => context().and_then(|context| remember::command(&event, &context)),
         "turn_start" | "entry" | "turn_end" | "before_stop" => {
             let mut response = json!({});
             merge_optional(
@@ -122,7 +124,7 @@ pub fn hook(event: Event) -> Result<Value, String> {
         "initialize" => Ok(
             match default_root().and_then(crate::state::StateRoot::new) {
                 Ok(root) => initialize_at(&event, &root),
-                Err(error) => with_tools(initialization_notice(error)),
+                Err(error) => with_tools(&event, initialization_notice(error)),
             },
         ),
         "permission" => Ok(policy::permission(&event)),
@@ -148,11 +150,15 @@ pub fn initialize_at(event: &Event, root: &crate::state::StateRoot) -> Value {
         })
     });
     merge_optional(&mut response, cleanup);
-    with_tools(response)
+    with_tools(event, response)
 }
 
-fn with_tools(mut response: Value) -> Value {
-    response["commands"] = json!([]);
+fn with_tools(event: &Event, mut response: Value) -> Value {
+    response["commands"] = if remember::subscribed(event) {
+        remember::specifications()
+    } else {
+        json!([])
+    };
     response["tools"] = json!([
         todo::specification(),
         memory_tool::specification(),
@@ -204,8 +210,26 @@ mod tests {
     #[test]
     fn setup_registers_the_hook_tools_and_preserves_other_features() {
         let previous = json!({"tasks": ["keep me"]});
-        let response = with_tools(json!({"state": previous, "notice": "previous notice"}));
+        let mut event = read_event(
+            json!({"protocol_version": 1, "event": "initialize", "workspace": "/work",
+            "session": {"id": "s1"}, "payload": {"subscribed_events": ["initialize"]}})
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        let response = with_tools(
+            &event,
+            json!({"state": previous, "notice": "previous notice"}),
+        );
         assert_eq!(response["commands"], json!([]));
+        event.payload["subscribed_events"] = json!(["initialize", "command"]);
+        let names = with_tools(&event, json!({}))["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|command| command["name"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["remember", "remember-host"]);
         assert_eq!(response["tools"].as_array().unwrap().len(), 3);
         assert_eq!(response["state"], previous);
         assert_eq!(response["notice"], "previous notice");

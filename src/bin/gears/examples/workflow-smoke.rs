@@ -169,6 +169,27 @@ fn run() -> Result<(), String> {
     // The hook allows reading, searching, todo and memory; the two writes, check and
     // the second patch were asked.
     assert_eq!(approvals.0.len(), 4);
+    let asked = requests.len();
+    drop(requests);
+    // The user's own words go to memory at once, without a question or a request.
+    let mut remembered = Vec::new();
+    runtime.hook_command("remember", "Run the fixture check offline.", &mut |event| {
+        if let Event::Notice(text) = event {
+            remembered.push(text);
+        }
+        Ok(())
+    })?;
+    assert!(
+        remembered.iter().any(|text| text.contains("Remembered [")),
+        "{remembered:?}"
+    );
+    assert!(
+        std::fs::read_to_string(fixture.workspace.join(".gears/MEMORY.md"))
+            .unwrap()
+            .contains("Run the fixture check offline.")
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), asked);
+    assert_eq!(approvals.0.len(), 4);
     drop(runtime);
     memory::run(&binary, &fixture.root)?;
     fixture.cleanup(&group, &sessions, &snapshots)?;

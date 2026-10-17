@@ -37,8 +37,8 @@ the config path. See [Gears setup](README.md) for provider selection
 and explicit key files. The bare batteries program name resolves beside the
 Gears executable for tools and hooks. The shipped hook subscribes to
 `initialize`, `permission`, `tool_execute`, `tool_result`, `turn_start`,
-`entry`, `before_stop`, `turn_end` and `answer`; it registers no slash
-commands.
+`entry`, `before_stop`, `turn_end`, `answer` and `command`, and registers
+the `/remember` and `/remember-host` commands.
 
 Run `src/tests/test-gears-batteries.sh` from the Motor OS repository root for
 the hermetic workflow gate; `test-gears-http.sh` runs the package's tests. It
@@ -129,6 +129,20 @@ the entry changed meanwhile, and an entry that already exists is reported
 as already remembered without a question. The file tools refuse the Gears
 directory and the workspace's `.gears/` directory, so the tool is the only
 way the agent writes memory.
+
+The user can also write an entry directly, with no question and no model
+call:
+
+```
+/remember In red, run `cargo test --offline`; the VM has no network.
+/remember-host This computer has no Internet access.
+```
+
+`/remember TEXT` adds the text to workspace memory and `/remember-host TEXT`
+to `batteries/MEMORY.md` in the Gears directory (`/user/cfg/gears` on
+Motor OS, `~/.gears` on Linux). Each writes the file at once, logs a yes in
+`batteries/changes.jsonl` and reports the new entry's id; the model is not
+told.
 
 Memory and skill changes of every kind appear in the next session, after
 `/new` or after a compaction; a running session keeps the prompt it started
