@@ -16,6 +16,7 @@ mod command_output;
 mod ctrl_c;
 mod descriptor_attr;
 mod diagnostics;
+mod environment;
 mod execute_permissions;
 mod file_append;
 mod file_locking;
@@ -766,7 +767,7 @@ fn test_pager_ops_need_sys_io() {
     // The executable pager is sys-io's: every operation is refused for any
     // other caller before its arguments are looked at.
     assert_eq!(SysMem::pager_init().err(), Some(moto_rt::E_NOT_ALLOWED));
-    let mut events = [(0_u64, 0_u64); 1];
+    let mut events = [[0_u64; 2]; 1];
     assert_eq!(
         SysMem::pager_dequeue(&mut events).err(),
         Some(moto_rt::E_NOT_ALLOWED)
@@ -1291,6 +1292,9 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if environment::run_command(&args) {
+        return;
+    }
     if swap_cancel::run_command(&args) {
         return;
     }
@@ -1303,6 +1307,11 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "cold-spawn" {
         cold_spawn::run_all_tests();
+        return;
+    }
+    #[cfg(debug_assertions)]
+    if args.len() == 2 && args[1] == "sys-io-self-test" {
+        sys_io_self_test::run_all_tests();
         return;
     }
     if args.len() == 2 && args[1] == "sched-fairness" {
@@ -1827,8 +1836,7 @@ fn main() {
     // Test that a userspace interrupt is handled correctly.
     unsafe { core::arch::asm!("int 3") }
 
-    unsafe { std::env::set_var("foo", "bar") };
-    assert_eq!(std::env::var("foo").unwrap(), "bar");
+    environment::run_all_tests();
 
     // We should never be allowed to shut down the sytem.
     assert_eq!(

@@ -5,6 +5,8 @@
 
 mod elf;
 pub(crate) mod pager;
+#[cfg(debug_assertions)]
+pub(super) mod self_test;
 mod vdso;
 
 use super::FsRuntime;
@@ -397,11 +399,11 @@ async fn build(
 ) -> Result<(RaiiHandle, u64)> {
     let entry = req.entry_id;
     // Authorize as the requester before reading a byte or locking the file.
-    executable_size(runtime, role, entry).await?;
-    let _lock = ConstructionLock::new(runtime, entry);
-    // Neither can change any more: every mutation is refused while the
-    // executable is locked.
     let file_size = executable_size(runtime, role, entry).await?;
+    // No await separates authorization from locking on the cooperative FS
+    // runtime. Mutations check this lock under the FS write guard, so even
+    // writers already queued behind the metadata read must respect it.
+    let _lock = ConstructionLock::new(runtime, entry);
 
     let header_bytes = read_vec(runtime, role, entry, 0, file_size.min(64)).await?;
     let header = elf::parse_header(&header_bytes, file_size)?;

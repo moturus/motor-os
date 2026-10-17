@@ -147,7 +147,14 @@ fn process_wake_handles(
     // A late object wake can reach an unrelated wait (including a futex's
     // empty wait). Only acknowledge requested handles; the others remain
     // pending in their objects' wake counters, not in this thread's queue.
-    let requested = wakers.intersection(wait_handles.iter().copied().map(SysHandle::from_u64));
+    let mut requested = super::process::WakerVec::new(SysHandle::NONE);
+    for &handle in wait_handles {
+        let handle = SysHandle::from_u64(handle);
+        if wakers.as_slice().binary_search(&handle).is_ok() {
+            requested.push(handle);
+        }
+    }
+    requested.sort_dedup();
     let wakers = requested.as_slice();
     for waker in wakers {
         curr.owner().process_wake(waker);

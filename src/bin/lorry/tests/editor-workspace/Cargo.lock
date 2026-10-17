@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.17.7"
+version = "0.17.8"
 
 [[package]]
 name = "moto-stats"
