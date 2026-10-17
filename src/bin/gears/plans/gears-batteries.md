@@ -636,12 +636,15 @@ after-turn command, `--preserve-prefix` with the request prefixes it read
 back, and `--hook-state`. Sessions written earlier keep their
 `request_prefix` records; Gears now ignores them.
 
+An ephemeral session's `sh` state moved from `/tmp/gears-sh-*` to
+`sessions/ephemeral/` in the Gears directory, which startup cleans up, so a
+killed Gears no longer leaves it behind.
+
 ## What remains
 
 | Work | Status and next step |
 | --- | --- |
 | Hands-on validation | Finish the Linux and Motor OS interactive checklist: tool enablement, approvals, revocation, resume, screen rendering and the memory question in both UIs. No live local-model result has been reported. |
-| Shell state of killed runs | An ephemeral session keeps its `sh` state in `/tmp/gears-sh-*`. A killed Gears cannot remove it, and startup cleanup covers only the Gears directory, so each kill leaves an empty directory behind (two tests kill Gears on purpose). Keeping that state under the Gears directory would let startup remove it. |
 
 ## Decisions
 

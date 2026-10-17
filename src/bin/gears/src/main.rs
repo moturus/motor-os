@@ -71,7 +71,9 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
     };
     match directory_lock.cleanup_temporaries() {
         Ok(0) => {}
-        Ok(count) => diagnostic(&format!("removed {count} abandoned state temporary files")),
+        Ok(count) => diagnostic(&format!(
+            "removed {count} abandoned temporary state entries"
+        )),
         Err(error) => {
             diagnostic(&format!("state cleanup: {error}"));
             return ExitCode::FAILURE;

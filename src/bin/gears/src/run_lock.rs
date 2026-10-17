@@ -58,11 +58,13 @@ impl DirectoryLock {
         })
     }
 
+    /// Only the lock's owner cleans up; a nested Gears shares a live directory.
     pub fn cleanup_temporaries(&self) -> Result<usize, String> {
         if self.path.is_none() {
             return Ok(0);
         }
-        self.state.cleanup_temporary_files()
+        Ok(self.state.cleanup_temporary_files()?
+            + crate::session::remove_abandoned_shell_state(&self.state)?)
     }
 
     pub fn owner(&self) -> u32 {
@@ -164,6 +166,25 @@ mod tests {
         let error = DirectoryLock::acquire_at(&root).err().unwrap();
         assert!(error.contains("initialized"), "{error}");
         assert!(root.join("gears.lock").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_owner_removes_shell_state_that_a_killed_gears_left_behind() {
+        let root =
+            std::env::temp_dir().join(format!("gears-shell-leftovers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let abandoned = root.join("sessions/ephemeral/sh-old-0");
+        std::fs::create_dir_all(&abandoned).unwrap();
+        std::fs::write(abandoned.join("cwd"), "/\n").unwrap();
+        let saved = root.join("sessions/group/session.sh-state");
+        std::fs::create_dir_all(&saved).unwrap();
+        let lock = DirectoryLock::acquire_at(&root).unwrap();
+        assert_eq!(lock.cleanup_temporaries().unwrap(), 1);
+        assert!(!abandoned.exists());
+        assert!(root.join("sessions/ephemeral").is_dir());
+        assert!(saved.is_dir());
+        drop(lock);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -22,7 +22,10 @@ the selected workspace through `bash -c` on Linux or `/system/bin/rush -c` on
 Motor OS. It is not a
 sandbox: an approved command has the same filesystem authority as Gears and
 may leave the workspace. Stdout, stderr, status, timeout, cancellation, and
-truncation remain distinct.
+truncation remain distinct. The working directory and exports it saves live
+beside a saved session, or in `sessions/ephemeral/` in the Gears directory
+for an ephemeral one; Gears removes the ephemeral state at exit, and what a
+killed Gears left there at its next start.
 
 Gears checks saved permission grants before hooks. A saved denial or hook
 denial blocks the call. A hook may allow it or require fresh confirmation.

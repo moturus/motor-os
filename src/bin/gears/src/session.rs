@@ -15,6 +15,8 @@ use crate::provider::{ContentBlock, Message, Role, Usage, UsageMeter};
 use crate::state::StateRoot;
 
 const VERSION: u32 = 1;
+/// Ephemeral sessions keep shell state here, inside the session store.
+const EPHEMERAL_SHELL_STATE: &str = "ephemeral";
 static NEXT_FILE: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -319,7 +321,7 @@ impl Store {
             retained.push(record);
         }
         let mut session = if ephemeral {
-            Session::ephemeral(header, retained)?
+            Session::ephemeral(header, retained, self.state.clone())?
         } else {
             let directory = self.state.directory(&self.group)?;
             let (path, file) = create_session_file(&directory, &id)?;
@@ -445,6 +447,8 @@ pub struct Session {
     writer: Option<File>,
     lock: Option<PathBuf>,
     recovered_entries: usize,
+    /// The session store that holds an ephemeral session's shell state.
+    ephemeral_root: Option<StateRoot>,
     ephemeral_shell_state: Option<PathBuf>,
 }
 
@@ -506,8 +510,10 @@ impl Session {
         )
     }
 
-    fn ephemeral(header: Header, entries: Vec<Entry>) -> Result<Self, String> {
-        Self::from_parts(header, entries, None, None, None, 0)
+    fn ephemeral(header: Header, entries: Vec<Entry>, root: StateRoot) -> Result<Self, String> {
+        let mut session = Self::from_parts(header, entries, None, None, None, 0)?;
+        session.ephemeral_root = Some(root);
+        Ok(session)
     }
 
     fn from_parts(
@@ -536,6 +542,7 @@ impl Session {
             writer,
             lock,
             recovered_entries,
+            ephemeral_root: None,
             ephemeral_shell_state: None,
         })
     }
@@ -579,8 +586,13 @@ impl Session {
             private_directory(&directory)?;
             return Ok(directory);
         }
+        let parent = self
+            .ephemeral_root
+            .as_ref()
+            .ok_or("this session has no shell state location")?
+            .directory(Path::new(EPHEMERAL_SHELL_STATE))?;
         for suffix in 0..1000_u32 {
-            let directory = std::env::temp_dir().join(format!("gears-sh-{}-{suffix}", self.id()));
+            let directory = parent.join(format!("sh-{}-{suffix}", self.id()));
             match create_private_directory(&directory) {
                 Ok(()) => {
                     self.ephemeral_shell_state = Some(directory.clone());
@@ -1201,6 +1213,34 @@ fn default_root() -> Result<PathBuf, String> {
     Ok(crate::directory::default_root()?.join("sessions"))
 }
 
+/// Removes shell state that ephemeral sessions of a killed Gears left behind.
+/// Call only while holding the Gears directory lock, before any session starts.
+pub fn remove_abandoned_shell_state(directory: &StateRoot) -> Result<usize, String> {
+    let relative = Path::new("sessions").join(EPHEMERAL_SHELL_STATE);
+    let Some(parent) = directory.existing_directory(&relative)? else {
+        return Ok(0);
+    };
+    let mut removed = 0;
+    for entry in
+        std::fs::read_dir(&parent).map_err(|error| format!("{}: {error}", parent.display()))?
+    {
+        let path = entry
+            .map_err(|error| format!("{}: {error}", parent.display()))?
+            .path();
+        let kind = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?
+            .file_type();
+        if kind.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        }
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 fn workspace_key(workspace: &Path) -> String {
     let name = workspace
         .file_name()
@@ -1440,10 +1480,10 @@ mod tests {
 
     #[test]
     fn ephemeral_shell_state_is_removed_with_the_session() {
-        let (base, _, store) = fixture("ephemeral-shell-state");
+        let (base, root, store) = fixture("ephemeral-shell-state");
         let mut session = store.create(true, None).unwrap();
         let state = session.shell_state_directory().unwrap();
-        assert!(state.starts_with(std::env::temp_dir()));
+        assert!(state.starts_with(root.join(EPHEMERAL_SHELL_STATE)));
         assert_eq!(session.shell_state_directory().unwrap(), state);
         drop(session);
         assert!(!state.exists());
