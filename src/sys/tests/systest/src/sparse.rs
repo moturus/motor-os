@@ -87,6 +87,7 @@ fn test_process_memory_stats() {
             before[1] + 8 * PAGE_SIZE_SMALL
         ]
     );
+    check_ps_memory(pid, memory());
     for addr in [lazy, eager, alias] {
         SysMem::unmap(target, 0, u64::MAX, addr).unwrap();
     }
@@ -95,6 +96,46 @@ fn test_process_memory_stats() {
     SysObj::put(process).unwrap();
     SysObj::put(target).unwrap();
     println!("test_process_memory_stats PASS");
+}
+
+// The unstarted process has stable counters and a mostly untouched 1 TiB
+// reservation. Both display modes must agree with the byte metrics exactly.
+fn check_ps_memory(pid: u64, expected: [u64; 2]) {
+    for tree in [false, true] {
+        let mut command = std::process::Command::new("/system/bin/ps");
+        if tree {
+            command.arg("-H");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "ps: {:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = String::from_utf8(output.stdout).unwrap();
+        let mut lines = output.lines();
+        assert_eq!(
+            lines.next().unwrap().split_whitespace().collect::<Vec<_>>(),
+            [
+                "PID*", "PPID", "A_THR", "T_THR", "A_CHLD", "T_CHLD", "V_USER", "V_KERN",
+                "VIRT_KB", "RES_KB", "CPU", "ST", "Name"
+            ]
+        );
+        let row = lines
+            .map(|line| line.split_whitespace().collect::<Vec<_>>())
+            .find(|fields| {
+                fields.first().is_some_and(|value| {
+                    value.trim_end_matches(['*', '+', '?']).parse::<u64>() == Ok(pid)
+                })
+            })
+            .unwrap_or_else(|| panic!("pid {pid} absent from ps (tree={tree}): {output}"));
+        let value = |column: usize| row[column].parse::<u64>().unwrap();
+        assert_eq!(value(8), expected[0] >> 10);
+        assert_eq!(value(9), expected[1] >> 10);
+        assert_eq!((value(6) + value(7)) * PAGE_SIZE_SMALL, expected[0]);
+    }
+    println!("test_ps_memory PASS");
 }
 
 /// 64 GiB and 1 TiB reserved lazily cost a few pages, not a share of their
