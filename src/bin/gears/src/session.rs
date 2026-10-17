@@ -17,9 +17,25 @@ use crate::state::StateRoot;
 const VERSION: u32 = 1;
 /// Ephemeral sessions keep shell state here, inside the session store.
 const EPHEMERAL_SHELL_STATE: &str = "ephemeral";
+/// Every entry kind Gears writes; a session holding any other is refused.
+const ENTRY_KINDS: [&str; 12] = [
+    "message",
+    "turn_error",
+    "usage",
+    "model_change",
+    "provider_change",
+    "session_name",
+    "compaction",
+    "hook_state",
+    "tool_state",
+    "permission_grant",
+    "runtime_identity",
+    "label",
+];
 static NEXT_FILE: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Header {
     #[serde(rename = "type")]
     kind: String,
@@ -32,6 +48,7 @@ pub struct Header {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Entry {
     #[serde(rename = "type")]
     pub kind: String,
@@ -621,7 +638,7 @@ impl Session {
         self.active_leaf.as_deref()
     }
 
-    pub fn append<T: Serialize>(&mut self, kind: &str, data: &T) -> Result<String, String> {
+    fn append<T: Serialize>(&mut self, kind: &str, data: &T) -> Result<String, String> {
         let data = serde_json::to_value(data)
             .map_err(|error| format!("cannot serialize session entry: {error}"))?;
         let id = format!("e{:016x}", self.next_entry);
@@ -1110,6 +1127,12 @@ fn incomplete_round_start(entries: &[Entry]) -> Result<Option<usize>, String> {
 fn validate_entries(entries: &[Entry]) -> Result<(), String> {
     let mut ids = HashSet::new();
     for entry in entries {
+        if !ENTRY_KINDS.contains(&entry.kind.as_str()) {
+            return Err(format!(
+                "session entry {} has unknown kind {:?}",
+                entry.id, entry.kind
+            ));
+        }
         if entry.id.is_empty() || !ids.insert(entry.id.clone()) {
             return Err(format!(
                 "duplicate or empty session entry id {:?}",
@@ -1398,6 +1421,28 @@ mod tests {
             .append_message(&Message::assistant("parent still live"))
             .unwrap();
         drop(writer);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn entries_of_an_unknown_kind_are_refused() {
+        let (base, _, store) = fixture("unknown-kind");
+        let mut writer = store.create(false, None).unwrap();
+        writer.append_message(&Message::user("work")).unwrap();
+        let path = writer.path().unwrap().to_path_buf();
+        drop(writer);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        let entry = Entry {
+            kind: "request_prefix".into(),
+            id: "e00000000000000ff".into(),
+            parent_id: None,
+            timestamp_ms: 0,
+            data: serde_json::json!({}),
+        };
+        writeln!(file, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        let error = store.open_path(&path).err().unwrap();
+        assert!(error.contains("unknown kind \"request_prefix\""), "{error}");
+        assert!(read_snapshot(&path).is_err());
         std::fs::remove_dir_all(base).unwrap();
     }
 

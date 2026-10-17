@@ -142,7 +142,8 @@ workspace:
 Each entry has an id and parent_id. Selecting an earlier entry changes only
 the conversation branch; it does not undo commands or filesystem changes.
 Only one process may write a saved session. A partial final record is ignored
-after a crash, while earlier corruption is reported.
+after a crash, while earlier corruption is reported. A session holding an
+entry of a kind this Gears does not write, or an unknown field, is refused.
 
 Interactive UIs display the saved active branch when a session is opened or
 selected, including messages from before compaction. The full-screen UI
