@@ -194,6 +194,11 @@ fixed on top of it:
   reservation size rather than constant, and the 72-byte figure is the
   segment node of an untouched reservation.
 
+Gate results for the follow-ups, 2026-10-17: three debug runs of
+`src/tests/full-test.sh` (18 minutes each), three release runs (10 to 11
+minutes) and one `src/tests/full-test-dev.sh --release` run (36 minutes)
+all passed.
+
 ## Deferred
 
 - Shrinking descriptor pools: the pool keeps its reuse-until-exit
