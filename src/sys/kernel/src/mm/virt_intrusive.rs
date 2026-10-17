@@ -468,7 +468,8 @@ impl VmemSegment {
     }
 
     // Maps or reserves every page of the segment, in address order. Fails
-    // only when the page table cannot grow.
+    // only when the page table refuses the mapping options: it never fails
+    // for lack of memory, admission keeps that away and exhaustion panics.
     fn construct(&mut self) -> Result<(), ErrorCode> {
         let num_pages = self.segment.size >> PAGE_SIZE_SMALL_LOG2;
         let huge = self.huge_candidates();
@@ -538,8 +539,8 @@ impl VmemSegment {
 
     // Map an owned frame of either kind at `start` and record it. The frame
     // is zeroed by the page table before its PTE is published. Fails only
-    // when the page table cannot grow; then the frame is dropped and the
-    // segment is left as it was.
+    // when the page table refuses the mapping options; then the frame is
+    // dropped and the segment is left as it was.
     fn map_frame(
         &mut self,
         start: u64,

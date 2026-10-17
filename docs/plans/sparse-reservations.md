@@ -58,8 +58,10 @@ Kernel memory held and admission charge per reservation, touched or not:
 | 4 GiB | 74.5 MiB | 128 MiB | 72 B | 256 KiB |
 | 1 TiB | refused | refused | 72 B | 256 KiB |
 
-The charge is held only during the syscall. Map time stops growing with
-size: 80 ms for 4 GiB today, one segment insert sparse. A thread spawn
+"Held sparse" is the segment node of an untouched reservation; the slab
+page it shares with 54 other nodes is not counted. The charge is held
+only during the syscall. Map time stops growing with size: 80 ms for
+4 GiB today, one segment insert sparse. A thread spawn
 allocates 256 stack descriptors today and one sparse. Per touched page
 nothing changes: 72 bytes of descriptor, 20 bytes of frame, the page
 table share, one admitted fault.
@@ -86,9 +88,11 @@ Details:
 - `VmemSegment::is_empty` goes by segment size, not by page count, so
   the drop assertion keeps its meaning. The nonempty-tree assertion
   that a sparse source can violate goes.
-- Construction owns rollback. `allocate_pages` clears the segment when
-  a page-table allocation fails; `map_frame` undoes only its own page.
-  A fault that fails at the page table leaves its fresh descriptor
+- Construction owns rollback. Page-table growth never fails: like frame
+  allocation it panics on exhaustion, which admission prevents. The
+  page table refuses only mapping options it does not accept; on that
+  error `allocate_pages` clears the segment and `map_frame` undoes only
+  its own page. A fault that meets it leaves its fresh descriptor
   frameless, which is a hole.
 - `lazy_fault_charge` is written as `mapping_charge(1, 1)`. It now
   covers one descriptor too, and is still 66 pages.
@@ -156,6 +160,39 @@ Gate results, 2026-10-17: three debug and three release runs of
 --release` run failed in javy-smoke's `memory-refused-fault`: the wasm
 smoke suite read the refusal counters at the system scope, where they have
 not lived since 4207b96e. Fixed in the suite (5d619731); the rerun passed.
+
+Review follow-ups, 2026-10-17. A review of the series found four gaps,
+fixed on top of it:
+
+- A share looked every source page up by address, so sharing N pages
+  cost N tree searches. The two passes now walk source and destination
+  in step and check each source address against the one expected
+  (5f5b9a97).
+- `alloc_user_shared` and the fixed-address fills reserved, released
+  the region lock, then undid a failed call by address, so a rollback
+  could remove a segment another thread had put at that address in the
+  meantime. Both reservations, the share and any rollback now happen
+  under the region locks, taken in one fixed order for any two regions,
+  the order `share_with` already used; the kernel-static fill and the
+  share from another process became locked operations too, and an
+  unaligned fixed address is refused instead of tripping a debug
+  assertion. The self-test covers the fixed-address and the share-from
+  rollbacks. A systest races a shared allocation that must be undone
+  against a thread that unmaps and remaps its address in a private
+  address space, with the gaps the runtime frees meanwhile kept mapped
+  once found (50f407ec, 9de7ee7a). On the kernel before the fix that
+  test fails with 27 misses against 2 stray gaps; on the fixed kernel a
+  miss can only follow a stray success, once each.
+- The fault-at-floor test accepted any failed child. The child now
+  reports its phases on stdout; the parent requires both lines, the
+  kernel's kill status and at least three refusals. The sparse suite
+  warms the pool up itself and waits for the pressure to clear
+  (2b42a741, 9de7ee7a).
+- The docs said page-table growth could fail and be rolled back. It
+  cannot: it panics on exhaustion like frame allocation, and `map_page`
+  fails only for options it does not accept. Map time is independent of
+  reservation size rather than constant, and the 72-byte figure is the
+  segment node of an untouched reservation.
 
 ## Deferred
 

@@ -326,7 +326,9 @@ before any hardware PTE is written.
 
 Lazy and file-paged segments are sparse: they hold descriptors only for the
 pages that have received a frame, so an untouched lazy reservation costs one
-segment node whatever its size, and mapping it takes constant time. The
+segment node whatever its size, and mapping it takes time independent of
+that size: a segment lookup and insertion, plus the search for a gap when
+the region's free space is fragmented. The
 fault path creates the descriptor on first touch, with the per-page options
 construction would have given it; readers treat a missing descriptor as an
 absent page with those options. Unmapped reservations stay dense, because
@@ -335,10 +337,13 @@ sharing into a lazy segment is refused. A lazy segment can be a share source
 once every page of the shared range has been touched; a share is validated
 in full before the first destination page changes.
 
-Frame allocation never fails: admission keeps the kernel away from an empty
-pool, and `phys::allocate_frame` panics if it is reached anyway. Eager
-construction rolls a segment back at its boundary when the page table cannot
-grow; nothing else in the mapping paths has an allocation failure branch.
+Neither frame allocation nor page-table growth can fail: admission keeps the
+kernel away from an empty pool, and `phys::allocate_frame` and the
+page-table allocator panic if it is reached anyway. `PageTable::map_page`
+fails only for mapping options it does not accept; eager construction rolls
+a segment back at its boundary on that error, and a fault that meets it
+leaves its fresh descriptor frameless, which is a hole. Nothing in the
+mapping paths has an allocation failure branch.
 
 `VmemKind` distinguishes boot, MM slab, MMIO, heap, stack, static, user,
 user-stack and unmapped segments. `VaddrMapStatus` reports unallocated,
