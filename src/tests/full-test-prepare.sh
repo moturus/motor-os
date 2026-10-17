@@ -86,5 +86,9 @@ host_build --locked --offline \
   --manifest-path "$ROOT_DIR/src/tests/rust-analyzer-smoke/Cargo.toml"
 cargo build --quiet --locked --offline "${profile_args[@]}" \
   --manifest-path "$ROOT_DIR/src/tests/rust-analyzer-smoke/Cargo.toml"
+# Only the developer-image suite runs test-gix.sh.
+if [ "$TEST_VM_PHASE" = developer ]; then
+  bash "$WD/test-gix.sh" --prepare
+fi
 
 echo "full-test-prepare ($BUILD) done"

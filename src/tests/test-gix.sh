@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Exercise the pinned Gitoxide fork on the host or an already booted Motor VM.
+# Exercise the pinned Gitoxide fork on the host or an already booted Motor VM;
+# --prepare only builds what both of those modes build.
 set -euo pipefail
 unset GIT_INDEX_FILE GIT_AUTHOR_DATE GIT_COMMITTER_DATE
 
@@ -7,8 +8,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 WD="$ROOT_DIR/src/tests"
 APP_DIR="$ROOT_DIR/src/bin/gix"
 mode="${1:-}"
-[ "$#" -eq 1 ] && { [ "$mode" = --host ] || [ "$mode" = --guest ]; } ||
-  { echo "usage: $0 --host|--guest" >&2; exit 2; }
+[ "$#" -eq 1 ] && case "$mode" in --host | --guest | --prepare) ;; *) false ;; esac ||
+  { echo "usage: $0 --host|--guest|--prepare" >&2; exit 2; }
 
 temporary="$(mktemp -d)"
 guest_root=
@@ -444,6 +445,27 @@ print(executables[0])
 PY
 )"
 
+# The Motor OS executables that the guest mode copies to the VM.
+build_native() {
+  local assembly_images linker
+  assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
+  linker="${assembly_images%/images}/sysroot/bin/motor-clang"
+  env "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER=$linker" \
+    "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS=-C link-self-contained=no -C default-linker-libraries=yes" \
+    "$cargo" build "${common[@]}" --features native-test-support \
+    --target x86_64-unknown-motor --bin gix --test native-port \
+    --message-format json-render-diagnostics
+}
+
+# Each build matches its later use flag for flag, or the suite builds again.
+if [ "$mode" = --prepare ]; then
+  "$cargo" test --no-run --quiet "${common[@]}" --lib
+  "$cargo" test --no-run --quiet "${common[@]}" --features native-test-support --test native-port
+  "$cargo" build --quiet "${common[@]}" --bin gix
+  build_native > /dev/null
+  exit
+fi
+
 if [ "$mode" = --host ]; then
   "$cargo" test "${common[@]}" --lib
   metadata="$temporary/metadata.json"
@@ -768,17 +790,8 @@ fi
 
 . "$WD/vm-test-boot.sh"
 test_vm_configure_ssh
-assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
-linker="${assembly_images%/images}/sysroot/bin/motor-clang"
 messages="$temporary/cargo-messages.json"
-native_env=(
-  "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER=$linker"
-  "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS=-C link-self-contained=no -C default-linker-libraries=yes"
-)
-env "${native_env[@]}" "$cargo" build "${common[@]}" \
-  --features native-test-support \
-  --target x86_64-unknown-motor --bin gix --test native-port \
-  --message-format json-render-diagnostics > "$messages"
+build_native > "$messages"
 artifact_paths="$(python3 - "$messages" <<'PY'
 import json
 import pathlib
