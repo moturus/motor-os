@@ -5,7 +5,11 @@
 use moto_sys::sys_mem::{PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 use moto_sys::{SysHandle, SysMem, SysObj};
 
-use crate::admission::{DRIFT_TOLERANCE_PAGES, assert_floors_held, assert_recovered};
+use moto_sys::stats::PID_KERNEL;
+
+use crate::admission::{
+    DRIFT_TOLERANCE_PAGES, assert_floors_held, assert_recovered, kernel_metric_at,
+};
 
 const GIB: u64 = 1 << 30;
 const TIB: u64 = 1 << 40;
@@ -251,21 +255,42 @@ fn test_exit_with_reservations() {
 
 /// A process holding a large sparse reservation drives the machine to the
 /// user floor and then touches more of it: the faulting thread is killed,
-/// the kernel stays alive, and the pool comes back.
+/// the kernel stays alive, and the pool comes back. The child reports each
+/// phase on its stdout, so a death before the fault phase, whatever its
+/// cause, fails here rather than passing as the kill under test.
 fn test_fault_at_floor() {
+    use std::io::Read;
+    let refused_before = kernel_metric_at("mem.admission_refused_user", PID_KERNEL);
     let used_before = used_pages();
     let mut child = crate::subcommand::spawn();
     child.sparse_fault_at_floor();
     let status = child.wait().unwrap();
+    let mut stdout = child.std_child().stdout.take().unwrap();
     drop(child);
-    assert!(
-        !status.success(),
-        "the process survived sparse faults below the user floor"
-    );
+    // Nothing allocates until the pool is back; see `assert_recovered`.
     assert_recovered(
         used_before,
         DRIFT_TOLERANCE_PAGES,
         "the sparse aggressor died",
+    );
+
+    let mut phases = String::new();
+    stdout.read_to_string(&mut phases).unwrap();
+    assert_eq!(
+        phases, "setup\ndrained\n",
+        "the child did not reach the fault phase"
+    );
+    // A kernel kill, not an exit or an abort of the child's own.
+    assert_eq!(
+        status.code(),
+        Some(-1),
+        "not killed by the kernel: {status:?}"
+    );
+    // Two refusals end the drain loops; the killing fault is at least one more.
+    let refusals = kernel_metric_at("mem.admission_refused_user", PID_KERNEL) - refused_before;
+    assert!(
+        refusals >= 3,
+        "{refusals} refusals, expected the drains' two and a fault's"
     );
     assert_floors_held();
     println!("test_sparse_fault_at_floor PASS");
@@ -283,18 +308,26 @@ pub fn run_exit_child() -> ! {
 }
 
 /// The child side of `test_fault_at_floor`. Never returns: it is killed on a
-/// refused fault, or it exits zero so the parent's assertion fires.
+/// refused fault, or it exits zero so the parent's assertion fires. Each
+/// phase is reported with a static line; the first one, written while
+/// memory is plentiful, is what allocates stdout's buffer.
 pub fn run_fault_at_floor_child() -> ! {
+    use std::io::Write;
+    let mut stdout = std::io::stdout();
     // The reservation costs nothing until touched; its first pages are
     // faulted in while memory is plentiful.
     let lazy = map_lazy(64 * GIB).unwrap();
     for idx in 0..8 {
         touch(lazy + idx * PAGE_SIZE_SMALL);
     }
+    stdout.write_all(b"setup\n").unwrap();
+    stdout.flush().unwrap();
     // Drain to the user floor: coarsely first, then one page at a time, so
     // that what is left of the band is smaller than a lazy fault's charge.
     while SysMem::alloc(PAGE_SIZE_SMALL, 256).is_ok() {}
     while SysMem::alloc(PAGE_SIZE_SMALL, 1).is_ok() {}
+    stdout.write_all(b"drained\n").unwrap();
+    stdout.flush().unwrap();
     // Each admitted fault takes one more page; at most a handful succeed
     // before the rest are refused and this thread is killed.
     for idx in 8..(64 * GIB / PAGE_SIZE_SMALL) {
@@ -303,10 +336,18 @@ pub fn run_fault_at_floor_child() -> ! {
     std::process::exit(0);
 }
 
-/// Run after the admission tests: the first pressure event of a boot grows
-/// the pool once, by about a thousand pages, and these tests expect it to be
-/// steady afterwards.
+/// The first pressure event of a boot grows the pool once, by about a
+/// thousand pages, and the floor test expects it to be steady afterwards.
+/// An OOM child, like `test_oom` in the full suite, absorbs it, cheaply
+/// when it has happened already.
+fn warm_up_pool() {
+    let mut child = crate::subcommand::spawn();
+    child.oom();
+    assert!(!child.wait().unwrap().success());
+}
+
 pub fn run_all_tests() {
+    warm_up_pool();
     test_large_reservations();
     test_lazy_share_source();
     test_shared_alloc_rollback_race();
