@@ -510,9 +510,9 @@ that proposed it (`-` for an entry the user wrote by hand), and continues
 with its text. A hand-written entry may give only the id. Ids are short
 ASCII; the tool generates four-character ones. Each file has a character
 limit set in `batteries.toml` (defaults 1,375 for `USER.md` and 2,200 for
-each `MEMORY.md`), counting entry text only. The previous `v1` format with
-JSON headers is still read; the first change rewrites the file as `v2`.
-An unreadable or oversized file is reported and skipped.
+each `MEMORY.md`), counting entry text only. A file with another header
+(including the `v1` format that reviews wrote), an unreadable file or an
+oversized one is reported and skipped.
 
 **The `memory` tool** takes `action` (`list`, `add`, `replace`, `remove`),
 `target` (`user`, `global`, `workspace`), `id` for replace and remove, and
@@ -633,8 +633,8 @@ and `status` commands.
 
 On 2026-10-17 the Gears features that only reviews used were removed: the
 after-turn command, `--preserve-prefix` with the request prefixes it read
-back, and `--hook-state`. Sessions written earlier keep their
-`request_prefix` records; Gears now ignores them.
+back, and `--hook-state`. Memory files in the `v1` format and prompt
+snapshots in older formats are no longer read.
 
 An ephemeral session's `sh` state moved from `/tmp/gears-sh-*` to
 `sessions/ephemeral/` in the Gears directory, which startup cleans up, so a

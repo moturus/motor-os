@@ -50,10 +50,9 @@ pub fn run(binary: &Path, base: &Path) -> Result<(), String> {
         text: text.into(),
     };
     let old = gears::batteries::snapshot::initialize(&event(None), &context.state)?;
-    // A file in the previous format is still read and rewritten on the first change.
     context.state.replace_file(
         Target::Global.relative(),
-        "# Gears memory v1\n§ {\"id\":\"old\",\"kind\":\"observed\",\"scope\":\"global\",\"source\":{\"session\":\"source\",\"entries\":[\"evidence\"]},\"date_ms\":1}\nUse literal check arguments.\n".as_bytes(),
+        "# Gears memory v2\n§ old 1970-01-01 source\nUse literal check arguments.\n".as_bytes(),
     )?;
     let add = Change {
         version: 2,

@@ -53,8 +53,8 @@ The release developer-image gate exercises the installed binary, and Lorry
 rebuilds the packaged source and runs its tests natively. The portable
 workflow fixture uses a scripted provider to drive real file tools, a Rust
 compiler check, task branching, the bounded missing-check reminder, the
-memory question, frozen prompts, memory files in both formats, the
-`history` and `status` commands and skill loading. The host and native
+memory question, `/remember`, frozen prompts, memory files, the `history`
+and `status` commands and skill loading. The host and native
 workflow tests make no provider or Internet requests.
 
 ## The check
@@ -104,10 +104,9 @@ Written by hand; the date and session are optional.
 
 Each entry starts with a `§ ` line holding its id, its date and the session
 that proposed it (`-` or nothing for an entry written by hand), then its
-text. A text line may not start with `§ `. Files in the previous
-`# Gears memory v1` format with JSON headers are still read; the first
-change rewrites them in the current format. An unreadable or oversized file
-is reported as a notice and left out of the prompt.
+text. A text line may not start with `§ `. A file with another header, an
+unreadable file or an oversized one is reported as a notice and left out of
+the prompt.
 
 The `memory` tool takes `action = list | add | replace | remove` and
 `target = user | global | workspace`, with `id` for replace and remove and

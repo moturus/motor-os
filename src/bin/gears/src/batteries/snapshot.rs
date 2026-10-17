@@ -16,13 +16,13 @@ const MAX_BYTES: usize = 1024 * 1024;
 const VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Snapshot {
     pub version: u32,
     pub fragments: Vec<String>,
 }
 
-/// `Ok(None)` for a snapshot in an older format, which is replaced by a fresh one.
-pub(crate) fn load(root: &StateRoot, hash: &str) -> Result<Option<Snapshot>, String> {
+pub(crate) fn load(root: &StateRoot, hash: &str) -> Result<Snapshot, String> {
     if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid prompt snapshot hash".into());
     }
@@ -41,7 +41,10 @@ pub(crate) fn load(root: &StateRoot, hash: &str) -> Result<Option<Snapshot>, Str
     }
     let snapshot: Snapshot = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid prompt snapshot: {error}"))?;
-    Ok((snapshot.version == VERSION).then_some(snapshot))
+    if snapshot.version != VERSION {
+        return Err("unsupported prompt snapshot version".into());
+    }
+    Ok(snapshot)
 }
 
 pub(crate) fn save(root: &StateRoot, snapshot: &Snapshot) -> Result<String, String> {
@@ -112,7 +115,10 @@ pub fn initialize(event: &Event, root: &StateRoot) -> Result<Value, String> {
     let mut state = crate::batteries::hook_state(event)?;
     let saved = match state.get("prompt_snapshot") {
         None => None,
-        Some(hash) => load(root, hash.as_str().ok_or("invalid prompt snapshot hash")?)?,
+        Some(hash) => Some(load(
+            root,
+            hash.as_str().ok_or("invalid prompt snapshot hash")?,
+        )?),
     };
     let compacted = event.payload["reason"] == "compaction";
     let mut notices = Vec::new();
@@ -290,26 +296,29 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_in_an_older_format_are_replaced() {
+    fn snapshots_in_another_format_are_refused() {
         let (root, mut event, state) = fixture("legacy");
-        std::fs::write(event.workspace.join("AGENTS.md"), "current instructions").unwrap();
-        let bytes = br#"{"version":2,"fragments":["legacy project text"],"memory":[]}"#;
-        let hash = digest(bytes);
-        state
-            .replace_file(
-                Path::new(&format!("batteries/snapshots/{hash}.json")),
-                bytes,
-            )
-            .unwrap();
-        event.session.state = Some(json!({"prompt_snapshot": hash}));
-        let response = initialize(&event, &state).unwrap();
-        assert!(
-            response["prompt_fragments"][0]
-                .as_str()
-                .unwrap()
-                .ends_with("current instructions")
-        );
-        assert_ne!(response["state"]["prompt_snapshot"], hash);
+        for (bytes, error) in [
+            (
+                br#"{"version":2,"fragments":["old"],"memory":[]}"#.as_slice(),
+                "unknown field",
+            ),
+            (
+                br#"{"version":2,"fragments":["old"]}"#,
+                "unsupported prompt snapshot version",
+            ),
+        ] {
+            let hash = digest(bytes);
+            state
+                .replace_file(
+                    Path::new(&format!("batteries/snapshots/{hash}.json")),
+                    bytes,
+                )
+                .unwrap();
+            event.session.state = Some(json!({"prompt_snapshot": hash}));
+            let refused = initialize(&event, &state).unwrap_err();
+            assert!(refused.contains(error), "{refused}");
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -7,7 +7,6 @@ use std::path::Path;
 use crate::state::StateRoot;
 use serde::{Deserialize, Serialize};
 
-const HEADER_V1: &str = "# Gears memory v1\n";
 const HEADER_V2: &str = "# Gears memory v2\n";
 pub const MAX_BYTES: usize = 256 * 1024;
 
@@ -119,18 +118,14 @@ impl Entry {
 }
 
 impl Document {
-    /// Reads the current format and the previous one with JSON headers.
+    /// Reads the current format; any other header is refused.
     pub fn parse(text: &str, limit: usize) -> Result<Self, String> {
         if text.len() > MAX_BYTES {
             return Err("memory file exceeds 256 KiB".into());
         }
-        let (body, v1) = if let Some(body) = text.strip_prefix(HEADER_V2) {
-            (body, false)
-        } else if let Some(body) = text.strip_prefix(HEADER_V1) {
-            (body, true)
-        } else {
-            return Err("unsupported memory file format/version".into());
-        };
+        let body = text
+            .strip_prefix(HEADER_V2)
+            .ok_or("unsupported memory file format/version")?;
         let mut entries = Vec::new();
         if !body.is_empty() {
             let body = body
@@ -139,11 +134,7 @@ impl Document {
             for section in body.split("\n§ ") {
                 let (header, text) = section.split_once('\n').ok_or("memory entry has no body")?;
                 let text = text.trim_end_matches('\n').to_string();
-                entries.push(if v1 {
-                    v1_entry(header, text)?
-                } else {
-                    v2_entry(header, text)?
-                });
+                entries.push(v2_entry(header, text)?);
             }
         }
         let document = Self { entries };
@@ -201,24 +192,6 @@ fn v2_entry(header: &str, text: String) -> Result<Entry, String> {
         id: id.to_string(),
         date: field(date),
         session: field(session),
-        text,
-    })
-}
-
-fn v1_entry(header: &str, text: String) -> Result<Entry, String> {
-    let metadata: serde_json::Value =
-        serde_json::from_str(header).map_err(|error| format!("invalid memory header: {error}"))?;
-    let id = metadata["id"].as_str().ok_or("memory entry has no id")?;
-    Ok(Entry {
-        id: id.to_string(),
-        date: metadata["date_ms"]
-            .as_u64()
-            .map(date_from_ms)
-            .unwrap_or_default(),
-        session: metadata["source"]["session"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
         text,
     })
 }
@@ -306,16 +279,6 @@ mod tests {
             Document::parse("# Gears memory v2\n", 10).unwrap(),
             Document::default()
         );
-        let v1 = "# Gears memory v1\n§ {\"id\":\"old\",\"kind\":\"user\",\"scope\":\"global\",\"source\":{\"session\":\"s0\",\"entries\":[\"e1\"]},\"date_ms\":1792022400000}\nOld fact.\n";
-        assert_eq!(
-            Document::parse(v1, 2200).unwrap().entries,
-            [Entry {
-                id: "old".into(),
-                date: "2026-10-15".into(),
-                session: "s0".into(),
-                text: "Old fact.".into(),
-            }]
-        );
         assert_eq!(
             document.prompt(Target::Workspace),
             "Workspace memory:\n[k7f2] Run `cargo test --offline`;\nthe VM has no network.\n[hand] Written by hand.\n[dated] Dated by hand."
@@ -361,7 +324,7 @@ mod tests {
             "# Gears memory v2\nno § header\n",
             "# Gears memory v2\n§ id 2026-10-15 s1 extra\ntext\n",
             "# Gears memory v2\n§ id\n",
-            "# Gears memory v1\n§ not json\ntext\n",
+            "# Gears memory v1\n§ {\"id\":\"old\"}\nOld fact.\n",
         ] {
             assert!(Document::parse(bad, 2200).is_err(), "{bad:?}");
         }
