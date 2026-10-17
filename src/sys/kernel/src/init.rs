@@ -355,6 +355,8 @@ fn cpu_main(this_cpu: u64) -> ! {
         #[cfg(debug_assertions)]
         crate::mm::user::share_validation_self_test();
         #[cfg(debug_assertions)]
+        crate::mm::user::sparse_lazy_self_test();
+        #[cfg(debug_assertions)]
         crate::arch::paging::retired_tables_self_test();
         crate::uspace::init();
 

@@ -1120,3 +1120,74 @@ pub fn share_validation_self_test() {
     }
     crate::raw_log!("share validation tests PASS");
 }
+
+// Sparse lazy segments: an untouched reservation holds no page descriptors
+// at any size, the first touch creates one, repeated touches keep the data,
+// guard pages and plain reservations still refuse faults, and unmapping
+// gives the accounting and the descriptors back.
+#[cfg(debug_assertions)]
+pub fn sparse_lazy_self_test() {
+    let space = UserAddressSpace::new().unwrap();
+    let descriptors = || space.inner.page_descriptors();
+    let accounted = || space.user_mem_stats().total();
+    let table = space.inner.page_table_ref();
+    let (descriptors_before, accounted_before) = (descriptors(), accounted());
+    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+
+    // 4 GiB, untouched: nothing but the segment node.
+    let lazy = space.alloc_user_lazy(1 << 20).unwrap();
+    assert_eq!(lazy.size, 4 << 30);
+    assert_eq!(descriptors(), descriptors_before);
+    assert_eq!(accounted(), accounted_before + lazy.size);
+    assert_eq!(table.virt_to_phys(lazy.start), None);
+    assert!(space.read_from_user(lazy.start, 1).is_err());
+
+    // The first touch creates the descriptor; a later fault on the same
+    // page takes the concurrent-fault shortcut and keeps the data.
+    let middle = lazy.start + lazy.size / 2;
+    let last = lazy.end() - PAGE_SIZE_SMALL;
+    space.fix_pagefault(lazy.start, 6).unwrap();
+    assert_eq!(descriptors(), descriptors_before + 1);
+    space.copy_to_user(b"first", lazy.start).unwrap();
+    space.fix_pagefault(lazy.start + 100, 6).unwrap();
+    assert_eq!(space.read_from_user(lazy.start, 5).unwrap(), b"first");
+    space.fix_pagefault(middle, 6).unwrap();
+    space.fix_pagefault(last, 4).unwrap();
+    assert_eq!(descriptors(), descriptors_before + 3);
+    assert_eq!(space.read_from_user(last, 1).unwrap(), [0]);
+    assert_eq!(table.virt_to_phys(lazy.start + PAGE_SIZE_SMALL), None);
+
+    // A user stack: its top page is mapped at creation, its guards refuse
+    // faults, and an interior page is created on first touch.
+    let stack = space.alloc_user_stack(14).unwrap();
+    assert_eq!(stack.segment.size, 16 * PAGE_SIZE_SMALL);
+    assert_eq!(descriptors(), descriptors_before + 4);
+    assert_eq!(space.fix_pagefault(stack.segment.start, 6), refused);
+    assert_eq!(space.fix_pagefault(stack.segment.end() - 1, 6), refused);
+    space
+        .fix_pagefault(stack.segment.start + PAGE_SIZE_SMALL, 6)
+        .unwrap();
+    assert_eq!(descriptors(), descriptors_before + 5);
+
+    // A plain reservation is dense and still refuses faults.
+    let plain = space.alloc_user_unmapped(2).unwrap();
+    assert_eq!(descriptors(), descriptors_before + 7);
+    assert_eq!(space.fix_pagefault(plain.start, 6), refused);
+
+    // A quarter of the user region, in one segment.
+    let quarter = space.alloc_user_lazy(1 << 31).unwrap();
+    assert_eq!(quarter.size, 8 << 40);
+    assert_eq!(descriptors(), descriptors_before + 7);
+    space
+        .fix_pagefault(quarter.end() - PAGE_SIZE_SMALL, 6)
+        .unwrap();
+    assert_eq!(descriptors(), descriptors_before + 8);
+
+    space.unmap(quarter.start).unwrap();
+    space.unmap(plain.start).unwrap();
+    space.drop_stacks(&stack, &None);
+    space.unmap(lazy.start).unwrap();
+    assert_eq!(descriptors(), descriptors_before);
+    assert_eq!(accounted(), accounted_before);
+    crate::raw_log!("sparse lazy tests PASS");
+}

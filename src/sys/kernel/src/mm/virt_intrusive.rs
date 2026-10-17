@@ -251,6 +251,12 @@ impl PageAllocator {
     pub(super) fn clear(&self) {
         self.inner.lock(line!()).clear()
     }
+
+    // The descriptors in use, for the self-tests.
+    #[cfg(debug_assertions)]
+    pub(super) fn used_pages(&self) -> u64 {
+        self.inner.lock(line!()).used_page_count
+    }
 }
 
 #[derive(Default)]
@@ -281,8 +287,10 @@ impl VmemSegment {
         }
     }
 
+    // Cleared or never set up. A live sparse segment may hold no pages, so
+    // the tree alone says nothing.
     fn is_empty(&self) -> bool {
-        self.pages.is_empty()
+        self.segment.size == 0 && self.pages.is_empty()
     }
 
     pub(super) fn segment(&self) -> MemorySegment {
@@ -310,7 +318,7 @@ impl VmemSegment {
         assert!(self.segment.contains(vmem_addr));
 
         let Some(page) = self.find_page(vmem_addr) else {
-            return VaddrMapStatus::Unmapped; // An absent file-paged page.
+            return VaddrMapStatus::Unmapped; // An untouched page of a sparse segment.
         };
 
         if let Some(frame) = page.frame.get() {
@@ -336,8 +344,10 @@ impl VmemSegment {
         access: MappingOptions,
     ) -> Result<(SlabArc<Frame>, u64), UserCopyError> {
         let Some(page) = self.find_page(vmem_addr) else {
+            // An untouched page of a sparse segment has the rights it would
+            // be created with.
             if self
-                .mapping_options
+                .page_options_at(vmem_addr)
                 .contains(access | MappingOptions::USER_ACCESSIBLE)
             {
                 return Err(UserCopyError::PageAbsent(vmem_addr));
@@ -398,23 +408,18 @@ impl VmemSegment {
 
         let mut pages = self.pages.take();
         let mut cursor = pages.front_mut();
-        let mut sz = 0;
-
         while let Some(page) = cursor.remove() {
             let page_ptr = UnsafeRef::into_raw(page);
             let page_mut = unsafe { page_ptr.as_mut().unwrap() };
-            // The size is the frame's, so take it before the frame goes. The
-            // frame is freed here, after the TLB flush above: no CPU can
+            // The frame is freed here, after the TLB flush above: no CPU can
             // reach a reused frame through a stale translation.
-            sz += page_mut.size();
             page_mut.frame.take();
             page_mut.clear();
             self.address_space().page_allocator.free_page(page_ptr);
         }
-        // A file-paged segment was accounted in full when it was reserved.
-        if self.mapping_options.contains(MappingOptions::FILE_PAGED) {
-            sz = self.segment.size;
-        }
+        // The segment was accounted in full when it was reserved, whether
+        // its pages were all created, touched later, or never touched.
+        let sz = self.segment.size;
 
         self.segment = MemorySegment::empty_segment();
         self.owner.clear();
@@ -447,8 +452,11 @@ impl VmemSegment {
         assert!(self.segment.size > 0);
         assert!(self.pages.is_empty());
 
-        if self.mapping_options.contains(MappingOptions::FILE_PAGED) {
-            return Ok(()); // Sparse: the pager installs pages on demand.
+        if self.is_sparse() {
+            // A page gets its descriptor with its frame: in the fault path,
+            // or from the pager for a file-paged segment.
+            debug_assert!(!self.mapping_options.contains(MappingOptions::HUGE_ELIGIBLE));
+            return Ok(());
         }
         // Nothing is published yet, so a failed construction rolls the whole
         // segment back here, once; the caller then drops it.
@@ -505,10 +513,11 @@ impl VmemSegment {
         Ok(())
     }
 
-    // One small page at `start`, mapped now unless the options make it lazy
-    // or unmapped.
+    // One small page at `start`, mapped now unless the options leave it
+    // unmapped: a reservation, a guard page.
     fn map_small(&mut self, start: u64, options: MappingOptions) -> Result<(), ErrorCode> {
-        if options.is_empty() || self.mapping_options.contains(MappingOptions::LAZY) {
+        debug_assert!(!options.contains(MappingOptions::LAZY));
+        if options.is_empty() {
             let page = self.new_page(start, options);
             self.pages.insert(unsafe { UnsafeRef::from_raw(page) });
             return Ok(());
@@ -626,6 +635,36 @@ impl VmemSegment {
         self.mapping_options.contains(MappingOptions::FILE_PAGED)
     }
 
+    // A sparse segment has descriptors only for the pages that got a frame.
+    fn is_sparse(&self) -> bool {
+        self.mapping_options
+            .intersects(MappingOptions::LAZY | MappingOptions::FILE_PAGED)
+    }
+
+    // The options a page of this segment is created with: the per-page view
+    // of the segment's, as construction derives it.
+    fn page_options_at(&self, addr: u64) -> MappingOptions {
+        let idx = (addr - self.segment.start) >> PAGE_SIZE_SMALL_LOG2;
+        page_mapping_options(
+            self.mapping_options,
+            idx,
+            self.segment.size >> PAGE_SIZE_SMALL_LOG2,
+        )
+    }
+
+    // The page holding `addr`, created without a frame if the sparse
+    // segment has none there yet.
+    fn find_or_create_page(&mut self, addr: u64) -> &mut Page {
+        if self.find_page(addr).is_none() {
+            debug_assert!(self.is_sparse());
+            let start = addr & !(PAGE_SIZE_SMALL - 1);
+            let options = self.page_options_at(start);
+            let page = self.new_page(start, options);
+            self.pages.insert(unsafe { UnsafeRef::from_raw(page) });
+        }
+        self.find_page_mut(addr).unwrap()
+    }
+
     pub(super) fn fix_pagefault(&mut self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         debug_assert!(self.segment.contains(pf_addr));
 
@@ -672,8 +711,8 @@ impl VmemSegment {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        let page = self.find_page_mut(pf_addr).unwrap();
-        assert!(page.contains(pf_addr));
+        let page = self.find_or_create_page(pf_addr);
+        debug_assert!(page.contains(pf_addr));
 
         if !page.frame.is_null() {
             // Multiple threads page-faulted the same address concurrently.

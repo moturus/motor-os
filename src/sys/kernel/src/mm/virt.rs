@@ -870,6 +870,11 @@ impl UserAddressSpaceBase {
         &self.base.page_table
     }
 
+    #[cfg(debug_assertions)]
+    pub(super) fn page_descriptors(&self) -> u64 {
+        self.base.page_allocator.used_pages()
+    }
+
     pub(super) fn new() -> Result<Self, ErrorCode> {
         #[cfg(debug_assertions)]
         log::debug!("UserAddressSpaceBase::new()");
