@@ -1,6 +1,7 @@
 # Sparse lazy memory
 
-Implementation plan, revised on 2026-10-16 after review and the decisions
+Implemented on 2026-10-17 as the five patches listed below. The plan was
+revised on 2026-10-16 after review and the decisions
 below. This develops option 4 of [lazy-memory.md](lazy-memory.md).
 
 ## Goal and scope

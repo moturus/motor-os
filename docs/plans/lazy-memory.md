@@ -6,6 +6,11 @@ so the cost of a lazy mapping sets how many memories, and how large, a process
 can afford. Nothing under `src/sys` has been changed; this records the
 measured behavior and the options for a later decision.
 
+Resolution, 2026-10-17: option 4 is implemented, see
+[sparse-reservations.md](sparse-reservations.md). A lazy reservation no
+longer creates descriptors at map time; the sections below describe the
+state before that change.
+
 ## How a lazy mapping works today
 
 - `SysMem::map(SELF, F_READABLE | F_WRITABLE | F_LAZY, ...)` allocates no data

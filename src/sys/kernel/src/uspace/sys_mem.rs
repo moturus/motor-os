@@ -41,9 +41,13 @@ fn map_charge(flags: u32, phys_addr: u64, page_size: u64, num_pages: u64) -> u64
         // Device memory comes from outside the small-page pool; only
         // descriptors and page tables are charged.
         (0, num_pages)
-    } else if flags == 0 || (flags & SysMem::F_LAZY) != 0 {
-        // No physical pages yet: each lazy fault is charged when it happens.
+    } else if flags == 0 {
+        // No physical pages: one descriptor per page of the reservation.
         (0, num_pages)
+    } else if (flags & SysMem::F_LAZY) != 0 {
+        // Sparse: no descriptors until first touch, and each fault is
+        // charged when it happens.
+        (0, 0)
     } else if (flags & SysMem::F_SHARE_SELF) != 0 {
         if phys_addr == u64::MAX {
             (num_pages, num_pages.saturating_mul(2)) // Descriptors at both ends.

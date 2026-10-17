@@ -318,11 +318,27 @@ allocating virtual memory never allocates from the heap. `Page` and
 `Frame` and page-table growth.
 
 A `Page`'s kind is derived from its `Frame`; a page without a frame is a
-small lazy or unmapped reservation. Lookup finds the greatest page start not
-above the queried address and checks its kind-sized extent. A segment's
-creation policy (`HUGE_ELIGIBLE`) is stored as an internal bit in its mapping
-options, never inferred from permissions or size, and stripped before any
-hardware PTE is written.
+small guard page or unmapped reservation. Lookup finds the greatest page
+start not above the queried address and checks its kind-sized extent. A
+segment's creation policy (`HUGE_ELIGIBLE`) is stored as an internal bit in
+its mapping options, never inferred from permissions or size, and stripped
+before any hardware PTE is written.
+
+Lazy and file-paged segments are sparse: they hold descriptors only for the
+pages that have received a frame, so an untouched lazy reservation costs one
+segment node whatever its size, and mapping it takes constant time. The
+fault path creates the descriptor on first touch, with the per-page options
+construction would have given it; readers treat a missing descriptor as an
+absent page with those options. Unmapped reservations stay dense, because
+they exist to receive shared frames: every share destination is dense, and
+sharing into a lazy segment is refused. A lazy segment can be a share source
+once every page of the shared range has been touched; a share is validated
+in full before the first destination page changes.
+
+Frame allocation never fails: admission keeps the kernel away from an empty
+pool, and `phys::allocate_frame` panics if it is reached anyway. Eager
+construction rolls a segment back at its boundary when the page table cannot
+grow; nothing else in the mapping paths has an allocation failure branch.
 
 `VmemKind` distinguishes boot, MM slab, MMIO, heap, stack, static, user,
 user-stack and unmapped segments. `VaddrMapStatus` reports unallocated,
@@ -331,8 +347,8 @@ copy-out, pinning and sharing refuse MMIO and frame-less pages.
 
 `PageTable::map_page` zeroes the entire frame before publishing its PTE.
 Clearing a segment unmaps each page by its actual kind, flushes the whole
-segment before dropping frames, and subtracts the sum of page byte sizes,
-not the descriptor count times 4 KiB, from region and process statistics.
+segment before dropping frames, and subtracts the segment size, which is
+what was accounted when it was reserved, from region and process statistics.
 The region lock is held continuously from reservation through mapping or
 rollback for MMIO and contiguous allocation, so a concurrent unmap cannot
 remove or replace the reservation in between.

@@ -39,6 +39,7 @@ mod poll;
 mod pressure;
 mod process_permissions;
 mod rush_caps;
+mod sparse;
 mod spawn_wait_kill;
 mod stats;
 mod stdio;
@@ -1410,6 +1411,10 @@ fn main() {
         admission::test_process_classes();
         return;
     }
+    if args.len() == 2 && args[1] == "sparse-tests" {
+        sparse::run_all_tests();
+        return;
+    }
     if args.len() == 2 && args[1] == "system-caps-tests" {
         spawn_wait_kill::test_system_parent_cannot_grant_unheld();
         fs_permissions::test_write_capability(moto_sys::caps::CAP_SYS);
@@ -1868,6 +1873,7 @@ fn main() {
     test_oom();
     diagnostics::test_vdso_panic_at_floor();
     admission::run_all_tests();
+    sparse::run_all_tests();
     test_nx();
     test_writable_executable_elf_rejected();
     test_oversized_elf_segment_reports_oom();

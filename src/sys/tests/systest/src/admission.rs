@@ -10,7 +10,7 @@ use moto_sys::sys_mem::{PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 /// Concurrent system activity (sys-io, sshd, the logger) moves the pool while
 /// these tests run; allow it this much slack where an exact figure is not the
 /// invariant under test.
-const DRIFT_TOLERANCE_PAGES: u64 = 256; // 1M.
+pub(crate) const DRIFT_TOLERANCE_PAGES: u64 = 256; // 1M.
 
 /// Reads a system-wide kernel metric by name. Metric ids are provider-private,
 /// so nothing here is hardcoded to a number.
@@ -163,7 +163,7 @@ fn assert_reservations_drain() {
 }
 
 /// The guard band held: the pool never came near empty.
-fn assert_floors_held() {
+pub(crate) fn assert_floors_held() {
     let low_water = kernel_metric("mem.small_pages_low_water");
     let sys_io_floor = kernel_metric("mem.sys_io_floor_pages");
     let user_floor = kernel_metric("mem.user_floor_pages");
@@ -330,7 +330,7 @@ fn test_lazy_fault_at_floor() {
 /// of assert_floors_held). So callers allocate nothing between the child's
 /// death and this call, and the pool wait allocates nothing either:
 /// `used_pages` fills a stack struct. The FS probe, which allocates, follows.
-fn assert_recovered(used_before: u64, tolerance: u64, after_what: &str) {
+pub(crate) fn assert_recovered(used_before: u64, tolerance: u64, after_what: &str) {
     const MAX_WAITS: u32 = 300;
     let wait = || std::thread::sleep(std::time::Duration::from_millis(50));
 
