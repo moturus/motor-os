@@ -250,44 +250,37 @@ impl UserAddressSpace {
         other: &UserAddressSpace,
     ) -> Result<(u64, u64), ErrorCode> {
         log::trace!("alloc_user_shared: 0x{vaddr:x}");
-        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
-
-        if other
-            .stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)
-            .is_err()
-        {
+        let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
+        self.stats_user_add(bytes)?;
+        if other.stats_user_add(bytes).is_err() {
             log::debug!("other OOM.");
-            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+            self.stats_user_sub(bytes);
             return Err(moto_rt::E_OUT_OF_MEMORY);
         }
+        // An unmap gives the space's own accounting back.
+        let give_back = |space: &UserAddressSpace, addr: u64| {
+            if space.unmap(addr).is_err() {
+                log::error!("alloc_user_shared: cannot unmap 0x{addr:x}");
+            }
+        };
 
         // Allocate in self.
-        let self_segment = {
-            if vaddr != u64::MAX {
-                match self
-                    .inner
-                    .vmem_allocate_user_fixed(vaddr, num_pages, mapping_options)
-                {
-                    Err(err) => {
-                        self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        other.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        return Err(err);
-                    }
-                    Ok(seg) => seg,
-                }
-            } else {
-                match self.inner.vmem_allocate_pages(
-                    VmemKind::Unmapped, /* not used */
-                    num_pages,
-                    Some(mapping_options),
-                ) {
-                    Err(err) => {
-                        self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        other.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        return Err(err);
-                    }
-                    Ok(seg) => seg,
-                }
+        let self_segment = if vaddr != u64::MAX {
+            self.inner
+                .vmem_allocate_user_fixed(vaddr, num_pages, mapping_options)
+        } else {
+            self.inner.vmem_allocate_pages(
+                VmemKind::Unmapped, /* not used */
+                num_pages,
+                Some(mapping_options),
+            )
+        };
+        let self_segment = match self_segment {
+            Ok(segment) => segment,
+            Err(err) => {
+                self.stats_user_sub(bytes);
+                other.stats_user_sub(bytes);
+                return Err(err);
             }
         };
 
@@ -297,28 +290,29 @@ impl UserAddressSpace {
                 .inner
                 .vmem_allocate_pages(VmemKind::Unmapped, num_pages, None)
             {
+                Ok(segment) => segment,
                 Err(err) => {
-                    self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                    other.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+                    give_back(self, self_segment.start);
+                    other.stats_user_sub(bytes);
                     return Err(err);
                 }
-                Ok(seg) => seg,
             };
 
         let addr_here = self_segment.start;
         let addr_there = other_segment.start;
-
-        self.inner
-            .share_with(
-                addr_here,
-                &other.inner,
-                addr_there,
-                super::MappingOptions::USER_ACCESSIBLE
-                    | super::MappingOptions::READABLE
-                    | super::MappingOptions::WRITABLE
-                    | super::MappingOptions::DONT_ZERO,
-            )
-            .unwrap();
+        if let Err(err) = self.inner.share_with(
+            addr_here,
+            &other.inner,
+            addr_there,
+            super::MappingOptions::USER_ACCESSIBLE
+                | super::MappingOptions::READABLE
+                | super::MappingOptions::WRITABLE
+                | super::MappingOptions::DONT_ZERO,
+        ) {
+            give_back(self, addr_here);
+            give_back(other, addr_there);
+            return Err(err);
+        }
 
         log::trace!("alloc_user_shared ok: 0x{addr_here:x} 0x{addr_there:x}");
         Ok((addr_here, addr_there))
@@ -1190,4 +1184,58 @@ pub fn sparse_lazy_self_test() {
     assert_eq!(descriptors(), descriptors_before);
     assert_eq!(accounted(), accounted_before);
     crate::raw_log!("sparse lazy tests PASS");
+}
+
+// alloc_user_shared cleans up after itself: when the peer cannot reserve
+// the counterpart, the first mapping is unmapped and each charge is
+// reversed exactly once.
+#[cfg(debug_assertions)]
+pub fn shared_alloc_cleanup_self_test() {
+    let space = UserAddressSpace::new().unwrap();
+    let peer = UserAddressSpace::new().unwrap();
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+    let usage = |space: &UserAddressSpace| {
+        (
+            space.total_usage.load(Ordering::Relaxed),
+            space.user_mem_stats().total(),
+            space.inner.page_descriptors(),
+        )
+    };
+    let (space_before, peer_before) = (usage(&space), usage(&peer));
+
+    // Fill the peer's address space with lazy reservations, cheap now,
+    // until a small one no longer fits.
+    let mut held = alloc::vec::Vec::new();
+    let mut pages = 1_u64 << 32;
+    while pages >= 16 {
+        match peer.alloc_user_lazy(pages) {
+            Ok(segment) => held.push(segment.start),
+            Err(_) => pages >>= 1,
+        }
+    }
+    assert!(peer.alloc_user_unmapped(16).is_err());
+
+    // The first refused call may grow kernel slabs that are never given
+    // back; the second must leave the pool exactly where it found it.
+    let peer_full = usage(&peer);
+    let refused = Err(moto_rt::E_OUT_OF_MEMORY);
+    assert_eq!(
+        space.alloc_user_shared(u64::MAX, 16, options, &peer),
+        refused
+    );
+    let free_before = super::phys::available_small_pages();
+    assert_eq!(
+        space.alloc_user_shared(u64::MAX, 16, options, &peer),
+        refused
+    );
+    assert_eq!(usage(&space), space_before);
+    assert_eq!(usage(&peer), peer_full);
+    assert_eq!(super::phys::available_small_pages(), free_before);
+
+    for start in held {
+        peer.unmap(start).unwrap();
+    }
+    assert_eq!(usage(&peer), peer_before);
+    crate::raw_log!("shared alloc cleanup tests PASS");
 }

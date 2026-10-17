@@ -405,7 +405,9 @@ impl VmemRegion {
         }
 
         let Some(start) = start else {
-            log::error!(
+            // A process can exhaust its own address space at will; that is
+            // its error, not a kernel event.
+            log::debug!(
                 "vmem_allocate: have 0x{:x}, in use 0x{:x}, need 0x{:x}: no gap: OOM",
                 self.segment.size,
                 self.bytes_used.load(Ordering::Relaxed),
