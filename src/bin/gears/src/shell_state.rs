@@ -7,7 +7,6 @@ use crate::state::StateRoot;
 
 const PENDING_CWD: &str = "cwd.pending";
 const PENDING_ENV: &str = "env.pending";
-const MAX_EXPORT_BYTES: usize = 4092;
 const MAX_CWD_BYTES: usize = 16 * 1024;
 const MAX_ENV_BYTES: usize = 16 * 1024 * 1024;
 
@@ -90,7 +89,7 @@ fn filter_exports(raw: &str) -> Result<String, String> {
         {
             return Err("invalid exported variable name".to_string());
         }
-        if name != "PATH" && !name.starts_with("GEARS_") && assignment.len() <= MAX_EXPORT_BYTES {
+        if name != "PATH" && !name.starts_with("GEARS_") {
             filtered.push_str(&record);
         }
         record.clear();
@@ -138,10 +137,8 @@ mod tests {
             filter_exports(raw).unwrap(),
             "export KEEP='one\ntwo'\ndeclare -x ALSO=$'a\\nb'\n"
         );
-        assert_eq!(
-            filter_exports(&format!("export BIG='{}'\n", "x".repeat(4093))).unwrap(),
-            ""
-        );
+        let long = format!("export LONG='{}'\n", "x".repeat(9800));
+        assert_eq!(filter_exports(&long).unwrap(), long);
     }
 
     #[test]

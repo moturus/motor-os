@@ -365,16 +365,15 @@ Details:
   Linux and rush on Motor OS. The script loads the saved variables, sets
   `PATH` to a fixed value, enters the saved directory (or the workspace if
   that is gone), runs the command with the model's timeout, and saves `pwd`
-  and `export -p`. It does not save `PATH`, Gears' own variables, or values
-  over 4,092 bytes, which crash rush when set. Its Motor OS description
-  lists the commands Motor OS has and how they differ from GNU: `rg` instead of
-  `grep`, sysbox's `head`, `tail`, `diff`, `find`, `wc`, `cat` and `less`
-  (no `tail -f`), `sed` on the developer image, `gix` instead of `git`, and
-  the sysbox additions. For commands not provided it gives
-  replacements: `awk` → `sed`, `rg -o -r` or `cut`; `touch` → `: > FILE`;
-  `basename`/`dirname` → `${x##*/}`/`${x%/*}`; `tee` → a redirection;
-  `timeout` → the tool's own timeout; `mktemp` → a fixed name under
-  `/user/tmp`.
+  and `export -p`. It does not save `PATH` or Gears' own variables. Its
+  Motor OS description lists the commands Motor OS has and how they differ
+  from GNU: `rg` instead of `grep`, sysbox's `head`, `tail`, `diff`,
+  `find`, `wc`, `cat` and `less` (no `tail -f`), `sed` on the developer
+  image, `gix` instead of `git`, and the sysbox additions. For commands not
+  provided it gives replacements: `awk` → `sed`, `rg -o -r` or `cut`;
+  `touch` → `: > FILE`; `basename`/`dirname` → `${x##*/}`/`${x%/*}`;
+  `tee` → a redirection; `timeout` → the tool's own timeout; `mktemp` → a
+  fixed name under `/user/tmp`.
 - **`check`** runs the argument vector the workspace declares as `check`
   (or `check.motor` / `check.linux`) in `.gears/batteries.toml`, directly,
   never through a shell, and records the outcome. The hook never allows it
