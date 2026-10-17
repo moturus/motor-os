@@ -51,6 +51,7 @@ impl DirectoryLock {
             },
             |pid| format!("Gears directory is locked by process {pid}"),
         )?;
+        confirm_owner(&path)?;
         Ok(Self {
             state,
             path: Some(path),
@@ -92,6 +93,16 @@ impl Drop for DirectoryLock {
 
 fn lock_pid(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Another Gears can replace the file between its creation and the PID write,
+/// so the owner reads it back; the replacement's owner keeps it.
+fn confirm_owner(path: &Path) -> Result<(), String> {
+    match lock_pid(path) {
+        Some(pid) if pid == std::process::id() => Ok(()),
+        Some(pid) => Err(format!("Another gears session {pid} is running. Exiting.")),
+        None => Err("Another gears session is starting. Exiting.".into()),
+    }
 }
 
 /// Create a lock file holding this process id. A file whose owner is gone is
@@ -166,6 +177,25 @@ mod tests {
         let error = DirectoryLock::acquire_at(&root).err().unwrap();
         assert!(error.contains("initialized"), "{error}");
         assert!(root.join("gears.lock").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_lock_rewritten_by_another_gears_belongs_to_it() {
+        let root = std::env::temp_dir().join(format!("gears-replaced-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("gears.lock");
+        std::fs::write(&path, format!("{}\n", std::process::id())).unwrap();
+        confirm_owner(&path).unwrap();
+        std::fs::write(&path, "4242\n").unwrap();
+        assert_eq!(
+            confirm_owner(&path).unwrap_err(),
+            "Another gears session 4242 is running. Exiting."
+        );
+        std::fs::write(&path, "").unwrap();
+        assert!(confirm_owner(&path).unwrap_err().contains("starting"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
         std::fs::remove_dir_all(root).unwrap();
     }
 

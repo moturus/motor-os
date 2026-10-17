@@ -137,6 +137,12 @@ existing session locks have the same publication window. PID reuse also
 means that liveness alone cannot establish that the holder is the original
 Gears process.
 
+Since 2026-10-17 Gears reads `gears.lock` back after writing its PID and
+exits ("Another gears session PID is running. Exiting.") when another Gears
+has replaced the file. That catches a replacement made before the read-back,
+but not one whose remover read the empty record earlier and removes the file
+after it: both Gears then run. Session locks have no read-back.
+
 For now, the lock follows the existing session-lock pattern and treats a
 fresh or unreadable lock conservatively. Revisit a portable way to publish
 and claim the owner atomically on Linux and Motor OS, including crash
