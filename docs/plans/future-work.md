@@ -130,14 +130,14 @@ user-class process that allocates during these tests.
 
 ## Atomic publication of the Gears directory lock (2026-10-02)
 
-Gears' planned `gears.lock` uses exclusive file creation, then writes its
+Gears' `gears.lock` uses exclusive file creation, then writes its
 PID. Another Gears can see the new file before the PID is written, mistake
 the empty record for a stale lock, remove it, and start concurrently. The
 existing session locks have the same publication window. PID reuse also
 means that liveness alone cannot establish that the holder is the original
 Gears process.
 
-For now, phase 1.5 follows the existing session-lock pattern and treats a
+For now, the lock follows the existing session-lock pattern and treats a
 fresh or unreadable lock conservatively. Revisit a portable way to publish
 and claim the owner atomically on Linux and Motor OS, including crash
 recovery and identity checks. Add a concurrent-start regression on both

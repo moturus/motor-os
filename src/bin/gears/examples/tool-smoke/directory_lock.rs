@@ -54,6 +54,7 @@ fn check(gears: &Path, root: &Path) -> Result<(), String> {
             .arg(root)
             .args(["--ephemeral", "--ui", "line"])
             .env("HOME", root)
+            .env(gears::directory::ENV, root.join(".gears"))
             .env_remove("GEARS_LOCK_OWNER")
             .env_remove(gears::provider::KEY_ENV);
         command
@@ -106,10 +107,7 @@ fn check(gears: &Path, root: &Path) -> Result<(), String> {
         .join()
         .map_err(|_| "prompt reader panicked")?
         .map_err(|error| error.to_string())?;
-    #[cfg(unix)]
     let lock = root.join(".gears/gears.lock");
-    #[cfg(not(unix))]
-    let lock = Path::new("/user/cfg/gears/gears.lock").to_path_buf();
     if lock.exists() {
         return Err(format!("closed Gears left its lock: {}", lock.display()));
     }

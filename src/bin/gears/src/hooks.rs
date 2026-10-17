@@ -898,15 +898,26 @@ fn validate_result_fields(event: &str, value: &Value) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// Removes a test's fixture directory when the test ends.
     #[cfg(unix)]
-    fn fixture(name: &str) -> (PathBuf, Session) {
+    struct Root(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    fn fixture(name: &str) -> (Root, PathBuf, Session) {
         let root = std::env::temp_dir().join(format!("gears-hooks-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let store = crate::session::Store::with_root(&workspace, root.join("state")).unwrap();
         let session = store.create(true, None).unwrap();
-        (workspace, session)
+        (Root(root), workspace, session)
     }
 
     #[cfg(unix)]
@@ -972,7 +983,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn questions_route_answers_and_hints_without_accepting_unknown_values() {
-        let (workspace, mut session) = fixture("question-answer");
+        let (_root, workspace, mut session) = fixture("question-answer");
         let log = workspace.join("answer.json");
         let config = HookConfig {
             name: "owner".into(), events: Some(vec!["initialize".into(), "answer".into()]),
@@ -1114,7 +1125,7 @@ mod tests {
                 "subscribe",
             ),
         ] {
-            let (workspace, mut session) = fixture(&format!("commands-{case}"));
+            let (_root, workspace, mut session) = fixture(&format!("commands-{case}"));
             let mut config = hook(
                 "fixture",
                 &format!("cat >/dev/null; printf '%s' '{{\"commands\":{commands}}}'"),
@@ -1161,7 +1172,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn transforms_are_ordered_and_state_is_durable() {
-        let (workspace, mut session) = fixture("ordered");
+        let (_root, workspace, mut session) = fixture("ordered");
         let first = hook(
             "first",
             r#"event=$(cat)
@@ -1212,7 +1223,7 @@ esac"#,
     #[cfg(unix)]
     #[test]
     fn duplicate_registered_tools_are_rejected() {
-        let (workspace, mut session) = fixture("duplicate-tool");
+        let (_root, workspace, mut session) = fixture("duplicate-tool");
         let script = r#"cat >/dev/null
 printf '%s' '{"tools":[{"name":"same","description":"test","parameters":{"type":"object"}}]}'"#;
         let result = Manager::initialize(
@@ -1228,7 +1239,7 @@ printf '%s' '{"tools":[{"name":"same","description":"test","parameters":{"type":
             &mut |_| {},
         );
         assert!(matches!(result, Err(error) if error.contains("duplicate tool name")));
-        let (workspace, mut session) = fixture("reserved-tool");
+        let (_root, workspace, mut session) = fixture("reserved-tool");
         let result = Manager::initialize(
             vec![hook("one", script, std::time::Duration::from_secs(2))],
             workspace,
@@ -1244,7 +1255,7 @@ printf '%s' '{"tools":[{"name":"same","description":"test","parameters":{"type":
     #[cfg(unix)]
     #[test]
     fn permission_denial_wins_over_allow() {
-        let (workspace, mut session) = fixture("permission-order");
+        let (_root, workspace, mut session) = fixture("permission-order");
         let permission_hook = |name, decision| {
             hook(
                 name,
@@ -1298,7 +1309,7 @@ esac"#
                 cancellation
             }),
         ] {
-            let (workspace, mut session) = fixture(name);
+            let (_root, workspace, mut session) = fixture(name);
             let script = format!(
                 r#"event=$(cat)
 case "$event" in
@@ -1341,7 +1352,7 @@ esac"#
     #[cfg(unix)]
     #[test]
     fn only_subscribed_events_start_the_hook() {
-        let (workspace, mut session) = fixture("event-filter");
+        let (_root, workspace, mut session) = fixture("event-filter");
         let log = workspace.join("events");
         let script = format!(
             "cat >> '{}'; printf '\\n' >> '{}'; printf '{{\"decision\":\"allow\"}}'",
@@ -1415,7 +1426,7 @@ esac"#
     #[test]
     fn before_stop_messages_are_bounded_without_truncation() {
         for bytes in [4096, 4097] {
-            let (workspace, mut session) = fixture(&format!("stop-note-{bytes}"));
+            let (_root, workspace, mut session) = fixture(&format!("stop-note-{bytes}"));
             let message = "x".repeat(bytes);
             let response = serde_json::json!({"message": message}).to_string();
             let mut config = hook(
@@ -1459,7 +1470,7 @@ esac"#
     #[cfg(unix)]
     #[test]
     fn repeated_setup_replaces_registrations_and_preserves_the_previous_manager_on_failure() {
-        let (workspace, mut session) = fixture("setup-again");
+        let (_root, workspace, mut session) = fixture("setup-again");
         let response = workspace.join("response.json");
         std::fs::write(&response, r#"{"prompt_fragments":["first"]}"#).unwrap();
         let script = format!("cat >/dev/null; cat '{}'", response.display());

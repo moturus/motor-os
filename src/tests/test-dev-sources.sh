@@ -290,6 +290,10 @@ for package in red gears; do
     fail "developer image cannot natively build /devtools/src/$package"
   expect_nested_guest_mode "/devtools/src/motor-os/bin/$package/target/lorry/debug/build" \
     build-script-build -rwxr-xr-- "Cargo-uplifted $package build scripts"
+  if [ "$package" = gears ]; then
+    vm_ssh "cd /devtools/src/motor-os/bin/gears && /devtools/bin/lorry test" ||
+      fail "developer image cannot natively test /devtools/src/motor-os/bin/gears"
+  fi
   vm_ssh "/system/bin/rm -r /devtools/src/motor-os/bin/$package/target"
 done
 vm_ssh "[ -n \"\$(/system/bin/find /devtools/lorry/user/vendor/objects -type f)\" ]" ||

@@ -121,12 +121,12 @@ description. Gears labels each addition with its hook name and shows the
 same detail in the permission event and prompt. The combined additions
 are limited to 16 KiB; empty text, NULs or an oversized addition deny the
 call. The decision rules and saved-denial precedence are unchanged.
-Registered commands use `{"name":"review","help":"Review the last turn"}`.
+Registered commands use `{"name":"tasks","help":"Show the task list"}`.
 Names are 1–64 ASCII letters, digits, underscores or hyphens, without `/`;
 help is a nonempty line of at most 256 bytes. Built-in names and duplicate
 registrations are rejected. Setup replaces command registrations along with
 tools and prompt fragments. A registering hook must receive `command` events.
-Both UIs list commands in `/help` and send `{"name":"review","argument":"focus text"}`
+Both UIs list commands in `/help` and send `{"name":"tasks","argument":"argument text"}`
 only to the owning hook. The command is not sent to the model. Common result
 fields apply; a successful interactive command also starts the after-turn
 command, when configured.

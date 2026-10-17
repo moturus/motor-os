@@ -97,7 +97,13 @@ fn check(gears: &Path, sh_directory: &Path, root: &Path) -> Result<(), String> {
                 stdin: None,
                 timeout: Duration::from_secs(10),
                 max_output_bytes: 65536,
-                env: vec![("HOME".into(), workspace.display().to_string())],
+                env: vec![
+                    ("HOME".into(), workspace.display().to_string()),
+                    (
+                        gears::directory::ENV.into(),
+                        workspace.join(".gears").display().to_string(),
+                    ),
+                ],
                 remove_env: vec![gears::provider::KEY_ENV.into()],
             },
             &cancellation,

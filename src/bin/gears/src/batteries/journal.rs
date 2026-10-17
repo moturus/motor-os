@@ -8,15 +8,9 @@ use crate::state::StateRoot;
 
 use serde::Serialize;
 
-use crate::batteries::paths::ToolContext;
-
 const MAX_LINE: usize = 1024 * 1024;
 
-pub fn append(context: &ToolContext, name: &str, value: &impl Serialize) -> Result<(), String> {
-    append_at(&context.state, &context.data_file(name)?, value)
-}
-
-/// Append to a checked state path, shared by turn records and decision history.
+/// Append to a checked state path, such as the decision history.
 pub fn append_at(root: &StateRoot, path: &Path, value: &impl Serialize) -> Result<(), String> {
     let relative = path
         .strip_prefix(root.path())
@@ -131,16 +125,9 @@ mod tests {
     #[test]
     fn crash_tail_recovery_keeps_complete_records_and_utf8() {
         let root = std::env::temp_dir().join(format!("batteries-journal-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("workspace")).unwrap();
-        let context = ToolContext::new(
-            root.join("workspace"),
-            root.join("state"),
-            "s1".into(),
-            None,
-        )
-        .unwrap();
-        append(&context, "turns.jsonl", &json!({"version": 1, "turn": 1})).unwrap();
-        let path = context.data_file("turns.jsonl").unwrap();
+        let state = StateRoot::new(root.clone()).unwrap();
+        let path = state.file(Path::new("batteries/records.jsonl")).unwrap();
+        append_at(&state, &path, &json!({"version": 1, "turn": 1})).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -155,12 +142,7 @@ mod tests {
             .unwrap()
             .write_all(b"{\"partial\":")
             .unwrap();
-        append(
-            &context,
-            "turns.jsonl",
-            &json!({"version": 1, "text": "🦀"}),
-        )
-        .unwrap();
+        append_at(&state, &path, &json!({"version": 1, "text": "🦀"})).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<serde_json::Value> = text
             .lines()
@@ -175,7 +157,7 @@ mod tests {
         );
         assert!(text.ends_with('\n'));
         std::fs::write(&path, "unfinished first line").unwrap();
-        append(&context, "turns.jsonl", &json!({"version": 1})).unwrap();
+        append_at(&state, &path, &json!({"version": 1})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"version\":1}\n");
         std::fs::remove_dir_all(root).unwrap();
     }

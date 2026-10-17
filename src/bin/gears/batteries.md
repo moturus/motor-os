@@ -49,12 +49,13 @@ through their PATH. A system-installed `rg` is not required for this gate.
 preparation phase invokes it before timing the suite. Direct `cargo test`
 and ordinary Linux use still need `rg` on PATH.
 
-The release developer-image gate exercises the installed binary and rebuilds
-the packaged source with Lorry. The portable workflow fixture uses a scripted
-provider to drive real file tools, a Rust compiler check, task branching, the
-bounded missing-check reminder, the memory question, frozen prompts, memory
-files in both formats, the `history` and `status` commands and skill loading.
-The host and native workflow tests make no provider or Internet requests.
+The release developer-image gate exercises the installed binary, and Lorry
+rebuilds the packaged source and runs its tests natively. The portable
+workflow fixture uses a scripted provider to drive real file tools, a Rust
+compiler check, task branching, the bounded missing-check reminder, the
+memory question, frozen prompts, memory files in both formats, the
+`history` and `status` commands and skill loading. The host and native
+workflow tests make no provider or Internet requests.
 
 ## The check
 

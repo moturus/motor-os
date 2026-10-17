@@ -1,12 +1,12 @@
 # Gears batteries: design and implementation plan
 
-Status (2026-10-15): the batteries are being simplified. The background
-reviewer, the queue of proposals, agent-written skills, the turn records
-and the evaluation harness are removed; what stays is the everyday agent
-and a memory the user controls one entry at a time. "Implementation steps"
-lists the patches and "What remains" what is left after them. Phases 0–9
-of the previous plan were implemented and gated before this change; that
-plan is in git history (commit `34c3a012`).
+Status (2026-10-16): the batteries were simplified on 2026-10-15 (commit
+`d9921bb2`). The background reviewer, the queue of proposals, agent-written
+skills, the turn records and the evaluation harness are gone; what stays is
+the everyday agent and a memory the user controls one entry at a time.
+"What remains" lists the open items. Phases 0–9 of the previous plan were
+implemented and gated before this change; that plan is in git history
+(commit `34c3a012`).
 
 ## Purpose and scope
 
@@ -608,55 +608,32 @@ and the lack of unattended approval are the first questions it must answer.
   `test-gears-batteries.sh`. Only `full-test-dev.sh` includes the
   Gears/batteries host and native test gates; its developer-source phase
   runs `test-gears-http-vm.sh` and `test-gears-batteries-vm.sh` in its
-  owned VM. `full-test.sh` has no Gears-specific steps. Gears and the
-  batteries are non-core components: their gate is these tests plus
-  `full-test-dev.sh --release`.
+  owned VM, then builds the packaged source and runs `lorry test` there.
+  Tests that start Gears select a temporary Gears directory with
+  `GEARS_DIRECTORY`, never the user's own. `full-test.sh` has no
+  Gears-specific steps. Gears and the batteries are non-core components:
+  their gate is these tests plus `full-test-dev.sh --release`.
 - Real-model sessions are user-run, outside `full-test`.
 
-## Implementation steps
+## Implementation
 
-Each step leaves a building, tested Gears; steps are patches of deletions
-with the small code that replaces them. Steps 2 and 3 must go in that order
-(the harness uses review code); the rest follow.
-
-1. This document.
-2. Remove the evaluation harness: the `eval_*` modules, the `eval` role,
-   the eval policy in `policy.rs`, Gears' `--gears-dir` flag (added for the
-   harness only), the `last_eval` status field, and the harness fixtures
-   in `workflow-smoke`.
-3. Remove reviews: the `review_*` modules, the `review` role, review marks
-   and the resume question, the `before_compact` and `command`
-   subscriptions, the `run_kind` policy, the review settings in
-   `batteries.toml`, the after-turn command in the shipped configuration,
-   and the review fixtures and tests.
-4. Remove `/accept`, the turn records (`turns.rs`) and the skill
-   observation, load log and usage modules; the memory tool and
-   `skill_view` stop needing a calling entry id.
-5. Replace the queue: the memory question keeps its proposal in the hook
-   state and offers yes or no; `pending.rs`, `pending_files.rs`,
-   `memory_sources.rs`, `workspace_memory.rs` and the `pending` and
-   `cleanup` commands go; `changes.jsonl` gets its `v2` records and the
-   reader skips unreadable lines.
-6. Skills: remove `skill_manage`, `skill_pending`, `skill_archive`,
-   `skill_cleanup`, `skill_store`'s approvals and `skill_snapshot`; the
-   catalog is read from disk; the loaded names live in hook state.
-7. Memory `v2`: the entry format, the `v1` reader, the snapshot without
-   memory reconciliation (`memory_snapshot.rs` and `memory_context.rs`
-   go), the `offer_lessons` setting with its instruction and declines, and
-   the reshaped `history` and `status`.
-8. Documents (`batteries.md`, `batteries-tools.md`, `README.md`,
-   `hook-protocol.md` examples), the shipped configuration and the test
-   scripts; then the full gates.
+The simplification landed as one change (commit `d9921bb2`) and passed
+`full-test-dev.sh --release`. It removed the evaluation harness with Gears'
+`--gears-dir` flag, reviews and their marks, `/accept`, the turn records,
+the proposal queue with the `pending` and `cleanup` commands, agent-written
+skills and the workspace-memory approval by hash. It added memory format
+`v2`, the yes/no question kept in hook state, `v2` records in
+`changes.jsonl`, the `offer_lessons` setting and the reshaped `history`
+and `status` commands.
 
 ## What remains
 
 | Work | Status and next step |
 | --- | --- |
-| Steps 2–8 above | In progress. |
 | Hands-on validation | Finish the Linux and Motor OS interactive checklist: tool enablement, approvals, revocation, resume, screen rendering and the memory question in both UIs. No live local-model result has been reported. |
 | Gears-side leftovers | `preserve_prefix`/`prefix_state` in the hook protocol, `--hook-state` and the after-turn command were added for reviews and are now unused by the batteries. They are generic Gears features; the user decides whether they stay. |
-| Native `lorry test` of gears | `shipped_tools::nested_work` and `startup_forks` fail natively (2026-10-14), root cause not found; no gate runs native `lorry test` on gears. |
 | Optional `/remember TEXT` | A hook command that writes the user's own words into memory with no model call. Not built; add it if the question flow proves tedious. |
+| Shell state of killed runs | An ephemeral session keeps its `sh` state in `/tmp/gears-sh-*`. A killed Gears cannot remove it, and startup cleanup covers only the Gears directory, so each kill leaves an empty directory behind (two tests kill Gears on purpose). Keeping that state under the Gears directory would let startup remove it. |
 
 ## Decisions
 

@@ -42,7 +42,7 @@ pub fn decide(event: &Event, context: &ToolContext) -> Result<Decision, String> 
         return Err("tool arguments must be an object".into());
     }
     match call.name.as_str() {
-        "todo" | "session_search" | "skill_view" | "memory" | "skill_manage" => Ok(Decision::Allow),
+        "todo" | "session_search" | "skill_view" | "memory" => Ok(Decision::Allow),
         "read_file" | "search_files" => {
             let input = arguments["path"]
                 .as_str()

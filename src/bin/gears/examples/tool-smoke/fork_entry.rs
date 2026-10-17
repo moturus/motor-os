@@ -11,15 +11,13 @@ use gears::session::{Compaction, HookState, RequestPrefix, Store};
 pub fn smoke(gears: &Path) -> Result<(), String> {
     let root = std::env::temp_dir().join(format!("gears-fork-entry-{}", std::process::id()));
     std::fs::create_dir(&root).map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    let state = root.join(".gears/sessions");
-    #[cfg(not(unix))]
-    let state = std::path::PathBuf::from("/user/cfg/gears/sessions");
-    let store = Store::with_root(&root, state)?;
+    // The children use this directory instead of the user's Gears directory.
+    let directory = root.join(".gears");
+    let store = Store::with_root(&root, directory.join("sessions"))?;
     let mut parent = store.create(false, None)?;
     parent.append_hook_state(&HookState {
         hook: "fixture".into(),
-        state: serde_json::json!({"run_kind":"executor", "retained":"source", "resource":"original"}),
+        state: serde_json::json!({"role":"parent", "retained":"source", "resource":"original"}),
         context: None,
     })?;
     parent.append_hook_state(&HookState {
@@ -33,7 +31,7 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
     })?;
     parent.append_hook_state(&HookState {
         hook: "fixture".into(),
-        state: serde_json::json!({"run_kind":"executor", "retained":"current", "resource":"changed"}),
+        state: serde_json::json!({"role":"parent", "retained":"current", "resource":"changed"}),
         context: None,
     })?;
     parent.append_message(&Message::user("Saved original task"))?;
@@ -76,7 +74,13 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
         stdin: Some(b"/session\n/quit\n".to_vec()),
         timeout: Duration::from_secs(10),
         max_output_bytes: 65536,
-        env: vec![("HOME".into(), root.display().to_string())],
+        env: vec![
+            ("HOME".into(), root.display().to_string()),
+            (
+                gears::directory::ENV.into(),
+                directory.display().to_string(),
+            ),
+        ],
         remove_env: vec![gears::provider::KEY_ENV.into()],
     };
     let output =
@@ -108,11 +112,11 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
     std::fs::write(&config, text).map_err(|error| error.to_string())?;
     request.args.extend([
         "-p".into(),
-        "Review saved task".into(),
+        "Continue the saved task".into(),
         "--output".into(),
         "jsonl".into(),
         "--hook-state".into(),
-        r#"fixture={"run_kind":"review","review_run":{"mark":"test"}}"#.into(),
+        r#"fixture={"role":"child","child_run":{"mark":"test"}}"#.into(),
     ]);
     let output =
         run(&request, &Cancellation::new(), &mut |_, _| {}).map_err(|error| error.to_string())?;
@@ -120,12 +124,12 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
     let event: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&event_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
-    assert_eq!(event["session"]["state"]["run_kind"], "review");
-    assert_eq!(event["session"]["state"]["review_run"]["mark"], "test");
+    assert_eq!(event["session"]["state"]["role"], "child");
+    assert_eq!(event["session"]["state"]["child_run"]["mark"], "test");
     assert_eq!(event["session"]["state"]["retained"], "current");
     assert_eq!(event["payload"]["preserve_prefix"], true);
     assert_eq!(event["payload"]["prefix_state"]["resource"], "original");
-    assert_eq!(event["payload"]["prefix_state"]["run_kind"], "executor");
+    assert_eq!(event["payload"]["prefix_state"]["role"], "parent");
     assert!(event["payload"].get("prefix_hook_states").is_none());
     assert!(!event["payload"].to_string().contains("other hook"));
     assert_ne!(event["session"]["id"], parent.id());
@@ -151,8 +155,6 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
     );
     parent.append_message(&Message::assistant("Parent continued"))?;
     drop(parent);
-    #[cfg(not(unix))]
-    std::fs::remove_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
     std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
     println!("gears CLI saved-entry fork ALL PASS");
     Ok(())
