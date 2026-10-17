@@ -796,3 +796,19 @@ Do not raise them again.
 - vsock credit on undecodable headers (finding 14). No credit stall was shown.
   Credit advertisements are cumulative, and malformed headers must not become
   trusted credit input.
+
+## P2: Shrinking descriptor pools (2026-10-17)
+
+Each address space keeps its page-descriptor slabs until teardown. Unmapping
+returns descriptors to its free list, but even a completely unused slab
+stays allocated. Sparse lazy reservations avoid descriptors for untouched
+pages; a long-running process that temporarily touches many pages still
+retains the descriptor pool from that peak.
+
+Return completely unused descriptor slabs to the physical allocator while
+preserving live descriptors and safe reuse under the existing allocator
+lock. Keep reclamation simple and avoid adding boot-time work. Validate
+repeated touch/unmap cycles and concurrent faults inside Motor OS, including
+slab boundaries, and check that reclamation does not regress allocation
+performance. This reclaims kernel bookkeeping memory, independently of
+reserved-versus-resident process statistics.
