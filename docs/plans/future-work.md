@@ -128,27 +128,20 @@ user-class process that allocates during these tests.
 1. double-copy during process spawn
 2. process text not shared across process copies
 
-## Atomic publication of the Gears directory lock (2026-10-02)
+## Atomic publication of session locks (2026-10-02)
 
-Gears' `gears.lock` uses exclusive file creation, then writes its
-PID. Another Gears can see the new file before the PID is written, mistake
-the empty record for a stale lock, remove it, and start concurrently. The
-existing session locks have the same publication window. PID reuse also
-means that liveness alone cannot establish that the holder is the original
-Gears process.
+A saved session's `.jsonl.lock` uses exclusive file creation, then writes
+its PID. Another Gears can see the new file before the PID is written,
+mistake the empty record for a stale lock, remove it, and open the session
+concurrently. PID reuse also means that liveness alone cannot establish that
+the holder is the original Gears process.
 
-Since 2026-10-17 Gears reads `gears.lock` back after writing its PID and
-exits ("Another gears session PID is running. Exiting.") when another Gears
-has replaced the file. That catches a replacement made before the read-back,
-but not one whose remover read the empty record earlier and removes the file
-after it: both Gears then run. Session locks have no read-back.
-
-For now, the lock follows the existing session-lock pattern and treats a
-fresh or unreadable lock conservatively. Revisit a portable way to publish
-and claim the owner atomically on Linux and Motor OS, including crash
-recovery and identity checks. Add a concurrent-start regression on both
-systems before claiming strict single-instance enforcement. Do not add boot
-work or a lock service solely for this.
+The Gears directory lock had the same race until 2026-10-17; it now holds an
+exclusive file lock (`File::try_lock`: `flock` on Linux, a sys-io lock on
+Motor OS) on `gears.lock` for the whole run and never removes the file, so
+the system releases it when Gears exits or is killed. Session locks can use
+the same approach. Until then they treat a fresh or unreadable lock
+conservatively. Do not add boot work or a lock service for this.
 
 ## FS block cache at RAM/16 (2026-10-01)
 

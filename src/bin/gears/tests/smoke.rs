@@ -263,13 +263,12 @@ fn a_second_gears_is_refused_while_the_first_holds_the_directory_lock() {
         .output()
         .unwrap();
     assert!(!second.status.success());
-    assert!(
-        String::from_utf8_lossy(&second.stderr)
-            .contains(&format!("locked by process {}", first.id()))
-    );
+    assert!(String::from_utf8_lossy(&second.stderr).contains(&format!(
+        "Another gears session {} is running. Exiting.",
+        first.id()
+    )));
     first.stdin.take().unwrap().write_all(b"/quit\n").unwrap();
     assert!(first.wait().unwrap().success());
-    assert!(!root.join(".gears/gears.lock").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -302,7 +301,6 @@ fn one_shot_streams_from_the_hermetic_backend() {
             .contains("hello mock")
     );
     assert_eq!(server.requests().len(), 1);
-    assert!(!root.join(".gears/gears.lock").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 

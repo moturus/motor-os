@@ -151,14 +151,12 @@ keeps the latest 1 MiB of display text; Page Up and Page Down scroll it.
 Displaying history does not rerun tools or request a model response.
 One-shot text and JSONL output contain only the new run's output.
 
-Gears also locks its user directory for the lifetime of the run. A second
-independent Gears is refused; nested runs share their checked ancestor's lock.
-After writing its PID, Gears reads the lock back and exits with "Another gears
-session PID is running. Exiting." if another Gears replaced it meanwhile.
-Stale locks are replaced when their owner is gone or identified as another
-program. Motor OS exposes a short command name rather than an executable
-identity, so a live owner with a truncated or unreadable name keeps its lock
-until it exits.
+Gears also locks its user directory for the lifetime of the run: it holds an
+exclusive file lock on `gears.lock` (`flock` on Linux, a sys-io file lock on
+Motor OS), which the system releases when Gears exits or is killed. A second
+independent Gears exits with "Another gears session PID is running.
+Exiting."; nested runs share their checked ancestor's lock. The file stays in
+the Gears directory; the PID in it only names the current owner.
 
 Library callers can use `session::read_snapshot(path)` or `Store::read(id)`
 while the owning process writes. The immutable snapshot includes the usable

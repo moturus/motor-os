@@ -51,7 +51,8 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
     assert!(output.stderr.contains("tools.toml"), "{output:?}");
     assert!(server.requests().is_empty());
     assert!(!marker.exists());
-    assert!(!selected.join("gears.lock").exists());
+    // The lock file stays; the next run starting shows the lock was released.
+    assert!(selected.join("gears.lock").is_file());
     std::fs::remove_file(selected.join("tools.toml")).map_err(|e| e.to_string())?;
     let output = run(&request, &Cancellation::new(), &mut |_, _| {}).map_err(|e| e.to_string())?;
     assert!(output.success(), "{output:?}");
@@ -61,7 +62,7 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
     assert_eq!(body["model"], "isolated-model");
     let store = Store::with_root(&workspace, selected.join("sessions"))?;
     assert!(!store.list()?.is_empty());
-    assert!(!selected.join("gears.lock").exists());
+    assert!(selected.join("gears.lock").is_file());
     // Bad directory selections fail before any provider request or state creation.
     for directory in ["", "relative"] {
         request.env[0].1 = directory.into();

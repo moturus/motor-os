@@ -1,8 +1,8 @@
 //! One Gears owner per user-state directory.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use crate::platform;
@@ -11,9 +11,13 @@ use crate::state::StateRoot;
 const OWNER_ENV: &str = "GEARS_LOCK_OWNER";
 const INCOMPLETE_GRACE: Duration = Duration::from_secs(2);
 
+/// The owner holds an exclusive lock on `gears.lock` for the whole run. The
+/// system drops the lock when the owner exits or is killed, so no file is ever
+/// judged stale or removed; the PID inside only names the owner.
 pub struct DirectoryLock {
     state: StateRoot,
-    path: Option<PathBuf>,
+    /// The locked file; `None` in a nested Gears that shares its ancestor's lock.
+    file: Option<File>,
     owner: u32,
 }
 
@@ -38,30 +42,44 @@ impl DirectoryLock {
             }
             return Ok(Self {
                 state,
-                path: None,
+                file: None,
                 owner,
             });
         }
-        create_pid_file(
-            &path,
-            |pid| {
-                pid != std::process::id()
-                    && platform::process_alive(pid)
-                    && platform::process_is_gears(pid)
-            },
-            |pid| format!("Gears directory is locked by process {pid}"),
-        )?;
-        confirm_owner(&path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| format!("cannot lock {}: {error}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(match lock_pid(&path) {
+                    Some(pid) => format!("Another gears session {pid} is running. Exiting."),
+                    None => "Another gears session is running. Exiting.".into(),
+                });
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(format!("cannot lock {}: {error}", path.display()));
+            }
+        }
+        let owner = std::process::id();
+        file.set_len(0)
+            .and_then(|()| writeln!(file, "{owner}"))
+            .and_then(|()| file.sync_data())
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(Self {
             state,
-            path: Some(path),
-            owner: std::process::id(),
+            file: Some(file),
+            owner,
         })
     }
 
     /// Only the lock's owner cleans up; a nested Gears shares a live directory.
     pub fn cleanup_temporaries(&self) -> Result<usize, String> {
-        if self.path.is_none() {
+        if self.file.is_none() {
             return Ok(0);
         }
         Ok(self.state.cleanup_temporary_files()?
@@ -75,34 +93,14 @@ impl DirectoryLock {
     /// # Safety
     /// Call only while process startup is single-threaded.
     pub unsafe fn export_owner(&self) {
-        if self.path.is_some() {
+        if self.file.is_some() {
             unsafe { std::env::set_var(OWNER_ENV, self.owner.to_string()) };
-        }
-    }
-}
-
-impl Drop for DirectoryLock {
-    fn drop(&mut self) {
-        if let Some(path) = &self.path
-            && lock_pid(path) == Some(self.owner)
-        {
-            let _ = std::fs::remove_file(path);
         }
     }
 }
 
 fn lock_pid(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-/// Another Gears can replace the file between its creation and the PID write,
-/// so the owner reads it back; the replacement's owner keeps it.
-fn confirm_owner(path: &Path) -> Result<(), String> {
-    match lock_pid(path) {
-        Some(pid) if pid == std::process::id() => Ok(()),
-        Some(pid) => Err(format!("Another gears session {pid} is running. Exiting.")),
-        None => Err("Another gears session is starting. Exiting.".into()),
-    }
 }
 
 /// Create a lock file holding this process id. A file whose owner is gone is
@@ -156,46 +154,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replaces_a_stale_pid_and_removes_its_own_lock() {
+    fn a_held_lock_refuses_another_owner_and_its_file_stays_for_the_next() {
         let root = std::env::temp_dir().join(format!("gears-run-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("gears.lock"), "0\n").unwrap();
-        let lock = DirectoryLock::acquire_at(&root).unwrap();
-        assert_eq!(lock_pid(&root.join("gears.lock")), Some(std::process::id()));
-        drop(lock);
-        assert!(!root.join("gears.lock").exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn a_fresh_incomplete_lock_is_not_removed() {
-        let root = std::env::temp_dir().join(format!("gears-empty-lock-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("gears.lock"), "").unwrap();
-        let error = DirectoryLock::acquire_at(&root).err().unwrap();
-        assert!(error.contains("initialized"), "{error}");
-        assert!(root.join("gears.lock").exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn a_lock_rewritten_by_another_gears_belongs_to_it() {
-        let root = std::env::temp_dir().join(format!("gears-replaced-lock-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
         let path = root.join("gears.lock");
-        std::fs::write(&path, format!("{}\n", std::process::id())).unwrap();
-        confirm_owner(&path).unwrap();
+        // A PID left by an earlier owner does not matter; only the lock does.
         std::fs::write(&path, "4242\n").unwrap();
+        let lock = DirectoryLock::acquire_at(&root).unwrap();
+        assert_eq!(lock_pid(&path), Some(std::process::id()));
         assert_eq!(
-            confirm_owner(&path).unwrap_err(),
-            "Another gears session 4242 is running. Exiting."
+            DirectoryLock::acquire_at(&root).err().unwrap(),
+            format!(
+                "Another gears session {} is running. Exiting.",
+                std::process::id()
+            )
         );
-        std::fs::write(&path, "").unwrap();
-        assert!(confirm_owner(&path).unwrap_err().contains("starting"));
-        assert_eq!(std::fs::read(&path).unwrap(), b"");
+        drop(lock);
+        assert!(path.is_file());
+        DirectoryLock::acquire_at(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exactly_one_of_concurrent_starts_gets_the_lock() {
+        let root = std::env::temp_dir().join(format!("gears-lock-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        let winners = std::thread::scope(|scope| {
+            let attempts = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        let lock = DirectoryLock::acquire_at(&root);
+                        // Hold any lock until every thread has tried.
+                        barrier.wait();
+                        lock.is_ok()
+                    })
+                })
+                .collect::<Vec<_>>();
+            attempts
+                .into_iter()
+                .map(|attempt| attempt.join().unwrap())
+                .filter(|won| *won)
+                .count()
+        });
+        assert_eq!(winners, 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 

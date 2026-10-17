@@ -67,26 +67,15 @@ fn check(gears: &Path, root: &Path) -> Result<(), String> {
             .spawn()
             .map_err(|error| error.to_string())?,
     );
-    let mut stdout = first.0.stdout.take().unwrap();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut prompt = [0; 7];
-        let result = stdout.read_exact(&mut prompt).map(|()| prompt);
-        let _ = sender.send(result);
-        std::io::copy(&mut stdout, &mut std::io::sink())
-    });
-    let prompt = receiver
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|error| format!("first Gears did not reach its prompt: {error}"))?
-        .map_err(|error| error.to_string())?;
-    if &prompt != b"gears> " {
-        return Err(format!("unexpected first Gears prompt: {prompt:?}"));
-    }
+    let reader = reach_prompt(&mut first.0, "first")?;
     let second = command()
         .args(["-p", "second"])
         .output()
         .map_err(|error| error.to_string())?;
-    let expected = format!("locked by process {}", first.0.id());
+    let expected = format!(
+        "Another gears session {} is running. Exiting.",
+        first.0.id()
+    );
     if second.status.success() || !String::from_utf8_lossy(&second.stderr).contains(&expected) {
         return Err(format!("second Gears replaced a live lock: {second:?}"));
     }
@@ -107,9 +96,57 @@ fn check(gears: &Path, root: &Path) -> Result<(), String> {
         .join()
         .map_err(|_| "prompt reader panicked")?
         .map_err(|error| error.to_string())?;
-    let lock = root.join(".gears/gears.lock");
-    if lock.exists() {
-        return Err(format!("closed Gears left its lock: {}", lock.display()));
+    // A killed owner releases the lock with its process; its file stays behind.
+    let mut killed = Running(
+        command()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| error.to_string())?,
+    );
+    reach_prompt(&mut killed.0, "killed")?;
+    drop(killed);
+    if !root.join(".gears/gears.lock").is_file() {
+        return Err("the lock file disappeared".into());
+    }
+    let mut next = command()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    next.stdin
+        .take()
+        .unwrap()
+        .write_all(b"/quit\n")
+        .map_err(|error| error.to_string())?;
+    let next = next.wait_with_output().map_err(|error| error.to_string())?;
+    if !next.status.success() {
+        return Err(format!("Gears after a killed owner was refused: {next:?}"));
     }
     Ok(())
+}
+
+/// Waits for the line UI's prompt, then keeps draining the output.
+fn reach_prompt(
+    child: &mut Child,
+    name: &str,
+) -> Result<std::thread::JoinHandle<std::io::Result<u64>>, String> {
+    let mut stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut prompt = [0; 7];
+        let result = stdout.read_exact(&mut prompt).map(|()| prompt);
+        let _ = sender.send(result);
+        std::io::copy(&mut stdout, &mut std::io::sink())
+    });
+    let prompt = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|error| format!("{name} Gears did not reach its prompt: {error}"))?
+        .map_err(|error| error.to_string())?;
+    if &prompt != b"gears> " {
+        return Err(format!("unexpected {name} Gears prompt: {prompt:?}"));
+    }
+    Ok(reader)
 }

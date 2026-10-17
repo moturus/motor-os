@@ -211,15 +211,17 @@ September 2026.
 9. A failed permission decision prevents execution. Failures of optional
    features are reported, never silent.
 10. A permission revocation applies before the next tool call.
-11. Only one Gears runs per Gears directory. Gears keeps a lock file there,
-    `gears.lock`, holding its pid. At startup, if the file names a running
-    Gears process, Gears refuses to start and says which pid holds it; a
-    file that names no running Gears process is left over from a crash and
-    is replaced. Gears processes that the running Gears starts itself find
-    the holder's pid in their environment and run under its lock after
-    checking that the holder is their ancestor. Only Gears owns and checks
-    this lock. `gears-batteries` commands neither acquire nor check it;
-    independent invocations do not receive concurrency guarantees.
+11. Only one Gears runs per Gears directory. Gears holds an exclusive file
+    lock on `gears.lock` there for its whole run and writes its pid into it.
+    A second Gears cannot take the lock, exits with "Another gears session
+    PID is running. Exiting." and starts nothing. The system releases the
+    lock when Gears exits or is killed, so a crash leaves nothing to
+    replace; the file itself is never removed. Gears processes that the
+    running Gears starts itself find the holder's pid in their environment
+    and run under its lock after checking that the holder is their ancestor.
+    Only Gears owns and checks this lock. `gears-batteries` commands neither
+    acquire nor check it; independent invocations do not receive concurrency
+    guarantees.
 12. Each long-term file (memory, saved grants, the provider choice) is
     written through a temporary file renamed over the old one; startup
     deletes temporary files left behind. This protects individual file
