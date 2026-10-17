@@ -59,23 +59,29 @@ pub fn run_command(args: &[String]) -> bool {
         _ => return false,
     }
 
+    let setenv: fn(&str, &str) = if args[2].starts_with("std-") {
+        // This isolated helper sets its environment before starting any threads.
+        |key, value| unsafe { std::env::set_var(key, value) }
+    } else {
+        moto_rt::process::setenv
+    };
+
     match args[2].as_str() {
-        "roundtrip" => {
-            // Exercise the path dependency; std's setter is updated with the toolchain.
+        "roundtrip" | "std-roundtrip" => {
             for len in [0, 4092, 4093, 4096, 32763, 32764] {
                 let expected = value(len);
-                moto_rt::process::setenv(KEY, &expected);
+                setenv(KEY, &expected);
                 check_value(KEY, &expected);
             }
             for (key, expected) in max_values() {
-                moto_rt::process::setenv(key, &expected);
+                setenv(key, &expected);
                 check_value(key, &expected);
             }
         }
-        "inherit" => {
+        "inherit" | "std-inherit" => {
             // Only this isolated helper mutates the environment used by descendants.
             for (key, expected) in max_values() {
-                moto_rt::process::setenv(key, &expected);
+                setenv(key, &expected);
             }
             check_success(&mut command("child"));
         }
@@ -87,8 +93,8 @@ pub fn run_command(args: &[String]) -> bool {
                 check_success(&mut command("grandchild"));
             }
         }
-        "oversized" => {
-            moto_rt::process::setenv(KEY, &value(MAX_VALUE_LEN + 1));
+        "oversized" | "std-oversized" => {
+            setenv(KEY, &value(MAX_VALUE_LEN + 1));
             panic!("oversized environment value was accepted");
         }
         mode => panic!("unknown environment test mode: {mode}"),
@@ -97,8 +103,9 @@ pub fn run_command(args: &[String]) -> bool {
 }
 
 pub fn run_all_tests() {
-    check_success(&mut command("roundtrip"));
-    check_success(&mut command("inherit"));
+    for mode in ["roundtrip", "std-roundtrip", "inherit", "std-inherit"] {
+        check_success(&mut command(mode));
+    }
 
     let mut explicit = command("grandchild");
     for (key, expected) in max_values() {
@@ -107,12 +114,14 @@ pub fn run_all_tests() {
     check_success(&mut explicit);
 
     // A failure alone could be unrelated to the limit; require its exact assertion.
-    let output = command("oversized").output().unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("assertion failed: val.len() <= MAX_ENV_VAL_LEN"),
-        "{stderr}"
-    );
+    for mode in ["oversized", "std-oversized"] {
+        let output = command(mode).output().unwrap();
+        assert!(!output.status.success(), "{mode}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("assertion failed: val.len() <= MAX_ENV_VAL_LEN"),
+            "{mode}: {stderr}"
+        );
+    }
     println!("environment::run_all_tests PASS");
 }

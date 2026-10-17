@@ -1811,8 +1811,6 @@ fn main() {
     // Test that a userspace interrupt is handled correctly.
     unsafe { core::arch::asm!("int 3") }
 
-    unsafe { std::env::set_var("foo", "bar") };
-    assert_eq!(std::env::var("foo").unwrap(), "bar");
     environment::run_all_tests();
 
     // We should never be allowed to shut down the sytem.
