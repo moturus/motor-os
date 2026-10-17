@@ -205,9 +205,9 @@ September 2026.
 7. Compaction either shrinks the conversation or reports that it could not.
    What it sends to the summarizer has a size limit, so one huge tool
    result cannot make every later turn fail.
-8. Cancellation and exit stop every child process Gears owns: tools, hooks,
-   the after-turn command and nested Gears runs, including their
-   descendants. The process ownership and cleanup rules are below.
+8. Cancellation and exit stop every child process Gears owns: tools, hooks
+   and nested Gears runs, including their descendants. The process
+   ownership and cleanup rules are below.
 9. A failed permission decision prevents execution. Failures of optional
    features are reported, never silent.
 10. A permission revocation applies before the next tool call.
@@ -428,7 +428,7 @@ proposal waiting for an answer.
 | `answer` | applies the user's yes or no |
 
 The shipped configuration subscribes the hook to exactly these events. It
-registers no slash commands and needs no after-turn command.
+registers no slash commands.
 
 **Project instructions** come only from `AGENTS.md` at the selected
 workspace root, or `.gears.md` there in its place, limited to 20,000

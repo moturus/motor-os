@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gears::config::{AfterTurnConfig, Config, ContextConfig, HookConfig, ToolDirectory};
+use gears::config::{Config, ContextConfig, HookConfig, ToolDirectory};
 use gears::mock::{MockServer, Script, sse_response};
 use gears::net::EgressPolicy;
 use gears::net::host_curl::HostCurl;
@@ -256,20 +256,6 @@ struct Fixture {
     workspace: PathBuf,
 }
 
-fn after_turn_config(script: &str, argument: &std::path::Path) -> AfterTurnConfig {
-    AfterTurnConfig {
-        command: vec![
-            "/bin/sh".into(),
-            "-c".into(),
-            script.into(),
-            "review".into(),
-            argument.display().to_string(),
-        ],
-        timeout: Duration::from_secs(5),
-        max_output_bytes: 4096,
-    }
-}
-
 #[test]
 fn endlessly_repeated_hook_questions_are_reported_and_bounded() {
     let fixture = Fixture::new("question-bound");
@@ -431,29 +417,28 @@ fn hook_hints_follow_setup_turn_end_and_command_responses() {
 }
 
 #[test]
-fn hook_commands_dispatch_to_the_owner_without_a_model_turn_then_start_after_turn() {
+fn hook_commands_dispatch_to_the_owner_without_a_model_turn() {
     let fixture = Fixture::new("hook-command");
     let log = fixture.root.join("command.json");
     let config = Config {
         hooks: vec![HookConfig {
             name: "owner".into(), events: Some(vec!["initialize".into(), "command".into()]),
             command: vec!["/bin/sh".into(), "-c".into(),
-                "event=$(cat); case \"$event\" in *'\"event\":\"initialize\"'*) printf '{\"commands\":[{\"name\":\"review\",\"help\":\"Review this work\"}]}' ;; *) printf '%s' \"$event\" > \"$1\"; printf '{\"notice\":\"handled\",\"state\":{\"handled\":true}}' ;; esac".into(),
+                "event=$(cat); case \"$event\" in *'\"event\":\"initialize\"'*) printf '{\"commands\":[{\"name\":\"tasks\",\"help\":\"Show the task list\"}]}' ;; *) printf '%s' \"$event\" > \"$1\"; printf '{\"notice\":\"handled\",\"state\":{\"handled\":true}}' ;; esac".into(),
                 "owner".into(), log.display().to_string()],
             timeout: Duration::from_secs(2), max_output_bytes: 4096,
         }],
-        after_turn: Some(after_turn_config("sleep 30 & printf '%s' $! > \"$1\"; wait", &fixture.root.join("pid"))),
         ..Config::default()
     };
     let provider = Scripted::new(vec![]);
     let mut runtime = fixture.runtime(provider.clone(), &config);
-    assert_eq!(runtime.hook_commands()[0].name, "review");
-    assert_eq!(runtime.hook_commands()[0].help, "Review this work");
+    assert_eq!(runtime.hook_commands()[0].name, "tasks");
+    assert_eq!(runtime.hook_commands()[0].help, "Show the task list");
     runtime.set_interactive(true).unwrap();
     let argument = "literal 'focus' $HOME\nsecond line";
     let mut notices = Vec::new();
     runtime
-        .hook_command("review", argument, &mut |event| {
+        .hook_command("tasks", argument, &mut |event| {
             if let Event::Notice(text) = event {
                 notices.push(text);
             }
@@ -463,18 +448,14 @@ fn hook_commands_dispatch_to_the_owner_without_a_model_turn_then_start_after_tur
     let event: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(log).unwrap()).unwrap();
     assert_eq!(event["event"], "command");
-    assert_eq!(event["payload"]["name"], "review");
+    assert_eq!(event["payload"]["name"], "tasks");
     assert_eq!(event["payload"]["argument"], argument);
     assert_eq!(
         runtime.session().hook_state("owner").unwrap()["handled"],
         true
     );
     assert!(notices.iter().any(|text| text.contains("handled")));
-    assert!(runtime.after_turn_running());
-    let pid = wait_for_review_pid(&fixture.root.join("pid"));
     runtime.new_session(false, None).unwrap();
-    assert_review_stopped(pid);
-    assert!(!runtime.after_turn_running());
     assert_eq!(runtime.hook_commands().len(), 1);
     assert!(
         runtime
@@ -484,186 +465,6 @@ fn hook_commands_dispatch_to_the_owner_without_a_model_turn_then_start_after_tur
     );
     assert!(provider.requests.lock().unwrap().is_empty());
     assert!(runtime.session().context_messages().unwrap().is_empty());
-}
-
-fn wait_for_review_pid(path: &std::path::Path) -> u32 {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(text) = std::fs::read_to_string(path)
-            && let Ok(pid @ 2..) = text.parse()
-        {
-            return pid;
-        }
-        assert!(std::time::Instant::now() < deadline, "review did not start");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-}
-
-fn assert_review_stopped(pid: u32) {
-    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        let state = stat
-            .rsplit_once(") ")
-            .unwrap()
-            .1
-            .split_whitespace()
-            .next()
-            .unwrap();
-        assert!(
-            matches!(state, "Z" | "X" | "x"),
-            "review child still running: {stat}"
-        );
-    }
-}
-
-#[test]
-fn after_turn_requires_an_interactive_completed_saved_turn_and_runs_after_hooks() {
-    let fixture = Fixture::new("after-turn-order");
-    let marker = fixture.root.join("hook finished");
-    let config = Config {
-        config_path: Some(fixture.root.join("selected config.toml")),
-        after_turn: Some(after_turn_config(
-            "test -f \"$1\" || exit 7; printf '%s\\n' \"$GEARS_WORKSPACE\" \"$GEARS_SESSION_PATH\" \"$GEARS_SESSION_ID\" \"$GEARS_CONFIG_PATH\" \"${OPENROUTER_API_KEY-unset}\"",
-            &marker,
-        )),
-        hooks: vec![HookConfig {
-            name: "end".into(),
-            events: Some(vec!["turn_end".into()]),
-            command: vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "cat >/dev/null; touch \"$1\"; printf '{}'".into(),
-                "end".into(),
-                marker.display().to_string(),
-            ],
-            timeout: Duration::from_secs(2),
-            max_output_bytes: 4096,
-        }],
-        ..Config::default()
-    };
-    let mut runtime = fixture.runtime(
-        Scripted::new(vec![
-            answer("one"),
-            answer("two"),
-            Err(ProviderError::Protocol("broken".into())),
-            answer("ephemeral"),
-        ]),
-        &config,
-    );
-    let mut ignore = |_: Event| Ok(());
-    runtime
-        .turn("one".into(), &mut FixedApproval(false), &mut ignore)
-        .unwrap();
-    assert!(
-        !runtime
-            .take_startup_notices()
-            .iter()
-            .any(|n| n.contains("after-turn"))
-    );
-    std::fs::remove_file(&marker).unwrap();
-    runtime.set_interactive(true).unwrap();
-    runtime
-        .turn("two".into(), &mut FixedApproval(false), &mut ignore)
-        .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let notice = loop {
-        if let Some(notice) = runtime
-            .take_startup_notices()
-            .into_iter()
-            .find(|n| n.contains("after-turn"))
-        {
-            break notice;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "review did not finish"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    };
-    assert!(notice.contains("output:"), "{notice}");
-    for value in [
-        fixture.workspace.display().to_string(),
-        runtime.session().path().unwrap().display().to_string(),
-        runtime.session().id().to_string(),
-        config.config_path.unwrap().display().to_string(),
-        "unset".into(),
-    ] {
-        assert!(notice.contains(&value), "{value}: {notice}");
-    }
-    assert!(
-        runtime
-            .turn("error".into(), &mut FixedApproval(false), &mut ignore)
-            .is_err()
-    );
-    assert!(
-        !runtime
-            .take_startup_notices()
-            .iter()
-            .any(|n| n.contains("after-turn"))
-    );
-    runtime.new_session(true, None).unwrap();
-    let mut notices = Vec::new();
-    runtime
-        .turn(
-            "ephemeral".into(),
-            &mut FixedApproval(false),
-            &mut |event| {
-                if let Event::Notice(text) = event {
-                    notices.push(text);
-                }
-                Ok(())
-            },
-        )
-        .unwrap();
-    assert!(notices.iter().any(|n| n.contains("no saved path")));
-}
-
-#[test]
-fn after_turn_is_joined_before_writes_session_changes_and_exit() {
-    for action in ["turn", "name", "model", "new", "close", "drop"] {
-        let fixture = Fixture::new(&format!("after-turn-stop-{action}"));
-        let pid_file = fixture.root.join("pid");
-        let config = Config {
-            after_turn: Some(after_turn_config(
-                "sleep 30 & printf '%s' $! > \"$1\"; wait",
-                &pid_file,
-            )),
-            ..Config::default()
-        };
-        let mut runtime =
-            fixture.runtime(Scripted::new(vec![answer("one"), answer("two")]), &config);
-        let mut ignore = |_: Event| Ok(());
-        runtime.set_interactive(true).unwrap();
-        runtime
-            .turn("one".into(), &mut FixedApproval(false), &mut ignore)
-            .unwrap();
-        let pid = wait_for_review_pid(&pid_file);
-        let session_path = runtime.session().path().unwrap().to_path_buf();
-        match action {
-            "turn" => {
-                runtime
-                    .turn("two".into(), &mut FixedApproval(false), &mut |_: Event| {
-                        assert_review_stopped(pid);
-                        Ok(())
-                    })
-                    .unwrap();
-                runtime.set_interactive(false).unwrap();
-            }
-            "name" => runtime.set_name("renamed").unwrap(),
-            "model" => runtime
-                .set_model("other/model".into(), &mut ignore)
-                .unwrap(),
-            "new" => runtime.new_session(false, None).unwrap(),
-            "close" => assert!(runtime.close().iter().any(|n| n.contains("stopped"))),
-            "drop" => {
-                drop(runtime);
-                assert_review_stopped(pid);
-                assert!(!session_path.with_extension("jsonl.lock").exists());
-                continue;
-            }
-            _ => unreachable!(),
-        }
-        assert_review_stopped(pid);
-    }
 }
 
 #[test]

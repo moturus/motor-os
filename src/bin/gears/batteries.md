@@ -38,7 +38,7 @@ and explicit key files. The bare batteries program name resolves beside the
 Gears executable for tools and hooks. The shipped hook subscribes to
 `initialize`, `permission`, `tool_execute`, `tool_result`, `turn_start`,
 `entry`, `before_stop`, `turn_end` and `answer`; it registers no slash
-commands and needs no after-turn command.
+commands.
 
 Run `src/tests/test-gears-batteries.sh` from the Motor OS repository root for
 the hermetic workflow gate; `test-gears-http.sh` runs the package's tests. It

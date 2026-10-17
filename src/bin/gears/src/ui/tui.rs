@@ -51,11 +51,6 @@ pub fn run(
         while !app.quit {
             show_runtime_notices(runtime, &mut app);
             app.render()?;
-            if runtime.after_turn_running()
-                && !event::poll(POLL).map_err(|error| error.to_string())?
-            {
-                continue;
-            }
             let input = event::read().map_err(|error| error.to_string())?;
             let Some(action) = app.edit(input) else {
                 continue;

@@ -42,13 +42,6 @@ pub struct ToolDirectory {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AfterTurnConfig {
-    pub command: Vec<String>,
-    pub timeout: Duration,
-    pub max_output_bytes: usize,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub egress_allowlist: Vec<String>,
@@ -70,8 +63,6 @@ pub struct Config {
     pub max_tool_rounds: usize,
     pub context: ContextConfig,
     pub hooks: Vec<HookConfig>,
-    pub after_turn: Option<AfterTurnConfig>,
-    pub config_path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -99,8 +90,6 @@ impl Default for Config {
                 recent_tail_tokens: DEFAULT_RECENT_TAIL,
             },
             hooks: Vec::new(),
-            after_turn: None,
-            config_path: None,
         }
     }
 }
@@ -128,7 +117,6 @@ struct RawConfig {
     context: RawContext,
     #[serde(default)]
     hooks: Vec<RawHook>,
-    after_turn: Option<RawAfterTurn>,
 }
 
 #[derive(Default, Deserialize)]
@@ -182,13 +170,6 @@ struct RawHook {
     name: String,
     command: Vec<String>,
     events: Option<Vec<String>>,
-    timeout_seconds: Option<u64>,
-    max_output_bytes: Option<usize>,
-}
-
-#[derive(Deserialize)]
-struct RawAfterTurn {
-    command: Vec<String>,
     timeout_seconds: Option<u64>,
     max_output_bytes: Option<usize>,
 }
@@ -262,10 +243,9 @@ impl Config {
                         .map_err(|error| format!("current directory: {error}"))?
                         .join(path)
                 };
-                let mut config = Self::parse_at(&text, &absolute)
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-                config.config_path = Some(absolute);
-                Ok(Some(config))
+                Self::parse_at(&text, &absolute)
+                    .map(Some)
+                    .map_err(|error| format!("{}: {error}", path.display()))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(format!("{}: {error}", path.display())),
@@ -289,39 +269,6 @@ impl Config {
             ));
         }
         let defaults = Self::default();
-        let after_turn = raw
-            .after_turn
-            .map(|raw| {
-                let mut command = raw.command;
-                if command.is_empty() || command[0].is_empty() {
-                    return Err("after_turn has no command".to_string());
-                }
-                let program = Path::new(&command[0]);
-                if !program.is_absolute()
-                    && program.components().count() > 1
-                    && let Some(base) = base
-                {
-                    command[0] = base.join(program).display().to_string();
-                }
-                let timeout = bounded_seconds(
-                    "after_turn.timeout_seconds",
-                    raw.timeout_seconds.unwrap_or(3600),
-                    1,
-                    3600,
-                )?;
-                let max_output_bytes = raw.max_output_bytes.unwrap_or(1024 * 1024);
-                if !(1024..=16 * 1024 * 1024).contains(&max_output_bytes) {
-                    return Err(
-                        "after_turn.max_output_bytes must be between 1024 and 16777216".into(),
-                    );
-                }
-                Ok(AfterTurnConfig {
-                    command,
-                    timeout,
-                    max_output_bytes,
-                })
-            })
-            .transpose()?;
         let egress_allowlist = validate_hosts(
             raw.net
                 .egress_allowlist
@@ -504,8 +451,6 @@ impl Config {
             max_tool_rounds,
             context,
             hooks,
-            after_turn,
-            config_path: None,
         })
     }
 }
@@ -571,67 +516,6 @@ fn validate_context(context: ContextConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn after_turn_commands_are_optional_bounded_and_resolve_beside_the_config() {
-        let root =
-            std::env::temp_dir().join(format!("gears-after-turn-config-{}", std::process::id()));
-        std::fs::create_dir(&root).unwrap();
-        let path = root.join("gears.toml");
-        std::fs::write(&path, "version = 1\n[after_turn]\ncommand = ['./review', 'argument with spaces']\ntimeout_seconds = 42\nmax_output_bytes = 2048\n").unwrap();
-        let config = Config::load_user(Some(&path)).unwrap();
-        assert_eq!(
-            config.config_path.as_deref(),
-            Some(path.canonicalize().unwrap().as_path())
-        );
-        let after = config.after_turn.unwrap();
-        assert_eq!(Path::new(&after.command[0]), root.join("review"));
-        assert_eq!(&after.command[1..], ["argument with spaces"]);
-        assert_eq!(after.timeout, Duration::from_secs(42));
-        assert_eq!(after.max_output_bytes, 2048);
-        std::fs::write(root.join("review"), "fixture").unwrap();
-        let mut relative = PathBuf::new();
-        for component in std::env::current_dir().unwrap().components() {
-            if matches!(component, std::path::Component::Normal(_)) {
-                relative.push("..");
-            }
-        }
-        relative.push(path.strip_prefix("/").unwrap());
-        let relative_config = Config::load_user(Some(&relative)).unwrap();
-        assert!(relative_config.config_path.as_ref().unwrap().is_absolute());
-        assert_eq!(
-            relative_config.config_path.unwrap().canonicalize().unwrap(),
-            path.canonicalize().unwrap()
-        );
-        let program = PathBuf::from(&relative_config.after_turn.unwrap().command[0]);
-        assert!(program.is_absolute());
-        assert_eq!(
-            program.canonicalize().unwrap(),
-            root.join("review").canonicalize().unwrap()
-        );
-        assert!(Config::default().after_turn.is_none());
-        let default =
-            Config::parse("version = 1\n[after_turn]\ncommand = ['gears-batteries', 'review']")
-                .unwrap()
-                .after_turn
-                .unwrap();
-        assert_eq!(default.timeout, Duration::from_secs(3600));
-        assert_eq!(default.max_output_bytes, 1024 * 1024);
-        for fields in [
-            "command = []",
-            "command = ['']",
-            "command = ['/review']\ntimeout_seconds = 0",
-            "command = ['/review']\ntimeout_seconds = 3601",
-            "command = ['/review']\nmax_output_bytes = 1023",
-            "command = ['/review']\nmax_output_bytes = 16777217",
-        ] {
-            assert!(
-                Config::parse(&format!("version = 1\n[after_turn]\n{fields}")).is_err(),
-                "{fields}"
-            );
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn plaintext_hosts_require_explicit_egress_and_use_the_same_matching() {

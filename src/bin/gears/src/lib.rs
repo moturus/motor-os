@@ -1,7 +1,6 @@
 //! Gears: a small extensible agent harness for Linux and Motor OS, with its
 //! optional batteries (file tools, the check, memory and skills) in `batteries`.
 
-pub mod after_turn;
 pub mod batteries;
 pub mod cancellation;
 pub mod cli;

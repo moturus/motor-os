@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::config::{AfterTurnConfig, Config, ContextConfig};
+use crate::config::{Config, ContextConfig};
 use crate::hooks::{Decision, Manager as Hooks, ToolResult};
 use crate::permissions::{Grant, Grants};
 use crate::process::{Cancellation, Stream};
@@ -169,9 +169,6 @@ pub struct Runtime {
     cancellation: Cancellation,
     usage: UsageMeter,
     startup_notices: Vec<String>,
-    after_turn_command: Option<AfterTurnConfig>,
-    config_path: Option<PathBuf>,
-    after_turn: crate::after_turn::Manager,
     interactive: bool,
     hint: Option<String>,
     questions_answered: usize,
@@ -308,9 +305,6 @@ impl Runtime {
             cancellation,
             usage,
             startup_notices,
-            after_turn_command: config.after_turn.clone(),
-            config_path: config.config_path.clone(),
-            after_turn: crate::after_turn::Manager::default(),
             interactive: false,
             hint,
             questions_answered: 0,
@@ -542,15 +536,7 @@ impl Runtime {
         if let Some(hint) = self.hooks.take_hint() {
             self.hint = hint;
         }
-        match self.after_turn.poll() {
-            Ok(notices) => self.startup_notices.extend(notices),
-            Err(error) => self.startup_notices.push(error),
-        }
         std::mem::take(&mut self.startup_notices)
-    }
-
-    pub fn after_turn_running(&self) -> bool {
-        self.after_turn.is_running()
     }
 
     pub fn hook_commands(&self) -> &[crate::hooks::CommandSpec] {
@@ -605,7 +591,7 @@ impl Runtime {
         if self.cancellation.cancelled() {
             return Err("command cancelled".into());
         }
-        self.start_after_turn(observer)
+        Ok(())
     }
 
     pub fn pending_hook_questions(&self) -> bool {
@@ -695,56 +681,6 @@ impl Runtime {
     }
 
     fn prepare_write(&mut self) -> Result<(), String> {
-        self.startup_notices.extend(self.after_turn.stop()?);
-        crate::process::ensure_cleanup()
-    }
-
-    fn start_after_turn(&mut self, observer: &mut dyn Observer) -> Result<(), String> {
-        if !self.interactive || self.cancellation.cancelled() {
-            return Ok(());
-        }
-        let Some(config) = &self.after_turn_command else {
-            return Ok(());
-        };
-        let Some(path) = self.session.path() else {
-            return observer.event(Event::Notice(
-                "after-turn command skipped: this session has no saved path".into(),
-            ));
-        };
-        let result = (|| {
-            let program = config
-                .command
-                .first()
-                .ok_or("command must not be empty")?
-                .clone();
-            let mut env = vec![
-                (
-                    "GEARS_WORKSPACE".into(),
-                    self.store.workspace().display().to_string(),
-                ),
-                ("GEARS_SESSION_ID".into(), self.session.id().to_string()),
-                ("GEARS_SESSION_PATH".into(), path.display().to_string()),
-            ];
-            let mut remove_env = vec![crate::provider::KEY_ENV.to_string()];
-            if let Some(path) = &self.config_path {
-                env.push(("GEARS_CONFIG_PATH".into(), path.display().to_string()));
-            } else {
-                remove_env.push("GEARS_CONFIG_PATH".into());
-            }
-            self.after_turn.start(crate::process::Request {
-                program,
-                args: config.command[1..].to_vec(),
-                cwd: self.store.workspace().to_path_buf(),
-                stdin: None,
-                timeout: config.timeout,
-                max_output_bytes: config.max_output_bytes,
-                env,
-                remove_env,
-            })
-        })();
-        if let Err(error) = result {
-            observer.event(Event::Notice(format!("after-turn command failed: {error}")))?;
-        }
         crate::process::ensure_cleanup()
     }
 
@@ -845,13 +781,7 @@ impl Runtime {
                     last_entry_id,
                 })
             });
-        match result {
-            Ok(()) => end_result.and_then(|()| self.start_after_turn(observer)),
-            Err(error) => {
-                let _ = end_result;
-                Err(error)
-            }
-        }
+        result.and(end_result)
     }
 
     fn run_turn(
@@ -1958,15 +1888,6 @@ fn apply_tool_states(
         tools.set_enabled(&name, enabled)?;
     }
     Ok(notices)
-}
-
-impl Drop for Runtime {
-    fn drop(&mut self) {
-        // Join while the session lock is still held.
-        if let Err(error) = self.after_turn.stop() {
-            crate::trace::log(crate::trace::Level::Error, &error);
-        }
-    }
 }
 
 fn effective_prompt(workspace: &std::path::Path, tools: &Registry, hooks: &Hooks) -> Effective {
