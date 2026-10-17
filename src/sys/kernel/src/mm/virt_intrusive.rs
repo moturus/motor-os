@@ -755,7 +755,8 @@ impl VmemSegment {
 
     /// Maps `other`'s size worth of this segment's pages, starting at page
     /// `first_page`, into `other`, sharing the frames. `other` is normally a
-    /// reservation; pages it already maps are replaced.
+    /// reservation; pages it already maps are replaced. The whole range is
+    /// checked first, so a refused share leaves `other` as it was.
     pub(super) fn share_range_with(
         &self,
         first_page: u64,
@@ -767,44 +768,42 @@ impl VmemSegment {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         // Segment provenance decides, whatever the actual backing: a huge
-        // page must never reach the small-page replacement loop below, and
-        // a file-paged segment has no complete set of pages to share.
+        // page must never reach the small-page replacement loop below, a
+        // file-paged segment has no complete set of pages to share, and a
+        // lazy destination may have no pages at all.
         if (self.mapping_options | other.mapping_options)
             .intersects(MappingOptions::HUGE_ELIGIBLE | MappingOptions::FILE_PAGED)
+            || other.mapping_options.contains(MappingOptions::LAZY)
         {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        debug_assert!(!self.pages.is_empty());
         debug_assert!(!other.pages.is_empty());
 
-        // Validate both complete ranges before replacing any destination PTE.
-        let mut source = self.pages.find(&start);
+        // The destination is dense, so its pages name every address of the
+        // range. Each source page is looked up by address, never assumed
+        // from its neighbor: a hole, a page without a frame (lazy, guard)
+        // or MMIO at either end refuses the share before anything changes.
+        let other_start = other.segment.start;
+        let source_addr = |dest_start: u64| start + (dest_start - other_start);
         for dest in other.pages.iter() {
-            let page = source.get().ok_or(moto_rt::E_INVALID_ARGUMENT)?;
-            if page.frame.get().is_some_and(Frame::is_mmio)
-                || dest.frame.get().is_some_and(Frame::is_mmio)
-            {
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-            source.move_next();
-        }
-
-        let mut self_cursor = self.pages.find(&start);
-        let mut other_cursor = other.pages.front();
-        while !other_cursor.is_null() {
-            let Some(this_page) = self_cursor.get() else {
+            let Some(frame) = self
+                .find_page(source_addr(dest.start))
+                .and_then(|page| page.frame.get())
+            else {
                 return Err(moto_rt::E_INVALID_ARGUMENT);
             };
-            let that_page = other_cursor
-                .clone_pointer()
-                .map(|ptr| unsafe { UnsafeRef::into_raw(ptr).as_mut().unwrap() })
-                .unwrap();
-
-            // Lazy and guard pages have no frame to share; a caller naming
-            // such a segment gets an error, not a kernel panic.
-            if this_page.frame.is_null() {
+            if frame.is_mmio() || dest.frame.get().is_some_and(Frame::is_mmio) {
                 return Err(moto_rt::E_INVALID_ARGUMENT);
             }
+        }
+
+        let mut other_cursor = other.pages.front();
+        while let Some(that_page) = other_cursor
+            .clone_pointer()
+            .map(|ptr| unsafe { UnsafeRef::into_raw(ptr).as_mut().unwrap() })
+        {
+            let this_page = self.find_page(source_addr(that_page.start)).unwrap();
+            debug_assert_eq!(this_page.start, source_addr(that_page.start));
             if !that_page.frame.is_null() {
                 other.address_space().page_table.unmap_page(
                     that_page.frame.get().unwrap().start(),
@@ -821,8 +820,6 @@ impl VmemSegment {
                 mapping_options,
             )?;
             that_page.mapping_options = mapping_options;
-
-            self_cursor.move_next();
             other_cursor.move_next();
         }
 

@@ -1033,3 +1033,90 @@ pub fn huge_mapping_self_test() {
     assert_eq!(block_metrics().taken, taken_before);
     crate::raw_log!("huge mapping tests PASS");
 }
+
+// A share is validated in full before the first destination PTE changes: a
+// lazy source with an untouched page is refused and the destination keeps
+// its bytes, the same source is accepted once every page is touched, and a
+// lazy destination is refused whatever its state.
+#[cfg(debug_assertions)]
+pub fn share_validation_self_test() {
+    const PAGES: u64 = 4;
+    let source_space = UserAddressSpace::new().unwrap();
+    let dest_space = UserAddressSpace::new().unwrap();
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+    let page = |segment: super::MemorySegment, idx: u64| segment.start + idx * PAGE_SIZE_SMALL;
+    let share = |dest: super::MemorySegment, source: super::MemorySegment| {
+        UserAddressSpace::map_shared(
+            &dest_space,
+            dest.start,
+            &source_space,
+            source.start,
+            options,
+        )
+    };
+
+    // The source: a lazy segment with its third page untouched.
+    let lazy = source_space.alloc_user_lazy(PAGES).unwrap();
+    for idx in [0, 1, 3] {
+        source_space.fix_pagefault(page(lazy, idx), 6).unwrap();
+    }
+    source_space.copy_to_user(b"source", lazy.start).unwrap();
+
+    // The destination: eager pages holding known bytes.
+    let dest = dest_space.alloc_user_heap(PAGES).unwrap();
+    dest_space.copy_to_user(b"intact", dest.start).unwrap();
+    let dest_phys = |idx: u64| {
+        dest_space
+            .inner
+            .page_table_ref()
+            .virt_to_phys(page(dest, idx))
+            .unwrap()
+    };
+    let source_phys = |idx: u64| {
+        source_space
+            .inner
+            .page_table_ref()
+            .virt_to_phys(page(lazy, idx))
+            .unwrap()
+    };
+    let before: [u64; PAGES as usize] = core::array::from_fn(|idx| dest_phys(idx as u64));
+
+    assert_eq!(share(dest, lazy), refused);
+    assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"intact");
+    for (idx, phys_before) in before.iter().enumerate() {
+        assert_eq!(dest_phys(idx as u64), *phys_before);
+    }
+
+    // Touched in full, the same source is accepted, and the destination
+    // reads the source's bytes through the shared frames.
+    source_space.fix_pagefault(page(lazy, 2), 6).unwrap();
+    share(dest, lazy).unwrap();
+    assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"source");
+    for idx in 0..PAGES {
+        assert_eq!(dest_phys(idx), source_phys(idx));
+    }
+
+    // A lazy destination is refused, untouched or touched; an untouched
+    // lazy source is refused too.
+    let lazy_dest = dest_space.alloc_user_lazy(PAGES).unwrap();
+    assert_eq!(share(lazy_dest, lazy), refused);
+    for idx in 0..PAGES {
+        dest_space.fix_pagefault(page(lazy_dest, idx), 6).unwrap();
+    }
+    assert_eq!(share(lazy_dest, lazy), refused);
+    let untouched = source_space.alloc_user_lazy(PAGES).unwrap();
+    assert_eq!(share(dest, untouched), refused);
+    assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"source");
+
+    for (space, segment) in [
+        (&dest_space, dest),
+        (&dest_space, lazy_dest),
+        (&source_space, lazy),
+        (&source_space, untouched),
+    ] {
+        space.unmap(segment.start).unwrap();
+    }
+    crate::raw_log!("share validation tests PASS");
+}
