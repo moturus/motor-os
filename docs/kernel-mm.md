@@ -350,8 +350,12 @@ Clearing a segment unmaps each page by its actual kind, flushes the whole
 segment before dropping frames, and subtracts the segment size, which is
 what was accounted when it was reserved, from region and process statistics.
 The region lock is held continuously from reservation through mapping or
-rollback for MMIO and contiguous allocation, so a concurrent unmap cannot
-remove or replace the reservation in between.
+rollback for MMIO and contiguous allocation, for a shared allocation (both
+regions, in one fixed order) and for a fixed-address fill from another
+process or from kernel-static memory, so a concurrent unmap cannot remove
+or replace the reservation in between, and a rollback never removes a
+segment another thread has since put at the same address. Any two region
+locks are taken in that one order, the higher region address first.
 
 ### User heaps and huge pages
 

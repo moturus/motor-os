@@ -257,65 +257,14 @@ impl UserAddressSpace {
             self.stats_user_sub(bytes);
             return Err(moto_rt::E_OUT_OF_MEMORY);
         }
-        // An unmap gives the space's own accounting back.
-        let give_back = |space: &UserAddressSpace, addr: u64| {
-            if space.unmap(addr).is_err() {
-                log::error!("alloc_user_shared: cannot unmap 0x{addr:x}");
-            }
-        };
-
-        // Allocate in self.
-        let self_segment = if vaddr != u64::MAX {
-            self.inner
-                .vmem_allocate_user_fixed(vaddr, num_pages, mapping_options)
-        } else {
-            self.inner.vmem_allocate_pages(
-                VmemKind::Unmapped, /* not used */
-                num_pages,
-                Some(mapping_options),
-            )
-        };
-        let self_segment = match self_segment {
-            Ok(segment) => segment,
-            Err(err) => {
+        // Both reservations, the share and any rollback happen under the
+        // region locks; each side's charge stays until its own unmap.
+        self.inner
+            .alloc_shared(vaddr, num_pages, mapping_options, &other.inner)
+            .inspect_err(|_| {
                 self.stats_user_sub(bytes);
                 other.stats_user_sub(bytes);
-                return Err(err);
-            }
-        };
-
-        // Allocate in other.
-        let other_segment =
-            match other
-                .inner
-                .vmem_allocate_pages(VmemKind::Unmapped, num_pages, None)
-            {
-                Ok(segment) => segment,
-                Err(err) => {
-                    give_back(self, self_segment.start);
-                    other.stats_user_sub(bytes);
-                    return Err(err);
-                }
-            };
-
-        let addr_here = self_segment.start;
-        let addr_there = other_segment.start;
-        if let Err(err) = self.inner.share_with(
-            addr_here,
-            &other.inner,
-            addr_there,
-            super::MappingOptions::USER_ACCESSIBLE
-                | super::MappingOptions::READABLE
-                | super::MappingOptions::WRITABLE
-                | super::MappingOptions::DONT_ZERO,
-        ) {
-            give_back(self, addr_here);
-            give_back(other, addr_there);
-            return Err(err);
-        }
-
-        log::trace!("alloc_user_shared ok: 0x{addr_here:x} 0x{addr_there:x}");
-        Ok((addr_here, addr_there))
+            })
     }
 
     pub fn user_page_table(&self) -> u64 {
@@ -433,25 +382,6 @@ impl UserAddressSpace {
             })
     }
 
-    /// Reserves `num_pages` at `vaddr` (no frames) and lets `fill` map
-    /// shared frames into the reservation, undoing it if that fails.
-    fn fill_fixed<F>(&self, vaddr: u64, num_pages: u64, fill: F) -> Result<(), ErrorCode>
-    where
-        F: FnOnce(&UserAddressSpaceBase) -> Result<(), ErrorCode>,
-    {
-        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
-        if let Err(err) =
-            self.inner
-                .vmem_allocate_user_fixed(vaddr, num_pages, super::MappingOptions::empty())
-        {
-            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-            return Err(err);
-        }
-        fill(&self.inner).inspect_err(|_| {
-            let _ = self.unmap(vaddr); // Gives the stats back too.
-        })
-    }
-
     /// Maps `source`'s segment at `source_addr` into this address space at
     /// `vaddr`, sharing its frames. The segments must be the same size, and
     /// nothing may be mapped at `vaddr` yet.
@@ -463,11 +393,17 @@ impl UserAddressSpace {
         num_pages: u64,
         mapping_options: super::MappingOptions,
     ) -> Result<(), ErrorCode> {
-        self.fill_fixed(vaddr, num_pages, |inner| {
-            source
-                .inner
-                .share_with(source_addr, inner, vaddr, mapping_options)
-        })
+        let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
+        self.stats_user_add(bytes)?;
+        self.inner
+            .share_into_fixed(
+                vaddr,
+                num_pages,
+                &source.inner,
+                source_addr,
+                mapping_options,
+            )
+            .inspect_err(|_| self.stats_user_sub(bytes))
     }
 
     /// Maps `num_pages` of kernel-static memory at `kernel_vaddr` into this
@@ -481,9 +417,11 @@ impl UserAddressSpace {
         mapping_options: super::MappingOptions,
     ) -> Result<(), ErrorCode> {
         debug_assert!(!mapping_options.contains(super::MappingOptions::WRITABLE));
-        self.fill_fixed(vaddr, num_pages, |inner| {
-            inner.share_kernel_static(kernel_vaddr, vaddr, mapping_options)
-        })
+        let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
+        self.stats_user_add(bytes)?;
+        self.inner
+            .fill_kernel_static(vaddr, kernel_vaddr, num_pages, mapping_options)
+            .inspect_err(|_| self.stats_user_sub(bytes))
     }
 
     pub fn alloc_user_lazy(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
@@ -1242,6 +1180,39 @@ pub fn shared_alloc_cleanup_self_test() {
     assert_eq!(usage(&space), space_before);
     assert_eq!(usage(&peer), peer_full);
     assert_eq!(super::phys::available_small_pages(), free_before);
+
+    // With a fixed address, the first mapping is made and then undone, so
+    // the address is free for the next caller.
+    const FIXED: u64 = 1 << 40;
+    assert_eq!(space.alloc_user_shared(FIXED, 16, options, &peer), refused);
+    assert_eq!(usage(&space), space_before);
+    let other = UserAddressSpace::new().unwrap();
+    let (here, there) = space.alloc_user_shared(FIXED, 16, options, &other).unwrap();
+    assert_eq!(here, FIXED);
+    space.unmap(here).unwrap();
+    other.unmap(there).unwrap();
+    assert_eq!(usage(&space), space_before);
+
+    // A refused share into a fixed address undoes its reservation the same
+    // way; an untouched lazy source is refused.
+    let untouched = other.alloc_user_lazy(16).unwrap();
+    let readable = MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE;
+    assert_eq!(
+        space.share_from(&other, untouched.start, FIXED, 16, readable),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert_eq!(usage(&space), space_before);
+    for idx in 0..16 {
+        other
+            .fix_pagefault(untouched.start + idx * PAGE_SIZE_SMALL, 6)
+            .unwrap();
+    }
+    space
+        .share_from(&other, untouched.start, FIXED, 16, readable)
+        .unwrap();
+    space.unmap(FIXED).unwrap();
+    other.unmap(untouched.start).unwrap();
+    assert_eq!(usage(&space), space_before);
 
     for start in held {
         peer.unmap(start).unwrap();

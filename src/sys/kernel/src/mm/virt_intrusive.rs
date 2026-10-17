@@ -1005,6 +1005,19 @@ impl SegmentMap {
             .map(|seg| unsafe { seg.vmem_segment_mut() })
     }
 
+    /// Two distinct segments by start address, both mutable.
+    pub(super) fn get_two_mut(
+        &mut self,
+        first: u64,
+        second: u64,
+    ) -> Option<(&mut VmemSegment, &mut VmemSegment)> {
+        assert_ne!(first, second);
+        let first = self.get_mut(&first)? as *mut VmemSegment;
+        let second = self.get_mut(&second)? as *mut VmemSegment;
+        // Distinct nodes of the map, so the two references never alias.
+        Some(unsafe { (&mut *first, &mut *second) })
+    }
+
     pub(super) fn last_segment(&self) -> Option<&VmemSegment> {
         if let Some(seg) = self.segments.back().get() {
             return Some(&seg.vmem_segment);

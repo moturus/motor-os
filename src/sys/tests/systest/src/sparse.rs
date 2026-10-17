@@ -106,6 +106,129 @@ fn test_lazy_share_source() {
     println!("test_sparse_lazy_share_source PASS");
 }
 
+/// A shared allocation at a fixed address whose second reservation fails is
+/// undone under the region lock. A thread that unmaps that address and maps
+/// its own segment there, as fast as it can, never loses the mapping to the
+/// rollback: once its map succeeds, the mapping is there to unmap. The
+/// address is in an address space of this process's own, where nothing
+/// else maps; this process's normal region is filled so that the second
+/// reservation finds no room, and a gap the runtime frees there in the
+/// meantime is kept mapped once found, so the next call fails again.
+fn test_shared_alloc_rollback_race() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    const PAGES: u64 = 16;
+    const ROUNDS: u32 = 20_000;
+    const HOLE: u64 = 1 << 40;
+    const MAX_STRAYS: usize = 256;
+
+    let used_before = used_pages();
+    let target =
+        SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=sparse-race").unwrap();
+    // What the mapper shares into the hole: its frames exist from the start.
+    let source = SysMem::alloc(PAGE_SIZE_SMALL, PAGES).unwrap();
+    let done = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(Barrier::new(3));
+    let go = Arc::new(Barrier::new(3));
+
+    // Both threads are up before the normal region is filled: their stacks
+    // need address space, and nothing they do below allocates any.
+    let sharer = {
+        let (done, ready, go) = (done.clone(), ready.clone(), go.clone());
+        std::thread::spawn(move || {
+            ready.wait();
+            go.wait();
+            let (mut strays, mut stray_count) = ([0_u64; MAX_STRAYS], 0_usize);
+            let mut refused = 0_u32;
+            for _ in 0..ROUNDS {
+                // The target side takes the hole, the caller's side finds
+                // no room, and the whole call is undone; or the hole is the
+                // mapper's for the moment and the call is refused at once.
+                match SysMem::map2(
+                    target,
+                    SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE,
+                    u64::MAX,
+                    HOLE,
+                    PAGE_SIZE_SMALL,
+                    PAGES,
+                ) {
+                    Err(moto_rt::E_OUT_OF_MEMORY) => refused += 1,
+                    // The caller's side found a gap the runtime freed: keep
+                    // it, so the next call fails again. The mapper takes
+                    // the hole back, as it does with anything there.
+                    Ok((here, there)) => {
+                        assert_eq!(here, HOLE);
+                        assert!(stray_count < MAX_STRAYS, "too many stray gaps");
+                        strays[stray_count] = there;
+                        stray_count += 1;
+                    }
+                    Err(err) => panic!("shared map failed with {err:?}"),
+                }
+            }
+            done.store(true, Ordering::Release);
+            (refused, strays, stray_count)
+        })
+    };
+    let mapper = {
+        let (done, ready, go) = (done.clone(), ready.clone(), go.clone());
+        std::thread::spawn(move || {
+            ready.wait();
+            go.wait();
+            let (mut rounds, mut misses) = (0_u64, 0_u64);
+            while !done.load(Ordering::Acquire) {
+                // Whatever is at the hole goes, as the scenario demands:
+                // nothing, or what the sharer left there.
+                let _ = SysMem::unmap(target, 0, u64::MAX, HOLE);
+                let mapped = SysMem::map(
+                    target,
+                    SysMem::F_SHARE_SELF | SysMem::F_READABLE,
+                    source,
+                    HOLE,
+                    PAGE_SIZE_SMALL,
+                    PAGES,
+                );
+                if mapped.is_err() {
+                    misses += 1;
+                    continue;
+                }
+                SysMem::unmap(target, 0, u64::MAX, HOLE)
+                    .expect("the mapper's mapping was taken by a rollback");
+                rounds += 1;
+            }
+            (rounds, misses)
+        })
+    };
+    ready.wait();
+
+    // Fill the normal region with lazy reservations, cheap now, until
+    // nothing of PAGES fits.
+    let mut fillers: Vec<u64> = Vec::with_capacity(1024);
+    let mut pages = 1_u64 << 28;
+    while pages >= PAGES {
+        match map_lazy(pages * PAGE_SIZE_SMALL) {
+            Ok(addr) => fillers.push(addr),
+            Err(_) => pages >>= 1,
+        }
+    }
+
+    go.wait();
+    let (refused, strays, stray_count) = sharer.join().unwrap();
+    let (rounds, misses) = mapper.join().unwrap();
+    let _ = SysMem::unmap(target, 0, u64::MAX, HOLE);
+    for addr in strays.iter().take(stray_count).chain(fillers.iter()) {
+        SysMem::free(*addr).unwrap();
+    }
+    SysMem::free(source).unwrap();
+    SysObj::put(target).unwrap();
+    assert!(rounds > 0, "the mapper never mapped");
+    assert!(refused > 0, "no shared allocation was ever undone");
+    assert_recovered(used_before, DRIFT_TOLERANCE_PAGES, "the rollback race");
+    println!(
+        "test_sparse_shared_alloc_rollback_race PASS: {rounds} maps and {misses} misses \
+         against {refused} refused shared allocations, {stray_count} stray gaps"
+    );
+}
+
 /// A process exits with large reservations still mapped and some pages
 /// touched; the pool returns once it is gone.
 fn test_exit_with_reservations() {
@@ -186,6 +309,7 @@ pub fn run_fault_at_floor_child() -> ! {
 pub fn run_all_tests() {
     test_large_reservations();
     test_lazy_share_source();
+    test_shared_alloc_rollback_race();
     test_exit_with_reservations();
     test_fault_at_floor();
 }
