@@ -135,6 +135,8 @@ fn reserve(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, Erro
     if state.retired {
         return Err(moto_rt::E_BAD_HANDLE);
     }
+    // The registry is taken twice on purpose: every check that can fail
+    // precedes `reserve_file`, so nothing needs rolling back.
     let id = {
         let mut pager = registry().lock(line!());
         if pager.notify.is_none() {
