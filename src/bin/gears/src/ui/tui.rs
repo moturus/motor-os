@@ -1483,7 +1483,6 @@ mod tests {
             crate::runtime::Options {
                 tools: Some(crate::tools::Registry::default()),
                 tool_state_directory: Some(root.join("global")),
-                ..crate::runtime::Options::default()
             },
         )
         .unwrap();

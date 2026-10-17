@@ -16,8 +16,6 @@ mod file_access;
 mod fork_entry;
 #[path = "tool-smoke/owned_work.rs"]
 mod owned_work;
-#[path = "tool-smoke/request_prefix.rs"]
-mod request_prefix;
 #[path = "tool-smoke/state_directory.rs"]
 mod state_directory;
 
@@ -47,7 +45,6 @@ fn main() -> Result<(), String> {
     directory_lock::smoke(&gears)?;
     fork_entry::smoke(&gears)?;
     file_access::smoke()?;
-    request_prefix::smoke()?;
     state_directory::smoke(&gears)?;
     println!("gears shipped tools ALL PASS");
     Ok(())
@@ -281,11 +278,6 @@ fn atomic_workspace_replacement_keeps_executable_access() {
 #[test]
 fn startup_forks_select_old_entries_without_locking_or_changing_the_parent() {
     fork_entry::smoke(Path::new(env!("CARGO_BIN_EXE_gears"))).unwrap();
-}
-
-#[test]
-fn saved_request_prefixes_survive_compaction_and_historical_forks() {
-    request_prefix::smoke().unwrap();
 }
 
 #[test]

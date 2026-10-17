@@ -110,21 +110,14 @@ fn offer(context: &ToolContext, notices: &mut Vec<String>) -> String {
 
 pub fn initialize(event: &Event, root: &StateRoot) -> Result<Value, String> {
     let mut state = crate::batteries::hook_state(event)?;
-    if let Some(prefix) = crate::batteries::prefix_state(event)?
-        && let Some(hash) = prefix.get("prompt_snapshot")
-    {
-        // A historical fork keeps the prompt its saved request used.
-        state["prompt_snapshot"] = hash.clone();
-    }
     let saved = match state.get("prompt_snapshot") {
         None => None,
         Some(hash) => load(root, hash.as_str().ok_or("invalid prompt snapshot hash")?)?,
     };
     let compacted = event.payload["reason"] == "compaction";
-    let preserve = event.payload["preserve_prefix"] == true;
     let mut notices = Vec::new();
     let snapshot = match saved {
-        Some(saved) if preserve || !compacted => saved,
+        Some(saved) if !compacted => saved,
         _ => {
             let context = ToolContext::new(
                 event.workspace.clone(),

@@ -266,12 +266,6 @@ context settings to the server's context capacity.
 
 ## Local tests
 
-Ephemeral readers can use `--fork SESSION --fork-entry ENTRY --ephemeral
---preserve-prefix` to retain the system instructions and tool schemas recorded
-at that entry, even if their copied history needs compaction. Tool execution
-still follows the current registry and permission hooks. Older sessions without
-a prefix snapshot report that reconstructed instructions are being used.
-
 Automated tests never use an Internet provider:
 
     bash src/tests/test-gears-http.sh

@@ -673,15 +673,6 @@ impl Manager {
         if event_name == "initialize"
             && let Some(fields) = payload.as_object_mut()
         {
-            if let Some(states) = fields.remove("prefix_hook_states") {
-                fields.insert(
-                    "prefix_state".into(),
-                    states
-                        .get(&hook.config.name)
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                );
-            }
             fields.insert(
                 "subscribed_events".into(),
                 serde_json::json!(hook.config.events),

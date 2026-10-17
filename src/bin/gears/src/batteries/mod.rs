@@ -88,18 +88,6 @@ pub(crate) fn hook_state(event: &Event) -> Result<Value, String> {
     }
 }
 
-/// The hook state saved with a historical request, when a fork preserves its prefix.
-pub(crate) fn prefix_state(event: &Event) -> Result<Option<&Value>, String> {
-    if event.payload["preserve_prefix"] != true {
-        return Ok(None);
-    }
-    match event.payload.get("prefix_state") {
-        None => Ok(None),
-        Some(value @ (Value::Object(_) | Value::Null)) => Ok(Some(value)),
-        _ => Err("historical prefix state must be an object or null".into()),
-    }
-}
-
 pub fn hook(event: Event) -> Result<Value, String> {
     let context = || paths::ToolContext::for_event(&event);
     match event.event.as_str() {

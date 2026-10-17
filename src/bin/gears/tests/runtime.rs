@@ -855,7 +855,6 @@ fn tool_toggles_update_the_next_request_and_preserve_scope_precedence() {
         Options {
             tools: Some(registry),
             tool_state_directory: Some(fixture.root.join("global")),
-            ..Options::default()
         },
     )
     .unwrap();
@@ -943,7 +942,6 @@ fn permission_listing_marks_stale_grants_and_revoke_clears_each_scope() {
         Options {
             tools: Some(registry),
             tool_state_directory: Some(global_dir),
-            ..Options::default()
         },
     )
     .unwrap();
@@ -1013,7 +1011,6 @@ common = ["./run"]
         Options {
             tools: Some(registry),
             tool_state_directory: Some(fixture.root.join("global")),
-            ..Options::default()
         },
     )
     .unwrap();
@@ -1062,7 +1059,6 @@ fn global_allow_survives_new_sessions_but_not_unattended_calls() {
         Options {
             tools: Some(registry),
             tool_state_directory: Some(fixture.root.join("global")),
-            ..Options::default()
         },
     )
     .unwrap();
@@ -1132,7 +1128,6 @@ fn failed_global_grant_write_keeps_the_pending_tool_unapproved() {
         Options {
             tools: Some(registry),
             tool_state_directory: Some(global_dir.clone()),
-            ..Options::default()
         },
     )
     .unwrap();
@@ -1203,7 +1198,6 @@ fn session_answers_override_global_answers_in_both_directions() {
             Options {
                 tools: Some(registry),
                 tool_state_directory: Some(global_dir),
-                ..Options::default()
             },
         )
         .unwrap();
@@ -1311,7 +1305,6 @@ fn global_denial_persists_and_refuses_later_attended_calls() {
         Options {
             tools: Some(registry),
             tool_state_directory: Some(global_dir.clone()),
-            ..Options::default()
         },
     )
     .unwrap();

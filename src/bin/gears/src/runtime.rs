@@ -15,7 +15,7 @@ use crate::provider::{
     ToolOutcome, ToolSpec, Usage, UsageMeter,
 };
 use crate::session::{
-    Compaction, PermissionGrant, RequestPrefix, Session, SessionInfo, Store, ToolState, TreeItem,
+    Compaction, PermissionGrant, Session, SessionInfo, Store, ToolState, TreeItem,
 };
 use crate::tool_state::Overrides;
 use crate::tools::{ExecutionContext, Registry};
@@ -162,7 +162,6 @@ pub struct Runtime {
     tools: Registry,
     tool_state_directory: PathBuf,
     prompt: Effective,
-    preserved_prefix: Option<RequestPrefix>,
     model: String,
     max_tool_rounds: usize,
     context: ContextConfig,
@@ -181,8 +180,6 @@ pub struct Options {
     pub tools: Option<Registry>,
     /// Where tool enablement is saved, instead of the Gears directory.
     pub tool_state_directory: Option<PathBuf>,
-    /// Inform hooks before initialization so corrections follow the frozen prefix.
-    pub preserved_prefix: Option<RequestPrefix>,
 }
 
 impl Runtime {
@@ -207,7 +204,6 @@ impl Runtime {
         let Options {
             tools,
             tool_state_directory,
-            preserved_prefix,
         } = options;
         let mut tools = match tools {
             Some(tools) => tools,
@@ -217,18 +213,6 @@ impl Runtime {
             Some(directory) => directory,
             None => crate::directory::default_root()?,
         };
-        if let Some(prefix) = &preserved_prefix {
-            if !session.is_ephemeral() {
-                return Err("preserving a saved prefix requires an ephemeral session".into());
-            }
-            let limit = config
-                .context
-                .window_tokens
-                .saturating_sub(config.context.output_reserve_tokens);
-            if estimate_request_tokens(&prefix.system, &[], &prefix.tools) > limit {
-                return Err("saved request prefix exceeds the model input limit".into());
-            }
-        }
         crate::process::ensure_cleanup()?;
         let cancellation = Cancellation::new();
         let previous_identity = session.latest_runtime_identity();
@@ -250,11 +234,8 @@ impl Runtime {
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
         let provider_name = session.provider().unwrap_or_else(|| "default".to_string());
-        let mut payload =
+        let payload =
             serde_json::json!({"reason": "startup", "provider": provider_name, "model": model});
-        if let Some(prefix) = &preserved_prefix {
-            preserve_hook_payload(&session, prefix, &mut payload, &mut startup_notices)?;
-        }
         let hooks = Hooks::initialize(
             config.hooks.clone(),
             store.workspace().to_path_buf(),
@@ -298,7 +279,6 @@ impl Runtime {
             tools,
             tool_state_directory,
             prompt,
-            preserved_prefix,
             model,
             max_tool_rounds: config.max_tool_rounds,
             context: config.context,
@@ -811,10 +791,6 @@ impl Runtime {
             };
             self.ensure_fits(&messages)?;
             let request = self.request(messages, true);
-            self.session.record_request_prefix(&RequestPrefix {
-                system: request.system.clone(),
-                tools: request.tools.clone(),
-            })?;
             let completion = {
                 let mut sink = RuntimeSink {
                     cancellation: &self.cancellation,
@@ -1106,16 +1082,7 @@ impl Runtime {
             .iter()
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
-        let mut payload =
-            serde_json::json!({"reason": reason, "provider": provider, "model": model});
-        if let Some(prefix) = &self.preserved_prefix {
-            preserve_hook_payload(
-                &self.session,
-                prefix,
-                &mut payload,
-                &mut self.startup_notices,
-            )?;
-        }
+        let payload = serde_json::json!({"reason": reason, "provider": provider, "model": model});
         let hooks = self.hooks.setup_again(
             &reserved,
             payload,
@@ -1202,7 +1169,6 @@ impl Runtime {
         self.hooks = hooks;
         self.prompt = prompt;
         self.usage = self.session.usage();
-        self.preserved_prefix = None;
         self.hooks.notify(
             "session_start",
             serde_json::json!({"session_id": self.session.id()}),
@@ -1607,16 +1573,6 @@ impl Runtime {
     }
 
     fn request(&self, messages: Vec<Message>, tools: bool) -> Request {
-        if let Some(prefix) = &self.preserved_prefix {
-            let request = Request::new(&self.model, messages)
-                .with_system(prefix.system.clone())
-                .with_cancellation(self.cancellation.clone());
-            return if tools {
-                request.with_tools(prefix.tools.clone())
-            } else {
-                request
-            };
-        }
         let request = Request::new(&self.model, messages)
             .with_system(self.prompt.fragments().to_vec())
             .with_cancellation(self.cancellation.clone());
@@ -1786,24 +1742,6 @@ impl Runtime {
         emit_notices(observer, notices)?;
         self.emit_hook_hint(observer)
     }
-}
-
-fn preserve_hook_payload(
-    session: &Session,
-    prefix: &RequestPrefix,
-    payload: &mut Value,
-    notices: &mut Vec<String>,
-) -> Result<(), String> {
-    payload["preserve_prefix"] = serde_json::json!(true);
-    if session.request_prefix()?.as_ref() == Some(prefix)
-        && let Some(saved) = session.request_prefix_hook_states()?
-    {
-        payload["prefix_hook_states"] = serde_json::json!(saved.states);
-        if !saved.checkpointed {
-            notices.push("saved request checkpoint unavailable; prefix resources use their creation snapshot".into());
-        }
-    }
-    Ok(())
 }
 
 fn call_detail(call: &ToolCall) -> String {

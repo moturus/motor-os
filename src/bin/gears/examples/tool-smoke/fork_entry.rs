@@ -6,7 +6,7 @@ use std::time::Duration;
 use gears::mock::{MockServer, sse_response};
 use gears::process::{Cancellation, Request, run};
 use gears::provider::Message;
-use gears::session::{Compaction, HookState, RequestPrefix, Store};
+use gears::session::{Compaction, HookState, Store};
 
 pub fn smoke(gears: &Path) -> Result<(), String> {
     let root = std::env::temp_dir().join(format!("gears-fork-entry-{}", std::process::id()));
@@ -17,7 +17,7 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
     let mut parent = store.create(false, None)?;
     parent.append_hook_state(&HookState {
         hook: "fixture".into(),
-        state: serde_json::json!({"role":"parent", "retained":"source", "resource":"original"}),
+        state: serde_json::json!({"role":"parent", "retained":"source"}),
         context: None,
     })?;
     parent.append_hook_state(&HookState {
@@ -25,13 +25,9 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
         state: serde_json::json!({"private":"other hook"}),
         context: None,
     })?;
-    parent.record_request_prefix(&RequestPrefix {
-        system: vec!["Frozen parent instructions".into()],
-        tools: Vec::new(),
-    })?;
     parent.append_hook_state(&HookState {
         hook: "fixture".into(),
-        state: serde_json::json!({"role":"parent", "retained":"current", "resource":"changed"}),
+        state: serde_json::json!({"role":"parent", "retained":"current"}),
         context: None,
     })?;
     parent.append_message(&Message::user("Saved original task"))?;
@@ -66,7 +62,6 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
             "--fork-entry".into(),
             entry,
             "--ephemeral".into(),
-            "--preserve-prefix".into(),
             "--ui".into(),
             "line".into(),
         ],
@@ -115,8 +110,6 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
         "Continue the saved task".into(),
         "--output".into(),
         "jsonl".into(),
-        "--hook-state".into(),
-        r#"fixture={"role":"child","child_run":{"mark":"test"}}"#.into(),
     ]);
     let output =
         run(&request, &Cancellation::new(), &mut |_, _| {}).map_err(|error| error.to_string())?;
@@ -124,30 +117,11 @@ pub fn smoke(gears: &Path) -> Result<(), String> {
     let event: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&event_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
-    assert_eq!(event["session"]["state"]["role"], "child");
-    assert_eq!(event["session"]["state"]["child_run"]["mark"], "test");
+    // The fork inherits the hook state saved before its entry, and only its own.
+    assert_eq!(event["session"]["state"]["role"], "parent");
     assert_eq!(event["session"]["state"]["retained"], "current");
-    assert_eq!(event["payload"]["preserve_prefix"], true);
-    assert_eq!(event["payload"]["prefix_state"]["resource"], "original");
-    assert_eq!(event["payload"]["prefix_state"]["role"], "parent");
-    assert!(event["payload"].get("prefix_hook_states").is_none());
-    assert!(!event["payload"].to_string().contains("other hook"));
+    assert!(!event.to_string().contains("other hook"));
     assert_ne!(event["session"]["id"], parent.id());
-    assert_eq!(server.requests().len(), 1);
-    let body: serde_json::Value =
-        serde_json::from_slice(&server.requests()[0].body).map_err(|error| error.to_string())?;
-    assert_eq!(body["messages"][0]["content"], "Frozen parent instructions");
-    // An unknown hook must fail before initialization or a provider request.
-    let position = request
-        .args
-        .iter()
-        .position(|arg| arg == "--hook-state")
-        .unwrap();
-    request.args[position + 1] = "unknown={}".into();
-    let output =
-        run(&request, &Cancellation::new(), &mut |_, _| {}).map_err(|error| error.to_string())?;
-    assert!(!output.success());
-    assert!(output.stderr.contains("unconfigured hook"), "{output:?}");
     assert_eq!(server.requests().len(), 1);
     assert_eq!(
         std::fs::read(&path).map_err(|error| error.to_string())?,

@@ -70,7 +70,6 @@ fn unconfirmed_cleanup_blocks_another_turn_and_session_mutation() {
         Options {
             tools: Some(gears::tools::Registry::load_config(&config).unwrap()),
             tool_state_directory: Some(base.join("global")),
-            ..Options::default()
         },
     )
     .unwrap();

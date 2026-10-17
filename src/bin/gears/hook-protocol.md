@@ -14,16 +14,6 @@ Unsubscribed events do not start a process, including `initialize`; hooks that
 register tools must subscribe to both `initialize` and `tool_execute`.
 
 `initialize` carries `reason`, `provider`, `model`, and `subscribed_events`.
-`preserve_prefix: true` means the model keeps its saved system/tool prefix;
-current corrections must be delivered as context after that prefix. Compaction
-may discard earlier correction notes, so hooks must supply them again then.
-When the prefix matches a saved request, `prefix_state` contains this hook's
-state at that request, or `null` if the hook was absent. Hooks should recover
-only historical resource references from it, keeping current permissions and
-run state. Prefix bytes are saved only when changed, but each actual request
-checkpoints its hook states. Older sessions without checkpoints use the
-prefix's creation snapshot and emit a notice. An absent `prefix_state` means
-the caller supplied a prefix without matching saved provenance.
 The subscription field is the hook's configured event list, or `null` when
 all events are subscribed. A hook should register commands only when
 `command` is subscribed; older senders omit the subscription field.
@@ -69,15 +59,6 @@ Every successful invocation returns an object. protocol_version may be omitted
 when it is 1. The common optional fields are state, context, and notice.
 State replaces that hook's latest namespaced state. Context is a normalized
 Gears message that is also added to model context.
-
-An ephemeral one-shot fork may pass `--hook-state NAME=JSON` to overlay fields
-on one configured hook's inherited state before its first initialization. JSON
-must be an object of at most 16 KiB, each hook may be named once, and the option
-requires `--fork --ephemeral -p`. Unconfigured hooks are refused. This lets an
-owned background reader declare its role and source without modifying the
-parent or introducing process-global role variables. `--preserve-prefix` keeps
-the marked parent's saved system/tool prefix while these current hooks enforce
-execution policy.
 
 Common fields also include `hint` and `question`. A hint is one line of at
 most 256 bytes; an empty string clears it. Later hints replace earlier ones.

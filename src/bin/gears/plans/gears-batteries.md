@@ -626,12 +626,16 @@ skills and the workspace-memory approval by hash. It added memory format
 `changes.jsonl`, the `offer_lessons` setting and the reshaped `history`
 and `status` commands.
 
+On 2026-10-17 the Gears features that only reviews used were removed: the
+after-turn command, `--preserve-prefix` with the request prefixes it read
+back, and `--hook-state`. Sessions written earlier keep their
+`request_prefix` records; Gears now ignores them.
+
 ## What remains
 
 | Work | Status and next step |
 | --- | --- |
 | Hands-on validation | Finish the Linux and Motor OS interactive checklist: tool enablement, approvals, revocation, resume, screen rendering and the memory question in both UIs. No live local-model result has been reported. |
-| Gears-side leftovers | `preserve_prefix`/`prefix_state` in the hook protocol, `--hook-state` and the after-turn command were added for reviews and are now unused by the batteries. They are generic Gears features; the user decides whether they stay. |
 | Optional `/remember TEXT` | A hook command that writes the user's own words into memory with no model call. Not built; add it if the question flow proves tedious. |
 | Shell state of killed runs | An ephemeral session keeps its `sh` state in `/tmp/gears-sh-*`. A killed Gears cannot remove it, and startup cleanup covers only the Gears directory, so each kill leaves an empty directory behind (two tests kill Gears on purpose). Keeping that state under the Gears directory would let startup remove it. |
 
