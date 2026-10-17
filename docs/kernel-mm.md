@@ -437,6 +437,23 @@ that touch the allocator directly:
   delayed publisher cannot restore an older observation over newer completed
   updates; it does not make the two counters an instantaneous snapshot.
 
+## Process memory statistics
+
+`memory_usage` reports reserved virtual bytes; `pages_user` and `pages_kernel`
+report the corresponding counts in 4 KiB pages. `memory_resident` reports RAM
+backing those tracked mappings. Untouched lazy pages, unbacked reservations,
+guards and MMIO do not contribute to resident memory. Huge pages contribute
+their full size. Cached kernel stacks remain counted until actually freed.
+
+Shared RAM counts once per mapping, including aliases. Kernel stacks are
+also attributed to their process, so summing these counters is not unique
+physical-memory usage; use system `mem.used` for that. The existing accounting
+coverage is unchanged: not all boot mappings are captured, fixed per-process
+static pages are excluded, and kernel bookkeeping is not charged to each
+process. Reservation and resident counters are sampled independently; a
+concurrent mapping change can make a snapshot temporarily inconsistent.
+Memory limits and admission retain their existing reservation-based policy.
+
 ## Validation
 
 Kernel self-tests run in debug boots on Motor OS through full-test.sh, on a

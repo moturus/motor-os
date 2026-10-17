@@ -199,12 +199,15 @@ Gate results for the follow-ups, 2026-10-17: three debug runs of
 minutes) and one `src/tests/full-test-dev.sh --release` run (36 minutes)
 all passed.
 
+Reserved/resident process stats are implemented by
+[resident-memory-stats.md](resident-memory-stats.md): existing reservation
+metrics are preserved and `memory_resident` reports tracked RAM backing.
+
 ## Deferred
 
 - Shrinking descriptor pools: the pool keeps its reuse-until-exit
   behavior. With sparse segments it only ever holds the busiest
   moment's touched pages.
-- Splitting reserved from resident in process stats.
 - Sharing into lazy segments. It would need descriptor creation in the
   share path and admission in the IPC get path, which takes no admission
   today. Add it only if a client needs it.

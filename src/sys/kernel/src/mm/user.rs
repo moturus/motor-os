@@ -314,11 +314,11 @@ impl UserAddressSpace {
         // When dropping, we count the full segment, with guard pages, so when adding,
         // we need to do the same.
         self.stats_kernel_add(num_pages)?;
-        super::virt::vmem_allocate_pages(super::virt::VmemKind::KernelStack, num_pages).inspect_err(
-            |_| {
+        super::virt::vmem_allocate_pages(super::virt::VmemKind::KernelStack, num_pages)
+            .inspect(|_| self.kernel_mem_stats.add_resident(num_pages - 2))
+            .inspect_err(|_| {
                 self.stats_kernel_sub(num_pages);
-            },
-        )
+            })
     }
 
     fn do_drop_user_stack(&self, user_stack: super::MemorySegment) {
@@ -330,6 +330,8 @@ impl UserAddressSpace {
 
         super::virt::KERNEL_ADDRESS_SPACE
             .free(kernel_stack.start, super::virt::VmemKind::KernelStack);
+        self.kernel_mem_stats
+            .sub_resident((kernel_stack.size >> PAGE_SIZE_SMALL_LOG2) - 2);
     }
 
     pub fn drop_stacks(&self, user_stack: &UserStack, kernel_stack: &Option<super::MemorySegment>) {
@@ -809,6 +811,7 @@ pub fn huge_mapping_self_test() {
     // the policy retained for the segment.
     let fallback = space.alloc_user_heap(HUGE_PAGES).unwrap();
     assert_eq!(fallback.size, PAGE_SIZE_MID);
+    assert_eq!(space.user_mem_stats().resident(), PAGE_SIZE_MID);
     assert_eq!(fallback.start & (PAGE_SIZE_MID - 1), 0);
     for page in [0, 1, HUGE_PAGES - 1] {
         assert_eq!(
@@ -842,6 +845,7 @@ pub fn huge_mapping_self_test() {
     );
     assert_eq!(space.read_from_user(fallback.start, 6).unwrap(), b"intact");
     space.unmap(fallback.start).unwrap();
+    assert_eq!(space.user_mem_stats().resident(), 0);
     assert_eq!(block_metrics().taken, taken_held);
 
     // Exactly one whole block free, dirtied first: the eligible request
@@ -858,6 +862,7 @@ pub fn huge_mapping_self_test() {
     drop(frame);
     let huge = space.alloc_user_heap(HUGE_PAGES).unwrap();
     assert_eq!(huge.size, PAGE_SIZE_MID);
+    assert_eq!(space.user_mem_stats().resident(), PAGE_SIZE_MID);
     assert_eq!(huge.start & (PAGE_SIZE_MID - 1), 0);
     assert_eq!(table.leaf_kind(huge.start), Some(PageType::MidPage));
     assert_eq!(table.virt_to_phys(huge.start + 12345), Some(phys + 12345));
@@ -893,6 +898,7 @@ pub fn huge_mapping_self_test() {
 
     // Teardown returns the block; the frame count observes it.
     space.unmap(huge.start).unwrap();
+    assert_eq!(space.user_mem_stats().resident(), 0);
     assert_eq!(block_metrics().taken, taken_held - 1);
     assert_eq!(table.leaf_kind(huge.start), None);
     drop(held);
@@ -937,9 +943,14 @@ pub fn huge_mapping_self_test() {
     }
     assert_eq!(HeapSizing::new(u64::MAX).mapped_pages, u64::MAX);
     let usage_before = space.user_mem_stats().total();
+    let resident_before = space.user_mem_stats().resident();
     let mixed = space.alloc_user_heap(HUGE_PAGES + 256).unwrap();
     assert_eq!(mixed.size, PAGE_SIZE_MID + 256 * PAGE_SIZE_SMALL);
     assert_eq!(space.user_mem_stats().total() - usage_before, mixed.size);
+    assert_eq!(
+        space.user_mem_stats().resident() - resident_before,
+        mixed.size
+    );
     let boundary = mixed.start + PAGE_SIZE_MID;
     assert_eq!(table.leaf_kind(mixed.start), Some(PageType::MidPage));
     assert_eq!(
@@ -962,6 +973,7 @@ pub fn huge_mapping_self_test() {
     space.unmap(rounded.start).unwrap();
     space.unmap(mixed.start).unwrap();
     assert_eq!(space.user_mem_stats().total(), usage_before);
+    assert_eq!(space.user_mem_stats().resident(), resident_before);
     assert_eq!(block_metrics().taken, taken_before);
     crate::raw_log!("huge mapping tests PASS");
 }
@@ -1016,6 +1028,10 @@ pub fn share_validation_self_test() {
     let before: [u64; PAGES as usize] = core::array::from_fn(|idx| dest_phys(idx as u64));
 
     assert_eq!(share(dest, lazy), refused);
+    assert_eq!(
+        dest_space.user_mem_stats().resident(),
+        PAGES * PAGE_SIZE_SMALL
+    );
     assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"intact");
     for (idx, phys_before) in before.iter().enumerate() {
         assert_eq!(dest_phys(idx as u64), *phys_before);
@@ -1025,6 +1041,10 @@ pub fn share_validation_self_test() {
     // reads the source's bytes through the shared frames.
     source_space.fix_pagefault(page(lazy, 2), 6).unwrap();
     share(dest, lazy).unwrap();
+    assert_eq!(
+        dest_space.user_mem_stats().resident(),
+        PAGES * PAGE_SIZE_SMALL
+    );
     assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"source");
     for idx in 0..PAGES {
         assert_eq!(dest_phys(idx), source_phys(idx));
@@ -1061,6 +1081,8 @@ pub fn share_validation_self_test() {
         space.unmap(segment.start).unwrap();
     }
     crate::raw_log!("share validation tests PASS");
+    assert_eq!(source_space.user_mem_stats().resident(), 0);
+    assert_eq!(dest_space.user_mem_stats().resident(), 0);
 }
 
 // Sparse lazy segments: an untouched reservation holds no page descriptors
@@ -1072,6 +1094,7 @@ pub fn sparse_lazy_self_test() {
     let space = UserAddressSpace::new().unwrap();
     let descriptors = || space.inner.page_descriptors();
     let accounted = || space.user_mem_stats().total();
+    let resident = || space.user_mem_stats().resident();
     let table = space.inner.page_table_ref();
     let (descriptors_before, accounted_before) = (descriptors(), accounted());
     let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
@@ -1081,6 +1104,7 @@ pub fn sparse_lazy_self_test() {
     assert_eq!(lazy.size, 4 << 30);
     assert_eq!(descriptors(), descriptors_before);
     assert_eq!(accounted(), accounted_before + lazy.size);
+    assert_eq!(resident(), 0);
     assert_eq!(table.virt_to_phys(lazy.start), None);
     assert!(space.read_from_user(lazy.start, 1).is_err());
 
@@ -1092,10 +1116,12 @@ pub fn sparse_lazy_self_test() {
     assert_eq!(descriptors(), descriptors_before + 1);
     space.copy_to_user(b"first", lazy.start).unwrap();
     space.fix_pagefault(lazy.start + 100, 6).unwrap();
+    assert_eq!(resident(), PAGE_SIZE_SMALL);
     assert_eq!(space.read_from_user(lazy.start, 5).unwrap(), b"first");
     space.fix_pagefault(middle, 6).unwrap();
     space.fix_pagefault(last, 4).unwrap();
     assert_eq!(descriptors(), descriptors_before + 3);
+    assert_eq!(resident(), 3 * PAGE_SIZE_SMALL);
     assert_eq!(space.read_from_user(last, 1).unwrap(), [0]);
     assert_eq!(table.virt_to_phys(lazy.start + PAGE_SIZE_SMALL), None);
 
@@ -1106,6 +1132,7 @@ pub fn sparse_lazy_self_test() {
     assert_eq!(descriptors(), descriptors_before + 4);
     assert_eq!(space.fix_pagefault(stack.segment.start, 6), refused);
     assert_eq!(space.fix_pagefault(stack.segment.end() - 1, 6), refused);
+    assert_eq!(resident(), 4 * PAGE_SIZE_SMALL);
     space
         .fix_pagefault(stack.segment.start + PAGE_SIZE_SMALL, 6)
         .unwrap();
@@ -1115,6 +1142,7 @@ pub fn sparse_lazy_self_test() {
     let plain = space.alloc_user_unmapped(2).unwrap();
     assert_eq!(descriptors(), descriptors_before + 7);
     assert_eq!(space.fix_pagefault(plain.start, 6), refused);
+    assert_eq!(resident(), 5 * PAGE_SIZE_SMALL);
 
     // A quarter of the user region, in one segment.
     let quarter = space.alloc_user_lazy(1 << 31).unwrap();
@@ -1131,6 +1159,7 @@ pub fn sparse_lazy_self_test() {
     space.unmap(lazy.start).unwrap();
     assert_eq!(descriptors(), descriptors_before);
     assert_eq!(accounted(), accounted_before);
+    assert_eq!(resident(), 0);
     crate::raw_log!("sparse lazy tests PASS");
 }
 
@@ -1147,6 +1176,7 @@ pub fn shared_alloc_cleanup_self_test() {
         (
             space.total_usage.load(Ordering::Relaxed),
             space.user_mem_stats().total(),
+            space.user_mem_stats().resident(),
             space.inner.page_descriptors(),
         )
     };

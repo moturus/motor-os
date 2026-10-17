@@ -636,7 +636,7 @@ pub(super) struct AddressSpaceBase {
     pub(super) page_table: PageTable,
     pub(super) page_allocator: super::virt_intrusive::PageAllocator,
 
-    mem_stats: Arc<crate::xray::stats::MemStats>,
+    pub(super) mem_stats: Arc<crate::xray::stats::MemStats>,
 }
 
 impl AddressSpaceBase {
@@ -749,6 +749,7 @@ impl KernelAddressSpace {
             super::zero_page(virt_addr, PageType::SmallPage);
 
             result.base.mem_stats.add(1);
+            result.base.mem_stats.add_resident(1);
         }
 
         result

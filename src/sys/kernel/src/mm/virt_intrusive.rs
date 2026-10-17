@@ -389,6 +389,7 @@ impl VmemSegment {
         // shootdown: a shootdown IPIs all CPUs and spins for their acks,
         // so doing it per page makes large frees pathologically slow.
         let mut mapped_pages = 0_u64;
+        let mut resident_pages = 0_u64;
         for page in self.pages.iter() {
             if let Some(frame) = page.frame.get() {
                 self.address_space().page_table.unmap_page_no_flush(
@@ -397,6 +398,9 @@ impl VmemSegment {
                     frame.kind(),
                 );
                 mapped_pages += 1;
+                if !frame.is_mmio() {
+                    resident_pages += frame.kind().page_size() >> PAGE_SIZE_SMALL_LOG2;
+                }
             }
         }
         if mapped_pages > 0 {
@@ -417,6 +421,7 @@ impl VmemSegment {
             page_mut.clear();
             self.address_space().page_allocator.free_page(page_ptr);
         }
+        self.address_space().mem_stats.sub_resident(resident_pages);
         // The segment was accounted in full when it was reserved, whether
         // its pages were all created, touched later, or never touched.
         let sz = self.segment.size;
@@ -432,6 +437,11 @@ impl VmemSegment {
     }
 
     pub(super) fn set_frame(&mut self, page: u64, frame: SlabArc<Frame>) {
+        let backing = frame.get().unwrap();
+        debug_assert!(!backing.is_mmio());
+        self.address_space()
+            .mem_stats
+            .add_resident(backing.kind().page_size() >> PAGE_SIZE_SMALL_LOG2);
         let page = self.find_page_mut(page).unwrap();
         debug_assert!(page.frame.is_null());
         page.frame = frame;
@@ -561,6 +571,9 @@ impl VmemSegment {
         }
         page_mut.frame = frame;
         self.pages.insert(unsafe { UnsafeRef::from_raw(page) });
+        self.address_space()
+            .mem_stats
+            .add_resident(kind.page_size() >> PAGE_SIZE_SMALL_LOG2);
         Ok(())
     }
 
@@ -775,6 +788,7 @@ impl VmemSegment {
         // No TLB flush: the PTE went from non-present to present, and x86
         // CPUs don't cache non-present translations (and every unmap path
         // flushes), so no CPU — including this one — holds a stale entry.
+        self.address_space().mem_stats.add_resident(1);
 
         Ok(())
     }
@@ -850,6 +864,8 @@ impl VmemSegment {
                     that_page.start,
                     PageType::SmallPage,
                 );
+            } else {
+                other.address_space().mem_stats.add_resident(1);
             }
 
             that_page.frame = this_page.frame.clone();

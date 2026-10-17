@@ -31,7 +31,7 @@ use moto_sys::stats::*;
 #[repr(u32)]
 #[derive(Clone, Copy, Debug)]
 pub enum MetricType {
-    /// Memory usage in bytes.
+    /// Reserved virtual memory in bytes, including unbacked pages.
     MemoryUsage = 0,
     /// CPU usage in tsc.
     CpuUsage = 1,
@@ -186,8 +186,10 @@ pub enum MetricType {
     SchedSyscallExitYields = 77,
     /// Syscall refusals naming an absent page in the caller's file mapping.
     FilePagedSyscallMisses = 78,
+    /// RAM backing tracked mappings, in bytes; shared pages count per mapping.
+    MemoryResident = 79,
 
-    TotalMetricTypes = 79,
+    TotalMetricTypes = 80,
 }
 
 impl MetricType {
@@ -289,6 +291,7 @@ impl MetricType {
             MetricType::MemCommittedPages => "mem.committed_pages",
             MetricType::SchedSyscallExitYields => "sched.syscall_exit_yields",
             MetricType::FilePagedSyscallMisses => "mem.file_paged_syscall_misses",
+            MetricType::MemoryResident => "memory_resident",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }
@@ -297,13 +300,13 @@ impl MetricType {
 #[derive(Debug)]
 pub struct MemStats {
     pages_used: AtomicU64,
+    pages_resident: AtomicU64,
     user_stats: bool,
 }
 
 impl Drop for MemStats {
     fn drop(&mut self) {
-        // assert_eq!(0, self.total());
-        if self.total() != 0 {
+        if self.total() != 0 || self.resident() != 0 {
             log::error!("Non-empty MemStats dropped: {self:?}.");
         }
     }
@@ -313,6 +316,7 @@ impl MemStats {
     const fn new(user_stats: bool) -> Self {
         Self {
             pages_used: AtomicU64::new(0),
+            pages_resident: AtomicU64::new(0),
             user_stats,
         }
     }
@@ -327,6 +331,40 @@ impl MemStats {
 
     pub fn total(&self) -> u64 {
         self.pages_used.load(Ordering::Relaxed) << PAGE_SIZE_SMALL_LOG2
+    }
+
+    pub fn resident(&self) -> u64 {
+        self.pages_resident.load(Ordering::Relaxed) << PAGE_SIZE_SMALL_LOG2
+    }
+
+    pub fn add_resident(&self, num_pages: u64) {
+        self.pages_resident.fetch_add(num_pages, Ordering::Relaxed);
+        if self.user_stats {
+            SYSTEM_STATS
+                .mem_stats_user
+                .pages_resident
+                .fetch_add(num_pages, Ordering::Relaxed);
+        } else if core::intrinsics::likely(SYSTEM_STATS.is_set()) {
+            SYSTEM_STATS
+                .mem_stats_kernel
+                .pages_resident
+                .fetch_add(num_pages, Ordering::Relaxed);
+        }
+    }
+
+    pub fn sub_resident(&self, num_pages: u64) {
+        self.pages_resident.fetch_sub(num_pages, Ordering::Relaxed);
+        if self.user_stats {
+            SYSTEM_STATS
+                .mem_stats_user
+                .pages_resident
+                .fetch_sub(num_pages, Ordering::Relaxed);
+        } else if core::intrinsics::likely(SYSTEM_STATS.is_set()) {
+            SYSTEM_STATS
+                .mem_stats_kernel
+                .pages_resident
+                .fetch_sub(num_pages, Ordering::Relaxed);
+        }
     }
 
     pub fn add(&self, num_pages: u64) {
@@ -718,6 +756,8 @@ impl KProcessStats {
         let pages_kernel = self.mem_stats_kernel.pages_used.load(Ordering::Relaxed);
         vals[MetricType::CpuUsage as usize] = self.cpu_usage(now);
         vals[MetricType::MemoryUsage as usize] = (pages_user + pages_kernel) << small_log2;
+        vals[MetricType::MemoryResident as usize] =
+            self.mem_stats_user.resident() + self.mem_stats_kernel.resident();
         vals[MetricType::ThreadsCreated as usize] = self.total_threads.load(Ordering::Relaxed);
         vals[MetricType::ActiveThreads as usize] = self.active_threads.load(Ordering::Relaxed);
         vals[MetricType::TotalChildren as usize] = self.total_children.load(Ordering::Relaxed);
@@ -1015,6 +1055,13 @@ pub fn init() {
         KERNEL_STATS
             .mem_stats_kernel
             .pages_used
+            .load(Ordering::Acquire),
+        Ordering::Relaxed,
+    );
+    SYSTEM_STATS.mem_stats_kernel.pages_resident.fetch_add(
+        KERNEL_STATS
+            .mem_stats_kernel
+            .pages_resident
             .load(Ordering::Acquire),
         Ordering::Relaxed,
     );

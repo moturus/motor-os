@@ -33,6 +33,70 @@ fn touch(addr: u64) {
     unsafe { (addr as *mut u64).write_volatile(addr) }
 }
 
+/// Query an unstarted process so the observer's allocations and demand-paged
+/// code cannot perturb the exact reserved/resident deltas under test.
+fn test_process_memory_stats() {
+    let target =
+        SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=memory-stats").unwrap();
+    let process = SysObj::create(target, 0, "process:entry_point=0").unwrap();
+    let pid = moto_sys::SysRay::process_pid(process).unwrap();
+    let memory = || ["memory_usage", "memory_resident"].map(|name| kernel_metric_at(name, pid));
+    let before = memory();
+    assert!(before[1] > 0 && before[1] < before[0]); // Backed stacks, with guards.
+    let lazy = SysMem::map(
+        target,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+        u64::MAX,
+        u64::MAX,
+        PAGE_SIZE_SMALL,
+        TIB / PAGE_SIZE_SMALL,
+    )
+    .unwrap();
+    assert_eq!(memory(), [before[0] + TIB, before[1]]);
+    let eager = SysMem::map(
+        target,
+        SysMem::F_READABLE | SysMem::F_WRITABLE,
+        u64::MAX,
+        u64::MAX,
+        PAGE_SIZE_SMALL,
+        4,
+    )
+    .unwrap();
+    assert_eq!(
+        memory(),
+        [
+            before[0] + TIB + 4 * PAGE_SIZE_SMALL,
+            before[1] + 4 * PAGE_SIZE_SMALL
+        ]
+    );
+
+    let source = SysMem::alloc(PAGE_SIZE_SMALL, 4).unwrap();
+    let alias = SysMem::map(
+        target,
+        SysMem::F_SHARE_SELF | SysMem::F_READABLE,
+        source,
+        moto_sys::CUSTOM_USERSPACE_REGION_START,
+        PAGE_SIZE_SMALL,
+        4,
+    )
+    .unwrap();
+    assert_eq!(
+        memory(),
+        [
+            before[0] + TIB + 8 * PAGE_SIZE_SMALL,
+            before[1] + 8 * PAGE_SIZE_SMALL
+        ]
+    );
+    for addr in [lazy, eager, alias] {
+        SysMem::unmap(target, 0, u64::MAX, addr).unwrap();
+    }
+    assert_eq!(memory(), before);
+    SysMem::free(source).unwrap();
+    SysObj::put(process).unwrap();
+    SysObj::put(target).unwrap();
+    println!("test_process_memory_stats PASS");
+}
+
 /// 64 GiB and 1 TiB reserved lazily cost a few pages, not a share of their
 /// size; a map above the 1 TiB cap is refused; the ends and the middle of
 /// each read as zero, keep what is written, and everything comes back on
@@ -365,6 +429,7 @@ fn warm_up_pool() {
 
 pub fn run_all_tests() {
     warm_up_pool();
+    test_process_memory_stats();
     test_large_reservations();
     test_lazy_share_source();
     test_shared_alloc_rollback_race();
