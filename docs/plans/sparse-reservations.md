@@ -151,6 +151,12 @@ three release runs of `src/tests/full-test.sh`, then
 `src/tests/full-test-dev.sh --release`. No retries, longer timeouts or
 weakened assertions. No boot-time work is added; thread spawn does less.
 
+Gate results, 2026-10-17: three debug and three release runs of
+`src/tests/full-test.sh` passed. The first `src/tests/full-test-dev.sh
+--release` run failed in javy-smoke's `memory-refused-fault`: the wasm
+smoke suite read the refusal counters at the system scope, where they have
+not lived since 4207b96e. Fixed in the suite (5d619731); the rerun passed.
+
 ## Deferred
 
 - Shrinking descriptor pools: the pool keeps its reuse-until-exit
