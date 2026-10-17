@@ -10,7 +10,6 @@ use super::process::Thread;
 use super::syscall::{ResultBuilder, SyscallArgs};
 use super::SysObject;
 use crate::mm::user::UserAddressSpace;
-use crate::mm::user_copy::UserCopyError;
 use crate::util::SpinLock;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::sync::{Arc, Weak};
@@ -87,22 +86,19 @@ pub(super) fn sys_pager(thread: &Thread, args: &SyscallArgs) -> SyscallResult {
     if caller.pid() != super::process::SYS_IO_PID {
         return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
     }
+    // sys-io has no file-paged segments, so its buffers need no page-fault retry.
     let result = match args.flags {
-        SysMem::F_PAGER_INIT => init(&caller).map_err(Into::into),
-        SysMem::F_PAGER_RESERVE => reserve(&caller, args).map_err(Into::into),
+        SysMem::F_PAGER_INIT => init(&caller),
+        SysMem::F_PAGER_RESERVE => reserve(&caller, args),
         SysMem::F_PAGER_DEQUEUE => dequeue(&caller, args.args[1], args.args[2]),
         SysMem::F_PAGER_FILL => fill(&caller, args),
-        SysMem::F_PAGER_FAIL => fail(args.args[1], args.args[2])
-            .map(|_| 0)
-            .map_err(Into::into),
-        SysMem::F_PAGER_ZERO_FROM => zero_from(args.args[1], args.args[2])
-            .map(|_| 0)
-            .map_err(Into::into),
-        _ => Err(moto_rt::E_INVALID_ARGUMENT.into()),
+        SysMem::F_PAGER_FAIL => fail(args.args[1], args.args[2]).map(|_| 0),
+        SysMem::F_PAGER_ZERO_FROM => zero_from(args.args[1], args.args[2]).map(|_| 0),
+        _ => Err(moto_rt::E_INVALID_ARGUMENT),
     };
     match result {
         Ok(value) => ResultBuilder::ok_1(value),
-        Err(err) => err.into_syscall_result(caller.address_space()),
+        Err(err) => ResultBuilder::result(err),
     }
 }
 
@@ -139,6 +135,8 @@ fn reserve(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, Erro
     if state.retired {
         return Err(moto_rt::E_BAD_HANDLE);
     }
+    // The registry is taken twice on purpose: every check that can fail
+    // precedes `reserve_file`, so nothing needs rolling back.
     let id = {
         let mut pager = registry().lock(line!());
         if pager.notify.is_none() {
@@ -170,24 +168,30 @@ fn reserve(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, Erro
     Ok(id)
 }
 
-fn dequeue(caller: &Arc<super::Process>, buf: u64, capacity: u64) -> Result<u64, UserCopyError> {
-    let mut batch = [(0_u64, 0_u64); SysMem::PAGER_MAX_EVENTS];
+fn dequeue(caller: &Arc<super::Process>, buf: u64, capacity: u64) -> Result<u64, ErrorCode> {
+    let mut batch = [[0_u64; 2]; SysMem::PAGER_MAX_EVENTS];
     let count = {
         let mut pager = registry().lock(line!());
         let count = (capacity as usize).min(batch.len()).min(pager.events.len());
         for slot in batch.iter_mut().take(count) {
-            *slot = pager.events.pop_front().unwrap();
+            let (id, page) = pager.events.pop_front().unwrap();
+            *slot = [id, page];
         }
         count
     };
-    let bytes = unsafe { core::slice::from_raw_parts(batch.as_ptr() as *const u8, count * 16) };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            batch.as_ptr() as *const u8,
+            core::mem::size_of_val(&batch[..count]),
+        )
+    };
     if let Err(err) = caller.address_space().copy_to_user(bytes, buf) {
         // Requeue, so a bad buffer loses nothing.
         let mut pager = registry().lock(line!());
-        for event in batch[..count].iter().rev() {
-            pager.events.push_front(*event);
+        for &[id, page] in batch[..count].iter().rev() {
+            pager.events.push_front((id, page));
         }
-        return Err(err);
+        return Err(err.into());
     }
     Ok(count as u64)
 }
@@ -202,10 +206,10 @@ fn resume(waiters: Vec<Waiter>, success: bool) {
 
 /// Installs private copies of `count` contiguous caller pages at `source`
 /// from `dest` on; returns how many pages were installed.
-fn fill(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, UserCopyError> {
+fn fill(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, ErrorCode> {
     let (id, dest, source, count) = (args.args[1], args.args[2], args.args[3], args.args[4]);
     if count == 0 || count > MAX_FILL_PAGES || !dest.is_multiple_of(PAGE) {
-        return Err(moto_rt::E_INVALID_ARGUMENT.into());
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
     let len = count * PAGE;
     let dest_end = dest.checked_add(len).ok_or(moto_rt::E_INVALID_ARGUMENT)?;
@@ -229,10 +233,12 @@ fn fill(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, UserCop
         let mut state = space.pager.lock(line!());
         let mapping = state.get_mut(start, id)?;
         if dest < mapping.start || dest_end > mapping.end {
-            return Err(moto_rt::E_INVALID_ARGUMENT.into());
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        let installed = space.fill_file(dest, &sources)?;
+        let (installed, result) = space.fill_file(dest, &sources);
+        // A failed fill may still have installed a prefix of the window.
         mapping.reservation.release(installed);
+        result?;
         (installed, mapping.take_waiters(dest, dest_end))
     };
     resume(waiters, true);

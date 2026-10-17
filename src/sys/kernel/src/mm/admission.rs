@@ -151,8 +151,12 @@ pub struct Commitment {
 }
 
 impl Commitment {
-    /// Gives back up to `pages`, as the pages it was held for are allocated.
+    /// Gives back `pages`, as the pages it was held for are allocated.
     pub fn release(&mut self, pages: u64) {
+        debug_assert!(
+            pages <= self.pages,
+            "filled pages exceed remaining commitment"
+        );
         let pages = pages.min(self.pages);
         if pages != 0 {
             self.pages -= pages;

@@ -28,6 +28,8 @@ General guidelines:
 * Stop if any preexisting bug is found and diagnose it. If the bug is test only and the fix
   is small and obvious, fix the test, commit, and continue. Otherwise stop and explain what happened.
 * Make sure your tests are included in src/tests/full-test.sh either directly or transitively.
+* Kernel tests must run inside Motor OS, not as Linux host tests. Do not reshape
+  kernel code or add abstractions solely to accommodate host test harnesses.
 * If you are working on a core OS component (basically, anything under src/sys),
   make sure src/tests/full-test.sh passes consistently as both debug and release
   builds/runs at least three times each before committing a patch. If this step fails, please make

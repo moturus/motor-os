@@ -598,15 +598,16 @@ impl UserAddressSpace {
 
     /// Copies each source page into a fresh frame and installs the copies
     /// from `start` on, keeping pages that are already present. Returns the
-    /// number of pages installed. The caller holds `pager` through
-    /// validation, installation and commitment accounting.
+    /// number of pages installed even if a later page fails. The caller holds
+    /// `pager` through validation, installation and commitment accounting.
     pub(crate) fn fill_file(
         &self,
         start: u64,
         sources: &[PinnedUserPage],
-    ) -> Result<u64, ErrorCode> {
+    ) -> (u64, Result<(), ErrorCode>) {
+        let mut installed = 0;
         // Admitted: the mapping's reservation covers these pages.
-        self.inner.with_file_segment(start, |segment| {
+        let result = self.inner.with_file_segment(start, |segment| {
             let end = (sources.len() as u64)
                 .checked_mul(PAGE_SIZE_SMALL)
                 .and_then(|bytes| start.checked_add(bytes))
@@ -614,15 +615,15 @@ impl UserAddressSpace {
             if !start.is_multiple_of(PAGE_SIZE_SMALL) || end > segment.segment().end() {
                 return Err(moto_rt::E_INVALID_ARGUMENT);
             }
-            let mut installed = 0;
             for (idx, source) in sources.iter().enumerate() {
                 let addr = start + ((idx as u64) << PAGE_SIZE_SMALL_LOG2);
                 if segment.fill_file_page(addr, Some(source))? {
                     installed += 1;
                 }
             }
-            Ok(installed)
-        })
+            Ok(())
+        });
+        (installed, result)
     }
 
     /// Installs a zeroed page in a file-paged segment unless one is present.

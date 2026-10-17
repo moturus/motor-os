@@ -1261,9 +1261,9 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.17.7"
+version = "0.17.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a1f77799833534c2aa19be58ab03aee6b60bc203d430ba43a65c97172e06d3f"
+checksum = "0a77aa5e9703e09b6fef00cd465edff63b4ab502177e10aecbbd93b3cef217d6"
 
 [[package]]
 name = "moto-sys"

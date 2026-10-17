@@ -324,8 +324,9 @@ impl SysMem {
         .map(|(id, _)| id)
     }
 
-    /// Moves queued (mapping id, page) events into `events`; returns how many.
-    pub fn pager_dequeue(events: &mut [(u64, u64)]) -> Result<usize, ErrorCode> {
+    /// Moves queued `[mapping_id, page]` events into `events`; returns how many.
+    /// A `page` of `PAGER_RETIRED` retires the mapping.
+    pub fn pager_dequeue(events: &mut [[u64; 2]]) -> Result<usize, ErrorCode> {
         Self::pager_op(
             Self::F_PAGER_DEQUEUE,
             [

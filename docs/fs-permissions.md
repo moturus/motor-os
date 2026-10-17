@@ -21,10 +21,11 @@ None ⊆ Interactive ⊆ System
 ```
 
 Directory `x` controls listing, traversal, and lookup. Directory `w` controls
-creation, deletion, rename, and permission changes of children. A non-writable file can therefore
-still be replaced when its parent directory is writable. The modes below are
-the image's initial permissions; runtime changes follow the authority rules
-described below.
+creation, deletion, rename, and permission changes of children. A non-writable
+file can therefore still be replaced when its parent directory is writable,
+unless an [executable lock](#executable-files-in-use) applies. The modes below
+are the image's initial permissions; runtime changes follow the authority
+rules described below.
 
 W^X applies when constructing an image: a shipped executable ELF grants no
 role write access. Directory `x` is traversal authority and does
@@ -326,11 +327,28 @@ absent.
 - The model has no users, ownership, groups, ACLs, sticky directories,
   symlinks, numeric Unix modes, or recursive chmod.
 - Non-writable files can be replaced where their parent directory is
-  writable. A permanent System seal requires `r--` or `---`, which also
-  removes execute or directory traversal permission.
+  writable, unless an executable lock applies. A permanent System seal
+  requires `r--` or `---`, which also removes execute or directory traversal
+  permission.
 - Copying onto an existing writable file whose parent denies permission
   changes is refused, because the copy could not give it the source's
   permissions. Its contents can still be replaced by writing to it.
+
+### Executable files in use
+
+Motor OS locks an executable while loading it and while any process uses it
+for demand paging. Writes, truncation, deletion, renaming, replacement by
+renaming another file onto it, permission changes (`chmod`), and
+`copy_file_range` into it fail with `E_NOT_ALLOWED`. This applies even when
+file and directory permissions would otherwise allow the operation.
+
+The lock lasts until the last process using those mappings exits or is
+killed. It no longer blocks file operations once that exit is visible.
+A daemon can therefore keep its executable locked for its whole lifetime.
+
+Files smaller than 1 MiB are loaded completely during spawn. They keep no
+executable lock after the child is created. The same is true of any larger
+image that the loader loads completely.
 
 ## Non-obvious implementation decisions
 

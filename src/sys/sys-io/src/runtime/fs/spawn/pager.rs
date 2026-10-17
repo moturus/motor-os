@@ -3,6 +3,9 @@
 //! and installs them. Each live mapping holds one executable-lock reference,
 //! released when the kernel retires the mapping.
 
+#[cfg(debug_assertions)]
+pub(in crate::runtime::fs) mod self_test;
+
 use super::elf;
 use super::{ExecLocks, RelocIndex, SpawnStats, native, read_range};
 use crate::runtime::fs::FsRuntime;
@@ -27,6 +30,7 @@ pub(crate) struct Mapping {
     relocs: Option<RelocIndex>,
     /// Adaptive window: doubles while faults continue where the last
     /// window ended, and drops back to one page otherwise.
+    /// These also describe the last successful fill: `[next - window * PAGE, next)`.
     next: Cell<u64>,
     window: Cell<u64>,
 }
@@ -46,6 +50,11 @@ impl Mapping {
             next: Cell::new(u64::MAX),
             window: Cell::new(1),
         }
+    }
+
+    fn in_last_window(&self, page: u64) -> bool {
+        let end = self.next.get();
+        end != u64::MAX && (end - self.window.get() * PAGE..end).contains(&page)
     }
 }
 
@@ -89,7 +98,7 @@ impl Pager {
     /// now. Retirements are queued before an exit becomes visible, so a
     /// drain lets a mutation that follows a waited-for exit proceed.
     pub fn drain(&self) {
-        let mut events = [(0_u64, 0_u64); SysMem::PAGER_MAX_EVENTS];
+        let mut events = [[0_u64; 2]; SysMem::PAGER_MAX_EVENTS];
         loop {
             let count = match SysMem::pager_dequeue(&mut events) {
                 Ok(count) => count,
@@ -98,7 +107,7 @@ impl Pager {
                     return;
                 }
             };
-            for &(id, page) in &events[..count] {
+            for &[id, page] in &events[..count] {
                 if page == SysMem::PAGER_RETIRED {
                     if let Some(mapping) = self.mappings.borrow_mut().remove(&id) {
                         self.exec_locks.borrow_mut().release(mapping.entry);
@@ -114,15 +123,20 @@ impl Pager {
     }
 
     fn is_live(&self, id: u64) -> bool {
-        self.drain();
+        // Explicit drains apply retirements; the kernel rejects stale fills.
         self.mappings.borrow().contains_key(&id)
     }
 
-    fn fill_failed(&self, id: u64, page: u64) {
+    fn fill_failed(&self, id: u64, page: u64, error: std::io::Error) {
         match SysMem::pager_fail(id, page) {
-            Ok(()) => self.failed_fills.set(self.failed_fills.get() + 1),
+            Ok(()) => {
+                log::warn!("pager: fill failed for page 0x{page:x}: {error}");
+                self.failed_fills.set(self.failed_fills.get() + 1);
+            }
             Err(moto_rt::E_BAD_HANDLE) => {} // Retired meanwhile.
-            Err(err) => log::error!("pager_fail({id}, 0x{page:x}) failed: {err}"),
+            Err(err) => {
+                log::error!("pager_fail({id}, 0x{page:x}) failed: {err}; fill error: {error}")
+            }
         }
     }
 }
@@ -251,6 +265,9 @@ async fn serve(runtime: FsRuntime, id: u64, page: u64) {
     let Some(mapping) = pager.mappings.borrow().get(&id).cloned() else {
         return;
     };
+    if mapping.in_last_window(page) {
+        return;
+    }
     pager.faults.set(pager.faults.get() + 1);
     let started = moto_rt::time::Instant::now();
     let window = if page == mapping.next.get() {
@@ -266,9 +283,9 @@ async fn serve(runtime: FsRuntime, id: u64, page: u64) {
             Ok(buf)
         }
         .await;
-        // Retirement releases the executable lock. Discard bytes read
-        // across it; the kernel also checks the ID at installation.
-        if !pager.is_live(id) {
+        // A retirement or another fill can make this request obsolete while
+        // reading. The kernel also checks the ID at installation.
+        if !pager.is_live(id) || mapping.in_last_window(page) {
             return;
         }
         let result = match read {
@@ -292,8 +309,7 @@ async fn serve(runtime: FsRuntime, id: u64, page: u64) {
                 count = 1;
             }
             Err(err) => {
-                log::warn!("pager: fill failed for page 0x{page:x}: {err}");
-                pager.fill_failed(id, page);
+                pager.fill_failed(id, page, err);
                 return;
             }
         }
@@ -315,8 +331,13 @@ pub(crate) async fn run(runtime: FsRuntime, notify: SysHandle) {
             let Some((id, page)) = pager.pending.borrow_mut().pop_front() else {
                 break;
             };
-            if !pager.mappings.borrow().contains_key(&id) {
-                continue; // Retired before it was served.
+            if pager
+                .mappings
+                .borrow()
+                .get(&id)
+                .is_none_or(|mapping| mapping.in_last_window(page))
+            {
+                continue; // Retired or satisfied by an earlier window.
             }
             let _ticket = ticket_rx.recv().await;
             let runtime = runtime.clone();
