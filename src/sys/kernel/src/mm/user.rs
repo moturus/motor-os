@@ -1104,11 +1104,21 @@ pub fn share_validation_self_test() {
     assert_eq!(share(dest, untouched), refused);
     assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"source");
 
+    // A source whose last page is untouched runs out of pages before the
+    // destination does.
+    let short = source_space.alloc_user_lazy(PAGES).unwrap();
+    for idx in 0..PAGES - 1 {
+        source_space.fix_pagefault(page(short, idx), 6).unwrap();
+    }
+    assert_eq!(share(dest, short), refused);
+    assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"source");
+
     for (space, segment) in [
         (&dest_space, dest),
         (&dest_space, lazy_dest),
         (&source_space, lazy),
         (&source_space, untouched),
+        (&source_space, short),
     ] {
         space.unmap(segment.start).unwrap();
     }

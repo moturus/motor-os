@@ -814,14 +814,17 @@ impl VmemSegment {
         debug_assert!(!other.pages.is_empty());
 
         // The destination is dense, so its pages name every address of the
-        // range. Each source page is looked up by address, never assumed
-        // from its neighbor: a hole, a page without a frame (lazy, guard)
-        // or MMIO at either end refuses the share before anything changes.
+        // range. The source is walked in step with it, and a source page
+        // that is not at the address the destination page names is a hole:
+        // that, a page without a frame (lazy, guard) or MMIO at either end
+        // refuses the share before anything changes.
         let other_start = other.segment.start;
         let source_addr = |dest_start: u64| start + (dest_start - other_start);
+        let mut source = self.pages.find(&start);
         for dest in other.pages.iter() {
-            let Some(frame) = self
-                .find_page(source_addr(dest.start))
+            let Some(frame) = source
+                .get()
+                .filter(|page| page.start == source_addr(dest.start))
                 .and_then(|page| page.frame.get())
             else {
                 return Err(moto_rt::E_INVALID_ARGUMENT);
@@ -829,14 +832,16 @@ impl VmemSegment {
             if frame.is_mmio() || dest.frame.get().is_some_and(Frame::is_mmio) {
                 return Err(moto_rt::E_INVALID_ARGUMENT);
             }
+            source.move_next();
         }
 
+        let mut source = self.pages.find(&start);
         let mut other_cursor = other.pages.front();
         while let Some(that_page) = other_cursor
             .clone_pointer()
             .map(|ptr| unsafe { UnsafeRef::into_raw(ptr).as_mut().unwrap() })
         {
-            let this_page = self.find_page(source_addr(that_page.start)).unwrap();
+            let this_page = source.get().unwrap();
             debug_assert_eq!(this_page.start, source_addr(that_page.start));
             if !that_page.frame.is_null() {
                 other.address_space().page_table.unmap_page(
@@ -854,6 +859,7 @@ impl VmemSegment {
                 mapping_options,
             )?;
             that_page.mapping_options = mapping_options;
+            source.move_next();
             other_cursor.move_next();
         }
 
