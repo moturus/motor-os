@@ -293,6 +293,11 @@ for package in red gears; do
   if [ "$package" = gears ]; then
     vm_ssh "cd /devtools/src/motor-os/bin/gears && /devtools/bin/lorry test" ||
       fail "developer image cannot natively test /devtools/src/motor-os/bin/gears"
+    # package.default-run makes a bare `lorry run` start gears, not gears-batteries.
+    out="$(vm_ssh "cd /devtools/src/motor-os/bin/gears && /devtools/bin/lorry run -- --version")" ||
+      fail "developer image cannot lorry run /devtools/src/motor-os/bin/gears"
+    printf '%s\n' "$out" | grep -qx 'gears [0-9][0-9.]*' ||
+      fail "lorry run in /devtools/src/motor-os/bin/gears did not start gears: $out"
   fi
   vm_ssh "/system/bin/rm -r /devtools/src/motor-os/bin/$package/target"
 done

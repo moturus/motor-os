@@ -3,6 +3,7 @@ name = "gears"
 description = "Extensible agent harness for Linux and Motor OS."
 version = "0.1.0"
 edition = "2024"
+default-run = "gears"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
