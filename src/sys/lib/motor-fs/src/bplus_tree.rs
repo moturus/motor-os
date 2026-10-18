@@ -406,7 +406,7 @@ impl<const ORDER: usize> Node<ORDER> {
         }
 
         // Allocate a new block.
-        let right_block_no = Superblock::allocate_block(txn).await?.block_no;
+        let right_block_no = Superblock::allocate_block(txn).await?;
 
         // Get this block.
         let mut this_block = txn.get_block(node_block_no).await?;
@@ -1639,8 +1639,8 @@ impl RootNode {
         root_block_no: BlockNo,
     ) -> Result<()> {
         // Allocate two new blocks.
-        let left_block_no = Superblock::allocate_block(txn).await?.block_no;
-        let right_block_no = Superblock::allocate_block(txn).await?.block_no;
+        let left_block_no = Superblock::allocate_block(txn).await?;
+        let right_block_no = Superblock::allocate_block(txn).await?;
 
         // Get the root block.
         let mut root_block = txn.get_block(root_block_no).await?;

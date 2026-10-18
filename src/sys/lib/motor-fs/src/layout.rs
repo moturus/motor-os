@@ -149,7 +149,7 @@ pub(crate) struct Superblock {
     version: u64,           // 1 at the moment.
     num_blocks: u64,        // Num blocks (may be less than what the device has).
     free_blocks: u64,       // The number of unused blocks.
-    generation: u64,        // Auto-incrementing. Used in EntityId.
+    generation: u64,        // Incremented for new directory entries. Used in EntryId.
     freelist_head: BlockNo, // The head of the block freelist.
     empty_area_start: u64,  // All blocks after this one are unused.
     _reserved: u64,
@@ -246,11 +246,21 @@ impl Superblock {
         }
     }
 
-    // Allocate a new/empty block. Also increments generation.
-    #[allow(clippy::await_holding_refcell_ref)]
-    pub async fn allocate_block<BD: AsyncBlockDevice>(
+    /// Allocate a directory entry with a fresh generation, including for files.
+    pub async fn allocate_entry<BD: AsyncBlockDevice>(
         txn: &mut Txn<'_, BD>,
     ) -> Result<EntryIdInternal> {
+        let block_no = Self::allocate_block(txn).await?;
+        let mut sb_block = txn.get_block(BlockNo(0)).await?;
+        let mut superblock_ref = sb_block.block_mut();
+        let superblock = superblock_ref.get_mut_at_offset::<Self>(0);
+        superblock.generation += 1;
+        Ok(EntryIdInternal::new(block_no, superblock.generation))
+    }
+
+    // Allocate a new/empty block without assigning an entry generation.
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn allocate_block<BD: AsyncBlockDevice>(txn: &mut Txn<'_, BD>) -> Result<BlockNo> {
         #[cfg(test)]
         ALLOC_BLOCK_CALLS.with(|c| c.set(c.get() + 1));
 
@@ -268,11 +278,7 @@ impl Superblock {
             superblock.check_accounting()?;
             superblock.free_blocks -= 1;
             superblock.empty_area_start += 1;
-            superblock.generation += 1;
-            return Ok(EntryIdInternal::new(
-                BlockNo(superblock.empty_area_start - 1),
-                superblock.generation,
-            ));
+            return Ok(BlockNo(superblock.empty_area_start - 1));
         };
 
         // Refcell may get re-borrowed in Self::reallocate_first_block, so we should drop the ref.
@@ -306,10 +312,7 @@ impl Superblock {
             superblock.freelist_head = next_head;
         }
         superblock.free_blocks -= 1;
-        superblock.generation += 1;
-        let generation = superblock.generation;
-
-        Ok(EntryIdInternal::new(res, generation))
+        Ok(res)
     }
 
     /// Take the first block in use by the file entry, detach it from the file, and return it.
@@ -764,18 +767,18 @@ impl DirEntryBlock {
         let sb_block = txn.get_block(BlockNo(0)).await?;
         let free_blocks_prev = sb_block.block().get_at_offset::<Superblock>(0).free_blocks;
 
-        let data_block_id = Superblock::allocate_block(txn).await?;
+        let data_block_no = Superblock::allocate_block(txn).await?;
         // We just allocated a new data block: need to zero it out.
-        let _ = txn.get_empty_block_mut(data_block_id.block_no);
+        let _ = txn.get_empty_block_mut(data_block_no);
 
-        Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_key).await?;
+        Self::link_child_block(txn, file_id.block_no, data_block_no, block_key).await?;
 
         let used_blocks =
             free_blocks_prev - sb_block.block().get_at_offset::<Superblock>(0).free_blocks;
 
         Self::increment_blocks_in_use(txn, file_id.block_no, used_blocks).await?;
 
-        Ok(data_block_id.block_no)
+        Ok(data_block_no)
     }
 
     /// Converts a file from inline storage to B+ tree storage. The file's inline
