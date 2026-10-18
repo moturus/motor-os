@@ -1,12 +1,12 @@
-//! Guest memory backing of the installed runner: one lazy reservation per
-//! memory, limited to 96 MiB, whose pages are released when the runner exits.
+//! Guest memory backing of the installed runner: one sparse lazy reservation
+//! per memory, limited to 4 GiB, whose pages are released when the runner exits.
 
 use wasm_smoke_suite::used_memory;
 
 use super::{Result, Suite, fs};
 
 const WASMI: &str = "MOTOR_OS_CAPS=0 /devtools/bin/wasmi";
-/// Leaves room for the runner to start but not to fault in its 96 MiB memory.
+/// Leaves room for the runner to start but not to fault in 96 MiB of memory.
 const FAULT_FREE: u64 = 48 << 20;
 /// Bounds the used-memory drift across the refused fault; the faulted pages
 /// alone are several times larger.
@@ -17,19 +17,10 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
         suite.root.join("backing.wasm"),
         include_bytes!(concat!(env!("OUT_DIR"), "/backing.wasm")),
     )?;
-    fs::write(
-        suite.root.join("oversized.wasm"),
-        include_bytes!(concat!(env!("OUT_DIR"), "/oversized.wasm")),
-    )?;
     suite.command(
         "memory-grow-to-limit",
         &format!("{WASMI} backing.wasm --invoke grow-to-limit"),
         0,
-    )?;
-    suite.refusal(
-        "memory-oversized",
-        &format!("{WASMI} oversized.wasm"),
-        "denied to allocate or grow the linear memory",
     )?;
     let before = used_memory()?;
     suite.refused_fault(
