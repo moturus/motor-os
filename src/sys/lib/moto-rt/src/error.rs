@@ -28,6 +28,9 @@ pub enum Error {
     StorageFull = 20,
     InvalidData = 21,
     ConnectionReset = 22,
+    /// The syscall wrapper should fault in the caller's page in result data[0]
+    /// and retry. The wrapper returns this error if its retry limit is reached.
+    PageAbsent = 23,
 
     // Keep this value as the last one.
     Max,
@@ -81,6 +84,7 @@ pub const E_NOT_CONNECTED: u16 = Error::NotConnected as u16;
 pub const E_STORAGE_FULL: u16 = Error::StorageFull as u16;
 pub const E_INVALID_DATA: u16 = Error::InvalidData as u16;
 pub const E_CONNECTION_RESET: u16 = Error::ConnectionReset as u16;
+pub const E_PAGE_ABSENT: u16 = Error::PageAbsent as u16;
 
 pub const E_MAX: u16 = u16::MAX;
 

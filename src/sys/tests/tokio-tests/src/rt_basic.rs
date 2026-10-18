@@ -198,14 +198,16 @@ fn test_spawn_remote() {
     let out = rt.block_on(async {
         let (tx, rx) = oneshot::channel();
 
-        let handle = tokio::spawn(async move {
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(10));
-                tx.send("ZOMG").unwrap();
-            });
+        let handle = tokio::spawn(async move { rx.await.unwrap() });
 
-            rx.await.unwrap()
-        });
+        // Upstream sends from a thread 10 ms after spawning it inside the
+        // task; a task descheduled that long saw the value without a wake and
+        // counted no remote schedule. Yield so the task parks on `rx` first,
+        // then send from a thread with no runtime context.
+        tokio::task::yield_now().await;
+        std::thread::spawn(move || tx.send("ZOMG").unwrap())
+            .join()
+            .unwrap();
 
         handle.await.unwrap()
     });

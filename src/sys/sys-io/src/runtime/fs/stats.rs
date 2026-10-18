@@ -108,11 +108,32 @@ mod ids {
     pub const FS_PRESSURE_REFUSED_CLIENTS: u32 = 1015;
     pub const FS_CHANNELS: u32 = 1016;
     pub const FS_CACHE_CAPACITY_BYTES: u32 = 1017;
+
+    // Spawning (see `super::spawn`).
+    pub const EXEC_LOCKED_FILES: u32 = 1018;
+    pub const SPAWNS: u32 = 1019;
+    pub const SPAWN_BUILD_US: u32 = 1020;
+    pub const SPAWN_VDSO_US: u32 = 1021;
+
+    // The executable pager (see `super::spawn::pager`).
+    pub const PAGER_MAPPINGS: u32 = 1022;
+    pub const PAGER_FAULTS: u32 = 1023;
+    pub const PAGER_FILLED_PAGES: u32 = 1024;
+    pub const PAGER_FAILED_FILLS: u32 = 1025;
+    pub const SPAWN_SCAN_US: u32 = 1026;
+    pub const PAGER_SERVE_US: u32 = 1027;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
 /// [`descriptors`].
-async fn entries(fs: &FS, stats: &FsStats, channels: u64) -> Vec<MetricEntry> {
+async fn entries(
+    fs: &FS,
+    stats: &FsStats,
+    channels: u64,
+    locked_files: u64,
+    spawn: &super::spawn::SpawnStats,
+    pager: &super::spawn::pager::Pager,
+) -> Vec<MetricEntry> {
     let num_blocks = fs.num_blocks();
     let empty_blocks = fs
         .empty_blocks()
@@ -146,6 +167,16 @@ async fn entries(fs: &FS, stats: &FsStats, channels: u64) -> Vec<MetricEntry> {
         ),
         MetricEntry::global(ids::FS_CHANNELS, channels),
         MetricEntry::global(ids::FS_CACHE_CAPACITY_BYTES, cache_stats.capacity * 4096),
+        MetricEntry::global(ids::EXEC_LOCKED_FILES, locked_files),
+        MetricEntry::global(ids::SPAWNS, spawn.requests.get()),
+        MetricEntry::global(ids::SPAWN_BUILD_US, spawn.build_us.get()),
+        MetricEntry::global(ids::SPAWN_VDSO_US, spawn.vdso_us.get()),
+        MetricEntry::global(ids::PAGER_MAPPINGS, pager.num_mappings()),
+        MetricEntry::global(ids::PAGER_FAULTS, pager.faults.get()),
+        MetricEntry::global(ids::PAGER_FILLED_PAGES, pager.filled_pages.get()),
+        MetricEntry::global(ids::PAGER_FAILED_FILLS, pager.failed_fills.get()),
+        MetricEntry::global(ids::SPAWN_SCAN_US, spawn.scan_us.get()),
+        MetricEntry::global(ids::PAGER_SERVE_US, pager.serve_us.get()),
     ]
 }
 
@@ -175,13 +206,26 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         ),
         MetricDescWire::new(ids::FS_CHANNELS, "fs.channels"),
         MetricDescWire::new(ids::FS_CACHE_CAPACITY_BYTES, "fs.cache.capacity_bytes"),
+        MetricDescWire::new(ids::EXEC_LOCKED_FILES, "exec.locked_files"),
+        MetricDescWire::new(ids::SPAWNS, "spawn.requests"),
+        MetricDescWire::new(ids::SPAWN_BUILD_US, "spawn.build_us"),
+        MetricDescWire::new(ids::SPAWN_VDSO_US, "spawn.vdso_us"),
+        MetricDescWire::new(ids::PAGER_MAPPINGS, "pager.mappings"),
+        MetricDescWire::new(ids::PAGER_FAULTS, "pager.faults"),
+        MetricDescWire::new(ids::PAGER_FILLED_PAGES, "pager.filled_pages"),
+        MetricDescWire::new(ids::PAGER_FAILED_FILLS, "pager.failed_fills"),
+        MetricDescWire::new(ids::SPAWN_SCAN_US, "spawn.scan_us"),
+        MetricDescWire::new(ids::PAGER_SERVE_US, "pager.serve_us"),
     ]
 }
 
-/// A request from the stats-server thread for a metrics snapshot, carrying the
-/// one-shot channel to respond on.
-struct StatsRequest {
-    respond_to: moto_async::oneshot::Sender<Vec<MetricEntry>>,
+/// Requests handled on the FS runtime, with a one-shot reply to the caller.
+enum StatsRequest {
+    Snapshot(moto_async::oneshot::Sender<Vec<MetricEntry>>),
+    #[cfg(debug_assertions)]
+    TestExecutableLocks(moto_async::oneshot::Sender<Result<(), String>>),
+    #[cfg(debug_assertions)]
+    TestPagerWindows(moto_async::oneshot::Sender<Result<(), String>>),
 }
 
 /// Sender half of the request channel. Set once, when the FS runtime spawns its
@@ -211,14 +255,33 @@ async fn stats_responder_task(
     mut requests: moto_async::channel::Receiver<StatsRequest>,
 ) {
     while let Some(req) = requests.recv().await {
-        let snapshot = entries(
-            &*runtime.fs.read().await,
-            &runtime.fs_stats,
-            runtime.channel_budget.fs_channels(),
-        )
-        .await;
-        // The receiver is gone if the stats-server thread stopped waiting; ignore.
-        let _ = req.respond_to.send(snapshot);
+        match req {
+            StatsRequest::Snapshot(respond_to) => {
+                // Not borrowed across the await below.
+                let locked_files = runtime.exec_locks.borrow().num_locked() as u64;
+                let snapshot = entries(
+                    &*runtime.fs.read().await,
+                    &runtime.fs_stats,
+                    runtime.channel_budget.fs_channels(),
+                    locked_files,
+                    &runtime.spawn_stats,
+                    &runtime.pager,
+                )
+                .await;
+                // The receiver is gone if the stats-server thread stopped waiting; ignore.
+                let _ = respond_to.send(snapshot);
+            }
+            #[cfg(debug_assertions)]
+            StatsRequest::TestExecutableLocks(respond_to) => {
+                let result = super::spawn::self_test::queued_mutations(&runtime).await;
+                let _ = respond_to.send(result);
+            }
+            #[cfg(debug_assertions)]
+            StatsRequest::TestPagerWindows(respond_to) => {
+                let result = super::spawn::pager::self_test::coalesced_windows(&runtime).await;
+                let _ = respond_to.send(result);
+            }
+        }
     }
 }
 
@@ -233,9 +296,41 @@ pub(crate) fn query_metrics() -> Vec<MetricEntry> {
     // cross-thread request/response round-trip to completion.
     moto_async::LocalRuntime::new().block_on(async move {
         let (respond_to, response) = moto_async::oneshot();
-        if requests.send(StatsRequest { respond_to }).await.is_err() {
+        if requests
+            .send(StatsRequest::Snapshot(respond_to))
+            .await
+            .is_err()
+        {
             return Vec::new();
         }
         response.await.unwrap_or_default()
     })
+}
+
+/// Run a native regression on the FS runtime through the existing on-demand
+/// self-test endpoint; only that runtime can touch its locks and poll its
+/// handlers. `request` wraps the reply sender in the matching request.
+#[cfg(debug_assertions)]
+fn run_fs_self_test(
+    request: fn(moto_async::oneshot::Sender<Result<(), String>>) -> StatsRequest,
+) -> Result<(), String> {
+    let requests = STATS_REQUESTS.get().ok_or("FS runtime not started")?;
+    moto_async::LocalRuntime::new().block_on(async {
+        let (respond_to, response) = moto_async::oneshot();
+        requests
+            .send(request(respond_to))
+            .await
+            .map_err(|_| "FS runtime stopped")?;
+        response.await.map_err(|_| "FS self-test reply lost")?
+    })
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn test_executable_locks() -> Result<(), String> {
+    run_fs_self_test(StatsRequest::TestExecutableLocks)
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn test_pager_windows() -> Result<(), String> {
+    run_fs_self_test(StatsRequest::TestPagerWindows)
 }

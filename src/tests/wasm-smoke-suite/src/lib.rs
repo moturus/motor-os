@@ -307,7 +307,9 @@ fn create_writable_dir(dir: &Path) -> Result<()> {
 fn admission_refusals() -> Result<u64> {
     let kernel = Collector::kernel();
     let catalog = Collector::describe(&kernel).map_err(|e| format!("metric catalog: {e:?}"))?;
-    let values = Collector::query(&kernel).map_err(|e| format!("kernel metrics: {e:?}"))?;
+    // Refusals are counted on the kernel's own process stats.
+    let values = Collector::query_scoped(&kernel, moto_sys::stats::PID_KERNEL)
+        .map_err(|e| format!("kernel metrics: {e:?}"))?;
     let mut total = 0;
     for name in ["mem.admission_refused_user", "mem.admission_refused_sys_io"] {
         let id = catalog

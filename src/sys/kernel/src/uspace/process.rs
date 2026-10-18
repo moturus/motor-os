@@ -180,6 +180,11 @@ pub struct Process {
     //     Thread::status is locked is dangerous, as the normal pattern
     //     is to order the two locks from the larger (process) to the smaller (thread).
     paused_debuggee: AtomicBool,
+
+    /// Set once a wake has posted the main thread's start (under that
+    /// thread's status lock; any later thread's start implies it). Outlives
+    /// the thread, unlike its own flag: see abandon_if_never_woken().
+    start_posted: AtomicBool,
 }
 
 unsafe impl Send for Process {}
@@ -206,7 +211,7 @@ impl Process {
         capabilities: u64,
         detached: bool,
         debug_name: String,
-    ) -> Result<Arc<Self>, ErrorCode> {
+    ) -> Result<(Arc<Self>, Arc<SysObject>), ErrorCode> {
         if !crate::mm::virt::is_user(entry_point) {
             return Err(moto_rt::E_NOT_ALLOWED);
         }
@@ -261,49 +266,63 @@ impl Process {
             ),
             debug_session: SpinLock::new(None),
             paused_debuggee: AtomicBool::new(false),
+            start_posted: AtomicBool::new(false),
         });
 
-        // Safe because this is the "constructor" and no other references exit.
-        // We cannot use Arc::get_mut() because of the weak self-reference in self.this.
-        // And we don't want to use nightly Arc::get_mut_unchecked, as we try to
-        // stick to stable API.
-        let self_mut = unsafe {
-            let ptr = Arc::as_ptr(&self_) as usize as *mut Process;
-            ptr.as_mut().unwrap()
-        };
-
-        let process_page = self_mut.address_space.process_static_page_mut();
-        process_page.pid = self_mut.pid().as_u64();
-        process_page.capabilities = capabilities;
-
-        self_mut.main_thread = Some(Thread::new(
-            self_.clone(),
-            user_stack,
-            kernel_stack,
-            self_mut.entry_point,
-        ));
-
-        let thread = self_mut.main_thread.as_ref().unwrap();
-        self_mut.threads.insert(thread.tid, thread.clone());
-
-        self_mut.self_object = Some(SysObject::new_owned(
-            Arc::new(alloc::format!("process:{}", self_mut.stats.pid().as_u64())),
+        // The process is discoverable by pid from here on, so a kill can reach
+        // it before it is complete. Its object comes first, so that an exit
+        // the kill completes has it to take and the caller still gets a
+        // handle, to a child that died at once; the rest is built under the
+        // status lock, which a kill holds while it looks for threads.
+        let self_object = SysObject::new_owned(
+            Arc::new(alloc::format!("process:{}", self_.stats.pid().as_u64())),
             self_.clone(),
             Arc::downgrade(&self_),
-        ));
+        );
+        {
+            let (self_mut, status) = unsafe { self_.get_mut() };
+            self_mut.self_object = Some(self_object.clone());
 
-        Ok(self_)
+            let process_page = self_mut.address_space.process_static_page_mut();
+            process_page.pid = self_mut.pid().as_u64();
+            process_page.capabilities = capabilities;
+
+            let thread = Thread::new(
+                self_.clone(),
+                user_stack,
+                kernel_stack,
+                self_mut.entry_point,
+            );
+            self_mut.threads.insert(thread.tid, thread.clone());
+            self_mut.main_thread = Some(thread.clone());
+            // A kill that came before the thread existed found nothing to
+            // finish the exit with; the thread does so now.
+            if *status != ProcessStatus::Created {
+                thread.post_kill(ThreadKilledReason::ProcessKilled);
+            }
+        }
+
+        Ok((self_, self_object))
     }
 
     pub fn from_pid(pid: u64) -> Option<Arc<Self>> {
         crate::xray::stats::stats_from_pid(pid).and_then(|stats| stats.owner.upgrade())
     }
 
+    /// Creates a process from an address space in the caller's handle table.
+    /// Returns the child's object, for the caller's handle table (the object
+    /// rather than the process: a kill by pid can complete the child's exit,
+    /// which takes the object, before the caller holds a handle) and, for a
+    /// delegated spawn (`requester=<connection handle>`, sys-io only), the
+    /// peer of that IPC connection, which is the child's parent and whose
+    /// authority every check below uses; it may be the caller itself. The
+    /// peer is held across registration, so a peer that goes away kills the
+    /// child like any other of its children when it is dropped.
     pub fn new_child(
         parent_thread: &Thread,
         address_space_handle: SysHandle,
         url_part: &str,
-    ) -> Result<Arc<Process>, ErrorCode> {
+    ) -> Result<(Arc<SysObject>, Option<Arc<Process>>), ErrorCode> {
         let args: alloc::vec::Vec<&str> = url_part.split(';').collect();
         let entry_point: Option<u64> = crate::util::decode_arg::<u64>(&args, "entry_point");
         let capabilities: u64 = crate::util::decode_arg::<u64>(&args, "capabilities").unwrap_or(0);
@@ -314,7 +333,28 @@ impl Process {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        let parent = parent_thread.owner();
+        let builder = parent_thread.owner();
+        let requester = match crate::util::decode_arg::<u64>(&args, "requester") {
+            None => None,
+            Some(connection) => {
+                if builder.pid() != SYS_IO_PID {
+                    return Err(moto_rt::E_NOT_ALLOWED);
+                }
+                let connection = builder
+                    .get_object(&SysHandle::from_u64(connection))
+                    .ok_or(moto_rt::E_BAD_HANDLE)?;
+                let requester = super::shared::peer_owner(builder.pid(), &connection.sys_object)
+                    .ok_or(moto_rt::E_NOT_ALLOWED)?;
+                // The requester did not create the address space itself.
+                if requester.capabilities() & moto_sys::caps::CAP_SPAWN == 0
+                    || !requester.status().is_alive()
+                {
+                    return Err(moto_rt::E_NOT_ALLOWED);
+                }
+                Some(requester)
+            }
+        };
+        let parent = requester.clone().unwrap_or_else(|| builder.clone());
         let parent_caps = parent.capabilities();
         // Every parent, System included, must hold these bits to grant them.
         if capabilities & !parent_caps & moto_sys::caps::PARENT_OWNED_CAPS != 0 {
@@ -346,7 +386,7 @@ impl Process {
             return Err(moto_rt::E_NOT_ALLOWED);
         }
 
-        let (address_space, url) = match parent.get_object(&address_space_handle) {
+        let (address_space, url) = match builder.get_object(&address_space_handle) {
             None => {
                 log::debug!("bad handle");
                 return Err(moto_rt::E_INVALID_ARGUMENT);
@@ -370,7 +410,7 @@ impl Process {
             crate::mm::admission::PROCESS_CHARGE_PAGES,
         )?;
 
-        let process = Self::new(
+        let (_process, object) = Self::new(
             parent.stats.clone(),
             address_space,
             entry_point.unwrap(),
@@ -380,11 +420,18 @@ impl Process {
         )
         .map_err(|_| moto_rt::E_INTERNAL_ERROR)?;
 
-        Ok(process)
+        Ok((object, requester))
     }
 
     pub fn pid(&self) -> ProcessId {
         self.stats.pid()
+    }
+
+    /// The parent while it lives: for a delegated child, its requester.
+    pub fn parent(&self) -> Option<Arc<Process>> {
+        self.stats
+            .parent()
+            .and_then(|parent| parent.owner.upgrade())
     }
 
     pub fn capabilities(&self) -> u64 {
@@ -428,16 +475,39 @@ impl Process {
         // LISTENERS, which is held while process status locks are taken, and
         // spawn_thread holds status while adding to wait_objects.
         let removed = self.wait_objects.lock(line!()).remove(handle);
-        let Some(obj) = removed else {
-            return Err(());
+        Self::release_object(removed.ok_or(())?);
+        Ok(())
+    }
+
+    /// put_object() for a handle that must still refer to `object`: sys-io
+    /// taking a delegated child's handle back from a requester that never
+    /// learned its number.
+    pub(super) fn put_object_of(
+        &self,
+        handle: &SysHandle,
+        object: &Arc<SysObject>,
+    ) -> Result<(), ()> {
+        let removed = {
+            let mut objects = self.wait_objects.lock(line!());
+            if !objects
+                .get(handle)
+                .is_some_and(|obj| Arc::ptr_eq(&obj.sys_object, object))
+            {
+                return Err(());
+            }
+            objects.remove(handle)
         };
+        Self::release_object(removed.ok_or(())?);
+        Ok(())
+    }
+
+    fn release_object(obj: WaitObject) {
         if obj.sys_object.remove_process_handle() {
             // A process handle, not an incidental kernel Arc, owns a
             // shared endpoint's lifetime.
             super::shared::on_drop(&obj.sys_object);
         }
         drop(obj);
-        Ok(())
     }
 
     // Note: we only mark the process as PausedDebuggee and don't
@@ -525,11 +595,6 @@ impl Process {
         };
 
         Some(thread.get_thread_data())
-    }
-
-    pub(super) fn self_object(&self) -> Option<Arc<SysObject>> {
-        let _status = self.status.lock(line!());
-        self.self_object.as_ref().map(|o| o.clone())
     }
 
     pub(super) fn self_pinned(&self) -> Option<Arc<Process>> {
@@ -654,6 +719,24 @@ impl Process {
                 thread.post_kill(ThreadKilledReason::ProcessKilled);
             }
         }
+    }
+
+    /// Kills a never-woken child and returns true, including if already killed.
+    /// Used for delegated rollback and detached children losing their parent.
+    /// The main thread's status lock serializes the kill with its first wake;
+    /// the process's start record survives thread teardown.
+    pub(super) fn abandon_if_never_woken(&self) -> bool {
+        let (target_mut, mut status_lock) = unsafe { self.get_mut() };
+        if *status_lock == ProcessStatus::Created {
+            if let Some(main_thread) = target_mut.main_thread.as_ref() {
+                if main_thread.kill_if_never_woken() {
+                    *status_lock = ProcessStatus::Exiting(u64::MAX);
+                    return true;
+                }
+            }
+        }
+        // Nothing can post the start any more: the record is final.
+        !self.start_posted.load(Ordering::Acquire)
     }
 
     pub(super) fn exit(&self, exit_status: u64) {
@@ -785,6 +868,9 @@ impl Process {
         exited_thread.cleanup();
 
         if exited {
+            // Queue executable retirements before exit becomes visible.
+            super::pager::retire_space(&self.address_space);
+
             // Close existing IPC endpoints before completion becomes visible
             // to waiters or status queries; services may run cleanup later.
             let objects = core::mem::take(&mut *self.wait_objects.lock(line!()));
@@ -836,14 +922,18 @@ impl Process {
         }
     }
 
-    fn job_fn_kill(_: Weak<Thread>, target: u64) {
-        // Safety: `target` comes from `Weak::into_raw` in `post_kill`, and a
+    fn job_fn_parent_dropped(_: Weak<Thread>, target: u64) {
+        // Safety: `target` comes from `Weak::into_raw` in `post_parent_dropped`, and a
         // posted job runs exactly once.
         let target = unsafe { Weak::from_raw(target as usize as *const Process) };
         if let Some(target) = target.upgrade() {
-            crate::xray::tracing::trace("job_fn_kill", target.pid().as_u64(), 0, 0);
+            crate::xray::tracing::trace("job_fn_parent_dropped", target.pid().as_u64(), 0, 0);
             if target.capabilities() & moto_sys::caps::CAP_SYS == 0 {
-                target.die();
+                if target.stats.is_detached() {
+                    target.abandon_if_never_woken();
+                } else {
+                    target.die();
+                }
             }
         }
     }
@@ -954,8 +1044,12 @@ pub struct Thread {
 
     wakes_queued: AtomicU64, // Counts wakes for self wakes.
     wakes_taken: AtomicU64,
+    wake_immediately: AtomicBool,
 
     pub diag: WakeDiag,
+
+    /// Set by the first wake, under the status lock; see kill_if_never_woken().
+    start_posted: AtomicBool,
 
     kernel_stack_segment: Option<mm::MemorySegment>,
 
@@ -1031,8 +1125,10 @@ impl Thread {
             join_handle: SysHandle::NONE,
             wakes_queued: AtomicU64::new(0),
             wakes_taken: AtomicU64::new(0),
+            wake_immediately: AtomicBool::new(false),
             diag: WakeDiag::default(),
             owner: Arc::downgrade(&owner),
+            start_posted: AtomicBool::new(false),
             thread_entry_point,
             user_stack,
             capabilities: AtomicU64::new(0),
@@ -1245,12 +1341,7 @@ impl Thread {
                 LiveThreadStatus::Preempted => {
                     // Paused in resume_in_userspace() or on_thread_preempted().
                     *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
-                    crate::sched::post(crate::sched::Job::new(
-                        Self::job_fn_resume_in_userspace,
-                        self.get_weak(),
-                        self.tid.as_u64(),
-                        self.get_cpu_affinity(),
-                    ));
+                    self.post_resume_in_userspace(false);
                     Ok(())
                 }
                 LiveThreadStatus::Syscall(_, _) => {
@@ -1387,7 +1478,13 @@ impl Thread {
         {
             let mut status = self.status.lock(line!());
             match *status {
-                ThreadStatus::Created | ThreadStatus::PausedDebuggee(_) => {
+                ThreadStatus::Created => {
+                    // Never started, so nothing else will finish its exit; a
+                    // wake after this sees Killed and does nothing.
+                    *status = ThreadStatus::Killed(reason);
+                    post_exited = true;
+                }
+                ThreadStatus::PausedDebuggee(_) => {
                     *status = ThreadStatus::Killed(reason);
                 }
                 ThreadStatus::Live(live_status) => match live_status {
@@ -1434,7 +1531,37 @@ impl Thread {
         }
     }
 
+    /// Kills the thread if it is still `Created` and no wake has posted its
+    /// start, atomically with such wakes: they set `start_posted` under this
+    /// lock. Returns whether it did; the exit then completes as in post_kill.
+    fn kill_if_never_woken(&self) -> bool {
+        {
+            let mut status = self.status.lock(line!());
+            if *status != ThreadStatus::Created || self.start_posted.load(Ordering::Relaxed) {
+                return false;
+            }
+            *status = ThreadStatus::Killed(ThreadKilledReason::ProcessKilled);
+        }
+        crate::sched::post(crate::sched::Job::new(
+            Self::job_fn_on_thread_exited,
+            self.get_weak(),
+            self.tid.as_u64(),
+            uCpus::MAX,
+        ));
+        true
+    }
+
     fn post_start(&self, arg: u64) {
+        // Under the status lock when a wake of a Created thread gets here;
+        // see kill_if_never_woken(). The first wake posts the start; a later
+        // one before the thread runs is a pending wake, as for a running
+        // thread, not a second start job.
+        if self.start_posted.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if let Some(owner) = self.owner.upgrade() {
+            owner.start_posted.store(true, Ordering::Release);
+        }
         self.wakes_taken
             .store(self.wakes_queued.load(Ordering::Relaxed), Ordering::Relaxed);
 
@@ -1457,7 +1584,13 @@ impl Thread {
         self.trace("thread do_start", arg, 0);
         let entry_point = self.thread_entry_point;
 
-        let process = self.owner.upgrade().unwrap();
+        // A start queued by a wake can outlive its process: a kill of this
+        // still Created thread finished its exit, the process is gone, and
+        // only a thread handle keeps this object. Nothing to start.
+        let Some(process) = self.owner.upgrade() else {
+            assert_matches!(self.status(), ThreadStatus::Killed(_));
+            return;
+        };
         let start = 0; // process.as_ref().uspace_base;
 
         let mut error = None;
@@ -1474,7 +1607,13 @@ impl Thread {
 
         if let Some(err) = error {
             {
-                *self.status.lock(line!()) = ThreadStatus::Error(err);
+                let mut status = self.status.lock(line!());
+                if *status != ThreadStatus::Created {
+                    // Killed before it ran: post_kill has finished its exit.
+                    assert_matches!(*status, ThreadStatus::Killed(_));
+                    return;
+                }
+                *status = ThreadStatus::Error(err);
             }
             self.on_thread_exited();
             return;
@@ -1484,13 +1623,8 @@ impl Thread {
             let tcb = {
                 let (self_mut, mut thread_status_lock) = unsafe { self.get_mut() };
                 if *thread_status_lock != ThreadStatus::Created {
+                    // Killed before it ran: post_kill has finished its exit.
                     assert_matches!(*thread_status_lock, ThreadStatus::Killed(_));
-                    crate::sched::post(crate::sched::Job::new(
-                        Self::job_fn_on_thread_exited,
-                        self.get_weak(),
-                        self.tid.as_u64(),
-                        uCpus::MAX,
-                    ));
                     return;
                 }
                 let self_ptr = self_mut as *const Thread;
@@ -1605,6 +1739,28 @@ impl Thread {
         self.after_wait()
     }
 
+    /// Hands the CPU to this CPU's scheduler loop from inside a syscall and
+    /// returns once the loop has run this thread again.
+    pub(super) fn scheduler_tick_in_syscall(&self) {
+        self.trace("thread::scheduler_tick_in_syscall", 0, 0);
+        self.wake_immediately.store(true, Ordering::Release);
+        // on_thread_paused() re-queues the thread; a scheduler loop resumes
+        // it in the kernel, and it returns here.
+        self.tcb.pause();
+        finish_direct_switch(self);
+        let mut status = self.status.lock(line!());
+        match *status {
+            ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op)) => {
+                *status = ThreadStatus::Live(LiveThreadStatus::Syscall(nr, op));
+            }
+            ThreadStatus::Killed(reason) => {
+                core::mem::drop(status); // Unlock.
+                self.die(reason); // Does not return.
+            }
+            x => panic!("scheduler_tick_in_syscall: bad status: {:?}", x),
+        }
+    }
+
     // W7: like wait(), but hands the CPU directly to `next` (claimed via a
     // *_for_switch wake) instead of posting its resume job and bouncing
     // through the scheduler loop. Own park bookkeeping runs from next's
@@ -1671,9 +1827,16 @@ impl Thread {
         self.trace("thread::on_thread_paused", 0, 0);
         self.tcb.validate_rsp();
         let mut call_on_exited = false;
+        let wake_immediately = self.wake_immediately.swap(false, Ordering::AcqRel);
         {
             let mut status = self.status.lock(line!());
             match *status {
+                ThreadStatus::Live(LiveThreadStatus::Syscall(nr, op)) if wake_immediately => {
+                    *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
+                    let this_cpu = self.get_cpu_affinity() == uCpus::MAX
+                        && crate::sched::this_cpu_queues_empty();
+                    self.post_wake_locked(this_cpu);
+                }
                 ThreadStatus::Live(LiveThreadStatus::Syscall(nr, op)) => {
                     let wakers_empty = self.wakers.lock(line!()).is_empty();
                     if wakers_empty
@@ -2171,22 +2334,27 @@ impl Thread {
         let (pf_addr, error_code) = self.tcb.pf_addr_error_code().unwrap();
         self.trace("thread pagefault", pf_addr, error_code);
         log::trace!("Thread #PF: 0x{pf_addr:x}");
+        // Publishing Preempted lets another CPU finish the thread's exit.
+        // Keep its process alive until fault dispatch and cleanup return.
+        let owner = self.owner();
         let mut resume_in_userspace = false;
         let mut call_on_exited = false;
         let mut killed_now = false;
+        let mut parked = false;
 
         {
             let mut status = self.status.lock(line!());
             match *status {
                 ThreadStatus::Live(LiveThreadStatus::Running) => {
-                    if self
-                        .owner()
-                        .address_space
-                        .fix_pagefault(pf_addr, error_code)
-                        .is_ok()
-                    {
+                    let fixed = owner.address_space.fix_pagefault(pf_addr, error_code);
+                    if fixed == Err(moto_rt::E_NOT_READY) {
+                        // An absent file-paged page: parked without a resume
+                        // job until the pager fills it (see pager::on_fault).
+                        *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
+                        parked = true;
+                    } else if fixed.is_ok() {
                         log::trace!("#PF fixed!");
-                        if self.owner().paused_debuggee.load(Ordering::Relaxed) {
+                        if owner.paused_debuggee.load(Ordering::Relaxed) {
                             *status = ThreadStatus::PausedDebuggee(LiveThreadStatus::Preempted);
                         } else {
                             *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
@@ -2203,6 +2371,20 @@ impl Thread {
                 }
                 _ => panic!("Unexpected thread status {:?}", *status),
             }
+        }
+
+        if parked {
+            if !super::pager::on_fault(self, pf_addr) {
+                // Another CPU may already have reclaimed the user TCB.
+                log::info!(
+                    "#PF: {} 0x{:x}:0x{:x} killed: no pager for 0x{pf_addr:x}",
+                    owner.debug_name(),
+                    owner.pid().as_u64(),
+                    self.tid.as_u64()
+                );
+                self.post_kill(ThreadKilledReason::PageFault);
+            }
+            return;
         }
 
         if killed_now {
@@ -2222,14 +2404,40 @@ impl Thread {
 
         if resume_in_userspace {
             // Page faults should not lead to CPU migrations.
-            crate::sched::post(crate::sched::Job::new(
-                Self::job_fn_resume_in_userspace,
-                self.get_weak(),
-                self.tid.as_u64(),
-                current_cpu(),
-            ));
+            self.post_resume_in_userspace(true);
         } else if call_on_exited {
             self.on_thread_exited();
+        }
+    }
+
+    fn post_resume_in_userspace(&self, this_cpu: bool) {
+        let cpu = if this_cpu {
+            current_cpu()
+        } else {
+            self.get_cpu_affinity()
+        };
+        crate::sched::post(crate::sched::Job::new(
+            Self::job_fn_resume_in_userspace,
+            self.get_weak(),
+            self.tid.as_u64(),
+            cpu,
+        ));
+    }
+
+    /// Resumes a parked file fault, or kills it if its page cannot be provided.
+    /// Only faults resolved in the fault handler itself use local placement.
+    pub(super) fn resume_file_fault(&self, this_cpu: bool, success: bool) {
+        if !success {
+            self.post_kill(ThreadKilledReason::PageFault);
+            return;
+        }
+        let mut status = self.status.lock(line!());
+        if *status == ThreadStatus::Live(LiveThreadStatus::Preempted) {
+            if self.owner().paused_debuggee.load(Ordering::Relaxed) {
+                *status = ThreadStatus::PausedDebuggee(LiveThreadStatus::Preempted);
+            } else {
+                self.post_resume_in_userspace(this_cpu);
+            }
         }
     }
 
@@ -2266,12 +2474,7 @@ impl Thread {
                         }
                     }
                     if resume_in_userspace {
-                        crate::sched::post(crate::sched::Job::new(
-                            Self::job_fn_resume_in_userspace,
-                            self.get_weak(),
-                            self.tid.as_u64(),
-                            self.get_cpu_affinity(),
-                        ));
+                        self.post_resume_in_userspace(false);
                     } else if call_on_exited {
                         self.on_thread_exited();
                     }
@@ -2395,11 +2598,11 @@ impl Thread {
     }
 }
 
-/// Kills `target` asynchronously. The job holds the process itself, not its
-/// pid: a pid can be reused by an unrelated process before the job runs.
-pub fn post_kill(target: Weak<Process>) {
+/// Cleans up a child after its parent drops; detached children survive once
+/// woken. Use the process's weak reference because its pid could be reused.
+pub fn post_parent_dropped(target: Weak<Process>) {
     crate::sched::post(crate::sched::Job::new(
-        Process::job_fn_kill,
+        Process::job_fn_parent_dropped,
         Weak::default(),
         Weak::into_raw(target) as usize as u64,
         uCpus::MAX,

@@ -6,6 +6,7 @@ pub use process::Process;
 // Public because arch::irq interacts with serial_console.
 pub mod serial_console;
 
+pub(crate) mod pager;
 mod shared;
 
 mod sysobject;

@@ -108,8 +108,11 @@ The divisor buys 128 bytes of metadata per touched page; compile-time
 assertions in `phys.rs` and `virt_intrusive.rs` hold the two largest
 consumers (`Frame`, `Page`) to 7/8 of that, leaving the rest for page tables
 (measured worst case ~104 bytes). The flat 64 pages cover unfavorable slab
-and page-table boundaries. Lazy and unmapped reservations use `D = 0`; each
-lazy fault is admitted separately at `mapping_charge(1, 0)`. Fixed charges:
+and page-table boundaries. Unmapped reservations use `D = 0` with `P` their
+page count. Lazy reservations are sparse, with no descriptors until first
+touch, so they are charged the flat `mapping_charge(0, 0)` whatever their
+size; each lazy fault is admitted separately at `mapping_charge(1, 1)`, one
+data page and its descriptor. Fixed charges:
 process 256 pages (applied at address-space creation and again in
 `Process::new_child`), thread 64, sys-object and IPC 16. If a structure grows
 enough to invalidate an allowance, the build or test must fail; the guard

@@ -17,8 +17,9 @@ use core::sync::atomic::Ordering;
 
 /// An arbitrarily defined maximum lenth of an environment variable key.
 pub const MAX_ENV_KEY_LEN: usize = 256;
-/// An arbitrarily defined maximum lenth of an environment variable value.
-pub const MAX_ENV_VAL_LEN: usize = 4092;
+/// Maximum environment value length in bytes; with its four-byte length
+/// prefix, a getenv result fits in eight 4 KiB pages.
+pub const MAX_ENV_VAL_LEN: usize = 32 * 1024 - 4;
 
 // Note: ErrorCode is u16.
 pub const STDIO_INHERIT: RtFd = -((ErrorCode::MAX as RtFd) + 1);

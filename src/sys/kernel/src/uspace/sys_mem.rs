@@ -41,9 +41,13 @@ fn map_charge(flags: u32, phys_addr: u64, page_size: u64, num_pages: u64) -> u64
         // Device memory comes from outside the small-page pool; only
         // descriptors and page tables are charged.
         (0, num_pages)
-    } else if flags == 0 || (flags & SysMem::F_LAZY) != 0 {
-        // No physical pages yet: each lazy fault is charged when it happens.
+    } else if flags == 0 {
+        // No physical pages: one descriptor per page of the reservation.
         (0, num_pages)
+    } else if (flags & SysMem::F_LAZY) != 0 {
+        // Sparse: no descriptors until first touch, and each fault is
+        // charged when it happens.
+        (0, 0)
     } else if (flags & SysMem::F_SHARE_SELF) != 0 {
         if phys_addr == u64::MAX {
             (num_pages, num_pages.saturating_mul(2)) // Descriptors at both ends.
@@ -386,7 +390,8 @@ fn sys_mem_global_stats(
 
             let stats = moto_sys::stats::AdmissionStats {
                 available_small_pages: crate::mm::phys::available_small_pages(),
-                reserved_small_pages: admission::reserved_pages(),
+                // Everything admission counts as taken but not allocated.
+                reserved_small_pages: admission::reserved_pages() + admission::committed_pages(),
                 user_floor_pages: admission::USER_FLOOR_PAGES,
                 sys_io_floor_pages: admission::SYS_IO_FLOOR_PAGES,
                 pressure_low_pages: admission::PRESSURE_LOW_PAGES,
@@ -407,7 +412,7 @@ fn copy_stats_to_user<T>(
         let src: &[u8] =
             core::slice::from_raw_parts(stats as *const _ as *const u8, core::mem::size_of::<T>());
         if let Err(err) = thread.owner().address_space().copy_to_user(src, user_ptr) {
-            return ResultBuilder::result(err);
+            return err.into_syscall_result(thread.owner().address_space());
         }
     }
 
@@ -456,6 +461,10 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
     let version = args.version;
     if version > 0 {
         return ResultBuilder::version_too_high();
+    }
+
+    if args.operation == SysMem::OP_PAGER {
+        return super::pager::sys_pager(thread, args);
     }
 
     let address_space_handle = SysHandle::from_u64(args.args[0]);

@@ -21,6 +21,10 @@ pub fn run_command(args: &[String]) -> bool {
             run_tests();
             true
         }
+        Some("swap-cancel-soak") => {
+            run_soak_tests();
+            true
+        }
         _ => false,
     }
 }
@@ -86,6 +90,18 @@ fn run_worker(root: &Path, swap: bool) -> ! {
 }
 
 pub fn run_tests() {
+    test_swap_cancel_releases_children();
+    test_killed_waiters_release_handle_lists();
+}
+
+/// Kills during direct CPU handoffs beside unrelated workloads. The
+/// handle-list check samples the kernel heap, which only the gate can do.
+pub fn run_soak_tests() {
+    test_swap_cancel_releases_children();
+    println!("swap-cancel-soak PASS");
+}
+
+fn test_swap_cancel_releases_children() {
     // Each episode must clear its child record; these are distinct kills, not
     // retries. Ordinary wakes provide a control for the swap-target path.
     for episode in 0..4 {
@@ -135,7 +151,6 @@ pub fn run_tests() {
         }
     }
     println!("test_swap_cancel_releases_children PASS");
-    test_killed_waiters_release_handle_lists();
 }
 
 /// The kernel's wait-handle limit. A list this long does not fit the kernel's

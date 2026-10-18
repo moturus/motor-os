@@ -114,6 +114,13 @@ pub fn do_syscall(curr: &super::process::Thread, args: &mut SyscallArgs) -> Sysc
         _ => ResultBuilder::not_implemented(),
     };
 
+    // TODO: we should NOT be looping through the scheduler if the thread was recently scheduled.
+    if crate::sched::this_cpu_timer_ticked() {
+        crate::xray::stats::kernel_stats()
+            .adjust_metric(crate::xray::stats::MetricType::SchedSyscallExitYields, 1);
+        curr.scheduler_tick_in_syscall();
+    }
+
     curr.on_syscall_exit();
     result
 }

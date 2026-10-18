@@ -87,13 +87,13 @@ pub fn min_free_small_pages() -> u64 {
     blocks.total_pages() - blocks.high_water_pages()
 }
 
-pub fn allocate_frame(kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {
-    let res = PhysicalMemory::inst().allocate_frame(kind);
-    if res.is_err() {
-        log::debug!("OOM");
-        panic!("OOM")
+/// A frame of the given kind. Admission keeps allocations away from
+/// exhaustion, so running out here is a kernel bug, not an error to pass up.
+pub fn allocate_frame(kind: PageType) -> SlabArc<Frame> {
+    match PhysicalMemory::inst().allocate_frame(kind) {
+        Ok(frame) => frame,
+        Err(_) => panic!("OOM"),
     }
-    res
 }
 
 /// A huge frame owning one whole dual-purpose block. Failure is the

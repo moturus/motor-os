@@ -22,13 +22,20 @@ use crate::util::map_native_error;
 mod block_io;
 mod lock_manager;
 mod mbr;
+mod spawn;
 pub mod stats;
 mod virtio_partition;
 
 /// The fs runtime's self-tests, gathered here because the module holding them
 /// is private to this one. See [`crate::self_test`].
 #[cfg(debug_assertions)]
-pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[lock_manager::self_test::TESTS];
+pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
+    lock_manager::self_test::TESTS,
+    &[
+        ("fs::spawn::queued_mutations", stats::test_executable_locks),
+        ("fs::pager::coalesced_windows", stats::test_pager_windows),
+    ],
+];
 
 /// The max number of "requests" in flight per connection.
 const MAX_IN_FLIGHT: usize = 64;
@@ -310,6 +317,27 @@ pub(crate) struct FsRuntime {
     fs_stats: Rc<stats::FsStats>,
     locks: Rc<RefCell<lock_manager::LockManager<PendingLockResponse>>>,
     channel_budget: Rc<channel_budget::ChannelBudget>,
+    exec_locks: Rc<RefCell<spawn::ExecLocks>>,
+    spawn_stats: Rc<spawn::SpawnStats>,
+    pager: Rc<spawn::pager::Pager>,
+}
+
+/// Every mutation of an executable that is being loaded or is mapped for
+/// demand paging is refused; see `spawn::ExecLocks`.
+/// Call with the FS write guard held: a writer queued behind spawn's metadata
+/// reader must observe the construction lock acquired when that reader finishes.
+fn refuse_if_executing(runtime: &FsRuntime, entry: EntryId) -> Result<()> {
+    if !runtime.exec_locks.borrow().is_locked(entry) {
+        return Ok(());
+    }
+    // Apply retirements already queued: a waited-for exit has queued its own.
+    runtime.pager.drain();
+    if runtime.exec_locks.borrow().is_locked(entry) {
+        return Err(std::io::Error::from_raw_os_error(
+            moto_rt::E_NOT_ALLOWED as i32,
+        ));
+    }
+    Ok(())
 }
 
 struct PendingLockResponse {
@@ -391,12 +419,20 @@ pub(super) async fn init(
         return Err(std::io::Error::from(ErrorKind::InvalidData));
     };
 
+    let exec_locks: Rc<RefCell<spawn::ExecLocks>> = Default::default();
+    let pager_notify = moto_sys::SysMem::pager_init()
+        .map_err(|err| std::io::Error::from_raw_os_error(err as i32))?;
     let runtime = FsRuntime {
         fs: fs.clone(),
         fs_stats,
         locks: Default::default(),
         channel_budget,
+        exec_locks: exec_locks.clone(),
+        spawn_stats: Default::default(),
+        pager: Rc::new(spawn::pager::Pager::new(exec_locks)),
     };
+    moto_async::LocalRuntime::spawn(spawn::pager::run(runtime.clone(), pager_notify));
+
     spawn_fs_listeners(runtime.clone()).await;
     stats::spawn_stats_responder(runtime);
     Ok(fs)
@@ -465,19 +501,21 @@ async fn fs_listener(
         return Ok(());
     }
 
-    let (role, can_write) = match moto_sys::SysObj::get_capabilities(sender.remote_handle()) {
-        Ok(capabilities) => (
-            fs_role(capabilities),
-            capabilities & moto_sys::caps::CAP_FS_WRITE != 0,
-        ),
-        Err(err) => {
-            log::warn!(
-                "FS: dropping client 0x{:x}: cannot query peer capabilities: {err:?}",
-                sender.remote_handle().as_u64()
-            );
-            return Ok(());
-        }
-    };
+    let (role, can_write, can_spawn) =
+        match moto_sys::SysObj::get_capabilities(sender.remote_handle()) {
+            Ok(capabilities) => (
+                fs_role(capabilities),
+                capabilities & moto_sys::caps::CAP_FS_WRITE != 0,
+                capabilities & moto_sys::caps::CAP_SPAWN != 0,
+            ),
+            Err(err) => {
+                log::warn!(
+                    "FS: dropping client 0x{:x}: cannot query peer capabilities: {err:?}",
+                    sender.remote_handle().as_u64()
+                );
+                return Ok(());
+            }
+        };
 
     // The wait-handle budget (see channel_budget): a channel past it would
     // eventually make the runtime thread's SysCpu::wait exceed the kernel's
@@ -516,7 +554,7 @@ async fn fs_listener(
                 let runtime = runtime.clone();
                 let ticket_tx = ticket_tx.clone();
                 moto_async::LocalRuntime::spawn(async move {
-                    on_msg(msg, sender, runtime, role, can_write).await;
+                    on_msg(msg, sender, runtime, role, can_write, can_spawn).await;
                     let _ = ticket_tx.send(()).await;
                 });
                 requests_since_io += 1;
@@ -562,11 +600,17 @@ async fn on_msg(
     runtime: FsRuntime,
     role: Role,
     can_write: bool,
+    can_spawn: bool,
 ) {
     // The capability gate, ahead of the pressure gate so that a forbidden
     // request is reported as such. It covers every lock operation and flush,
     // and frees donated pages for the same reason the pressure gate does.
-    if !can_write && api_fs::known_cmd(msg.command) && !api_fs::is_read_command(msg.command) {
+    // Building a child takes the requester's spawn capability, which the
+    // kernel would check only once the image is loaded.
+    let forbidden =
+        (!can_write && api_fs::known_cmd(msg.command) && !api_fs::is_read_command(msg.command))
+            || (!can_spawn && msg.command == api_fs::CMD_SPAWN);
+    if forbidden {
         api_fs::release_donated_pages(&msg, &sender);
         let resp = api_fs::empty_resp_encode(msg.id, Err(moto_rt::Error::NotAllowed));
         let _ = sender.send(resp).await;
@@ -635,6 +679,7 @@ async fn on_msg(
             on_cmd_copy_file_range(msg, &sender, runtime, role).await
         }
         moto_sys_io::api_fs::CMD_FILE_LOCK => on_cmd_file_lock(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_SPAWN => spawn::on_cmd_spawn(msg, &sender, runtime, role).await,
 
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
@@ -976,6 +1021,7 @@ async fn on_cmd_write(
     }
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, file_id)?;
     let written = fs
         .write(role, file_id, offset, &io_page.bytes()[..(len as usize)])
         .await?;
@@ -1012,6 +1058,7 @@ async fn on_cmd_write_multi(
     let mut total = 0_u32;
     {
         let mut fs_guard = runtime.fs.write().await;
+        refuse_if_executing(&runtime, file_id)?;
         let mut chunk_offset = offset;
         for (io_page, size) in pages.iter().zip(api_fs::io_chunks(offset, len)) {
             match fs_guard
@@ -1263,6 +1310,7 @@ async fn on_cmd_set_permissions(
     let access = AccessPermissions::try_from(raw_access)?;
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, entry_id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.set_permissions(role, entry_id, role, access)
@@ -1289,6 +1337,7 @@ async fn on_cmd_set_all_permissions(
     );
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, entry_id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.set_all_permissions(role, entry_id, permissions)
@@ -1310,6 +1359,7 @@ async fn on_cmd_resize(
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, file_id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.resize(role, file_id, new_size)
@@ -1331,6 +1381,7 @@ async fn on_cmd_delete_entry(
     let entry_id = api_fs::delete_entry_msg_decode(msg);
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, entry_id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.delete_entry(role, entry_id)
@@ -1423,6 +1474,13 @@ async fn on_cmd_move_entry(
         api_fs::move_entry_req_decode(msg, sender).map_err(map_native_error)?;
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, entry_id)?;
+    // A rename onto an executing file would delete it.
+    if replace
+        && let Ok(Some((replaced, _))) = fs.stat(Role::System, new_parent_id, fname.as_str()).await
+    {
+        refuse_if_executing(&runtime, replaced)?;
+    }
     let result = if replace {
         fs.move_entry(role, entry_id, new_parent_id, fname.as_str())
             .await
@@ -1446,6 +1504,7 @@ async fn on_cmd_copy_file_range(
     let (from, to, offset, size) = api_fs::copy_file_range_req_decode(msg);
 
     let mut fs = runtime.fs.write().await;
+    refuse_if_executing(&runtime, to)?;
 
     // In this implementation, from_offset == to_offset.
     let copied = fs

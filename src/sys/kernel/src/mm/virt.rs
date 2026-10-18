@@ -21,6 +21,7 @@ use super::slab::*;
 use super::virt_intrusive::SegmentMap;
 use super::virt_intrusive::VmemSegment;
 use super::*;
+use crate::util::LockGuard;
 use crate::util::SpinLock;
 use crate::util::StaticRef;
 use crate::util::UnsafeRef;
@@ -65,7 +66,7 @@ const VMEM_K_SLABS_END: u64 = VMEM_K_SLABS_START + 7 * ONE_GB; // 32 GB
 pub const VMEM_K_SYS_IO_START: u64 = VMEM_K_SLABS_END; // 32 GB
 
 // User virtual addresses start at zero and can go up to VMEM_USER_END.
-const VMEM_USER_END: u64 = PAGING_DIRECT_MAP_OFFSET >> 1; // 1 << 45 on x64.
+const VMEM_USER_END: u64 = moto_sys::USERSPACE_REGION_END;
 
 // Note: the address below must NOT be in the L4 region that is used by
 //       the kernel, as we will either have to give the userspace access
@@ -299,9 +300,16 @@ impl VmemRegion {
         VaddrMapStatus::Unallocated
     }
 
-    fn pin_user_page(&self, addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+    fn pin_user_page(
+        &self,
+        addr: u64,
+        access: MappingOptions,
+    ) -> Result<(SlabArc<Frame>, u64), super::user_copy::UserCopyError> {
         let segments = self.used_segments.lock(line!());
-        segments.find(addr)?.pin_user_page(addr)
+        segments
+            .find(addr)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?
+            .pin_user_page(addr, access)
     }
 
     #[allow(unused)]
@@ -398,7 +406,9 @@ impl VmemRegion {
         }
 
         let Some(start) = start else {
-            log::error!(
+            // A process can exhaust its own address space at will; that is
+            // its error, not a kernel event.
+            log::debug!(
                 "vmem_allocate: have 0x{:x}, in use 0x{:x}, need 0x{:x}: no gap: OOM",
                 self.segment.size,
                 self.bytes_used.load(Ordering::Relaxed),
@@ -549,7 +559,17 @@ impl VmemRegion {
         num_pages: u64,
         mapping_options: MappingOptions,
     ) -> Result<MemorySegment, ErrorCode> {
-        debug_assert_eq!(0, vaddr_start & (PAGE_SIZE_SMALL - 1));
+        let mut segments = self.used_segments.lock(line!());
+        self.allocate_user_fixed_locked(&mut segments, vaddr_start, num_pages, mapping_options)
+    }
+
+    fn allocate_user_fixed_locked(
+        &self,
+        segments: &mut SegmentMap,
+        vaddr_start: u64,
+        num_pages: u64,
+        mapping_options: MappingOptions,
+    ) -> Result<MemorySegment, ErrorCode> {
         debug_assert!(!self.address_space.is_null());
         let size = num_pages << PAGE_SIZE_SMALL_LOG2;
 
@@ -558,12 +578,15 @@ impl VmemRegion {
             size,
         };
 
-        if (vaddr_start < self.segment.start) || ((vaddr_start + size) >= self.segment.end()) {
+        // The address is the caller's choice; unaligned or outside the
+        // region is its error.
+        if (vaddr_start & (PAGE_SIZE_SMALL - 1)) != 0
+            || (vaddr_start < self.segment.start)
+            || ((vaddr_start + size) >= self.segment.end())
+        {
             log::debug!("allocate_user_fixed failed for addr 0x{vaddr_start:x}");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-
-        let mut segments = self.used_segments.lock(line!());
 
         // Validate that there is no overlap with existing segments.
         if segments.intersects(&memory_segment) {
@@ -579,6 +602,19 @@ impl VmemRegion {
         unsafe { self.address_space.get() }.mem_stats.add(num_pages);
 
         Ok(memory_segment)
+    }
+
+    /// Runs `f` on the file-paged segment holding `addr`, under the region lock.
+    fn with_file_segment<R>(
+        &self,
+        addr: u64,
+        f: impl FnOnce(&mut super::virt_intrusive::VmemSegment) -> Result<R, ErrorCode>,
+    ) -> Result<R, ErrorCode> {
+        let mut segments = self.used_segments.lock(line!());
+        match segments.find_mut(addr) {
+            Some(segment) if segment.is_file_paged() => f(segment),
+            _ => Err(moto_rt::E_INVALID_ARGUMENT),
+        }
     }
 
     fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
@@ -600,7 +636,7 @@ pub(super) struct AddressSpaceBase {
     pub(super) page_table: PageTable,
     pub(super) page_allocator: super::virt_intrusive::PageAllocator,
 
-    mem_stats: Arc<crate::xray::stats::MemStats>,
+    pub(super) mem_stats: Arc<crate::xray::stats::MemStats>,
 }
 
 impl AddressSpaceBase {
@@ -654,6 +690,8 @@ pub struct KernelAddressSpace {
 
     static_shared_page: UnsafeRef<moto_sys::KernelStaticPage>,
     next_slabs_addr: AtomicU64,
+    /// The executable pager's registry; see `uspace::pager`.
+    pager: crate::uspace::pager::PagerRegistry,
 
     _pin: PhantomPinned,
 }
@@ -691,6 +729,7 @@ impl KernelAddressSpace {
 
             static_shared_page: UnsafeRef::const_default(),
             next_slabs_addr: AtomicU64::new(VMEM_K_SLABS_START),
+            pager: crate::uspace::pager::PagerRegistry::new(),
 
             _pin: PhantomPinned,
         }));
@@ -710,6 +749,7 @@ impl KernelAddressSpace {
             super::zero_page(virt_addr, PageType::SmallPage);
 
             result.base.mem_stats.add(1);
+            result.base.mem_stats.add_resident(1);
         }
 
         result
@@ -793,6 +833,10 @@ impl KernelAddressSpace {
 
 pub(super) static KERNEL_ADDRESS_SPACE: StaticRef<KernelAddressSpace> = StaticRef::default_const();
 
+pub(crate) fn pager_registry() -> &'static crate::uspace::pager::PagerRegistry {
+    &KERNEL_ADDRESS_SPACE.pager
+}
+
 pub(super) struct UserAddressSpaceBase {
     base: AddressSpaceBase,
     pub(super) normal_memory: VmemRegion, // "Normal" memory, managed by the kernel.
@@ -841,6 +885,11 @@ impl UserAddressSpaceBase {
 
     pub(super) fn page_table_ref(&self) -> &PageTable {
         &self.base.page_table
+    }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn page_descriptors(&self) -> u64 {
+        self.base.page_allocator.used_pages()
     }
 
     pub(super) fn new() -> Result<Self, ErrorCode> {
@@ -972,6 +1021,12 @@ impl UserAddressSpaceBase {
         num_pages: u64,
         mapping_options: MappingOptions,
     ) -> Result<MemorySegment, ErrorCode> {
+        // File faults and fills are served only in the normal region.
+        if mapping_options.contains(MappingOptions::FILE_PAGED) {
+            return self
+                .normal_memory
+                .allocate_user_fixed(vaddr_start, num_pages, mapping_options);
+        }
         match vaddr_start {
             0..=VMEM_USER_END => {
                 self.normal_memory
@@ -984,13 +1039,17 @@ impl UserAddressSpaceBase {
         }
     }
 
-    pub(super) fn pin_user_page(&self, addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+    pub(super) fn pin_user_page(
+        &self,
+        addr: u64,
+        access: MappingOptions,
+    ) -> Result<(SlabArc<Frame>, u64), super::user_copy::UserCopyError> {
         match addr {
-            0..=VMEM_USER_END => self.normal_memory.pin_user_page(addr),
+            0..=VMEM_USER_END => self.normal_memory.pin_user_page(addr, access),
             moto_sys::CUSTOM_USERSPACE_REGION_START..=moto_sys::CUSTOM_USERSPACE_REGION_END => {
-                self.custom_memory.pin_user_page(addr)
+                self.custom_memory.pin_user_page(addr, access)
             }
-            _ => None,
+            _ => Err(moto_rt::E_INVALID_ARGUMENT.into()),
         }
     }
 
@@ -1002,6 +1061,17 @@ impl UserAddressSpaceBase {
         self.normal_memory.mmio_map(phys_addr, num_pages, true)
     }
 
+    /// The region holding `vaddr`.
+    fn region_for(&self, vaddr: u64) -> Option<&VmemRegion> {
+        if self.normal_memory.segment.contains(vaddr) {
+            Some(&self.normal_memory)
+        } else if self.custom_memory.segment.contains(vaddr) {
+            Some(&self.custom_memory)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn share_with(
         &self,
         addr_here: u64,
@@ -1010,192 +1080,251 @@ impl UserAddressSpaceBase {
         mapping_options: MappingOptions,
     ) -> Result<(), ErrorCode> {
         log::trace!("share_with: here: 0x{addr_here:x} there: 0x{addr_there:x}");
-        let ptr_here = self as *const _ as usize;
-        let ptr_there = other as *const _ as usize;
-        if ptr_here == ptr_there {
-            if addr_here == addr_there {
-                log::debug!("map_shared: source and destination are identical");
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-
-            // TODO: here we duplicate the mapping code below, as
-            // we have only one mutex guard, not two. Can this be
-            // easily refactored to avoid duplicate code?
-            let here_in_normal = self.normal_memory.segment.contains(addr_here);
-            let there_in_normal = self.normal_memory.segment.contains(addr_there);
-
-            if here_in_normal == there_in_normal {
-                let lock = if here_in_normal {
-                    self.normal_memory.used_segments.lock(line!())
-                } else {
-                    self.custom_memory.used_segments.lock(line!())
-                };
-                let Some(map_here_segment) = lock.get(&addr_here) else {
-                    log::debug!("map_shared: can't find the source segment");
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
-                };
-                let Some(map_there_segment) = lock.get(&addr_there) else {
-                    log::debug!("map_shared: can't find the destination segment");
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
-                };
-
-                if map_there_segment.segment().size != map_here_segment.segment().size {
-                    log::debug!(
-                        "map_shared: segment sizes don't match: to: {} from: {}",
-                        map_there_segment.segment().size,
-                        map_here_segment.segment().size,
-                    );
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
-                }
-
-                // TODO: add a SegmentMap helper for borrowing two distinct
-                // entries mutably, then remove this same-region cast.
-                let there_mut = unsafe {
-                    (map_there_segment as *const _ as usize as *mut VmemSegment)
-                        .as_mut()
-                        .unwrap_unchecked()
-                };
-
-                return map_here_segment.share_with(
-                    there_mut,
-                    mapping_options | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
-                );
-            }
-
-            // Cross-region sharing has two independent collections, so the
-            // destination can be borrowed mutably without a cast. Keep the
-            // lock order fixed: normal, then custom.
-            let mut normal = self.normal_memory.used_segments.lock(line!());
-            let mut custom = self.custom_memory.used_segments.lock(line!());
-            let (map_here_segment, map_there_segment) = if here_in_normal {
-                (normal.get(&addr_here), custom.get_mut(&addr_there))
-            } else {
-                (custom.get(&addr_here), normal.get_mut(&addr_there))
-            };
-
-            let Some(map_here_segment) = map_here_segment else {
-                log::debug!("map_shared: can't find the source segment");
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            };
-            let Some(map_there_segment) = map_there_segment else {
-                log::debug!("map_shared: can't find the destination segment");
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            };
-
-            if map_there_segment.segment().size != map_here_segment.segment().size {
-                log::debug!(
-                    "map_shared: segment sizes don't match: to: {} from: {}",
-                    map_there_segment.segment().size,
-                    map_here_segment.segment().size,
-                );
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-
-            return map_here_segment.share_with(
-                map_there_segment,
-                mapping_options | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
-            );
+        let here = self
+            .region_for(addr_here)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let there = other
+            .region_for(addr_there)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        if core::ptr::eq(here, there) && addr_here == addr_there {
+            log::debug!("map_shared: source and destination are identical");
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-
-        // Always lock in the same order to avoid deadlocks.
-        let (mut lock_here, mut lock_there) = {
-            if ptr_here < ptr_there {
-                let lock_there = if other.normal_memory.segment.contains(addr_there) {
-                    other.normal_memory.used_segments.lock(line!())
-                } else {
-                    other.custom_memory.used_segments.lock(line!())
-                };
-                let lock_here = if self.normal_memory.segment.contains(addr_here) {
-                    self.normal_memory.used_segments.lock(line!())
-                } else {
-                    self.custom_memory.used_segments.lock(line!())
-                };
-
-                (lock_here, lock_there)
-            } else {
-                let lock_here = if self.normal_memory.segment.contains(addr_here) {
-                    self.normal_memory.used_segments.lock(line!())
-                } else {
-                    self.custom_memory.used_segments.lock(line!())
-                };
-                let lock_there = if other.normal_memory.segment.contains(addr_there) {
-                    other.normal_memory.used_segments.lock(line!())
-                } else {
-                    other.custom_memory.used_segments.lock(line!())
-                };
-
-                (lock_here, lock_there)
-            }
-        };
 
         // TODO: we here only map if both address spaces have allocated
         // the segments to map exactly as they are being considered here.
         // We should allow mapping any allocated region to any allocated
         // region, regardless of the history of allocations.
-        let map_here_segment = lock_here.get_mut(&addr_here);
-        let map_there_segment = lock_there.get_mut(&addr_there);
-
-        if map_there_segment.is_none() || map_here_segment.is_none() {
+        let (mut here_map, mut there_map) = lock_regions(here, there);
+        let Some((source, dest)) = share_pair(
+            &mut here_map,
+            there_map.as_deref_mut(),
+            addr_here,
+            addr_there,
+        ) else {
             log::debug!("map_shared: can't find the segments to map");
             return Err(moto_rt::E_INVALID_ARGUMENT);
+        };
+        share_segments(source, dest, mapping_options)
+    }
+
+    /// Reserves `num_pages` at `vaddr` here (anywhere when `vaddr` is
+    /// `u64::MAX`) and `num_pages` anywhere in `other`, and shares the
+    /// first into the second, read-write. The region locks are held from
+    /// the first reservation to the end, so a failed step is undone before
+    /// anything else can see, remove or replace either reservation.
+    pub(super) fn alloc_shared(
+        &self,
+        vaddr: u64,
+        num_pages: u64,
+        mapping_options: MappingOptions,
+        other: &Self,
+    ) -> Result<(u64, u64), ErrorCode> {
+        let here = if vaddr == u64::MAX {
+            &self.normal_memory
+        } else {
+            self.region_for(vaddr).ok_or(moto_rt::E_INVALID_ARGUMENT)?
+        };
+        let there = &other.normal_memory;
+        let (mut here_map, mut there_map) = lock_regions(here, there);
+
+        let addr_here = if vaddr == u64::MAX {
+            here.allocate_pages_locked(&mut here_map, num_pages, mapping_options)?
+        } else {
+            here.allocate_user_fixed_locked(&mut here_map, vaddr, num_pages, mapping_options)?
         }
+        .start;
+        let reserved = there.allocate_pages_locked(
+            there_map.as_deref_mut().unwrap_or(&mut here_map),
+            num_pages,
+            MappingOptions::empty(),
+        );
+        let addr_there = match reserved {
+            Ok(segment) => segment.start,
+            Err(err) => {
+                here.free_locked(&mut here_map, addr_here).unwrap();
+                return Err(err);
+            }
+        };
 
-        let map_there_segment = map_there_segment.unwrap();
-        let map_here_segment = map_here_segment.unwrap();
+        let (source, dest) = share_pair(
+            &mut here_map,
+            there_map.as_deref_mut(),
+            addr_here,
+            addr_there,
+        )
+        .unwrap();
+        let shared = share_segments(
+            source,
+            dest,
+            MappingOptions::READABLE | MappingOptions::WRITABLE,
+        );
+        if let Err(err) = shared {
+            there
+                .free_locked(
+                    there_map.as_deref_mut().unwrap_or(&mut here_map),
+                    addr_there,
+                )
+                .unwrap();
+            here.free_locked(&mut here_map, addr_here).unwrap();
+            return Err(err);
+        }
+        Ok((addr_here, addr_there))
+    }
 
-        if map_there_segment.segment().size != map_here_segment.segment().size {
-            log::debug!(
-                "map_shared: segment sizes don't match: to: {} from: {}",
-                map_there_segment.segment().size,
-                map_here_segment.segment().size,
-            );
+    /// Reserves `num_pages` at `vaddr` and maps `source`'s segment at
+    /// `source_addr` into it, sharing the frames. Both region locks are
+    /// held throughout, so a refused share removes the reservation before
+    /// anything else can see it.
+    pub(super) fn share_into_fixed(
+        &self,
+        vaddr: u64,
+        num_pages: u64,
+        source: &Self,
+        source_addr: u64,
+        mapping_options: MappingOptions,
+    ) -> Result<(), ErrorCode> {
+        let dest = self.region_for(vaddr).ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let from = source
+            .region_for(source_addr)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        if core::ptr::eq(dest, from) && vaddr == source_addr {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-
-        map_here_segment.share_with(
-            map_there_segment,
-            mapping_options | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
-        )
+        let (mut from_map, mut dest_map) = lock_regions(from, dest);
+        dest.allocate_user_fixed_locked(
+            dest_map.as_deref_mut().unwrap_or(&mut from_map),
+            vaddr,
+            num_pages,
+            MappingOptions::empty(),
+        )?;
+        let shared = share_pair(&mut from_map, dest_map.as_deref_mut(), source_addr, vaddr)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)
+            .and_then(|(source, dest)| share_segments(source, dest, mapping_options));
+        if shared.is_err() {
+            dest.free_locked(dest_map.as_deref_mut().unwrap_or(&mut from_map), vaddr)
+                .unwrap();
+        }
+        shared
     }
 
     pub(super) fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         self.normal_memory.fix_pagefault(pf_addr, error_code)
     }
 
-    /// Maps the kernel-static pages starting at `kernel_vaddr` into the
-    /// reservation at `vaddr` (both page-aligned; the reservation's size
-    /// says how many), sharing the frames. This is how sys-io's read-only
-    /// segments are mapped from the kernel's copy of its ELF bytes.
-    pub(super) fn share_kernel_static(
+    /// See `VmemRegion::with_file_segment`; file mappings are ordinary memory.
+    pub(super) fn with_file_segment<R>(
         &self,
-        kernel_vaddr: u64,
+        addr: u64,
+        f: impl FnOnce(&mut super::virt_intrusive::VmemSegment) -> Result<R, ErrorCode>,
+    ) -> Result<R, ErrorCode> {
+        if !self.normal_memory.segment.contains(addr) {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        self.normal_memory.with_file_segment(addr, f)
+    }
+
+    /// Reserves `num_pages` at `vaddr` and maps the kernel-static pages
+    /// starting at `kernel_vaddr` (page-aligned) into it, sharing the
+    /// frames: how sys-io's read-only segments are mapped from the
+    /// kernel's copy of its ELF bytes. The user region lock is held from
+    /// the reservation through the share or its rollback; the kernel-static
+    /// lock nests inside it.
+    pub(super) fn fill_kernel_static(
+        &self,
         vaddr: u64,
+        kernel_vaddr: u64,
+        num_pages: u64,
         mapping_options: MappingOptions,
     ) -> Result<(), ErrorCode> {
+        let region = self.region_for(vaddr).ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let mut user_segments = region.used_segments.lock(line!());
+        region.allocate_user_fixed_locked(
+            &mut user_segments,
+            vaddr,
+            num_pages,
+            MappingOptions::empty(),
+        )?;
         let kernel_segments = KERNEL_ADDRESS_SPACE
             .kernel_static
             .used_segments
             .lock(line!());
-        let Some(source) = kernel_segments.find(kernel_vaddr) else {
-            log::debug!("share_kernel_static: 0x{kernel_vaddr:x} is not kernel-static");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+        let shared = match kernel_segments.find(kernel_vaddr) {
+            Some(source) => {
+                let first_page = (kernel_vaddr - source.segment().start) >> PAGE_SIZE_SMALL_LOG2;
+                let dest = user_segments.get_mut(&vaddr).unwrap();
+                source.share_range_with(
+                    first_page,
+                    dest,
+                    mapping_options | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
+                )
+            }
+            None => {
+                log::debug!("fill_kernel_static: 0x{kernel_vaddr:x} is not kernel-static");
+                Err(moto_rt::E_INVALID_ARGUMENT)
+            }
         };
-        let first_page = (kernel_vaddr - source.segment().start) >> PAGE_SIZE_SMALL_LOG2;
-
-        let mut user_segments = if self.normal_memory.segment.contains(vaddr) {
-            self.normal_memory.used_segments.lock(line!())
-        } else {
-            self.custom_memory.used_segments.lock(line!())
-        };
-        let Some(dest) = user_segments.get_mut(&vaddr) else {
-            log::debug!("share_kernel_static: no reservation at 0x{vaddr:x}");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        };
-
-        source.share_range_with(
-            first_page,
-            dest,
-            mapping_options | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
-        )
+        drop(kernel_segments);
+        if shared.is_err() {
+            region.free_locked(&mut user_segments, vaddr).unwrap();
+        }
+        shared
     }
+}
+
+/// Locks the segment maps of `here` and `there` in the one order the kernel
+/// uses for any two regions, the higher region address first, so that two
+/// operations on the same pair of regions never wait for each other. One
+/// guard, and `None`, when they are the same region.
+fn lock_regions<'a>(
+    here: &'a VmemRegion,
+    there: &'a VmemRegion,
+) -> (LockGuard<'a, SegmentMap>, Option<LockGuard<'a, SegmentMap>>) {
+    if core::ptr::eq(here, there) {
+        return (here.used_segments.lock(line!()), None);
+    }
+    if (here as *const VmemRegion as usize) > (there as *const VmemRegion as usize) {
+        let here_map = here.used_segments.lock(line!());
+        (here_map, Some(there.used_segments.lock(line!())))
+    } else {
+        let there_map = there.used_segments.lock(line!());
+        (here.used_segments.lock(line!()), Some(there_map))
+    }
+}
+
+/// A share's source segment at `addr_here` and destination segment at
+/// `addr_there`, from one map or two. The addresses must differ when the
+/// map is shared.
+fn share_pair<'a>(
+    here_map: &'a mut SegmentMap,
+    there_map: Option<&'a mut SegmentMap>,
+    addr_here: u64,
+    addr_there: u64,
+) -> Option<(&'a VmemSegment, &'a mut VmemSegment)> {
+    match there_map {
+        Some(there_map) => Some((here_map.get(&addr_here)?, there_map.get_mut(&addr_there)?)),
+        None => here_map
+            .get_two_mut(addr_here, addr_there)
+            .map(|(here, there)| (&*here, there)),
+    }
+}
+
+/// Shares `source` into `dest`, user-accessible, once their sizes match.
+fn share_segments(
+    source: &VmemSegment,
+    dest: &mut VmemSegment,
+    mapping_options: MappingOptions,
+) -> Result<(), ErrorCode> {
+    if dest.segment().size != source.segment().size {
+        log::debug!(
+            "map_shared: segment sizes don't match: to: {} from: {}",
+            dest.segment().size,
+            source.segment().size,
+        );
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    }
+    source.share_with(
+        dest,
+        mapping_options | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
+    )
 }

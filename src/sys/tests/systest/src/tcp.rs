@@ -30,28 +30,36 @@ fn completed_backlog_cap() -> usize {
 pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
     let provider = moto_stats::Collector::provider_by_name("sys-io")
         .expect("sys-io stats provider is not registered");
-    let metric = moto_stats::Collector::describe(&provider)
-        .unwrap()
-        .into_iter()
-        .find(|metric| metric.name == name)
-        .unwrap_or_else(|| panic!("sys-io metric {name:?} is not described"));
-    // read() polls sys-io's net runtime for a live snapshot; under load that
-    // round-trip can come back empty and surface as NotFound for a metric that
-    // always exists (same race as fs.rs::read_sys_io_fs_metrics). Opening the
-    // stats connection can also exhaust its listener pool: formerly NotFound,
-    // now NotReady. Keep both within the existing snapshot deadline.
+    // Both describe() and read() open a connection to sys-io's stats server,
+    // which fails with NotReady while other clients hold its small listener
+    // pool. read() also polls sys-io's net runtime for a live snapshot; under
+    // load that round-trip can come back empty and surface as NotFound for a
+    // metric that always exists (same race as fs.rs::read_sys_io_fs_metrics).
+    // Keep both within one snapshot deadline.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let busy = |err: moto_rt::ErrorCode| {
+        assert!(
+            matches!(err, moto_rt::E_NOT_FOUND | moto_rt::E_NOT_READY)
+                && std::time::Instant::now() < deadline,
+            "read sys-io metric {name:?}: {err}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let metric = loop {
+        match moto_stats::Collector::describe(&provider) {
+            Ok(metrics) => {
+                break metrics
+                    .into_iter()
+                    .find(|metric| metric.name == name)
+                    .unwrap_or_else(|| panic!("sys-io metric {name:?} is not described"));
+            }
+            Err(err) => busy(err),
+        }
+    };
     loop {
         match moto_stats::Collector::read(&provider, metric.id, moto_stats::SCOPE_GLOBAL) {
             Ok(value) => return value,
-            Err(err) => {
-                assert!(
-                    matches!(err, moto_rt::E_NOT_FOUND | moto_rt::E_NOT_READY)
-                        && std::time::Instant::now() < deadline,
-                    "read sys-io metric {name:?}: {err}"
-                );
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            Err(err) => busy(err),
         }
     }
 }
@@ -1063,7 +1071,10 @@ fn test_disconnect_before_rx_ready_releases_channels() {
     drop(client_connection);
     drop(listener_connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
-    wait_for_sys_io_metric("net.channels", |value| value == channels_before);
+    // A departed client's sockets keep its channel slot while they sit in
+    // TIME_WAIT, so slots left by earlier tests can expire during this wait:
+    // the count may end below the baseline, never above it.
+    wait_for_sys_io_metric("net.channels", |value| value <= channels_before);
 
     println!("test_disconnect_before_rx_ready_releases_channels() PASS");
 }

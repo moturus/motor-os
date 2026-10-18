@@ -229,14 +229,12 @@ echo "full-test: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE target=$IMG_TAR
 
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then
-  bash "$WD/test-kernel-wait-set.sh" --release
   bash "$WD/test-moto-ipc-sync.sh" --release
   make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
     crossterm-smoke BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
   bash "$WD/test-kloader-image.sh" --release
 else
-  bash "$WD/test-kernel-wait-set.sh"
   bash "$WD/test-moto-ipc-sync.sh"
   make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
     crossterm-smoke -j"$(nproc)"
@@ -845,6 +843,15 @@ out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest rus
   fail "Rush capability precedence exited with status $rush_caps_status: '$out'"
 [ "$out" = "rush_caps::test_detach_grant_precedence PASS" ] ||
   fail "Rush capability precedence: '$out'"
+
+# An unstarted detached child dying with its parent needs the same mask.
+raw_spawn_status=0
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest raw-spawn-detached")" ||
+  raw_spawn_status="$?"
+[ "$raw_spawn_status" -eq 0 ] ||
+  fail "raw-spawn detached test exited with status $raw_spawn_status: '$out'"
+[ "$out" = "raw_spawn::test_unstarted_detached_child_dies_with_parent PASS" ] ||
+  fail "raw-spawn detached test: '$out'"
 
 test_rush_script_caps rush
 test_rush_script_caps sh

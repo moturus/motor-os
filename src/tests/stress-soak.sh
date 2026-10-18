@@ -6,7 +6,9 @@
 # workloads spanning the VM-side coverage in full-test.sh (fs, DNS/networking,
 # tokio/mio, process/stdio), plus continuous TUI traffic through all three
 # terminal providers (sys-tty, russhd pty, and rmux) and futex stress
-# (`systest futex-stress`: raw and std-primitive phases), while a foreground
+# (`systest futex-stress`: raw and std-primitive phases), executable demand
+# paging/relocation/exit/write races, sparse reservation/first-touch/share/
+# page-table churn, and kills during direct CPU handoffs, while a foreground
 # monitor scans for crash markers, detects stalls, and -- on the first anomaly
 # -- captures full forensics (ps / stats x2 / mdbg
 # print-stacks / qemu-monitor vCPU dump / console tail) BEFORE tearing the VM
@@ -18,6 +20,7 @@
 # Environment overrides:
 #   MOTOR_STRESS_OUT   base dir for run output (default /tmp/motor-stress).
 #   MOTO_SMP           guest vCPU count (default 4). Read by run-qemu.sh.
+#   MOTO_MEMORY_MIB    guest RAM in MiB (run-qemu.sh default: 1024).
 #   MOTO_CPU_AFFINITY  host cpuset to pin qemu to via taskset (default: no pin).
 #                      Read by run-qemu.sh; each run stamps its config as the
 #                      first console.log line ("run-qemu: -smp N ...").
@@ -565,6 +568,27 @@ w_futex() {
     [ "$rc" -ne 0 ] && f=$((f+1)); write_stat futex "$n" "$f" "$rc" "futex-stress"; pace "$rc"
   done
 }
+# The full suites' memory-floor and global-usage assertions run in the gate.
+# These modes retain content/lifetime assertions with bounded resident memory
+# while faults, filesystem traffic, and network traffic compete in sys-io.
+# Each mode ends with "<name> PASS" on success.
+w_systest() { # paging-soak|sparse-soak|swap-cancel-soak
+  local name="$1" n=0 f=0 rc current="$OUT/$1.current"
+  while :; do
+    n=$((n+1))
+    run_timeout 300 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
+      "MOTOR_OS_CAPS=0x3cc /devtools/tests/systest $name" >"$current" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ "$(tail -n 1 "$current")" != "$name PASS" ]; then
+      rc=96
+    fi
+    cat "$current" >>"$OUT/$name.log"
+    echo "iter=$n rc=$rc" >>"$OUT/$name.log"
+    [ "$rc" -ne 0 ] && f=$((f+1))
+    write_stat "$name" "$n" "$f" "$rc" "$name"
+    pace "$rc"
+  done
+}
 # Repeat the same directory, download, upload/overwrite, recursive-copy, and
 # cleanup assertions used by full-test.sh.
 # 600s SLO: under 4:1 oversubscription plus six sibling workloads a pass
@@ -792,6 +816,9 @@ start_workload() { # name function [args...]
 }
 start_workload suites w_suites
 start_workload futex w_futex
+start_workload paging-soak w_systest paging-soak
+start_workload sparse-soak w_systest sparse-soak
+start_workload swap-cancel-soak w_systest swap-cancel-soak
 start_workload fs-sftp w_fs_sftp
 start_workload fs-write w_fs_write
 start_workload tui-console w_tui_console
@@ -908,9 +935,20 @@ while :; do
       VSSH_TMO=25 vssh_n /system/bin/stats get 1 2>&1 |
         grep -aE 'mem\.(blocks_|pages_reserved|pages_free_low|block_|admission_refused|used_pages|phys_small_pages_low_water)' || true
     } >> "$OUT/blocks.log"
+    {
+      echo "=== uptime=${up}s $(date +%H:%M:%S)"
+      VSSH_TMO=25 vssh_n /system/bin/stats get 2 2>&1 |
+        grep -aE 'pager\.|spawn\.' || true
+    } >> "$OUT/pager.log"
   fi
 
   if [ "$up" -ge "$DURATION" ]; then
+    for name in paging-soak sparse-soak swap-cancel-soak; do
+      if [ ! -f "$OUT/$name.stat" ]; then
+        STOP_REASON="ANOMALY workload-incomplete:$name (increase requested duration)"
+        capture_forensics "$STOP_REASON"; break 2
+      fi
+    done
     SOAK_END=$now
     log "duration reached, finishing clean"
     break

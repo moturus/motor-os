@@ -10,6 +10,7 @@ pub mod phys;
 pub(crate) mod phys_blocks;
 mod slab;
 pub mod user;
+pub mod user_copy;
 pub mod virt;
 mod virt_intrusive;
 
@@ -286,6 +287,9 @@ bitflags! {
         // A segment's creation policy, never a per-page hardware option:
         // 2 MiB-aligned placement and huge candidates for its mapping.
         const HUGE_ELIGIBLE   = 512;
+        // A segment's creation policy: pages are installed on demand by the
+        // executable pager (uspace::pager); absent pages have no descriptor.
+        const FILE_PAGED      = 1024;
     }
 }
 

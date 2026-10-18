@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.17.7"
+version = "0.17.8"
 dependencies = [
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
@@ -1426,7 +1426,6 @@ dependencies = [
 name = "rt"
 version = "0.1.0"
 dependencies = [
- "elfloader",
  "frusa",
  "futures",
  "log",

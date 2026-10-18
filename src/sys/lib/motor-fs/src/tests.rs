@@ -100,6 +100,50 @@ fn basic() {
 }
 
 #[test]
+fn generation_advances_only_for_entries() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(async {
+        let mut fs = create_fs("motor_fs_entry_generation_test", 1024).await?;
+        let first = fs
+            .create_entry(
+                Role::System,
+                crate::ROOT_DIR_ID,
+                EntryKind::File,
+                "first",
+                RolePermissions::all(AccessPermissions::Rwx),
+            )
+            .await?;
+        let first_generation = crate::EntryIdInternal::from(first).generation;
+
+        let bytes = [0x5a; async_fs::BLOCK_SIZE];
+        for offset in (0..2 * 1024 * 1024).step_by(bytes.len()) {
+            assert_eq!(
+                fs.write(Role::System, first, offset as u64, &bytes).await?,
+                bytes.len()
+            );
+        }
+
+        let second = fs
+            .create_entry(
+                Role::System,
+                crate::ROOT_DIR_ID,
+                EntryKind::File,
+                "second",
+                RolePermissions::all(AccessPermissions::Rwx),
+            )
+            .await?;
+        assert_eq!(
+            crate::EntryIdInternal::from(second).generation,
+            first_generation + 1
+        );
+        Ok::<(), std::io::Error>(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn flush_error() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();

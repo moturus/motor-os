@@ -3,6 +3,7 @@ use crate::util::UnsafeRef;
 use crate::{mm::phys::*, util::SpinLock};
 use core::{arch::asm, sync::atomic::AtomicBool};
 
+use crate::mm::user_copy::UserCopyError;
 use moto_sys::ErrorCode;
 
 // The full physical memory is mapped to [DIRECT_MAP_OFFSET, *)
@@ -23,6 +24,7 @@ fn kpt() -> PageTableImpl {
         table_l4: unsafe { (l4_table as *mut HwPageTable).as_mut().unwrap() },
         userspace: false,
         dead: false,
+        retired_tables: 0,
     }
 }
 
@@ -196,31 +198,35 @@ struct PageTableImpl {
     table_l4: &'static mut HwPageTable,
     userspace: bool,
     dead: bool,
+    // Emptied page-table pages awaiting the next flush; see retire_table().
+    retired_tables: u64,
 }
 
 impl PageTableImpl {
-    fn user_phys_addr(&self, virt_addr: u64) -> Option<u64> {
+    fn user_phys_addr(&self, virt_addr: u64) -> Result<u64, UserCopyError> {
         let mut table = &*self.table_l4;
         for shift in [39, 30, 21, 12] {
             let pte = table.get((virt_addr >> shift) & 511);
-            let required = PTE::PRESENT | PTE::USER;
-            if pte.entry & required != required {
-                return None;
+            if !pte.is_present() {
+                return Err(UserCopyError::PageAbsent(virt_addr));
+            }
+            if pte.entry & PTE::USER == 0 {
+                return Err(moto_rt::E_INVALID_ARGUMENT.into());
             }
             if shift == 12 || (shift != 39 && pte.is_huge_page()) {
                 // Device mappings are not buffers for kernel copies.
                 if pte.entry & (PTE::WRITE_THROUGH | PTE::CACHE_DISABLE) != 0 {
-                    return None;
+                    return Err(moto_rt::E_INVALID_ARGUMENT.into());
                 }
                 let mask = (1 << shift) - 1;
-                return Some((pte.get_addr() & !mask) + (virt_addr & mask));
+                return Ok((pte.get_addr() & !mask) + (virt_addr & mask));
             }
             if pte.is_huge_page() {
-                return None; // No level-4 leaf in four-level paging.
+                return Err(moto_rt::E_INVALID_ARGUMENT.into()); // No level-4 leaf.
             }
             table = HwPageTable::from_pte(pte);
         }
-        None
+        Err(moto_rt::E_INVALID_ARGUMENT.into())
     }
 
     #[cfg(debug_assertions)]
@@ -385,6 +391,7 @@ impl PageTableImpl {
 
     // With `flush: false` the caller must flush the TLB (e.g. via
     // `flush_pages`) before the unmapped physical frame is freed/reused.
+    // Page-table pages emptied here are held until that flush too.
     fn unmap_page(&mut self, phys_addr: u64, virt_addr: u64, kind: PageType, flush: bool) {
         assert_eq!(0, phys_addr & (kind.page_size() - 1));
         assert_eq!(0, virt_addr & (kind.page_size() - 1));
@@ -403,7 +410,7 @@ impl PageTableImpl {
             table_l3.set(idx_l3, PTE::empty());
             if table_l3.is_empty() {
                 self.table_l4.set(idx_l4, PTE::empty());
-                phys_deallocate_frameless(table_l3.self_phys_addr(), PageType::SmallPage);
+                self.retire_table(table_l3.self_phys_addr());
             }
             if flush {
                 self.flush_virt_addr(virt_addr);
@@ -422,10 +429,10 @@ impl PageTableImpl {
             table_l2.set(idx_l2, PTE::empty());
             if table_l2.is_empty() {
                 table_l3.set(idx_l3, PTE::empty());
-                phys_deallocate_frameless(table_l2.self_phys_addr(), PageType::SmallPage);
+                self.retire_table(table_l2.self_phys_addr());
                 if table_l3.is_empty() {
                     self.table_l4.set(idx_l4, PTE::empty());
-                    phys_deallocate_frameless(table_l3.self_phys_addr(), PageType::SmallPage);
+                    self.retire_table(table_l3.self_phys_addr());
                 }
             }
             if flush {
@@ -443,13 +450,13 @@ impl PageTableImpl {
         table_l1.set(idx_l1, PTE::empty());
         if table_l1.is_empty() {
             table_l2.set(idx_l2, PTE::empty());
-            phys_deallocate_frameless(table_l1.self_phys_addr(), PageType::SmallPage);
+            self.retire_table(table_l1.self_phys_addr());
             if table_l2.is_empty() {
                 table_l3.set(idx_l3, PTE::empty());
-                phys_deallocate_frameless(table_l2.self_phys_addr(), PageType::SmallPage);
+                self.retire_table(table_l2.self_phys_addr());
                 if table_l3.is_empty() {
                     self.table_l4.set(idx_l4, PTE::empty());
-                    phys_deallocate_frameless(table_l3.self_phys_addr(), PageType::SmallPage);
+                    self.retire_table(table_l3.self_phys_addr());
                 }
             }
         }
@@ -492,19 +499,44 @@ impl PageTableImpl {
         pte_l1.is_present()
     }
 
-    fn flush_virt_addr(&self, virt_addr: u64) {
+    // An emptied page-table page whose parent entry was just cleared. A CPU
+    // can still walk it through a cached directory entry until the next
+    // flush, so it is kept until flush_pages() instead of going back to the
+    // pool, where it could be reused and rewritten under that walk. The
+    // list is threaded through entry 0 of the retired pages: a page-aligned
+    // link reads as a not-present entry, so a stale walk still faults and
+    // sets no accessed or dirty bit.
+    fn retire_table(&mut self, phys_addr: u64) {
+        debug_assert_eq!(0, phys_addr & (PAGE_SIZE_SMALL - 1));
+        unsafe { *((phys_addr + PAGING_DIRECT_MAP_OFFSET) as *mut u64) = self.retired_tables };
+        self.retired_tables = phys_addr;
+    }
+
+    // Only after a flush: no CPU can reach the retired pages any more.
+    fn free_retired_tables(&mut self) {
+        while self.retired_tables != 0 {
+            let phys_addr = self.retired_tables;
+            self.retired_tables =
+                unsafe { *((phys_addr + PAGING_DIRECT_MAP_OFFSET) as *const u64) };
+            phys_deallocate_frameless(phys_addr, PageType::SmallPage);
+        }
+    }
+
+    fn flush_virt_addr(&mut self, virt_addr: u64) {
         self.flush_pages(virt_addr, 1);
     }
 
     // A single TLB shootdown for the whole range: a shootdown is expensive
     // (IPI all CPUs + spin for their acks), so unmapping a region must not
-    // do it per page.
-    fn flush_pages(&self, first_page_vaddr: u64, num_pages: u64) {
-        if self.dead {
-            // This is a userspace PT and the process is dead: no need to flush TLB.
-            return;
+    // do it per page. The page-table pages retired by the unmaps are freed
+    // once no CPU can walk them.
+    fn flush_pages(&mut self, first_page_vaddr: u64, num_pages: u64) {
+        // A dead userspace PT needs no flush: every CPU was moved off it
+        // before teardown began.
+        if !self.dead {
+            super::tlb::invalidate(self.table_l4.self_phys_addr(), first_page_vaddr, num_pages);
         }
-        super::tlb::invalidate(self.table_l4.self_phys_addr(), first_page_vaddr, num_pages);
+        self.free_retired_tables();
     }
 }
 
@@ -705,6 +737,8 @@ impl Drop for PageTable {
                 // it. Local backstop for tables that never reached that
                 // path (e.g. spawn failures).
                 evict_if_current(guard.table_l4.self_phys_addr());
+                // Every unmap was followed by its flush, so nothing is retired.
+                debug_assert_eq!(0, guard.retired_tables);
                 guard.table_l4.dealloc();
             }
 
@@ -737,6 +771,7 @@ impl PageTable {
             table_l4: l4_table,
             userspace: false,
             dead: false,
+            retired_tables: 0,
         })));
 
         PageTable {
@@ -754,6 +789,7 @@ impl PageTable {
             table_l4: hw_page,
             userspace: true,
             dead: false,
+            retired_tables: 0,
         };
         let inst = UnsafeRef::from_ptr(Box::leak(Box::new(SpinLock::new(inst))));
 
@@ -853,7 +889,8 @@ impl PageTable {
 
     /// Unmap without flushing the TLB. The caller must call `flush_pages`
     /// before the unmapped physical frame is freed/reused, otherwise another
-    /// CPU may keep accessing the frame through a stale translation.
+    /// CPU may keep accessing the frame through a stale translation. That
+    /// flush also frees the page-table pages the unmaps emptied.
     pub fn unmap_page_no_flush(&self, phys_addr: u64, virt_addr: u64, kind: PageType) {
         unsafe {
             self.inst
@@ -929,7 +966,11 @@ impl PageTable {
         unsafe { self.inst.get().lock(line!()).leaf_kind(virt_addr) }
     }
 
-    pub fn copy_from_user(&self, mut virt_addr: u64, mut buf: &mut [u8]) -> Result<(), ErrorCode> {
+    pub fn copy_from_user(
+        &self,
+        mut virt_addr: u64,
+        mut buf: &mut [u8],
+    ) -> Result<(), UserCopyError> {
         if buf.is_empty() {
             return Ok(());
         }
@@ -938,13 +979,11 @@ impl PageTable {
             .checked_add(buf.len() as u64)
             .is_none_or(|end| end > (1 << 47))
         {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         while !buf.is_empty() {
             let page_table = unsafe { self.inst.get() }.lock(line!());
-            let phys_addr = page_table
-                .user_phys_addr(virt_addr)
-                .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+            let phys_addr = page_table.user_phys_addr(virt_addr)?;
             let size = buf
                 .len()
                 .min((PAGE_SIZE_SMALL - (virt_addr & (PAGE_SIZE_SMALL - 1))) as usize);
@@ -962,4 +1001,50 @@ impl PageTable {
         }
         Ok(())
     }
+}
+
+// Emptied page-table pages go back to the pool with the flush that follows
+// their unmaps, never before it (see PageTableImpl::retire_table). Two pages
+// 2 MiB apart in a private table share an L3 and an L2 and have an L1 each,
+// so unmapping both empties four tables. Runs on the BSP alone, so the pool
+// counts are exact.
+#[cfg(debug_assertions)]
+pub fn retired_tables_self_test() {
+    let table = PageTable::new_user_page_table().unwrap();
+    let vaddrs = [PAGE_SIZE_LARGE, PAGE_SIZE_LARGE + PAGE_SIZE_MID];
+    let frames = vaddrs.map(|_| phys_allocate_frameless(PageType::SmallPage).unwrap());
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+    let free_before = available_small_pages();
+    let map_both = || {
+        for (vaddr, phys) in vaddrs.into_iter().zip(frames) {
+            table
+                .map_page(phys, vaddr, PageType::SmallPage, options)
+                .unwrap();
+        }
+        assert_eq!(available_small_pages(), free_before - 4);
+    };
+
+    // The batched path: nothing is freed until the caller's flush.
+    map_both();
+    for (vaddr, phys) in vaddrs.into_iter().zip(frames) {
+        table.unmap_page_no_flush(phys, vaddr, PageType::SmallPage);
+    }
+    assert_eq!(available_small_pages(), free_before - 4);
+    table.flush_pages(vaddrs[0], (vaddrs[1] - vaddrs[0]) / PAGE_SIZE_SMALL + 1);
+    assert_eq!(available_small_pages(), free_before);
+
+    // The single-page path flushes, and so frees, by itself.
+    map_both();
+    table.unmap_page(frames[0], vaddrs[0], PageType::SmallPage);
+    assert_eq!(available_small_pages(), free_before - 3);
+    table.unmap_page(frames[1], vaddrs[1], PageType::SmallPage);
+    assert_eq!(available_small_pages(), free_before);
+
+    for phys in frames {
+        phys_deallocate_frameless(phys, PageType::SmallPage);
+    }
+    drop(table);
+    assert_eq!(available_small_pages(), free_before + 3);
+    crate::raw_log!("page table retire tests PASS");
 }

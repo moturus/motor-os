@@ -28,6 +28,8 @@ General guidelines:
 * Stop if any preexisting bug is found and diagnose it. If the bug is test only and the fix
   is small and obvious, fix the test, commit, and continue. Otherwise stop and explain what happened.
 * Make sure your tests are included in src/tests/full-test.sh either directly or transitively.
+* Kernel tests must run inside Motor OS, not as Linux host tests. Do not reshape
+  kernel code or add abstractions solely to accommodate host test harnesses.
 * If you are working on a core OS component (basically, anything under src/sys),
   make sure src/tests/full-test.sh passes consistently as both debug and release
   builds/runs at least three times each before committing a patch. If this step fails, please make
@@ -50,6 +52,9 @@ General guidelines:
   outside of core Motor OS repo are tolerated (this file is in the root of the core Motor OS repo).
 * Format your changes with `cargo fmt` from the repository-selected toolchain.
 * Be careful not to introduce performance regressions.
+* If you want to add a static variable to a crate in src/sys/, first ask the user: statics are
+  frowned upon.
+* Python is frowned upon - use shell scripts for tests.
 * Regular tests must not go out to the Internet, as this introduces flakiness to our tests and
   potentially destabilize (DDOS) the external resource. Only rare integration tests for internet-facing
   services like DNS lookup or ping should include reaching out to the internet, and only after

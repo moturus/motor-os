@@ -199,7 +199,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
 
         let hash = DirEntryBlock::get_hash(&mut txn, parent_id, filename).await?;
 
-        let entry_id = Superblock::allocate_block(&mut txn).await?;
+        let entry_id = Superblock::allocate_entry(&mut txn).await?;
         DirEntryBlock::init_child_entry(&mut txn, parent_id, entry_id, kind, filename, permissions);
         DirEntryBlock::link_child_block(&mut txn, parent_id.block_no, entry_id.block_no, hash)
             .await?;

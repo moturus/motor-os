@@ -870,8 +870,8 @@ fn process_socket_stats(server: &mut LocalServer, waker: SysHandle) {
             resp.socket_stats[..stats.len()].copy_from_slice(&stats);
             resp.header.result = moto_rt::E_OK;
         }
-        // Runs on this thread, not the net runtime's: the self-tests are pure
-        // and quick, but nothing about them should be able to stall packets.
+        // Runs on this thread. Tests needing FS state dispatch to that runtime;
+        // the pure tests run here without blocking the network runtime.
         #[cfg(debug_assertions)]
         CMD_SELF_TEST => {
             let outcome = crate::self_test::run_all();

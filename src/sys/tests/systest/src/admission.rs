@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::sync::Barrier;
 
 use moto_sys::SysMem;
+use moto_sys::stats::PID_KERNEL;
 use moto_sys::sys_mem::{PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 
 /// Concurrent system activity (sys-io, sshd, the logger) moves the pool while
 /// these tests run; allow it this much slack where an exact figure is not the
 /// invariant under test.
-const DRIFT_TOLERANCE_PAGES: u64 = 256; // 1M.
+pub(crate) const DRIFT_TOLERANCE_PAGES: u64 = 256; // 1M.
 
 /// Reads a system-wide kernel metric by name. Metric ids are provider-private,
 /// so nothing here is hardcoded to a number.
@@ -28,6 +29,21 @@ pub(crate) fn kernel_metric(name: &str) -> u64 {
         .find(|e| e.metric == desc.id && e.scope == moto_stats::SCOPE_GLOBAL)
         .map(|e| e.value)
         .unwrap_or_else(|| panic!("kernel metric '{name}' not reported"))
+}
+
+/// A kernel metric at a PID scope; the kernel's own per-CPU counters live
+/// under `PID_KERNEL`.
+pub(crate) fn kernel_metric_at(name: &str, scope: u64) -> u64 {
+    use moto_stats::Collector;
+
+    let kernel = Collector::kernel();
+    let descs = Collector::describe(&kernel).unwrap();
+    let desc = descs
+        .iter()
+        .find(|d| d.name == name)
+        .unwrap_or_else(|| panic!("no kernel metric '{name}'"));
+    Collector::read(&kernel, desc.id, scope)
+        .unwrap_or_else(|err| panic!("kernel metric '{name}' at scope {scope}: {err:?}"))
 }
 
 fn used_pages() -> u64 {
@@ -107,8 +123,9 @@ pub fn test_process_classes() {
 
 pub fn class_child(caps: u64, privileged: bool) {
     assert_eq!(moto_sys::ProcessStaticPage::get().capabilities, caps);
-    let user_before = kernel_metric("mem.admission_refused_user");
-    let privileged_before = kernel_metric("mem.admission_refused_sys_io");
+    // Refusals are the kernel's own per-CPU counters.
+    let user_before = kernel_metric_at("mem.admission_refused_user", PID_KERNEL);
+    let privileged_before = kernel_metric_at("mem.admission_refused_sys_io", PID_KERNEL);
     let pages = free_pages_upper_bound();
 
     // Oversized but well-formed: admission must refuse before allocating. This
@@ -121,11 +138,11 @@ pub fn class_child(caps: u64, privileged: bool) {
         );
     }
     assert_eq!(
-        kernel_metric("mem.admission_refused_user") - user_before,
+        kernel_metric_at("mem.admission_refused_user", PID_KERNEL) - user_before,
         if privileged { 0 } else { REFUSALS }
     );
     assert_eq!(
-        kernel_metric("mem.admission_refused_sys_io") - privileged_before,
+        kernel_metric_at("mem.admission_refused_sys_io", PID_KERNEL) - privileged_before,
         if privileged { REFUSALS } else { 0 }
     );
 }
@@ -146,7 +163,7 @@ fn assert_reservations_drain() {
 }
 
 /// The guard band held: the pool never came near empty.
-fn assert_floors_held() {
+pub(crate) fn assert_floors_held() {
     let low_water = kernel_metric("mem.small_pages_low_water");
     let sys_io_floor = kernel_metric("mem.sys_io_floor_pages");
     let user_floor = kernel_metric("mem.user_floor_pages");
@@ -220,7 +237,7 @@ fn test_admission_stats_query() {
 /// E_OUT_OF_MEMORY, not a kernel panic; refusal has no side effects, and
 /// repeating it does not drift the pool downward.
 fn test_oversized_mapping_refused() {
-    let refused_before = kernel_metric("mem.admission_refused_user");
+    let refused_before = kernel_metric_at("mem.admission_refused_user", PID_KERNEL);
     let used_before = used_pages();
 
     for _ in 0..3 {
@@ -230,7 +247,7 @@ fn test_oversized_mapping_refused() {
         );
     }
 
-    let refusals = kernel_metric("mem.admission_refused_user") - refused_before;
+    let refusals = kernel_metric_at("mem.admission_refused_user", PID_KERNEL) - refused_before;
     assert!(refusals >= 3, "only {refusals} refusals counted");
 
     let used_after = used_pages();
@@ -313,7 +330,7 @@ fn test_lazy_fault_at_floor() {
 /// of assert_floors_held). So callers allocate nothing between the child's
 /// death and this call, and the pool wait allocates nothing either:
 /// `used_pages` fills a stack struct. The FS probe, which allocates, follows.
-fn assert_recovered(used_before: u64, tolerance: u64, after_what: &str) {
+pub(crate) fn assert_recovered(used_before: u64, tolerance: u64, after_what: &str) {
     const MAX_WAITS: u32 = 300;
     let wait = || std::thread::sleep(std::time::Duration::from_millis(50));
 

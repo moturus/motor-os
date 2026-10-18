@@ -153,16 +153,25 @@ fn alias_parent() -> ! {
 /// it. Exit must flush what the relay already holds instead of dropping it on
 /// a deadline.
 fn exit_parent(args: &[String]) -> ! {
+    let ready = format!("{}.ready", args[2]);
+    if std::path::Path::new(&ready).try_exists().unwrap() {
+        std::fs::remove_file(&ready).unwrap();
+    }
     let child = spawn(
-        &["stdio-file-relay-exit-writer", args[2].as_str()],
+        &["stdio-file-relay-exit-writer", args[2].as_str(), &ready],
         moto_rt::process::STDIO_NULL,
         moto_rt::process::STDIO_INHERIT,
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    // Long enough that the writer is mid-stream, so the relay is genuinely
-    // interrupted rather than idle.
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Startup can outlast a fixed sleep. Exit only once the writer has
+    // successfully sent bytes through the relay being tested.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !std::path::Path::new(&ready).try_exists().unwrap() {
+        assert!(std::time::Instant::now() < deadline, "writer never started");
+        std::thread::yield_now();
+    }
+    std::fs::remove_file(&ready).unwrap();
     assert!(child.pid > 0);
     std::process::exit(0)
 }
@@ -176,7 +185,12 @@ fn exit_writer(args: &[String]) -> ! {
     while accepted < CAP {
         match moto_rt::fs::write(moto_rt::FD_STDOUT, &buf) {
             Ok(0) | Err(_) => break,
-            Ok(written) => accepted += written as u64,
+            Ok(written) => {
+                if accepted == 0 {
+                    std::fs::write(&args[3], b"").unwrap();
+                }
+                accepted += written as u64;
+            }
         }
     }
     std::fs::write(&args[2], format!("{accepted}\n")).unwrap();

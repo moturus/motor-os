@@ -318,11 +318,32 @@ allocating virtual memory never allocates from the heap. `Page` and
 `Frame` and page-table growth.
 
 A `Page`'s kind is derived from its `Frame`; a page without a frame is a
-small lazy or unmapped reservation. Lookup finds the greatest page start not
-above the queried address and checks its kind-sized extent. A segment's
-creation policy (`HUGE_ELIGIBLE`) is stored as an internal bit in its mapping
-options, never inferred from permissions or size, and stripped before any
-hardware PTE is written.
+small guard page or unmapped reservation. Lookup finds the greatest page
+start not above the queried address and checks its kind-sized extent. A
+segment's creation policy (`HUGE_ELIGIBLE`) is stored as an internal bit in
+its mapping options, never inferred from permissions or size, and stripped
+before any hardware PTE is written.
+
+Lazy and file-paged segments are sparse: they hold descriptors only for the
+pages that have received a frame, so an untouched lazy reservation costs one
+segment node whatever its size, and mapping it takes time independent of
+that size: a segment lookup and insertion, plus the search for a gap when
+the region's free space is fragmented. The
+fault path creates the descriptor on first touch, with the per-page options
+construction would have given it; readers treat a missing descriptor as an
+absent page with those options. Unmapped reservations stay dense, because
+they exist to receive shared frames: every share destination is dense, and
+sharing into a lazy segment is refused. A lazy segment can be a share source
+once every page of the shared range has been touched; a share is validated
+in full before the first destination page changes.
+
+Neither frame allocation nor page-table growth can fail: admission keeps the
+kernel away from an empty pool, and `phys::allocate_frame` and the
+page-table allocator panic if it is reached anyway. `PageTable::map_page`
+fails only for mapping options it does not accept; eager construction rolls
+a segment back at its boundary on that error, and a fault that meets it
+leaves its fresh descriptor frameless, which is a hole. Nothing in the
+mapping paths has an allocation failure branch.
 
 `VmemKind` distinguishes boot, MM slab, MMIO, heap, stack, static, user,
 user-stack and unmapped segments. `VaddrMapStatus` reports unallocated,
@@ -331,11 +352,15 @@ copy-out, pinning and sharing refuse MMIO and frame-less pages.
 
 `PageTable::map_page` zeroes the entire frame before publishing its PTE.
 Clearing a segment unmaps each page by its actual kind, flushes the whole
-segment before dropping frames, and subtracts the sum of page byte sizes,
-not the descriptor count times 4 KiB, from region and process statistics.
+segment before dropping frames, and subtracts the segment size, which is
+what was accounted when it was reserved, from region and process statistics.
 The region lock is held continuously from reservation through mapping or
-rollback for MMIO and contiguous allocation, so a concurrent unmap cannot
-remove or replace the reservation in between.
+rollback for MMIO and contiguous allocation, for a shared allocation (both
+regions, in one fixed order) and for a fixed-address fill from another
+process or from kernel-static memory, so a concurrent unmap cannot remove
+or replace the reservation in between, and a rollback never removes a
+segment another thread has since put at the same address. Any two region
+locks are taken in that one order, the higher region address first.
 
 ### User heaps and huge pages
 
@@ -411,6 +436,23 @@ that touch the allocator directly:
   512/768-page hysteresis write the shared flag. This guarantees that a
   delayed publisher cannot restore an older observation over newer completed
   updates; it does not make the two counters an instantaneous snapshot.
+
+## Process memory statistics
+
+`memory_usage` reports reserved virtual bytes; `pages_user` and `pages_kernel`
+report the corresponding counts in 4 KiB pages. `memory_resident` reports RAM
+backing those tracked mappings. Untouched lazy pages, unbacked reservations,
+guards and MMIO do not contribute to resident memory. Huge pages contribute
+their full size. Cached kernel stacks remain counted until actually freed.
+
+Shared RAM counts once per mapping, including aliases. Kernel stacks are
+also attributed to their process, so summing these counters is not unique
+physical-memory usage; use system `mem.used` for that. The existing accounting
+coverage is unchanged: not all boot mappings are captured, fixed per-process
+static pages are excluded, and kernel bookkeeping is not charged to each
+process. Reservation and resident counters are sampled independently; a
+concurrent mapping change can make a snapshot temporarily inconsistent.
+Memory limits and admission retain their existing reservation-based policy.
 
 ## Validation
 

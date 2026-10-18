@@ -52,12 +52,16 @@ fn process_wait_handles<'a>(
         };
         let dst_bytes =
             unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 8) };
-        if let Err(err) = curr
+        if curr
             .owner()
             .address_space()
             .read_from_user_into(h_ptr, dst_bytes)
+            .is_err()
         {
-            return Err(ResultBuilder::result(err));
+            // Do not retry a bad buffer after delivering the wake. Defer death
+            // to syscall exit so the caller can release its switch claim.
+            curr.owner().die();
+            return Err(ResultBuilder::invalid_argument());
         }
         dst
     } else {
@@ -143,7 +147,14 @@ fn process_wake_handles(
     // A late object wake can reach an unrelated wait (including a futex's
     // empty wait). Only acknowledge requested handles; the others remain
     // pending in their objects' wake counters, not in this thread's queue.
-    let requested = wakers.intersection(wait_handles.iter().copied().map(SysHandle::from_u64));
+    let mut requested = super::process::WakerVec::new(SysHandle::NONE);
+    for &handle in wait_handles {
+        let handle = SysHandle::from_u64(handle);
+        if wakers.as_slice().binary_search(&handle).is_ok() {
+            requested.push(handle);
+        }
+    }
+    requested.sort_dedup();
     let wakers = requested.as_slice();
     for waker in wakers {
         curr.owner().process_wake(waker);
@@ -181,10 +192,8 @@ fn process_wake_handles(
 
     // The whole array is written back (wakers, then zero fill) exactly as
     // before, but batched through a stack buffer — not one spinlocked page
-    // walk per 8-byte slot. A failed write (e.g. another thread of the
-    // process unmapped the array mid-wait) fails the call instead of
-    // panicking the kernel; the already-consumed wakes are lost, which is
-    // the caller's own contract violation.
+    // walk per 8-byte slot. If the caller unmapped the array mid-wait or
+    // supplied read-only memory, kill its process at syscall exit.
     const CHUNK: usize = 64;
     let mut chunk = [0_u64; CHUNK];
     let mut slot = 0_u64;
@@ -206,6 +215,7 @@ fn process_wake_handles(
             .copy_to_user(bytes, h_ptr + 8 * slot)
             .is_err()
         {
+            curr.owner().die();
             return ResultBuilder::invalid_argument();
         }
         slot += n as u64;
@@ -666,13 +676,8 @@ fn sys_cpu_usage_impl(curr: &super::process::Thread, args: &mut SyscallArgs) -> 
             usage.len() * core::mem::size_of::<f32>(),
         );
 
-        if curr
-            .owner()
-            .address_space()
-            .copy_to_user(bytes, addr)
-            .is_err()
-        {
-            return ResultBuilder::invalid_argument();
+        if let Err(err) = curr.owner().address_space().copy_to_user(bytes, addr) {
+            return err.into_syscall_result(curr.owner().address_space());
         }
     }
 
@@ -716,14 +721,13 @@ fn sys_query_percpu_stats(curr: &super::process::Thread, args: &mut SyscallArgs)
     }
 
     let user_page_addr = args.args[0];
-    let page_addr = if let Ok(addr) = curr
+    let page_addr = match curr
         .owner()
         .address_space()
-        .get_user_page_as_kernel(user_page_addr)
+        .get_user_page_as_kernel(user_page_addr, crate::mm::MappingOptions::WRITABLE)
     {
-        addr
-    } else {
-        return ResultBuilder::invalid_argument();
+        Ok(addr) => addr,
+        Err(err) => return err.into_syscall_result(curr.owner().address_space()),
     };
 
     let num_entries = crate::xray::stats::fill_percpu_stats_page(page_addr.kernel_addr() as usize);

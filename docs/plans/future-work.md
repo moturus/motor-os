@@ -822,3 +822,20 @@ by drop before its FIN. First, read the TIME-WAIT sockets' ring capacities
 (`TcpSocketStatsV1`) and the channel count during a burst. Then release the
 rings whatever the close order, and keep only the tuple and timer for the
 10 s. Measurements and the client used are in `build/claude-targets/m3/`.
+
+## P2: Shrinking descriptor pools (2026-10-17)
+
+Each address space keeps its page-descriptor slabs until teardown. Unmapping
+returns descriptors to its free list, but even a completely unused slab
+stays allocated. Sparse lazy reservations avoid descriptors for untouched
+pages; a long-running process that temporarily touches many pages still
+retains the descriptor pool from that peak.
+
+Return completely unused descriptor slabs to the physical allocator while
+preserving live descriptors and safe reuse under the existing allocator
+lock. Keep reclamation simple and avoid adding boot-time work. Validate
+repeated touch/unmap cycles and concurrent faults inside Motor OS, including
+slab boundaries, and check that reclamation does not regress allocation
+performance. This reclaims kernel bookkeeping memory, independently of
+reserved-versus-resident process statistics.
+>>>>>>> dev
