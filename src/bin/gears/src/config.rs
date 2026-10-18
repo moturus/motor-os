@@ -191,10 +191,52 @@ impl Config {
             return Self::read_config(path)?
                 .ok_or_else(|| format!("{}: not found", path.display()));
         }
-        match Self::default_path() {
-            Some(path) => Ok(Self::read_config(&path)?.unwrap_or_default()),
-            None => Ok(Self::default()),
+        Self::load_found(&Found::detect(), false)
+    }
+
+    /// Load what `detect` found; with both, `source_tree` picks the shipped one.
+    pub fn load_found(found: &Found, source_tree: bool) -> Result<Self, String> {
+        match (found, source_tree) {
+            (Found::User(user), _) | (Found::Both { user, .. }, false) => {
+                Self::read_config(user)?.ok_or_else(|| format!("{}: not found", user.display()))
+            }
+            (Found::SourceTree(package), _) | (Found::Both { package, .. }, true) => {
+                let path = package.join("config/gears.toml");
+                let mut config = Self::read_config(&path)?
+                    .ok_or_else(|| format!("{}: not found", path.display()))?;
+                // Its tools are the ones shipped beside it.
+                config.tool_base = Some(package.clone());
+                Ok(config)
+            }
+            (Found::Neither(directory), _) => Err(format!(
+                "no gears.toml in {}: copy config/gears.toml and tools/ from the Gears \
+                 source there",
+                directory.display()
+            )),
         }
+    }
+
+    /// Use the addresses the user chose for providers. A host the user typed is
+    /// allowed for egress, and for plain HTTP when its URL uses `http`.
+    /// Addresses for providers this file does not define are left for others.
+    pub fn apply_urls(&mut self, urls: &BTreeMap<String, String>) -> Result<(), String> {
+        for (name, url) in urls {
+            let Some(provider) = self.providers.get_mut(name) else {
+                continue;
+            };
+            let endpoint = crate::provider::Endpoint::new(url)
+                .map_err(|error| format!("saved address for provider {name:?}: {error}"))?;
+            let host = validate_hosts(vec![endpoint.url().host().to_string()])?.remove(0);
+            provider.plain_http = endpoint.url().scheme() == crate::net::Scheme::Http;
+            if !self.egress_allowlist.contains(&host) {
+                self.egress_allowlist.push(host.clone());
+            }
+            if provider.plain_http && !self.plain_http_allowlist.contains(&host) {
+                self.plain_http_allowlist.push(host);
+            }
+            provider.base_url = url.clone();
+        }
+        Ok(())
     }
 
     fn read_config(path: &Path) -> Result<Option<Self>, String> {
@@ -379,6 +421,51 @@ impl Config {
             hooks,
         })
     }
+}
+
+/// The `gears.toml` files available when `--config` is not given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Found {
+    /// `gears.toml` in the Gears directory.
+    User(PathBuf),
+    /// The Gears package Gears was built in, whose `config/gears.toml` ships.
+    SourceTree(PathBuf),
+    Both {
+        user: PathBuf,
+        package: PathBuf,
+    },
+    /// Neither; holds the Gears directory.
+    Neither(PathBuf),
+}
+
+impl Found {
+    pub fn detect() -> Self {
+        let directory = crate::directory::default_root().unwrap_or_default();
+        let user = directory.join("gears.toml");
+        let package = std::env::current_exe()
+            .ok()
+            .and_then(|executable| source_tree_of(&executable));
+        match (user.is_file(), package) {
+            (true, Some(package)) => Self::Both { user, package },
+            (true, None) => Self::User(user),
+            (false, Some(package)) => Self::SourceTree(package),
+            (false, None) => Self::Neither(directory),
+        }
+    }
+}
+
+/// The package directory when `executable` lies in its `target/` tree, as after
+/// `cargo run` or `lorry run`; only the Gears package with its shipped
+/// `config/gears.toml` counts.
+fn source_tree_of(executable: &Path) -> Option<PathBuf> {
+    let target = executable
+        .ancestors()
+        .find(|path| path.file_name() == Some("target".as_ref()))?;
+    let package = target.parent()?;
+    let manifest: toml::Table =
+        toml::from_str(&std::fs::read_to_string(package.join("Cargo.toml")).ok()?).ok()?;
+    let gears = manifest.get("package")?.get("name")?.as_str()? == "gears";
+    (gears && package.join("config/gears.toml").is_file()).then(|| package.to_path_buf())
 }
 
 fn named_provider(
@@ -581,6 +668,74 @@ plain_http_allowlist = ["192.168.4.1"]"#,
         assert_eq!(provider.key_file, Some(directory.join("secrets/key")));
         assert_eq!(provider.ca_cert, Some(directory.join("ca.pem")));
         assert!(Config::parse("version = 1\n[provider]\nmodel = 'm'").is_err());
+    }
+
+    #[test]
+    fn saved_addresses_replace_provider_urls_and_allow_their_hosts() {
+        let mut config = Config::parse_in(
+            include_str!("../config/gears.toml"),
+            Path::new("/user/cfg/gears"),
+        )
+        .unwrap();
+        let urls = BTreeMap::from([
+            (
+                "local".to_string(),
+                "http://192.168.4.1:8080/v1".to_string(),
+            ),
+            ("elsewhere".to_string(), "https://other.test/v1".to_string()),
+        ]);
+        config.apply_urls(&urls).unwrap();
+        assert_eq!(
+            config.providers["local"].base_url,
+            "http://192.168.4.1:8080/v1"
+        );
+        assert!(config.providers["local"].plain_http);
+        assert!(config.egress_allowlist.contains(&"192.168.4.1".to_string()));
+        assert!(
+            config
+                .plain_http_allowlist
+                .contains(&"192.168.4.1".to_string())
+        );
+        assert!(!config.egress_allowlist.contains(&"other.test".to_string()));
+        let bad = BTreeMap::from([("local".to_string(), "not a url".to_string())]);
+        assert!(config.apply_urls(&bad).is_err());
+    }
+
+    #[test]
+    fn the_shipped_config_is_found_from_an_executable_in_the_package_target() {
+        let root = std::env::temp_dir().join(format!("gears-source-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let package = root.join("gears");
+        std::fs::create_dir_all(package.join("config")).unwrap();
+        std::fs::create_dir_all(package.join("target/release")).unwrap();
+        std::fs::write(package.join("Cargo.toml"), "[package]\nname = \"gears\"\n").unwrap();
+        let executable = package.join("target/release/gears");
+        assert_eq!(source_tree_of(&executable), None);
+        std::fs::write(package.join("config/gears.toml"), "version = 1\n").unwrap();
+        assert_eq!(source_tree_of(&executable), Some(package.clone()));
+        assert_eq!(
+            source_tree_of(&package.join("target/lorry/debug/gears")),
+            Some(package.clone())
+        );
+        assert_eq!(source_tree_of(&root.join("bin/gears")), None);
+        std::fs::write(package.join("Cargo.toml"), "[package]\nname = \"other\"\n").unwrap();
+        assert_eq!(source_tree_of(&executable), None);
+        let config = Config::load_found(&Found::SourceTree(package.clone()), false).unwrap();
+        assert_eq!(config.tool_base, Some(package.clone()));
+        let user = root.join("user.toml");
+        std::fs::write(&user, "version = 1\n").unwrap();
+        let both = Found::Both {
+            user,
+            package: package.clone(),
+        };
+        assert_eq!(Config::load_found(&both, false).unwrap().tool_base, None);
+        assert_eq!(
+            Config::load_found(&both, true).unwrap().tool_base,
+            Some(package)
+        );
+        let error = Config::load_found(&Found::Neither(root.clone()), false).unwrap_err();
+        assert!(error.contains("no gears.toml"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

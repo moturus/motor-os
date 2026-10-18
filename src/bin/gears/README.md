@@ -18,6 +18,13 @@ without a key file is sent no key. Select a model and run:
 Gears chooses the full-screen UI when both input and output are terminals.
 Use --ui line or --ui tui to choose explicitly.
 
+Without `--config`, Gears reads `gears.toml` from the Gears directory. Run from
+its own source tree (`cargo run` or `lorry run` in `src/bin/gears`), it uses
+the shipped `config/gears.toml` and the `tools/` beside it when the Gears
+directory has none. Keys, settings and sessions always stay in the Gears
+directory. A provider address saved in `provider.toml` replaces the
+configured one, and its host is allowed for egress.
+
 The optional `tools/sh` directory receives one string command and runs it in
 the selected workspace through `bash -c` on Linux or `/system/bin/rush -c` on
 Motor OS. It is not a

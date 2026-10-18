@@ -979,8 +979,7 @@ impl Runtime {
 
     pub fn save_default_selection(&mut self) -> Result<(), String> {
         self.prepare_write()?;
-        crate::provider_choice::ProviderChoice::new(&self.provider_name, &self.model)?
-            .save_default()
+        crate::provider_choice::ProviderChoice::save_selection(&self.provider_name, &self.model)
     }
 
     pub fn set_name(&mut self, name: &str) -> Result<(), String> {

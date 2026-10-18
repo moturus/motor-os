@@ -91,7 +91,7 @@ fn reset(args: &Args) -> ExitCode {
 }
 
 fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
-    let config = match Config::load_user(args.config.as_deref()) {
+    let mut config = match Config::load_user(args.config.as_deref()) {
         Ok(config) => config,
         Err(error) => {
             diagnostic(&format!("config: {error}"));
@@ -132,6 +132,12 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(choice) = &choice
+        && let Err(error) = config.apply_urls(&choice.urls)
+    {
+        diagnostic(&format!("provider choice: {error}"));
+        return ExitCode::FAILURE;
+    }
     if let Some(path) = args.log_file.as_deref().or(config.log_file.as_deref()) {
         match gears::trace::Tracer::to_file(path, config.log_level) {
             Ok(tracer) => gears::trace::init(tracer),
