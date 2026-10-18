@@ -64,6 +64,12 @@ pub(crate) fn help(runtime: &Runtime) -> String {
     text
 }
 
+pub(crate) fn reset_notice(removed: usize) -> String {
+    format!(
+        "Gears was reset ({removed} entries removed). This run keeps its provider, model and key until Gears restarts."
+    )
+}
+
 pub(crate) fn parse_tool_action(argument: &str) -> Result<(&str, ToolState, bool), String> {
     let parts = argument.split_whitespace().collect::<Vec<_>>();
     let ([action, name] | [action, name, "--global"]) = parts.as_slice() else {

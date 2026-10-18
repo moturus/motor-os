@@ -160,6 +160,8 @@ pub struct Runtime {
     session: Session,
     hooks: Hooks,
     tools: Registry,
+    /// The tools as configured, before saved enablement; `/reset` returns to them.
+    configured_tools: Registry,
     tool_state_directory: PathBuf,
     prompt: Effective,
     model: String,
@@ -209,6 +211,7 @@ impl Runtime {
             Some(tools) => tools,
             None => Registry::load_config(config)?,
         };
+        let configured_tools = tools.clone();
         let tool_state_directory = match tool_state_directory {
             Some(directory) => directory,
             None => crate::directory::default_root()?,
@@ -277,6 +280,7 @@ impl Runtime {
             session,
             hooks,
             tools,
+            configured_tools,
             tool_state_directory,
             prompt,
             model,
@@ -1010,6 +1014,17 @@ impl Runtime {
         self.prepare_write()?;
         let session = self.store.create(ephemeral, name)?;
         self.install_session(session, "new")
+    }
+
+    /// Removes what the user and Gears added (see `crate::reset`) and continues
+    /// in a new session. The provider, model and key of this run stay loaded.
+    pub fn reset(&mut self) -> Result<usize, String> {
+        // Leave the saved session first, so nothing writes into removed files.
+        self.new_session(true, None)?;
+        let removed = crate::reset::reset(&self.tool_state_directory, self.store.workspace())?;
+        self.tools = self.configured_tools.clone();
+        self.new_session(false, None)?;
+        Ok(removed)
     }
 
     pub fn resume(&mut self, selector: &str) -> Result<(), String> {

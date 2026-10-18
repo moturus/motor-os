@@ -162,6 +162,21 @@ fn command(
             show_session(runtime);
             Ok(Command::Continue)
         }
+        "reset" => {
+            let answer = input.read_line(&format!(
+                "{} Continue? [yes/no] ",
+                crate::reset::DESCRIPTION
+            ))?;
+            if !matches!(answer.as_deref().map(str::trim), Some("yes" | "y")) {
+                eprintln!("Reset cancelled.");
+                return Ok(Command::Continue);
+            }
+            let removed = runtime.reset()?;
+            eprintln!("{}", super::reset_notice(removed));
+            show_runtime_notices(runtime, renderer)?;
+            show_session(runtime);
+            Ok(Command::Continue)
+        }
         "resume" => {
             let selector = if argument.is_empty() {
                 choose_session(runtime, input)?

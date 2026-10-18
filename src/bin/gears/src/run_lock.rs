@@ -90,6 +90,11 @@ impl DirectoryLock {
         self.owner
     }
 
+    /// False in a nested Gears, which shares its ancestor's lock.
+    pub fn owns_directory(&self) -> bool {
+        self.file.is_some()
+    }
+
     /// # Safety
     /// Call only while process startup is single-threaded.
     pub unsafe fn export_owner(&self) {

@@ -193,6 +193,14 @@ user prompt; clone copies the current active branch into a new file.
 Use `/tool enable|disable|reset NAME [--global]` to change a directory tool's
 effective state and `/permission revoke NAME [--global]` to remove grants.
 
+`gears reset` (or `/reset` in a running Gears) asks once, then removes
+everything the user and Gears added: key files, saved settings and model
+choices, `batteries.toml`, memory, skills and sessions in the Gears directory,
+and `.gears/` in the current directory. It keeps what an installation
+provides: `gears.toml`, `gears-batteries.toml` and `tools/`. `/reset`
+continues in a new session; the provider, model and key already loaded stay in
+use until Gears restarts. `gears reset` refuses to run inside another Gears.
+
 Compaction summarizes older active-branch context and retains a recent tail.
 It appends a compaction entry but never deletes history. /compact accepts optional
 focus text. Automatic compaction uses the configured context limit, output

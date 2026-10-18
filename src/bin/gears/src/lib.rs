@@ -17,6 +17,7 @@ pub mod prompt;
 mod property;
 pub mod provider;
 pub mod provider_choice;
+pub mod reset;
 pub mod run_lock;
 pub mod runtime;
 pub mod session;

@@ -833,6 +833,50 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn reset_removes_what_the_user_added_and_continues_with_the_configured_tools() {
+    let fixture = Fixture::new("reset");
+    let global = fixture.root.join("global");
+    let store = Store::with_root(&fixture.workspace, global.join("sessions")).unwrap();
+    let session = store.create(false, None).unwrap();
+    let old = session.path().unwrap().to_path_buf();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: false,
+        }],
+        ..Config::default()
+    };
+    let mut runtime = Runtime::with_options(
+        Scripted::new(vec![]),
+        store,
+        session,
+        &config,
+        "test/model".into(),
+        Options {
+            tools: Some(Registry::load_config(&config).unwrap()),
+            tool_state_directory: Some(global.clone()),
+        },
+    )
+    .unwrap();
+    runtime
+        .set_tool_state("sh", ToolState::Enabled, true)
+        .unwrap();
+    assert!(runtime.tool_statuses().unwrap()[0].enabled);
+    std::fs::write(global.join("gears.toml"), "version = 1\n").unwrap();
+    std::fs::write(global.join("local.key"), "key").unwrap();
+    std::fs::create_dir_all(fixture.workspace.join(".gears")).unwrap();
+    std::fs::write(fixture.workspace.join(".gears/MEMORY.md"), "fact").unwrap();
+    runtime.reset().unwrap();
+    assert!(global.join("gears.toml").is_file());
+    assert!(!global.join("local.key").exists());
+    assert!(!global.join("tools.toml").exists());
+    assert!(!old.exists());
+    assert!(!fixture.workspace.join(".gears").exists());
+    assert!(runtime.session().path().unwrap().is_file());
+    assert!(!runtime.tool_statuses().unwrap()[0].enabled);
+}
+
+#[test]
 fn tool_toggles_update_the_next_request_and_preserve_scope_precedence() {
     let fixture = Fixture::new("tool-toggles");
     let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();

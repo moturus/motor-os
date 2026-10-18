@@ -22,6 +22,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "compact",
     "model",
     "provider",
+    "reset",
 ];
 
 pub const USAGE: &str = "\
@@ -30,6 +31,7 @@ gears - a small extensible agent harness
 Usage: gears [OPTIONS]
        gears -p PROMPT [OPTIONS]
        gears ask [-m MODEL] PROMPT
+       gears reset [--workspace DIR]
 
 Options:
   --config PATH       Read configuration from PATH
@@ -53,7 +55,10 @@ Options:
 
 Interactive commands include /new, /resume, /name, /session, /tree, /label,
 /fork, /clone, /compact, /provider, /model, /tools, /tool, /permissions,
-/permission, /status, /help, and /quit.
+/permission, /status, /reset, /help, and /quit.
+`gears reset` and /reset ask, then remove keys, saved settings, memory, skills
+and sessions from the Gears directory, keeping gears.toml, gears-batteries.toml
+and tools/, and remove .gears/ from the current directory.
 Use /tool enable|disable|reset NAME [--global] to change directory tools.
 Use /permission revoke NAME [--global] to remove saved grants.
 Use /provider NAME --default or /model ID --default to save both defaults.
@@ -63,6 +68,7 @@ Use /provider NAME --default or /model ID --default to save both defaults.
 pub enum Action {
     Run,
     Ask,
+    Reset,
     Version,
     Help,
 }
@@ -220,6 +226,21 @@ impl Args {
                 return Err("--output jsonl cannot use --ui tui".into());
             }
         }
+        if args.action == Action::Reset
+            && (args.config.is_some()
+                || args.log_file.is_some()
+                || args.provider.is_some()
+                || args.model.is_some()
+                || args.prompt.is_some()
+                || args.output != Output::Text
+                || ui_set
+                || args.verbosity > 0
+                || args.session != SessionStart::New
+                || args.fork_entry.is_some()
+                || args.name.is_some())
+        {
+            return Err("gears reset takes only --workspace".into());
+        }
         if args.action == Action::Ask {
             if args.prompt.is_none() {
                 return Err("ask requires a prompt".to_string());
@@ -242,6 +263,7 @@ impl Args {
     fn positional(&mut self, argument: &str) -> Result<(), String> {
         match (&self.action, &self.prompt) {
             (Action::Run, _) if argument == "ask" => self.action = Action::Ask,
+            (Action::Run, None) if argument == "reset" => self.action = Action::Reset,
             (Action::Ask, None) => self.prompt = Some(argument.to_string()),
             _ => return Err(format!("unexpected argument {argument:?}")),
         }
@@ -338,6 +360,22 @@ mod tests {
             vec!["--fork", "parent", "--ephemeral", "--ephemeral"],
             vec!["--fork", "parent", "--ephemeral", "--fork", "other"],
             vec!["ask", "review", "--fork", "parent", "--ephemeral"],
+        ] {
+            assert!(Args::parse(&argv).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn reset_takes_only_a_workspace() {
+        assert_eq!(Args::parse(&["reset"]).unwrap().action, Action::Reset);
+        let args = Args::parse(&["reset", "--workspace", "/work"]).unwrap();
+        assert_eq!(args.workspace, Some(PathBuf::from("/work")));
+        for argv in [
+            vec!["reset", "now"],
+            vec!["reset", "-p", "work"],
+            vec!["reset", "--config", "/c.toml"],
+            vec!["reset", "--ephemeral"],
+            vec!["-p", "work", "reset"],
         ] {
             assert!(Args::parse(&argv).is_err(), "{argv:?}");
         }

@@ -1047,6 +1047,17 @@ fn handle_command(
             app.restore_history(runtime)?;
             show_runtime_notices(runtime, app);
         }
+        "reset" => {
+            let choices = ["No".to_string(), "Yes".to_string()];
+            if picker(app, crate::reset::DESCRIPTION, &choices)? != Some(1) {
+                app.push(Kind::Notice, "Reset cancelled.".into(), false);
+                return Ok(());
+            }
+            let removed = runtime.reset()?;
+            app.restore_history(runtime)?;
+            app.push(Kind::Notice, super::reset_notice(removed), false);
+            show_runtime_notices(runtime, app);
+        }
         "resume" => {
             let selector = if argument.is_empty() {
                 let sessions = runtime.list_sessions()?;
@@ -1299,10 +1310,15 @@ fn picker_frame(width: u16, height: u16, title: &str, items: &[String], selected
     if height == 0 {
         return frame;
     }
-    let visible = height.saturating_sub(2).max(1);
+    // A long title wraps, leaving at least one row for the items.
+    let title = wrap(&single_line(title), width);
+    let title_rows = title.len().min(height.saturating_sub(1).max(1));
+    for (row, text) in title.iter().take(title_rows).enumerate() {
+        frame.lines[row].push(Color::Cyan, text, width);
+    }
+    let visible = height.saturating_sub(title_rows + 1).max(1);
     let start = selected.saturating_sub(visible / 2);
     let end = (start + visible).min(items.len());
-    frame.lines[0].push(Color::Cyan, &single_line(title), width);
     for (index, item) in items[start..end].iter().enumerate() {
         let actual = start + index;
         let color = if actual == selected {
@@ -1310,7 +1326,7 @@ fn picker_frame(width: u16, height: u16, title: &str, items: &[String], selected
         } else {
             Color::White
         };
-        let line = &mut frame.lines[index + 1];
+        let line = &mut frame.lines[title_rows + index];
         line.push(color, if actual == selected { "> " } else { "  " }, width);
         line.push(color, &single_line(item), width);
     }
@@ -1757,6 +1773,28 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         assert_eq!(app.scroll, 0);
         assert_eq!(rendered(&app), frame);
+    }
+
+    #[test]
+    fn a_long_picker_title_wraps_above_the_choices() {
+        let frame = picker_frame(
+            10,
+            5,
+            "Reset Gears: remove",
+            &["No".into(), "Yes".into()],
+            0,
+        );
+        let text = frame
+            .lines
+            .iter()
+            .map(|line| {
+                line.0
+                    .iter()
+                    .map(|styled| styled.character)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text, ["Reset Gear", "s: remove", "> No", "  Yes", ""]);
     }
 
     #[test]

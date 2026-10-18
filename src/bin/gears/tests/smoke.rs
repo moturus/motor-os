@@ -47,6 +47,56 @@ fn gears(root: &Path, workspace: &Path, config: &Path) -> Command {
 }
 
 #[test]
+fn reset_asks_then_keeps_only_the_installation() {
+    let root = fixture("reset");
+    let workspace = root.join("workspace");
+    for directory in [
+        ".gears/tools/sh",
+        ".gears/sessions/group",
+        "workspace/.gears",
+    ] {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    for file in [
+        ".gears/gears.toml",
+        ".gears/openrouter.key",
+        "workspace/.gears/MEMORY.md",
+    ] {
+        std::fs::write(root.join(file), "x").unwrap();
+    }
+    let reset = |answer: &[u8]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_gears"))
+            .arg("reset")
+            .current_dir(&workspace)
+            .env("HOME", &root)
+            .env_remove(gears::directory::ENV)
+            .env_remove("GEARS_LOCK_OWNER")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(answer).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let declined = reset(b"no\n");
+    assert!(!declined.status.success());
+    assert!(String::from_utf8_lossy(&declined.stdout).contains("Reset cancelled."));
+    assert!(root.join(".gears/openrouter.key").is_file());
+    let output = reset(b"yes\n");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("Reset Gears: remove keys"), "{stdout}");
+    assert!(!stdout.contains("openrouter.key"), "{stdout}");
+    assert!(root.join(".gears/gears.toml").is_file());
+    assert!(root.join(".gears/tools/sh").is_dir());
+    assert!(!root.join(".gears/openrouter.key").exists());
+    assert!(!root.join(".gears/sessions").exists());
+    assert!(!workspace.join(".gears").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn batteries_hook_uses_the_gears_sibling_even_when_path_contains_another_program() {
     // Parallel spawns can inherit a writable copy fd until exec. Prepare and
     // run these executables in a process with no other process-creating tests.

@@ -43,7 +43,50 @@ fn main() -> ExitCode {
             print!("{}", gears::cli::USAGE);
             ExitCode::SUCCESS
         }
+        Action::Reset => reset(&args),
         Action::Run | Action::Ask => run(args, key_from_env),
+    }
+}
+
+/// Runs before the configuration loads, so a broken setup can be reset too.
+fn reset(args: &Args) -> ExitCode {
+    let result = (|| {
+        let lock = DirectoryLock::acquire_default()?;
+        if !lock.owns_directory() {
+            return Err("gears reset cannot run inside another Gears".to_string());
+        }
+        let workspace = match &args.workspace {
+            Some(workspace) => workspace.clone(),
+            None => {
+                std::env::current_dir().map_err(|error| format!("current directory: {error}"))?
+            }
+        };
+        print!("{} Continue? [yes/no] ", gears::reset::DESCRIPTION);
+        std::io::stdout()
+            .flush()
+            .map_err(|error| error.to_string())?;
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|error| error.to_string())?;
+        if !matches!(answer.trim(), "yes" | "y") {
+            return Ok(None);
+        }
+        gears::reset::reset(&gears::directory::default_root()?, &workspace).map(Some)
+    })();
+    match result {
+        Ok(Some(removed)) => {
+            println!("Gears was reset; {removed} entries removed.");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => {
+            println!("Reset cancelled.");
+            ExitCode::FAILURE
+        }
+        Err(error) => {
+            diagnostic(&error);
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -111,7 +154,7 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
     let result = match args.action {
         Action::Ask => ask(&args, &config, choice.as_ref(), key_from_env),
         Action::Run => agent(&args, &config, choice.as_ref(), key_from_env, tools),
-        Action::Version | Action::Help => unreachable!(),
+        Action::Version | Action::Help | Action::Reset => unreachable!(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
