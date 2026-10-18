@@ -1178,6 +1178,38 @@ out-of-tree load client that 3f's in-crate client replaces.
   inherit their stdio: a None child cannot write a file that rush redirected
   for it without `CAP_FS_WRITE` (`docs/caps.md`).
 
+**3a measurements, 2026-10-18.** Published `wasmtime-rt` with a temporary
+stack-reporting patch, the wasm image at 224 MiB, the same fixtures plus
+epoch-compiled sleep and hello variants, and the load client sampling the
+server's resident memory; servers and client share the VM, so each closed
+connection has both ends in sys-io. Log and patch in `build/claude-targets/m3/`
+(`x3a-224.log`, `diag-stack.patch`).
+
+- **Fibers.** Eight slots, refused at once when full (`Motor fiber stack
+  limit reached`, HTTP 500). p2 takes one per in-flight request: the ninth
+  concurrent sleeping request fails while eight wait. p3 shares them: 64
+  concurrent hello requests used 2 slots and 32 sleeping requests 5. Pulley
+  serving used at most 6 KiB of each 2 MiB stack over about 930 leases, so the
+  eager 2 MiB (about 4.2 MiB of server memory per in-flight p2 request) is
+  nearly all unused. Native AOT will put Wasm frames on these stacks too.
+- **Deadlines.** None by default. Eight never-ending p2 requests hold every
+  slot, and all later requests get 500 until restart. `-W timeout=2s` with
+  epoch-compiled artifacts turns them into 500s at 2 s and frees the slots
+  (p2 and p3); a server with a timeout rejects artifacts compiled without
+  epochs, and the reverse.
+- **Connection memory.** Each closed loopback connection held about 400 KiB of
+  sys-io for 10 s (29.9 to 75.0 MiB over 114 p2 requests), the unexplained
+  figure in the `future-work.md` TIME-WAIT entry, not 130 KiB. Eight
+  concurrent requests for 50 rounds, or 64 concurrent p3 requests for a few
+  rounds, filled the VM to about 200 MiB; `rt_net` then reported `accept pump
+  reservation failed: OutOfMemory` and the server exited with `Error:
+  OutOfMemory (os error 8)`, because `serve` returns on any accept error.
+  Sixty-two idle connections held 45 MiB (34 in sys-io, 12 in the server), and
+  nothing times them out: Hyper has no timer, so no header-read or idle
+  timeout applies, and the connection limit is 1,000.
+- **Per request.** 2 MiB echoes: 8 concurrent p2 requests raised the server by
+  about 32 MiB, 16 concurrent p3 requests by about 7 MiB.
+
 1. **3a — HTTP resource defaults.** Extend milestone 2's finite command defaults
    with request, body/buffer and serving-concurrency limits; size the stack pool
    for the intended concurrency and wire epoch deadlines. Measure aggregate
