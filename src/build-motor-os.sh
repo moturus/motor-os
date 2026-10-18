@@ -527,6 +527,7 @@ build_native_llvm() {
 	cmake -S "$LLVM/llvm" -B "$NATIVE_LLVM_BUILD" -G Ninja \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_SYSTEM_NAME=Linux \
+		-DCMAKE_SYSROOT="$SYSROOT" \
 		-DCMAKE_C_COMPILER="$B/clang" \
 		-DCMAKE_CXX_COMPILER="$B/clang++" \
 		-DCMAKE_C_COMPILER_TARGET=x86_64-unknown-motor \
