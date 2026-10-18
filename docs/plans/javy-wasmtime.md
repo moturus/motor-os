@@ -18,16 +18,19 @@ settled points of the earlier plan reviews are folded in.
 
 Evidence under `build/` is host-local and not required.
 
-- **Forks:** published `moturus/javy` `motor-9.1.0` at `e5918dc`,
-  `moturus/wasmtime` `motor-48.0.1` at `18a70a3d6` (both lock moto-rt 0.17.8)
-  and `moturus/wasmi` `motor-1.1.0` at `f230d920`; the other Motor branches are
-  unchanged since milestone 2. Tree work is on the `wasm` branch.
-- **In progress: Linux-parity memory limits** (owner rulings 2026-10-18, in
-  [the memory contract](#javy-pipeline-and-memory-backing)). Wasmi
-  `55bc21a5`, Javy `859b412`, Wasmtime `b8ef81e8c` and the tree replace
-  96 MiB per memory, 128 MiB per process and four memories with 4 GiB per
-  memory and no total or count, and stop Wasmi writing zeros into
-  reservations. With locally built binaries swapped into the assembly
+- **Forks:** published `moturus/javy` `motor-9.1.0` at `859b412`,
+  `moturus/wasmtime` `motor-48.0.1` at `b8ef81e8c` and `moturus/wasmi`
+  `motor-1.1.0` at `55bc21a5`; the other Motor branches are unchanged since
+  milestone 2. Tree work is on the `wasm` branch.
+- **Done: Linux-parity memory limits** (owner rulings 2026-10-18, in
+  [the memory contract](#javy-pipeline-and-memory-backing)). Those fork heads
+  and tree `c4e44de3..c3ecb975` replace 96 MiB per memory, 128 MiB per
+  process and four memories with 4 GiB per memory and no total or count, and
+  stop Wasmi writing zeros into reservations. The add-ons rebuilt from the
+  published heads pass `test-wasm.sh` under QEMU (384 s) and Cloud Hypervisor
+  (392 s) and `full-test-dev.sh --release` (3,433 s, ALL PASS), which also
+  covers the gate of Wasmtime `75d22026a` that the previous resume point asked
+  for. Before publication, with locally built binaries swapped into the assembly
   (evidence in `build/claude-targets/sparse-limits/`), both VMM matrices pass
   (QEMU 387 s, Cloud Hypervisor 390 s; 66 `javy-smoke` commands, 70 on the
   first VM, and 97 `wasmtime-smoke` commands per VM), and `memory-check` and
@@ -37,14 +40,8 @@ Evidence under `build/` is host-local and not required.
   (TypeScript compile median 20.99 s against 21.14 s, equal peaks; Wasmi and
   `wasmtime-rt` execution equal). TypeScript compile peaks at 224 MiB are now
   181–189 MiB with either set of tools, down from 201.6–204.2 MiB on
-  2026-10-11; the newer kernel and assembly account for that. The owner
-  publishes the forks; then
-  `src/build-motor-os.sh --javy-only --wasmtime-only`,
-  `make dev.img wasm.img BUILD=release`, `src/tests/test-wasm.sh --vmm qemu`,
-  `src/tests/test-wasm.sh --vmm chv` and `src/tests/full-test-dev.sh --release`
-  qualify the published heads. That run also stands in for the gate of
-  Wasmtime `75d22026a` that the previous resume point asked for.
-- **Then milestone 3**, starting with 3a. Its measurements and decisions are
+  2026-10-11; the newer kernel and assembly account for that.
+- **Now milestone 3**, starting with 3a. Its measurements and decisions are
   under [Milestone 3](#milestone-3-httphttps-and-opt-in-p3).
 - **Working rules from the owner:** commit messages are one line with no
   trailers, in this tree and in the forks; the owner pushes fork branches; the
@@ -946,8 +943,8 @@ Status 2026-10-08: 2a is delivered; 2b, 2c, 2e and 2g are implemented as
 qualified with locally built binaries on both images at 224 MiB (evidence in
 `build/wasm-milestone2/`). 2d is done and 2f is partly done (below); since
 2026-10-09 the delivered add-on passes the matrix under both VMMs. Since
-2026-10-11 all items are done; only the gate in
-[the resume point](#status-and-resume-point-2026-10-18) remains.
+2026-10-11 all items are done, and since 2026-10-18 the published heads are
+gated ([the resume point](#status-and-resume-point-2026-10-18)).
 
 - **2b:** owned lazy reservations (then 96 MiB per memory, 128 MiB and four
   per process; 4 GiB and no total or count since 2026-10-18) back every
@@ -1264,18 +1261,16 @@ image and the developer image within the RAM and disk requirements.
 
 ### Order and prerequisites
 
-Recommended next steps: publish and gate the memory-limit change in
-[the resume point](#status-and-resume-point-2026-10-18), then 3a, 3b and 3f,
-with 3c–3e after them; 4a and 4c can proceed in the
-fork alongside. Retain one image-matrix driver and use the common acceptance
+Recommended next steps: 3a, 3b and 3f, with 3c–3e after them; 4a and 4c can
+proceed in the fork alongside. Retain one image-matrix driver and use the common acceptance
 rules above for every milestone. Keep Wasmtime engine regressions in its fork;
 Javy/Wasmi regressions live in `javy-smoke`.
 
 | Milestone | Starts after |
 | --- | --- |
 | 1 | Done 2026-10-09. |
-| 2 | Done; the memory-limit change awaits publication and its gate. |
-| 3 | That gate; 3a precedes 3f. |
+| 2 | Done; gated with the memory-limit change on 2026-10-18. |
+| 3 | In progress; 3a precedes 3f. |
 | 4 | 4a and 4c can start in the fork after 2a; 4b, 4d–4f need the milestone 3 host and the milestone 2 template. |
 
 Production changes follow [AGENTS.md](../../AGENTS.md). Application changes use
