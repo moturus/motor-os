@@ -92,7 +92,7 @@ mkdir -p "$temporary/prefix/bin" "$rust/src/tools/rust-analyzer"
 printf '%s\n' '#!/usr/bin/env bash' \
 	'[ "$RUSTC" = "${0%/cargo}/rustc" ] || exit 3' \
 	'case "$*" in' \
-	'  "fetch --locked --target x86_64-unknown-motor --config $EXPECTED_CONFIG")' \
+	'  "fetch --locked --config $EXPECTED_CONFIG")' \
 	'    [ "$PWD" = "$EXPECTED_WORKSPACE" ] || exit 5 ;;' \
 	'  "fetch --locked --manifest-path $EXPECTED_URL/Cargo.toml") ;;' \
 	'  "fetch --locked --manifest-path $EXPECTED_INVENTORY/Cargo.toml") ;;' \

@@ -179,6 +179,7 @@ test_vm_configure_ssh
 "$WD/test-toolchain-prefix.sh"
 "$WD/test-toolchain-runtime.sh"
 "$WD/test-toolchain-rust-analyzer.sh"
+"$WD/test-toolchain-rust-analyzer-fetch.sh"
 "$WD/test-toolchain-rust-analyzer-identity.sh"
 "$WD/test-toolchain-state.sh"
 "$WD/test-toolchain-submodules.sh"
