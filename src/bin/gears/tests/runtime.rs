@@ -1254,6 +1254,22 @@ fn session_answers_override_global_answers_in_both_directions() {
 
 #[test]
 fn an_executable_change_invalidates_a_session_allow_before_the_next_call() {
+    // Parallel spawns can inherit a writable copy of the fixture executable until
+    // exec, making its own exec fail with ETXTBSY. Run alone in a child process.
+    const CHILD: &str = "GEARS_EXECUTABLE_CHANGE_FIXTURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(CHILD, "1")
+            .args([
+                "--exact",
+                "an_executable_change_invalidates_a_session_allow_before_the_next_call",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new("executable-grant-change");
     let directory = fixture.root.join("package");
