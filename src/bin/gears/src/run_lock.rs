@@ -159,7 +159,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_held_lock_refuses_another_owner_and_its_file_stays_for_the_next() {
+    fn a_held_lock_refuses_another_owner_and_its_file_stays() {
         let root = std::env::temp_dir().join(format!("gears-run-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -176,8 +176,9 @@ mod tests {
             )
         );
         drop(lock);
+        // Release is checked across processes (tool-smoke directory_lock): here a
+        // test spawning in parallel can hold a forked copy of the file until exec.
         assert!(path.is_file());
-        DirectoryLock::acquire_at(&root).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
