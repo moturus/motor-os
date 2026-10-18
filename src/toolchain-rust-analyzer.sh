@@ -104,9 +104,10 @@ toolchain_reverify_rust_analyzer() {
 
 toolchain_fetch_rust_analyzer() {
 	local rust="$1" prefix="$2" manifest
-	# Provisioning may acquire sources; native check/build and regular tests are offline.
+	# Cargo's cross-build resolver also requests host-platform dependencies.
+	# Fetch the full lockfile before the offline native build.
 	(cd "$rust/src/tools/rust-analyzer" && RUSTC="$prefix/bin/rustc" \
-		"$prefix/bin/cargo" fetch --locked --target x86_64-unknown-motor \
+		"$prefix/bin/cargo" fetch --locked \
 		--config "$RUST_ANALYZER_CARGO_CONFIG") || return
 	for manifest in "$RUST_ANALYZER_URL_SOURCE/Cargo.toml" \
 		"$RUST_ANALYZER_INVENTORY_SOURCE/Cargo.toml"; do

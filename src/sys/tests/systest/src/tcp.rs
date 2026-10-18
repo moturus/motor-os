@@ -28,6 +28,13 @@ fn completed_backlog_cap() -> usize {
 }
 
 pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
+    read_sys_io_metric_opt(name)
+        .unwrap_or_else(|| panic!("sys-io metric {name:?} is not described"))
+}
+
+/// Reads a system-wide sys-io metric by name; `None` if sys-io does not
+/// describe it.
+pub(crate) fn read_sys_io_metric_opt(name: &str) -> Option<u64> {
     let provider = moto_stats::Collector::provider_by_name("sys-io")
         .expect("sys-io stats provider is not registered");
     // Both describe() and read() open a connection to sys-io's stats server,
@@ -47,18 +54,13 @@ pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
     };
     let metric = loop {
         match moto_stats::Collector::describe(&provider) {
-            Ok(metrics) => {
-                break metrics
-                    .into_iter()
-                    .find(|metric| metric.name == name)
-                    .unwrap_or_else(|| panic!("sys-io metric {name:?} is not described"));
-            }
+            Ok(metrics) => break metrics.into_iter().find(|metric| metric.name == name)?,
             Err(err) => busy(err),
         }
     };
     loop {
         match moto_stats::Collector::read(&provider, metric.id, moto_stats::SCOPE_GLOBAL) {
-            Ok(value) => return value,
+            Ok(value) => return Some(value),
             Err(err) => busy(err),
         }
     }
