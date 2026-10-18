@@ -59,7 +59,8 @@ toolchain_content_tree_digest() (
 )
 
 toolchain_native_configuration_digest() {
-	toolchain_hash_pairs schema motor-native-config-v7 target x86_64-unknown-motor \
+	toolchain_hash_pairs schema motor-native-config-v8 target x86_64-unknown-motor \
+		cxx_runtime_sysroot /MOTOR_SYSROOT \
 		rust_analyzer_recipe motor-native-rust-analyzer-v3-std \
 		rustfmt_recipe motor-native-rustfmt-v1 \
 		clippy_recipe motor-native-clippy-v1 \
