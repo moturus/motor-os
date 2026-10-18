@@ -1306,6 +1306,14 @@ fn main() {
         cold_spawn::run_all_tests();
         return;
     }
+    if args.len() == 2 && args[1] == "paging-soak" {
+        cold_spawn::run_soak_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "sparse-soak" {
+        sparse::run_soak_tests();
+        return;
+    }
     #[cfg(debug_assertions)]
     if args.len() == 2 && args[1] == "sys-io-self-test" {
         sys_io_self_test::run_all_tests();

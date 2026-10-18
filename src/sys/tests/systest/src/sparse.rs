@@ -224,6 +224,12 @@ fn test_lazy_share_source() {
 /// reservation finds no room, and a gap the runtime frees there in the
 /// meantime is kept mapped once found, so the next call fails again.
 fn test_shared_alloc_rollback_race() {
+    shared_alloc_rollback_race(true);
+}
+
+/// The race itself; `check_recovery` samples global usage, which only the
+/// quiet gate can do.
+fn shared_alloc_rollback_race(check_recovery: bool) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier};
     const PAGES: u64 = 16;
@@ -339,7 +345,9 @@ fn test_shared_alloc_rollback_race() {
         misses <= stray_count as u64,
         "{misses} misses against {stray_count} stray gaps: a rollback took the mapper's mapping"
     );
-    assert_recovered(used_before, DRIFT_TOLERANCE_PAGES, "the rollback race");
+    if check_recovery {
+        assert_recovered(used_before, DRIFT_TOLERANCE_PAGES, "the rollback race");
+    }
     println!(
         "test_sparse_shared_alloc_rollback_race PASS: {rounds} maps and {misses} misses \
          against {refused} refused shared allocations, {stray_count} stray gaps"
@@ -468,6 +476,151 @@ fn warm_up_pool() {
     panic!("memory pressure did not clear after the warm-up child died");
 }
 
+/// Bounded resident memory, widely scattered descriptors, and simultaneous
+/// faults on the same pages. Each thread owns a distinct word in each page.
+fn soak_first_touch() {
+    const WORKERS: u64 = 4;
+    const REGIONS: u64 = 64;
+    let offsets = [0, PAGE_SIZE_SMALL, (2 << 20) - PAGE_SIZE_SMALL];
+    for round in 0..4 {
+        let base = map_lazy(TIB).unwrap();
+        let barrier = std::sync::Barrier::new(WORKERS as usize);
+        std::thread::scope(|scope| {
+            for worker in 0..WORKERS {
+                let barrier = &barrier;
+                let offsets = &offsets;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for region in 0..REGIONS {
+                        for offset in offsets {
+                            let addr = base + region * (TIB / REGIONS) + offset + worker * 8;
+                            let expected = addr ^ (round + 1);
+                            unsafe {
+                                let word = addr as *mut u64;
+                                assert_eq!(word.read_volatile(), 0, "fresh sparse word {addr:#x}");
+                                word.write_volatile(expected);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        for region in 0..REGIONS {
+            for offset in offsets {
+                for worker in 0..WORKERS {
+                    let addr = base + region * (TIB / REGIONS) + offset + worker * 8;
+                    assert_eq!(
+                        unsafe { (addr as *const u64).read_volatile() },
+                        addr ^ (round + 1)
+                    );
+                }
+            }
+        }
+        SysMem::free(base).unwrap();
+    }
+    println!("sparse soak_first_touch PASS");
+}
+
+/// Page-table pages emptied by a free go back to the pool only after the
+/// TLB flush that ends the free. Readers sweep a region, one page per L1
+/// table, until the owner tells them to stop, so their CPUs cache its
+/// directory entries; while the owner frees it, each reader builds tables
+/// of its own from the pool and checks every word it maps. The owner then
+/// maps the region again, at the same address if the runtime gives it
+/// back, and the readers check its fresh pages too. A table page reused
+/// before the flush would show as a wrong word on either side.
+fn soak_table_churn() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    const READERS: usize = 3;
+    const ROUNDS: u64 = 200;
+    const PAGES: u64 = 16;
+    const STRIDE: u64 = 2 << 20;
+
+    let phase = AtomicU64::new(0);
+    let region = AtomicU64::new(0);
+    let sweeps = AtomicU64::new(0);
+    let joined = AtomicUsize::new(0);
+    let acks = AtomicUsize::new(0);
+    let read_phase = |round: u64| 2 * round + 1;
+    let stop_phase = |round: u64| 2 * round + 2;
+    std::thread::scope(|scope| {
+        for _ in 0..READERS {
+            scope.spawn(|| {
+                for round in 0..ROUNDS {
+                    while phase.load(Ordering::Acquire) != read_phase(round) {
+                        std::hint::spin_loop();
+                    }
+                    let base = region.load(Ordering::Relaxed);
+                    joined.fetch_add(1, Ordering::Release);
+                    while phase.load(Ordering::Acquire) == read_phase(round) {
+                        for idx in 0..PAGES {
+                            let addr = base + idx * STRIDE;
+                            let word = unsafe { (addr as *const u64).read_volatile() };
+                            assert_eq!(word, addr ^ (round + 1), "swept word {addr:#x}");
+                        }
+                        sweeps.fetch_add(1, Ordering::Relaxed);
+                    }
+                    acks.fetch_add(1, Ordering::Release);
+                    // Fresh tables while the owner's free is in flight.
+                    let own = map_lazy(4 * STRIDE).unwrap();
+                    for idx in 0..4 {
+                        let addr = own + idx * STRIDE;
+                        let word = addr as *mut u64;
+                        unsafe {
+                            assert_eq!(word.read_volatile(), 0, "fresh reader word {addr:#x}");
+                            word.write_volatile(!addr);
+                            assert_eq!(word.read_volatile(), !addr, "reader word {addr:#x}");
+                        }
+                    }
+                    SysMem::free(own).unwrap();
+                }
+            });
+        }
+        for round in 0..ROUNDS {
+            let base = map_lazy(PAGES * STRIDE).unwrap();
+            for idx in 0..PAGES {
+                let addr = base + idx * STRIDE;
+                let word = addr as *mut u64;
+                unsafe {
+                    assert_eq!(word.read_volatile(), 0, "fresh owner word {addr:#x}");
+                    word.write_volatile(addr ^ (round + 1));
+                }
+            }
+            region.store(base, Ordering::Relaxed);
+            joined.store(0, Ordering::Relaxed);
+            acks.store(0, Ordering::Relaxed);
+            let sweeps_before = sweeps.load(Ordering::Relaxed);
+            phase.store(read_phase(round), Ordering::Release);
+            // Every reader is in this round, and the region has been walked
+            // a few times; a reader that joins late must not miss the phase.
+            while joined.load(Ordering::Acquire) != READERS
+                || sweeps.load(Ordering::Relaxed) < sweeps_before + 4 * READERS as u64
+            {
+                std::hint::spin_loop();
+            }
+            phase.store(stop_phase(round), Ordering::Release);
+            while acks.load(Ordering::Acquire) != READERS {
+                std::hint::spin_loop();
+            }
+            SysMem::free(base).unwrap();
+        }
+    });
+    println!("sparse soak_table_churn PASS");
+}
+
+/// The soak-safe phases: content and lifetime assertions only, no global
+/// usage samples, since sibling workloads allocate at any time.
+pub fn run_soak_tests() {
+    soak_first_touch();
+    soak_table_churn();
+    shared_alloc_rollback_race(false);
+    test_lazy_share_source();
+    let mut child = crate::subcommand::spawn();
+    child.sparse_exit();
+    assert!(child.wait().unwrap().success());
+    println!("sparse-soak PASS");
+}
+
 pub fn run_all_tests() {
     warm_up_pool();
     test_process_memory_stats();
@@ -476,4 +629,6 @@ pub fn run_all_tests() {
     test_shared_alloc_rollback_race();
     test_exit_with_reservations();
     test_fault_at_floor();
+    soak_first_touch();
+    soak_table_churn();
 }
