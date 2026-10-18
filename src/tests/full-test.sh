@@ -167,6 +167,7 @@ test_vm_configure_ssh
 "$WD/test-toolchain-authoring-sources.sh"
 "$WD/test-toolchain-bootstrap.sh"
 "$WD/test-toolchain-cutover.sh"
+"$WD/test-toolchain-cxx-sysroot.sh"
 "$WD/test-toolchain-entry-point.sh"
 "$WD/test-toolchain-host.sh"
 "$WD/test-toolchain-keyed-paths.sh"
