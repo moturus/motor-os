@@ -137,33 +137,51 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         &invocation("0", "-W max-table-elements=40000", "limits-elements"),
         0,
     )?;
-    suite.refusal(
+    // Memories: no process-wide count or total, 4 GiB each.
+    suite.command(
         "memories-default",
         &invocation("0", "", "limits-memories"),
-        "reservation limits",
+        0,
     )?;
     suite.refusal(
-        "memories-fixed",
-        &invocation("0", "-W max-memories=5", "limits-memories"),
-        "reservation limits",
+        "memories-override",
+        &invocation("0", "-W max-memories=4", "limits-memories"),
+        "memory count too high",
     )?;
     suite.refusal(
         "memory-too-large",
         &invocation("0", "", "memory-too-large"),
         "exceeds",
     )?;
+    // Growing to 4 GiB touches no page, or the VM could not hold it.
     let (stdout, _) = suite.command(
         "memory-to-limit",
-        &(invocation("0", "--invoke grow", "memory-grow") + " 1535"),
+        &(invocation("0", "--invoke grow", "memory-grow") + " 65535"),
         0,
     )?;
     expect("memory-to-limit", stdout.trim(), "1")?;
     let (stdout, _) = suite.command(
-        "memory-beyond-limit",
-        &(invocation("0", "--invoke grow", "memory-grow") + " 1536"),
+        "memory-size-override",
+        &(invocation(
+            "0",
+            "-W max-memory-size=1048576 --invoke grow",
+            "memory-grow",
+        ) + " 16"),
         0,
     )?;
-    expect("memory-beyond-limit", stdout.trim(), "-1")?;
+    expect("memory-size-override", stdout.trim(), "-1")?;
+    let (stdout, _) = suite.command(
+        "memory64-to-limit",
+        &(invocation("0", "--invoke grow", "memory64-grow") + " 65535"),
+        0,
+    )?;
+    expect("memory64-to-limit", stdout.trim(), "1")?;
+    let (stdout, _) = suite.command(
+        "memory64-beyond-limit",
+        &(invocation("0", "--invoke grow", "memory64-grow") + " 65536"),
+        0,
+    )?;
+    expect("memory64-beyond-limit", stdout.trim(), "-1")?;
 
     // The mandatory TypeScript workload, compiled by Javy and precompiled.
     let (stdout, _) = suite.command("typescript", &invocation("0", "", "typescript"), 0)?;
