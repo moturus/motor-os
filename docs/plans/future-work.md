@@ -1,5 +1,11 @@
 # Future work -- recorded, deliberately not scheduled
 
+## Shared zero page
+
+Motor OS kernel should have a single shared copy-on-write zero page,
+this will help wasm memory64 grow beyond 4G (and will overall be a
+memory efficiency win)
+
 ## Frusa work
 
 (a) Investigate moving Rust heap from Frusa4k to Frusa16k or Frusa32k
