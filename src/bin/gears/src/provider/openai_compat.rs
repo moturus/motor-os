@@ -18,9 +18,6 @@ use super::{
     StreamEvent,
 };
 
-/// The blessed default: the one endpoint validated against a real key.
-pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-
 /// How an endpoint wants usage reporting turned on for a streamed request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageStyle {
@@ -80,10 +77,6 @@ impl Endpoint {
         let url = Url::parse(&format!("{base}/chat/completions"))?;
         let quirks = Quirks::for_host(url.host());
         Ok(Endpoint { url, quirks })
-    }
-
-    pub fn openrouter() -> Endpoint {
-        Endpoint::new(OPENROUTER_BASE_URL).expect("the default base url parses")
     }
 
     /// Override the table, for an endpoint it guesses wrong about.
@@ -649,7 +642,10 @@ mod tests {
     #[test]
     fn the_completions_url_is_built_from_the_base() {
         assert_eq!(
-            Endpoint::openrouter().url().as_str(),
+            Endpoint::new("https://openrouter.ai/api/v1")
+                .unwrap()
+                .url()
+                .as_str(),
             "https://openrouter.ai/api/v1/chat/completions"
         );
         // A trailing slash in the config must not double up.
@@ -657,7 +653,7 @@ mod tests {
             Endpoint::new("https://openrouter.ai/api/v1/")
                 .unwrap()
                 .url(),
-            Endpoint::openrouter().url()
+            Endpoint::new("https://openrouter.ai/api/v1").unwrap().url()
         );
         assert_eq!(
             Endpoint::new("http://127.0.0.1:9/v1").unwrap().url().path(),
@@ -668,7 +664,9 @@ mod tests {
 
     #[test]
     fn quirks_follow_the_host() {
-        let openrouter = Endpoint::openrouter().quirks();
+        let openrouter = Endpoint::new("https://openrouter.ai/api/v1")
+            .unwrap()
+            .quirks();
         assert_eq!(openrouter.usage, UsageStyle::Include);
         assert!(openrouter.reports_cost);
         assert!(openrouter.reasoning_echo);
@@ -685,7 +683,8 @@ mod tests {
         assert!(!other.prompt_cache_key);
         assert!(!other.cache_markers);
         assert!(
-            !Endpoint::openrouter()
+            !Endpoint::new("https://openrouter.ai/api/v1")
+                .unwrap()
                 .with_reasoning_echo(Some(false))
                 .quirks()
                 .reasoning_echo

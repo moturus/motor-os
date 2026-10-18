@@ -31,6 +31,9 @@ pub struct NamedProvider {
     pub base_url: String,
     pub plain_http: bool,
     pub model: Option<String>,
+    /// Model ids offered when choosing a model; any id may still be used.
+    pub models: Vec<String>,
+    /// Without a key file the provider is sent no `Authorization` header.
     pub key_file: Option<PathBuf>,
     pub ca_cert: Option<PathBuf>,
     pub reasoning_echo: Option<bool>,
@@ -46,16 +49,12 @@ pub struct ToolDirectory {
 pub struct Config {
     pub egress_allowlist: Vec<String>,
     pub plain_http_allowlist: Vec<String>,
-    pub base_url: String,
-    /// `base_url` is plaintext; its host was checked against both lists.
-    pub plain_http: bool,
-    pub model: Option<String>,
     pub models: Vec<String>,
-    pub key_file: Option<PathBuf>,
-    pub ca_cert: Option<PathBuf>,
-    pub reasoning_echo: Option<bool>,
+    /// Every provider, `[provider]` among them as "default".
     pub providers: BTreeMap<String, NamedProvider>,
     pub tools: Vec<ToolDirectory>,
+    /// Where relative tool directories resolve; the Gears directory if `None`.
+    pub tool_base: Option<PathBuf>,
     pub default_provider: String,
     pub default_model: Option<String>,
     pub log_file: Option<PathBuf>,
@@ -68,17 +67,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            egress_allowlist: vec!["openrouter.ai".to_string()],
+            egress_allowlist: Vec::new(),
             plain_http_allowlist: Vec::new(),
-            base_url: crate::provider::openai_compat::OPENROUTER_BASE_URL.to_string(),
-            plain_http: false,
-            model: None,
             models: Vec::new(),
-            key_file: None,
-            ca_cert: None,
-            reasoning_echo: None,
             providers: BTreeMap::new(),
             tools: Vec::new(),
+            tool_base: None,
             default_provider: "default".to_string(),
             default_model: None,
             log_file: None,
@@ -102,8 +96,7 @@ struct RawConfig {
     default_model: Option<String>,
     #[serde(default)]
     net: RawNet,
-    #[serde(default)]
-    provider: RawProvider,
+    provider: Option<RawProvider>,
     #[serde(default)]
     providers: BTreeMap<String, RawProvider>,
     #[serde(default)]
@@ -135,6 +128,7 @@ struct RawProvider {
     api_key_file: Option<PathBuf>,
     ca_cert: Option<PathBuf>,
     reasoning_echo: Option<bool>,
+    models: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -183,18 +177,7 @@ struct RawHook {
 
 impl Config {
     pub fn provider(&self, name: &str) -> Option<NamedProvider> {
-        if name == "default" {
-            Some(NamedProvider {
-                base_url: self.base_url.clone(),
-                plain_http: self.plain_http,
-                model: self.model.clone(),
-                key_file: self.key_file.clone(),
-                ca_cert: self.ca_cert.clone(),
-                reasoning_echo: self.reasoning_echo,
-            })
-        } else {
-            self.providers.get(name).cloned()
-        }
+        self.providers.get(name).cloned()
     }
 
     pub fn default_path() -> Option<PathBuf> {
@@ -217,14 +200,10 @@ impl Config {
     fn read_config(path: &Path) -> Result<Option<Self>, String> {
         match std::fs::read_to_string(path) {
             Ok(text) => {
-                let absolute = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    std::env::current_dir()
-                        .map_err(|error| format!("current directory: {error}"))?
-                        .join(path)
-                };
-                Self::parse_at(&text, &absolute)
+                // Key and certificate files live in the Gears directory, whichever
+                // gears.toml names them.
+                let directory = crate::directory::default_root().ok();
+                Self::parse_with_base(&text, directory.as_deref())
                     .map(Some)
                     .map_err(|error| format!("{}: {error}", path.display()))
             }
@@ -237,8 +216,9 @@ impl Config {
         Self::parse_with_base(text, None)
     }
 
-    fn parse_at(text: &str, path: &Path) -> Result<Self, String> {
-        Self::parse_with_base(text, path.parent())
+    /// Parse with relative key and certificate paths in `directory`.
+    pub fn parse_in(text: &str, directory: &Path) -> Result<Self, String> {
+        Self::parse_with_base(text, Some(directory))
     }
 
     fn parse_with_base(text: &str, base: Option<&Path>) -> Result<Self, String> {
@@ -249,12 +229,7 @@ impl Config {
                 raw.version
             ));
         }
-        let defaults = Self::default();
-        let egress_allowlist = validate_hosts(
-            raw.net
-                .egress_allowlist
-                .unwrap_or(defaults.egress_allowlist),
-        )?;
+        let egress_allowlist = validate_hosts(raw.net.egress_allowlist.unwrap_or_default())?;
         let plain_http_allowlist =
             validate_hosts(raw.net.plain_http_allowlist.unwrap_or_default())?;
         if let Some(host) = plain_http_allowlist
@@ -265,56 +240,34 @@ impl Config {
                 "net.plain_http_allowlist host {host:?} must also be in net.egress_allowlist"
             ));
         }
-        let base_url = raw.provider.base_url.unwrap_or(defaults.base_url);
-        let endpoint = crate::provider::Endpoint::new(&base_url)
-            .map_err(|error| format!("bad provider.base_url: {error}"))?;
-        let plain_http = endpoint.url().scheme() == crate::net::Scheme::Http;
-        if plain_http {
-            // Refuse at load time, so the user sees this rather than a key
-            // error or a per-request refusal.
-            crate::net::EgressPolicy::new(&egress_allowlist)
-                .with_plain_http_allowlist(&plain_http_allowlist)
-                .check(endpoint.url())
-                .map_err(|error| {
-                    format!(
-                        "provider.base_url: {error}; list the host in both \
-                         net.egress_allowlist and net.plain_http_allowlist"
-                    )
-                })?;
-        }
-        let key_file = provider_path(raw.provider.api_key_file, base)?;
-        let ca_cert = provider_path(raw.provider.ca_cert, base)?;
+        // `[provider]` is the provider named "default"; nothing is built in.
         let mut providers = BTreeMap::new();
+        if let Some(provider) = raw.provider {
+            let provider = named_provider(
+                "provider",
+                provider,
+                &egress_allowlist,
+                &plain_http_allowlist,
+                base,
+            )?;
+            providers.insert("default".to_string(), provider);
+        }
         for (name, provider) in raw.providers {
             if name.is_empty() || !valid_name(&name) || name == "default" {
                 return Err(format!("invalid provider name {name:?}"));
             }
-            let base_url = provider
-                .base_url
-                .ok_or_else(|| format!("provider {name:?} needs base_url"))?;
-            let endpoint = crate::provider::Endpoint::new(&base_url)
-                .map_err(|error| format!("bad provider {name:?} base_url: {error}"))?;
-            let plain_http = endpoint.url().scheme() == crate::net::Scheme::Http;
-            if plain_http {
-                crate::net::EgressPolicy::new(&egress_allowlist)
-                    .with_plain_http_allowlist(&plain_http_allowlist)
-                    .check(endpoint.url())
-                    .map_err(|error| format!("provider {name:?} base_url: {error}"))?;
-            }
-            providers.insert(
-                name,
-                NamedProvider {
-                    base_url,
-                    plain_http,
-                    model: provider.model.filter(|model| !model.trim().is_empty()),
-                    key_file: provider_path(provider.api_key_file, base)?,
-                    ca_cert: provider_path(provider.ca_cert, base)?,
-                    reasoning_echo: provider.reasoning_echo,
-                },
-            );
+            let label = format!("providers.{name}");
+            let provider = named_provider(
+                &label,
+                provider,
+                &egress_allowlist,
+                &plain_http_allowlist,
+                base,
+            )?;
+            providers.insert(name, provider);
         }
         let default_provider = match raw.default_provider {
-            Some(name) if name == "default" || providers.contains_key(&name) => name,
+            Some(name) if providers.contains_key(&name) => name,
             Some(name) => return Err(format!("unknown default_provider {name:?}")),
             None if providers.len() == 1 => providers.keys().next().unwrap().clone(),
             None if providers.len() > 1 => {
@@ -344,7 +297,7 @@ impl Config {
         let log_level = match raw.trace.level {
             Some(level) => crate::trace::Level::parse(&level)
                 .ok_or_else(|| format!("unknown trace level {level:?}"))?,
-            None => defaults.log_level,
+            None => crate::trace::Level::Info,
         };
         let max_tool_rounds = raw.runtime.max_tool_rounds.unwrap_or(32);
         if !(1..=256).contains(&max_tool_rounds) {
@@ -413,15 +366,10 @@ impl Config {
         Ok(Self {
             egress_allowlist,
             plain_http_allowlist,
-            base_url,
-            plain_http,
-            model: raw.provider.model.filter(|model| !model.trim().is_empty()),
             models,
-            key_file,
-            ca_cert,
-            reasoning_echo: raw.provider.reasoning_echo,
             providers,
             tools,
+            tool_base: None,
             default_provider,
             default_model: raw.default_model.filter(|model| !model.trim().is_empty()),
             log_file: raw.trace.file,
@@ -433,13 +381,53 @@ impl Config {
     }
 }
 
+fn named_provider(
+    label: &str,
+    raw: RawProvider,
+    egress_allowlist: &[String],
+    plain_http_allowlist: &[String],
+    base: Option<&Path>,
+) -> Result<NamedProvider, String> {
+    let base_url = raw
+        .base_url
+        .ok_or_else(|| format!("{label} needs base_url"))?;
+    let endpoint = crate::provider::Endpoint::new(&base_url)
+        .map_err(|error| format!("bad {label}.base_url: {error}"))?;
+    let plain_http = endpoint.url().scheme() == crate::net::Scheme::Http;
+    if plain_http {
+        // Refuse at load time, so the user sees this rather than a key error
+        // or a per-request refusal.
+        crate::net::EgressPolicy::new(egress_allowlist)
+            .with_plain_http_allowlist(plain_http_allowlist)
+            .check(endpoint.url())
+            .map_err(|error| {
+                format!(
+                    "{label}.base_url: {error}; list the host in both \
+                     net.egress_allowlist and net.plain_http_allowlist"
+                )
+            })?;
+    }
+    let mut models = raw.models.unwrap_or_default();
+    models.retain(|model| !model.trim().is_empty());
+    Ok(NamedProvider {
+        base_url,
+        plain_http,
+        model: raw.model.filter(|model| !model.trim().is_empty()),
+        models,
+        key_file: provider_path(raw.api_key_file, base)?,
+        ca_cert: provider_path(raw.ca_cert, base)?,
+        reasoning_echo: raw.reasoning_echo,
+    })
+}
+
 fn provider_path(path: Option<PathBuf>, base: Option<&Path>) -> Result<Option<PathBuf>, String> {
     path.map(|path| {
         if path.is_absolute() {
             Ok(path)
         } else {
-            base.map(|base| base.join(&path))
-                .ok_or_else(|| format!("provider path {} needs a config file", path.display()))
+            base.map(|base| base.join(&path)).ok_or_else(|| {
+                format!("provider path {} needs the Gears directory", path.display())
+            })
         }
     })
     .transpose()
@@ -565,8 +553,7 @@ plain_http_allowlist = ["host.test"]"#,
 plain_http_allowlist = ["192.168.4.1"]"#,
         ))
         .unwrap();
-        assert!(config.plain_http);
-        assert!(!Config::parse("version = 1").unwrap().plain_http);
+        assert!(config.providers["default"].plain_http);
     }
 
     #[test]
@@ -575,25 +562,25 @@ plain_http_allowlist = ["192.168.4.1"]"#,
         assert_eq!(config.max_tool_rounds, 32);
         assert_eq!(config.context.output_reserve_tokens, 16_384);
         assert!(config.hooks.is_empty());
-        assert_eq!(config.provider("default").unwrap().reasoning_echo, None);
+        // No provider or host is built in; they come from the shipped gears.toml.
+        assert!(config.provider("default").is_none());
+        assert!(config.egress_allowlist.is_empty());
     }
 
     #[test]
-    fn provider_files_resolve_beside_the_config_file() {
-        let root = std::env::temp_dir().join(format!("gears-config-path-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("new")).unwrap();
-        let path = root.join("new/gears.toml");
-        std::fs::write(
-            &path,
-            "version = 1\n[provider]\nmodel = 'current'\napi_key_file = 'secrets/key'\nca_cert = 'ca.pem'\n",
+    fn relative_key_files_live_in_the_gears_directory() {
+        let directory = Path::new("/home/user/.gears");
+        let config = Config::parse_in(
+            "version = 1\n[provider]\nbase_url = 'https://one.test/v1'\nmodel = 'current'\napi_key_file = 'secrets/key'\nca_cert = 'ca.pem'\nmodels = ['a', '', 'b']\n",
+            directory,
         )
         .unwrap();
-        let config = Config::load_user(Some(&path)).unwrap();
-        assert_eq!(config.model.as_deref(), Some("current"));
-        assert_eq!(config.key_file, Some(root.join("new/secrets/key")));
-        assert_eq!(config.ca_cert, Some(root.join("new/ca.pem")));
-        std::fs::remove_dir_all(root).unwrap();
+        let provider = config.provider("default").unwrap();
+        assert_eq!(provider.model.as_deref(), Some("current"));
+        assert_eq!(provider.models, ["a", "b"]);
+        assert_eq!(provider.key_file, Some(directory.join("secrets/key")));
+        assert_eq!(provider.ca_cert, Some(directory.join("ca.pem")));
+        assert!(Config::parse("version = 1\n[provider]\nmodel = 'm'").is_err());
     }
 
     #[test]
@@ -615,25 +602,42 @@ plain_http_allowlist = ["192.168.4.1"]"#,
 
     #[test]
     fn shipped_batteries_config_loads_both_providers_and_hook() {
-        let config = Config::parse_at(
+        let config = Config::parse_in(
             include_str!("../config/gears-batteries.toml"),
-            Path::new("/user/cfg/gears/gears-batteries.toml"),
+            Path::new("/user/cfg/gears"),
         )
         .unwrap();
         assert_eq!(config.default_provider, "openrouter");
         assert!(config.providers["local"].plain_http);
+        assert_eq!(config.providers["local"].key_file, None);
         assert_eq!(
-            config.providers["local"].key_file,
-            Some(PathBuf::from("/user/cfg/gears/local.key"))
+            config.providers["openrouter"].key_file,
+            Some(PathBuf::from("/user/cfg/gears/openrouter.key"))
         );
+        assert_eq!(
+            config.providers.keys().collect::<Vec<_>>(),
+            ["local", "openai", "openrouter"]
+        );
+        assert!(
+            config
+                .providers
+                .values()
+                .all(|provider| !provider.models.is_empty())
+        );
+        let plain = Config::parse_in(
+            include_str!("../config/gears.toml"),
+            Path::new("/user/cfg/gears"),
+        )
+        .unwrap();
+        assert_eq!(plain.providers, config.providers);
         assert_eq!(config.hooks[0].command, ["gears-batteries", "hook"]);
         assert!(config.tools.iter().all(|tool| tool.enabled));
     }
 
     #[test]
     fn named_providers_are_validated_and_have_a_selected_default() {
-        let path = Path::new("/tmp/gears-test-config/gears.toml");
-        let config = Config::parse_at(
+        let path = Path::new("/tmp/gears-test-config");
+        let config = Config::parse_in(
             r#"version = 1
 default_provider = 'local'
 default_model = 'small'

@@ -1,5 +1,5 @@
-//! API keys (plan decision 5, proposal option A): a key file, overridable by
-//! `OPENROUTER_API_KEY` for one-off runs.
+//! API keys: the provider's `api_key_file`, overridable by `OPENROUTER_API_KEY`
+//! for one-off runs. A provider without a key file uses no key.
 //!
 //! The key is the one secret gears holds, and this type exists to make it
 //! awkward to leak: it never prints itself, registers itself for redaction
@@ -9,7 +9,7 @@
 //! it out of its own environment at startup so tools it spawns cannot inherit
 //! it. The fs tools' deny-list (step 3 of the plan) covers the file.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub struct ApiKey(String);
 
@@ -38,43 +38,6 @@ impl ApiKey {
         ApiKey::parse(&text, &path.display().to_string())
     }
 
-    /// The key file read when the config names none.
-    pub fn default_path() -> Option<PathBuf> {
-        #[cfg(target_os = "motor")]
-        {
-            Some(PathBuf::from("/user/cfg/gears/openrouter.key"))
-        }
-
-        #[cfg(all(unix, not(target_os = "motor")))]
-        {
-            std::env::home_dir().map(|home| home.join(".config/gears/openrouter.key"))
-        }
-
-        #[cfg(not(any(target_os = "motor", unix)))]
-        {
-            None
-        }
-    }
-
-    /// Load from `explicit` if the config named a file, else from the default
-    /// path. Deliberately does not read the environment: taking the key out
-    /// of gears' own environment is the caller's job, and only the caller
-    /// knows it is still single-threaded.
-    pub fn load(explicit: Option<&Path>) -> Result<ApiKey, String> {
-        match explicit {
-            Some(path) => ApiKey::from_file(path),
-            None => match ApiKey::default_path() {
-                Some(path) if path.exists() => ApiKey::from_file(&path),
-                Some(path) => Err(format!(
-                    "no API key: set {} or write one to {}",
-                    super::KEY_ENV,
-                    path.display()
-                )),
-                None => Err(format!("no API key: set {}", super::KEY_ENV)),
-            },
-        }
-    }
-
     /// The key itself. The only caller is the transport, which puts it in its
     /// child's environment.
     pub fn expose(&self) -> &str {
@@ -91,6 +54,7 @@ impl std::fmt::Debug for ApiKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn temp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("gears-key-{name}-{}", std::process::id()))
@@ -117,21 +81,15 @@ mod tests {
     }
 
     #[test]
-    fn a_key_file_loads_and_a_missing_one_says_where_to_put_it() {
+    fn a_key_file_loads_and_a_missing_one_names_its_path() {
         let path = temp("file.key");
         std::fs::write(&path, "sk-from-a-file\n").unwrap();
-        let key = ApiKey::load(Some(&path)).unwrap();
+        let key = ApiKey::from_file(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert_eq!(key.expose(), "sk-from-a-file");
 
         let missing = temp("missing.key");
-        let error = ApiKey::load(Some(&missing)).unwrap_err();
+        let error = ApiKey::from_file(&missing).unwrap_err();
         assert!(error.contains(missing.to_str().unwrap()), "{error}");
-    }
-
-    #[test]
-    fn the_default_path_is_the_platforms_config_directory() {
-        let path = ApiKey::default_path().expect("a path on this platform");
-        assert!(path.ends_with("gears/openrouter.key"), "{}", path.display());
     }
 }

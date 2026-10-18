@@ -7,8 +7,9 @@ coding workflow.
 
 ## Run
 
-Set OPENROUTER_API_KEY or put the key in the configured key file, select a
-model, and run:
+Each provider in `gears.toml` names its key file (`api_key_file`, kept in the
+Gears directory); `OPENROUTER_API_KEY` overrides it for one run, and a provider
+without a key file is sent no key. Select a model and run:
 
     gears --model provider/model
     gears -p "answer once" --model provider/model
@@ -94,14 +95,12 @@ gears --config /user/cfg/gears/gears-batteries.toml --model MODEL
 ```
 
 On Linux, use `~/.gears/gears-batteries.toml` as the configuration path.
-The sample selects OpenRouter and reads `openrouter.key` beside the config.
+The sample selects OpenRouter and reads `openrouter.key` in the Gears directory.
 For a local OpenAI-compatible server, set `providers.local.base_url` and
 select `--provider local --model MODEL`. Only loopback HTTP is enabled.
 If the server uses another host, add it to both `net.egress_allowlist` and
 `net.plain_http_allowlist` when using HTTP.
-Put the local server's key in `local.key` beside the config; for a server
-that ignores authentication, that file can contain a placeholder such as
-`local`. Explicit keys are required for HTTP providers.
+The local provider has no key file and is sent no key.
 The sample registers project instructions and `todo`, enables the six
 batteries tools plus shell, Gix, Lorry and curl, and applies the batteries
 approval policy. Declare a literal check vector in the workspace's
@@ -226,15 +225,8 @@ your model, using a context size the model supports:
     llama-server -m /absolute/path/to/model.gguf --alias local \
       --host 192.168.4.1 --port 8080 --ctx-size 32768 --parallel 1 --jinja
 
-Tool use requires a model and chat template supporting tool calls. Inside
-Motor OS, create a separate placeholder credential for an unauthenticated
-local server and clear any inherited cloud credential:
-
-    mkdir -p /user/cfg/gears
-    echo local-llama > /user/cfg/gears/local-llama.key
-    unset OPENROUTER_API_KEY
-
-Save this as `/user/cfg/gears/gears.toml`:
+Tool use requires a model and chat template supporting tool calls. An
+unauthenticated local server needs no key file. Save this as `/user/cfg/gears/gears.toml`:
 
 ```toml
 version = 1
@@ -242,7 +234,6 @@ version = 1
 [provider]
 base_url = "http://192.168.4.1:8080/v1"
 model = "local"
-api_key_file = "/user/cfg/gears/local-llama.key"
 
 [net]
 egress_allowlist = ["192.168.4.1"]
@@ -263,11 +254,10 @@ OpenRouter receives earlier assistant reasoning on subsequent turns. Other
 hosts omit it by default; set `reasoning_echo = true` or `false` under
 `[provider]` or a named `[providers.NAME]` to override the host default.
 
-Gears refuses implicit default-key-file fallback over HTTP. An explicit key
-file is allowed, but `OPENROUTER_API_KEY` takes precedence even if inherited
-from the shell. Keep it unset for the file-based setup, or explicitly use
-`OPENROUTER_API_KEY=local-llama` for a one-off invocation. If the server uses
-authentication, supply its matching key instead of the placeholder.
+A provider without `api_key_file` is sent no `Authorization` header, and
+`OPENROUTER_API_KEY` is ignored for it, so a cloud key never travels over HTTP
+to a local server. If the server uses authentication, give the provider an
+`api_key_file` holding its key.
 
 Check the host connection and start Gears from the desired guest workspace:
 

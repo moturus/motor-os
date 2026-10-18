@@ -352,16 +352,13 @@ fn select(
     Ok((provider_name, provider, model))
 }
 
-fn load_key(provider: &NamedProvider, from_env: Option<String>) -> Result<ApiKey, String> {
-    match from_env {
-        Some(key) => ApiKey::parse(&key, KEY_ENV),
-        // A cloud credential in the default file must not leak in the clear
-        // just because base_url changed.
-        None if provider.plain_http && provider.key_file.is_none() => Err(format!(
-            "plain HTTP cannot use the implicit default key file; \
-             set provider.api_key_file or {KEY_ENV} explicitly"
-        )),
-        None => ApiKey::load(provider.key_file.as_deref()),
+/// `None` for a provider without a key file: it gets no key, not even one
+/// from the environment, so a cloud key never reaches a local server.
+fn load_key(provider: &NamedProvider, from_env: Option<String>) -> Result<Option<ApiKey>, String> {
+    match (&provider.key_file, from_env) {
+        (None, _) => Ok(None),
+        (Some(_), Some(key)) => ApiKey::parse(&key, KEY_ENV).map(Some),
+        (Some(path), None) => ApiKey::from_file(path).map(Some),
     }
 }
 
@@ -369,15 +366,17 @@ fn connect(
     config: &Config,
     provider_name: &str,
     provider: &NamedProvider,
-    key: &ApiKey,
+    key: &Option<ApiKey>,
     verbosity: u8,
 ) -> Result<OpenAiCompat<HttpBackend>, String> {
     let policy = EgressPolicy::new(&config.egress_allowlist)
         .with_plain_http_allowlist(&config.plain_http_allowlist);
-    let http = HttpBackend::new(policy)
+    let mut http = HttpBackend::new(policy)
         .map_err(|error| error.to_string())?
-        .with_verbosity(verbosity)
-        .with_secret(KEY_ENV, key.expose());
+        .with_verbosity(verbosity);
+    if let Some(key) = key {
+        http = http.with_secret(KEY_ENV, key.expose());
+    }
     let http = match provider.ca_cert.as_deref() {
         Some(path) => http.with_ca_cert(path).map_err(|error| error.to_string())?,
         None => http,
@@ -385,7 +384,12 @@ fn connect(
     let endpoint = Endpoint::new(&provider.base_url)
         .map_err(|error| error.to_string())?
         .with_reasoning_echo(provider.reasoning_echo);
-    Ok(OpenAiCompat::new(http, endpoint).with_cache_identity(provider_name))
+    let client = OpenAiCompat::new(http, endpoint).with_cache_identity(provider_name);
+    Ok(if key.is_some() {
+        client
+    } else {
+        client.without_key()
+    })
 }
 
 fn diagnostic(message: &str) {

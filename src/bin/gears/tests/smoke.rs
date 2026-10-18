@@ -895,7 +895,7 @@ fn unattended_sh_is_denied_and_the_turn_continues() {
 }
 
 #[test]
-fn http_refuses_implicit_credentials_and_preserves_explicit_precedence() {
+fn keys_come_only_from_the_providers_key_file_or_the_environment() {
     let root = fixture("http-keys");
     let key_dir = root.join(".config/gears");
     std::fs::create_dir_all(&key_dir).unwrap();
@@ -903,16 +903,17 @@ fn http_refuses_implicit_credentials_and_preserves_explicit_precedence() {
     std::fs::write(&default_key, "fixture-default-key").unwrap();
     let explicit_key = root.join("local.key");
     std::fs::write(&explicit_key, "fixture-local-key").unwrap();
+    // The old default key file is never read, and a provider without a key file
+    // is sent no key at all, not even the environment's.
     for (key_file, env_key, expected) in [
         (None, None, None),
+        (None, Some("fixture-env-key"), None),
         (Some(&explicit_key), None, Some("fixture-local-key")),
         (
             Some(&explicit_key),
             Some("fixture-env-key"),
             Some("fixture-env-key"),
         ),
-        (None, Some("fixture-env-key"), Some("fixture-env-key")),
-        (Some(&default_key), None, Some("fixture-default-key")),
     ] {
         let server = MockServer::start_one(sse_response(&[
             r#"{"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}]}"#,
@@ -935,26 +936,17 @@ fn http_refuses_implicit_credentials_and_preserves_explicit_precedence() {
             command.env("OPENROUTER_API_KEY", key);
         }
         let output = command.output().unwrap();
-        if let Some(key) = expected {
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(server.requests().len(), 1);
-            assert_eq!(
-                server.requests()[0].header("Authorization"),
-                Some(format!("Bearer {key}").as_str())
-            );
-            assert_eq!(output.stdout, b"hello\n");
-        } else {
-            assert!(!output.status.success());
-            let error = String::from_utf8(output.stderr).unwrap();
-            assert!(error.contains("implicit default key file"), "{error}");
-            assert!(error.contains("provider.api_key_file"));
-            assert!(error.contains("OPENROUTER_API_KEY"));
-            assert!(server.requests().is_empty());
-        }
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(
+            server.requests()[0].header("Authorization"),
+            expected.map(|key| format!("Bearer {key}")).as_deref()
+        );
+        assert_eq!(output.stdout, b"hello\n");
     }
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -1,19 +1,29 @@
-# Install this file and the tools/ directory in your Gears directory.
-# Use gears --config PATH/gears-batteries.toml --model MODEL from your workspace.
+# The Gears settings for the batteries coding workflow, used with
+# gears --config PATH/gears-batteries.toml. Gears asks for everything else.
 version = 1
 default_provider = "openrouter"
 
+# Gears offers these providers and models when no model is chosen yet, and in
+# /setup; any other model id can be typed there. Keys are saved beside this
+# file in the Gears directory. A provider without api_key_file gets no key.
 [providers.openrouter]
 base_url = "https://openrouter.ai/api/v1"
 api_key_file = "openrouter.key"
+models = ["~deepseek/deepseek-v4-flash-latest", "google/gemini-3.8-flash",
+          "google/gemma-4-26b-a4b-it:free", "openai/gpt-6.1-sol",
+          "openai/gpt-6-astra"]
 
-# Set this URL and select --provider local --model MODEL for a local server.
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+api_key_file = "openai.key"
+models = ["gpt-6.1-sol", "gpt-6-astra"]
+
 [providers.local]
-base_url = "http://127.0.0.1:11434/v1"
-api_key_file = "local.key"
+base_url = "http://127.0.0.1:8080/v1"
+models = ["local"]
 
 [net]
-egress_allowlist = ["127.0.0.1", "openrouter.ai"]
+egress_allowlist = ["openrouter.ai", "api.openai.com", "127.0.0.1"]
 plain_http_allowlist = ["127.0.0.1"]
 
 [[hooks]]

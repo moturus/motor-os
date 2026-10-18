@@ -92,7 +92,10 @@ impl Registry {
         if config.tools.is_empty() {
             return Ok(Self::default());
         }
-        Self::load(&config.tools, &crate::directory::default_root()?)
+        match &config.tool_base {
+            Some(base) => Self::load(&config.tools, base),
+            None => Self::load(&config.tools, &crate::directory::default_root()?),
+        }
     }
 
     pub fn load(entries: &[ToolDirectory], base: &Path) -> Result<Self, String> {
