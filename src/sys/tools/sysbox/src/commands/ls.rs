@@ -114,6 +114,44 @@ fn detailed_entry(
     })
 }
 
+/// Whether a per-entry request failed because the entry was removed while
+/// listing: motor-fs reports a freed entry block as InvalidArgument and a
+/// reused one as InvalidData.
+fn entry_vanished(err: moto_rt::Error) -> bool {
+    matches!(
+        err,
+        moto_rt::Error::InvalidArgument | moto_rt::Error::InvalidData
+    )
+}
+
+/// One walk of a directory. Entries removed after their successor was fetched
+/// are skipped; an entry removed before that strands the cursor, and the
+/// error it produced is returned.
+async fn walk_dir(
+    client: &std::rc::Rc<moto_io::fs::FsClient>,
+    dir: moto_io::fs::EntryId,
+) -> moto_rt::Result<Vec<DetailedEntry>> {
+    let mut entries = Vec::new();
+    let mut entry_id = client.get_first_entry(dir).await?;
+    while let Some(id) = entry_id {
+        // Fetch the successor first, as std::fs::read_dir does, so a
+        // concurrently removed current entry cannot strand the cursor.
+        entry_id = client.get_next_entry(id).await?;
+        let metadata = match client.metadata(id).await {
+            Ok(metadata) => metadata,
+            Err(err) if entry_vanished(err) => continue,
+            Err(err) => return Err(err),
+        };
+        let name = match client.name(id).await {
+            Ok(name) => name,
+            Err(err) if entry_vanished(err) => continue,
+            Err(err) => return Err(err),
+        };
+        entries.push(detailed_entry(name, &metadata)?);
+    }
+    Ok(entries)
+}
+
 fn read_entries(operand: &str, path: &Path) -> moto_rt::Result<Vec<DetailedEntry>> {
     use moto_io::fs::{EntryKind, FsClient};
 
@@ -132,16 +170,16 @@ fn read_entries(operand: &str, path: &Path) -> moto_rt::Result<Vec<DetailedEntry
             return Ok(vec![detailed_entry(operand, &metadata)?]);
         }
 
-        let mut entries = Vec::new();
-        let mut entry_id = client.get_first_entry(id).await?;
-        while let Some(id) = entry_id {
-            // Fetch the successor first, as std::fs::read_dir does, so a
-            // concurrently removed current entry cannot strand the cursor.
-            entry_id = client.get_next_entry(id).await?;
-            let metadata = client.metadata(id).await?;
-            entries.push(detailed_entry(client.name(id).await?, &metadata)?);
+        // A stranded cursor means the directory changed under the walk;
+        // start over a bounded number of times, then report it.
+        const WALKS: usize = 3;
+        for walk in 1..=WALKS {
+            match walk_dir(&client, id).await {
+                Err(err) if entry_vanished(err) && walk < WALKS => continue,
+                result => return result,
+            }
         }
-        Ok(entries)
+        unreachable!()
     })
 }
 
