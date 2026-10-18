@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::sync::mpsc;
+use std::sync::{OnceLock, mpsc};
 use std::time::Duration;
 
 use crossterm::cursor;
@@ -90,9 +90,18 @@ struct Screen {
     left: bool,
 }
 
+/// Motor OS takes one Ctrl+C registration per process, and the setup questions
+/// and the session each enter the screen.
+fn enable_ctrl_c_events() -> Result<(), String> {
+    static ENABLED: OnceLock<Result<(), String>> = OnceLock::new();
+    ENABLED
+        .get_or_init(|| event::enable_ctrl_c_events().map_err(|error| error.to_string()))
+        .clone()
+}
+
 impl Screen {
     fn enter() -> Result<Self, String> {
-        crossterm::event::enable_ctrl_c_events().map_err(|error| error.to_string())?;
+        enable_ctrl_c_events()?;
         enable_raw_mode().map_err(|error| error.to_string())?;
         if let Err(error) = execute!(io::stdout(), EnableBracketedPaste, cursor::Hide) {
             let _ = disable_raw_mode();

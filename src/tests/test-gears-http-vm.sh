@@ -165,5 +165,29 @@ EOT
 done
 restore_permissions
 
+# A first run in a terminal: the setup questions and then the session TUI.
+# Motor OS allows one Ctrl+C registration per process, so the second screen
+# must not register again.
+CASE=first-run-tui
+FIRST="$GUEST_DIR/first-run"
+vm_ssh "/system/bin/mkdir $FIRST; /system/bin/mkdir $FIRST/ws"
+vm_ssh "/system/bin/rush -c 'cat >$FIRST/gears.toml'" <<'EOF'
+version = 1
+default_provider = "local"
+[providers.local]
+base_url = "http://127.0.0.1:8080/v1"
+models = ["small"]
+[net]
+egress_allowlist = ["127.0.0.1"]
+plain_http_allowlist = ["127.0.0.1"]
+EOF
+# Provider, address and model pickers, then /exit in the session.
+printf '\r\r\r/exit\r' | vm_ssh -tt "GEARS_DIRECTORY=$FIRST /devtools/bin/gears --workspace $FIRST/ws" \
+  >"$WORK/$CASE.log" 2>&1 || fail "gears failed: $(tr -d '\r' <"$WORK/$CASE.log" | tail -c 300)"
+grep -q 'Gears session .* exited\.' "$WORK/$CASE.log" || fail "the session TUI did not start"
+vm_ssh "/system/bin/cat $FIRST/provider.toml" >"$WORK/$CASE.provider.log"
+grep -qx 'provider = "local"' "$WORK/$CASE.provider.log" || fail "provider not saved"
+grep -qx 'model = "small"' "$WORK/$CASE.provider.log" || fail "model not saved"
+
 vm_ssh "/system/bin/rm -r $GUEST_DIR"
 echo "test-gears-http-vm.sh ALL PASS"
