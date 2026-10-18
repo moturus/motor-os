@@ -7,9 +7,15 @@ coding workflow.
 
 ## Run
 
-Each provider in `gears.toml` names its key file (`api_key_file`, kept in the
-Gears directory); `OPENROUTER_API_KEY` overrides it for one run, and a provider
-without a key file is sent no key. Select a model and run:
+Start `gears`. The first time, it asks which provider to use (the shipped
+`gears.toml` offers OpenRouter, OpenAI and a local server), the local server's
+address, a model from the provider's list or any other id, and the API key,
+which is typed hidden and saved in the Gears directory (mode 0600 on Linux). Later starts ask nothing; `/setup` asks again. A `-p` run never
+asks. Nothing needs editing in `gears.toml`.
+
+Each provider names its key file (`api_key_file`, kept in the Gears directory);
+`OPENROUTER_API_KEY` overrides it for one run, and a provider without a key
+file is sent no key. A model can also be given directly:
 
     gears --model provider/model
     gears -p "answer once" --model provider/model
@@ -21,7 +27,7 @@ Use --ui line or --ui tui to choose explicitly.
 Without `--config`, Gears reads `gears.toml` from the Gears directory. Run from
 its own source tree (`cargo run` or `lorry run` in `src/bin/gears`), it uses
 the shipped `config/gears.toml` and the `tools/` beside it when the Gears
-directory has none. Keys, settings and sessions always stay in the Gears
+directory has none, and asks which to use when both exist. Keys, settings and sessions always stay in the Gears
 directory. A provider address saved in `provider.toml` replaces the
 configured one, and its host is allowed for egress.
 

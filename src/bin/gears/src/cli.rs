@@ -23,6 +23,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "model",
     "provider",
     "reset",
+    "setup",
 ];
 
 pub const USAGE: &str = "\
@@ -55,7 +56,9 @@ Options:
 
 Interactive commands include /new, /resume, /name, /session, /tree, /label,
 /fork, /clone, /compact, /provider, /model, /tools, /tool, /permissions,
-/permission, /status, /reset, /help, and /quit.
+/permission, /status, /setup, /reset, /help, and /quit.
+Without a chosen model, an interactive start asks for the provider, model and
+key; /setup asks again at any time.
 `gears reset` and /reset ask, then remove keys, saved settings, memory, skills
 and sessions from the Gears directory, keeping gears.toml, gears-batteries.toml
 and tools/, and remove .gears/ from the current directory.

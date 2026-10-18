@@ -21,6 +21,7 @@ pub mod reset;
 pub mod run_lock;
 pub mod runtime;
 pub mod session;
+pub mod setup;
 pub mod shell_state;
 pub mod state;
 pub mod tool_state;

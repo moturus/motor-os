@@ -47,6 +47,55 @@ fn gears(root: &Path, workspace: &Path, config: &Path) -> Command {
 }
 
 #[test]
+fn a_first_run_asks_provider_model_and_key_and_saves_them_in_the_gears_directory() {
+    let root = fixture("first-run");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let directory = root.join("gears-directory");
+    let run = |answers: &[u8]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_gears"))
+            .args(["--ui", "line", "--ephemeral", "--workspace"])
+            .arg(&workspace)
+            .env("HOME", &root)
+            .env(gears::directory::ENV, &directory)
+            .env_remove("GEARS_LOCK_OWNER")
+            .env_remove("OPENROUTER_API_KEY")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(answers).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("config");
+    let before = std::fs::read_dir(&shipped).unwrap().count();
+    // The shipped settings apply: openrouter, its second model, then the key.
+    let output = run(b"1\n2\nsk-first-run\n/quit\n");
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Choose a provider"), "{stderr}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("sk-first-run"));
+    assert_eq!(
+        std::fs::read_to_string(directory.join("openrouter.key")).unwrap(),
+        "sk-first-run\n"
+    );
+    let saved = std::fs::read_to_string(directory.join("provider.toml")).unwrap();
+    assert!(saved.contains("google/gemini-3.8-flash"), "{saved}");
+    assert_eq!(std::fs::read_dir(&shipped).unwrap().count(), before);
+    // The next start asks nothing.
+    let output = run(b"/quit\n");
+    assert!(output.status.success(), "{output:?}");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("Choose a provider"));
+    // With settings of its own too, Gears asks which to use.
+    std::fs::copy(shipped.join("gears.toml"), directory.join("gears.toml")).unwrap();
+    let output = run(b"\n");
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("running from its source tree"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn reset_asks_then_keeps_only_the_installation() {
     let root = fixture("reset");
     let workspace = root.join("workspace");

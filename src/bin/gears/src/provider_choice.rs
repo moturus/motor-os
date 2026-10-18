@@ -61,7 +61,7 @@ impl ProviderChoice {
         .save_at(directory)
     }
 
-    fn load_at(directory: &Path) -> Result<Option<Self>, String> {
+    pub fn load_at(directory: &Path) -> Result<Option<Self>, String> {
         let choice: Option<Self> =
             StateRoot::new(directory.to_path_buf())?.load_toml(FILE, VERSION)?;
         choice
@@ -76,7 +76,7 @@ impl ProviderChoice {
             })
     }
 
-    fn save_at(&self, directory: &Path) -> Result<(), String> {
+    pub fn save_at(&self, directory: &Path) -> Result<(), String> {
         StateRoot::new(directory.to_path_buf())?.save_toml(FILE, VERSION, self)
     }
 }

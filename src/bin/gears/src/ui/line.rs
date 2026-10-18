@@ -1,7 +1,7 @@
 //! Plain terminal UI for interactive and one-shot runs.
 
 use std::collections::VecDeque;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -13,8 +13,7 @@ pub fn run(
     runtime: &mut Runtime,
     initial: Option<String>,
     interactive: bool,
-    models: &[String],
-    providers: &[String],
+    config: &crate::config::Config,
 ) -> Result<(), String> {
     runtime.set_interactive(interactive)?;
     let mut input = Input::new()?;
@@ -60,7 +59,7 @@ pub fn run(
             continue;
         }
         if line.starts_with('/') {
-            let result = command(runtime, &line, models, providers, &mut input, &mut renderer);
+            let result = command(runtime, &line, config, &mut input, &mut renderer);
             if !matches!(&result, Ok(Command::Quit)) && runtime.pending_hook_questions() {
                 run_operation(
                     runtime,
@@ -102,8 +101,7 @@ enum Command {
 fn command(
     runtime: &mut Runtime,
     line: &str,
-    models: &[String],
-    providers: &[String],
+    config: &crate::config::Config,
     input: &mut Input,
     renderer: &mut Renderer,
 ) -> Result<Command, String> {
@@ -160,6 +158,15 @@ fn command(
             show_history(runtime)?;
             show_runtime_notices(runtime, renderer)?;
             show_session(runtime);
+            Ok(Command::Continue)
+        }
+        "setup" => {
+            let current = super::current_config(config)?;
+            let directory = crate::directory::default_root()?;
+            match crate::setup::run(&current, &directory, &mut InputAsk(input))? {
+                Some(chosen) => runtime.apply_setup(&chosen.provider, chosen.model, renderer)?,
+                None => eprintln!("Setup cancelled."),
+            }
             Ok(Command::Continue)
         }
         "reset" => {
@@ -244,7 +251,11 @@ fn command(
         "model" => {
             let (argument, save_default) = super::selection_and_default(argument);
             let model = if argument.is_empty() {
-                choose_model(runtime.model(), models, input)?
+                choose_model(
+                    runtime.model(),
+                    &super::model_choices(config, runtime.provider_name()),
+                    input,
+                )?
             } else {
                 argument.to_string()
             };
@@ -260,7 +271,12 @@ fn command(
         "provider" => {
             let (argument, save_default) = super::selection_and_default(argument);
             let provider = if argument.is_empty() {
-                choose_named(runtime.provider_name(), providers, input, "provider")?
+                choose_named(
+                    runtime.provider_name(),
+                    &config.providers.keys().cloned().collect::<Vec<_>>(),
+                    input,
+                    "provider",
+                )?
             } else {
                 argument.to_string()
             };
@@ -671,6 +687,31 @@ impl Input {
         })
     }
 
+    /// Like `read_line`, but what is typed is not shown.
+    fn read_hidden(&mut self, prompt: &str) -> Result<Option<String>, String> {
+        print!("{prompt}");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let line = match &mut self.raw {
+            Some(raw) => read_raw_line(
+                &mut self.queued,
+                &mut self.skip_lf,
+                |buffer| raw.read(buffer, None),
+                &mut io::sink(),
+            ),
+            None if io::stdin().is_terminal() => read_hidden_terminal(),
+            None => {
+                let mut line = String::new();
+                match io::stdin().read_line(&mut line) {
+                    Ok(0) => Ok(None),
+                    Ok(_) => Ok(Some(line.trim_end_matches(['\r', '\n']).to_string())),
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+        };
+        println!();
+        line
+    }
+
     fn read_line(&mut self, prompt: &str) -> Result<Option<String>, String> {
         print!("{prompt}");
         io::stdout().flush().map_err(|error| error.to_string())?;
@@ -717,6 +758,85 @@ impl Input {
             Err(error) => Err(error.to_string()),
         }
     }
+}
+
+/// Setup questions as numbered prompts.
+struct InputAsk<'a>(&'a mut Input);
+
+impl crate::setup::Ask for InputAsk<'_> {
+    fn choose(&mut self, title: &str, items: &[String]) -> Result<Option<usize>, String> {
+        eprintln!("{title}");
+        for (index, item) in items.iter().enumerate() {
+            eprintln!("{:>3}. {item}", index + 1);
+        }
+        loop {
+            let Some(answer) = self.0.read_line("number> ")? else {
+                return Ok(None);
+            };
+            match answer.trim().parse::<usize>() {
+                _ if answer.trim().is_empty() => return Ok(None),
+                Ok(number @ 1..) if number <= items.len() => return Ok(Some(number - 1)),
+                _ => eprintln!("choose 1 to {}, or press Enter to cancel", items.len()),
+            }
+        }
+    }
+
+    fn text(&mut self, title: &str, hidden: bool) -> Result<Option<String>, String> {
+        let prompt = format!("{title}> ");
+        if hidden {
+            self.0.read_hidden(&prompt)
+        } else {
+            self.0.read_line(&prompt)
+        }
+    }
+}
+
+/// Setup questions asked before the line session starts.
+pub struct SetupPrompts(Input);
+
+impl SetupPrompts {
+    pub fn new() -> Result<Self, String> {
+        Input::new().map(Self)
+    }
+}
+
+impl crate::setup::Ask for SetupPrompts {
+    fn choose(&mut self, title: &str, items: &[String]) -> Result<Option<usize>, String> {
+        InputAsk(&mut self.0).choose(title, items)
+    }
+
+    fn text(&mut self, title: &str, hidden: bool) -> Result<Option<String>, String> {
+        InputAsk(&mut self.0).text(title, hidden)
+    }
+}
+
+/// A line from a cooked terminal, without echoing it.
+fn read_hidden_terminal() -> Result<Option<String>, String> {
+    use crossterm::event::{Event as Input, KeyCode, KeyEventKind, KeyModifiers};
+    crossterm::terminal::enable_raw_mode().map_err(|error| error.to_string())?;
+    let result = (|| {
+        let mut text = String::new();
+        loop {
+            match crossterm::event::read().map_err(|error| error.to_string())? {
+                Input::Paste(pasted) => text.push_str(pasted.trim_end_matches(['\r', '\n'])),
+                Input::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Enter => return Ok(Some(text)),
+                    KeyCode::Esc => return Ok(None),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(None);
+                    }
+                    KeyCode::Backspace => {
+                        text.pop();
+                    }
+                    KeyCode::Char(character) => text.push(character),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    })();
+    let _ = crossterm::terminal::disable_raw_mode();
+    result
 }
 
 fn read_raw_line(

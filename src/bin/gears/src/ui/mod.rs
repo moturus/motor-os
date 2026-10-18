@@ -64,6 +64,31 @@ pub(crate) fn help(runtime: &Runtime) -> String {
     text
 }
 
+/// Models to offer: the provider's own list, then the configured `[models] used`.
+pub(crate) fn model_choices(config: &crate::config::Config, provider: &str) -> Vec<String> {
+    let mut models = config
+        .provider(provider)
+        .map(|provider| provider.models)
+        .unwrap_or_default();
+    for model in &config.models {
+        if !models.contains(model) {
+            models.push(model.clone());
+        }
+    }
+    models
+}
+
+/// Setup sees the provider addresses saved since the configuration loaded.
+pub(crate) fn current_config(
+    config: &crate::config::Config,
+) -> Result<crate::config::Config, String> {
+    let mut config = config.clone();
+    if let Some(choice) = crate::provider_choice::ProviderChoice::load_default()? {
+        config.apply_urls(&choice.urls)?;
+    }
+    Ok(config)
+}
+
 pub(crate) fn reset_notice(removed: usize) -> String {
     format!(
         "Gears was reset ({removed} entries removed). This run keeps its provider, model and key until Gears restarts."

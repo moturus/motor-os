@@ -977,6 +977,27 @@ impl Runtime {
         observer.event(Event::Notice(format!("provider: {name}")))
     }
 
+    /// Use what `/setup` chose. The same provider is reconnected too, since
+    /// its address or key may have changed.
+    pub fn apply_setup(
+        &mut self,
+        provider: &str,
+        model: String,
+        observer: &mut dyn Observer,
+    ) -> Result<(), String> {
+        self.prepare_write()?;
+        if provider == self.provider_name {
+            let factory = self
+                .provider_factory
+                .as_ref()
+                .ok_or("provider switching is not configured")?;
+            self.provider = factory(provider)?;
+        } else {
+            self.set_provider(provider, observer)?;
+        }
+        self.set_model(model, observer)
+    }
+
     pub fn save_default_selection(&mut self) -> Result<(), String> {
         self.prepare_write()?;
         crate::provider_choice::ProviderChoice::save_selection(&self.provider_name, &self.model)

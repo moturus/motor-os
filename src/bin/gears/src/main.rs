@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gears::cancellation::Cancellation;
 use gears::cli::{Action, Args, Output, SessionStart};
-use gears::config::{Config, NamedProvider};
+use gears::config::{Config, Found, NamedProvider};
 use gears::net::EgressPolicy;
 #[cfg(unix)]
 use gears::net::host_curl::HostCurl as HttpBackend;
@@ -91,8 +91,28 @@ fn reset(args: &Args) -> ExitCode {
 }
 
 fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
-    let mut config = match Config::load_user(args.config.as_deref()) {
-        Ok(config) => config,
+    // Only an interactive agent run asks setup questions.
+    let setup_ui =
+        match (args.action == Action::Run && args.prompt.is_none() && args.output == Output::Text)
+            .then(|| {
+                gears::ui::select::choose(args.ui, false, || {
+                    (
+                        std::io::stdin().is_terminal(),
+                        std::io::stdout().is_terminal(),
+                    )
+                })
+            })
+            .transpose()
+        {
+            Ok(ui) => ui,
+            Err(error) => {
+                diagnostic(&error);
+                return ExitCode::FAILURE;
+            }
+        };
+    let mut config = match load_config(&args, setup_ui) {
+        Ok(Some(config)) => config,
+        Ok(None) => return ExitCode::SUCCESS,
         Err(error) => {
             diagnostic(&format!("config: {error}"));
             return ExitCode::FAILURE;
@@ -159,7 +179,14 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
     }
     let result = match args.action {
         Action::Ask => ask(&args, &config, choice.as_ref(), key_from_env),
-        Action::Run => agent(&args, &config, choice.as_ref(), key_from_env, tools),
+        Action::Run => agent(
+            &args,
+            &config,
+            choice.as_ref(),
+            key_from_env,
+            tools,
+            setup_ui,
+        ),
         Action::Version | Action::Help | Action::Reset => unreachable!(),
     };
     match result {
@@ -172,13 +199,45 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
     }
 }
 
+/// `--config`, else what `Found::detect` finds. With both the user's and the
+/// source tree's, an interactive run asks; `None` if the user cancelled.
+fn load_config(
+    args: &Args,
+    setup_ui: Option<gears::ui::select::Selected>,
+) -> Result<Option<Config>, String> {
+    if args.config.is_some() {
+        return Config::load_user(args.config.as_deref()).map(Some);
+    }
+    let found = Found::detect();
+    let source_tree = match (&found, setup_ui) {
+        (Found::Both { user, package }, Some(ui)) => {
+            match gears::setup::ask_settings(asker(ui)?.as_mut(), user, package)? {
+                Some(source_tree) => source_tree,
+                None => return Ok(None),
+            }
+        }
+        _ => false,
+    };
+    Config::load_found(&found, source_tree).map(Some)
+}
+
+/// Setup questions in the UI the session will use; closed before it starts.
+fn asker(ui: gears::ui::select::Selected) -> Result<Box<dyn gears::setup::Ask>, String> {
+    Ok(match ui {
+        gears::ui::select::Selected::Tui => Box::new(gears::ui::tui::SetupScreen::enter()?),
+        gears::ui::select::Selected::Line => Box::new(gears::ui::line::SetupPrompts::new()?),
+    })
+}
+
 fn agent(
     args: &Args,
     config: &Config,
     choice: Option<&ProviderChoice>,
     key_from_env: Option<String>,
     tools: Registry,
+    setup_ui: Option<gears::ui::select::Selected>,
 ) -> Result<(), String> {
+    let mut config = config.clone();
     let workspace = args.workspace.clone().map_or_else(
         || std::env::current_dir().map_err(|error| format!("current directory: {error}")),
         Ok,
@@ -192,7 +251,34 @@ fn agent(
     })?;
     let store = Store::new(&workspace)?;
     let mut session = open_session(&store, args)?;
-    let (provider_name, selected_provider, model) = select(args, config, choice, Some(&session))?;
+    let (provider_name, selected_provider, model) = select(args, &config, choice, Some(&session))?;
+    let missing_key = key_from_env.is_none()
+        && selected_provider
+            .key_file
+            .as_ref()
+            .is_some_and(|path| !path.exists());
+    let (provider_name, selected_provider, model) = match (setup_ui, model) {
+        (Some(ui), None) => {
+            let directory = gears::directory::default_root()?;
+            let chosen = gears::setup::run(&config, &directory, asker(ui)?.as_mut())?
+                .ok_or("setup cancelled")?;
+            if let Some(saved) = ProviderChoice::load_default()? {
+                config.apply_urls(&saved.urls)?;
+            }
+            let provider = config
+                .provider(&chosen.provider)
+                .ok_or_else(|| format!("unknown provider {:?}", chosen.provider))?;
+            (chosen.provider, provider, chosen.model)
+        }
+        (Some(ui), Some(model)) if missing_key => {
+            if !gears::setup::ask_key(asker(ui)?.as_mut(), &provider_name, &selected_provider)? {
+                return Err("setup cancelled".into());
+            }
+            (provider_name, selected_provider, model)
+        }
+        (_, model) => (provider_name, selected_provider, model.ok_or(NO_MODEL)?),
+    };
+    let config = &config;
     let key = load_key(&selected_provider, key_from_env.clone())?;
     let provider: Arc<dyn Provider> = Arc::new(connect(
         config,
@@ -212,6 +298,11 @@ fn agent(
     let factory_config = config.clone();
     let verbosity = args.verbosity;
     let factory: ProviderFactory = Arc::new(move |name| {
+        // `/setup` may have saved a new address since startup.
+        let mut factory_config = factory_config.clone();
+        if let Some(saved) = ProviderChoice::load_default()? {
+            factory_config.apply_urls(&saved.urls)?;
+        }
         let selected = factory_config
             .provider(name)
             .ok_or_else(|| format!("unknown provider {name:?}"))?;
@@ -229,24 +320,14 @@ fn agent(
             std::io::stdout().lock(),
         );
     }
-    let mut provider_names = vec!["default".to_string()];
-    provider_names.extend(config.providers.keys().cloned());
     let interactive = !one_shot;
     let result = match selected {
-        gears::ui::select::Selected::Line => gears::ui::line::run(
-            &mut runtime,
-            args.prompt.clone(),
-            interactive,
-            &config.models,
-            &provider_names,
-        ),
-        gears::ui::select::Selected::Tui => gears::ui::tui::run(
-            &mut runtime,
-            args.prompt.clone(),
-            interactive,
-            &config.models,
-            &provider_names,
-        ),
+        gears::ui::select::Selected::Line => {
+            gears::ui::line::run(&mut runtime, args.prompt.clone(), interactive, config)
+        }
+        gears::ui::select::Selected::Tui => {
+            gears::ui::tui::run(&mut runtime, args.prompt.clone(), interactive, config)
+        }
     };
     for notice in runtime.close() {
         diagnostic(&notice);
@@ -281,6 +362,7 @@ fn ask(
     key_from_env: Option<String>,
 ) -> Result<(), String> {
     let (provider_name, selected_provider, model) = select(args, config, choice, None)?;
+    let model = model.ok_or(NO_MODEL)?;
     let key = load_key(&selected_provider, key_from_env)?;
     let provider = connect(
         config,
@@ -327,12 +409,15 @@ impl EventSink for AskSink {
 
 /// The provider and model, preferring the command line, then the session,
 /// then the saved choice, then the configuration's defaults.
+const NO_MODEL: &str =
+    "no model selected; run gears without -p to choose a provider and model, or pass --model";
+
 fn select(
     args: &Args,
     config: &Config,
     choice: Option<&ProviderChoice>,
     session: Option<&Session>,
-) -> Result<(String, NamedProvider, String), String> {
+) -> Result<(String, NamedProvider, Option<String>), String> {
     let provider_name = args
         .provider
         .clone()
@@ -353,8 +438,7 @@ fn select(
         })
         .or_else(|| config.default_model.clone())
         .or_else(|| provider.model.clone())
-        .or_else(|| config.models.first().cloned())
-        .ok_or("no model selected; use --model or provider.model in the config")?;
+        .or_else(|| config.models.first().cloned());
     Ok((provider_name, provider, model))
 }
 

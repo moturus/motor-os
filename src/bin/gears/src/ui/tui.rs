@@ -27,8 +27,7 @@ pub fn run(
     runtime: &mut Runtime,
     initial: Option<String>,
     interactive: bool,
-    models: &[String],
-    providers: &[String],
+    config: &crate::config::Config,
 ) -> Result<(), String> {
     runtime.set_interactive(interactive)?;
     let mut screen = Screen::enter()?;
@@ -58,7 +57,7 @@ pub fn run(
             match action {
                 Action::Quit => app.quit = true,
                 Action::Submit(text) if text.starts_with('/') => {
-                    let result = handle_command(runtime, &mut app, &text, models, providers);
+                    let result = handle_command(runtime, &mut app, &text, config);
                     if !app.quit && runtime.pending_hook_questions() {
                         run_operation(runtime, super::Operation::Questions, true, &mut app)?;
                     }
@@ -992,8 +991,7 @@ fn handle_command(
     runtime: &mut Runtime,
     app: &mut App,
     text: &str,
-    models: &[String],
-    providers: &[String],
+    config: &crate::config::Config,
 ) -> Result<(), String> {
     let (name, argument) = text[1..]
         .split_once(char::is_whitespace)
@@ -1046,6 +1044,16 @@ fn handle_command(
             runtime.new_session(argument == "--ephemeral", None)?;
             app.restore_history(runtime)?;
             show_runtime_notices(runtime, app);
+        }
+        "setup" => {
+            let current = super::current_config(config)?;
+            let directory = crate::directory::default_root()?;
+            match crate::setup::run(&current, &directory, &mut AppAsk(app))? {
+                Some(chosen) => {
+                    runtime.apply_setup(&chosen.provider, chosen.model, &mut AppObserver(app))?;
+                }
+                None => app.push(Kind::Notice, "Setup cancelled.".into(), false),
+            }
         }
         "reset" => {
             let choices = ["No".to_string(), "Yes".to_string()];
@@ -1176,9 +1184,9 @@ fn handle_command(
             let (argument, save_default) = super::selection_and_default(argument);
             let model = if argument.is_empty() {
                 let mut choices = vec![runtime.model().to_string()];
-                for model in models {
-                    if !choices.contains(model) {
-                        choices.push(model.clone());
+                for model in super::model_choices(config, runtime.provider_name()) {
+                    if !choices.contains(&model) {
+                        choices.push(model);
                     }
                 }
                 let selected =
@@ -1201,7 +1209,7 @@ fn handle_command(
             let (argument, save_default) = super::selection_and_default(argument);
             let provider = if argument.is_empty() {
                 let mut choices = vec![runtime.provider_name().to_string()];
-                for provider in providers {
+                for provider in config.providers.keys() {
                     if !choices.contains(provider) {
                         choices.push(provider.clone());
                     }
@@ -1254,6 +1262,13 @@ impl Observer for AppObserver<'_> {
 }
 
 fn picker(app: &mut App, title: &str, items: &[String]) -> Result<Option<usize>, String> {
+    let selected = pick(title, items);
+    app.invalidate();
+    app.render()?;
+    selected
+}
+
+fn pick(title: &str, items: &[String]) -> Result<Option<usize>, String> {
     if items.is_empty() {
         return Err("nothing to select".to_string());
     }
@@ -1262,29 +1277,113 @@ fn picker(app: &mut App, title: &str, items: &[String]) -> Result<Option<usize>,
     loop {
         render_picker(title, items, selected, &mut previous)?;
         match event::read().map_err(|error| error.to_string())? {
-            InputEvent::Resize(_, _) => {}
             InputEvent::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Up => selected = selected.saturating_sub(1),
                 KeyCode::Down => selected = (selected + 1).min(items.len() - 1),
-                KeyCode::Enter => {
-                    app.invalidate();
-                    app.render()?;
-                    return Ok(Some(selected));
-                }
-                KeyCode::Esc => {
-                    app.invalidate();
-                    app.render()?;
-                    return Ok(None);
-                }
+                KeyCode::Enter => return Ok(Some(selected)),
+                KeyCode::Esc => return Ok(None),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.invalidate();
-                    app.render()?;
                     return Ok(None);
                 }
                 _ => {}
             },
             _ => {}
         }
+    }
+}
+
+/// One line of text; `hidden` input shows a dot per character.
+fn text_entry(title: &str, hidden: bool) -> Result<Option<String>, String> {
+    let mut text = String::new();
+    let mut previous = None;
+    loop {
+        let (width, height) = terminal::size().map_err(|error| error.to_string())?;
+        let next = text_frame(width, height, title, &text, hidden);
+        let mut output = io::stdout().lock();
+        paint_frame(&mut output, previous.as_ref(), &next).map_err(|error| error.to_string())?;
+        output.flush().map_err(|error| error.to_string())?;
+        previous = Some(next);
+        match event::read().map_err(|error| error.to_string())? {
+            InputEvent::Paste(pasted) => text.push_str(pasted.trim_end_matches(['\r', '\n'])),
+            InputEvent::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Enter => return Ok(Some(text)),
+                KeyCode::Esc => return Ok(None),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(None);
+                }
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    text.push(character);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+fn text_frame(width: u16, height: u16, title: &str, text: &str, hidden: bool) -> Frame {
+    let width = usize::from(width).max(3);
+    let height = usize::from(height).max(1);
+    let mut frame = Frame::new(width, height);
+    let title = wrap(&single_line(title), width);
+    let rows = title.len().min(height - 1);
+    for (row, line) in title.iter().take(rows).enumerate() {
+        frame.lines[row].push(Color::Cyan, line, width);
+    }
+    let shown = if hidden {
+        "•".repeat(text.chars().count())
+    } else {
+        single_line(text)
+    };
+    // Long input keeps its end in view.
+    let count = shown.chars().count();
+    let tail = shown
+        .chars()
+        .skip(count.saturating_sub(width - 3))
+        .collect::<String>();
+    frame.lines[rows].push(Color::White, "> ", width);
+    frame.lines[rows].push(Color::White, &tail, width);
+    frame.cursor = Some(((2 + tail.chars().count()) as u16, rows as u16));
+    frame
+}
+
+/// Setup questions asked before the session UI starts.
+pub struct SetupScreen {
+    _screen: Screen,
+}
+
+impl SetupScreen {
+    pub fn enter() -> Result<Self, String> {
+        Screen::enter().map(|screen| Self { _screen: screen })
+    }
+}
+
+impl crate::setup::Ask for SetupScreen {
+    fn choose(&mut self, title: &str, items: &[String]) -> Result<Option<usize>, String> {
+        pick(title, items)
+    }
+
+    fn text(&mut self, title: &str, hidden: bool) -> Result<Option<String>, String> {
+        text_entry(title, hidden)
+    }
+}
+
+/// `/setup` inside a running session; the transcript is redrawn afterwards.
+struct AppAsk<'a>(&'a mut App);
+
+impl crate::setup::Ask for AppAsk<'_> {
+    fn choose(&mut self, title: &str, items: &[String]) -> Result<Option<usize>, String> {
+        picker(self.0, title, items)
+    }
+
+    fn text(&mut self, title: &str, hidden: bool) -> Result<Option<String>, String> {
+        let text = text_entry(title, hidden);
+        self.0.invalidate();
+        self.0.render()?;
+        text
     }
 }
 
@@ -1560,12 +1659,30 @@ mod tests {
             .clone();
         let mut app = App::new(&runtime, true).unwrap();
         app.scroll = 100;
-        handle_command(&mut runtime, &mut app, "/new", &[], &[]).unwrap();
+        handle_command(
+            &mut runtime,
+            &mut app,
+            "/new",
+            &crate::config::Config::default(),
+        )
+        .unwrap();
         assert!(!visible(&app).contains("saved answer"));
-        handle_command(&mut runtime, &mut app, &format!("/resume {id}"), &[], &[]).unwrap();
+        handle_command(
+            &mut runtime,
+            &mut app,
+            &format!("/resume {id}"),
+            &crate::config::Config::default(),
+        )
+        .unwrap();
         assert!(visible(&app).contains("latest answer"));
         assert_eq!(app.scroll, 0);
-        handle_command(&mut runtime, &mut app, &format!("/tree {branch}"), &[], &[]).unwrap();
+        handle_command(
+            &mut runtime,
+            &mut app,
+            &format!("/tree {branch}"),
+            &crate::config::Config::default(),
+        )
+        .unwrap();
         assert!(visible(&app).contains("saved answer"));
         assert!(!visible(&app).contains("latest answer"));
         assert!(!visible(&app).contains("abandoned answer"));
@@ -1773,6 +1890,27 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         assert_eq!(app.scroll, 0);
         assert_eq!(rendered(&app), frame);
+    }
+
+    #[test]
+    fn hidden_text_shows_dots_and_long_text_keeps_its_end_in_view() {
+        let text = |frame: Frame| {
+            frame
+                .lines
+                .iter()
+                .map(|line| {
+                    line.0
+                        .iter()
+                        .map(|styled| styled.character)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let hidden = text_frame(12, 3, "API key", "sk-1", true);
+        assert_eq!(hidden.cursor, Some((6, 1)));
+        assert_eq!(text(hidden), ["API key", "> ••••", ""]);
+        let long = text_frame(8, 2, "Model id", "abcdefghij", false);
+        assert_eq!(text(long), ["Model id", "> fghij"]);
     }
 
     #[test]
