@@ -28,9 +28,17 @@ not installed;
 `src/tests/test-wasm.sh` uploads them to `/none/tmp` on every VM boot during tests.
 
 `wasmtime-rt` runs as role None (`MOTOR_OS_CAPS=0`, `0x100`, `0x200` or
-`0x300`) and needs `--allow-precompiled`. Each linear memory is limited to
-96 MiB, and a process to four memories reserving 128 MiB in total; `-W
-max-memory-size` and `-W max-memories` can only lower these. A store defaults
+`0x300`) and needs `--allow-precompiled`.
+
+Wasmtime and Wasmi reserve each linear memory's declared maximum, or 4 GiB
+without one, as a sparse lazy mapping: only the pages a guest touches use RAM,
+and, as on Linux, there is no limit on the total or the number of memories in a
+process. A 64-bit memory cannot grow past 4 GiB; `memory.grow` returns -1, as
+upstream Wasmtime does with `-O memory-may-move=n`. When RAM runs out, Motor
+kills whichever process has a page fault refused (there is no OOM killer, see
+[OOM handling](oom-handling.md)): the guest's runtime or another process. `-W
+max-memory-size` and `-W max-memories` bound a `wasmtime-rt` guest as upstream.
+A store defaults
 to 64 instances, 16 tables and 32,768 table elements, which `-W max-instances`,
 `-W max-tables` and `-W max-table-elements` override. `-W timeout=DURATION`
 interrupts a guest compiled with epoch interruption. The example and HTML documentation are part of `dev.img`.
