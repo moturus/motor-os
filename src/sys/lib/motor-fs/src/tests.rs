@@ -4334,3 +4334,259 @@ fn concurrent_miss_dedup() {
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
     rt.block_on(concurrent_miss_dedup_test()).unwrap();
 }
+
+/// Serves `inner`, but records and refuses any access past the device instead
+/// of forwarding it: the filesystem must never issue one, whatever entry ids a
+/// caller passes.
+struct RangeCheckingBlockDevice {
+    inner: AsyncFileBlockDevice,
+    out_of_range: Rc<Cell<Option<u64>>>,
+}
+
+impl RangeCheckingBlockDevice {
+    fn check(&self, block_no: u64) -> Result<()> {
+        if block_no < self.inner.num_blocks() {
+            return Ok(());
+        }
+        self.out_of_range.set(Some(block_no));
+        Err(ErrorKind::InvalidInput.into())
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl AsyncBlockDevice for RangeCheckingBlockDevice {
+    type Completion = <AsyncFileBlockDevice as AsyncBlockDevice>::Completion;
+
+    fn num_blocks(&self) -> u64 {
+        self.inner.num_blocks()
+    }
+
+    async fn read_block<T: AsMut<fittings::iobuf::IoBuf> + Unpin>(
+        &self,
+        block_no: u64,
+        block: T,
+    ) -> (T, Result<()>) {
+        if let Err(err) = self.check(block_no) {
+            return (block, Err(err));
+        }
+        self.inner.read_block(block_no, block).await
+    }
+
+    async fn write_block<T: AsRef<fittings::iobuf::IoBuf> + Unpin>(
+        &self,
+        block_no: u64,
+        block: T,
+    ) -> (T, Result<()>) {
+        if let Err(err) = self.check(block_no) {
+            return (block, Err(err));
+        }
+        self.inner.write_block(block_no, block).await
+    }
+
+    async fn write_blocks_with_completion(
+        &self,
+        first_block_no: u64,
+        blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
+    ) -> Result<Self::Completion> {
+        self.check(first_block_no)?;
+        self.inner
+            .write_blocks_with_completion(first_block_no, blocks)
+            .await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.inner.flush().await
+    }
+}
+
+fn entry_id_at(block_no: u64, generation: u64) -> EntryId {
+    crate::EntryIdInternal::new(crate::BlockNo::from_u64(block_no), generation).into()
+}
+
+fn assert_refused<T>(result: Result<T>, operation: &str, block_no: u64) {
+    match result {
+        Err(err) if err.kind() == ErrorKind::InvalidInput => {}
+        Err(err) => panic!("{operation} on block {block_no:#x}: {err:?}, not InvalidInput"),
+        Ok(_) => panic!("{operation} on block {block_no:#x} succeeded"),
+    }
+}
+
+// Entry ids come from untrusted callers. Block numbers that cannot hold an
+// entry (the superblock, the transaction log, anything past the device) are
+// refused by every operation, and the device never sees them.
+async fn entry_id_range_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024;
+    let path = std::env::temp_dir().join("motor_fs_entry_id_range_test");
+    let path = Utf8PathBuf::from_path_buf(path).unwrap();
+    std::fs::remove_file(path.clone()).ok();
+
+    let out_of_range = Rc::new(Cell::new(None));
+    let device = RangeCheckingBlockDevice {
+        inner: AsyncFileBlockDevice::create(&path, NUM_BLOCKS).await?,
+        out_of_range: out_of_range.clone(),
+    };
+    let mut fs = crate::MotorFs::format(Box::new(device)).await?;
+    let role = Role::System;
+    let root = crate::ROOT_DIR_ID;
+    let all = RolePermissions::all(AccessPermissions::Rwx);
+    let file = fs
+        .create_entry(role, root, EntryKind::File, "file", all)
+        .await?;
+    assert_eq!(fs.write(role, file, 0, b"original").await?, 8);
+
+    let generation = crate::EntryIdInternal::from(file).generation;
+    let txn_log_start = NUM_BLOCKS - crate::MAX_BLOCKS_IN_TXN_LOG as u64;
+    let mut buf = [0_u8; 8];
+    for block_no in [
+        0,
+        txn_log_start,
+        NUM_BLOCKS - 1,
+        NUM_BLOCKS,
+        1 << 56,
+        u64::MAX,
+    ] {
+        let id = entry_id_at(block_no, generation);
+        assert_refused(fs.stat(role, id, "file").await, "stat", block_no);
+        assert_refused(
+            fs.create_entry(role, id, EntryKind::File, "new", all).await,
+            "create_entry",
+            block_no,
+        );
+        assert_refused(
+            fs.set_permissions(role, id, role, AccessPermissions::Rw)
+                .await,
+            "set_permissions",
+            block_no,
+        );
+        assert_refused(
+            fs.set_all_permissions(role, id, all).await,
+            "set_all_permissions",
+            block_no,
+        );
+        assert_refused(fs.delete_entry(role, id).await, "delete_entry", block_no);
+        assert_refused(
+            fs.move_entry(role, id, root, "moved").await,
+            "move_entry",
+            block_no,
+        );
+        assert_refused(
+            fs.move_entry(role, file, id, "moved").await,
+            "move_entry into",
+            block_no,
+        );
+        assert_refused(
+            fs.move_noreplace(role, id, root, "moved").await,
+            "move_noreplace",
+            block_no,
+        );
+        assert_refused(
+            fs.move_noreplace(role, file, id, "moved").await,
+            "move_noreplace into",
+            block_no,
+        );
+        assert_refused(
+            fs.get_first_entry(role, id).await,
+            "get_first_entry",
+            block_no,
+        );
+        assert_refused(
+            fs.get_next_entry(role, id).await,
+            "get_next_entry",
+            block_no,
+        );
+        assert_refused(fs.get_parent(role, id).await, "get_parent", block_no);
+        assert_refused(fs.name(role, id).await, "name", block_no);
+        assert_refused(fs.metadata(role, id).await, "metadata", block_no);
+        assert_refused(fs.read(role, id, 0, &mut buf).await, "read", block_no);
+        assert_refused(fs.write(role, id, 0, b"x").await, "write", block_no);
+        assert_refused(fs.resize(role, id, 0).await, "resize", block_no);
+        assert_refused(
+            fs.copy_file_range(role, id, 0, file, 0, 8).await,
+            "copy_file_range from",
+            block_no,
+        );
+        assert_refused(
+            fs.copy_file_range(role, file, 0, id, 0, 8).await,
+            "copy_file_range into",
+            block_no,
+        );
+        fs.prefetch(id, 0, 1).await;
+    }
+    assert_eq!(
+        out_of_range.get(),
+        None,
+        "the device saw a block past its end"
+    );
+
+    // Nothing above touched the filesystem, and the root is still reachable
+    // both as `ROOT_ID` and by its own entry id.
+    assert_eq!(fs.metadata(role, root).await?.size, 1);
+    assert!(fs.stat(role, async_fs::ROOT_ID, "file").await?.is_some());
+    assert!(fs.stat(role, root, "file").await?.is_some());
+    assert_eq!(fs.read(role, file, 0, &mut buf).await?, 8);
+    assert_eq!(&buf, b"original");
+    Ok(())
+}
+
+#[test]
+fn entry_id_range() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(entry_id_range_test()).unwrap();
+}
+
+// A block inside the entry area that holds no entry: `stat` used to read the
+// parent's kind before validating the block, and `kind` panics on anything
+// that is not an entry. Both a never-written block and a file data block,
+// whose bytes the caller chose, must be refused like any other bad id.
+async fn stat_non_entry_parent_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 256;
+    let mut fs = create_fs("motor_fs_stat_non_entry_parent_test", NUM_BLOCKS).await?;
+    let role = Role::System;
+    let all = RolePermissions::all(AccessPermissions::Rwx);
+    let file = fs
+        .create_entry(role, crate::ROOT_DIR_ID, EntryKind::File, "file", all)
+        .await?;
+    // A whole block of data does not fit inline, so it gets a block of its own.
+    let data = [0xa5_u8; async_fs::BLOCK_SIZE];
+    assert_eq!(fs.write(role, file, 0, &data).await?, data.len());
+
+    let txn_log_start = NUM_BLOCKS - crate::MAX_BLOCKS_IN_TXN_LOG as u64;
+    let mut data_block = None;
+    for block_no in 2..txn_log_start {
+        if fs
+            .block_cache()
+            .get_block(block_no)
+            .await?
+            .block()
+            .as_bytes()
+            == &data[..]
+        {
+            data_block = Some(block_no);
+            break;
+        }
+    }
+    let data_block = data_block.expect("the file's data block");
+
+    let generation = crate::EntryIdInternal::from(file).generation;
+    let never_written = txn_log_start - 1;
+    assert_refused(
+        fs.stat(role, entry_id_at(never_written, generation), "x")
+            .await,
+        "stat",
+        never_written,
+    );
+    assert!(
+        fs.stat(role, entry_id_at(data_block, generation), "x")
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn stat_non_entry_parent() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(stat_non_entry_parent_test()).unwrap();
+}

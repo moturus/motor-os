@@ -18,8 +18,7 @@ use moto_tooling::iobuf::IoBuf;
 
 use crate::{
     DirEntryBlock, EntryIdInternal, INLINE_CAPACITY, INLINE_DATA_OFFSET, MAX_BLOCKS_IN_TXN_LOG,
-    RESERVED_BLOCKS, ROOT_DIR_ID, ROOT_DIR_ID_INTERNAL, Superblock, Txn, dir_entry,
-    validate_filename,
+    RESERVED_BLOCKS, ROOT_DIR_ID_INTERNAL, Superblock, Txn, dir_entry, validate_filename,
 };
 
 pub const PARTITION_ID: u8 = 0x2e;
@@ -82,6 +81,24 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         }
     }
 
+    /// The internal form of an entry id supplied by a caller, who may pass any
+    /// value. `ROOT_ID` means the root directory. Block numbers that no entry
+    /// can have are refused here, before they reach the block cache: the
+    /// superblock, the transaction log and anything past the device. A wrong
+    /// generation, or a block holding something other than an entry, is
+    /// caught by `validate_entry` once the block is read.
+    fn internal_id(&self, entry_id: EntryId) -> Result<EntryIdInternal> {
+        if entry_id == async_fs::ROOT_ID {
+            return Ok(ROOT_DIR_ID_INTERNAL);
+        }
+        let id: EntryIdInternal = entry_id.into();
+        let txn_log_start = self.block_cache.total_blocks() - MAX_BLOCKS_IN_TXN_LOG as u64;
+        if id.block_no() == 0 || id.block_no() >= txn_log_start {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        Ok(id)
+    }
+
     #[cfg(all(feature = "image-admin", target_os = "linux"))]
     pub async fn set_all_permissions_image_admin(
         &mut self,
@@ -90,13 +107,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         permissions: RolePermissions,
     ) -> Result<()> {
         self.check_err()?;
-        let entry_id = if entry_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            entry_id
-        };
-        Txn::do_set_all_permissions_image_admin_txn(self, caller, entry_id.into(), permissions)
-            .await
+        let entry_id = self.internal_id(entry_id)?;
+        Txn::do_set_all_permissions_image_admin_txn(self, caller, entry_id, permissions).await
     }
 
     /// Give `entry_id` the permissions, timestamps and user extensions of
@@ -109,12 +121,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         source: &async_fs::Metadata,
     ) -> Result<()> {
         self.check_err()?;
-        let entry_id = if entry_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            entry_id
-        };
-        Txn::do_copy_metadata_image_admin_txn(self, caller, entry_id.into(), source).await
+        let entry_id = self.internal_id(entry_id)?;
+        Txn::do_copy_metadata_image_admin_txn(self, caller, entry_id, source).await
     }
 
     /// Mode-E access enforcement: require that `role` holds the `need`
@@ -142,8 +150,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     /// on the entry's current parent. Only System may change the root. The
     /// setters hold `&mut self`, so the parent cannot change before their
     /// transaction commits.
-    async fn require_chmod_authority(&self, caller: Role, entry_id: EntryId) -> Result<()> {
-        match self.get_parent(caller, entry_id).await? {
+    async fn require_chmod_authority(&self, caller: Role, entry_id: EntryIdInternal) -> Result<()> {
+        match self.get_parent(caller, entry_id.into()).await? {
             Some(parent) => {
                 self.require_access(caller, parent.into(), Need::Write)
                     .await
@@ -434,7 +442,9 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         if count == 0 || self.check_err().is_err() {
             return;
         }
-        let file_id: EntryIdInternal = file_id.into();
+        let Ok(file_id) = self.internal_id(file_id) else {
+            return;
+        };
         let Ok(entry_block) = self.block_cache.get_block(file_id.block_no()).await else {
             return;
         };
@@ -503,17 +513,9 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         replace: bool,
     ) -> Result<()> {
         self.check_err()?;
-        let new_parent_id = if new_parent_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            new_parent_id
-        };
-
-        if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
-            return Err(ErrorKind::InvalidInput.into());
-        }
-
-        if entry_id == new_parent_id {
+        let entry_id = self.internal_id(entry_id)?;
+        let new_parent_id = self.internal_id(new_parent_id)?;
+        if entry_id == ROOT_DIR_ID_INTERNAL || entry_id == new_parent_id {
             return Err(ErrorKind::InvalidInput.into());
         }
 
@@ -523,10 +525,11 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         // which will create a detached cycle.
         let mut ancestor_id = new_parent_id;
         loop {
-            let Some(grandparent_id) = self.get_parent(role, ancestor_id).await? else {
-                assert_eq!(ancestor_id, ROOT_DIR_ID_INTERNAL.into());
+            let Some(grandparent_id) = self.get_parent(role, ancestor_id.into()).await? else {
+                assert_eq!(ancestor_id, ROOT_DIR_ID_INTERNAL);
                 break;
             };
+            let grandparent_id = EntryIdInternal::from(grandparent_id);
             if grandparent_id == entry_id {
                 log::debug!("MotorFS::move_entry: cannot move an entry under its own child.");
                 return Err(ErrorKind::InvalidInput.into());
@@ -534,20 +537,21 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             ancestor_id = grandparent_id;
         }
 
-        let old_parent_id = self.get_parent(role, entry_id).await?.unwrap();
+        let old_parent_id = self.get_parent(role, entry_id.into()).await?.unwrap();
+        let old_parent_id = EntryIdInternal::from(old_parent_id);
 
         // Moving requires write on both the source and destination directories.
-        self.require_access(role, old_parent_id.into(), Need::Write)
+        self.require_access(role, old_parent_id, Need::Write)
             .await?;
-        self.require_access(role, new_parent_id.into(), Need::Write)
+        self.require_access(role, new_parent_id, Need::Write)
             .await?;
 
-        log::debug!("move_entry {entry_id:x} to parent {new_parent_id:x} with name '{new_name}'");
+        log::debug!("move_entry {entry_id:?} to parent {new_parent_id:?} with name '{new_name}'");
         Txn::do_move_entry_txn(
             self,
-            entry_id.into(),
-            old_parent_id.into(),
-            new_parent_id.into(),
+            entry_id,
+            old_parent_id,
+            new_parent_id,
             new_name,
             replace,
         )
@@ -568,15 +572,11 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         validate_filename(filename)?;
         log::debug!("stat: {parent_id:x} '{filename}'");
 
-        let parent_id = if parent_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            parent_id
-        };
-        let id: EntryIdInternal = parent_id.into();
-
+        let id = self.internal_id(parent_id)?;
         {
             let parent_block = self.block_cache.get_block(id.block_no()).await?.clone();
+            // `kind` panics on a block that is not an entry: validate first.
+            dir_entry!(parent_block).validate_entry(id)?;
             if dir_entry!(parent_block).kind() != EntryKind::Directory {
                 return Err(ErrorKind::NotADirectory.into());
             }
@@ -622,28 +622,19 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             }
         }
 
-        let parent_id = if parent_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            parent_id
-        };
+        let parent_id = self.internal_id(parent_id)?;
 
         // Creating an entry requires write on the parent directory. The
         // existence check uses the unenforced lookup so that `w` alone suffices
         // (it does not additionally require traverse/`x`).
-        self.require_access(role, parent_id.into(), Need::Write)
-            .await?;
+        self.require_access(role, parent_id, Need::Write).await?;
 
-        if self
-            .lookup_child(parent_id.into(), filename)
-            .await?
-            .is_some()
-        {
+        if self.lookup_child(parent_id, filename).await?.is_some() {
             return Err(ErrorKind::AlreadyExists.into());
         }
 
-        log::debug!("create_entry: parent_id: {parent_id:x} kind: {kind:?} fname: '{filename}'");
-        Txn::do_create_entry_txn(self, parent_id.into(), kind, filename, permissions)
+        log::debug!("create_entry: parent_id: {parent_id:?} kind: {kind:?} fname: '{filename}'");
+        Txn::do_create_entry_txn(self, parent_id, kind, filename, permissions)
             .await
             .map(|e| e.into())
     }
@@ -656,13 +647,9 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         access: async_fs::AccessPermissions,
     ) -> Result<()> {
         self.check_err()?;
-        let entry_id = if entry_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            entry_id
-        };
+        let entry_id = self.internal_id(entry_id)?;
         self.require_chmod_authority(caller, entry_id).await?;
-        Txn::do_set_permissions_txn(self, caller, entry_id.into(), target, access).await
+        Txn::do_set_permissions_txn(self, caller, entry_id, target, access).await
     }
 
     async fn set_all_permissions(
@@ -672,29 +659,26 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         permissions: RolePermissions,
     ) -> Result<()> {
         self.check_err()?;
-        let entry_id = if entry_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            entry_id
-        };
+        let entry_id = self.internal_id(entry_id)?;
         self.require_chmod_authority(caller, entry_id).await?;
-        Txn::do_set_all_permissions_txn(self, caller, entry_id.into(), permissions).await
+        Txn::do_set_all_permissions_txn(self, caller, entry_id, permissions).await
     }
 
     async fn delete_entry(&mut self, role: Role, entry_id: EntryId) -> Result<()> {
         self.check_err()?;
-        if entry_id == ROOT_DIR_ID_INTERNAL.into() {
+        let entry_id = self.internal_id(entry_id)?;
+        if entry_id == ROOT_DIR_ID_INTERNAL {
             return Err(ErrorKind::InvalidInput.into());
         }
 
         // Deletion is gated by write on the parent directory.
-        if let Some(parent) = self.get_parent(role, entry_id).await? {
+        if let Some(parent) = self.get_parent(role, entry_id.into()).await? {
             self.require_access(role, parent.into(), Need::Write)
                 .await?;
         }
 
-        log::debug!("delete_entry {entry_id:x}");
-        Txn::do_delete_entry_txn(self, entry_id.into()).await
+        log::debug!("delete_entry {entry_id:?}");
+        Txn::do_delete_entry_txn(self, entry_id).await
     }
 
     async fn move_entry(
@@ -723,12 +707,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     #[allow(clippy::await_holding_refcell_ref)]
     async fn get_first_entry(&self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>> {
         self.check_err()?;
-        let parent_id = if parent_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            parent_id
-        };
-        let parent_id: EntryIdInternal = parent_id.into();
+        let parent_id = self.internal_id(parent_id)?;
         let parent_block = self
             .block_cache
             .get_block(parent_id.block_no())
@@ -759,18 +738,18 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     #[allow(clippy::await_holding_refcell_ref)]
     async fn get_next_entry(&self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         self.check_err()?;
-        if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
+        let entry_id = self.internal_id(entry_id)?;
+        if entry_id == ROOT_DIR_ID_INTERNAL {
             return Ok(None);
         }
 
         // Listing is gated by execute (traverse) on the directory (the entry's
         // parent).
-        if let Some(parent) = self.get_parent(role, entry_id).await? {
+        if let Some(parent) = self.get_parent(role, entry_id.into()).await? {
             self.require_access(role, parent.into(), Need::Execute)
                 .await?;
         }
 
-        let entry_id: EntryIdInternal = entry_id.into();
         let entry_block = self
             .block_cache
             .get_block(entry_id.block_no())
@@ -811,8 +790,8 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     async fn get_parent(&self, _role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         self.check_err()?;
-        let id: EntryIdInternal = entry_id.into();
-        if id == ROOT_DIR_ID_INTERNAL || id == async_fs::ROOT_ID.into() {
+        let id = self.internal_id(entry_id)?;
+        if id == ROOT_DIR_ID_INTERNAL {
             return Ok(None);
         }
 
@@ -826,12 +805,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     async fn name(&self, _role: Role, entry_id: EntryId) -> Result<String> {
         self.check_err()?;
-        let entry_id = if entry_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            entry_id
-        };
-        let id: EntryIdInternal = entry_id.into();
+        let id = self.internal_id(entry_id)?;
         let block = self.block_cache.get_block(id.block_no()).await?;
         dir_entry!(block).validate_entry(id)?;
 
@@ -842,12 +816,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     async fn metadata(&self, _role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
         self.check_err()?;
-        let entry_id = if entry_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            entry_id
-        };
-        let id: EntryIdInternal = entry_id.into();
+        let id = self.internal_id(entry_id)?;
         let block = self.block_cache.get_block(id.block_no()).await?;
         dir_entry!(block).validate_entry(id)?;
 
@@ -863,7 +832,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         buf: &mut [u8],
     ) -> Result<usize> {
         self.check_err()?;
-        let file_id: EntryIdInternal = file_id.into();
+        let file_id = self.internal_id(file_id)?;
         let entry_block = self.block_cache.get_block(file_id.block_no()).await?;
         dir_entry!(entry_block).validate_entry(file_id)?;
         // Inlined `require_access(role, file_id, Need::Read)`: reads are hot,
@@ -939,20 +908,20 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         buf: &[u8],
     ) -> Result<usize> {
         self.check_err()?;
-        self.require_access(role, file_id.into(), Need::Write)
-            .await?;
+        let file_id = self.internal_id(file_id)?;
+        self.require_access(role, file_id, Need::Write).await?;
         log::trace!(
-            "write to file {file_id:x} at offset 0x{offset:x} len 0x{:x}",
+            "write to file {file_id:?} at offset 0x{offset:x} len 0x{:x}",
             buf.len()
         );
-        Txn::do_write_txn(self, file_id.into(), offset, buf).await
+        Txn::do_write_txn(self, file_id, offset, buf).await
     }
 
     async fn resize(&mut self, role: Role, file_id: EntryId, new_size: u64) -> Result<()> {
         self.check_err()?;
-        self.require_access(role, file_id.into(), Need::Write)
-            .await?;
-        Txn::do_resize_txn(self, file_id.into(), new_size).await
+        let file_id = self.internal_id(file_id)?;
+        self.require_access(role, file_id, Need::Write).await?;
+        Txn::do_resize_txn(self, file_id, new_size).await
     }
 
     async fn empty_blocks(&self) -> Result<u64> {
