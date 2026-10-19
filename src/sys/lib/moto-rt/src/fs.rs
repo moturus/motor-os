@@ -87,10 +87,11 @@ pub struct FileAttr {
     pub created: u128,
     pub modified: u128,
     pub accessed: u128,
-    /// v2: a unique object identity. For motor-fs, low u64 = block_no and
-    /// high u64 = generation. For synthetic descriptors, the low u64 is a
-    /// per-process open-description ID and the high u64 is zero. Zero means
-    /// unknown. The VDSO writes this field (and fields of future versions)
+    /// v2: a unique object identity. Filesystem IDs are opaque and stable
+    /// within a boot; the filesystem root has ID zero. For synthetic
+    /// descriptors, the low u64 is a per-process open-description ID and the
+    /// high u64 is zero. Otherwise, zero means unknown identity.
+    /// The VDSO writes this field (and fields of future versions)
     /// only when the caller-stamped `version` says the buffer has room.
     pub entry_id: u128,
 }

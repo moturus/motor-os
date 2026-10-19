@@ -570,7 +570,8 @@ pub(super) async fn on_cmd_spawn(
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
-    let req = api_fs::spawn_msg_decode(msg, sender).map_err(crate::util::map_native_error)?;
+    let mut req = api_fs::spawn_msg_decode(msg, sender).map_err(crate::util::map_native_error)?;
+    req.entry_id = runtime.entry_ids.decode(req.entry_id);
     let stats = &runtime.spawn_stats;
     stats.requests.set(stats.requests.get() + 1);
     let started = moto_rt::time::Instant::now();

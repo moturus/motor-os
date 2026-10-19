@@ -20,6 +20,7 @@ use crate::util::map_err_into_native;
 use crate::util::map_native_error;
 
 mod block_io;
+mod entry_ids;
 mod lock_manager;
 mod mbr;
 mod spawn;
@@ -30,6 +31,7 @@ mod virtio_partition;
 /// is private to this one. See [`crate::self_test`].
 #[cfg(debug_assertions)]
 pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
+    entry_ids::self_test::TESTS,
     lock_manager::self_test::TESTS,
     &[
         ("fs::spawn::queued_mutations", stats::test_executable_locks),
@@ -309,11 +311,12 @@ impl FileSystem for FS {
 }
 
 /// The FS runtime handle passed around the message handlers: the filesystem
-/// plus its data-path stats. Cheap to clone (two `Rc`s). Mirrors
+/// plus its data-path stats. Cheap to clone (shared via `Rc`). Mirrors
 /// `runtime::net::NetRuntime`.
 #[derive(Clone)]
 pub(crate) struct FsRuntime {
     fs: Rc<LocalRwLock<FS>>,
+    entry_ids: Rc<entry_ids::EntryIds>,
     fs_stats: Rc<stats::FsStats>,
     locks: Rc<RefCell<lock_manager::LockManager<PendingLockResponse>>>,
     channel_budget: Rc<channel_budget::ChannelBudget>,
@@ -424,6 +427,7 @@ pub(super) async fn init(
         .map_err(|err| std::io::Error::from_raw_os_error(err as i32))?;
     let runtime = FsRuntime {
         fs: fs.clone(),
+        entry_ids: Rc::new(entry_ids::EntryIds::new()),
         fs_stats,
         locks: Default::default(),
         channel_budget,
@@ -734,6 +738,7 @@ async fn on_cmd_file_lock(
     let request_id = msg.id;
     let (entry_id, open_id, operation) =
         api_fs::file_lock_msg_decode(msg).map_err(map_native_error)?;
+    let entry_id = runtime.entry_ids.decode(entry_id);
     let connection_id = sender.remote_handle().as_u64();
     if operation == moto_rt::fs::UNLOCK {
         let grants = runtime
@@ -823,6 +828,7 @@ async fn on_cmd_stat(
     role: Role,
 ) -> Result<()> {
     let (parent_id, fname) = api_fs::stat_msg_decode(msg, sender).map_err(map_native_error)?;
+    let parent_id = runtime.entry_ids.decode(parent_id);
 
     let fs = runtime.fs.read().await;
     let Some((entry_id, entry_kind)) =
@@ -838,7 +844,7 @@ async fn on_cmd_stat(
     };
     core::mem::drop(fs);
 
-    let resp = api_fs::stat_resp_encode(msg, entry_id, entry_kind);
+    let resp = api_fs::stat_resp_encode(msg, runtime.entry_ids.encode(entry_id), entry_kind);
     sender.send(resp).await.map_err(map_native_error)
 }
 
@@ -871,7 +877,7 @@ async fn on_cmd_stat_path(
     }
     core::mem::drop(fs);
 
-    let resp = api_fs::stat_resp_encode(msg, entry_id, entry_kind);
+    let resp = api_fs::stat_resp_encode(msg, runtime.entry_ids.encode(entry_id), entry_kind);
     sender.send(resp).await.map_err(map_native_error)
 }
 
@@ -883,6 +889,7 @@ async fn on_cmd_create_file(
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
+    let parent_id = runtime.entry_ids.decode(parent_id);
 
     let mut fs = runtime.fs.write().await;
     let entry_id = fs
@@ -902,7 +909,7 @@ async fn on_cmd_create_file(
     core::mem::drop(fs);
     log::debug!("created file {parent_id:x}:{fname} => {entry_id:x}");
 
-    let resp = api_fs::stat_resp_encode(msg, entry_id, EntryKind::File);
+    let resp = api_fs::stat_resp_encode(msg, runtime.entry_ids.encode(entry_id), EntryKind::File);
     sender.send(resp).await.map_err(map_native_error)
 }
 
@@ -914,6 +921,7 @@ async fn on_cmd_create_with_permissions(
 ) -> Result<()> {
     let (parent_id, kind, fname, raw_permissions) =
         api_fs::create_with_permissions_msg_decode(msg, sender).map_err(map_native_error)?;
+    let parent_id = runtime.entry_ids.decode(parent_id);
     let permissions = RolePermissions::new(
         raw_permissions[0].try_into()?,
         raw_permissions[1].try_into()?,
@@ -928,7 +936,7 @@ async fn on_cmd_create_with_permissions(
         .map_err(map_native_error)?;
     core::mem::drop(fs);
 
-    let resp = api_fs::stat_resp_encode(msg, entry_id, kind);
+    let resp = api_fs::stat_resp_encode(msg, runtime.entry_ids.encode(entry_id), kind);
     sender.send(resp).await.map_err(map_native_error)
 }
 
@@ -940,6 +948,7 @@ async fn on_cmd_create_dir(
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
+    let parent_id = runtime.entry_ids.decode(parent_id);
 
     let mut fs = runtime.fs.write().await;
     let entry_id = fs
@@ -959,7 +968,11 @@ async fn on_cmd_create_dir(
     core::mem::drop(fs);
     log::debug!("created directory {parent_id:x}:{fname} => {entry_id:x}");
 
-    let resp = api_fs::stat_resp_encode(msg, entry_id, EntryKind::Directory);
+    let resp = api_fs::stat_resp_encode(
+        msg,
+        runtime.entry_ids.encode(entry_id),
+        EntryKind::Directory,
+    );
     sender.send(resp).await.map_err(map_native_error)
 }
 
@@ -1013,6 +1026,7 @@ async fn on_cmd_write(
 
     let (file_id, offset, len, io_page) =
         api_fs::write_msg_decode(msg, sender).map_err(map_native_error)?;
+    let file_id = runtime.entry_ids.decode(file_id);
 
     // `len` comes from the (untrusted) client; reject anything that does not
     // fit into an io_page instead of panicking on the slice below.
@@ -1052,6 +1066,7 @@ async fn on_cmd_write_multi(
 ) -> Result<()> {
     let (file_id, offset, len, pages) =
         api_fs::write_multi_msg_decode(msg, sender).map_err(map_native_error)?;
+    let file_id = runtime.entry_ids.decode(file_id);
 
     // One FS lock acquire for the whole message. The decode above recovered
     // every page, so all paths below free them on drop.
@@ -1102,6 +1117,7 @@ async fn on_cmd_read(
 ) -> Result<()> {
     let started = stats::now_ticks();
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
+    let file_id = runtime.entry_ids.decode(file_id);
 
     // Requests spanning more than one io_page get a multi-page response;
     // see `api_fs::READ_MAX_PAGES`.
@@ -1285,6 +1301,7 @@ async fn on_cmd_metadata(
     role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::metadata_msg_decode(msg);
+    let entry_id = runtime.entry_ids.decode(entry_id);
 
     let fs = runtime.fs.read().await;
     let metadata = fs.metadata(role, entry_id).await?;
@@ -1307,6 +1324,7 @@ async fn on_cmd_set_permissions(
     role: Role,
 ) -> Result<()> {
     let (entry_id, raw_access) = api_fs::set_permissions_msg_decode(msg);
+    let entry_id = runtime.entry_ids.decode(entry_id);
     let access = AccessPermissions::try_from(raw_access)?;
 
     let mut fs = runtime.fs.write().await;
@@ -1330,6 +1348,7 @@ async fn on_cmd_set_all_permissions(
     role: Role,
 ) -> Result<()> {
     let (entry_id, raw_permissions) = api_fs::set_all_permissions_msg_decode(msg);
+    let entry_id = runtime.entry_ids.decode(entry_id);
     let permissions = RolePermissions::new(
         raw_permissions[0].try_into()?,
         raw_permissions[1].try_into()?,
@@ -1357,6 +1376,7 @@ async fn on_cmd_resize(
     role: Role,
 ) -> Result<()> {
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
+    let file_id = runtime.entry_ids.decode(file_id);
 
     let mut fs = runtime.fs.write().await;
     refuse_if_executing(&runtime, file_id)?;
@@ -1379,6 +1399,7 @@ async fn on_cmd_delete_entry(
     role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::delete_entry_msg_decode(msg);
+    let entry_id = runtime.entry_ids.decode(entry_id);
 
     let mut fs = runtime.fs.write().await;
     refuse_if_executing(&runtime, entry_id)?;
@@ -1414,9 +1435,12 @@ async fn on_cmd_get_first_entry(
     role: Role,
 ) -> Result<()> {
     let parent_id = api_fs::get_first_entry_req_decode(msg);
+    let parent_id = runtime.entry_ids.decode(parent_id);
     let fs = runtime.fs.read().await;
-    let resp = api_fs::get_first_entry_resp_encode(msg, fs.get_first_entry(role, parent_id).await?);
+    let entry_id = fs.get_first_entry(role, parent_id).await?;
     core::mem::drop(fs);
+    let resp =
+        api_fs::get_first_entry_resp_encode(msg, entry_id.map(|id| runtime.entry_ids.encode(id)));
 
     let _ = sender.send(resp).await;
     Ok(())
@@ -1429,10 +1453,14 @@ async fn on_cmd_get_next_entry(
     role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::get_next_entry_req_decode(msg);
+    let entry_id = runtime.entry_ids.decode(entry_id);
     let fs = runtime.fs.read().await;
     let next_entry_id = fs.get_next_entry(role, entry_id).await?;
     core::mem::drop(fs);
-    let resp = api_fs::get_next_entry_resp_encode(msg, next_entry_id);
+    let resp = api_fs::get_next_entry_resp_encode(
+        msg,
+        next_entry_id.map(|id| runtime.entry_ids.encode(id)),
+    );
 
     let _ = sender.send(resp).await;
     Ok(())
@@ -1445,6 +1473,7 @@ async fn on_cmd_get_name(
     role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::get_name_req_decode(msg);
+    let entry_id = runtime.entry_ids.decode(entry_id);
     let fs = runtime.fs.read().await;
     let name = fs.name(role, entry_id).await?;
     core::mem::drop(fs);
@@ -1472,6 +1501,8 @@ async fn on_cmd_move_entry(
 ) -> Result<()> {
     let (entry_id, new_parent_id, fname) =
         api_fs::move_entry_req_decode(msg, sender).map_err(map_native_error)?;
+    let entry_id = runtime.entry_ids.decode(entry_id);
+    let new_parent_id = runtime.entry_ids.decode(new_parent_id);
 
     let mut fs = runtime.fs.write().await;
     refuse_if_executing(&runtime, entry_id)?;
@@ -1502,6 +1533,8 @@ async fn on_cmd_copy_file_range(
     role: Role,
 ) -> Result<()> {
     let (from, to, offset, size) = api_fs::copy_file_range_req_decode(msg);
+    let from = runtime.entry_ids.decode(from);
+    let to = runtime.entry_ids.decode(to);
 
     let mut fs = runtime.fs.write().await;
     refuse_if_executing(&runtime, to)?;

@@ -77,17 +77,20 @@ async fn check_mutations(runtime: &FsRuntime, dir: EntryId) -> Result<(), String
         .admit_fs(server)
         .map_err(|_| "self-test channel budget exhausted")?;
 
+    let wire_entry = runtime.entry_ids.encode(entry);
+    let wire_other = runtime.entry_ids.encode(other);
+    let wire_dir = runtime.entry_ids.encode(dir);
     for case in 0..10 {
         let (name, mut msg) = match case {
-            0 => ("truncate", api_fs::resize_msg_encode(entry, 0)),
+            0 => ("truncate", api_fs::resize_msg_encode(wire_entry, 0)),
             1 => (
                 "chmod",
-                api_fs::set_permissions_msg_encode(entry, AccessPermissions::Rw),
+                api_fs::set_permissions_msg_encode(wire_entry, AccessPermissions::Rw),
             ),
             2 => (
                 "chmod-all",
                 api_fs::set_all_permissions_msg_encode(
-                    entry,
+                    wire_entry,
                     RolePermissions::all(AccessPermissions::Rw),
                 ),
             ),
@@ -98,7 +101,7 @@ async fn check_mutations(runtime: &FsRuntime, dir: EntryId) -> Result<(), String
                     .map_err(|err| err.to_string())?;
                 page.bytes_mut().fill(b'x');
                 if case == 3 {
-                    ("write", api_fs::write_msg_encode(entry, 0, 1, page))
+                    ("write", api_fs::write_msg_encode(wire_entry, 0, 1, page))
                 } else {
                     let tail = client
                         .alloc_page(u64::MAX)
@@ -107,7 +110,7 @@ async fn check_mutations(runtime: &FsRuntime, dir: EntryId) -> Result<(), String
                     tail.bytes_mut().fill(b'x');
                     (
                         "write-multi",
-                        api_fs::write_multi_msg_encode(entry, 0, 4097, vec![page, tail]),
+                        api_fs::write_multi_msg_encode(wire_entry, 0, 4097, vec![page, tail]),
                     )
                 }
             }
@@ -119,23 +122,23 @@ async fn check_mutations(runtime: &FsRuntime, dir: EntryId) -> Result<(), String
                 match case {
                     5 => (
                         "rename",
-                        api_fs::move_entry_req_encode(entry, dir, "renamed", page),
+                        api_fs::move_entry_req_encode(wire_entry, wire_dir, "renamed", page),
                     ),
                     6 => (
                         "rename-noreplace",
-                        api_fs::move_noreplace_req_encode(entry, dir, "renamed", page),
+                        api_fs::move_noreplace_req_encode(wire_entry, wire_dir, "renamed", page),
                     ),
                     _ => (
                         "rename-onto",
-                        api_fs::move_entry_req_encode(other, dir, "executable", page),
+                        api_fs::move_entry_req_encode(wire_other, wire_dir, "executable", page),
                     ),
                 }
             }
             8 => (
                 "copy",
-                api_fs::copy_file_range_req_encode(other, entry, 0, 8),
+                api_fs::copy_file_range_req_encode(wire_other, wire_entry, 0, 8),
             ),
-            _ => ("delete", api_fs::delete_entry_msg_encode(entry)),
+            _ => ("delete", api_fs::delete_entry_msg_encode(wire_entry)),
         };
         msg.id = case;
 
