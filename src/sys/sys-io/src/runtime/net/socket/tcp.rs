@@ -472,9 +472,7 @@ impl MotoSocket {
         let Self { base, state } = &*socket_ref;
         let tcp_state = state.unwrap_tcp();
 
-        let pid = base
-            .runtime
-            .connection_pid(base.client_sender.remote_handle());
+        let pid = base.runtime.connection_pid(base.client_handle());
 
         let (local_addr, local_port) = addr_to_octets(&base.ip_backend().local_addr);
         let (remote_addr, remote_port) = match tcp_state.remote_addr {
@@ -1095,7 +1093,7 @@ impl MotoSocket {
                 moto_rt::E_NOT_CONNECTED
             };
 
-            (base.client_sender.clone(), msg)
+            (base.sender().clone(), msg)
         };
 
         let _ = sender.send(msg).await;
@@ -1129,7 +1127,7 @@ impl MotoSocket {
             api_net::put_socket_addr(&mut msg.payload, &base.ip_backend().local_addr);
             msg.status = moto_rt::E_OK;
 
-            (base.client_sender.clone(), msg)
+            (base.sender().clone(), msg)
         };
 
         let _ = sender.send(msg).await;
@@ -1500,7 +1498,11 @@ impl MotoSocket {
             if socket_ref.base.lingering {
                 return;
             }
-            (socket_ref.base.socket_id, socket_ref.base.sender().clone())
+            // A socket retired to TIME-WAIT has no client to tell.
+            let Some(sender) = socket_ref.base.client_sender.clone() else {
+                return;
+            };
+            (socket_ref.base.socket_id, sender)
         };
 
         let mut msg = moto_ipc::io_channel::Msg::new();
@@ -1603,7 +1605,7 @@ impl MotoSocket {
             // Sockets can linger long after their clients are gone.
             if let Some(client) = runtime_ref
                 .clients
-                .get_mut(&socket_ref.base.sender().remote_handle())
+                .get_mut(&socket_ref.base.client_handle())
             {
                 let _ = client.sockets.remove(&socket_ref.base.socket_id);
             }
@@ -1885,7 +1887,10 @@ impl MotoSocket {
         if close_handshake_complete {
             // Step 3: retain the protocol control block through TIME-WAIT.
             // This phase is independent of SO_LINGER; the netstack timer
-            // normally closes the socket after ten seconds.
+            // normally closes the socket after ten seconds. The client is
+            // owed nothing more, so drop its channel now: otherwise the
+            // channel's shared pages outlive the client for those seconds.
+            moto_socket.borrow_mut().base.release_client_sender();
             let protocol_deadline = moto_async::Instant::now()
                 + std::time::Duration::from_secs(DEFAULT_LINGER_SECS as u64);
             let closed = std::future::poll_fn(|cx| {
@@ -2134,7 +2139,7 @@ impl MotoSocket {
 
         {
             let mut socket_ref = moto_socket.borrow_mut();
-            if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
+            if socket_ref.base.client_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
 
@@ -2191,7 +2196,7 @@ impl MotoSocket {
 
         {
             let mut socket_ref = moto_socket.borrow_mut();
-            if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
+            if socket_ref.base.client_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
 
@@ -2219,7 +2224,7 @@ impl MotoSocket {
 
         {
             let mut socket_ref = moto_socket.borrow_mut();
-            if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
+            if socket_ref.base.client_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
             // Check that the socket is indeed tcp before unwrapping.
@@ -2302,7 +2307,7 @@ impl MotoSocket {
 
         {
             let mut socket_ref = moto_socket.borrow_mut();
-            if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
+            if socket_ref.base.client_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
             // Check that the socket is indeed tcp before unwrapping.
@@ -2449,13 +2454,18 @@ impl MotoSocket {
 
         {
             let mut socket_ref = moto_socket.borrow_mut();
-            if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
+            if socket_ref.base.client_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
             // Check that the socket is indeed tcp before unwrapping.
             if !matches!(socket_ref.state, SocketState::Tcp(_)) {
                 // TODO: drop the connection?
                 return Err(ErrorKind::InvalidData.into());
+            }
+            // Already closed: the linger task owns the socket now, and its
+            // client channel may be gone.
+            if socket_ref.base.lingering {
+                return Err(ErrorKind::NotFound.into());
             }
         }
 

@@ -1532,6 +1532,18 @@ fn main() {
         tcp::test_loopback_peer_time_wait();
         return;
     }
+    if args.len() == 2 && args[1] == "test-time-wait-releases-client-channel" {
+        tcp::test_time_wait_releases_client_channel();
+        return;
+    }
+    if args.len() == 2 && args[1] == "tcp-time-wait-child" {
+        tcp::time_wait_child();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-requests-to-retired-tcp-socket" {
+        tcp::test_requests_to_retired_tcp_socket();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-native-listener-drop-backpressure" {
         tcp::test_native_listener_drop_backpressure();
         return;

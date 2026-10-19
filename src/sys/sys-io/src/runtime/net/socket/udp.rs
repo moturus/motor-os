@@ -133,7 +133,7 @@ impl MotoSocket {
         let Self { base, state } = socket_mut;
         let udp_state = state.unwrap_udp();
 
-        let sender = base.client_sender.clone();
+        let sender = base.sender().clone();
         let page_allocator = async |subchannel_mask| {
             sender
                 .alloc_page(subchannel_mask)
@@ -419,7 +419,7 @@ impl MotoSocket {
         let socket_mut = &mut *socket_ref;
         let Self { base, state } = socket_mut;
 
-        if base.sender().remote_handle() != sender.remote_handle() {
+        if base.client_handle() != sender.remote_handle() {
             log::debug!("UDP TX: wrong client for socket");
             Self::drop_undeliverable_udp_tx(runtime, &msg, sender);
             return Ok(());
@@ -537,7 +537,7 @@ impl MotoSocket {
 
         {
             let socket_ref = moto_socket.borrow();
-            if socket_ref.base.sender().remote_handle() != sender.remote_handle() {
+            if socket_ref.base.client_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
             if !matches!(socket_ref.state, SocketState::Udp(_)) {
@@ -573,7 +573,7 @@ impl MotoSocket {
 
         {
             let socket_ref = moto_socket.borrow();
-            if socket_ref.base.sender().remote_handle() != sender.remote_handle() {
+            if socket_ref.base.client_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
             if !matches!(socket_ref.state, SocketState::Udp(_)) {
@@ -615,7 +615,7 @@ impl MotoSocket {
             let socket_mut = &mut *socket_ref;
             let Self { base, state } = socket_mut;
 
-            if base.sender().remote_handle() != sender.remote_handle() {
+            if base.client_handle() != sender.remote_handle() {
                 log::debug!("UDP TX: wrong client for socket");
                 return Err(ErrorKind::NotFound.into());
             }
