@@ -1552,7 +1552,10 @@ fn test_failed_tcp_setup_rolls_back_socket() {
     use moto_sys_io::api_net;
 
     let clients_before = read_sys_io_metric("net.active_clients");
-    let sockets_before = read_sys_io_metric("net.tcp_sockets");
+    let socket_ids_before: Vec<_> = read_tcp_socket_stats()
+        .into_iter()
+        .map(|socket| socket.id)
+        .collect();
     let total_before = read_sys_io_metric("net.total_tcp_sockets");
     let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
@@ -1569,11 +1572,15 @@ fn test_failed_tcp_setup_rolls_back_socket() {
         read_sys_io_metric("net.total_tcp_sockets"),
         total_before + 1
     );
-    assert_eq!(
-        read_sys_io_metric("net.tcp_sockets"),
-        sockets_before,
-        "the failed connect changed the socket count; live sockets: {:?}",
-        read_tcp_socket_stats()
+    // Earlier tests' lingering sockets may disappear during this request.
+    // Compare identities so their cleanup cannot hide a newly leaked socket.
+    let new_sockets: Vec<_> = read_tcp_socket_stats()
+        .into_iter()
+        .filter(|socket| !socket_ids_before.contains(&socket.id))
+        .collect();
+    assert!(
+        new_sockets.is_empty(),
+        "the failed connect leaked sockets: {new_sockets:?}"
     );
 
     drop(connection);
