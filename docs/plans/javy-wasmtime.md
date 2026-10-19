@@ -8,13 +8,13 @@ runtime-only `wasmtime-rt` build through the normal add-on workflow, ship in
 the developer and small wasm images, and pass their installed-tool checks on
 both images at 256 and 224 MiB. HTTP serving (milestone 3) and the full
 compiler with native packaging (milestone 4) are ahead; see
-[Status and resume point](#status-and-resume-point-2026-10-18).
+[Status and resume point](#status-and-resume-point-2026-10-19).
 
 This document records the requirements, the design contracts, a short account
 of the completed work and the detailed plan for the milestones ahead. The
 settled points of the earlier plan reviews are folded in.
 
-## Status and resume point (2026-10-18)
+## Status and resume point (2026-10-19)
 
 Evidence under `build/` is host-local and not required.
 
@@ -41,13 +41,18 @@ Evidence under `build/` is host-local and not required.
   `wasmtime-rt` execution equal). TypeScript compile peaks at 224 MiB are now
   181–189 MiB with either set of tools, down from 201.6–204.2 MiB on
   2026-10-11; the newer kernel and assembly account for that.
-- **Now milestone 3, step 3a.** Its measurements found that closed
-  connections exhaust a 224 MiB VM through sys-io's TIME-WAIT memory, and the
-  owner asked for that fix first. The fix is a standalone sys-io patch, now
-  gated, uncommitted and awaiting review; its causes, tests and results are
-  under [Milestone 3](#milestone-3-httphttps-and-opt-in-p3). After it, 3a
-  resumes with the open decisions listed there: stack slots, deadlines,
-  connection timeouts and accept errors.
+- **Now milestone 3, step 3a, waiting on the kernel.** 3a's measurements
+  found two limits at 224 MiB. Closed connections exhausted the VM through
+  sys-io's TIME-WAIT memory; that is fixed by the standalone sys-io patch
+  `4ee0cf22`. Eager fiber stacks allow only 8 in-flight p2 requests; the
+  owner ruled (2026-10-19) to replace them with lazily committed guarded
+  stacks, as on Linux. That needs the kernel to map lazily at a fixed
+  address, a kernel change outside this plan. **Resume** with "Lazy guarded
+  fiber stacks" under [Milestone 3](#milestone-3-httphttps-and-opt-in-p3),
+  once that kernel change has landed: it lists the prerequisite, the fork
+  change, the tests and the measurements. The other 3a rulings (2026-10-19):
+  deadlines follow Linux, and connection timeouts and accept errors follow
+  upstream.
 - **Working rules from the owner:** commit messages are one line with no
   trailers, in this tree and in the forks; the owner pushes fork branches; the
   `moturus/javy` fork takes code only; stop for review before any change under
@@ -589,7 +594,9 @@ read-write alias and is charged twice (`src/sys/kernel/src/mm/user.rs`): unmap
 both addresses for every mapping, including the guard's alias, and measure
 physical use and admission separately. Pages are eager. Pool stacks. The
 qualified bounds are 2 MiB per stack, eight process-wide slots and two cached
-stacks per pool; production concurrency sizing remains open.
+stacks per pool. The owner ruled (2026-10-19) to replace them with lazily
+committed stacks once the kernel maps lazily at fixed addresses; see "Lazy
+guarded fiber stacks" under milestone 3.
 
 Require a deliberate overrun as None/mask 0 to kill only that process, thousands
 of teardown cycles to return memory, and acceptable per-stack cost. If this
@@ -949,7 +956,7 @@ qualified with locally built binaries on both images at 224 MiB (evidence in
 `build/wasm-milestone2/`). 2d is done and 2f is partly done (below); since
 2026-10-09 the delivered add-on passes the matrix under both VMMs. Since
 2026-10-11 all items are done, and since 2026-10-18 the published heads are
-gated ([the resume point](#status-and-resume-point-2026-10-18)).
+gated ([the resume point](#status-and-resume-point-2026-10-19)).
 
 - **2b:** owned lazy reservations (then 96 MiB per memory, 128 MiB and four
   per process; 4 GiB and no total or count since 2026-10-18) back every
@@ -1216,11 +1223,10 @@ connection has both ends in sys-io. Log and patch in `build/claude-targets/m3/`
 - **Per request.** 2 MiB echoes: 8 concurrent p2 requests raised the server by
   about 32 MiB, 16 concurrent p3 requests by about 7 MiB.
 
-**TIME-WAIT release, 2026-10-18 (sys-io patch, uncommitted).** The owner asked
-for a standalone `src/sys` patch, fully gated and left uncommitted for review.
-It is in the `wasm` working tree, with a copy in
-`build/claude-targets/m3/time-wait.patch`. It changes no fork, moto-io, moto-rt
-or kernel code and adds no statics.
+**TIME-WAIT release, 2026-10-18 (sys-io patch `4ee0cf22`).** The owner asked
+for a standalone `src/sys` patch, fully gated and left uncommitted for review,
+and committed it on 2026-10-19 after review. It changes no fork, moto-io,
+moto-rt or kernel code and adds no statics.
 
 - **Causes.** A server closes first, so its socket spends `CLOSE_DELAY` (10 s)
   in TIME-WAIT, and three things kept its memory there:
@@ -1303,27 +1309,90 @@ or kernel code and adds no statics.
 - **Docs.** The P2 TIME-WAIT entry in `future-work.md` becomes a P3 for what
   remains, 10–25 KiB per socket: the netstack socket, the `MotoSocket` and
   its linger task.
-- **Next.** Owner review of the patch. Once approved, it is committed as one
-  patch. 3a then resumes with the decisions below.
+- **Next.** 3a resumes with the decisions below.
 
-**Open 3a decisions** (put to the owner 2026-10-18; the recommendation first):
+**3a decisions** (put to the owner 2026-10-18):
 
-1. **Stack slots.** In the fork, default `--max-concurrent-requests` to 8 for
-   p2 only, so a ninth request waits instead of getting a 500; p3 keeps
-   upstream's 1,000. Lazily committed guarded stacks would need a kernel
-   option, a lazy map at a fixed address with a guard page; leave them for
-   later.
-2. **Deadlines.** (a) Linux parity: no default; document `-W timeout` and
-   epoch compilation. (b) A Motor default timeout, which requires every
-   precompiled serve artifact to be built with epochs.
-3. **Connection timeouts.** Give Hyper its timer, which turns on its built-in
-   30 s header-read timeout. It is a small fork change and departs from
-   upstream `serve`, which gives Hyper no timer.
-4. **Accept errors.** In the fork, log a failed accept, back off and keep
-   serving, rather than exit on a transient `OutOfMemory`. Upstream exits the
-   same way, so this is also a departure from upstream.
+1. **Stack slots** (ruled 2026-10-19: lazy guarded stacks, as on Linux), not
+   a p2 request cap or smaller stacks. The fork's eager pool is replaced
+   once the kernel can map lazily at a fixed address. Until then a ninth
+   in-flight p2 request gets HTTP 500. The work is described below.
+2. **Deadlines** (ruled 2026-10-19: Linux parity). No default timeout;
+   document `-W timeout` and epoch compilation.
+3. **Connection timeouts** (ruled 2026-10-19: upstream). Hyper gets no timer,
+   so idle and slow connections stay open up to the connection limit;
+   document it.
+4. **Accept errors** (ruled 2026-10-19: upstream). `serve` exits on any
+   accept error, including a transient `OutOfMemory`.
 
-Decisions 1, 3 and 4 are small fork patches with tests in `wasmtime-smoke`.
+**Lazy guarded fiber stacks (ruled 2026-10-19, waiting on the kernel).** This
+is where 3a resumes, once the kernel lets a None process map lazily at a
+fixed address. That kernel change is outside this plan; the work here is
+fork-only.
+
+- **Today** (`src/motor_stack.rs` in `moturus/wasmtime` `motor-48.0.1`, wired
+  in by `src/motor.rs` through `Config::with_host_stack`). The pool maps each
+  stack eagerly with `SysMem::map2(SELF, F_SHARE_SELF | F_READABLE |
+  F_WRITABLE, ...)`, because a lazy map cannot be placed at a chosen address.
+  Each stack sits at a fixed slot address, starting 16 MiB into the custom
+  userspace region, with a read-only 4 KiB guard page below it. A 2 MiB
+  stack costs 4,202,496 bytes: real frames plus a read-write alias that is
+  charged as well. The static `OCCUPIED` bitmask allows 8 slots per process.
+  The pool caches two stacks and zero-fills a cached stack on reuse when
+  Wasmtime asks for a zeroed one. `contains()` covers the slot arena.
+- **Why it matters.** p2 takes one stack per in-flight request; 3a measured
+  a 500 for the ninth while eight waited. Pulley touched at most 6 KiB of
+  each 2 MiB stack. Native AOT (milestone 4) runs Wasm frames on these
+  stacks too, so it needs full-size stacks. On Linux, Wasmtime reserves each
+  stack with a guard page and commits only touched pages, so the only bound
+  is `--max-concurrent-requests` (1,000).
+- **Kernel prerequisite (owner, `src/sys`).** Today the kernel accepts
+  `F_READABLE | F_WRITABLE | F_LAZY` only with an automatic address
+  (`virt_addr == u64::MAX`, `src/sys/kernel/src/uspace/sys_mem.rs`), and
+  `F_CUSTOM_USER` needs `CAP_IO_MANAGER`. The pool needs a lazy read-write
+  map at a caller-chosen address in the custom region, open to a None
+  process with no capabilities, charged per touched page. The fork takes
+  `moto-sys` by path (`../motor-os/src/sys/lib/moto-sys`), so the new flag
+  needs no crate release.
+- **Fork change.**
+  1. Map each stack's data range lazily at its slot address. Keep the guard
+     page below it: a read-only page as now, or an unmapped hole if the
+     kernel guarantees that nothing maps into the custom region on its own.
+     There is no alias left to unmap.
+  2. Size the arena for upstream's request bound instead of 8 slots:
+     1,000 × (2 MiB + 4 KiB) is about 2 GiB of the 1 TiB custom region.
+     `OCCUPIED` is a `u64` bitmask and holds at most 64 slots, so it needs
+     another allocator, such as a free list under the pool's lock.
+  3. Do not zero-fill a lazy stack on reuse: writing zeros over 2 MiB
+     commits all of it. A zeroed request takes a freshly mapped stack (lazy
+     pages read as zero), or the pool stops caching. Whatever pages a cached
+     stack touched stay resident, so measure the cache's cost or drop it.
+  4. Update `contains()` to the new arena, and `MOTOR.md` and the
+     [fibers contract](#fibers-resource-limits-and-http) ("Pages are eager",
+     "eight process-wide slots").
+- **Tests.** `stack-check` (`motor-runtime/src/bin/stack-check.rs`, on
+  `motor-runtime/fixtures/stack-yield.wat`) asserts the 8-slot limit, the
+  eager charge and pooled zeroing. Change it so that:
+  - an untouched 2 MiB stack is charged near zero, and touched pages are
+    charged;
+  - many stacks (hundreds) can be leased at once;
+  - the 2,048-cycle teardown loop and the cancellation loop still leak
+    nothing;
+  - `stack-check overflow` still kills only its process.
+
+  `stack-check` and `memory-check` are fork qualification binaries that
+  milestone 2 ran by hand, and no tree test runs them. Consider registering
+  `stack-check` in `wasmtime-smoke`, so `full-test-dev.sh` covers it.
+- **Measure (3a).** At 224 MiB, run p2 sleeping requests well past 8
+  concurrent (for example 64) with no 500s, and record the server's memory
+  per in-flight request. 3a measured 4.2 MiB per request with eager stacks.
+  Repeat the p3 runs to confirm they are unchanged, then record the result
+  here.
+- **Rest of 3a.** Document the rulings above in `docs/wasm.md` and the
+  fork's `MOTOR.md`: no default deadline (`-W timeout` needs epoch-compiled
+  artifacts), no Hyper timer, and exit on accept errors. 3a's request and
+  body/buffer bounds come from these measurements; put any departure from
+  upstream's defaults to the owner.
 
 1. **3a — HTTP resource defaults.** Extend milestone 2's finite command defaults
    with request, body/buffer and serving-concurrency limits; size the stack pool
@@ -1417,7 +1486,7 @@ Javy/Wasmi regressions live in `javy-smoke`.
 | --- | --- |
 | 1 | Done 2026-10-09. |
 | 2 | Done; gated with the memory-limit change on 2026-10-18. |
-| 3 | In progress; 3a precedes 3f. |
+| 3 | In progress; 3a waits on kernel lazy maps at fixed addresses and precedes 3f. |
 | 4 | 4a and 4c can start in the fork after 2a; 4b, 4d–4f need the milestone 3 host and the milestone 2 template. |
 
 Production changes follow [AGENTS.md](../../AGENTS.md). Application changes use
