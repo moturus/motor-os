@@ -803,31 +803,26 @@ Do not raise them again.
   Credit advertisements are cumulative, and malformed headers must not become
   trusted credit input.
 
-## P2: closed TCP connections hold sys-io memory for 10 s (2026-10-11)
+## P3: TIME-WAIT sockets still hold 10-25 KiB each (2026-10-18)
 
 A connection that sys-io closes first, as an HTTP server usually does, stays
 in TIME-WAIT for `CLOSE_DELAY`, 10 s
-(`src/sys/sys-io/netstack/src/socket/tcp.rs:388`), and sys-io's memory for it
-is held that long. On a 224 MiB VM, 50 sequential loopback HTTP/1.1 requests
-with `Connection: close`, to `wasmtime-rt serve` or to a native std server,
-raised sys-io's `net.tcp_sockets` from 13 to 63 and its `pages_user` by
-6.5 MiB, about 130 KiB per connection. Both returned to baseline about 10 s
-after the last request. An earlier 100-request run against `wasmtime-rt serve`
-went from 30 to 70 MiB, about 400 KiB per connection, which is not explained.
-A server taking 20 new connections a second therefore holds 26-80 MiB in
-sys-io at steady state.
+(`src/sys/sys-io/netstack/src/socket/tcp.rs:388`). Until 2026-10-18 it held
+about 400 KiB of sys-io memory for that time. Its rings were released only if
+the application had closed before FIN-WAIT-2 and the ACK of the FIN carried no
+ACK of data. Its socket also kept the client channel, whose 512 KiB of shared
+pages stayed mapped after the client let go. Both are released now. On a
+224 MiB VM, 200 loopback HTTP/1.1 requests with `Connection: close` to
+`wasmtime-rt serve` leave sys-io about 5 MiB above its baseline for the 10 s,
+against 80 MiB before. With 800 sockets in TIME-WAIT, sys-io is about 10 MiB
+above its baseline.
 
-Keeping TIME-WAIT is intended (`cdd7c886`), but only the tuple and its timer
-need to stay. The netstack shrinks an orphaned socket's rings to 1 byte on
-entering TIME-WAIT (`set_state`, tcp.rs:2096-2119), but only on the state
-transition and only if `rx_shutdown` is already set; `set_rx_shutdown`
-(tcp.rs:1502) just sets the flag. A socket that reaches FIN-WAIT-2 or
-TIME-WAIT before the application closes it keeps its full rings, 64 KiB each
-way at 224 MiB. That does not explain the native server's case, which closes
-by drop before its FIN. First, read the TIME-WAIT sockets' ring capacities
-(`TcpSocketStatsV1`) and the channel count during a burst. Then release the
-rings whatever the close order, and keep only the tuple and timer for the
-10 s. Measurements and the client used are in `build/claude-targets/m3/`.
+What stays is the netstack socket, the `MotoSocket` and its linger task. Only
+the tuple and its timer need to stay (`cdd7c886`). A compact TIME-WAIT record
+would bring a server taking 20 new connections a second from 2-5 MiB of
+retained sys-io memory to well under 1 MiB. Measurements and the client used
+are in `build/claude-targets/m3/` (`xtw.sh`, `x3b.sh`, `xtw-*.log`,
+`x3b-224.log`).
 
 ## P2: Shrinking descriptor pools (2026-10-17)
 

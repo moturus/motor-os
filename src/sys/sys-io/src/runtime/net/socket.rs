@@ -54,8 +54,13 @@ pub(super) struct SocketBase {
     runtime: super::NetRuntime,
     backend: SocketBackend,
 
-    // Denormalized for quick validation.
-    client_sender: ClientSender,
+    // The owning client's channel. A TCP socket retired to TIME-WAIT drops
+    // it: nothing goes to the client again, and the channel's shared pages
+    // must not outlive the client by the ten seconds of TIME-WAIT.
+    client_sender: Option<ClientSender>,
+    // The channel's handle, which keys the client's socket set; denormalized
+    // for quick validation and kept after the sender is dropped.
+    client_handle: SysHandle,
 
     // The socket is "detached" from its client and should be
     // dropped when last TX bytes are out (RX is not happening
@@ -95,7 +100,8 @@ impl SocketBase {
                 device_notify,
                 local_addr: socket_addr,
             }),
-            client_sender,
+            client_handle: client_sender.remote_handle(),
+            client_sender: Some(client_sender),
             lingering: false,
         }
     }
@@ -114,7 +120,8 @@ impl SocketBase {
             socket_id,
             runtime,
             backend: SocketBackend::Vsock(tuple),
-            client_sender,
+            client_handle: client_sender.remote_handle(),
+            client_sender: Some(client_sender),
             lingering: false,
         }
     }
@@ -128,7 +135,8 @@ impl SocketBase {
             socket_id,
             runtime,
             backend: SocketBackend::VsockListener,
-            client_sender,
+            client_handle: client_sender.remote_handle(),
+            client_sender: Some(client_sender),
             lingering: false,
         }
     }
@@ -147,8 +155,20 @@ impl SocketBase {
         tuple
     }
 
+    /// The client's channel; a socket that dropped it never sends again.
     pub(super) fn sender(&self) -> &ClientSender {
-        &self.client_sender
+        self.client_sender
+            .as_ref()
+            .expect("socket released its client channel")
+    }
+
+    pub(super) fn client_handle(&self) -> SysHandle {
+        self.client_handle
+    }
+
+    /// Drops this socket's reference to the client's channel.
+    pub(super) fn release_client_sender(&mut self) {
+        self.client_sender = None;
     }
 
     pub(super) fn runtime(&self) -> &super::NetRuntime {
@@ -202,7 +222,7 @@ impl Drop for MotoSocket {
         }
 
         let socket_id = base.socket_id;
-        let client_handle = base.client_sender.remote_handle();
+        let client_handle = base.client_handle;
         let ip = base.ip_backend();
         let device_idx = ip.device_idx;
         let netstack_handle = ip.handle(socket_id);
@@ -253,7 +273,7 @@ impl MotoSocket {
         let socket_id = base.socket_id;
         let device_idx = base.ip_backend().device_idx;
         let netstack_handle = base.ip_backend().handle(socket_id);
-        let client_handle = base.client_sender.remote_handle();
+        let client_handle = base.client_handle;
         let mut inner = runtime.inner.borrow_mut();
         if !inner
             .clients
@@ -283,7 +303,7 @@ impl MotoSocket {
     ) -> std::io::Result<Rc<RefCell<Self>>> {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
-        let client_handle = base.client_sender.remote_handle();
+        let client_handle = base.client_handle;
         let mut inner = runtime.inner.borrow_mut();
         if !inner
             .clients
@@ -316,7 +336,7 @@ impl MotoSocket {
     ) -> std::io::Result<Rc<RefCell<Self>>> {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
-        let client_handle = base.client_sender.remote_handle();
+        let client_handle = base.client_handle;
         let mut inner = runtime.inner.borrow_mut();
         if !inner
             .clients
@@ -345,7 +365,7 @@ impl MotoSocket {
 
     // Accepted TCP/vsock sockets may move to another channel of the owner.
     pub(super) fn set_client_sender(&mut self, client_sender: &ClientSender) -> bool {
-        let prev_handle = self.base.client_sender.remote_handle();
+        let prev_handle = self.base.client_handle;
         let next_handle = client_sender.remote_handle();
         let mut runtime_ref = self.base.runtime.inner.borrow_mut();
         if !runtime_ref
@@ -369,7 +389,8 @@ impl MotoSocket {
                     .sockets
                     .insert(self.socket_id())
             );
-            self.base.client_sender = client_sender.clone();
+            self.base.client_sender = Some(client_sender.clone());
+            self.base.client_handle = next_handle;
         }
         true
     }

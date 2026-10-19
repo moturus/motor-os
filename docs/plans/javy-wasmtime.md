@@ -41,8 +41,13 @@ Evidence under `build/` is host-local and not required.
   `wasmtime-rt` execution equal). TypeScript compile peaks at 224 MiB are now
   181–189 MiB with either set of tools, down from 201.6–204.2 MiB on
   2026-10-11; the newer kernel and assembly account for that.
-- **Now milestone 3**, starting with 3a. Its measurements and decisions are
-  under [Milestone 3](#milestone-3-httphttps-and-opt-in-p3).
+- **Now milestone 3, step 3a.** Its measurements found that closed
+  connections exhaust a 224 MiB VM through sys-io's TIME-WAIT memory, and the
+  owner asked for that fix first. The fix is a standalone sys-io patch, now
+  gated, uncommitted and awaiting review; its causes, tests and results are
+  under [Milestone 3](#milestone-3-httphttps-and-opt-in-p3). After it, 3a
+  resumes with the open decisions listed there: stack slots, deadlines,
+  connection timeouts and accept errors.
 - **Working rules from the owner:** commit messages are one line with no
   trailers, in this tree and in the forks; the owner pushes fork branches; the
   `moturus/javy` fork takes code only; stop for review before any change under
@@ -1172,9 +1177,10 @@ out-of-tree load client that 3f's in-crate client replaces.
   no fixed address or guard page from userspace. With memories unbounded they
   are the next limit on serving concurrency; the owner ruled (2026-10-18) to
   measure them in 3a before choosing a design. Upstream uses lazily committed
-  stacks with a guard page and no slot limit. Each closed connection holds
-  about 130 KiB in sys-io for 10 s (TIME-WAIT, a P2 in `future-work.md`), which
-  bounds sustained connection rates on small VMs. Drivers should let servers
+  stacks with a guard page and no slot limit. Each closed connection held
+  about 130 KiB in sys-io for 10 s (TIME-WAIT), which bounds sustained
+  connection rates on small VMs; 3a measured 400 KiB, and the TIME-WAIT
+  release below removes most of it. Drivers should let servers
   inherit their stdio: a None child cannot write a file that rush redirected
   for it without `CAP_FS_WRITE` (`docs/caps.md`).
 
@@ -1198,17 +1204,126 @@ connection has both ends in sys-io. Log and patch in `build/claude-targets/m3/`
   (p2 and p3); a server with a timeout rejects artifacts compiled without
   epochs, and the reverse.
 - **Connection memory.** Each closed loopback connection held about 400 KiB of
-  sys-io for 10 s (29.9 to 75.0 MiB over 114 p2 requests), the unexplained
-  figure in the `future-work.md` TIME-WAIT entry, not 130 KiB. Eight
+  sys-io for 10 s (29.9 to 75.0 MiB over 114 p2 requests), the figure the
+  `future-work.md` TIME-WAIT entry left unexplained, not 130 KiB. Eight
   concurrent requests for 50 rounds, or 64 concurrent p3 requests for a few
   rounds, filled the VM to about 200 MiB; `rt_net` then reported `accept pump
   reservation failed: OutOfMemory` and the server exited with `Error:
-  OutOfMemory (os error 8)`, because `serve` returns on any accept error.
-  Sixty-two idle connections held 45 MiB (34 in sys-io, 12 in the server), and
+  OutOfMemory (os error 8)`, because `serve` returns on any accept error. The
+  TIME-WAIT release below fixes the memory. Sixty-two idle connections held 45 MiB (34 in sys-io, 12 in the server), and
   nothing times them out: Hyper has no timer, so no header-read or idle
   timeout applies, and the connection limit is 1,000.
 - **Per request.** 2 MiB echoes: 8 concurrent p2 requests raised the server by
   about 32 MiB, 16 concurrent p3 requests by about 7 MiB.
+
+**TIME-WAIT release, 2026-10-18 (sys-io patch, uncommitted).** The owner asked
+for a standalone `src/sys` patch, fully gated and left uncommitted for review.
+It is in the `wasm` working tree, with a copy in
+`build/claude-targets/m3/time-wait.patch`. It changes no fork, moto-io, moto-rt
+or kernel code and adds no statics.
+
+- **Causes.** A server closes first, so its socket spends `CLOSE_DELAY` (10 s)
+  in TIME-WAIT, and three things kept its memory there:
+  1. The socket's `ClientSender` kept the client channel's 64 + 64 shared
+     pages (512 KiB) mapped in sys-io after the client was done with it.
+  2. The netstack shrinks an orphaned socket's rings only on a state change,
+     and only if `rx_shutdown` is already set, so a socket that reached
+     FIN-WAIT-2 or TIME-WAIT before its close kept its rings (64 KiB each way
+     at 224 MiB).
+  3. In `process()` the state change runs before the ACK of the FIN dequeues
+     the data it also acknowledges, so the rings still held data at the
+     transition. 199 of 200 `serve` sockets took this path: they were closed
+     in FIN-WAIT-1.
+- **Fix.** The netstack (`src/sys/sys-io/netstack/src/socket/tcp.rs`) gets one
+  `release_orphan_rings` helper, called from `set_state`, from
+  `set_rx_shutdown` and after that dequeue; the floors stay 16 KiB in
+  FIN-WAIT-2 and 1 byte in TIME-WAIT. An orphaned socket ignores text past
+  the peer's FIN, as RFC 9293 does, so no ring is released under text already
+  admitted to it. In sys-io (`runtime/net/socket.rs`, `socket/tcp.rs`,
+  `socket/udp.rs`), `SocketBase::client_sender` becomes an `Option`, and the
+  channel handle that keys the client's socket set is kept beside it; every
+  ownership check compares that handle. Linger step 3, which waits out
+  TIME-WAIT, drops the sender, and the state-change notifier skips a socket
+  without one. A close of a socket the client has already closed fails with
+  `NotFound` instead of running teardown again.
+- **Review, 2026-10-18.** A reviewer found three crashes in the first version,
+  each reproduced in a VM. All three are fixed above:
+  1. A UDP request naming the retired TCP socket's ID, from any client,
+     panicked sys-io: the UDP ownership checks read the released sender
+     before checking the socket type.
+  2. The owner's second close ran teardown again and panicked on the released
+     sender. HEAD also accepts a second close: it answers OK and runs
+     teardown again.
+  3. In debug builds, the netstack asserted when the ACK that ends CLOSING
+     carried text past the peer's FIN: the release shrank the receive ring
+     after the text was admitted. HEAD hits the same assertion, through the
+     `set_state` release, when our data was acknowledged with the peer's FIN.
+
+  The review also asked for a single-connection systest with an isolated
+  baseline, TIME-WAIT checked after the channel is released, and the
+  FIN-WAIT-2 release test folded into an existing test.
+- **Tests.** Each new test fails without its fix.
+  - netstack: `test_rx_shutdown_in_time_wait_releases_rings`,
+    `test_rx_shutdown_rings_released_when_fin_ack_covers_data` and
+    `test_rx_shutdown_ignores_text_after_peer_fin` are new, and
+    `test_no_rx_shutdown_keeps_rings_in_fin_wait_2` now continues through
+    both releases. `cargo test --lib` passes all 916 tests.
+  - systest: `test_time_wait_releases_client_channel` runs one connection in
+    a child (`tcp-time-wait-child`) whose server end closes as an HTTP/1.1
+    server does. With no other socket closing, it requires `net.channels`
+    back at its baseline, and then the socket still in TIME-WAIT. HEAD fails
+    it with `timed out waiting for net.channels; last value was 2`.
+  - systest: `test_requests_to_retired_tcp_socket` takes a raw channel's
+    socket through a positive-linger close to TIME-WAIT. It then sends a
+    second close (expects `NotFound`) and UDP get-option requests on the TCP
+    socket from the owner (`InvalidData`) and from another client
+    (`NotFound`). The first version panics sys-io on it, with or without the
+    close fix; HEAD fails it at the second close.
+- **Effect.** Measured on the wasm image the gate built, at 224 MiB, with
+  `xtw.sh` and `x3b.sh` (logs `xtw-base-224.log`, `xtw-final-224.log` and
+  `x3b-224.log`).
+  - 200 `Connection: close` hello requests to `wasmtime-rt serve`, 8 at a
+    time, leave 208 sockets in TIME-WAIT. sys-io resident is then 22.6 MiB
+    with 3 channels, against 97.8 MiB with 101 channels before the patch, from
+    a baseline of 17.3 MiB. Once the sockets expire, sys-io settles at
+    21–22 MiB both with and without the patch.
+  - The 3a cases that ran the VM out of memory now pass with no failures: two
+    rounds of 400 p2 requests at 8 concurrent, then a p3 server taking 400 at
+    8 and 256 at 64. The VM stays at or below 53 MiB during the p2 run and
+    63 MiB during the p3 run, with up to 1,465 sockets in TIME-WAIT, about
+    10–12 KiB of sys-io each. Before the patch, the first p2 round filled the
+    VM to about 200 MiB, and `serve` exited on `OutOfMemory`.
+- **Gate.** The first version passed `full-test.sh` 3 times in debug and 3
+  times in release, and `full-test-dev.sh --release`. The revised version
+  passed the same gate on 2026-10-18: debug 1,094, 1,034 and 1,030 s, release
+  781, 699 and 662 s, `full-test-dev.sh --release` 2,427 s. Both new systests
+  passed in all six `full-test.sh` runs. `xtw.sh` on the revised image
+  (`xtw-rev-224.log`) leaves sys-io at 22.1 MiB with 2 channels after the
+  `serve` burst, in line with the first version's numbers.
+- **Docs.** The P2 TIME-WAIT entry in `future-work.md` becomes a P3 for what
+  remains, 10–25 KiB per socket: the netstack socket, the `MotoSocket` and
+  its linger task.
+- **Next.** Owner review of the patch. Once approved, it is committed as one
+  patch. 3a then resumes with the decisions below.
+
+**Open 3a decisions** (put to the owner 2026-10-18; the recommendation first):
+
+1. **Stack slots.** In the fork, default `--max-concurrent-requests` to 8 for
+   p2 only, so a ninth request waits instead of getting a 500; p3 keeps
+   upstream's 1,000. Lazily committed guarded stacks would need a kernel
+   option, a lazy map at a fixed address with a guard page; leave them for
+   later.
+2. **Deadlines.** (a) Linux parity: no default; document `-W timeout` and
+   epoch compilation. (b) A Motor default timeout, which requires every
+   precompiled serve artifact to be built with epochs.
+3. **Connection timeouts.** Give Hyper its timer, which turns on its built-in
+   30 s header-read timeout. It is a small fork change and departs from
+   upstream `serve`, which gives Hyper no timer.
+4. **Accept errors.** In the fork, log a failed accept, back off and keep
+   serving, rather than exit on a transient `OutOfMemory`. Upstream exits the
+   same way, so this is also a departure from upstream.
+
+Decisions 1, 3 and 4 are small fork patches with tests in `wasmtime-smoke`.
 
 1. **3a — HTTP resource defaults.** Extend milestone 2's finite command defaults
    with request, body/buffer and serving-concurrency limits; size the stack pool

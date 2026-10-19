@@ -1073,9 +1073,9 @@ fn test_disconnect_before_rx_ready_releases_channels() {
     drop(client_connection);
     drop(listener_connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
-    // A departed client's sockets keep its channel slot while they sit in
-    // TIME_WAIT, so slots left by earlier tests can expire during this wait:
-    // the count may end below the baseline, never above it.
+    // A departed client's lingering sockets keep its channel slot until
+    // they reach TIME_WAIT, so slots left by earlier tests can be released
+    // during this wait: the count may end below the baseline, never above it.
     wait_for_sys_io_metric("net.channels", |value| value <= channels_before);
 
     println!("test_disconnect_before_rx_ready_releases_channels() PASS");
@@ -2110,6 +2110,194 @@ pub fn test_loopback_peer_time_wait() {
         wait_for_sockets_released(addr);
     }
     println!("test_loopback_peer_time_wait() PASS");
+}
+
+/// The child half of `test_time_wait_releases_client_channel`: one loopback
+/// connection whose server end closes the way an HTTP/1.1 server does
+/// (respond, shut down writing, read the peer's EOF, drop), so that end is in
+/// TIME-WAIT when this process exits. Prints the server's address.
+pub fn time_wait_child() {
+    use std::net::{Shutdown, TcpListener, TcpStream};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(addr).unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    // Each end sends a byte: a close that never sent one is a reset.
+    client.write_all(b"x").unwrap();
+    let mut byte = [0_u8];
+    server.read_exact(&mut byte).unwrap();
+    server.write_all(b"y").unwrap();
+    server.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    assert_eq!(response, b"y");
+    drop(client);
+    assert_eq!(server.read(&mut byte).unwrap(), 0);
+    drop(server);
+    println!("{addr}");
+}
+
+/// Waits until `addr`, a socket retired to TIME-WAIT, is gone, so that it
+/// cannot move later gauge checks.
+fn wait_for_time_wait_end(addr: SocketAddr) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !sockets_on_addr_released(addr) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "TIME-WAIT on {addr} did not end"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn in_time_wait(addr: SocketAddr) -> bool {
+    read_tcp_socket_stats().iter().any(|socket| {
+        socket.local_addr() == Some(addr)
+            && socket.protocol_state == moto_sys_io::stats::TcpProtocolState::TimeWait
+    })
+}
+
+/// A client's socket in TIME-WAIT must not keep its channel: the channel maps
+/// 512 KiB of pages shared with the client, and a server's closed connections
+/// held them for ten seconds after the server was gone.
+pub fn test_time_wait_releases_client_channel() {
+    use moto_sys_io::stats::TcpProtocolState;
+
+    // An isolated baseline: a departed client's closing socket keeps its
+    // channel until TIME-WAIT, so let any that earlier tests left get there.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while read_tcp_socket_stats().iter().any(|socket| {
+        matches!(
+            socket.protocol_state,
+            TcpProtocolState::FinWait1
+                | TcpProtocolState::FinWait2
+                | TcpProtocolState::Closing
+                | TcpProtocolState::LastAck
+        )
+    }) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sockets still closing"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let channels_before = read_sys_io_metric("net.channels");
+
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("tcp-time-wait-child")
+        .output()
+        .unwrap();
+    assert!(child.status.success());
+    let addr: SocketAddr = String::from_utf8(child.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    wait_for_sys_io_metric("net.channels", |value| value == channels_before);
+    // Checked after the channel went: TIME-WAIT ending would release it too.
+    assert!(in_time_wait(addr), "{addr} left TIME-WAIT");
+    wait_for_time_wait_end(addr);
+    println!("test_time_wait_releases_client_channel() PASS");
+}
+
+fn recv_raw_net_response_to(
+    connection: &moto_ipc::io_channel::ClientConnection,
+    command: moto_sys_io::api_net::NetCmd,
+) -> moto_ipc::io_channel::Msg {
+    use moto_sys_io::api_net::NetCmd;
+
+    loop {
+        let msg = recv_raw_net_response(connection);
+        if msg.command != NetCmd::EvtTcpStreamStateChanged as u16 {
+            assert_eq!(msg.command, command as u16);
+            return msg;
+        }
+    }
+}
+
+/// Requests naming a TCP socket retired to TIME-WAIT, which has let go of its
+/// client's channel, fail instead of reaching for that channel: the owner's
+/// second close, and UDP requests on the TCP socket from any client.
+pub fn test_requests_to_retired_tcp_socket() {
+    use moto_ipc::io_channel::{ClientConnection, Msg};
+    use moto_sys_io::api_net::{self, NetCmd};
+
+    let close = |handle| {
+        let mut msg = Msg::new();
+        msg.command = NetCmd::TcpStreamClose as u16;
+        msg.handle = handle;
+        msg
+    };
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let owner = ClientConnection::connect("sys-io").unwrap();
+    owner
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
+        .unwrap();
+    let connect_resp = recv_raw_net_response_to(&owner, NetCmd::TcpStreamConnect);
+    connect_resp.status().unwrap();
+    let handle = connect_resp.handle;
+    let addr = api_net::get_socket_addr(&connect_resp.payload);
+    let (mut peer, _) = listener.accept().unwrap();
+
+    // A byte out, or the close would be a reset.
+    let page = owner.alloc_page(api_net::io_subchannel_mask(0)).unwrap();
+    page.bytes_mut()[0] = b'x';
+    owner
+        .send(api_net::tcp_stream_tx_msg(handle, page, 1, 0))
+        .unwrap();
+    let mut byte = [0_u8];
+    peer.read_exact(&mut byte).unwrap();
+
+    // With a positive linger, the close is answered once its handshake is done.
+    let mut linger = Msg::new();
+    linger.command = NetCmd::TcpStreamSetOption as u16;
+    linger.handle = handle;
+    linger.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+    linger.payload.args_32_mut()[2] = 1;
+    linger.payload.args_32_mut()[3] = 5;
+    owner.send(linger).unwrap();
+    recv_raw_net_response_to(&owner, NetCmd::TcpStreamSetOption)
+        .status()
+        .unwrap();
+    owner.send(close(handle)).unwrap();
+    assert_eq!(peer.read(&mut byte).unwrap(), 0);
+    // Not a close: one that never sent a byte would reset the connection.
+    peer.shutdown(std::net::Shutdown::Write).unwrap();
+    recv_raw_net_response_to(&owner, NetCmd::TcpStreamClose)
+        .status()
+        .unwrap();
+    assert!(in_time_wait(addr), "{addr} is not in TIME-WAIT");
+
+    owner.send(close(handle)).unwrap();
+    assert_eq!(
+        recv_raw_net_response_to(&owner, NetCmd::TcpStreamClose).status,
+        moto_rt::E_NOT_FOUND
+    );
+
+    let other = ClientConnection::connect("sys-io").unwrap();
+    for (connection, expected) in [
+        (&owner, moto_rt::E_INVALID_DATA),
+        (&other, moto_rt::E_NOT_FOUND),
+    ] {
+        let mut msg = Msg::new();
+        msg.command = NetCmd::UdpSocketGetOption as u16;
+        msg.handle = handle;
+        msg.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
+        connection.send(msg).unwrap();
+        assert_eq!(
+            recv_raw_net_response_to(connection, NetCmd::UdpSocketGetOption).status,
+            expected
+        );
+    }
+
+    drop((owner, other, peer, listener));
+    wait_for_sockets_released(listener_addr);
+    wait_for_time_wait_end(addr);
+    println!("test_requests_to_retired_tcp_socket() PASS");
 }
 
 fn test_tcp_socket_state_transitions() {
@@ -4335,6 +4523,8 @@ pub fn run_all_tests() {
     test_native_net_cancellation();
     test_connect_reset_is_not_a_timeout();
     test_loopback_peer_time_wait();
+    test_time_wait_releases_client_channel();
+    test_requests_to_retired_tcp_socket();
     test_tcp_socket_state_transitions();
     test_half_open_accounting();
     test_backlog_growth_and_shrink();
