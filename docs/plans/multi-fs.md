@@ -16,10 +16,13 @@ Standing summary: for iteration 1, sparse files and the 16 MiB reserve
 (8 MiB on guests under 32 MiB), with D13's admission and reclamation
 rules, are accepted as sufficient OOM protection; a rigorous OOM
 treatment is deferred and comes back into scope when iteration 1 is
-complete (R8.5, D15). The wire-ID backend is settled: check CPUID at
-sys-io startup, use AES-NI when available, otherwise warn and use the
-zero-preserving XOR fallback, whose weaker security is explicitly
-accepted in D1. No code has changed.
+complete (R8.5, D15). The wire-ID codec is implemented in commit
+`d3af1b662de22941e78ac4af522c2fd5d5da104e`: client-facing FS entry IDs
+are now cryptographically shuffled per boot with AES-128 when AES-NI is
+available. sys-io checks CPUID once at startup; otherwise it warns and
+uses the zero-preserving XOR fallback, whose weaker security is explicitly
+accepted in D1. Both modes preserve `ROOT_ID = 0`. Mount-id packing and
+multi-filesystem support remain planned.
 
 The implementation plan below was reconciled in the thirteenth pass and
 has not been reviewed or updated for these design changes. The current
@@ -41,7 +44,8 @@ Decisions so far:
    startup: use AES-128 through AES-NI if available; otherwise log a
    warning and use the adjusted XOR fallback with a random seed (D1).
    The fallback is obfuscation, not cryptographic protection. All IDs pass
-   through the chosen codec at the client boundary.
+   through the chosen codec at the client boundary. The wire codec landed
+   in `d3af1b66`; the internal mount-id scheme remains to be implemented.
 2. **First use case is `/none/tmp`**, the None role's temporary directory,
    which every image already creates. memfs is mounted over it and the root
    filesystem's `/none/tmp` is shadowed. `/user/tmp` stays on the root
@@ -96,8 +100,9 @@ Decisions so far:
     1 is complete (R8.5, D15).
 13. **The error code lands first.** `moto-rt` gets `CrossesDevices`, the
     crate is published, the Rust and mlibc forks map it, and the rebuilt
-    toolchain is selected before any sys-io patch, so the implementation
-    uses the final code from the start (Q11; plan steps 1 and 2).
+    toolchain is selected before sys-io starts returning the cross-mount
+    error, so multi-filesystem support uses the final code from the start
+    (Q11; plan steps 1 and 2). The wire codec has already landed separately.
 14. **All sysbox work is deferred.** Iteration 1 adds no `mount` command,
     `mv` fallback, recursive-move flag, or changes to `cp`. Cross-mount
     rename fails without copying or deleting anything. Server support for
@@ -199,6 +204,13 @@ not line numbers.
   against the on-disk entry (in use, and the generation matches), so a
   stale or forged id is refused. The superblock keeps `num_blocks`,
   `free_blocks` and `generation`; it has no entry count.
+- Since `d3af1b66`, those raw entry ids stay internal to sys-io.
+  `FsRuntime` owns a shared per-boot `EntryIds` codec
+  (`runtime/fs/entry_ids.rs`): AES-128 through AES-NI when available,
+  otherwise the warned, non-cryptographic XOR fallback of D1. Client IDs
+  are decoded at ingress and encoded at egress, including the IDs exposed
+  through `FileAttr.entry_id`; the root stays zero. Internal filesystem
+  users, locks and pager mappings retain unencoded identities.
 - Clients (`rt.vdso/src/rt_fs.rs` over `moto-io`) canonicalize paths
   lexically, including `..`, keep the cwd as a string, and never call
   `get_parent`. A rename resolves the source entry and the destination
@@ -270,8 +282,10 @@ not line numbers.
   its batch (up to 256 KiB) is entirely free. `SysMem::alloc(PAGE_4K, 1)`
   maps one readable, writable page the kernel admits immediately, and
   `SysMem::free` unmaps it.
-- Error codes: `moto_rt::Error` is a `repr(u16)` enum whose last code is
-  `PageAbsent = 23` (`moto-rt/src/error.rs`). Three places map the codes:
+- Error codes: `moto_rt::Error` is a `repr(u16)` enum;
+  `CrossesDevices = 24` follows `PageAbsent = 23`
+  (`moto-rt/src/error.rs`) and is published in moto-rt 0.17.9
+  (commit `f34023e0`). Three places map the codes:
   the Rust std port, `library/std/src/sys/io/error/motor.rs` in
   `../toolchain-src/rust` (unknown codes become `ErrorKind::Uncategorized`);
   the mlibc port, `sysdeps/motor/include/mlibc/motor-util.hpp` in
@@ -283,7 +297,7 @@ not line numbers.
   `ErrorKind::CrossesDevices` exists.
 - How a moto-rt change reaches std (`docs/toolchain.md` §5,
   `docs/build-rustc.md`): Rust std depends on the published crates.io
-  `moto-rt` (`version = "0.17"`), pinned by the Rust fork's
+  `moto-rt` (minimum 0.17.9 for the new error mapping), pinned by the Rust fork's
   `library/Cargo.lock`, never on a path into this checkout. The tuple that
   identifies a toolchain is `src/toolchain-versions.sh` (fork commits,
   lockfile hashes, lineage id); `src/build-motor-os.sh` builds it, derives
@@ -840,6 +854,11 @@ D1 settles CPU-dependent codec selection. D15 records deferred work,
 including the OOM review that reopens on iteration-1 completion.
 
 ### D1. Entry ids across mounts and opaque wire IDs (decided)
+
+**Implementation status:** the wire codec described below, its shared
+`FsRuntime` ownership and the client-boundary conversions landed in
+`d3af1b662de22941e78ac4af522c2fd5d5da104e`. The mount-id packing,
+mount-point normalization and per-mount validation remain design work.
 
 There are three identity forms: fs-local IDs, internal mount-qualified
 IDs, and opaque wire IDs. Keep them distinct at call sites. An internal
@@ -1403,14 +1422,29 @@ omit root-FS metrics requiring filesystem access if mount 0 is corrupted.
 
 These are the supporting changes for memfs and sys-io (R1.6). The new
 `moto-rt` error, its stdlib/mlibc mappings and the required toolchain update
-are part of iteration 1. All sysbox work is excluded.
+are part of iteration 1. sys-io's reverse mapping in
+`util::map_err_into_native` must also preserve `ErrorKind::CrossesDevices`
+as `moto_rt::Error::CrossesDevices` when encoding a response.
+All sysbox work is excluded.
+
+Preparatory status (2026-10-19): moto-rt 0.17.9 is published. Local
+consumer lockfiles and the Rust fork's root and library lockfiles now
+select it; std's minimum dependency is also 0.17.9. The Rust mapping is
+pushed in `c037341a5a5`, and the mlibc mapping in `52bed56c`. The toolchain
+declaration now pins those commits and the Rust lockfile hashes. The host
+toolchain with key `bea8b730277cb02938c947d5ed91c2e32f800e5b98f480c1e68d2f3de5b4ee12`
+is built, registered and selected in `rust-toolchain.toml`. The matching
+native assembly and all four release images are rebuilt. Six moto-rt
+path-dependency lockfile updates are committed and pushed outside this
+repository: `../javy` (`c496a4f`, two lockfiles) and `../wasmtime`
+(`fda311d08c`, four).
 
 | Crate / tree | Change | Size |
 |---|---|---|
-| `moto-rt` | `Error::CrossesDevices = 24`, `E_CROSSES_DEVICES`; version 0.17.9; `src/sys/Cargo.lock` and the lockfile refresh of about eighteen `Cargo.lock` files (Background); published to crates.io | small, but touches every lockfile; publishing needs crates.io access |
-| `../toolchain-src/rust` (the `moturus/rust` fork branch) | `library/std/src/sys/io/error/motor.rs`: map `CrossesDevices` to `ErrorKind::CrossesDevices`; `library/Cargo.lock`: select moto-rt 0.17.9; one commit, pushed | one line plus the lock |
+| `moto-rt` | `Error::CrossesDevices = 24`, `E_CROSSES_DEVICES`; version 0.17.9; refresh all 17 tracked consumer lockfiles, including `src/sys/Cargo.lock`; published to crates.io | small dependency-only updates |
+| `../toolchain-src/rust` (the `moturus/rust` fork branch) | `library/std/src/sys/io/error/motor.rs`: map `CrossesDevices` to `ErrorKind::CrossesDevices`; `library/std/Cargo.toml`: require moto-rt 0.17.9; root and `library/Cargo.lock`: select 0.17.9; one commit, pushed | mapping, dependency and two lockfiles |
 | `../toolchain-src/mlibc` (the `moturus/mlibc` fork branch) | `sysdeps/motor/include/mlibc/motor-util.hpp`: `case 24: return EXDEV;`; one commit, pushed | one line |
-| this repository, toolchain declaration | `src/toolchain-versions.sh` (`MOTOR_RUST_REV`, `MOTOR_RUST_LIBRARY_LOCK_SHA256`, `MOTOR_MLIBC_REV`), the rebuilt toolchain's name in `rust-toolchain.toml`, `docs/build-rustc.md` and `docs/toolchain.md` moto-rt version mentions | config and docs; one `src/build-motor-os.sh` run |
+| this repository, toolchain declaration | `src/toolchain-versions.sh` (`MOTOR_RUST_REV`, `MOTOR_RUST_ROOT_LOCK_SHA256`, `MOTOR_RUST_LIBRARY_LOCK_SHA256`, `MOTOR_MLIBC_REV`), the rebuilt toolchain's name in `rust-toolchain.toml`, `docs/build-rustc.md` and `docs/toolchain.md` moto-rt version mentions | config and docs; one `src/build-motor-os.sh` run |
 | `async-fs` | `MAX_FS_BLOCKS`, `MAX_FS_GENERATIONS` and the mount-id layout note; `Need` + `check_access` + `validate_filename` moved here | small |
 | `motor-fs` | call the moved helpers; nothing for the limits: no asserts, no checks (decision 16, Q22) | a few lines |
 | `memfs` (new) | the filesystem, its block store with the free-block cache, and its host tests | the bulk of the library work |

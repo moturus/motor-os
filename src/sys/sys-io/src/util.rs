@@ -30,6 +30,7 @@ pub fn map_err_into_native(err: std::io::Error) -> moto_rt::Error {
             moto_rt::Error::StorageFull
         }
         std::io::ErrorKind::FileTooLarge => moto_rt::Error::FileTooLarge,
+        std::io::ErrorKind::CrossesDevices => moto_rt::Error::CrossesDevices,
         std::io::ErrorKind::ResourceBusy | std::io::ErrorKind::ExecutableFileBusy => {
             moto_rt::Error::AlreadyInUse
         }
