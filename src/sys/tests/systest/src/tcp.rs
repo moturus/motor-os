@@ -35,8 +35,13 @@ pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
 /// Reads a system-wide sys-io metric by name; `None` if sys-io does not
 /// describe it.
 pub(crate) fn read_sys_io_metric_opt(name: &str) -> Option<u64> {
-    let provider = moto_stats::Collector::provider_by_name("sys-io")
-        .expect("sys-io stats provider is not registered");
+    // Discovery is best effort and can omit live providers under contention.
+    // Registry discovery itself is covered by stats::test_stats_provider.
+    let provider = moto_stats::ProviderInfo {
+        id: moto_sys::stats::PID_SYS_IO,
+        name: "sys-io".into(),
+        url: "sys-io-stats".into(),
+    };
     // Both describe() and read() open a connection to sys-io's stats server,
     // which fails with NotReady while other clients hold its small listener
     // pool. read() also polls sys-io's net runtime for a live snapshot; under
