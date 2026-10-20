@@ -1315,8 +1315,36 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
     status
 }
 
+// Global sizing hint; remove it before dispatching positional subcommands.
+fn take_host_cpus(args: &mut Vec<String>) -> Result<Option<usize>, &'static str> {
+    let mut host_cpus = None;
+    let mut index = 1;
+    while index < args.len() {
+        let Some(value) = args[index].strip_prefix("--host-cpus=") else {
+            index += 1;
+            continue;
+        };
+        if host_cpus.is_some() {
+            return Err("duplicate --host-cpus");
+        }
+        let count = value
+            .parse::<usize>()
+            .ok()
+            .filter(|count| *count != 0)
+            .ok_or("--host-cpus requires a positive CPU count");
+        host_cpus = Some(count?);
+        args.remove(index);
+    }
+    Ok(host_cpus)
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    let host_cpus = take_host_cpus(&mut args).unwrap_or_else(|error| {
+        eprintln!("systest: {error}");
+        std::process::exit(2);
+    });
+    let available_cpus = (moto_sys::num_cpus() as usize).min(host_cpus.unwrap_or(usize::MAX));
     if environment::run_command(&args) {
         return;
     }
@@ -1483,7 +1511,7 @@ fn main() {
         return;
     }
     if args.len() >= 2 && args[1] == "futex-stress" {
-        futex_stress::run(&args);
+        futex_stress::run(&args, available_cpus);
         return;
     }
     if args.len() >= 2 && args[1] == "fs-bench" {
@@ -1619,6 +1647,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "test-poll" {
         poll::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-active-channel-polls" {
+        io_channel::test_active_channel_polls(available_cpus);
         return;
     }
     if args.len() == 2 && args[1] == "mio-accept-pump-repro" {
@@ -1878,7 +1910,7 @@ fn main() {
     threads::run_all_tests();
     moto_async::run_all_tests();
     poll::run_all_tests();
-    io_channel::run_all_tests();
+    io_channel::run_all_tests(available_cpus);
     test_thread_names();
     test_halt_poll_metrics();
     test_cpus();

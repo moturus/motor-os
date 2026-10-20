@@ -822,6 +822,27 @@ systest_output="$(cat "$SYSTEST_LOG")"
 [ "${systest_output##*$'\n'}" = "systest: ALL PASS" ] ||
   fail "systest did not finish with 'systest: ALL PASS'"
 
+# A full eight-phase batch with the smallest CPU budget exercises the sizing
+# hint and all futex checks without adding a minute-long soak to this suite.
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_BIN/systest --host-cpus=1 futex-stress 1")" ||
+  fail "CPU-sized futex stress failed: $out"
+printf '%s\n' "$out"
+case "$out" in
+  *"1 available CPUs"*"futex-stress: PASS"*) ;;
+  *) fail "CPU-sized futex stress did not pass: $out" ;;
+esac
+# The hint changes the efficiency precondition, retaining every exchange.
+vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/systest --host-cpus=1 test-active-channel-polls"
+for host_cpus in 0 invalid; do
+  if out="$(vm_ssh_stdout "$TEST_BIN/systest --host-cpus=$host_cpus futex-stress 1" 2>&1)"; then
+    fail "systest accepted --host-cpus=$host_cpus: $out"
+  fi
+  case "$out" in
+    *"--host-cpus requires a positive CPU count"*) ;;
+    *) fail "systest did not reject --host-cpus=$host_cpus: $out" ;;
+  esac
+done
+
 # The SSH login shell consumes russhd's one-time capability environment.
 # Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE |
 # CAP_VSOCK | CAP_NET | CAP_FS_WRITE

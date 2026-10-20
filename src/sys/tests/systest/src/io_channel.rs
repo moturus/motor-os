@@ -633,9 +633,9 @@ fn test_concurrent_spawn_reads() {
 /// Both runtimes poll a recently active channel instead of parking (the
 /// Receiver registers a moto_async::SpinSource), so a ping-pong costs a
 /// small fraction of a wait syscall per round trip instead of about two.
-/// Polling only pays off when the peer runs on another CPU: on one CPU each
-/// turn hands the CPU over, so the count is reported but not asserted.
-fn test_active_channel_polls() {
+/// Polling only pays off when the peer runs on another available CPU: when
+/// vCPUs share one host CPU, the count is also reported but not asserted.
+pub fn test_active_channel_polls(available_cpus: usize) {
     const ITERS: u64 = 20000;
     let pid = moto_sys::current_pid();
     let waits_0 = crate::kernel_metric("sys_cpu_waits", pid);
@@ -677,7 +677,7 @@ fn test_active_channel_polls() {
     println!(
         "      io_channel::test_active_channel_polls: {ITERS} roundtrips, {waits} wait syscalls"
     );
-    if !crate::under_load() && moto_sys::num_cpus() >= 2 {
+    if !crate::under_load() && available_cpus >= 2 {
         assert!(
             waits < ITERS / 2,
             "{waits} wait syscalls for {ITERS} roundtrips"
@@ -686,7 +686,7 @@ fn test_active_channel_polls() {
     println!("----- io_channel::test_active_channel_polls PASS");
 }
 
-pub fn run_all_tests() {
+pub fn run_all_tests(available_cpus: usize) {
     test_listener_cleanup();
     basic_test();
     test_ping_pong();
@@ -696,7 +696,7 @@ pub fn run_all_tests() {
     test_remote_page_free_preserves_other_waiters();
     test_error_handler_on_double_free();
     test_concurrent_spawn_reads();
-    test_active_channel_polls();
+    test_active_channel_polls(available_cpus);
 
     println!("io_channel: ALL PASS");
 }

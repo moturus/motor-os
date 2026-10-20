@@ -77,6 +77,13 @@ KEY="$ROOT/src/tests/test.key"
 IMG_DIR="$ROOT/vm_images/$BUILD"
 export MOTO_IMAGE=motor-os-dev.qcow2
 HOST_RNET="$ROOT/src/bin/rnetbench/target/release/rnetbench"
+# Ask the host scheduler to resolve ranges and overlapping affinity entries.
+# Leave the guest's default sizing alone when no host affinity was requested.
+SYSTEST_CPU_ARG=""
+if [ -n "${MOTO_CPU_AFFINITY:-}" ]; then
+  HOST_CPUS="$(taskset -c "$MOTO_CPU_AFFINITY" env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc)" || exit 2
+  SYSTEST_CPU_ARG="--host-cpus=$HOST_CPUS"
+fi
 # qemu monitor over TCP: a unix-socket path under a deep scratch dir exceeds the
 # 108-byte sun_path limit, and TCP is what the watchdog settled on anyway.
 MON_HOST=127.0.0.1
@@ -135,6 +142,7 @@ if [ "${STRESS_DRYRUN:-0}" = 1 ]; then
   echo "  KEY        : $KEY"
   echo "  IMG_DIR    : $IMG_DIR"
   echo "  HOST_RNET  : $HOST_RNET"
+  echo "  systest CPU: ${SYSTEST_CPU_ARG:-guest default}"
   rc=0
   [ -f "$KEY" ]                 && echo "  [ok]      ssh key present"        || { echo "  [MISSING] ssh key"; rc=1; }
   [ -x "$IMG_DIR/run-qemu.sh" ] && echo "  [ok]      run-qemu.sh present"    || { echo "  [MISSING] $IMG_DIR/run-qemu.sh (run: make BUILD=$BUILD all)"; rc=1; }
@@ -392,7 +400,7 @@ gate_udp_socket_count
 
 log "VM gate: systest"
 run_timeout 900 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-  "MOTOR_OS_CAPS=0x3cc /devtools/tests/systest --vsock" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
+  "MOTOR_OS_CAPS=0x3cc /devtools/tests/systest $SYSTEST_CPU_ARG --vsock" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
 gate_rc=${PIPESTATUS[0]}
 [ "$gate_rc" -eq 0 ] || gate_fail "systest (rc=$gate_rc)"
 [ "$(tail -n 1 "$OUT/gate-systest.log")" = "systest: ALL PASS" ] ||
@@ -563,7 +571,7 @@ w_futex() {
   while :; do
     n=$((n+1))
     run_timeout 300 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-      "/devtools/tests/systest futex-stress 60" >>"$OUT/futex.log" 2>&1; rc=$?
+      "/devtools/tests/systest $SYSTEST_CPU_ARG futex-stress 60" >>"$OUT/futex.log" 2>&1; rc=$?
     echo "iter=$n rc=$rc" >>"$OUT/futex.log"
     [ "$rc" -ne 0 ] && f=$((f+1)); write_stat futex "$n" "$f" "$rc" "futex-stress"; pace "$rc"
   done
@@ -577,7 +585,7 @@ w_systest() { # paging-soak|sparse-soak|swap-cancel-soak
   while :; do
     n=$((n+1))
     run_timeout 300 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-      "MOTOR_OS_CAPS=0x3cc /devtools/tests/systest $name" >"$current" 2>&1
+      "MOTOR_OS_CAPS=0x3cc /devtools/tests/systest $SYSTEST_CPU_ARG $name" >"$current" 2>&1
     rc=$?
     if [ "$rc" -eq 0 ] && [ "$(tail -n 1 "$current")" != "$name PASS" ]; then
       rc=96
