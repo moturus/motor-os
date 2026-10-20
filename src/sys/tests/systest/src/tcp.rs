@@ -1722,6 +1722,7 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
     let stop = Arc::new(AtomicBool::new(false));
     let messages = Arc::new(AtomicU64::new(0));
     let full_observations = Arc::new(AtomicU64::new(0));
+    let active_producers = Arc::new(AtomicU64::new(0));
     let start = Arc::new(std::sync::Barrier::new(3));
     let mut producers = Vec::new();
     for _ in 0..2 {
@@ -1729,6 +1730,7 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
         let stop = stop.clone();
         let messages = messages.clone();
         let full_observations = full_observations.clone();
+        let active_producers = active_producers.clone();
         let start = start.clone();
         producers.push(std::thread::spawn(move || {
             let mut ack = moto_ipc::io_channel::Msg::new();
@@ -1741,6 +1743,9 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
                     Ok(()) => {
                         sent += 1;
                         messages.fetch_add(1, Ordering::Relaxed);
+                        if sent == 1 {
+                            active_producers.fetch_add(1, Ordering::Release);
+                        }
                     }
                     Err(moto_rt::Error::NotReady) => {
                         full_observations.fetch_add(1, Ordering::Relaxed);
@@ -1755,15 +1760,18 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
     start.wait();
 
     // More than one ring's worth of successful sends proves sys-io is
-    // continuously draining this channel; full observations prove both
-    // producers are keeping pressure on it when the probe starts.
+    // continuously draining this channel; full observations prove ring
+    // pressure. Require each producer to send before the probe starts:
+    // the shared counters alone can be met by one.
     let load_deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while messages.load(Ordering::Relaxed) < MIN_MESSAGES
+    while active_producers.load(Ordering::Acquire) < 2
+        || messages.load(Ordering::Relaxed) < MIN_MESSAGES
         || full_observations.load(Ordering::Relaxed) < MIN_FULL_OBSERVATIONS
     {
         assert!(
             std::time::Instant::now() < load_deadline,
-            "inline-data producers did not saturate the ring: {} messages, {} full observations",
+            "inline-data producers did not saturate the ring: {} active producers, {} messages, {} full observations",
+            active_producers.load(Ordering::Acquire),
             messages.load(Ordering::Relaxed),
             full_observations.load(Ordering::Relaxed)
         );
