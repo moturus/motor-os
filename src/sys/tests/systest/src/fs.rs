@@ -1031,7 +1031,6 @@ fn resize_test() {
 /// Retained write completions used to exhaust CHV's 128-entry block queue
 /// before the worker could reach Commit and release their descriptors.
 pub fn scattered_writes_test() {
-    use std::io::Write;
     use std::os::fd::AsRawFd;
 
     const FILES: usize = 248;
@@ -1061,7 +1060,7 @@ pub fn scattered_writes_test() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     // Open during setup: debug logging from open must not split the write batch.
-    let mut files: Vec<_> = paths
+    let files: Vec<_> = paths
         .iter()
         .enumerate()
         .step_by(STRIDE)
@@ -1073,13 +1072,41 @@ pub fn scattered_writes_test() {
         })
         .collect();
     let flush_file = std::fs::File::open(&paths[0]).unwrap();
+    let overwrites: Vec<_> = files
+        .iter()
+        .map(|(i, file)| {
+            (
+                moto_rt::fs::get_file_attr(file.as_raw_fd())
+                    .unwrap()
+                    .entry_id,
+                !(*i as u8),
+            )
+        })
+        .collect();
+    let mut runtime = moto_async::LocalRuntime::new();
+    let client = moto_io::fs::FsClient::connect().unwrap();
     // Empty the creation batch before measuring the 62 one-block overwrites.
     moto_rt::fs::flush(flush_file.as_raw_fd()).unwrap();
     let before = read_sys_io_fs_metrics(&sys_io_provider);
     let started = std::time::Instant::now();
-    for (i, file) in &mut files {
-        file.write_all(&[!(*i as u8); LEN]).unwrap();
-    }
+    // Submit the whole batch before waiting for completions. Blocking round
+    // trips can outlast the automatic flush interval on oversubscribed CPUs.
+    runtime.block_on(async {
+        client.enable_response_pump();
+        moto_async::LocalRuntime::spawn(client.clone().run_response_pump());
+        let writes: Vec<_> = overwrites
+            .into_iter()
+            .map(|(entry_id, byte)| {
+                let client = client.clone();
+                moto_async::LocalRuntime::spawn(async move {
+                    assert_eq!(client.write(entry_id, 0, &[byte; LEN]).await.unwrap(), LEN);
+                })
+            })
+            .collect();
+        for write in writes {
+            write.await;
+        }
+    });
     let overwrite_elapsed = started.elapsed();
     moto_rt::fs::flush(flush_file.as_raw_fd()).unwrap();
     let after = read_sys_io_fs_metrics(&sys_io_provider);
