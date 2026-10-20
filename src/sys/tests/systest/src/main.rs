@@ -806,6 +806,34 @@ fn test_invalid_memory_map_options() {
         Err(moto_rt::E_NOT_ALLOWED)
     );
 
+    // Zero pages are refused at the entry, before any path can build an
+    // empty segment, which was a kernel panic. The wrapper asserts a
+    // non-zero count, so these go through the raw syscall.
+    for flags in [
+        0,
+        SysMem::F_READABLE | SysMem::F_WRITABLE,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+        SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE,
+    ] {
+        let nr = (u64::from(syscalls::SYS_MEM) << 56)
+            | (u64::from(SysMem::OP_MAP) << 48)
+            | (u64::from(flags) << 16);
+        assert_eq!(
+            syscalls::do_syscall(
+                nr,
+                SysHandle::SELF.as_u64(),
+                u64::MAX,
+                u64::MAX,
+                sys_mem::PAGE_SIZE_SMALL,
+                0,
+                0
+            )
+            .error_code(),
+            moto_rt::E_INVALID_ARGUMENT,
+            "flags 0x{flags:x}"
+        );
+    }
+
     println!("test_invalid_memory_map_options PASS");
 }
 

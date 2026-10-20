@@ -818,11 +818,14 @@ impl VmemSegment {
         }
         // Segment provenance decides, whatever the actual backing: a huge
         // page must never reach the small-page replacement loop below, a
-        // file-paged segment has no complete set of pages to share, and a
-        // lazy destination may have no pages at all.
+        // file-paged segment has no complete set of pages to share, a lazy
+        // destination may have no pages at all, and a guarded destination
+        // would get frames installed in its guards.
         if (self.mapping_options | other.mapping_options)
             .intersects(MappingOptions::HUGE_ELIGIBLE | MappingOptions::FILE_PAGED)
-            || other.mapping_options.contains(MappingOptions::LAZY)
+            || other
+                .mapping_options
+                .intersects(MappingOptions::LAZY | MappingOptions::GUARD)
         {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }

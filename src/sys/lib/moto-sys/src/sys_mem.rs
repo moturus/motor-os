@@ -57,6 +57,13 @@ impl SysMem {
     // Targeting the caller's own address space requires CAP_IO_MANAGER.
     pub const F_EXECUTABLE: u32 = 0x80;
 
+    // Only with F_READABLE | F_WRITABLE, eager or with F_LAZY: a heap
+    // allocation of num_pages between two pages that are never mapped, so an
+    // access just below or just above it kills the thread. The segment is
+    // num_pages + 2 pages, not rounded; map returns its start (the lower
+    // guard) and its full size, and unmap takes that start.
+    pub const F_GUARDED: u32 = 0x100;
+
     // Bit flags for query.
     pub const F_QUERY_STATS: u32 = 1;
     pub const F_QUERY_ADMISSION_STATS: u32 = 2;

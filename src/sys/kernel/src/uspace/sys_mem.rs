@@ -61,6 +61,10 @@ fn map_charge(flags: u32, phys_addr: u64, page_size: u64, num_pages: u64) -> u64
         // before the flat metadata charge, so no refund follows huge success.
         let mapped = crate::mm::user::HeapSizing::new(num_pages).mapped_pages;
         (mapped, mapped)
+    } else if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_GUARDED) {
+        // A guarded eager heap: small pages only, and a frameless descriptor
+        // for each guard.
+        (num_pages, num_pages.saturating_add(2))
     } else {
         (num_pages, num_pages)
     };
@@ -81,7 +85,12 @@ fn sys_map(
         .process_stats
         .adjust_metric(crate::xray::stats::MetricType::SysMemMaps, 1);
 
-    // Protect against bad numbers.
+    // Protect against bad numbers. No mapping is empty: every path below
+    // builds a segment, and a segment of zero size is a kernel assertion.
+    if num_pages == 0 {
+        log::debug!("sys_mem_impl: zero pages");
+        return ResultBuilder::invalid_argument();
+    }
     let (new_bytes, overflow) = page_size.overflowing_mul(num_pages);
     if overflow || new_bytes > (1 << 40) {
         return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY); // TODO: should we kill the process?
@@ -211,6 +220,23 @@ fn sys_map(
         }
 
         return match address_space.alloc_user_lazy(num_pages) {
+            Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
+            Err(_) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
+        };
+    }
+
+    if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_GUARDED)
+        || flags == (SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY | SysMem::F_GUARDED)
+    {
+        // A heap allocation between two never-mapped guard pages: the caller
+        // gets the whole segment, num_pages + 2 pages, guards included.
+        if phys_addr != u64::MAX || virt_addr != u64::MAX {
+            log::debug!("sys_mem_impl: bad map addresses");
+            return ResultBuilder::invalid_argument();
+        }
+
+        let lazy = (flags & SysMem::F_LAZY) != 0;
+        return match address_space.alloc_user_guarded(num_pages, lazy) {
             Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
             Err(_) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
         };

@@ -75,6 +75,14 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
+    pub fn guard_touch(&mut self, case: u64) {
+        use std::io::Write;
+        self.stdin
+            .write_all(format!("guard_touch {case}\n").as_bytes())
+            .unwrap();
+        self.stdin.flush().unwrap();
+    }
+
     pub fn bad_wait_array(&mut self, case: usize) {
         use std::io::{BufRead, BufReader, Write};
         self.stdin
@@ -207,6 +215,10 @@ fn do_command(cmd: String) {
         "sparse_exit" => {
             assert_eq!(1, words.len());
             crate::sparse::run_exit_child()
+        }
+        "guard_touch" => {
+            assert_eq!(2, words.len());
+            crate::sparse::run_guard_touch_child(words[1].parse().unwrap())
         }
         "bad_wait_array" => {
             assert_eq!(2, words.len());
