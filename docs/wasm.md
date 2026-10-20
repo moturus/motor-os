@@ -43,6 +43,17 @@ to 64 instances, 16 tables and 32,768 table elements, which `-W max-instances`,
 `-W max-tables` and `-W max-table-elements` override. `-W timeout=DURATION`
 interrupts a guest compiled with epoch interruption. The example and HTML documentation are part of `dev.img`.
 
+`wasmtime-rt` runs asynchronous calls, such as each `serve` request, on fiber
+stacks that are lazy guarded mappings: a stack uses RAM only for the pages it
+touches, and, as on Linux, their number is not limited. `serve` behaves as
+upstream: up to 1,000 concurrent requests and connections by default
+(`--max-concurrent-requests`, `--max-concurrent-connections`), no default
+request deadline, no header-read or idle timeout, and exit on any accept
+error. A request deadline needs `-W timeout` and an artifact compiled with
+epoch interruption: a server with a timeout refuses artifacts compiled
+without epochs, and a server without one refuses artifacts compiled with
+them.
+
 ## Run the example
 
 In the developer VM's shell:
