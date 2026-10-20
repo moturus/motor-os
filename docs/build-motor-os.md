@@ -59,9 +59,9 @@ Wasmtime add-ons are built from one branch of their forks at the exact revision
 declared in `src/build-addon-sources.sh`, in `$MOTORH/javy` and
 `$MOTORH/wasmtime`: a clean checkout is moved to that revision, and commits
 that are not on the fork's branch are never left behind. Everything the forks
-depend on — Wasmi, Wizer, Tokio, Mio, target-lexicon, and the Motor OS crates
-themselves — are Cargo git dependencies pinned by the forks' lockfiles, which
-Cargo fetches; no fork refers to a sibling checkout, and this tree's
+depend on — Wasmi, Wizer, Tokio, Mio and target-lexicon by git, and the Motor
+OS crates by git (Javy) or from crates.io (Wasmtime: `moto-rt`, `moto-sys`) —
+is pinned by the forks' lockfiles, which Cargo fetches; no fork refers to a sibling checkout, and this tree's
 `src/sys/lib` is not an input of the add-ons.
 
 After selecting the host toolchain, the build prepares all add-on sources and

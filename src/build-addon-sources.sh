@@ -5,13 +5,13 @@
 # revision declared here, so every Motor OS branch names the fork revisions it
 # was gated with. To take new fork work: push the fork, then set its revision
 # (an exported MOTOR_<ADDON>_REV wins, for a build before the pin is committed).
-# What the forks depend on — Tokio, Mio, target-lexicon, Wasmi, Wizer and the
-# Motor OS crates — are Cargo git dependencies pinned by the add-ons' lockfiles;
-# the tree keeps no sibling checkout of them.
+# What the forks depend on — Tokio, Mio, target-lexicon, Wasmi and Wizer by git,
+# the Motor OS crates by git (Javy) or from crates.io (Wasmtime) — is pinned by
+# the add-ons' lockfiles; the tree keeps no sibling checkout of them.
 MOTOR_JAVY_BRANCH=motor-9.1.0
-MOTOR_JAVY_REV="${MOTOR_JAVY_REV:-c7c29b2aa394ab8a0841ee91db14eda7883c3722}"
+MOTOR_JAVY_REV="${MOTOR_JAVY_REV:-12a6c52d7dbd62056ead74d8ddea3f8a235f278f}"
 MOTOR_WASMTIME_BRANCH=motor-48.0.1
-MOTOR_WASMTIME_REV="${MOTOR_WASMTIME_REV:-8804845d7a76f56e2547f4178c93cb38c6d8c526}"
+MOTOR_WASMTIME_REV="${MOTOR_WASMTIME_REV:-08a09edeacd8eb82399f9e4bbbba7d06e7f97292}"
 
 # "repo:branch" follows the branch head; "repo:branch:revision" builds that
 # revision of the branch.

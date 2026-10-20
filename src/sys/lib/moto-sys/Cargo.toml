@@ -5,12 +5,12 @@ authors = ["The Motor OS Project Developers"]
 license = "MIT OR Apache-2.0"
 keywords = ["motor", "motor-os"]
 readme = "README.md"
-repository = "https://github.com/moturus/moto-sys"
+repository = "https://github.com/moturus/motor-os"
 description = "Motor OS system crate."
 edition = "2021"
 
 [dependencies]
-moto-rt = { version = "0.17", optional = true }
+moto-rt = { version = "0.17", path = "../moto-rt", optional = true }
 
 [features]
 base = ["moto-rt/base"]

@@ -22,7 +22,7 @@ dependencies = [
  "bitflags",
  "filedescriptor",
  "mio",
- "moto-rt 0.17.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moto-rt",
  "parking_lot",
  "rustix",
  "signal-hook",
@@ -92,10 +92,6 @@ dependencies = [
 [[package]]
 name = "moto-rt"
 version = "0.17.8"
-
-[[package]]
-name = "moto-rt"
-version = "0.17.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a77aa5e9703e09b6fef00cd465edff63b4ab502177e10aecbbd93b3cef217d6"
 
@@ -105,15 +101,17 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "libc",
- "moto-rt 0.17.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moto-rt",
  "moto-sys",
 ]
 
 [[package]]
 name = "moto-sys"
-version = "0.3.1"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c345df997a770a2935df31acc3532aae239b26915800064b0d10d954956ce22b"
 dependencies = [
- "moto-rt 0.17.8",
+ "moto-rt",
 ]
 
 [[package]]

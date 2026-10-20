@@ -18,16 +18,21 @@ settled points of the earlier plan reviews are folded in.
 
 Evidence under `build/` is host-local and not required.
 
-- **Forks:** published `moturus/javy` `motor-9.1.0` at `859b412`,
-  `moturus/wasmtime` `motor-48.0.1` at `fda311d08` and `moturus/wasmi`
-  `motor-1.1.0` at `55bc21a5`. Committed locally and awaiting the owner's
-  push, in this order: mio `87e045c`, tokio `860f25ca`, wasmi `18be00bc`,
-  javy `c7c29b2`, wasmtime `8804845d7` (on top of `5d9818f3c`, lazy guarded
-  fiber stacks). They end every cross-repository path dependency; see
-  [the dependency scheme](#fork-dependency-scheme-2026-10-20). The tree pins
-  the javy and wasmtime revisions it builds in `src/build-addon-sources.sh`;
-  the add-ons rebuilt from those pins pass `test-wasm.sh` under Cloud
-  Hypervisor and `full-test-dev.sh --release` (2026-10-20). Tree work is on
+- **Forks:** pushed on 2026-10-20, branches at these heads: mio `motor-1.2.0`
+  `87e045c`, tokio `motor-1.51.1` `860f25ca`, wasmi `motor-1.1.0` `18be00bc`,
+  javy `motor-9.1.0` `12a6c52` (on the owner's `c496a4f`), wasmtime
+  `motor-48.0.1` `08a09edea` (on top of `8804845d7` and `5d9818f3c`, lazy
+  guarded fiber stacks). They end every cross-repository path dependency; see
+  [the dependency scheme](#fork-dependency-scheme-2026-10-20). Javy and
+  Wasmtime take `moto-rt` and `moto-sys` from crates.io, and Wasmtime's WASI
+  filesystem adapter is path-based over `moto-rt` (see
+  [Native filesystem](#native-filesystem-clocks-and-networking)). The tree pins
+  the javy and wasmtime revisions it builds in `src/build-addon-sources.sh`.
+  With the current pins, `make BUILD=release`, both add-on builds and
+  `full-test.sh --release` pass (2026-10-20, the owner limited the check to
+  that); the wasm matrices under QEMU and Cloud Hypervisor passed the same
+  morning with wasmtime `08a09edea` and the same Javy content before its
+  rebase. Tree work is on
   the `wasm` branch.
 - **Done: Linux-parity memory limits** (owner rulings 2026-10-18, in
   [the memory contract](#javy-pipeline-and-memory-backing)). Those fork heads
@@ -53,7 +58,7 @@ Evidence under `build/` is host-local and not required.
   sys-io's TIME-WAIT memory; that is fixed by the standalone sys-io patch
   `4ee0cf22`. Eager fiber stacks allowed only 8 in-flight p2 requests; the
   owner ruled (2026-10-19) for lazily committed guarded stacks, as on Linux,
-  and Wasmtime `5d9818f3c` (not yet published) builds them on the kernel's
+  and Wasmtime `5d9818f3c` (pushed 2026-10-20) builds them on the kernel's
   guarded heap maps (`fc48f27d`). Its local build passes `stack-check` and
   serves 64 concurrent p2 requests at 224 MiB. **Resume** with the "Next"
   item of "Lazy guarded fiber stacks" under
@@ -144,7 +149,7 @@ not establish them.
  |           WASI grants, resource limits, guarded stacks             |
  |                            |                                       |
  |          Motor FS adapter       Tokio -> Mio -> Motor TCP/UDP      |
- |          moto-io/moto-async      native clocks/entropy             |
+ |          moto-rt path calls      native clocks/entropy             |
  +----------------------------+---------------------------------------+
                               | native calls / existing IPC
                               v
@@ -217,8 +222,8 @@ What the branches carry:
   `wasi_snapshot_preview1` imports rejected at instantiation).
 - `moturus/wasmtime`: Wizer instrumentation decoupled from the runtime,
   allocator-backed compilation and loading, Motor filesystem/socket/clock/entropy
-  adapters (including entry-ID filesystem walks and the narrow `CMD_STAT`
-  lookup), target-resolved native defaults and `Config::motor_runtime()` for
+  adapters (path-based directory capabilities over `moto-rt`),
+  target-resolved native defaults and `Config::motor_runtime()` for
   Pulley, immutable native ELF templates with a publisher, bounded guarded
   stacks, shared command/HTTP hosts, Motor's `P3_DEFAULT=false`, the runtime-only
   CLI with an explicit ELF layout, and build/check scripts. The role/mask guard
@@ -517,9 +522,9 @@ path validation alone does not address directory replacement. Test renamed
 preopens/subdirectories, replacement between check and use, stat/open mismatch,
 stale generations, permissions and descriptor lifetime.
 
-The maintained `motor_fs` adapter already uses `moto_io::fs::FsClient` operations
+Until 2026-10-20 the `motor_fs` adapter used `moto_io::fs::FsClient` operations
 on entry IDs and `motor_lookup::lookup` for parent-relative `CMD_STAT` walks.
-Milestone 2 qualifies this implementation beyond its existing rename/replacement
+Milestone 2 qualified that implementation beyond its existing rename/replacement
 and client-reuse tests, including ownership, cancellation/reentrancy, stale
 connections and IPC cost. `stat(path)` reuses the VDSO I/O runtime but is
 synchronous and performs path lookup plus metadata RPCs; identity-only walks
@@ -530,6 +535,24 @@ does not exist in the tree; proposing one remains optional and unapproved, and
 no new filesystem protocol is required. Generation IDs do not imply POSIX
 open-after-unlink. Hardlink, symlink and set-times return explicit unsupported
 errors.
+
+**Decision 2026-10-20 (owner):** the adapter is path-based over `moto-rt`,
+so that Wasmtime depends on no unpublished Motor OS crate. A directory
+descriptor is the absolute path below its preopen; every operation composes
+the guest's relative path with it and calls the native path API (`stat`,
+`open`, `mkdir`, `unlink`, `rmdir`, `rename`, `opendir`/`readdir`). A handle
+names a place, not an object: a renamed directory is not followed, a
+replacement under the same name is reached, and a `..` that leaves a file
+fails with `NotADirectory` as the old walk did. Open files are native
+descriptors (positioned I/O is `seek` plus `read`/`write` under a per-file
+lock, since the native calls use the descriptor's position) and keep the
+object they were opened on; identity for `metadata-hash`, `is-same-file` and
+p1 inodes is `FileAttr::entry_id`. Confinement is unchanged: absolute paths,
+NULs, overlong names and `..` above the preopen are refused before I/O, and
+Motor has no symlinks. What is given up is handle-follows-rename and
+replacement confinement, which no upstream fixture in the smoke suite needs;
+the fork's `motor-host-tests` now pin the path semantics instead. `moto-io`,
+`moto-async`, `moto-ipc` and `moto-sys-io` left the fork with the rewrite.
 
 There is no public clock-resolution API. Derive the adapter's nanosecond
 resolution from the existing VDSO tick-rate value with ceiling division; do not
@@ -769,7 +792,7 @@ The scheme now:
 
 | Dependency | Declared as | Pinned by |
 | --- | --- | --- |
-| Motor OS crates (`moto-rt`, `moto-sys`, `moto-io`, `moto-async`, `moto-ipc`, `moto-sys-io`) | `git = "https://github.com/moturus/motor-os", branch = "main"`, one revision for all of them; Wasmtime also patches crates.io `moto-rt` to it so Tokio's and Mio's `moto-rt = "0.17"` unify with it | the fork's lockfiles |
+| Motor OS crates | Javy: `moto-rt` and `moto-sys` by `git = "https://github.com/moturus/motor-os", branch = "main"`, one revision for both; Wasmtime (since the update below): `moto-rt = "0.17"` and `moto-sys = "0.3.2"` from crates.io, which Tokio's and Mio's `moto-rt = "0.17"` share | the fork's lockfiles |
 | Fork-to-fork (Wasmtime → Tokio, Mio, target-lexicon; Javy → Wasmi, Wizer in `moturus/wasmtime`) | `[patch.crates-io]` entries with `git = "https://github.com/moturus/<repo>", branch = "motor-<version>"` | the fork's lockfiles |
 | Ring | unchanged: git, exact rev | the fork's lockfiles |
 | Javy and Wasmtime themselves | `src/build-addon-sources.sh`: branch and full revision, like `src/toolchain-versions.sh` | the tree branch |
@@ -784,12 +807,42 @@ Measured: resolving the Motor OS crates from GitHub takes 4 s and the repository
 is 22 MiB in Cargo's git cache; Javy's Wizer dependency clones `moturus/wasmtime`
 (140 MiB) once per machine.
 
+**Update, later on 2026-10-20:** the owner published `moto-rt` 0.17.9,
+`moto-sys` 0.3.2 (equal to the tree's `src/sys/lib/moto-sys`, with
+`F_GUARDED`) and `moto-rt-cabi`, and ruled that Wasmtime takes `moto-rt` and
+`moto-sys` from crates.io with a path-based filesystem adapter. Wasmtime
+`08a09edea` declares `moto-rt = "0.17"` and `moto-sys = "0.3.2"` in its four
+workspaces, patches no Motor OS crate by git any more, and dropped `moto-io`,
+`moto-async`, `moto-ipc` and `moto-sys-io` with the adapter rewrite, so
+nothing it needs is unpublished. Javy still takes `moto-rt` and `moto-sys` by
+git at `fc48f27d`; both are published, so switching it is the same two-line
+change per manifest plus `cargo update --workspace`. The "publish" alternative
+below is therefore taken for the two crates every consumer needs; the other
+nine are needed by nothing outside the tree.
+
+**Tree-wide, same day:** the owner first ruled that everything takes
+`moto-rt` from crates.io. The build showed the limit of that: a crate outside
+`src/sys` that also uses an unpublished sys library by path (rmux with
+moto-ipc, russhd with moto-io) then links two copies of moto-rt and moto-sys
+and fails on mismatched types. The final ruling is therefore: crates under
+`src/sys` reference each other by path (moto-sys keeps `version = "0.17"` next
+to `path`, so the published crate asks crates.io), and every crate outside
+`src/sys` takes Motor OS crates from crates.io only, which needs the remaining
+libraries published as one crate, `moto-api`; see
+[docs/plans/moto-api.md](moto-api.md). Its interim step 1 is in place: rmux,
+russhd, rnetbench and the smoke suites keep path dependencies on moto-rt and
+moto-sys until moto-api exists, rush moved to crates.io, and ten lockfiles
+record the owner's moto-sys 0.3.2 bump (`32756ef6`). Open points for the
+owner: the in-tree moto-rt source is 0.17.8 while crates.io has 0.17.9, and
+`src/toolchain-runtime.sh` still describes the pre-ruling layout.
+
 What a human does:
 
 - **Advance a tree branch's toolchain or `src/sys/lib`:** nothing in the
   forks. Their locks keep their Motor OS revision and crates.io versions.
-- **Use a new kernel or sys-io feature in a fork:** push the tree commit; in the
-  fork, `cargo update -p moto-rt [--precise <rev>]` in each workspace with a
+- **Use a new kernel or sys-io feature in a fork:** for Javy, push the tree
+  commit and `cargo update -p moto-rt [--precise <rev>]`; for Wasmtime, publish
+  the crate and `cargo update -p moto-sys` (or `moto-rt`); in each workspace with a
   lockfile (Wasmtime: root, `motor-runtime`, `motor-tests`, `motor-host-tests`;
   Javy: root, `motor-tests`), commit, push; then set the fork's `MOTOR_*_REV`
   in `src/build-addon-sources.sh` and gate.
@@ -830,7 +883,7 @@ Pre-existing, unchanged: Javy's lock carries three copies of the
 `wasmtime-internal-*` crates (upstream Javy's crates.io Wasmtime and the Wizer
 workspace's), as it did with the path patch.
 
-**Gate, 2026-10-20 (fork heads unpushed, pinned in the tree).** Every
+**Gate, 2026-10-20 (fork heads pinned in the tree, pushed later that day).** Every
 workspace resolves and fetches with `--locked`, also from an empty Cargo home;
 `src/check-addon-lockfiles.sh` validates all twelve add-on workspaces offline;
 `test-build-addons.sh` covers the pinned checkouts (older revision detaches,
@@ -1062,7 +1115,8 @@ gated ([the resume point](#status-and-resume-point-2026-10-19)).
   no charge after 256 teardown cycles and failed instantiations. TypeScript
   through `wasmtime-rt` ran about 3.5% faster than the copying
   `MallocMemory` path (563 against 583 ms over SSH, five runs).
-- **2c:** new checks cover NUL rejection, renamed subdirectory handles, stale
+- **2c** (entry-ID adapter, superseded on 2026-10-20 by the path-based one; see
+  the decision under Native filesystem)**:** new checks cover NUL rejection, renamed subdirectory handles, stale
   handles to deleted directories, replacement after `stat` and unsupported
   link operations. A three-level parent-ID walk costs 41–54 µs against
   98–101 µs for a native path `stat`. A stale handle fails with
@@ -1162,7 +1216,9 @@ completes 2f.
    `MallocMemory` path that grows by copying. Qualify growth to the per-memory
    limit in steps on both images at 224 MiB, and record execution timing as in
    1i. Output: fork with engine tests, evidence.
-3. **2c — filesystem confinement.** Qualify the existing entry-ID adapter
+3. **2c — filesystem confinement** (done with the entry-ID adapter, which the
+   path-based adapter over `moto-rt` replaced on 2026-10-20; its
+   `motor-host-tests` cover the same cases with path semantics)**.** Qualify the existing entry-ID adapter
    (`motor_fs` plus `motor_lookup::lookup`) against the contract: absolute paths,
    NULs and traversal rejected before I/O; renamed preopens/subdirectories,
    replacement between check and use,
@@ -1475,15 +1531,17 @@ kills the thread.
   no default deadline (`-W timeout` needs epoch-compiled artifacts), no
   header-read or idle timeout, and exit on accept errors. `MOTOR.md` needs
   nothing for behavior that matches upstream.
-- **Next.** The owner pushes the five forks (mio, tokio, wasmi, javy,
-  wasmtime `8804845d7`, which carries `5d9818f3c`) and then this tree. The
-  moto-rt 0.17.9 lock that blocked `--locked` builds on 2026-10-19 is gone
-  with [the dependency scheme](#fork-dependency-scheme-2026-10-20): the
-  fork's locks pin the Motor OS crates by git revision. The add-ons rebuilt
-  from the pinned revisions through `src/build-motor-os.sh --javy-only` and
-  `--wasmtime-only`; the gate results are recorded in the scheme section's
-  follow-up below. Then run `test-wasm.sh` under Cloud Hypervisor as well,
-  and 3a closes; 3b and 3f follow.
+- **Next.** The forks are pushed (2026-10-20: mio, tokio, wasmi, javy
+  `12a6c52`, wasmtime `08a09edea`, which carries `8804845d7` and `5d9818f3c`);
+  the tree changes of that day are staged for the owner's commit. The moto-rt
+  0.17.9 lock that blocked `--locked` builds on 2026-10-19 is gone with
+  [the dependency scheme](#fork-dependency-scheme-2026-10-20): Javy and
+  Wasmtime take `moto-rt` 0.17.9 and `moto-sys` 0.3.2 from crates.io. The
+  add-ons rebuilt from the pinned revisions through `src/build-motor-os.sh
+  --javy-only` and `--wasmtime-only`; the wasm matrices passed under QEMU and
+  Cloud Hypervisor with wasmtime `08a09edea`, so 3a closes once the owner's
+  commit lands; 3b and 3f follow the moto-api merge
+  ([docs/plans/moto-api.md](moto-api.md)).
 
 1. **3a — HTTP resource defaults.** Extend milestone 2's finite command defaults
    with request, body/buffer and serving-concurrency limits; size the stack pool
