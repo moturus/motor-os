@@ -7,9 +7,13 @@ pub mod file_block_device;
 
 pub mod block_cache;
 mod block_device;
+#[cfg(feature = "std")]
+mod checks;
 mod filesystem;
 
 pub use block_device::*;
+#[cfg(feature = "std")]
+pub use checks::*;
 pub use filesystem::*;
 
 #[cfg(not(feature = "std"))]

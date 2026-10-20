@@ -31,7 +31,7 @@ use async_fs::Timestamp;
 use bytemuck::Pod;
 use std::io::Result;
 
-pub const MAX_FILENAME_LEN: usize = 255;
+pub use async_fs::{MAX_FILENAME_LEN, validate_filename};
 pub const RESERVED_BLOCKS: usize = MAX_BLOCKS_IN_TXN_LOG + 2;
 
 pub(crate) const MAX_BLOCKS_IN_TXN: usize = 16;
@@ -1164,18 +1164,6 @@ impl DirEntryBlock {
         self_.block_header.blocks_in_use -= val;
         Ok(())
     }
-}
-
-pub fn validate_filename(filename: &str) -> Result<()> {
-    if filename.len() > MAX_FILENAME_LEN || filename.contains('/') || filename.starts_with("..") {
-        return Err(ErrorKind::InvalidFilename.into());
-    }
-
-    if filename.trim().len() != filename.len() {
-        return Err(ErrorKind::InvalidFilename.into());
-    }
-
-    Ok(())
 }
 
 // Note: this macro returns a refcell's ref, which clippy flags when held across .await.

@@ -4,6 +4,7 @@
 //!       to resemble dir entry or tree blocks, and then issue operations like
 //!       insert/delete. This should be fixed at a higher (OS?) level.
 
+use async_fs::Need;
 use async_fs::block_cache::BlockCache;
 use async_fs::{AsyncBlockDevice, BLOCK_SIZE, FileSystem};
 use async_fs::{EntryId, EntryKind, Role, RolePermissions};
@@ -30,15 +31,6 @@ pub const MAX_FLUSH_DELAY_MS: u64 = 50;
 
 #[cfg(not(test))]
 pub const MAX_FLUSH_DELAY_MS: u64 = 500;
-
-/// The permission a Mode-E access check requires of the caller's role byte.
-/// `Execute` gates directory traversal/listing (see PERMISSIONS_DESIGN.md §5).
-#[derive(Clone, Copy)]
-enum Need {
-    Read,
-    Write,
-    Execute,
-}
 
 /// Slots in [`MotorFs::lookup_cursors`]: how many files can have an active
 /// sequential-lookup cursor at once (concurrent streams beyond this thrash,
@@ -170,18 +162,9 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         entry_id: EntryIdInternal,
         need: Need,
     ) -> Result<()> {
-        let access = metadata.access(role)?;
-        let ok = match need {
-            Need::Read => access.can_read(),
-            Need::Write => access.can_write(),
-            Need::Execute => access.can_execute(),
-        };
-        if ok {
-            Ok(())
-        } else {
+        async_fs::check_access(metadata, role, need).inspect_err(|_| {
             log::debug!("access denied: {role:?} on {entry_id:?}");
-            Err(ErrorKind::PermissionDenied.into())
-        }
+        })
     }
 
     /// Drop all sequential-lookup cursors. Called by every mutating
