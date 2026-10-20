@@ -394,6 +394,13 @@ else
   (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --features image-admin)
 fi
 
+# memfs shares these runtime-free tests with its native Lorry test harness.
+if [ "$BUILD" = "release" ]; then
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/Cargo.toml" -p memfs
+else
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/Cargo.toml" -p memfs
+fi
+
 . "$WD/test-roots.sh"
 RMUX_TMPDIR="$TEST_TMP/full-test-rmux"
 

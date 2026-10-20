@@ -1,33 +1,40 @@
 # Multiple filesystems in sys-io
 
-Status: **requirements and design updated for prototype review**
-(2026-10-19). All sysbox work is outside
-iteration 1, including a mount-listing command and cross-mount `mv`
-fallbacks (decisions 9 and 14). Existing clients continue to use
-sys-io's file-copy requests; sys-io never implements a move by copying
-and deleting. D15 retains the agreed safeguards for a future sysbox
-design. The new cross-mount error in `moto-rt` and its stdlib/mlibc
-mappings remain in iteration 1. Block-bounded writes are atomic, mounts
-cannot hide an existing mount, `MountPoint` no longer stores a redundant
-name, and memfs reads do not spawn readahead tasks. Mount-table ownership
-remains as specified in D2; the proposed simplification is not yet decided.
+Status: **preparatory work complete; sys-io mount integration pending**
+(2026-10-20). The wire-ID codec, incoming Motor FS ID validation,
+cross-device error and toolchain mappings, shared filesystem helpers, and
+standalone memfs crate are committed. sys-io still serves one Motor FS
+filesystem; `/none/tmp` is still on disk. No mount config is shipped.
+
+All sysbox work remains outside iteration 1, including a mount-listing
+command and cross-mount `mv` fallbacks (decisions 9 and 14). Existing
+clients continue to use sys-io's file-copy requests; sys-io never
+implements a move by copying and deleting. D15 retains the agreed
+safeguards for a future sysbox design. Mount-table ownership remains as
+specified in D2; the proposed simplification is not yet decided.
+
+Completed work:
+
+| Work | Commit(s) | Current result |
+|---|---|---|
+| Wire entry-ID shuffling | `d3af1b66` | Per-boot AES-128 when AES-NI is available, otherwise the warned XOR fallback; both preserve root ID 0. Client ingress/egress uses the shared codec. |
+| Incoming Motor FS ID validation | `d6c0ad2a` | Reject impossible block addresses before cache access; validate entry blocks and generations, including stale/forged-ID tests. This is separate from future mount-bit validation. |
+| Cross-device error | `f34023e0`, `5c1e5749` | Published moto-rt 0.17.9, `CrossesDevices = 24`, std/mlibc mappings, sys-io's reverse mapping, refreshed pins/locks and selected rebuilt toolchain (D11). |
+| Shared access/name helpers | `c4b688a5` | `Need`, `check_access`, `MAX_FILENAME_LEN` and `validate_filename` live in `async-fs`; motor-fs uses them and preserves its filename-validation API. |
+| Standalone memfs | `8dfe872f` | Complete synchronous implementation with thin async adapters, sparse storage, quota accounting, independent free-page cache and shared host/native tests (D7). No production caller yet. |
 
 Standing summary: for iteration 1, sparse files and the 16 MiB reserve
 (8 MiB on guests under 32 MiB), with D13's admission and reclamation
 rules, are accepted as sufficient OOM protection; a rigorous OOM
 treatment is deferred and comes back into scope when iteration 1 is
-complete (R8.5, D15). The wire-ID codec is implemented in commit
-`d3af1b662de22941e78ac4af522c2fd5d5da104e`: client-facing FS entry IDs
-are now cryptographically shuffled per boot with AES-128 when AES-NI is
-available. sys-io checks CPUID once at startup; otherwise it warns and
-uses the zero-preserving XOR fallback, whose weaker security is explicitly
-accepted in D1. Both modes preserve `ROOT_ID = 0`. Mount-id packing and
-multi-filesystem support remain planned.
+complete (R8.5, D15). The codec's weaker XOR mode remains explicitly
+accepted in D1. Mount-id packing, routing, boot mounting, pressure
+admission and mount observability remain to be implemented.
 
-The implementation plan below was reconciled in the thirteenth pass and
-has not been reviewed or updated for these design changes. The current
-requirements and design take precedence; reconcile the plan before
-implementation.
+The implementation plan below is reconciled with the current requirements,
+design and committed work. Its original step numbers are retained for
+cross-references; the wire codec and standalone memfs landed out of the
+original sequence. The completed validation is recorded with the plan.
 
 Decisions so far:
 
@@ -62,12 +69,12 @@ Decisions so far:
    exceed RAM and is then reported as configured. Independently of the
    cap, sys-io refuses memfs operations that allocate while the guest's
    free memory is below the reserve (decision 12, D13).
-6. **Cross-mount rename gets a new error code in iteration 1**, a
+6. **Cross-mount rename uses the new error code**, the implemented
    `moto_rt::Error::CrossesDevices` variant mapped to
    `std::io::ErrorKind::CrossesDevices` and libc's `EXDEV` (Q4).
    No copy-plus-delete fallback is implemented in iteration 1 (decision 14).
-   This touches `moto-rt`, the std port and the mlibc port in the
-   toolchain tree (D11).
+   The error plumbing is complete (D11); returning it for cross-mount
+   rename awaits sys-io mount dispatch.
 7. **Executables in memfs** are locked while they back a running process
    exactly as root-filesystem executables are, and the demand pager copies
    their bytes on each fault as it does today. Sharing memfs pages with the
@@ -98,11 +105,11 @@ Decisions so far:
     every OOM scenario. The rigorous treatment of metadata, concurrent
     allocations and headroom becomes in scope again as soon as iteration
     1 is complete (R8.5, D15).
-13. **The error code lands first.** `moto-rt` gets `CrossesDevices`, the
-    crate is published, the Rust and mlibc forks map it, and the rebuilt
-    toolchain is selected before sys-io starts returning the cross-mount
-    error, so multi-filesystem support uses the final code from the start
-    (Q11; plan steps 1 and 2). The wire codec has already landed separately.
+13. **The error code lands first.** This prerequisite is complete:
+    `moto-rt` has `CrossesDevices`, the crate is published, the Rust and
+    mlibc forks map it, and the rebuilt toolchain is selected. sys-io
+    mount support will use the final code from the start (Q11; plan
+    steps 1 and 2). The wire codec landed separately.
 14. **All sysbox work is deferred.** Iteration 1 adds no `mount` command,
     `mv` fallback, recursive-move flag, or changes to `cp`. Cross-mount
     rename fails without copying or deleting anything. Server support for
@@ -121,8 +128,11 @@ Decisions so far:
     that resolves to the mount with `InvalidData` until reboot (D1, D2).
     The Motor FS limits (2^56 blocks, 2^48 generations) cannot be reached
     by normal operation and get no error path and no tests; nothing
-    asserts them, in motor-fs or in sys-io, and motor-fs carries no limit
-    code at all: the sys-io check is the single guard (Q13, Q22). The mount counter is different: once runtime mount
+    asserts them, in motor-fs or in sys-io, and motor-fs carries no
+    checks for those format limits: the planned sys-io check is the single
+    guard (Q13, Q22). Motor FS's implemented validation of untrusted input
+    IDs against actual device bounds and entry metadata is separate.
+    The mount counter is different: once runtime mount
     exists, exhausting it is client-driven, so it is an error
     (`StorageFull`), never a panic (D1, D14).
 17. **memfs keeps a free-block cache.** Freed data blocks stay in a
@@ -200,9 +210,11 @@ not line numbers.
   generation: u64 }` (`layout.rs`, `repr(C)`), transmuted to the `u128` in
   `From<EntryIdInternal> for EntryId`. The block number is the first eight
   bytes, which on x86-64 are bits 0..63 of the `u128`; the never-reused
-  generation is bits 64..127. motor-fs validates a client-supplied id
-  against the on-disk entry (in use, and the generation matches), so a
-  stale or forged id is refused. The superblock keeps `num_blocks`,
+  generation is bits 64..127. Since `d6c0ad2a`, all incoming IDs pass
+  through `internal_id`: root zero maps to the on-disk root; superblock,
+  transaction-log and out-of-device addresses are rejected before block
+  cache access. The entry-block type/in-use and generation checks then
+  reject malformed or stale identities. The superblock keeps `num_blocks`,
   `free_blocks` and `generation`; it has no entry count.
 - Since `d3af1b66`, those raw entry ids stay internal to sys-io.
   `FsRuntime` owns a shared per-boot `EntryIds` codec
@@ -219,14 +231,21 @@ not line numbers.
   fallback. `FileAttr.entry_id` is exposed to programs as the file's unique
   identity.
 - Permission enforcement (`r`/`w`/directory `x` per role) lives inside
-  motor-fs: `require_access` loads the entry and calls the pure
-  `check_access(metadata, role, need)`; the authority rules for changing a
-  mode (`may_set`, `perms_monotonic`) already live in `async-fs` and are
-  called from motor-fs's transactions. sys-io derives the role from the
-  connection peer's capabilities and passes it down; `CAP_FS_WRITE` gates
+  each filesystem. Since `c4b688a5`, the pure `check_access(metadata,
+  role, need)`, `Need`, filename validation and its length bound live in
+  `async-fs`, alongside the mode-authority rules (`may_set`,
+  `perms_monotonic`). Motor FS and memfs use those shared helpers.
+  sys-io derives the role from the connection peer's capabilities and
+  passes it down; `CAP_FS_WRITE` gates
   every mutating command in sys-io itself. Default modes for new entries
   are computed in sys-io, so they are the same for every filesystem it
   serves.
+- `src/sys/lib/memfs` is a workspace member with ten tests wired into
+  `full-test.sh` in both profiles. Its async trait methods delegate to
+  public synchronous counterparts and never yield; the same tests also
+  run natively through Lorry. It has no production dependency from sys-io,
+  no RAM-derived defaults and no admission policy. Callers supply its
+  capacity, cache cap and root mode; D7 describes the implemented library.
 - State keyed by entry id inside sys-io: the file lock manager, the
   executable locks (`spawn::ExecLocks`, consulted by `refuse_if_executing`
   before write, resize, delete, move, replace and permission changes), and
@@ -310,14 +329,13 @@ not line numbers.
   commit; edit `MOTOR_RUST_REV` and `MOTOR_RUST_LIBRARY_LOCK_SHA256`
   (and `MOTOR_MLIBC_REV` for an mlibc change); run `src/build-motor-os.sh`;
   put the printed name into `rust-toolchain.toml`; run the core gate; commit
-  the declaration, the selector and the docs together. Commits `57b5e6ea`,
-  `0d731dca` and `d7917225` are the last instance of this: the moto-rt bump
-  with `src/sys/Cargo.lock`, a refresh of about eighteen `Cargo.lock` files
-  under `src/bin`, `src/imager` and `src/tests`, then the toolchain
-  declaration, selector and docs. The local `moto-rt` may run ahead of
-  std's within one major version, so a new variant compiles in this
-  repository before the toolchain is rebuilt; std just reports it as
-  `Uncategorized` until then.
+  the declaration, the selector and the docs together. The latest instance
+  is `f34023e0` plus `5c1e5749`: moto-rt 0.17.9 and `CrossesDevices`,
+  the consumer lockfile refresh, fork pins, rebuilt toolchain selector,
+  reverse error mapping and docs. The selected std now recognizes this
+  variant. For future additions, local `moto-rt` can run ahead of std's
+  within one major version, so a new variant may compile here before std
+  recognizes it; an old std reports such a code as `Uncategorized`.
 - sysbox (`src/sys/tools/sysbox`) hosts the coreutils-style commands.
   `cp` has `-r` with `copy_directory` / `copy_file` helpers over
   `std::fs::copy`; `mv` is a thin wrapper around `std::fs::rename` and
@@ -396,9 +414,9 @@ not line numbers.
 
 Items marked **(stated)** come from the task and subsequent user guidance;
 **(decided)** records an accepted review decision. These requirements
-supersede conflicting text in the implementation plan and question record,
-which were last reconciled in the thirteenth pass. D15 records explicitly
-deferred work.
+remain authoritative; implementation status does not relax them. The plan
+and question record below are reconciled as of 2026-10-20. D15 records
+explicitly deferred work.
 
 ### R1. Scope
 
@@ -409,8 +427,9 @@ deferred work.
   a new file. Without it, only the root filesystem is mounted. D1's
   opaque wire-ID scheme still applies.
 - R1.3 **(decided)** First use case: mount an in-memory filesystem
-  (`memfs`, to be created) at `/none/tmp`, completely hiding the
-  `/none/tmp` directory of the root filesystem. In mount-command terms:
+  (`memfs`, now implemented as a standalone crate) at `/none/tmp`,
+  completely hiding the `/none/tmp` directory of the root filesystem.
+  In mount-command terms:
   `mount -t memfs /none/tmp`.
 - R1.4 **(decided)** Iteration 1 applies mounts at boot from the config
   only. No runtime mount or unmount, and no client command can change the
@@ -430,7 +449,7 @@ deferred work.
   toolchain update. All sysbox changes are out of scope, including
   command-specific tests. No kernel changes. D11 identifies the supporting
   changes to `async-fs`, `motor-fs`, `moto-sys-io` and `moto-io`, and the
-  planned changes outside this repository in `../toolchain-src/rust` and
+  completed changes outside this repository in `../toolchain-src/rust` and
   `../toolchain-src/mlibc` (AGENTS.md notes 3 and 4).
 - R1.7 **(decided)** Keep future mounts possible without implementing their
   lifecycle now: mount IDs are never reused within a boot, entry-related
@@ -855,10 +874,12 @@ including the OOM review that reopens on iteration-1 completion.
 
 ### D1. Entry ids across mounts and opaque wire IDs (decided)
 
-**Implementation status:** the wire codec described below, its shared
-`FsRuntime` ownership and the client-boundary conversions landed in
-`d3af1b662de22941e78ac4af522c2fd5d5da104e`. The mount-id packing,
-mount-point normalization and per-mount validation remain design work.
+**Implementation status:** the wire codec, its shared `FsRuntime`
+ownership, client-boundary conversions and debug codec self-tests landed
+in `d3af1b66`. Motor FS input-ID validation landed separately in
+`d6c0ad2a`; memfs's local counter-ID packing is implemented in `8dfe872f`.
+The shared mount-layout constants, mount-id packing, mount-point
+normalization and corruption quarantine remain planned (steps 7 and 10).
 
 There are three identity forms: fs-local IDs, internal mount-qualified
 IDs, and opaque wire IDs. Keep them distinct at call sites. An internal
@@ -976,9 +997,11 @@ Invariants:
   for the Motor FS limits themselves,
   in motor-fs or anywhere else: this check is the single guard (Q22). The
   self-test covers `check_local` and the flag (D12).
-- The constants live in `async-fs` (`MAX_FS_BLOCKS = 1 << 56`,
+- The planned constants belong in `async-fs` (`MAX_FS_BLOCKS = 1 << 56`,
   `MAX_FS_GENERATIONS = 1 << 48`, with the mount-id layout documented
-  beside them), so motor-fs, memfs and sys-io share one definition.
+  beside them). They were not part of the shared-helper extraction;
+  add them with mount routing in step 7 so memfs and sys-io share the
+  definition. They do not add Motor FS format-limit checks (decision 16).
 - The mount id is a per-boot counter. The root filesystem is mount 0, so
   its internal ids retain today's layout and the wire `ROOT_ID` (0)
   still names the root of the root filesystem. Every later
@@ -1196,7 +1219,15 @@ checks and in-flight requests need a later lifecycle design (D14).
 
 ### D7. memfs (sparse files and allocated-storage accounting)
 
-A new crate `src/sys/lib/memfs`, std, depending on `async-fs` and
+**Implementation status:** the standalone library and its ten tests landed
+in `8dfe872f`. It implements all `async_fs::FileSystem` methods, with a
+public `<method>_sync` counterpart for each async method; `num_blocks`
+remains synchronous. The async adapters delegate directly without awaiting,
+spawning tasks or taking async locks. Mounting, RAM-derived defaults,
+pressure admission, paging integration and published metrics remain sys-io
+work.
+
+The crate `src/sys/lib/memfs` uses std, depending on `async-fs` and
 `async-trait`, and on `moto-sys` for the block store on Motor OS only
 (the `cfg(target_os = "motor")` dependency pattern `async-fs` and
 `motor-fs` already use). memfs knows nothing about RAM or memory
@@ -1217,10 +1248,10 @@ pressure: sys-io computes its cap and its cache cap and passes them in.
 - **Entries.** `Metadata` (the shared 128-byte record, so permissions and
   timestamps are the same type motor-fs stores), the leaf name, the parent
   id, and either file data or a directory. A directory's children are a
-  `BTreeMap<String, u64>`: lookup by name is `O(log n)`, and
-  `get_first_entry` / `get_next_entry` enumerate in name order. These
-  maps and name strings are charged as metadata under the capacity rule
-  below. Ordinary collection allocations are permitted under iteration
+  `BTreeMap<Rc<str>, u64>`, sharing each name with its entry: lookup by
+  name is `O(log n)`, and `get_first_entry` / `get_next_entry` enumerate in
+  name order. These maps and name strings are charged as metadata under
+  the capacity rule below. Ordinary collection allocations are permitted under iteration
   1's accepted reserve assumption; rigorous fallibility/residency treatment
   returns to scope on completion of that iteration (R8.5, D15).
 - **Sparse file data.** Store logical size separately from an ordered
@@ -1253,17 +1284,20 @@ pressure: sys-io computes its cap and its cache cap and passes them in.
   a cached block before asking the kernel. `release_free_blocks()`
   returns every cached block to the kernel without allocating temporary
   storage; admitting a freed block into the cache must not require a new
-  allocation. Otherwise free it directly. The cache handle is shared with
-  sys-io so admission can drain it without locking the filesystem (D13).
-  The cache cap is computed from `guest_ram_mib()`, the same figure the
-  block cache and the TCP buffers
-  use, with no further adjustment (Background): the larger of 16 MiB and
+  allocation. The implemented cache stores its links in the free pages
+  themselves. `MemFs::free_block_cache()` returns an independently owned,
+  cloneable `FreeBlockCache` handle backed by `Rc<RefCell<..>>`; sys-io
+  will retain it so admission can drain free pages without locking the
+  filesystem (D13). Entries and live file data are not reference-counted.
+  sys-io will compute the cache cap from `guest_ram_mib()`, the same figure
+  the block cache and the TCP buffers use, with no further adjustment
+  (Background): the larger of 16 MiB and
   5% of RAM on guests of 256 MiB and up (`SMALL_GUEST_MIB`), 8 MiB on
   [128, 256) MiB, 4 MiB on [64, 128) MiB, 2 MiB below 64 MiB. On the
-  host, for the unit tests, a `Block` is a boxed page and the tests set
-  their own cache cap. The cost is one syscall per block the cache cannot
-  serve (R6.4); allocating blocks in larger runs is a later optimization
-  if that ever shows.
+  host, a `Block` uses fallible `alloc_zeroed` with 4 KiB alignment and
+  matching `dealloc`; tests set their own cache cap. The cost on Motor OS
+  is one syscall per block the cache cannot serve (R6.4); allocating blocks
+  in larger runs is a later optimization if that ever shows.
 - **Capacity.** `MemFs::new(MemFsConfig { max_size, free_cache_cap,
   root_mode })`. The file-data charge is exactly
   `4096 * allocated_data_blocks`; logical size and holes contribute zero.
@@ -1272,11 +1306,13 @@ pressure: sys-io computes its cap and its cache cap and passes them in.
   blocks leave the file. Cached free blocks are not file usage: they
   count against memory and the cache cap, not the file-data charge.
   `max_size` includes metadata charges as well: an entry/root charge,
-  stored-name capacity (including duplicate directory keys), and a charge
+  stored-name byte length (charged once for the shared name), and a charge
   for each allocated sparse-index/directory-map entry, allowing for tree
   node overhead. Charge before publishing the corresponding storage;
-  release its charge on removal. Fixed conservative structural charges
-  suffice for iteration 1; their constants must be documented and tested.
+  release its charge on removal. The implemented conservative charges are
+  512 bytes per entry (including the root and name's `Rc` header), 128
+  per directory link and 64 per sparse-index slot, plus data and name
+  bytes. These constants are documented and tested.
   An empty-file workload must eventually reach the cap. Exact allocator
   slab residency and transient growth are part of D15's deferred OOM
   review, not a claim made by `used_bytes()`. The constructor rejects a
@@ -1297,24 +1333,26 @@ pressure: sys-io computes its cap and its cache cap and passes them in.
   and at least 8 MiB; the subtraction saturates, so a guest under 32 MiB
   gets the 8 MiB floor and, with it, the 8 MiB reserve of D13 (Q21).
 - **Permissions.** Shared code, not a copy: `Need` and the pure
-  `check_access(metadata, role, need)` move from `motor-fs/src/fs.rs` to
-  `async-fs` (motor-fs keeps calling them), `validate_filename` moves
-  alongside, and `may_set` / `perms_monotonic` are already there. memfs
-  applies them at the insertion points PERMISSIONS_DESIGN.md §5 lists:
+  `check_access(metadata, role, need)` moved from `motor-fs/src/fs.rs` to
+  `async-fs` in `c4b688a5`; `MAX_FILENAME_LEN` and `validate_filename`
+  moved alongside, and `may_set` / `perms_monotonic` were already there.
+  memfs applies them at the insertion points PERMISSIONS_DESIGN.md §5 lists:
   `x` on the parent for `stat` and enumeration, `w` on the parent for
   create, delete, move (both parents) and mode changes, `r`/`w` on the file
   for read/write/resize, System-only for the root's mode.
 - **Root mode.** sys-io passes the shadowed directory's mode read at mount
   time (`rwxrwxrwx` for `/none/tmp`), or the configured one.
 - **Timestamps.** `Timestamp::now()` on create, write, resize, rename.
-- **Tests.** Host unit tests covering every trait method, the capacity
-  accounting (R9.1), the block store's page counts across write, truncate,
-  delete and `release_free_blocks`, huge sparse growth with no index
+- **Tests.** Ten shared host/native tests cover every trait method, the
+  capacity accounting (R9.1), the block store's page counts across write,
+  truncate, delete and `release_free_blocks`, huge sparse growth with no index
   growth, distant writes, zeroing on cache reuse and shrink/regrow,
-  stale-id rejection, and the permission
-  matrix for all three roles. motor-fs may be a dev-dependency so that one
-  trait-level sequence runs against both filesystems and the answers are
-  compared (R4.10).
+  stale/malformed-ID rejection, and the permission matrix for all three
+  roles. A no-op waker polls each test future once and asserts readiness,
+  also checking that memfs never yields. Host tests run transitively from
+  `full-test.sh`; native Lorry validation exercises the Motor page
+  allocator with the same suite. The optional motor-fs differential suite
+  of R4.10 was not added.
 
 ### D8. Configuration file (decided)
 
@@ -1422,13 +1460,15 @@ omit root-FS metrics requiring filesystem access if mount 0 is corrupted.
 
 These are the supporting changes for memfs and sys-io (R1.6). The new
 `moto-rt` error, its stdlib/mlibc mappings and the required toolchain update
-are part of iteration 1. sys-io's reverse mapping in
-`util::map_err_into_native` must also preserve `ErrorKind::CrossesDevices`
-as `moto_rt::Error::CrossesDevices` when encoding a response.
-All sysbox work is excluded.
+are complete. sys-io's reverse mapping in `util::map_err_into_native`
+also preserves `ErrorKind::CrossesDevices` as
+`moto_rt::Error::CrossesDevices`, committed in `5c1e5749`. The remaining
+server work is to produce that error for cross-mount moves (D5).
+All sysbox work remains excluded.
 
-Preparatory status (2026-10-19): moto-rt 0.17.9 is published. Local
-consumer lockfiles and the Rust fork's root and library lockfiles now
+Preparatory status (2026-10-20): moto-rt 0.17.9 is published (`f34023e0`).
+Commit `5c1e5749` records the consumer pins/locks and toolchain selection.
+Local consumer lockfiles and the Rust fork's root and library lockfiles now
 select it; std's minimum dependency is also 0.17.9. The Rust mapping is
 pushed in `c037341a5a5`, and the mlibc mapping in `52bed56c`. The toolchain
 declaration now pins those commits and the Rust lockfile hashes. The host
@@ -1439,21 +1479,22 @@ path-dependency lockfile updates are committed and pushed outside this
 repository: `../javy` (`c496a4f`, two lockfiles) and `../wasmtime`
 (`fda311d08c`, four).
 
-| Crate / tree | Change | Size |
+| Crate / tree | Status | Change |
 |---|---|---|
-| `moto-rt` | `Error::CrossesDevices = 24`, `E_CROSSES_DEVICES`; version 0.17.9; refresh all 17 tracked consumer lockfiles, including `src/sys/Cargo.lock`; published to crates.io | small dependency-only updates |
-| `../toolchain-src/rust` (the `moturus/rust` fork branch) | `library/std/src/sys/io/error/motor.rs`: map `CrossesDevices` to `ErrorKind::CrossesDevices`; `library/std/Cargo.toml`: require moto-rt 0.17.9; root and `library/Cargo.lock`: select 0.17.9; one commit, pushed | mapping, dependency and two lockfiles |
-| `../toolchain-src/mlibc` (the `moturus/mlibc` fork branch) | `sysdeps/motor/include/mlibc/motor-util.hpp`: `case 24: return EXDEV;`; one commit, pushed | one line |
-| this repository, toolchain declaration | `src/toolchain-versions.sh` (`MOTOR_RUST_REV`, `MOTOR_RUST_ROOT_LOCK_SHA256`, `MOTOR_RUST_LIBRARY_LOCK_SHA256`, `MOTOR_MLIBC_REV`), the rebuilt toolchain's name in `rust-toolchain.toml`, `docs/build-rustc.md` and `docs/toolchain.md` moto-rt version mentions | config and docs; one `src/build-motor-os.sh` run |
-| `async-fs` | `MAX_FS_BLOCKS`, `MAX_FS_GENERATIONS` and the mount-id layout note; `Need` + `check_access` + `validate_filename` moved here | small |
-| `motor-fs` | call the moved helpers; nothing for the limits: no asserts, no checks (decision 16, Q22) | a few lines |
-| `memfs` (new) | the filesystem, its block store with the free-block cache, and its host tests | the bulk of the library work |
-| `moto-sys-io` | `CMD_GET_MOUNTS` and its codec (D10) | small |
-| `moto-io` | `FsClient::mounts()` for native clients and integration tests | small |
-| `systest` | the memfs memory test of D12 and the other in-VM checks of R9.2 | one module |
-| `img_files/motor-os-base` | `system/cfg/sys-fs.toml`; `none/tmp/.shadowed-by-memfs` for the test | two files; no YAML or policy change |
-| `docs/fs-permissions.md` | one sentence: `/none/tmp` is in memory, empty after every boot, bounded by its cap and by memory, and a rename across its boundary fails with `CrossesDevices` (R8.4) | docs |
-| sysbox, kernel, `rt.vdso`, Rust std behavior beyond the mapping, imager code | none | — |
+| `moto-rt` | Done | `Error::CrossesDevices = 24`, `E_CROSSES_DEVICES`, published version 0.17.9; all 17 tracked consumer lockfiles refreshed. |
+| `../toolchain-src/rust` | Done, `c037341a5a5` | std maps `CrossesDevices`; its dependency and the root/library lockfiles select moto-rt 0.17.9. Committed and pushed on the fork. |
+| `../toolchain-src/mlibc` | Done, `52bed56c` | `motor-util.hpp` maps code 24 to `EXDEV`. Committed and pushed on the fork. |
+| this repository, toolchain declaration | Done, `5c1e5749` | Updated fork pins, lock hashes, selector and docs; rebuilt host toolchain and native assembly selected. |
+| `async-fs`, shared checks | Done, `c4b688a5` | `Need`, `check_access`, `MAX_FILENAME_LEN` and `validate_filename` moved here. |
+| `async-fs`, ID layout | Pending, step 7 | `MAX_FS_BLOCKS`, `MAX_FS_GENERATIONS` and the mount-id layout note. |
+| `motor-fs` | Done, `d6c0ad2a`, `c4b688a5` | Validate incoming IDs and use the shared helpers; no checks/asserts for the theoretical format limits (decision 16, Q22). |
+| `memfs` | Done, `8dfe872f` | Standalone filesystem, synchronous/async interfaces, sparse block store, free-block cache, quota accounting and shared host/native tests; host suite wired into `full-test.sh`. |
+| `moto-sys-io` | Pending, step 13 | `CMD_GET_MOUNTS` and its bounded structured codec (D10). |
+| `moto-io` | Pending, step 13 | `FsClient::mounts()` for native clients and integration tests. |
+| `systest` | Pending, step 14 | The memfs memory test of D12 and other in-VM mount checks of R9.2. |
+| `img_files/motor-os-base` | Pending, step 14 | `system/cfg/sys-fs.toml` and `none/tmp/.shadowed-by-memfs`; no YAML or policy change. |
+| `docs/fs-permissions.md` | Pending, step 14 | Document `/none/tmp`'s volatility, cap/reserve and cross-mount rename error (R8.4). |
+| sysbox, kernel, `rt.vdso`, Rust std behavior beyond the mapping, imager code | Outside scope | No changes for this iteration. |
 
 All sysbox work is outside this iteration. D15 records the constraints
 already agreed for a future cross-mount move design; no copy-plus-delete
@@ -1461,8 +1502,9 @@ algorithm or command implementation is required here.
 
 ### D12. Design validation (iteration-1 acceptance)
 
-- Host: memfs unit tests (D7); a sys-io self-test (`crate::self_test`,
-  debug builds) for `split`/`join`/`resolve`/`export` round trips, the
+- Library: the implemented memfs tests run on the host and natively on
+  Motor OS (D7). Planned sys-io self-tests (`crate::self_test`, inside
+  Motor OS debug builds) cover `split`/`join`/`resolve`/`export` round trips, the
   shadowed-id alias, `check_local` and the corrupted flag (including
   forwarded/internal access and flush, while healthy mounts still work),
   the config validator's accept and reject cases including a missing file,
@@ -1722,107 +1764,146 @@ Hole-preserving copies are optional later work; sparse storage does not
 imply them. None of these are iteration-1 requirements.
 
 The accepted recommendations are incorporated into R1–R9 and D1–D14.
-The implementation plan and the question record were last reconciled in
-the thirteenth pass; they have not been reviewed or updated for the latest
-design changes above.
+The plan below records completed work and the remaining implementation;
+D15 remains follow-up scope, not an additional iteration-1 prerequisite.
 
-## Implementation plan (reconciled, thirteenth pass)
+## Implementation plan (updated 2026-10-20)
 
-Small reviewed patches, each with its tests, grouped into milestones;
-each patch is tested lightly and committed, and the full gate of R9.3
-runs at the end of its milestone (decision 11). Steps 1 and 2 are the
-decision 6 work and land first (decision 13), so every later patch uses
-`CrossesDevices` as the final code. Step 2 changes trees outside this
-repository and needs crates.io and fork-push access; the split of that
-work is in the Q11 answer. Steps 3 to 13 change no observable behavior
-in the shipped images beyond the opaque wire-ID values of step 8; step
-14 switches `/none/tmp` to memfs with every mechanism it depends on
-already in place. No step touches sysbox (decision 14).
+Keep remaining work in small reviewed patches with focused tests, grouped
+into the milestones below; R9.3 specifies the full milestone gates.
+Original step numbers are retained, but completed work need not be repeated.
+The wire codec (step 8) landed first, and steps 4–6 landed together as the
+standalone memfs crate. The remaining mount-layout constants move from the
+old step 3 into step 7, where routing needs them. No further external
+toolchain changes are planned, and no remaining step touches sysbox.
 
-**Milestone A, the error code** (gate: `docs/toolchain.md` §5, three
-debug and three release core runs plus one release developer-image run on
-the new toolchain):
+Until step 14, shipped images still use only mount 0. Intermediate changes
+add dispatch/admission machinery and the listing API, but do not switch
+`/none/tmp` to RAM. Step 14 enables it only after all supporting mechanisms
+and their tests are in place.
 
-1. `moto-rt`: `Error::CrossesDevices = 24`, version 0.17.9, `src/sys/Cargo.lock`
-   and the lockfile refresh. std reports the code as `Uncategorized` until
-   step 2; nothing produces it yet.
-2. Toolchain, per `docs/toolchain.md` §5: publish moto-rt 0.17.9; commit
-   the std mapping and the `library/Cargo.lock` selection on the Rust fork
-   branch and the `EXDEV` line on the mlibc fork branch; push both; edit
-   `src/toolchain-versions.sh`; run `src/build-motor-os.sh`; put the
-   printed name into `rust-toolchain.toml`; update the two docs; run the
-   §5 gate; commit the declaration, selector and docs together.
+**Completed validation (through 2026-10-20).** The combined preparatory
+state, including the selected toolchain and the shared-helper/memfs
+changes, passed:
 
-**Milestone B, shared helpers** (gate: three debug and three release core
-runs):
+- All ten memfs tests on Linux in debug and release, and the same ten
+  tests through native Lorry in a release developer VM.
+- Motor FS host tests with `image-admin` in both profiles: 45 passed,
+  with the three existing benchmark tests ignored.
+- Memfs Clippy on Linux and Motor targets, Motor FS host Clippy,
+  `cargo check` for sys-io on the Motor target, formatting and diff checks.
+- Three debug and three release `src/tests/full-test.sh` runs, plus one
+  complete `src/tests/full-test-dev.sh --release` run. The first developer
+  run exposed stale WASM memory-limit tests (96 MiB versus the pinned
+  runtimes' 4 GiB). The separate test-only fix `c7f9ec66` passed focused
+  WASM checks on `wasm:224` and `dev:256`, then the full developer rerun.
 
-3. `async-fs`: `MAX_FS_BLOCKS`, `MAX_FS_GENERATIONS`, the id-layout note,
-   and the moved `Need` / `check_access` / `validate_filename`; motor-fs
-   adjusted to call them. No behavior change; nothing for the limits
-   (decision 16).
+This validates the library and existing shipped system, not mounted memfs.
+The mount-specific acceptance tests of R9.2/D12 remain pending.
 
-**Milestone C, the memfs crate** (host tests and clippy only: nothing
-links it into an image yet):
+**Milestone A, the error code — complete.**
 
-4. `memfs` part 1: entries, directories, lookup and enumeration,
-   create/delete/rename, metadata, the counter ids (decision 21), host
-   tests.
-5. `memfs` part 2: the block store with the free-block cache and
-   `release_free_blocks()` (D7), sparse file data (decision 23),
-   read/write/resize/copy_file_range, the capacity accounting with its
-   metadata charges and the cap, with the host tests of R9.1: no charge
-   for holes, distant writes, zeroing on reuse and shrink/regrow, the
-   partial-failure contract, the cache cap and the page counts.
-6. `memfs` part 3: permission enforcement and the role matrix tests;
-   optionally the differential test against motor-fs (R4.10).
+1. **Done, `f34023e0` and `5c1e5749`.** `moto-rt` exposes
+   `CrossesDevices = 24` / `E_CROSSES_DEVICES` in published version 0.17.9;
+   consumer lockfiles are refreshed.
+2. **Done, D11.** The Rust and mlibc fork mappings are committed and
+   pushed; the rebuilt toolchain and native assembly are selected by
+   `5c1e5749`, which also adds sys-io's reverse error mapping. The
+   completed 3+3+1 gate above used that toolchain.
 
-**Milestone D, dispatch through the mount table** (gate: three debug and
-three release core runs plus one release developer-image run, because
-every handler changes):
+**Milestone B, shared access/name helpers — complete.**
 
-7. `sys-io`: `MountTable` with mount 0 only, behind `Rc<RefCell<..>>` and
-   its lookup methods (D2); `split`/`join`/`resolve`/`export`,
-   `check_local` and the corrupted flag (decision 16) with self-tests;
-   every handler and internal user (spawn, pager, locks, stats, the net
-   config loader) resolves before locking; per-mount lock; `CMD_FLUSH`
-   over the table (D5). Wire IDs are still the internal IDs. No behavior
-   change. This is the one patch allowed to exceed the usual size,
-   because every handler changes together.
-8. `sys-io`: the wire codec of D1: the CPUID check at startup, AES-128
-   through AES-NI, the zero-preserving XOR fallback with its warning,
-   decode at client ingress and encode at egress, owned by `FsRuntime`;
-   the codec self-tests of D12 (known answers, round trips, both
-   selection paths). Clients see different opaque IDs, nothing else.
+3. **Done, `c4b688a5`.** Move `Need`, `check_access`, `MAX_FILENAME_LEN`
+   and `validate_filename` to `async-fs`; motor-fs calls/re-exports them.
+   Motor FS incoming-ID hardening and its tests landed separately in
+   `d6c0ad2a`. Neither change introduces checks for the theoretical
+   Motor FS format limits (decision 16); shared mount-layout constants
+   remain in step 7.
 
-**Milestone E, mounting without a shipped config** (gate: three debug and
-three release core runs):
+**Milestone C, standalone memfs — complete in `8dfe872f`.**
 
-9. `sys-io`: `sys-fs.toml` parser, the per-entry validator and
-   `mount_one` (D8, D9) with self-tests, boot-time mounting with the
-   fail-closed policy, `FS::MemFs`, the cap and cache-cap derivations
-   (decision 5, Q21). No image ships the file yet.
-10. `sys-io`: mount-point semantics of D3 (shadow aliasing, sibling and
-    name forwarding, the `NotAllowed` refusals of decision 19 for the
-    subject and the replacement destination) with self-tests.
-11. `sys-io`: cross-mount copy through the bounce buffer with the
-    per-request cap, and the cross-mount move error (D5), with
-    self-tests; nothing in sysbox (decision 14).
-12. `sys-io`: the reserve gate with the cache drain before a memory
-    refusal at every admission gate, FS, network and client (D13), the
-    freeing operations served under the kernel's flag, the
-    `reserve_refused` counter, and self-tests including the pure
-    decision function of D12.
-13. `CMD_GET_MOUNTS`, `FsClient::mounts()` and the memfs stats metrics
-    (D10); the listing shows mount 0 alone until step 14. No sysbox
-    command (decision 9).
+4. **Done.** Entries, directories, lookup/enumeration,
+   create/delete/rename, metadata and never-reused counter IDs, with
+   public synchronous operations and thin async trait adapters.
+5. **Done.** Native page ownership, the bounded free-page cache and its
+   independently drainable handle, sparse data, block-bounded atomic
+   writes, resize/copy, data-plus-metadata quota charges and statistics.
+   Tests cover holes, distant writes, reuse/zeroing, failed-write
+   atomicity, copy prefixes, cache caps and page release.
+6. **Done.** Shared permission enforcement, all roles and mode-authority
+   transitions, plus the host/native test harness. `full-test.sh` runs
+   the host suite in both profiles. No production dependency on memfs
+   exists yet; RAM sizing and pressure admission belong to sys-io.
 
-**Milestone F, ship it** (gate: three debug and three release core runs
-plus one release developer-image run):
+**Milestone D, mount-table dispatch — step 7 remains; step 8 is complete.**
+
+Gate: three debug and three release core runs plus one release
+developer-image run, because every handler changes.
+
+7. **Next.** Add the shared ID-layout constants/note and implement the
+   mount-0-only `MountTable` behind the D2 methods and
+   `Rc<RefCell<..>>`. Add `split`/`join`/`resolve`/`export`, `check_local`
+   and corruption quarantine. Route every handler and internal user
+   (spawn, pager, locks, stats, net config and `resolv.conf`) through
+   checked mount access, including the post-lock corruption recheck;
+   use one lock per mount and table-wide flush (D5/D6).
+   Preserve the existing wire codec around this internal routing:
+   ingress decodes once, egress encodes after normalization, and locks
+   and pager state use canonical internal IDs. Add in-VM self-tests for
+   packing, unknown mounts, aliases, corruption and checked internal
+   access. This dispatch conversion may exceed the usual patch size
+   because the callers must change together.
+8. **Done, `d3af1b66`.** CPUID-selected AES-128/XOR codec, shared
+   `FsRuntime` ownership and all client-boundary conversions. Debug
+   self-tests cover XOR/root/round trips and AES known answers when
+   available. Retain D12's AES-disabled startup and mount-normalization
+   coverage in integration validation; the codec itself needs no rewrite.
+
+**Milestone E, memfs integration and boot mounting — pending.**
+
+Gate: three debug and three release core runs. No image ships the config
+during this milestone.
+
+9. Add sys-io's memfs dependency and `FS::MemFs` dispatch. Skip readahead
+   task creation on both memfs read paths (D4). Add the `sys-fs.toml`
+   parser and whole-file validator, including protected config paths and
+   rejection of later ancestors that would hide earlier mounts. Implement
+   and test RAM-derived capacity/cache limits and root-mode selection
+   (D7–D9); the library continues to receive explicit values.
+10. Implement `mount_one` and boot loading with the missing-file and
+    fail-closed policies. Complete D3's path normalization, shadow aliasing,
+    sibling/name forwarding and protection of mount roots as both source
+    and replacement destination. Mount through the live table in file
+    order; retain D2 ownership and D6's lock rules. Test nested ordering,
+    protected paths, aliases and `NotAllowed` precedence.
+11. Add bounded cross-mount copy with chunks respecting both block
+    boundaries and committed-prefix reporting; cap same-mount requests
+    too. Return the implemented `CrossesDevices` error for cross-mount
+    moves after mount-root checks and before mutation (D5). Test both
+    directions and executable-lock enforcement; no sysbox fallback.
+12. Integrate the memfs reserve and shared cache handles into every
+    memory-refusing admission gate, including network/client gates.
+    Reclaim and resample before a final refusal; allow the specified
+    freeing operations under kernel pressure, rechecking size under the
+    same lock and returning released pages before replying. Add
+    `reserve_refused` and D12/D13 classification/reclamation tests.
+13. Add `CMD_GET_MOUNTS`, its bounded structured pagination codec,
+    `FsClient::mounts()` and memfs aggregate metrics (D10). Test malformed
+    cursors, path encoding, multi-response listings and unknown/omitted
+    statistics for corrupted mounts. The shipped listing shows mount 0
+    alone until step 14; no sysbox command.
+
+**Milestone F, enable `/none/tmp` — pending.**
+
+Gate: three debug and three release core runs plus one release
+developer-image run.
 
 14. Ship `sys-fs.toml` and `.shadowed-by-memfs` in `img_files/motor-os-base`,
-    add the in-VM tests of R9.2 and D12, including the memfs memory test
-    and the pressure reclamation check, and the `docs/fs-permissions.md`
-    sentence (R8.4).
+    add R9.2/D12's mounted-filesystem tests, including memory/reserve
+    recovery and pressure reclamation, and update `docs/fs-permissions.md`.
+    Verify the existing spawn, permissions, copy and developer/WASM users
+    on the mounted filesystem. At iteration-1 completion, reopen the
+    rigorous OOM review of D15; passing the smoke gate does not close it.
 
 ## Open questions
 
@@ -1869,12 +1950,11 @@ as the record of how each point was settled.
   the crate is published to crates.io, the fork's `library/Cargo.lock`
   selects it, the fork commits are pushed, the toolchain is rebuilt, and
   the new name is committed with the declaration. Doing it first is
-  right, and the plan now does (decision 13, steps 1 and 2); nothing in
-  sys-io is written against an interim code. Confirmed split: you publish
-  moto-rt 0.17.9 and push the two fork branches; I prepare the moto-rt
-  patch, the two fork diffs and the declaration edit, run
-  `src/build-motor-os.sh` once the pushes are in, put the printed name
-  into `rust-toolchain.toml`, and run the §5 gate on the result.
+  right (decision 13, steps 1 and 2); nothing in sys-io is written against
+  an interim code. This sequence is now complete: moto-rt 0.17.9 was
+  published, the two fork mappings were pushed, and the rebuilt
+  toolchain is selected. D11 records the commits and key; the implementation
+  plan records the completed 3+3+1 validation.
 - **Q12. Scope of the `sysbox mv` fallback.** Answered: deferred. The
   eleventh pass limited the fallback to files and the twelfth restored
   directories behind `-r`; after the twelfth pass all sysbox work left
@@ -1950,6 +2030,8 @@ as the record of how each point was settled.
   id is caught by sys-io and disables only its own mount, which is
   strictly better than a panic once a second Motor FS partition exists
   (D14). Answered: no asserts; the checks that return `InvalidData` and
-  mark the mount corrupted stay as the single guard, and motor-fs is
-  untouched apart from the moved helpers (decision 16, D1, D11, plan
-  step 3).
+  mark the mount corrupted remain the planned single guard for those
+  format limits (decision 16, D1, D11, plan step 7). The separate
+  `d6c0ad2a` hardening validates untrusted incoming IDs against the
+  actual device and entry metadata; it does not enforce the theoretical
+  2^56/2^48 format limits. The shared-helper move is complete (step 3).
