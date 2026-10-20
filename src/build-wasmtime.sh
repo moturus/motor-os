@@ -84,7 +84,7 @@ build_wasmtime() {
 		cargo fetch --locked
 		cd ..
 		CARGO_NET_OFFLINE=true MOTOR_BUILD_DIR="$ASSEMBLY_BUILD_ROOT/wasmtime" \
-			JOBS="$(wasm_addon_jobs)" ./motor-build.sh runtime
+			MOTOR_SYSROOT="$ASSEMBLY_ROOT/sysroot" JOBS="$(wasm_addon_jobs)" ./motor-build.sh runtime
 	)
 	local data="$WASMTIME_IMG/devtools/wasmtime"
 	mkdir -p "$WASMTIME_IMG/devtools/bin" "$data"

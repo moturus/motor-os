@@ -52,18 +52,23 @@ $MOTORH/toolchain-src/mlibc/
 Managed inputs must exactly match the declaration. A wrong remote, missing or
 unreachable commit, incorrect gitlink, dirty file, or untracked file is an
 error. The build never advances a toolchain branch, runs `cargo update`, or
-silently changes a dependency selection. The userspace add-ons are the
-exception by design: ripgrep, Helix, sed, and the Javy/Wasmi and Wasmtime
-add-ons follow one branch of their forks, in `$MOTORH/ripgrep`,
-`$MOTORH/helix`, `$MOTORH/sed`, `$MOTORH/javy` with its `$MOTORH/wasmi` and
-`$MOTORH/wasmtime` siblings, and `$MOTORH/wasmtime` with its
-`$MOTORH/target-lexicon`, `$MOTORH/tokio` and `$MOTORH/mio` siblings.
+silently changes a dependency selection. The userspace add-ons differ by
+design: ripgrep, Helix, and sed follow one branch of their forks, in
+`$MOTORH/ripgrep`, `$MOTORH/helix`, and `$MOTORH/sed`. The Javy/Wasmi and
+Wasmtime add-ons are built from one branch of their forks at the exact revision
+declared in `src/build-addon-sources.sh`, in `$MOTORH/javy` and
+`$MOTORH/wasmtime`: a clean checkout is moved to that revision, and commits
+that are not on the fork's branch are never left behind. Everything the forks
+depend on — Wasmi, Wizer, Tokio, Mio, target-lexicon, and the Motor OS crates
+themselves — are Cargo git dependencies pinned by the forks' lockfiles, which
+Cargo fetches; no fork refers to a sibling checkout, and this tree's
+`src/sys/lib` is not an input of the add-ons.
 
 After selecting the host toolchain, the build prepares all add-on sources and
 checks their lockfiles before building the native assembly, downloading add-on
 assets, or compiling add-ons. The shared inventory in
-`src/build-addon-sources.sh` covers ripgrep, Helix, sed, Javy, Wasmi, Wasmtime,
-the independent Motor test workspaces in the forks, and the Motor smoke/plugin
+`src/build-addon-sources.sh` covers ripgrep, Helix, sed, Javy, Wasmtime, the
+independent Motor test workspaces in the forks, and the Motor smoke/plugin
 workspaces. Upstream-only release and standalone fuzz workspaces are excluded.
 The `--javy-only` and `--wasmtime-only` paths check their selected workspaces too.
 

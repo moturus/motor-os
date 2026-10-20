@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate the current Motor checkout together with the existing sibling heads.
+# Validate the add-on workspaces' lockfiles offline, at the fork checkouts' current heads.
 
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

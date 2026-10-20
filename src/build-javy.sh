@@ -22,10 +22,11 @@ javy_download() {
 }
 
 # The provenance of a wasm add-on, which is also its reuse key: the selected
-# toolchain, each "repo:branch" source head in $1, the checkout files given
-# after it and the native library content.
+# toolchain, each "repo:branch[:revision]" source in $1 at its checked-out
+# commit with the git dependencies its lockfiles pin, and the checkout files
+# given after it.
 wasm_source_manifest() (
-	local sources="$1" spec repo branch
+	local sources="$1" spec repo branch revision
 	shift
 	cd "$MOTOR"
 	printf 'assembly=%s\n' "${ASSEMBLY_ROOT##*/}"
@@ -33,14 +34,13 @@ wasm_source_manifest() (
 	printf 'rustc=%s\n' "$(rustc --version)"
 	printf 'target=x86_64-unknown-motor\nprofile=release\n'
 	for spec in $sources; do
-		repo=${spec%%:*}; branch=${spec#*:}
+		IFS=: read -r repo branch revision <<< "$spec"
 		printf '%s=https://github.com/moturus/%s.git %s %s\n' \
 			"$repo" "$repo" "$branch" "$(git -C "$MOTORH/$repo" rev-parse HEAD)"
+		(cd "$MOTORH/$repo" && git ls-files -z '*Cargo.lock' |
+			xargs -0 grep -h '^source = "git+' | LC_ALL=C sort -u | sed 's/^source = /  /')
 	done
 	sha256sum rust-toolchain.toml "$@"
-	# Include local native-library edits as well as their committed contents.
-	git ls-files -z --cached --others --exclude-standard src/sys/lib |
-		LC_ALL=C sort -zu | xargs -0 sha256sum | sha256sum
 )
 
 javy_source_manifest() {
@@ -119,7 +119,8 @@ build_javy() {
 		# Fetch the complete locked graph, including host build dependencies.
 		cargo fetch --locked
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" JOBS="$(wasm_addon_jobs)" \
-			JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" ./motor-build.sh
+			MOTOR_SYSROOT="$ASSEMBLY_ROOT/sysroot" JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" \
+			./motor-build.sh
 	)
 	rm -rf "$JAVY_TESTS"
 	mkdir -p "$JAVY_IMG/devtools/bin" "$data/plugins" "$JAVY_TESTS"

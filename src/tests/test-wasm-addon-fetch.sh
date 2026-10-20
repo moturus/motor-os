@@ -10,6 +10,7 @@ export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-$(sed -n 's/^channel = "\(.*\)"/\1/
 export CARGO_HOME="$temporary/cargo-home"
 export CARGO_TARGET_DIR="$temporary/target"
 MOTORH="$temporary/motorh"
+ASSEMBLY_ROOT="$temporary/assembly"
 ASSEMBLY_BUILD_ROOT="$temporary/build"
 WASMTIME_IMG="$temporary/image"
 WASMTIME_TESTS="$temporary/tests"

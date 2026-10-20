@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
 # Offline checks of the userspace add-on stage of src/build-motor-os.sh: the
-# branch-following checkouts, Helix staging and ELF validation, and the rule
-# that each add-on is rebuilt alone and is no part of the assembly.
+# branch-following and revision-pinned checkouts, Helix staging and ELF
+# validation, and the rule that each add-on is rebuilt alone and is no part of
+# the assembly.
 
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -46,6 +47,61 @@ if (update_addon_source helix "$HELIX" "$remote" helix-test) >/dev/null 2>&1; th
 	fail "a dirty add-on checkout was updated"
 fi
 git -C "$HELIX" checkout -q -- source
+
+# A pinned add-on is built at its declared revision: an older one detaches the
+# checkout, a newer one fast-forwards the branch, a revision the branch does not
+# reach yet is fetched by its hash, and commits that are not on the remote
+# branch are never left behind.
+git -C "$remote" config uploadpack.allowReachableSHA1InWant true
+first="$(git -C "$seed" rev-parse HEAD~1)"
+second="$(git -C "$seed" rev-parse HEAD)"
+update_addon_source helix "$HELIX" "$remote" helix-test "$first" >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$first" ] ||
+	fail "the checkout did not select the declared revision"
+[ -z "$(git -C "$HELIX" branch --show-current)" ] ||
+	fail "an older declared revision did not detach the checkout"
+update_addon_source helix "$HELIX" "$remote" helix-test "$second" >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$second" ] ||
+	fail "the checkout did not move to the newer declared revision"
+git -C "$HELIX" checkout -q helix-test
+git -C "$HELIX" reset -q --hard "$first"
+update_addon_source helix "$HELIX" "$remote" helix-test "$second" >/dev/null 2>&1
+[ "$(git -C "$HELIX" branch --show-current)" = helix-test ] &&
+	[ "$(git -C "$HELIX" rev-parse HEAD)" = "$second" ] ||
+	fail "a newer declared revision did not fast-forward the branch"
+printf third > "$seed/source"
+git -C "$seed" commit -qam third
+third="$(git -C "$seed" rev-parse HEAD)"
+if (update_addon_source helix "$HELIX" "$remote" helix-test "$third") >/dev/null 2>&1; then
+	fail "an unpublished declared revision was accepted"
+fi
+git -C "$seed" checkout -q -b helix-other
+printf fourth > "$seed/source"
+git -C "$seed" commit -qam fourth
+fourth="$(git -C "$seed" rev-parse HEAD)"
+git -C "$seed" push -q origin helix-test helix-other
+update_addon_source helix "$HELIX" "$remote" helix-test "$fourth" >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$fourth" ] ||
+	fail "a declared revision on another branch was not fetched"
+update_addon_source helix "$HELIX" "$remote" helix-test "$third" >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$third" ] || fail "the checkout did not return to the branch head"
+git -C "$HELIX" checkout -q -B helix-test "$third"
+printf local > "$HELIX/source"
+git -C "$HELIX" -c user.email=test@example.com -c user.name=Test commit -qam local
+local_head="$(git -C "$HELIX" rev-parse HEAD)"
+if (update_addon_source helix "$HELIX" "$remote" helix-test "$third") >/dev/null 2>&1; then
+	fail "a checkout with local commits was moved to the declared revision"
+fi
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$local_head" ] || fail "local commits were left behind"
+update_addon_source helix "$HELIX" "$remote" helix-test "$local_head" >/dev/null 2>&1 ||
+	fail "a pinned local commit was refused"
+git -C "$HELIX" reset -q --hard "$third"
+case "$(declare -f prepare_addon_sources)" in
+	*'IFS=: read -r repo branch revision <<< "$spec"'*'"$branch" "$revision"'*) ;;
+	*) fail "add-on sources are not prepared at their declared revisions" ;;
+esac
+[[ "$MOTOR_JAVY_REV" =~ ^[0-9a-f]{40}$ ]] && [[ "$MOTOR_WASMTIME_REV" =~ ^[0-9a-f]{40}$ ]] ||
+	fail "the wasm add-ons do not declare full fork revisions"
 
 ASSEMBLY_ROOT="$temporary/assembly"
 ASSEMBLY_SYSROOT="$ASSEMBLY_ROOT/sysroot"

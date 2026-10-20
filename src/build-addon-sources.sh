@@ -1,8 +1,22 @@
 #!/usr/bin/env bash
 # Shared source and workspace inventory for add-on builds and merge validation.
 
-JAVY_SOURCES=(javy:motor-9.1.0 wasmi:motor-1.1.0 wasmtime:motor-48.0.1)
-WASMTIME_SOURCES=(wasmtime:motor-48.0.1 target-lexicon:motor-0.13.5 tokio:motor-1.51.1 mio:motor-1.2.0)
+# Each wasm add-on is built from one Motor branch of its fork at the exact
+# revision declared here, so every Motor OS branch names the fork revisions it
+# was gated with. To take new fork work: push the fork, then set its revision
+# (an exported MOTOR_<ADDON>_REV wins, for a build before the pin is committed).
+# What the forks depend on — Tokio, Mio, target-lexicon, Wasmi, Wizer and the
+# Motor OS crates — are Cargo git dependencies pinned by the add-ons' lockfiles;
+# the tree keeps no sibling checkout of them.
+MOTOR_JAVY_BRANCH=motor-9.1.0
+MOTOR_JAVY_REV="${MOTOR_JAVY_REV:-c7c29b2aa394ab8a0841ee91db14eda7883c3722}"
+MOTOR_WASMTIME_BRANCH=motor-48.0.1
+MOTOR_WASMTIME_REV="${MOTOR_WASMTIME_REV:-8804845d7a76f56e2547f4178c93cb38c6d8c526}"
+
+# "repo:branch" follows the branch head; "repo:branch:revision" builds that
+# revision of the branch.
+JAVY_SOURCES=("javy:$MOTOR_JAVY_BRANCH:$MOTOR_JAVY_REV")
+WASMTIME_SOURCES=("wasmtime:$MOTOR_WASMTIME_BRANCH:$MOTOR_WASMTIME_REV")
 
 select_addon_workspaces() {
 	local selection="$1" spec repo
@@ -15,7 +29,7 @@ select_addon_workspaces() {
 	fi
 	if [ "$selection" != wasmtime ]; then
 		ADDON_SOURCES+=("${JAVY_SOURCES[@]}")
-		ADDON_WORKSPACES+=(javy javy/motor-tests wasmi
+		ADDON_WORKSPACES+=(javy javy/motor-tests
 			motor-os/src/tests/javy-smoke motor-os/src/tests/javy-smoke/plugins)
 	fi
 	if [ "$selection" != javy ]; then
@@ -34,20 +48,17 @@ select_addon_workspaces() {
 }
 
 prepare_addon_sources() {
-	local spec repo branch
+	local spec repo branch revision
 	for spec in "${ADDON_SOURCES[@]}"; do
-		repo=${spec%%:*}; branch=${spec#*:}
-		update_addon_source "$repo" "$MOTORH/$repo" "https://github.com/moturus/$repo.git" "$branch"
+		IFS=: read -r repo branch revision <<< "$spec"
+		update_addon_source "$repo" "$MOTORH/$repo" "https://github.com/moturus/$repo.git" \
+			"$branch" "$revision"
 	done
 }
 
 report_addon_lockfiles() {
 	local spec repo workspace root output
 	local failed=()
-	[ "$(readlink -f "$MOTORH/motor-os")" = "$MOTOR" ] || {
-		printf 'ERROR: sibling motor-os must resolve to the checkout being validated: %s\n' "$MOTOR"
-		return 1
-	}
 	output="$(cargo --version)" || return 1
 	printf 'Add-on lockfile validation: %s\n' "$output"
 	printf 'Rust toolchain: %s\n' "$RUSTUP_TOOLCHAIN"

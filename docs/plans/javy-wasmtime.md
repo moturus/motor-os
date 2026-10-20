@@ -19,11 +19,16 @@ settled points of the earlier plan reviews are folded in.
 Evidence under `build/` is host-local and not required.
 
 - **Forks:** published `moturus/javy` `motor-9.1.0` at `859b412`,
-  `moturus/wasmtime` `motor-48.0.1` at `b8ef81e8c` and `moturus/wasmi`
-  `motor-1.1.0` at `55bc21a5`; the other Motor branches are unchanged since
-  milestone 2. Wasmtime `5d9818f3c` (lazy guarded fiber stacks) is committed
-  locally on `motor-48.0.1` and awaits the owner's push. Tree work is on the
-  `wasm` branch.
+  `moturus/wasmtime` `motor-48.0.1` at `fda311d08` and `moturus/wasmi`
+  `motor-1.1.0` at `55bc21a5`. Committed locally and awaiting the owner's
+  push, in this order: mio `87e045c`, tokio `860f25ca`, wasmi `18be00bc`,
+  javy `c7c29b2`, wasmtime `8804845d7` (on top of `5d9818f3c`, lazy guarded
+  fiber stacks). They end every cross-repository path dependency; see
+  [the dependency scheme](#fork-dependency-scheme-2026-10-20). The tree pins
+  the javy and wasmtime revisions it builds in `src/build-addon-sources.sh`;
+  the add-ons rebuilt from those pins pass `test-wasm.sh` under Cloud
+  Hypervisor and `full-test-dev.sh --release` (2026-10-20). Tree work is on
+  the `wasm` branch.
 - **Done: Linux-parity memory limits** (owner rulings 2026-10-18, in
   [the memory contract](#javy-pipeline-and-memory-backing)). Those fork heads
   and tree `c4e44de3..c3ecb975` replace 96 MiB per memory, 128 MiB per
@@ -185,9 +190,11 @@ requests intermittently reset before a status line, which remains unexplained,
 and graceful shutdown and Ctrl-C were not qualified.
 
 The owner published the six maintained branches on 2026-10-07. Each is a real
-upstream repository with a Motor branch; the development layout is `../javy`,
-`../wasmi`, `../wasmtime`, `../target-lexicon`, `../tokio` and `../mio` beside
-this repository, and the add-on build resolves the published references.
+upstream repository with a Motor branch. The tree checks out only `javy` and
+`wasmtime`, beside this repository, at the revisions pinned in
+`src/build-addon-sources.sh`; the other four, and the Motor OS crates, are git
+dependencies that the forks' lockfiles pin (since 2026-10-20; the heads below
+are the 2026-10-07 publication).
 
 | GitHub repository | Branch | Head |
 | --- | --- | --- |
@@ -205,7 +212,7 @@ What the branches carry:
   panicking.
 - `moturus/javy`: Wasmi as the only engine for compilation and Wizer snapshots,
   compiler/module state released between build phases, the Javy-local C++ TLS
-  shim with its ownership/TLS checks, the sibling-source build and test scripts,
+  shim with its ownership/TLS checks, the build and test scripts,
   and the runner fixes (stdin read lazily inside `fd_read`; mistyped
   `wasi_snapshot_preview1` imports rejected at instantiation).
 - `moturus/wasmtime`: Wizer instrumentation decoupled from the runtime,
@@ -675,16 +682,17 @@ kept but not extended. Motor integration tests must be Rust crates called by she
 scripts and exercise tools produced by the normal reproducible build and
 installed in the image. Keep generated evidence under `build/` and distinguish
 prototype results from delivered implementation. Keep Wasmi's core/IR crates in
-its workspace and Wizer in Wasmtime's `crates/wizer`. Native libraries come
-from the unchanged `src/sys/lib` tree through an in-tree moto-rt path patch like
-`src/bin/russhd/Cargo.toml`; stage the complete dependency closure without
-personal paths.
+its workspace and Wizer in Wasmtime's `crates/wizer`. Native libraries are git
+dependencies on `moturus/motor-os` pinned by the forks' lockfiles; no fork
+refers to a sibling checkout by path, and the tree's own `src/sys/lib` is not
+an input of the add-ons (owner rule 2026-10-19, scheme below).
 
 After correction 1j, repeat the integration pattern for Wasmtime: one assembly
-add-on per tool family built by a script under `src/`, following the published
-branches with the add-on checkout helper, recording the resolved source graph
-with the installed files, and invalidating reuse on changes to sources,
-lockfiles, build settings, pinned inputs or native library content. Binaries go
+add-on per tool family built by a script under `src/`, at the fork revision
+pinned in `src/build-addon-sources.sh` by the add-on checkout helper, recording
+the resolved source graph (with the git dependencies the lockfiles pin) with
+the installed files, and invalidating reuse on changes to the pinned revision,
+build settings or pinned inputs. Binaries go
 to `/devtools/bin`, tool data and provenance to `/devtools/<tool>` (never
 `/devtools/cfg`), and test inputs stay outside the images in the assembly's
 `tests/<tool>`; both images consume the same release overlay. Integration tests
@@ -743,6 +751,98 @@ maintained baseline. Upstream bases are Javy 9.1.0
 `7bac2c2775808aaec5d4aa5627a5e447b51102cf`, Wasmi/IR 1.1.0
 `8273dfb09d493971b7bb12fe614d740cdc857175`, p2 0.2.12, p3 0.3.0, Tokio 1.51.1,
 Mio 1.2.0, Ring 0.17.14, getrandom 0.2.15 and Brotli 8.0.4.
+
+### Fork dependency scheme, 2026-10-20
+
+Owner rules (2026-10-19): no cross-repository path dependencies anywhere;
+only `build-motor-os.sh` clones other repositories into `../` and works with
+them; any branch of this tree must build with any version of the forks and of
+the toolchain; upgrading or switching must be easy for a human. Until
+2026-10-19 the wasm forks patched Tokio, Mio, target-lexicon, Wasmi, Wizer and
+the Motor OS crates in by sibling path (`../tokio`, `../motor-os/src/sys/lib`),
+unlike the older Motor branches of Mio and Tokio, which took `moto-rt` from
+crates.io. A path dependency pins the sibling's version in the fork's
+lockfile, so one tree branch's moto-rt bump broke `cargo build --locked` of
+the fork for every other branch.
+
+The scheme now:
+
+| Dependency | Declared as | Pinned by |
+| --- | --- | --- |
+| Motor OS crates (`moto-rt`, `moto-sys`, `moto-io`, `moto-async`, `moto-ipc`, `moto-sys-io`) | `git = "https://github.com/moturus/motor-os", branch = "main"`, one revision for all of them; Wasmtime also patches crates.io `moto-rt` to it so Tokio's and Mio's `moto-rt = "0.17"` unify with it | the fork's lockfiles |
+| Fork-to-fork (Wasmtime → Tokio, Mio, target-lexicon; Javy → Wasmi, Wizer in `moturus/wasmtime`) | `[patch.crates-io]` entries with `git = "https://github.com/moturus/<repo>", branch = "motor-<version>"` | the fork's lockfiles |
+| Ring | unchanged: git, exact rev | the fork's lockfiles |
+| Javy and Wasmtime themselves | `src/build-addon-sources.sh`: branch and full revision, like `src/toolchain-versions.sh` | the tree branch |
+| Toolchain and sysroot for the fork scripts | `RUSTUP_TOOLCHAIN` and `MOTOR_SYSROOT` in the environment, exported by `build-motor-os.sh`; the scripts no longer read `../motor-os` | the tree branch |
+
+Cargo accepts a lockfile pinned to a commit that is not on the declared
+branch (`cargo update -p moto-rt --precise <rev>` fetches it by hash, as does
+a fresh `cargo fetch --locked`), so the forks name `main` and today pin
+`fc48f27d` (the `dev` head, which has `F_GUARDED` and the same `src/sys/lib`
+as `wasm`). Once `main` carries it, plain `cargo update -p moto-rt` suffices.
+Measured: resolving the Motor OS crates from GitHub takes 4 s and the repository
+is 22 MiB in Cargo's git cache; Javy's Wizer dependency clones `moturus/wasmtime`
+(140 MiB) once per machine.
+
+What a human does:
+
+- **Advance a tree branch's toolchain or `src/sys/lib`:** nothing in the
+  forks. Their locks keep their Motor OS revision and crates.io versions.
+- **Use a new kernel or sys-io feature in a fork:** push the tree commit; in the
+  fork, `cargo update -p moto-rt [--precise <rev>]` in each workspace with a
+  lockfile (Wasmtime: root, `motor-runtime`, `motor-tests`, `motor-host-tests`;
+  Javy: root, `motor-tests`), commit, push; then set the fork's `MOTOR_*_REV`
+  in `src/build-addon-sources.sh` and gate.
+- **Change Mio, Tokio, target-lexicon or Wasmi:** push the fork; in Wasmtime
+  or Javy `cargo update -p <crate>`; then as above.
+- **Switch tree branches:** `build-motor-os.sh` moves a clean `../javy` or
+  `../wasmtime` to the branch's pinned revision (fast-forward on the fork
+  branch when possible, otherwise detached, `git checkout <branch>` resumes
+  work). It never leaves commits that are on no branch of the fork; an
+  exported `MOTOR_JAVY_REV`/`MOTOR_WASMTIME_REV` builds a committed but
+  unpinned revision.
+- **Push order:** forks before the tree commit that pins them, so every
+  machine can fetch the pin.
+
+Alternatives considered:
+
+- **Publish the Motor OS crates to crates.io** and take them by version, as
+  `std` takes `moto-rt`. This is the only option that also removes the git
+  dependency on the tree. It needs eight crates published in dependency order
+  (`moto-sys` 0.3.2, `moto-ipc` 0.2.6, `moto-mpmc`, `moto-io-internal`,
+  `moto-async`, `moto-sys-io`, `moto-io`, and `async-fs` renamed, since that
+  name is taken on crates.io), `version =` on their in-tree path dependencies,
+  and a publish for every sys-io protocol change the forks need. Published
+  `moto-sys` 0.3.1 already differs from the tree's 0.3.1 (no `F_GUARDED`, no
+  `E_PAGE_ABSENT` retry in `do_syscall`), which is the hazard: a version that
+  was not bumped is silently stale, whereas a git revision is exact. The git
+  scheme can move to this one crate by crate without touching the tree's
+  scripts.
+- **Declare `branch = "dev"`** instead of `main`, so that plain `cargo update`
+  follows `dev`. A one-line change per manifest plus `cargo update`.
+- **Pin ripgrep, Helix and sed by revision** the same way (`repo:branch:rev`
+  in `src/build-addon-sources.sh`); they still follow their branch heads.
+- **Move the Motor WASI host out of the fork** into a tree-owned crate that
+  depends on Wasmtime by git, so that the tree's own path dependencies serve
+  it. Too large: the adapters implement `wasmtime-wasi`'s internal backends.
+
+Pre-existing, unchanged: Javy's lock carries three copies of the
+`wasmtime-internal-*` crates (upstream Javy's crates.io Wasmtime and the Wizer
+workspace's), as it did with the path patch.
+
+**Gate, 2026-10-20 (fork heads unpushed, pinned in the tree).** Every
+workspace resolves and fetches with `--locked`, also from an empty Cargo home;
+`src/check-addon-lockfiles.sh` validates all twelve add-on workspaces offline;
+`test-build-addons.sh` covers the pinned checkouts (older revision detaches,
+newer fast-forwards, unpublished revision refused, revision on another branch
+fetched, local commits never left). `src/build-motor-os.sh --javy-only` and
+`--wasmtime-only` rebuilt both add-ons from the pins (Javy 1 m 43 s, Cargo
+reusing Binaryen). Fork tests: Wasmi's regressions and no-std check, Wasmtime's
+compiler-policy and ELF tests, `motor-wasi-tests` and Javy's `motor-tests`
+built for Motor. VM gates on the rebuilt images: `test-wasm.sh` under Cloud
+Hypervisor PASS (97 `wasmtime-smoke` commands per VM) and
+`full-test-dev.sh --release` ALL PASS (QEMU wasm:224 and dev:256 included,
+about 41 min). Logs: `build/claude-targets/deps/`.
 
 ### Deterministic reference recipe
 
@@ -1375,18 +1475,15 @@ kills the thread.
   no default deadline (`-W timeout` needs epoch-compiled artifacts), no
   header-read or idle timeout, and exit on accept errors. `MOTOR.md` needs
   nothing for behavior that matches upstream.
-- **Next.** The owner pushes `5d9818f3c`. The remote's `fda311d08` locks
-  moto-rt 0.17.9, which no Motor OS branch has yet (the tree is at 0.17.8),
-  so the fork does not build with `--locked` against this tree until moto-rt
-  0.17.9 lands; the local qualification built with the 0.17.8 lock of
-  `b8ef81e8c` (`build/claude-targets/fiber/build-lock.sh`). Then rebuild the
-  Wasmtime add-on
-  (`src/build-motor-os.sh --wasmtime-only`) and the developer and wasm images,
-  run `test-wasm.sh` under QEMU and Cloud Hypervisor and
-  `full-test-dev.sh --release`, and record the results here. 3a then closes;
-  3b and 3f follow. The add-on build refuses a fork checkout with commits that
-  are not on the remote, so qualifying before publication would mean swapping
-  binaries into the assembly, as was done for the memory limits.
+- **Next.** The owner pushes the five forks (mio, tokio, wasmi, javy,
+  wasmtime `8804845d7`, which carries `5d9818f3c`) and then this tree. The
+  moto-rt 0.17.9 lock that blocked `--locked` builds on 2026-10-19 is gone
+  with [the dependency scheme](#fork-dependency-scheme-2026-10-20): the
+  fork's locks pin the Motor OS crates by git revision. The add-ons rebuilt
+  from the pinned revisions through `src/build-motor-os.sh --javy-only` and
+  `--wasmtime-only`; the gate results are recorded in the scheme section's
+  follow-up below. Then run `test-wasm.sh` under Cloud Hypervisor as well,
+  and 3a closes; 3b and 3f follow.
 
 1. **3a — HTTP resource defaults.** Extend milestone 2's finite command defaults
    with request, body/buffer and serving-concurrency limits; size the stack pool

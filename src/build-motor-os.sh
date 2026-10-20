@@ -279,17 +279,17 @@ CFG_LIBC="system/cfg/libc"         # mlibc config files (resolv.conf, ...)
 # See docs/build-llvm.md for the prose walkthrough behind each numbered stage.
 # ============================================================================
 
-# --- add-on source checkout: follow one branch of a fork ----------------------
+# --- add-on source checkout: one branch of a fork, at its head or a revision --
 update_addon_source() {
-	local name="$1" checkout="$2" url="$3" branch="$4" head remote
+	local name="$1" checkout="$2" url="$3" branch="$4" revision="${5:-}" head remote
 	if [ ! -e "$checkout" ]; then
 		log "cloning $name ($branch)"
 		git clone --branch "$branch" --single-branch "$url" "$checkout"
-		return
+		[ -n "$revision" ] || return 0
 	fi
 	git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
 		die "$checkout exists but is not a Git checkout"
-	[ "$(git -C "$checkout" branch --show-current)" = "$branch" ] ||
+	[ -n "$revision" ] || [ "$(git -C "$checkout" branch --show-current)" = "$branch" ] ||
 		die "$name checkout must be on branch $branch: $checkout"
 	[ -z "$(git -C "$checkout" status --porcelain)" ] ||
 		die "$name checkout is dirty — preserve its changes and re-run: $checkout"
@@ -297,11 +297,39 @@ update_addon_source() {
 	git -C "$checkout" fetch "$url" "$branch"
 	head="$(git -C "$checkout" rev-parse HEAD)"
 	remote="$(git -C "$checkout" rev-parse FETCH_HEAD)"
-	[ "$head" != "$remote" ] || return 0
-	git -C "$checkout" merge-base --is-ancestor "$head" "$remote" ||
-		die "$name checkout has local or diverged commits — update it manually: $checkout"
-	log "updating $name ($branch)"
-	git -C "$checkout" merge --ff-only "$remote"
+	if [ -z "$revision" ]; then
+		[ "$head" != "$remote" ] || return 0
+		git -C "$checkout" merge-base --is-ancestor "$head" "$remote" ||
+			die "$name checkout has local or diverged commits — update it manually: $checkout"
+		log "updating $name ($branch)"
+		git -C "$checkout" merge --ff-only "$remote"
+		return
+	fi
+	[ "$head" != "$revision" ] || return 0
+	# The declared revision may be ahead of the branch, or on another branch.
+	git -C "$checkout" cat-file -e "$revision^{commit}" 2>/dev/null ||
+		git -C "$checkout" fetch "$url" "$revision" ||
+		die "$name revision $revision is not in $url"
+	# Commits that are on no branch of the fork are local work: never leave
+	# them. Pin them (MOTOR_<NAME>_REV) or check out the declared revision.
+	local pushed=false tip
+	git -C "$checkout" fetch "$url" $(git ls-remote --heads "$url" | cut -f2)
+	for tip in $(cut -f1 "$(git -C "$checkout" rev-parse --absolute-git-dir)/FETCH_HEAD"); do
+		if git -C "$checkout" merge-base --is-ancestor "$head" "$tip"; then
+			pushed=true
+			break
+		fi
+	done
+	[ "$pushed" = true ] ||
+		die "$name checkout has commits that are not in $url — pin HEAD or check out $revision: $checkout"
+	if [ "$(git -C "$checkout" branch --show-current)" = "$branch" ] &&
+		git -C "$checkout" merge-base --is-ancestor "$head" "$revision"; then
+		log "updating $name ($branch) to $revision"
+		git -C "$checkout" merge --ff-only "$revision"
+		return
+	fi
+	log "checking out $name at $revision (git checkout $branch resumes work on the branch)"
+	git -C "$checkout" checkout --detach "$revision"
 }
 
 # --- stage 2: the C-ABI shim (libmoto_rt_cabi.a) ----------------------------
