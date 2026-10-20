@@ -1,5 +1,5 @@
 //! Guest memory backing of the installed runner: one lazy reservation per
-//! memory, limited to 96 MiB, whose pages are released when the runner exits.
+//! memory, limited to 4 GiB, whose pages are released when the runner exits.
 
 use wasm_smoke_suite::used_memory;
 

@@ -135,15 +135,20 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         &invocation("0", "-W max-table-elements=40000", "limits-elements"),
         0,
     )?;
-    suite.refusal(
+    suite.command(
         "memories-default",
         &invocation("0", "", "limits-memories"),
-        "reservation limits",
+        0,
     )?;
     suite.refusal(
-        "memories-fixed",
+        "memories-limited",
+        &invocation("0", "-W max-memories=4", "limits-memories"),
+        "memory count too high",
+    )?;
+    suite.command(
+        "memories-override",
         &invocation("0", "-W max-memories=5", "limits-memories"),
-        "reservation limits",
+        0,
     )?;
     suite.refusal(
         "memory-too-large",
@@ -152,13 +157,13 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
     )?;
     let (stdout, _) = suite.command(
         "memory-to-limit",
-        &(invocation("0", "--invoke grow", "memory-grow") + " 1535"),
+        &(invocation("0", "--invoke grow", "memory-grow") + " 65535"),
         0,
     )?;
     expect("memory-to-limit", stdout.trim(), "1")?;
     let (stdout, _) = suite.command(
         "memory-beyond-limit",
-        &(invocation("0", "--invoke grow", "memory-grow") + " 1536"),
+        &(invocation("0", "--invoke grow", "memory-grow") + " 65536"),
         0,
     )?;
     expect("memory-beyond-limit", stdout.trim(), "-1")?;

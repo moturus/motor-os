@@ -1,2 +1,2 @@
-;; One page more than the installed runner allows a memory.
-(module (memory 1537))
+;; A valid 64-bit memory one page above the runner's 4 GiB per-memory limit.
+(module (memory i64 65537))
