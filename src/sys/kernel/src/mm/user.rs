@@ -445,6 +445,32 @@ impl UserAddressSpace {
             })
     }
 
+    /// `num_pages` small pages between two guard pages that are never
+    /// mapped, eager or lazy. The segment is `num_pages + 2` pages, guards
+    /// included and nothing rounded: that is what the caller sees, is
+    /// charged for and unmaps.
+    pub fn alloc_user_guarded(
+        &self,
+        num_pages: u64,
+        lazy: bool,
+    ) -> Result<super::MemorySegment, ErrorCode> {
+        let num_pages = num_pages
+            .checked_add(2)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let mut options = MappingOptions::READABLE
+            | MappingOptions::WRITABLE
+            | MappingOptions::USER_ACCESSIBLE
+            | MappingOptions::GUARD;
+        if lazy {
+            options |= MappingOptions::LAZY;
+        }
+        let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
+        self.stats_user_add(bytes)?;
+        self.inner
+            .vmem_allocate_pages(VmemKind::User, num_pages, Some(options))
+            .inspect_err(|_| self.stats_user_sub(bytes))
+    }
+
     pub fn alloc_user_unmapped(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
         // Stats have to be increased, otherwise:
         // - process A gets unmapped, no stats change
@@ -1161,6 +1187,142 @@ pub fn sparse_lazy_self_test() {
     assert_eq!(accounted(), accounted_before);
     assert_eq!(resident(), 0);
     crate::raw_log!("sparse lazy tests PASS");
+}
+
+// Guarded heaps: an eager one is dense, exactly `pages + 2` small pages with
+// a frameless descriptor at each end, never rounded or huge; a lazy one is
+// sparse. Both refuse faults on their guards, neither end of a share may be
+// guarded, and unmapping gives everything back.
+#[cfg(debug_assertions)]
+pub fn guarded_heap_self_test() {
+    use super::PageType;
+    // A heap would round this to 512 pages.
+    const PAGES: u64 = (PAGE_SIZE_MID >> PAGE_SIZE_SMALL_LOG2) / 2 + 1;
+    let space = UserAddressSpace::new().unwrap();
+    let peer = UserAddressSpace::new().unwrap();
+    let descriptors = || space.inner.page_descriptors();
+    let accounted = || space.user_mem_stats().total();
+    let resident = || space.user_mem_stats().resident();
+    let table = space.inner.page_table_ref();
+    let (descriptors_before, accounted_before, resident_before) =
+        (descriptors(), accounted(), resident());
+    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+
+    // The smallest allocation of either kind: one page between the guards.
+    for lazy in [false, true] {
+        let one = space.alloc_user_guarded(1, lazy).unwrap();
+        let page = one.start + PAGE_SIZE_SMALL;
+        assert_eq!(one.size, 3 * PAGE_SIZE_SMALL);
+        assert_eq!(accounted(), accounted_before + one.size);
+        assert_eq!(table.virt_to_phys(page).is_some(), !lazy);
+        assert_eq!(space.fix_pagefault(one.start, 6), refused);
+        assert_eq!(space.fix_pagefault(one.end() - 1, 4), refused);
+        space.fix_pagefault(page, 6).unwrap();
+        assert_eq!(resident(), resident_before + PAGE_SIZE_SMALL);
+        space.copy_to_user(b"one", page).unwrap();
+        assert_eq!(space.read_from_user(page, 3).unwrap(), b"one");
+        space.unmap(one.start).unwrap();
+        assert_eq!(descriptors(), descriptors_before);
+        assert_eq!(accounted(), accounted_before);
+        assert_eq!(resident(), resident_before);
+    }
+
+    // Eager: exactly PAGES + 2 pages, every interior page resident; the
+    // guards have no frame and no translation, and refuse faults whatever
+    // the access.
+    let eager = space.alloc_user_guarded(PAGES, false).unwrap();
+    assert_eq!(eager.size, (PAGES + 2) * PAGE_SIZE_SMALL);
+    assert_eq!(descriptors(), descriptors_before + PAGES + 2);
+    assert_eq!(accounted(), accounted_before + eager.size);
+    assert_eq!(resident(), resident_before + PAGES * PAGE_SIZE_SMALL);
+    let (lower, upper) = (eager.start, eager.end() - PAGE_SIZE_SMALL);
+    assert_eq!(table.virt_to_phys(lower), None);
+    assert_eq!(table.virt_to_phys(upper), None);
+    assert_eq!(
+        table.leaf_kind(lower + PAGE_SIZE_SMALL),
+        Some(PageType::SmallPage)
+    );
+    assert_eq!(
+        table.leaf_kind(upper - PAGE_SIZE_SMALL),
+        Some(PageType::SmallPage)
+    );
+    assert_eq!(space.fix_pagefault(lower, 6), refused);
+    assert_eq!(space.fix_pagefault(lower + PAGE_SIZE_SMALL - 1, 4), refused);
+    assert_eq!(space.fix_pagefault(upper, 4), refused);
+    assert_eq!(space.fix_pagefault(upper + PAGE_SIZE_SMALL - 1, 6), refused);
+    space
+        .copy_to_user(b"guarded", lower + PAGE_SIZE_SMALL)
+        .unwrap();
+    assert_eq!(
+        space.read_from_user(lower + PAGE_SIZE_SMALL, 7).unwrap(),
+        b"guarded"
+    );
+    assert!(space.copy_to_user(b"x", lower).is_err());
+    assert!(space.read_from_user(upper, 1).is_err());
+    assert_eq!(descriptors(), descriptors_before + PAGES + 2);
+
+    // Lazy: nothing until touched; the guards refuse and never get a
+    // descriptor, an interior page gets one on first touch.
+    let lazy = space.alloc_user_guarded(PAGES, true).unwrap();
+    assert_eq!(lazy.size, (PAGES + 2) * PAGE_SIZE_SMALL);
+    assert_eq!(descriptors(), descriptors_before + PAGES + 2);
+    assert_eq!(accounted(), accounted_before + eager.size + lazy.size);
+    assert_eq!(space.fix_pagefault(lazy.start, 6), refused);
+    assert_eq!(space.fix_pagefault(lazy.end() - 1, 4), refused);
+    assert!(space.read_from_user(lazy.start, 1).is_err());
+    assert_eq!(descriptors(), descriptors_before + PAGES + 2);
+    space
+        .fix_pagefault(lazy.start + PAGE_SIZE_SMALL, 6)
+        .unwrap();
+    space
+        .fix_pagefault(lazy.end() - PAGE_SIZE_SMALL - 1, 4)
+        .unwrap();
+    assert_eq!(descriptors(), descriptors_before + PAGES + 4);
+    assert_eq!(resident(), resident_before + (PAGES + 2) * PAGE_SIZE_SMALL);
+    assert_eq!(table.virt_to_phys(lazy.start), None);
+
+    // Neither can be a share source: a guard has no frame.
+    let dest = peer.alloc_user_unmapped(PAGES + 2).unwrap();
+    for source in [eager, lazy] {
+        assert_eq!(
+            UserAddressSpace::map_shared(&peer, dest.start, &space, source.start, options),
+            refused
+        );
+    }
+    peer.unmap(dest.start).unwrap();
+
+    // Nor a share destination, which would put frames in the guards. The
+    // refused destination keeps its guards, bytes, translation and accounting.
+    let source = peer.alloc_user_heap(3).unwrap();
+    peer.copy_to_user(b"src", source.start).unwrap();
+    let guarded = space.alloc_user_guarded(1, false).unwrap();
+    let page = guarded.start + PAGE_SIZE_SMALL;
+    space.copy_to_user(b"dst", page).unwrap();
+    let phys = table.virt_to_phys(page).unwrap();
+    let full = (descriptors(), accounted(), resident());
+    let peer_resident = peer.user_mem_stats().resident();
+    assert_eq!(
+        UserAddressSpace::map_shared(&space, guarded.start, &peer, source.start, options),
+        refused
+    );
+    assert_eq!(table.virt_to_phys(guarded.start), None);
+    assert_eq!(table.virt_to_phys(guarded.end() - PAGE_SIZE_SMALL), None);
+    assert_eq!(table.virt_to_phys(page), Some(phys));
+    assert_eq!(space.read_from_user(page, 3).unwrap(), b"dst");
+    assert_eq!(space.fix_pagefault(guarded.start, 6), refused);
+    assert_eq!((descriptors(), accounted(), resident()), full);
+    assert_eq!(peer.user_mem_stats().resident(), peer_resident);
+    space.unmap(guarded.start).unwrap();
+    peer.unmap(source.start).unwrap();
+
+    space.unmap(lazy.start).unwrap();
+    space.unmap(eager.start).unwrap();
+    assert_eq!(descriptors(), descriptors_before);
+    assert_eq!(accounted(), accounted_before);
+    assert_eq!(resident(), resident_before);
+    crate::raw_log!("guarded heap tests PASS");
 }
 
 // alloc_user_shared cleans up after itself: when the peer cannot reserve

@@ -339,7 +339,8 @@ fn kill_zero_checks_that_a_process_exists() {
 
 #[test]
 fn kill_reports_an_unknown_pid() {
-    let run = run_c("kill 999999");
+    // A long-running host can allocate ordinary high PIDs to live processes.
+    let run = run_c(&format!("kill -0 {}", i32::MAX));
     assert_eq!(run.code, 1);
     assert!(run.stderr.contains("no such process"));
 }

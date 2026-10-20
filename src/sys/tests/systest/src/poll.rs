@@ -166,7 +166,6 @@ fn run_mio_accept_pump_case(poison_rearm: bool) {
         let deadline = moto_rt::time::Instant::now() + Duration::from_secs(5);
         loop {
             if marker.exists() {
-                std::fs::remove_file(marker).unwrap();
                 return;
             }
             if let Some(status) = peer.try_wait().unwrap() {
@@ -253,6 +252,8 @@ fn run_mio_accept_pump_case(poison_rearm: bool) {
     }
     assert_eq!(events[0].token, 1);
     serve(&listener, &mut second);
+    // The marker can appear before the peer finishes writing it.
+    std::fs::remove_file(&marker).unwrap();
 
     poll::del(registry, listener.as_raw_fd()).unwrap();
     moto_rt::fs::close(registry).unwrap();

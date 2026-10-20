@@ -3,6 +3,7 @@
 //! still hold at the floor.
 
 use moto_sys::sys_mem::{PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
+use moto_sys::syscalls::do_syscall;
 use moto_sys::{SysHandle, SysMem, SysObj};
 
 use moto_sys::stats::PID_KERNEL;
@@ -22,6 +23,18 @@ fn map_lazy(bytes: u64) -> Result<u64, moto_rt::ErrorCode> {
         u64::MAX,
         PAGE_SIZE_SMALL,
         bytes >> PAGE_SIZE_SMALL_LOG2,
+    )
+}
+
+fn map_guarded(pages: u64, lazy: bool) -> Result<(u64, u64), moto_rt::ErrorCode> {
+    let lazy = if lazy { SysMem::F_LAZY } else { 0 };
+    SysMem::map2(
+        SysHandle::SELF,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_GUARDED | lazy,
+        u64::MAX,
+        u64::MAX,
+        PAGE_SIZE_SMALL,
+        pages,
     )
 }
 
@@ -87,8 +100,34 @@ fn test_process_memory_stats() {
             before[1] + 8 * PAGE_SIZE_SMALL
         ]
     );
+    // Guarded: six pages reserved for four, and the guards never resident.
+    let guarded = SysMem::map(
+        target,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_GUARDED,
+        u64::MAX,
+        u64::MAX,
+        PAGE_SIZE_SMALL,
+        4,
+    )
+    .unwrap();
+    let guarded_lazy = SysMem::map(
+        target,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY | SysMem::F_GUARDED,
+        u64::MAX,
+        u64::MAX,
+        PAGE_SIZE_SMALL,
+        4,
+    )
+    .unwrap();
+    assert_eq!(
+        memory(),
+        [
+            before[0] + TIB + 20 * PAGE_SIZE_SMALL,
+            before[1] + 12 * PAGE_SIZE_SMALL
+        ]
+    );
     check_ps_memory(pid, memory());
-    for addr in [lazy, eager, alias] {
+    for addr in [lazy, eager, alias, guarded, guarded_lazy] {
         SysMem::unmap(target, 0, u64::MAX, addr).unwrap();
     }
     assert_eq!(memory(), before);
@@ -457,6 +496,119 @@ pub fn run_fault_at_floor_child() -> ! {
     std::process::exit(0);
 }
 
+/// `F_GUARDED`, eager or lazy: the segment is the request plus one page at
+/// each end, exactly; the guards have no translation, the interior works as
+/// usual, and a touch on a guard kills the toucher. Guards come only with
+/// a plain heap request.
+fn test_guarded_maps() {
+    const PAGES: u64 = 257; // A plain heap would round this to 512 pages.
+    let present = |addr: u64| SysMem::virt_to_phys(addr).is_ok();
+    for (pages, lazy) in [(1, false), (1, true), (PAGES, false), (PAGES, true)] {
+        let (start, size) = map_guarded(pages, lazy).unwrap();
+        assert_eq!(size, (pages + 2) * PAGE_SIZE_SMALL);
+        let (lower, upper) = (start, start + size - PAGE_SIZE_SMALL);
+        let ends = [lower + PAGE_SIZE_SMALL, upper - PAGE_SIZE_SMALL];
+        let interior = if pages == 1 { &ends[..1] } else { &ends[..] };
+        assert!(!present(lower));
+        assert!(!present(upper));
+        for addr in interior {
+            assert_eq!(present(*addr), !lazy, "{pages} pages, lazy {lazy}");
+            assert_eq!(unsafe { (*addr as *const u64).read_volatile() }, 0);
+            touch(*addr);
+            assert_eq!(unsafe { (*addr as *const u64).read_volatile() }, *addr);
+            assert!(present(*addr));
+        }
+        assert!(!present(lower));
+        assert!(!present(upper));
+        SysMem::free(start).unwrap();
+    }
+
+    let rw = SysMem::F_READABLE | SysMem::F_WRITABLE;
+    for (flags, virt_addr, pages) in [
+        (SysMem::F_GUARDED, u64::MAX, 1),
+        (SysMem::F_GUARDED | SysMem::F_READABLE, u64::MAX, 1),
+        (SysMem::F_GUARDED | rw | SysMem::F_SHARE_SELF, u64::MAX, 1),
+        (
+            SysMem::F_GUARDED | rw,
+            moto_sys::CUSTOM_USERSPACE_REGION_START,
+            1,
+        ),
+        (SysMem::F_GUARDED | rw, u64::MAX, 0),
+        (SysMem::F_GUARDED | rw | SysMem::F_LAZY, u64::MAX, 0),
+    ] {
+        // The raw syscall: the wrapper asserts a non-zero page count.
+        let nr = (u64::from(moto_sys::syscalls::SYS_MEM) << 56)
+            | (u64::from(SysMem::OP_MAP) << 48)
+            | (u64::from(flags) << 16);
+        assert_eq!(
+            do_syscall(
+                nr,
+                SysHandle::SELF.as_u64(),
+                u64::MAX,
+                virt_addr,
+                PAGE_SIZE_SMALL,
+                pages,
+                0
+            )
+            .error_code(),
+            moto_rt::E_INVALID_ARGUMENT
+        );
+    }
+
+    // A touch on either guard of either kind is a kernel kill.
+    for case in 0..4 {
+        let mut child = crate::subcommand::spawn();
+        child.guard_touch(case);
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(-1), "guard touch {case}: {status:?}");
+    }
+
+    // IPC maps a client's pages into the listener's existing segment, so a
+    // guarded listener buffer is refused, and keeps its guards, its bytes
+    // and its translation.
+    let (start, size) = map_guarded(4, false).unwrap();
+    let interior = start + PAGE_SIZE_SMALL;
+    touch(interior);
+    let phys = SysMem::virt_to_phys(interior).unwrap();
+    let source = SysMem::alloc(PAGE_SIZE_SMALL, 6).unwrap();
+    let url = |addr: u64| {
+        format!(
+            "shared:url=guarded-{};address={addr};page_type=small;page_num=6",
+            moto_sys::current_pid()
+        )
+    };
+    let listener = SysObj::create(SysHandle::SELF, 0, &url(start)).unwrap();
+    assert_eq!(
+        SysObj::get(SysHandle::SELF, 0, &url(source)),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert!(!present(start));
+    assert!(!present(start + size - PAGE_SIZE_SMALL));
+    assert_eq!(SysMem::virt_to_phys(interior), Ok(phys));
+    assert_eq!(
+        unsafe { (interior as *const u64).read_volatile() },
+        interior
+    );
+    SysObj::put(listener).unwrap();
+    SysMem::free(source).unwrap();
+    SysMem::free(start).unwrap();
+    println!("test_sparse_guarded_maps PASS");
+}
+
+/// The child side of `test_guarded_maps`: touches a guard page and must not
+/// survive it. Bit 0 of `case` picks the lazy kind, bit 1 the upper guard.
+pub fn run_guard_touch_child(case: u64) -> ! {
+    let (start, size) = map_guarded(4, case & 1 != 0).unwrap();
+    let guard = if case & 2 != 0 {
+        start + size - PAGE_SIZE_SMALL
+    } else {
+        start
+    };
+    touch(guard);
+    println!("guard_touch {case}: still alive");
+    std::process::exit(0);
+}
+
 /// The first pressure event of a boot grows the pool once, by about a
 /// thousand pages, and the floor test expects it to be steady afterwards.
 /// An OOM child, like `test_oom` in the full suite, absorbs it, cheaply
@@ -615,6 +767,7 @@ pub fn run_soak_tests() {
     soak_table_churn();
     shared_alloc_rollback_race(false);
     test_lazy_share_source();
+    test_guarded_maps();
     let mut child = crate::subcommand::spawn();
     child.sparse_exit();
     assert!(child.wait().unwrap().success());
@@ -626,6 +779,7 @@ pub fn run_all_tests() {
     test_process_memory_stats();
     test_large_reservations();
     test_lazy_share_source();
+    test_guarded_maps();
     test_shared_alloc_rollback_race();
     test_exit_with_reservations();
     test_fault_at_floor();

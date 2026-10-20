@@ -419,7 +419,7 @@ fn basic(slot: &str) {
 /// brought close to the rotation size first, so the drain that writes the
 /// held records out also rotates the file partway through.
 fn records_under_pressure(slot: &str) {
-    const HELD: usize = 64;
+    const HELD: usize = 128;
     let tag = derived_tag(slot, "pressure");
     let path = log_path(&tag);
     let previous_path = format!("{path}.prev");
@@ -457,9 +457,10 @@ fn records_under_pressure(slot: &str) {
     moto_sys::SysRay::log(&kernel_before).unwrap();
     crate::kernel_log::wait_for_file_records(&[kernel_before.as_bytes()]);
 
-    // Everything the episode sends is built now: 64 records of 3 KiB are
-    // three times the backlog, so most of them can only be dropped. Kernel
-    // records go through sys-tty's own queue first; a few is enough.
+    // Build the episode before squeezing memory. The 128 records of 3 KiB
+    // exceed both strobe's 64-message I/O queue and its 64 KiB backlog, so
+    // some must be dropped before the RPCs finish. Kernel records go through
+    // sys-tty's own queue first; a few is enough.
     let held: Vec<String> = (0..HELD)
         .map(|i| {
             let prefix = format!("{nonce} held {i:03} ");

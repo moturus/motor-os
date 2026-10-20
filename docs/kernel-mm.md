@@ -317,6 +317,10 @@ allocating virtual memory never allocates from the heap. `Page` and
 (128 bytes per data page) is asserted at compile time to cover `Page`,
 `Frame` and page-table growth.
 
+A map of zero pages is refused at the syscall entry with
+`E_INVALID_ARGUMENT`: every mapping path builds a segment, and an empty
+segment is a kernel assertion.
+
 A `Page`'s kind is derived from its `Frame`; a page without a frame is a
 small guard page or unmapped reservation. Lookup finds the greatest page
 start not above the queried address and checks its kind-sized extent. A
@@ -398,11 +402,26 @@ Huge availability is best effort. After a pressure episode most blocks are
 split and pinned by other processes' pages, so huge requests fall back until
 those pages die.
 
+### Guarded heaps
+
+`F_GUARDED`, with `F_READABLE | F_WRITABLE` alone or with `F_LAZY`, puts a
+page that is never mapped at each end of a heap allocation: the segment is
+`num_pages + 2` small pages, never rounded and never huge; `map2` returns
+its start (the lower guard) and its full size, and `free` takes that start.
+A guard has no frame and refuses every fault, which kills the faulting
+thread as a stack guard does, and a guarded segment is refused at either
+end of a share. The guards count toward reserved but not resident memory; the eager
+kind is charged for its pages plus a descriptor per guard, the lazy kind
+per touched page.
+
 ### Sharing
 
 `share_range_with` validates both ranges before replacing any destination
 PTE or frame and returns `E_INVALID_ARGUMENT` if either endpoint belongs to
-a huge-eligible segment, whatever its actual backing, or contains MMIO. This
+a huge-eligible segment, whatever its actual backing, or contains MMIO, or
+if the destination is lazy or guarded: a guarded destination would get
+frames installed in its guards, and a guarded source is refused because a
+guard has no frame. This
 applies to `F_SHARE_SELF` and to IPC's `map_shared`, including same-space
 sharing. Supported shared buffers are fresh-frame `F_SHARE_SELF`, unmapped
 reservations at the receiving end, and populated lazy small-only
@@ -466,7 +485,11 @@ layouts, table rounding and span limits, and the publication order of each
 transition. A mapping self-test on the live pool, run on the BSP before the
 schedulers are published, holds every whole dual-purpose block to force
 fallback, releases one dirtied block to prove a huge leaf maps it zeroed,
-and checks that sharing is refused at either eligible endpoint.
+and checks that sharing is refused at either eligible endpoint. A
+guarded-heap self-test checks the exact shape of both kinds, including the
+one-page minimum and a size an ordinary heap would round, guard refusals,
+share refusal at either end with the refused destination intact, and
+teardown.
 
 Systest (`mem_blocks.rs`, reached by full-test.sh) covers placement of fresh
 1 MiB pieces within `10 + 2 * CPUs` blocks on the plain 1 GiB guest, mixed
@@ -477,7 +500,10 @@ the pressure episode, and process and region accounting. The MMIO suite runs
 from the System console fixture with `CAP_IO_MANAGER`: a mapping outside RAM
 is queried, freed and then faulted on; RAM, wrapped and unaligned ranges are
 refused with their rollback checked; an MMIO page is refused as syscall
-buffer.
+buffer. Systest's `sparse.rs` covers `F_GUARDED` through `map2`: shape and
+translations of both kinds, the accounting of an unstarted process,
+refused flag combinations, a child killed on touching either guard, and a
+guarded IPC listener buffer refused with its guards and bytes intact.
 
 Pool-squeezing cases run only in plain systest, never under load.
 Benchmarks are user-owned.
