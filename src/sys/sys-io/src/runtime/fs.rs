@@ -444,7 +444,6 @@ fn refuse_if_executing(runtime: &FsRuntime, entry: EntryId) -> Result<()> {
 }
 
 struct PendingLockResponse {
-    entry_id: EntryId,
     access: mounts::Resolved,
     connection_id: u64,
     open_id: u64,
@@ -910,7 +909,6 @@ async fn on_cmd_file_lock(
         return Err(ErrorKind::NotConnected.into());
     }
     let pending = PendingLockResponse {
-        entry_id,
         access,
         connection_id,
         open_id,
@@ -962,7 +960,7 @@ async fn send_lock_grants(mut grants: Vec<PendingLockResponse>, runtime: &FsRunt
                 runtime
                     .locks
                     .borrow_mut()
-                    .release(grant.entry_id, grant.connection_id, grant.open_id)
+                    .release(grant.access.id, grant.connection_id, grant.open_id)
                     .expect("granted lock cannot have a pending acquisition"),
             );
         }
