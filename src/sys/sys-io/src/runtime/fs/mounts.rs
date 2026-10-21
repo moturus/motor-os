@@ -276,22 +276,35 @@ pub(super) async fn stat_path(
     if !path.starts_with('/') {
         return Err(ErrorKind::InvalidInput.into());
     }
-    let (mut id, mut kind) = (ROOT_ID, EntryKind::Directory);
+    let mut names = path.split('/').filter(|name| !name.is_empty()).peekable();
     // Even "/" goes through the root corruption gate.
-    Resolved::resolve(table, id)?;
-    for name in path.split('/').filter(|name| !name.is_empty()) {
-        if kind != EntryKind::Directory {
-            return Err(ErrorKind::NotFound.into());
-        }
-        let entry = Resolved::resolve(table, id)?;
+    let mut entry = Resolved::resolve(table, ROOT_ID)?;
+    let (mut id, mut kind) = (entry.id, EntryKind::Directory);
+    while names.peek().is_some() {
+        // Keep this mount's read lock until the walk crosses into another.
         let fs = entry.read().await?;
-        let (local, next_kind) = fs
-            .stat(role, entry.local, name)
-            .await?
-            .ok_or(ErrorKind::NotFound)?;
-        id = entry.export(local)?;
-        kind = next_kind;
-        // The guard drops before resolving the next component.
+        let mut local = entry.local;
+        for name in names.by_ref() {
+            if kind != EntryKind::Directory {
+                return Err(ErrorKind::NotFound.into());
+            }
+            // Another reader may have quarantined the mount meanwhile.
+            entry.healthy()?;
+            let (child, child_kind) = fs
+                .stat(role, local, name)
+                .await?
+                .ok_or(ErrorKind::NotFound)?;
+            (id, kind) = (entry.export(child)?, child_kind);
+            let (mount, child_local) = split(id);
+            if mount != entry.mount {
+                break;
+            }
+            local = child_local;
+        }
+        drop(fs);
+        if names.peek().is_some() {
+            entry = Resolved::resolve(table, id)?;
+        }
     }
     Ok((id, kind))
 }
