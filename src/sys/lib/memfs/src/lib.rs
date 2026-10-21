@@ -31,7 +31,7 @@ pub use blocks::FreeBlockCache;
 const ENTRY_CHARGE: u64 = 512;
 const DIR_LINK_CHARGE: u64 = 128;
 const BLOCK_CHARGE: u64 = async_fs::BLOCK_SIZE as u64 + 64;
-const LOW_ID_MASK: u64 = (1 << 56) - 1;
+const LOW_ID_MASK: u64 = async_fs::MAX_FS_BLOCKS - 1;
 const ROLES: [Role; 3] = [Role::None, Role::Interactive, Role::System];
 
 pub struct MemFsConfig {

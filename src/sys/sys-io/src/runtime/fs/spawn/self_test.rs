@@ -8,18 +8,44 @@ use moto_ipc::io_channel;
 use moto_sys_io::api_fs;
 use std::task::Poll;
 
+pub(in crate::runtime::fs) async fn quarantined_read(
+    runtime: &FsRuntime,
+    entry: EntryId,
+) -> Result<(), String> {
+    let mut page = [0; 4096];
+    st_assert_eq!(
+        super::read_exact_at(runtime, Role::System, entry, 0, &mut page)
+            .await
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    Ok(())
+}
+
 pub(in crate::runtime::fs) async fn queued_mutations(runtime: &FsRuntime) -> Result<(), String> {
+    for path in ["/", "/none/tmp"] {
+        let (id, _) = fs::mounts::stat_path(&runtime.mounts, Role::System, path)
+            .await
+            .map_err(|err| err.to_string())?;
+        check_mount(runtime, id).await?;
+    }
+    Ok(())
+}
+
+async fn check_mount(runtime: &FsRuntime, parent: EntryId) -> Result<(), String> {
     let name = format!(
         ".spawn-lock-test-{}",
         moto_rt::time::Instant::now().as_u64()
     );
-    let dir = runtime
-        .fs
+    let parent = runtime.resolve(parent).map_err(|err| err.to_string())?;
+    let dir = parent
         .write()
         .await
+        .map_err(|err| err.to_string())?
         .create_entry(
             Role::System,
-            async_fs::ROOT_ID,
+            parent.local,
             EntryKind::Directory,
             &name,
             RolePermissions::new(
@@ -30,15 +56,18 @@ pub(in crate::runtime::fs) async fn queued_mutations(runtime: &FsRuntime) -> Res
         )
         .await
         .map_err(|err| err.to_string())?;
+    let dir = parent.export(dir).map_err(|err| err.to_string())?;
 
     let result = check_mutations(runtime, dir).await;
     // Clean up even when a broken handler changed, renamed, or deleted a file.
     let cleanup = async {
-        let mut fs = runtime.fs.write().await;
-        while let Some(entry) = fs.get_first_entry(Role::System, dir).await? {
+        let directory = runtime.resolve(dir)?;
+        let mut fs = directory.write().await?;
+        while let Some(entry) = fs.get_first_entry(Role::System, directory.local).await? {
+            directory.check_local(entry)?;
             fs.delete_entry(Role::System, entry).await?;
         }
-        fs.delete_entry(Role::System, dir).await
+        fs.delete_entry(Role::System, directory.local).await
     }
     .await
     .map_err(|err| err.to_string());
@@ -46,24 +75,28 @@ pub(in crate::runtime::fs) async fn queued_mutations(runtime: &FsRuntime) -> Res
 }
 
 async fn check_mutations(runtime: &FsRuntime, dir: EntryId) -> Result<(), String> {
+    let directory = runtime.resolve(dir).map_err(|err| err.to_string())?;
     let (entry, other) = {
-        let mut fs = runtime.fs.write().await;
+        let mut fs = directory.write().await.map_err(|err| err.to_string())?;
         let mut entries = Vec::new();
         for name in ["executable", "other"] {
             let entry = fs
                 .create_entry(
                     Role::System,
-                    dir,
+                    directory.local,
                     EntryKind::File,
                     name,
                     RolePermissions::all(AccessPermissions::Rwx),
                 )
                 .await
                 .map_err(|err| err.to_string())?;
+            directory
+                .check_local(entry)
+                .map_err(|err| err.to_string())?;
             fs.write(Role::System, entry, 0, b"original")
                 .await
                 .map_err(|err| err.to_string())?;
-            entries.push(entry);
+            entries.push(directory.export(entry).map_err(|err| err.to_string())?);
         }
         (entries[0], entries[1])
     };
@@ -144,7 +177,7 @@ async fn check_mutations(runtime: &FsRuntime, dir: EntryId) -> Result<(), String
 
         // Hold the metadata reader while the real handler queues for writing.
         // Its first poll must reach the write-lock wait, not finish the request.
-        let reader = runtime.fs.read().await;
+        let reader = directory.read().await.map_err(|err| err.to_string())?;
         let mut mutation = core::pin::pin!(fs::on_msg(
             msg,
             server.clone(),
@@ -171,9 +204,10 @@ async fn check_mutations(runtime: &FsRuntime, dir: EntryId) -> Result<(), String
         }
     }
 
-    let reader = runtime.fs.read().await;
+    let entry = runtime.resolve(entry).map_err(|err| err.to_string())?;
+    let reader = entry.read().await.map_err(|err| err.to_string())?;
     let metadata = reader
-        .metadata(Role::System, entry)
+        .metadata(Role::System, entry.local)
         .await
         .map_err(|err| err.to_string())?;
     st_assert_eq!(metadata.size, 8);
@@ -186,7 +220,7 @@ async fn check_mutations(runtime: &FsRuntime, dir: EntryId) -> Result<(), String
     let mut bytes = [0; 8];
     st_assert_eq!(
         reader
-            .read(Role::System, entry, 0, &mut bytes)
+            .read(Role::System, entry.local, 0, &mut bytes)
             .await
             .map_err(|err| err.to_string())?,
         8

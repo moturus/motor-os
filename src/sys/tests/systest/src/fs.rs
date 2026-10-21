@@ -46,6 +46,11 @@ fn temp_dir() -> PathBuf {
     path
 }
 
+// Storage/cache regressions must reach Motor FS even when TMPDIR is memfs.
+fn disk_temp_path(name: &str) -> PathBuf {
+    std::path::Path::new("/user/tmp").join(name)
+}
+
 /// A busy filesystem connection must not prevent kernel wakes from admitting
 /// another connection or delivering that client's intermittent requests.
 pub fn concurrent_client_progress_test() {
@@ -900,7 +905,7 @@ pub fn hot_cache_read_test() {
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }
-    let path = crate::temp_path("systest-fs-hot");
+    let path = disk_temp_path("systest-fs-hot");
     std::fs::write(&path, bytes.as_slice()).unwrap();
 
     // Warm the cache; also verifies the content.
@@ -1037,7 +1042,7 @@ pub fn scattered_writes_test() {
     const FILES: usize = 248;
     const STRIDE: usize = 4;
     const LEN: usize = 1024; // Inline data: each file occupies one entry block.
-    let root = crate::temp_path("systest-fs-scattered-writes");
+    let root = disk_temp_path("systest-fs-scattered-writes");
     std::fs::create_dir(&root).unwrap();
     let paths: Vec<_> = (0..FILES).map(|i| root.join(format!("{i:03}"))).collect();
     for (i, path) in paths.iter().enumerate() {
@@ -1185,7 +1190,7 @@ pub fn concurrent_flush_stress_test() {
     for t in 0..THREADS {
         let progress = progress.clone();
         handles.push(std::thread::spawn(move || {
-            let path = crate::temp_path(&format!("systest-flush-stress-{t}"));
+            let path = disk_temp_path(&format!("systest-flush-stress-{t}"));
             let _ = std::fs::remove_file(&path);
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -1366,7 +1371,7 @@ pub fn verify_pattern_file(path: &str, len: u64, label: &str) {
 /// Several processes and threads stream the same large file at once and
 /// verify its contents.
 fn concurrent_large_file_read_test() {
-    let path = crate::temp_path("systest-concurrent-read");
+    let path = disk_temp_path("systest-concurrent-read");
     let path_str = path.to_str().unwrap();
     if std::fs::metadata(&path).is_ok() {
         std::fs::remove_file(&path).unwrap();

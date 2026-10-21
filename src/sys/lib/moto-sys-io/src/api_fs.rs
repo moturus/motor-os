@@ -34,13 +34,15 @@ pub const CMD_STAT_PATH: u16 = 20;
 /// Build a child process from an executable on the caller's behalf; see
 /// `spawn_msg_encode`.
 pub const CMD_SPAWN: u16 = 21;
+/// Global mount topology and sampled usage, visible to every role.
+pub const CMD_GET_MOUNTS: u16 = 22;
 
 /// True for the command ids the FS server dispatches; keep in sync with the
 /// `CMD_*` list above. sys-io's memory-pressure gate consults this so an
 /// unrecognized command is answered `InvalidData` as usual, not counted and
 /// refused as a pressure refusal.
 pub fn known_cmd(cmd: u16) -> bool {
-    (CMD_STAT..=CMD_SPAWN).contains(&cmd)
+    (CMD_STAT..=CMD_GET_MOUNTS).contains(&cmd)
 }
 
 /// Commands allowed without CAP_FS_WRITE. New commands require it unless
@@ -56,6 +58,7 @@ pub fn is_read_command(cmd: u16) -> bool {
             | CMD_GET_FIRST_ENTRY
             | CMD_GET_NEXT_ENTRY
             | CMD_GET_NAME
+            | CMD_GET_MOUNTS
     )
 }
 
@@ -63,6 +66,135 @@ pub fn is_read_command(cmd: u16) -> bool {
 /// carries its io_page index. One name across every encoder, decoder, and
 /// `release_donated_pages`, so the layout cannot drift between them.
 pub const SINGLE_PAGE_SLOT: usize = 11;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MountKind {
+    MotorFs = 0,
+    MemFs = 1,
+}
+
+/// The configured path can become stale if an ancestor is renamed. Unknown
+/// numbers are represented explicitly, including all usage on corrupt mounts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountInfo {
+    pub id: u32,
+    pub kind: MountKind,
+    pub path: String,
+    pub corrupted: bool,
+    pub used: Option<u64>,
+    pub entries: Option<u64>,
+    pub cap: Option<u64>,
+}
+
+pub const MOUNTS_END: u32 = u32::MAX;
+const MOUNT_HEADER: usize = 32;
+const _: () = assert!(MOUNT_HEADER + MAX_PATH_LEN <= PAGE_SIZE);
+
+impl MountInfo {
+    /// Length-prefixed record; kept independent of the channel for validation.
+    pub fn encode(&self, bytes: &mut [u8]) -> Result<usize> {
+        let len = MOUNT_HEADER + self.path.len();
+        if self.path.is_empty()
+            || self.path.len() > MAX_PATH_LEN
+            || len > bytes.len()
+            || self.id >= 1 << 24
+            || (self.corrupted
+                && (self.used.is_some() || self.entries.is_some() || self.cap.is_some()))
+        {
+            return Err(moto_rt::Error::InvalidData);
+        }
+        bytes[..MOUNT_HEADER].fill(0);
+        bytes[..4].copy_from_slice(&self.id.to_le_bytes());
+        bytes[4] = self.kind as u8;
+        bytes[5] = self.corrupted as u8;
+        bytes[6..8].copy_from_slice(&(self.path.len() as u16).to_le_bytes());
+        for (index, value) in [self.used, self.entries, self.cap].into_iter().enumerate() {
+            if let Some(value) = value {
+                bytes[5] |= 2 << index;
+                bytes[8 + 8 * index..16 + 8 * index].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        bytes[MOUNT_HEADER..len].copy_from_slice(self.path.as_bytes());
+        Ok(len)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < MOUNT_HEADER || bytes.len() > MOUNT_HEADER + MAX_PATH_LEN {
+            return Err(moto_rt::Error::InvalidData);
+        }
+        let path_len = u16::from_le_bytes(bytes[6..8].try_into().unwrap()) as usize;
+        let flags = bytes[5];
+        let id = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+        if path_len == 0
+            || MOUNT_HEADER + path_len != bytes.len()
+            || flags & !15 != 0
+            || (flags & 1 != 0 && flags != 1)
+            || id >= 1 << 24
+        {
+            return Err(moto_rt::Error::InvalidData);
+        }
+        let kind = match bytes[4] {
+            0 => MountKind::MotorFs,
+            1 => MountKind::MemFs,
+            _ => return Err(moto_rt::Error::InvalidData),
+        };
+        let path = core::str::from_utf8(&bytes[MOUNT_HEADER..])
+            .map_err(|_| moto_rt::Error::InvalidData)?
+            .into();
+        let value = |index: usize| {
+            (flags & (2u8 << index) != 0).then(|| {
+                u64::from_le_bytes(bytes[8 + 8 * index..16 + 8 * index].try_into().unwrap())
+            })
+        };
+        Ok(Self {
+            id,
+            kind,
+            path,
+            corrupted: flags & 1 != 0,
+            used: value(0),
+            entries: value(1),
+            cap: value(2),
+        })
+    }
+}
+
+pub fn get_mounts_req_encode(cursor: u32) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_GET_MOUNTS;
+    msg.payload.args_64_mut()[0] = cursor as u64;
+    msg
+}
+
+pub fn get_mounts_req_decode(msg: Msg) -> Result<u32> {
+    msg.payload.args_64()[0]
+        .try_into()
+        .map_err(|_| moto_rt::Error::InvalidArgument)
+}
+
+pub fn get_mounts_resp_encode(id: u64, mount: &MountInfo, next: u32, page: IoPage) -> Result<Msg> {
+    let len = mount.encode(page.bytes_mut())?;
+    let mut msg = Msg::new();
+    msg.id = id;
+    msg.command = CMD_GET_MOUNTS;
+    msg.status = moto_rt::Error::Ok.into();
+    msg.payload.args_64_mut()[0] = next as u64;
+    msg.payload.args_64_mut()[1] = len as u64;
+    msg.payload.shared_pages_mut()[SINGLE_PAGE_SLOT] = IoPage::into_u16(page);
+    Ok(msg)
+}
+
+pub fn get_mounts_resp_decode(msg: Msg, sender: &Sender) -> Result<(MountInfo, u32)> {
+    msg.status()?;
+    // Recover the page before validation so malformed records also release it.
+    let page = sender.get_page(msg.payload.shared_pages()[SINGLE_PAGE_SLOT])?;
+    let next = msg.payload.args_64()[0]
+        .try_into()
+        .map_err(|_| moto_rt::Error::InvalidData)?;
+    let len = usize::try_from(msg.payload.args_64()[1]).map_err(|_| moto_rt::Error::InvalidData)?;
+    let bytes = page.bytes().get(..len).ok_or(moto_rt::Error::InvalidData)?;
+    Ok((MountInfo::decode(bytes)?, next))
+}
 
 pub fn file_lock_msg_encode(entry_id: EntryId, open_id: u64, operation: u8) -> Msg {
     let mut msg = Msg::new();

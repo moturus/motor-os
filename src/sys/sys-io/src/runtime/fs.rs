@@ -4,7 +4,7 @@ use async_fs::Role;
 use async_fs::RolePermissions;
 use async_fs::{EntryKind, FileSystem};
 use async_trait::async_trait;
-use moto_async::{AsFuture, LocalRwLock};
+use moto_async::AsFuture;
 use moto_sys_io::api_fs;
 use moto_sys_io::api_fs::FS_URL;
 use std::cell::RefCell;
@@ -19,10 +19,15 @@ use crate::runtime::fs::virtio_partition::VirtioPartition;
 use crate::util::map_err_into_native;
 use crate::util::map_native_error;
 
+pub(crate) mod admission;
 mod block_io;
+mod config;
 mod entry_ids;
 mod lock_manager;
 mod mbr;
+mod mounts;
+#[cfg(debug_assertions)]
+mod self_test;
 mod spawn;
 pub mod stats;
 mod virtio_partition;
@@ -33,6 +38,10 @@ mod virtio_partition;
 pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     entry_ids::self_test::TESTS,
     lock_manager::self_test::TESTS,
+    mounts::self_test::TESTS,
+    config::self_test::TESTS,
+    admission::self_test::TESTS,
+    self_test::TESTS,
     &[
         ("fs::spawn::queued_mutations", stats::test_executable_locks),
         ("fs::pager::coalesced_windows", stats::test_pager_windows),
@@ -77,8 +86,12 @@ fn fs_role(capabilities: u64) -> Role {
 // has crate visibility to allow internal/async FS access, but
 // VirtioPartition is an internal detail of mod fs.
 #[allow(private_interfaces)]
+// Each mount already allocates its FS in an Rc. Keep direct enum dispatch
+// instead of adding another allocation and indirection for the disk backend.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum FS {
     MotorFs(motor_fs::MotorFs<VirtioPartition>),
+    MemFs(memfs::MemFs),
 }
 
 impl FS {
@@ -86,13 +99,15 @@ impl FS {
     async fn prefetch(&self, file_id: EntryId, first_key: u64, count: u64) {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.prefetch(file_id, first_key, count).await,
+            FS::MemFs(_) => {}
         }
     }
 
     /// Block cache hit/miss/dedup counters. Diagnostics only.
-    fn cache_stats(&self) -> async_fs::block_cache::BlockCacheStats {
+    fn cache_stats(&self) -> Option<async_fs::block_cache::BlockCacheStats> {
         match self {
-            FS::MotorFs(motor_fs) => motor_fs.cache_stats(),
+            FS::MotorFs(motor_fs) => Some(motor_fs.cache_stats()),
+            FS::MemFs(_) => None,
         }
     }
 }
@@ -108,6 +123,7 @@ impl FileSystem for FS {
     ) -> Result<Option<(EntryId, EntryKind)>> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.stat(role, parent_id, filename).await,
+            FS::MemFs(fs) => fs.stat_sync(role, parent_id, filename),
         }
     }
 
@@ -121,6 +137,7 @@ impl FileSystem for FS {
         permissions: RolePermissions,
     ) -> Result<EntryId> {
         match self {
+            FS::MemFs(fs) => fs.create_entry_sync(role, parent_id, kind, name, permissions),
             FS::MotorFs(motor_fs) => {
                 motor_fs
                     .create_entry(role, parent_id, kind, name, permissions)
@@ -138,6 +155,7 @@ impl FileSystem for FS {
         access: AccessPermissions,
     ) -> Result<()> {
         match self {
+            FS::MemFs(fs) => fs.set_permissions_sync(caller, entry_id, target, access),
             FS::MotorFs(motor_fs) => {
                 motor_fs
                     .set_permissions(caller, entry_id, target, access)
@@ -153,6 +171,7 @@ impl FileSystem for FS {
         permissions: RolePermissions,
     ) -> Result<()> {
         match self {
+            FS::MemFs(fs) => fs.set_all_permissions_sync(caller, entry_id, permissions),
             FS::MotorFs(motor_fs) => {
                 motor_fs
                     .set_all_permissions(caller, entry_id, permissions)
@@ -165,6 +184,7 @@ impl FileSystem for FS {
     async fn delete_entry(&mut self, role: Role, entry_id: EntryId) -> Result<()> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.delete_entry(role, entry_id).await,
+            FS::MemFs(fs) => fs.delete_entry_sync(role, entry_id),
         }
     }
 
@@ -177,6 +197,7 @@ impl FileSystem for FS {
         new_name: &str,
     ) -> Result<()> {
         match self {
+            FS::MemFs(fs) => fs.move_entry_sync(role, entry_id, new_parent_id, new_name),
             FS::MotorFs(motor_fs) => {
                 motor_fs
                     .move_entry(role, entry_id, new_parent_id, new_name)
@@ -193,6 +214,7 @@ impl FileSystem for FS {
         new_name: &str,
     ) -> Result<()> {
         match self {
+            FS::MemFs(fs) => fs.move_noreplace_sync(role, entry_id, new_parent_id, new_name),
             FS::MotorFs(motor_fs) => {
                 motor_fs
                     .move_noreplace(role, entry_id, new_parent_id, new_name)
@@ -205,6 +227,7 @@ impl FileSystem for FS {
     async fn get_first_entry(&self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.get_first_entry(role, parent_id).await,
+            FS::MemFs(fs) => fs.get_first_entry_sync(role, parent_id),
         }
     }
 
@@ -212,6 +235,7 @@ impl FileSystem for FS {
     async fn get_next_entry(&self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.get_next_entry(role, entry_id).await,
+            FS::MemFs(fs) => fs.get_next_entry_sync(role, entry_id),
         }
     }
 
@@ -219,6 +243,7 @@ impl FileSystem for FS {
     async fn get_parent(&self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.get_parent(role, entry_id).await,
+            FS::MemFs(fs) => fs.get_parent_sync(role, entry_id),
         }
     }
 
@@ -226,6 +251,7 @@ impl FileSystem for FS {
     async fn name(&self, role: Role, entry_id: EntryId) -> Result<String> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.name(role, entry_id).await,
+            FS::MemFs(fs) => fs.name_sync(role, entry_id),
         }
     }
 
@@ -233,6 +259,7 @@ impl FileSystem for FS {
     async fn metadata(&self, role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.metadata(role, entry_id).await,
+            FS::MemFs(fs) => fs.metadata_sync(role, entry_id),
         }
     }
 
@@ -247,6 +274,7 @@ impl FileSystem for FS {
     ) -> Result<usize> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.read(role, file_id, offset, buf).await,
+            FS::MemFs(fs) => fs.read_sync(role, file_id, offset, buf),
         }
     }
 
@@ -261,6 +289,7 @@ impl FileSystem for FS {
     ) -> Result<usize> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.write(role, file_id, offset, buf).await,
+            FS::MemFs(fs) => fs.write_sync(role, file_id, offset, buf),
         }
     }
 
@@ -268,6 +297,7 @@ impl FileSystem for FS {
     async fn resize(&mut self, role: Role, file_id: EntryId, new_size: u64) -> Result<()> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.resize(role, file_id, new_size).await,
+            FS::MemFs(fs) => fs.resize_sync(role, file_id, new_size),
         }
     }
 
@@ -282,6 +312,7 @@ impl FileSystem for FS {
         size: u64,
     ) -> Result<u64> {
         match self {
+            FS::MemFs(fs) => fs.copy_file_range_sync(role, from, from_offset, to, to_offset, size),
             FS::MotorFs(motor_fs) => {
                 motor_fs
                     .copy_file_range(role, from, from_offset, to, to_offset, size)
@@ -294,18 +325,21 @@ impl FileSystem for FS {
     fn num_blocks(&self) -> u64 {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.num_blocks(),
+            FS::MemFs(fs) => fs.num_blocks(),
         }
     }
 
     async fn empty_blocks(&self) -> Result<u64> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.empty_blocks().await,
+            FS::MemFs(fs) => fs.empty_blocks_sync(),
         }
     }
 
     async fn flush(&mut self) -> Result<()> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.flush().await,
+            FS::MemFs(fs) => fs.flush_sync(),
         }
     }
 }
@@ -315,7 +349,8 @@ impl FileSystem for FS {
 /// `runtime::net::NetRuntime`.
 #[derive(Clone)]
 pub(crate) struct FsRuntime {
-    fs: Rc<LocalRwLock<FS>>,
+    mounts: Rc<RefCell<mounts::MountTable>>,
+    pub(crate) free_caches: Rc<admission::FreeCaches>,
     entry_ids: Rc<entry_ids::EntryIds>,
     fs_stats: Rc<stats::FsStats>,
     locks: Rc<RefCell<lock_manager::LockManager<PendingLockResponse>>>,
@@ -323,6 +358,38 @@ pub(crate) struct FsRuntime {
     exec_locks: Rc<RefCell<spawn::ExecLocks>>,
     spawn_stats: Rc<spawn::SpawnStats>,
     pager: Rc<spawn::pager::Pager>,
+}
+
+impl FsRuntime {
+    fn resolve(&self, internal: EntryId) -> Result<mounts::Resolved> {
+        mounts::Resolved::resolve(&self.mounts, internal)
+    }
+
+    fn decode(&self, wire: EntryId) -> Result<mounts::Resolved> {
+        self.resolve(self.entry_ids.decode(wire))
+    }
+
+    pub(crate) fn root(&self) -> Result<mounts::Resolved> {
+        mounts::Resolved::on_mount(&self.mounts, 0, async_fs::ROOT_ID)
+    }
+
+    pub(crate) async fn read_root_file(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        config::read_root_file(&self.mounts, path).await
+    }
+
+    fn admit_allocation(&self, command: u16, destination: &mounts::Resolved) -> Result<()> {
+        if admission::needs_reserve(command, destination.kind) {
+            self.free_caches.reserve(&self.fs_stats)?;
+        }
+        Ok(())
+    }
+
+    fn pressure_refused(&self) -> std::io::Error {
+        self.fs_stats
+            .pressure_refused
+            .set(self.fs_stats.pressure_refused.get() + 1);
+        ErrorKind::OutOfMemory.into()
+    }
 }
 
 /// Every mutation of an executable that is being loaded or is mapped for
@@ -345,6 +412,7 @@ fn refuse_if_executing(runtime: &FsRuntime, entry: EntryId) -> Result<()> {
 
 struct PendingLockResponse {
     entry_id: EntryId,
+    access: mounts::Resolved,
     connection_id: u64,
     open_id: u64,
     sender: channel_budget::ClientSender,
@@ -354,7 +422,7 @@ struct PendingLockResponse {
 pub(super) async fn init(
     block_device: virtio_async::VirtioDevice,
     channel_budget: Rc<channel_budget::ChannelBudget>,
-) -> Result<Rc<LocalRwLock<FS>>> {
+) -> Result<FsRuntime> {
     let block_device = virtio_async::BlockDevice::from(block_device)?;
     let fs_stats = Rc::new(stats::FsStats::default());
 
@@ -375,7 +443,7 @@ pub(super) async fn init(
     // The boot-time MBR read has completed; all later I/O shares this owner.
     let (block_io, inbox) = moto_async::channel::channel(64);
     moto_async::LocalRuntime::spawn(block_io::run(block_device.clone(), inbox, fs_stats.clone()));
-    let mut fs: Option<Rc<LocalRwLock<FS>>> = None;
+    let mut fs: Option<FS> = None;
     for pte in &mbr.entries {
         log::trace!("MBR PTE: {pte:?}");
         match pte.partition_type {
@@ -404,14 +472,14 @@ pub(super) async fn init(
                         std::io::Error::from(ErrorKind::InvalidData)
                     })?,
                 );
-                fs = Some(Rc::new(LocalRwLock::new(FS::MotorFs(
+                fs = Some(FS::MotorFs(
                     motor_fs::MotorFs::open_with_cache_size(partition, block_cache_blocks())
                         .await
                         .map_err(|err| {
                             log::error!("Mbr::parse() failed: {err:?}.");
                             std::io::Error::from(ErrorKind::InvalidData)
                         })?,
-                ))));
+                ));
             }
             _ => continue,
         }
@@ -422,11 +490,20 @@ pub(super) async fn init(
         return Err(std::io::Error::from(ErrorKind::InvalidData));
     };
 
+    let mounts = Rc::new(RefCell::new(mounts::MountTable::new(fs)));
+    let free_caches = Rc::new(admission::FreeCaches::default());
+    config::load(&mounts, &free_caches)
+        .await
+        .unwrap_or_else(|err| {
+            panic!("Cannot apply /system/cfg/sys-fs.toml: {err}");
+        });
+
     let exec_locks: Rc<RefCell<spawn::ExecLocks>> = Default::default();
     let pager_notify = moto_sys::SysMem::pager_init()
         .map_err(|err| std::io::Error::from_raw_os_error(err as i32))?;
     let runtime = FsRuntime {
-        fs: fs.clone(),
+        mounts,
+        free_caches,
         entry_ids: Rc::new(entry_ids::EntryIds::new()),
         fs_stats,
         locks: Default::default(),
@@ -438,8 +515,8 @@ pub(super) async fn init(
     moto_async::LocalRuntime::spawn(spawn::pager::run(runtime.clone(), pager_notify));
 
     spawn_fs_listeners(runtime.clone()).await;
-    stats::spawn_stats_responder(runtime);
-    Ok(fs)
+    stats::spawn_stats_responder(runtime.clone());
+    Ok(runtime)
 }
 
 async fn spawn_fs_listeners(runtime: FsRuntime) {
@@ -496,7 +573,7 @@ async fn fs_listener(
     spawn_new_listener(runtime.clone()).await;
 
     // Under memory pressure a new client is refused.
-    if moto_sys::memory_pressure() {
+    if runtime.free_caches.pressure() {
         runtime
             .fs_stats
             .pressure_refused_clients
@@ -581,21 +658,19 @@ async fn fs_listener(
     }
 }
 
-/// True for the one command served under memory pressure: releasing a lock.
-///
-/// Every other FS command can grow sys-io -- the block cache allocates on a
-/// miss, the lock manager keeps per-lock state, each message costs a task --
-/// and sys-io dies if the kernel refuses that growth. UNLOCK is exempt
-/// because it only removes lock-manager state and hands queued waiters their
-/// pre-encoded responses: refusing it would strand locks past the episode,
-/// since `Drop`-based unlock on file close never retries.
-fn served_under_pressure(msg: &moto_ipc::io_channel::Msg) -> bool {
+/// Freeing a held memfs ID is allowed under pressure. Resize's size-dependent
+/// check happens under the very guard used to mutate, in its handler.
+fn served_under_pressure(msg: &moto_ipc::io_channel::Msg, runtime: &FsRuntime) -> bool {
     // The decoder owns the operation-byte layout (it is infallible and
     // allocation-free); reading the byte directly here would be a second
     // copy of that layout.
-    msg.command == moto_sys_io::api_fs::CMD_FILE_LOCK
+    (msg.command == api_fs::CMD_FILE_LOCK
         && api_fs::file_lock_msg_decode(*msg)
-            .is_ok_and(|(_, _, operation)| operation == moto_rt::fs::UNLOCK)
+            .is_ok_and(|(_, _, operation)| operation == moto_rt::fs::UNLOCK))
+        || (matches!(msg.command, api_fs::CMD_DELETE_ENTRY | api_fs::CMD_RESIZE)
+            && runtime
+                .decode(msg.payload.arg_128())
+                .is_ok_and(|entry| entry.kind == api_fs::MountKind::MemFs))
 }
 
 async fn on_msg(
@@ -630,8 +705,8 @@ async fn on_msg(
     // pages must be freed here -- a handler releases them by decoding, which
     // never happens for a refused request, and the channel's page pool would
     // leak a slot per refusal.
-    if moto_sys::memory_pressure() && api_fs::known_cmd(msg.command) && !served_under_pressure(&msg)
-    {
+    let pressured = api_fs::known_cmd(msg.command) && runtime.free_caches.pressure();
+    if pressured && !served_under_pressure(&msg, &runtime) {
         api_fs::release_donated_pages(&msg, &sender);
         runtime
             .fs_stats
@@ -661,9 +736,11 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_SET_ALL_PERMISSIONS => {
             on_cmd_set_all_permissions(msg, &sender, runtime, role).await
         }
-        moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, runtime, role).await,
+        moto_sys_io::api_fs::CMD_RESIZE => {
+            on_cmd_resize(msg, &sender, runtime, role, pressured).await
+        }
         moto_sys_io::api_fs::CMD_DELETE_ENTRY => {
-            on_cmd_delete_entry(msg, &sender, runtime, role).await
+            on_cmd_delete_entry(msg, &sender, runtime, role, pressured).await
         }
         moto_sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, runtime).await,
         moto_sys_io::api_fs::CMD_GET_FIRST_ENTRY => {
@@ -684,6 +761,7 @@ async fn on_msg(
         }
         moto_sys_io::api_fs::CMD_FILE_LOCK => on_cmd_file_lock(msg, &sender, runtime).await,
         moto_sys_io::api_fs::CMD_SPAWN => spawn::on_cmd_spawn(msg, &sender, runtime, role).await,
+        api_fs::CMD_GET_MOUNTS => on_cmd_get_mounts(msg, &sender, runtime).await,
 
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
@@ -738,7 +816,8 @@ async fn on_cmd_file_lock(
     let request_id = msg.id;
     let (entry_id, open_id, operation) =
         api_fs::file_lock_msg_decode(msg).map_err(map_native_error)?;
-    let entry_id = runtime.entry_ids.decode(entry_id);
+    let access = runtime.decode(entry_id)?;
+    let entry_id = access.id;
     let connection_id = sender.remote_handle().as_u64();
     if operation == moto_rt::fs::UNLOCK {
         let grants = runtime
@@ -771,6 +850,7 @@ async fn on_cmd_file_lock(
     }
     let pending = PendingLockResponse {
         entry_id,
+        access,
         connection_id,
         open_id,
         sender: sender.clone(),
@@ -808,8 +888,15 @@ async fn on_cmd_file_lock(
 }
 
 async fn send_lock_grants(mut grants: Vec<PendingLockResponse>, runtime: &FsRuntime) {
-    while let Some(grant) = grants.pop() {
-        if grant.sender.send(grant.response).await.is_err() {
+    while let Some(mut grant) = grants.pop() {
+        let denied = if let Err(err) = grant.access.healthy() {
+            grant.response =
+                api_fs::empty_resp_encode(grant.response.id, Err(map_err_into_native(err)));
+            true
+        } else {
+            false
+        };
+        if grant.sender.send(grant.response).await.is_err() || denied {
             grants.extend(
                 runtime
                     .locks
@@ -828,9 +915,9 @@ async fn on_cmd_stat(
     role: Role,
 ) -> Result<()> {
     let (parent_id, fname) = api_fs::stat_msg_decode(msg, sender).map_err(map_native_error)?;
-    let parent_id = runtime.entry_ids.decode(parent_id);
-
-    let fs = runtime.fs.read().await;
+    let parent = runtime.decode(parent_id)?;
+    let parent_id = parent.local;
+    let fs = parent.read().await?;
     let Some((entry_id, entry_kind)) =
         fs.stat(role, parent_id, fname.as_str())
             .await
@@ -842,6 +929,7 @@ async fn on_cmd_stat(
         log::debug!("stat({parent_id}, {fname}): not found");
         return Err(std::io::Error::from(ErrorKind::NotFound));
     };
+    let entry_id = parent.export(entry_id)?;
     core::mem::drop(fs);
 
     let resp = api_fs::stat_resp_encode(msg, runtime.entry_ids.encode(entry_id), entry_kind);
@@ -857,25 +945,7 @@ async fn on_cmd_stat_path(
     role: Role,
 ) -> Result<()> {
     let path = api_fs::stat_path_msg_decode(msg, sender).map_err(map_native_error)?;
-    if !path.starts_with('/') {
-        return Err(std::io::Error::from(ErrorKind::InvalidInput));
-    }
-
-    let fs = runtime.fs.read().await;
-    let (mut entry_id, mut entry_kind) = (async_fs::ROOT_ID, EntryKind::Directory);
-    for name in path.split('/') {
-        if name.is_empty() {
-            continue;
-        }
-        if entry_kind != EntryKind::Directory {
-            return Err(std::io::Error::from(ErrorKind::NotFound));
-        }
-        let Some(next) = fs.stat(role, entry_id, name).await? else {
-            return Err(std::io::Error::from(ErrorKind::NotFound));
-        };
-        (entry_id, entry_kind) = next;
-    }
-    core::mem::drop(fs);
+    let (entry_id, entry_kind) = mounts::stat_path(&runtime.mounts, role, &path).await?;
 
     let resp = api_fs::stat_resp_encode(msg, runtime.entry_ids.encode(entry_id), entry_kind);
     sender.send(resp).await.map_err(map_native_error)
@@ -889,9 +959,10 @@ async fn on_cmd_create_file(
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
-    let parent_id = runtime.entry_ids.decode(parent_id);
-
-    let mut fs = runtime.fs.write().await;
+    let parent = runtime.decode(parent_id)?;
+    runtime.admit_allocation(msg.command, &parent)?;
+    let parent_id = parent.local;
+    let mut fs = parent.write().await?;
     let entry_id = fs
         .create_entry(
             role,
@@ -906,6 +977,7 @@ async fn on_cmd_create_file(
             map_err_into_native(err)
         })
         .map_err(map_native_error)?;
+    let entry_id = parent.export(entry_id)?;
     core::mem::drop(fs);
     log::debug!("created file {parent_id:x}:{fname} => {entry_id:x}");
 
@@ -921,19 +993,22 @@ async fn on_cmd_create_with_permissions(
 ) -> Result<()> {
     let (parent_id, kind, fname, raw_permissions) =
         api_fs::create_with_permissions_msg_decode(msg, sender).map_err(map_native_error)?;
-    let parent_id = runtime.entry_ids.decode(parent_id);
+    let parent = runtime.decode(parent_id)?;
+    runtime.admit_allocation(msg.command, &parent)?;
+    let parent_id = parent.local;
     let permissions = RolePermissions::new(
         raw_permissions[0].try_into()?,
         raw_permissions[1].try_into()?,
         raw_permissions[2].try_into()?,
     );
 
-    let mut fs = runtime.fs.write().await;
+    let mut fs = parent.write().await?;
     let entry_id = fs
         .create_entry(role, parent_id, kind, fname.as_str(), permissions)
         .await
         .map_err(map_err_into_native)
         .map_err(map_native_error)?;
+    let entry_id = parent.export(entry_id)?;
     core::mem::drop(fs);
 
     let resp = api_fs::stat_resp_encode(msg, runtime.entry_ids.encode(entry_id), kind);
@@ -948,9 +1023,10 @@ async fn on_cmd_create_dir(
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
-    let parent_id = runtime.entry_ids.decode(parent_id);
-
-    let mut fs = runtime.fs.write().await;
+    let parent = runtime.decode(parent_id)?;
+    runtime.admit_allocation(msg.command, &parent)?;
+    let parent_id = parent.local;
+    let mut fs = parent.write().await?;
     let entry_id = fs
         .create_entry(
             role,
@@ -965,6 +1041,7 @@ async fn on_cmd_create_dir(
             map_err_into_native(err)
         })
         .map_err(map_native_error)?;
+    let entry_id = parent.export(entry_id)?;
     core::mem::drop(fs);
     log::debug!("created directory {parent_id:x}:{fname} => {entry_id:x}");
 
@@ -1026,7 +1103,7 @@ async fn on_cmd_write(
 
     let (file_id, offset, len, io_page) =
         api_fs::write_msg_decode(msg, sender).map_err(map_native_error)?;
-    let file_id = runtime.entry_ids.decode(file_id);
+    let file = runtime.decode(file_id)?;
 
     // `len` comes from the (untrusted) client; reject anything that does not
     // fit into an io_page instead of panicking on the slice below.
@@ -1034,10 +1111,11 @@ async fn on_cmd_write(
         return Err(std::io::Error::from(ErrorKind::InvalidInput));
     }
 
-    let mut fs = runtime.fs.write().await;
-    refuse_if_executing(&runtime, file_id)?;
+    runtime.admit_allocation(msg.command, &file)?;
+    let mut fs = file.write().await?;
+    refuse_if_executing(&runtime, file.id)?;
     let written = fs
-        .write(role, file_id, offset, &io_page.bytes()[..(len as usize)])
+        .write(role, file.local, offset, &io_page.bytes()[..(len as usize)])
         .await?;
     assert_eq!(written, len as usize);
     core::mem::drop(fs);
@@ -1066,18 +1144,19 @@ async fn on_cmd_write_multi(
 ) -> Result<()> {
     let (file_id, offset, len, pages) =
         api_fs::write_multi_msg_decode(msg, sender).map_err(map_native_error)?;
-    let file_id = runtime.entry_ids.decode(file_id);
+    let file = runtime.decode(file_id)?;
+    runtime.admit_allocation(msg.command, &file)?;
 
     // One FS lock acquire for the whole message. The decode above recovered
     // every page, so all paths below free them on drop.
     let mut total = 0_u32;
     {
-        let mut fs_guard = runtime.fs.write().await;
-        refuse_if_executing(&runtime, file_id)?;
+        let mut fs_guard = file.write().await?;
+        refuse_if_executing(&runtime, file.id)?;
         let mut chunk_offset = offset;
         for (io_page, size) in pages.iter().zip(api_fs::io_chunks(offset, len)) {
             match fs_guard
-                .write(role, file_id, chunk_offset, &io_page.bytes()[..size])
+                .write(role, file.local, chunk_offset, &io_page.bytes()[..size])
                 .await
             {
                 Ok(written) => {
@@ -1117,12 +1196,13 @@ async fn on_cmd_read(
 ) -> Result<()> {
     let started = stats::now_ticks();
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
-    let file_id = runtime.entry_ids.decode(file_id);
+    let file = runtime.decode(file_id)?;
+    let file_id = file.id;
 
     // Requests spanning more than one io_page get a multi-page response;
     // see `api_fs::READ_MAX_PAGES`.
     if len as usize > moto_ipc::io_channel::PAGE_SIZE {
-        return on_cmd_read_multi(msg, sender, runtime, role, file_id, offset, len).await;
+        return on_cmd_read_multi(msg, sender, runtime, role, file, offset, len).await;
     }
 
     let io_page = sender
@@ -1130,11 +1210,11 @@ async fn on_cmd_read(
         .await
         .map_err(map_native_error)?;
 
-    let fs_guard = runtime.fs.read().await;
+    let fs_guard = file.read().await?;
     let read = fs_guard
         .read(
             role,
-            file_id,
+            file.local,
             offset,
             &mut io_page.bytes_mut()[..(len as usize)],
         )
@@ -1171,11 +1251,12 @@ async fn on_cmd_read_multi(
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
-    file_id: EntryId,
+    file: mounts::Resolved,
     offset: u64,
     len: u16,
 ) -> Result<()> {
     let started = stats::now_ticks();
+    let file_id = file.id;
 
     // `len`/`offset` come from the (untrusted) client: reject anything
     // spanning more chunks than a response can carry.
@@ -1200,13 +1281,14 @@ async fn on_cmd_read_multi(
         .map_err(map_native_error)?;
     let mut total = 0_u32;
     {
-        let fs_guard = runtime.fs.read().await;
+        let fs_guard = file.read().await?;
         let mut chunk_offset = offset;
         for (&size, io_page) in chunk_sizes[..num_chunks].iter().zip(&pages) {
+            file.healthy()?;
             let read = fs_guard
                 .read(
                     role,
-                    file_id,
+                    file.local,
                     chunk_offset,
                     &mut io_page.bytes_mut()[..size],
                 )
@@ -1249,19 +1331,7 @@ async fn on_cmd_read_multi(
     // the per-message trigger cheap).
     let end = offset + total as u64;
     if total == len as u32 && end.is_multiple_of(async_fs::BLOCK_SIZE as u64) {
-        runtime
-            .fs_stats
-            .readahead_spawns
-            .set(runtime.fs_stats.readahead_spawns.get() + 1);
-        moto_async::LocalRuntime::spawn(async move {
-            let fs = runtime.fs.read().await;
-            fs.prefetch(
-                file_id,
-                end / (async_fs::BLOCK_SIZE as u64),
-                READAHEAD_BLOCKS,
-            )
-            .await;
-        });
+        spawn_readahead(runtime, file_id, end / async_fs::BLOCK_SIZE as u64);
     }
     Ok(())
 }
@@ -1283,14 +1353,25 @@ fn maybe_readahead(runtime: FsRuntime, file_id: EntryId, offset: u64, read: usiz
         return;
     }
 
+    spawn_readahead(runtime, file_id, block_key + TRIGGER_WINDOW);
+}
+
+fn spawn_readahead(runtime: FsRuntime, file_id: EntryId, first: u64) {
+    let Ok(file) = runtime.resolve(file_id) else {
+        return;
+    };
+    if file.kind != api_fs::MountKind::MotorFs {
+        return;
+    }
     runtime
         .fs_stats
         .readahead_spawns
         .set(runtime.fs_stats.readahead_spawns.get() + 1);
     moto_async::LocalRuntime::spawn(async move {
-        let fs = runtime.fs.read().await;
-        fs.prefetch(file_id, block_key + TRIGGER_WINDOW, READAHEAD_BLOCKS)
-            .await;
+        let Ok(fs) = file.read().await else {
+            return;
+        };
+        fs.prefetch(file.local, first, READAHEAD_BLOCKS).await;
     });
 }
 
@@ -1301,10 +1382,9 @@ async fn on_cmd_metadata(
     role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::metadata_msg_decode(msg);
-    let entry_id = runtime.entry_ids.decode(entry_id);
-
-    let fs = runtime.fs.read().await;
-    let metadata = fs.metadata(role, entry_id).await?;
+    let entry = runtime.decode(entry_id)?;
+    let fs = entry.read().await?;
+    let metadata = fs.metadata(role, entry.local).await?;
     // A full response-page pool must not block filesystem writers.
     core::mem::drop(fs);
 
@@ -1324,14 +1404,14 @@ async fn on_cmd_set_permissions(
     role: Role,
 ) -> Result<()> {
     let (entry_id, raw_access) = api_fs::set_permissions_msg_decode(msg);
-    let entry_id = runtime.entry_ids.decode(entry_id);
+    let entry = runtime.decode(entry_id)?;
     let access = AccessPermissions::try_from(raw_access)?;
 
-    let mut fs = runtime.fs.write().await;
-    refuse_if_executing(&runtime, entry_id)?;
+    let mut fs = entry.write().await?;
+    refuse_if_executing(&runtime, entry.id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
-        fs.set_permissions(role, entry_id, role, access)
+        fs.set_permissions(role, entry.local, role, access)
             .await
             .map_err(map_err_into_native),
     );
@@ -1348,18 +1428,18 @@ async fn on_cmd_set_all_permissions(
     role: Role,
 ) -> Result<()> {
     let (entry_id, raw_permissions) = api_fs::set_all_permissions_msg_decode(msg);
-    let entry_id = runtime.entry_ids.decode(entry_id);
+    let entry = runtime.decode(entry_id)?;
     let permissions = RolePermissions::new(
         raw_permissions[0].try_into()?,
         raw_permissions[1].try_into()?,
         raw_permissions[2].try_into()?,
     );
 
-    let mut fs = runtime.fs.write().await;
-    refuse_if_executing(&runtime, entry_id)?;
+    let mut fs = entry.write().await?;
+    refuse_if_executing(&runtime, entry.id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
-        fs.set_all_permissions(role, entry_id, permissions)
+        fs.set_all_permissions(role, entry.local, permissions)
             .await
             .map_err(map_err_into_native),
     );
@@ -1374,19 +1454,28 @@ async fn on_cmd_resize(
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
+    pressured: bool,
 ) -> Result<()> {
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
-    let file_id = runtime.entry_ids.decode(file_id);
-
-    let mut fs = runtime.fs.write().await;
-    refuse_if_executing(&runtime, file_id)?;
+    let file = runtime.decode(file_id)?;
+    let mut fs = file.write().await?;
+    refuse_if_executing(&runtime, file.id)?;
+    if pressured
+        && (file.kind != api_fs::MountKind::MemFs
+            || new_size > fs.metadata(role, file.local).await?.size)
+    {
+        return Err(runtime.pressure_refused());
+    }
     let resp = api_fs::empty_resp_encode(
         msg.id,
-        fs.resize(role, file_id, new_size)
+        fs.resize(role, file.local, new_size)
             .await
             .map_err(map_err_into_native),
     );
     core::mem::drop(fs);
+    if pressured {
+        runtime.free_caches.reclaim();
+    }
 
     let _ = sender.send(resp).await;
     Ok(())
@@ -1397,19 +1486,23 @@ async fn on_cmd_delete_entry(
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
+    pressured: bool,
 ) -> Result<()> {
     let entry_id = api_fs::delete_entry_msg_decode(msg);
-    let entry_id = runtime.entry_ids.decode(entry_id);
-
-    let mut fs = runtime.fs.write().await;
-    refuse_if_executing(&runtime, entry_id)?;
+    let entry = runtime.decode(entry_id)?;
+    entry.protect_root()?;
+    let mut fs = entry.write().await?;
+    refuse_if_executing(&runtime, entry.id)?;
     let resp = api_fs::empty_resp_encode(
         msg.id,
-        fs.delete_entry(role, entry_id)
+        fs.delete_entry(role, entry.local)
             .await
             .map_err(map_err_into_native),
     );
     core::mem::drop(fs);
+    if pressured {
+        runtime.free_caches.reclaim();
+    }
 
     let _ = sender.send(resp).await;
     Ok(())
@@ -1420,9 +1513,12 @@ async fn on_cmd_flush(
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
 ) -> Result<()> {
-    let mut fs = runtime.fs.write().await;
-    let resp = api_fs::empty_resp_encode(msg.id, fs.flush().await.map_err(map_err_into_native));
-    core::mem::drop(fs);
+    let resp = api_fs::empty_resp_encode(
+        msg.id,
+        mounts::flush(&runtime.mounts)
+            .await
+            .map_err(map_err_into_native),
+    );
 
     let _ = sender.send(resp).await;
     Ok(())
@@ -1435,9 +1531,13 @@ async fn on_cmd_get_first_entry(
     role: Role,
 ) -> Result<()> {
     let parent_id = api_fs::get_first_entry_req_decode(msg);
-    let parent_id = runtime.entry_ids.decode(parent_id);
-    let fs = runtime.fs.read().await;
-    let entry_id = fs.get_first_entry(role, parent_id).await?;
+    let parent = runtime.decode(parent_id)?;
+    let fs = parent.read().await?;
+    let entry_id = fs
+        .get_first_entry(role, parent.local)
+        .await?
+        .map(|local| parent.export(local))
+        .transpose()?;
     core::mem::drop(fs);
     let resp =
         api_fs::get_first_entry_resp_encode(msg, entry_id.map(|id| runtime.entry_ids.encode(id)));
@@ -1453,9 +1553,13 @@ async fn on_cmd_get_next_entry(
     role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::get_next_entry_req_decode(msg);
-    let entry_id = runtime.entry_ids.decode(entry_id);
-    let fs = runtime.fs.read().await;
-    let next_entry_id = fs.get_next_entry(role, entry_id).await?;
+    let entry = runtime.decode(entry_id)?.namespace_entry()?;
+    let fs = entry.read().await?;
+    let next_entry_id = fs
+        .get_next_entry(role, entry.local)
+        .await?
+        .map(|local| entry.export(local))
+        .transpose()?;
     core::mem::drop(fs);
     let resp = api_fs::get_next_entry_resp_encode(
         msg,
@@ -1473,9 +1577,9 @@ async fn on_cmd_get_name(
     role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::get_name_req_decode(msg);
-    let entry_id = runtime.entry_ids.decode(entry_id);
-    let fs = runtime.fs.read().await;
-    let name = fs.name(role, entry_id).await?;
+    let entry = runtime.decode(entry_id)?.namespace_entry()?;
+    let fs = entry.read().await?;
+    let name = fs.name(role, entry.local).await?;
     core::mem::drop(fs);
     if name.len() > moto_rt::fs::MAX_FILENAME_LEN {
         return Err(std::io::ErrorKind::InvalidData.into());
@@ -1504,26 +1608,64 @@ async fn on_cmd_move_entry(
     let entry_id = runtime.entry_ids.decode(entry_id);
     let new_parent_id = runtime.entry_ids.decode(new_parent_id);
 
-    let mut fs = runtime.fs.write().await;
-    refuse_if_executing(&runtime, entry_id)?;
-    // A rename onto an executing file would delete it.
-    if replace
-        && let Ok(Some((replaced, _))) = fs.stat(Role::System, new_parent_id, fname.as_str()).await
-    {
-        refuse_if_executing(&runtime, replaced)?;
-    }
-    let result = if replace {
-        fs.move_entry(role, entry_id, new_parent_id, fname.as_str())
-            .await
-    } else {
-        fs.move_noreplace(role, entry_id, new_parent_id, fname.as_str())
-            .await
-    };
+    let result = move_entry(&runtime, role, entry_id, new_parent_id, &fname, replace).await;
     let resp = api_fs::empty_resp_encode(msg.id, result.map_err(map_err_into_native));
-    core::mem::drop(fs);
 
     let _ = sender.send(resp).await;
     Ok(())
+}
+
+async fn check_replacement(
+    runtime: &FsRuntime,
+    parent: &mounts::Resolved,
+    fs: &FS,
+    name: &str,
+) -> Result<()> {
+    if let Some((local, _)) = fs.stat(Role::System, parent.local, name).await? {
+        let replaced = runtime.resolve(parent.export(local)?)?;
+        replaced.protect_root()?;
+        refuse_if_executing(runtime, replaced.id)?;
+    }
+    Ok(())
+}
+
+async fn move_entry(
+    runtime: &FsRuntime,
+    role: Role,
+    entry: EntryId,
+    parent: EntryId,
+    name: &str,
+    replace: bool,
+) -> Result<()> {
+    let entry = runtime.resolve(entry)?;
+    let parent = runtime.resolve(parent)?;
+    entry.protect_root()?;
+    // Root protection precedes CrossesDevices, including the destination.
+    if replace {
+        let fs = parent.read().await?;
+        check_replacement(runtime, &parent, &fs, name).await?;
+    }
+    if entry.mount != parent.mount {
+        return Err(ErrorKind::CrossesDevices.into());
+    }
+    runtime.admit_allocation(
+        if replace {
+            api_fs::CMD_MOVE_ENTRY
+        } else {
+            api_fs::CMD_MOVE_NOREPLACE
+        },
+        &parent,
+    )?;
+    let mut fs = entry.write().await?;
+    parent.healthy()?;
+    refuse_if_executing(runtime, entry.id)?;
+    if replace {
+        check_replacement(runtime, &parent, &fs, name).await?;
+        fs.move_entry(role, entry.local, parent.local, name).await
+    } else {
+        fs.move_noreplace(role, entry.local, parent.local, name)
+            .await
+    }
 }
 
 async fn on_cmd_copy_file_range(
@@ -1536,16 +1678,93 @@ async fn on_cmd_copy_file_range(
     let from = runtime.entry_ids.decode(from);
     let to = runtime.entry_ids.decode(to);
 
-    let mut fs = runtime.fs.write().await;
-    refuse_if_executing(&runtime, to)?;
-
     // In this implementation, from_offset == to_offset.
-    let copied = fs
-        .copy_file_range(role, from, offset, to, offset, size)
-        .await?;
-    core::mem::drop(fs);
+    let copied = copy_file_range(&runtime, role, from, offset, to, offset, size).await?;
 
     let resp = api_fs::copy_file_range_resp_encode(msg.id, copied);
     let _ = sender.send(resp).await;
     Ok(())
+}
+
+async fn copy_file_range(
+    runtime: &FsRuntime,
+    role: Role,
+    from: EntryId,
+    from_offset: u64,
+    to: EntryId,
+    to_offset: u64,
+    size: u64,
+) -> Result<u64> {
+    let from = runtime.resolve(from)?;
+    let to = runtime.resolve(to)?;
+    runtime.admit_allocation(api_fs::CMD_COPY_FILE_RANGE, &to)?;
+    let size = size.min(api_fs::WRITE_MAX_BYTES as u64);
+    from_offset
+        .checked_add(size)
+        .ok_or(ErrorKind::InvalidInput)?;
+    to_offset.checked_add(size).ok_or(ErrorKind::InvalidInput)?;
+    if from.mount == to.mount {
+        let mut fs = to.write().await?;
+        from.healthy()?;
+        refuse_if_executing(runtime, to.id)?;
+        return fs
+            .copy_file_range(role, from.local, from_offset, to.local, to_offset, size)
+            .await;
+    }
+    let mut buffer = [0; async_fs::BLOCK_SIZE];
+    let block = async_fs::BLOCK_SIZE as u64;
+    let mut copied = 0;
+    while copied < size {
+        let src = from_offset + copied;
+        let dst = to_offset + copied;
+        let chunk = (size - copied)
+            .min(block - src % block)
+            .min(block - dst % block) as usize;
+        let result = async {
+            let read = {
+                let fs = from.read().await?;
+                fs.read(role, from.local, src, &mut buffer[..chunk]).await?
+            };
+            let mut fs = to.write().await?;
+            refuse_if_executing(runtime, to.id)?;
+            fs.write(role, to.local, dst, &buffer[..read]).await
+        }
+        .await;
+        match result {
+            Ok(written) => {
+                copied += written as u64;
+                if written < chunk {
+                    break;
+                }
+            }
+            Err(err) => {
+                if copied == 0 {
+                    return Err(err);
+                }
+                break;
+            }
+        }
+    }
+    Ok(copied)
+}
+
+async fn on_cmd_get_mounts(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    runtime: FsRuntime,
+) -> Result<()> {
+    let cursor = api_fs::get_mounts_req_decode(msg).map_err(map_native_error)?;
+    let info = mounts::info(&runtime.mounts, cursor).await?;
+    let next = if cursor as usize + 1 == runtime.mounts.borrow().iter().count() {
+        api_fs::MOUNTS_END
+    } else {
+        cursor + 1
+    };
+    let page = sender
+        .alloc_page(u64::MAX)
+        .await
+        .map_err(map_native_error)?;
+    let response =
+        api_fs::get_mounts_resp_encode(msg.id, &info, next, page).map_err(map_native_error)?;
+    sender.send(response).await.map_err(map_native_error)
 }

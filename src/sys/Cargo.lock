@@ -1678,6 +1678,7 @@ dependencies = [
  "futures",
  "ipnetwork",
  "log",
+ "memfs",
  "moto-async",
  "moto-io-internal",
  "moto-ipc",

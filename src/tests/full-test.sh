@@ -615,6 +615,13 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   vm_ssh "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
 fi
+# Before uploading any test binaries, the RAM mount is empty and hides the
+# sentinel shipped on disk. Listing also exercises mounted-root metadata/name.
+out="$(vm_ssh_stdout "/system/bin/ls /none/tmp")" ||
+  fail "cannot list fresh /none/tmp"
+[ -z "$out" ] || fail "fresh memfs is not empty: $out"
+vm_ssh "[ ! -e /none/tmp/.shadowed-by-memfs ]" ||
+  fail "memfs exposes its shadowed disk contents"
 # An earlier run's leftover test directories would fail the mkdirs below.
 remove_test_roots vm_ssh
 {

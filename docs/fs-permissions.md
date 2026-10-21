@@ -9,6 +9,23 @@ This document describes permissions on newly built images. It does not define
 a migration for existing images and does not impose an OS-wide W^X rule on
 files created after boot.
 
+`/none/tmp` is an empty, volatile memfs after each boot. Its root inherits the
+image's `rwxrwxrwx` mode through `/system/cfg/sys-fs.toml`; only System may
+change a mounted root's mode. `/user/tmp` and `/system/tmp` remain on disk.
+Memfs charges live data and metadata against its configured capacity. With
+the default configuration the cap is guest RAM rounded down to 16 MiB, minus
+16 MiB, with an 8 MiB minimum. Allocating requests also preserve a sampled
+16 MiB memory reserve (8 MiB below 32 MiB RAM); cached free pages are reclaimed
+before a memory refusal. A large explicit capacity does not reserve RAM.
+Sparse logical length and holes do not consume data storage.
+
+Copies between disk and memfs work normally. Renaming between them returns
+`CrossesDevices` (`EXDEV` in libc); moving or deleting a mount root, or replacing
+one by rename, returns `PermissionDenied`. `remove_dir_all("/none/tmp")` can
+empty the mount before failing to remove its root. Prefer a private subtree
+for temporary work. The native `FsClient::mounts()` API lists all mounts,
+configured paths, capacities and sampled usage for every role.
+
 ## Permission model
 
 A Motor FS mode contains three permission triplets in **System, Interactive,

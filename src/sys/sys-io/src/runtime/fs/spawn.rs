@@ -113,11 +113,13 @@ async fn read_exact_at(
     mut dst: &mut [u8],
 ) -> Result<()> {
     let block = async_fs::BLOCK_SIZE as u64;
-    let fs = runtime.fs.read().await;
+    let entry = runtime.resolve(entry)?;
+    let fs = entry.read().await?;
     while !dst.is_empty() {
+        entry.healthy()?;
         let in_block = ((block - offset % block) as usize).min(dst.len());
         let (head, tail) = dst.split_at_mut(in_block);
-        let read = fs.read(role, entry, offset, head).await?;
+        let read = fs.read(role, entry.local, offset, head).await?;
         if read != in_block {
             return Err(ErrorKind::UnexpectedEof.into());
         }
@@ -143,12 +145,14 @@ async fn read_range(
         let len = (dst.len() - done).min(BATCH);
         let first_key = (offset + done as u64) / block;
         let last_key = (offset + (done + len) as u64 - 1) / block;
-        runtime
-            .fs
-            .read()
-            .await
-            .prefetch(entry, first_key, last_key - first_key + 1)
-            .await;
+        let resolved = runtime.resolve(entry)?;
+        if resolved.kind == api_fs::MountKind::MotorFs {
+            resolved
+                .read()
+                .await?
+                .prefetch(resolved.local, first_key, last_key - first_key + 1)
+                .await;
+        }
         read_exact_at(
             runtime,
             role,
@@ -372,7 +376,8 @@ async fn scan_relocations(
 
 /// The file's size, once the requester's role is allowed to run it.
 async fn executable_size(runtime: &FsRuntime, role: Role, entry: EntryId) -> Result<u64> {
-    let metadata = runtime.fs.read().await.metadata(role, entry).await?;
+    let entry = runtime.resolve(entry)?;
+    let metadata = entry.read().await?.metadata(role, entry.local).await?;
     if metadata.kind() != EntryKind::File {
         return Err(ErrorKind::InvalidInput.into());
     }
@@ -571,7 +576,7 @@ pub(super) async fn on_cmd_spawn(
     role: Role,
 ) -> Result<()> {
     let mut req = api_fs::spawn_msg_decode(msg, sender).map_err(crate::util::map_native_error)?;
-    req.entry_id = runtime.entry_ids.decode(req.entry_id);
+    req.entry_id = runtime.decode(req.entry_id)?.id;
     let stats = &runtime.spawn_stats;
     stats.requests.set(stats.requests.get() + 1);
     let started = moto_rt::time::Instant::now();

@@ -31,6 +31,7 @@ mod logging;
 mod mem_blocks;
 mod mmio;
 mod moto_async;
+mod mounts;
 mod mpmc;
 mod net_caps;
 mod net_driver;
@@ -1306,6 +1307,18 @@ fn main() {
         cold_spawn::run_all_tests();
         return;
     }
+    if args.len() == 2 && args[1] == "mounts" {
+        mounts::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mounts-none" {
+        mounts::none_role();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-memfs-pressure" {
+        pressure::test_memfs_reclamation();
+        return;
+    }
     if args.len() == 2 && args[1] == "paging-soak" {
         cold_spawn::run_soak_tests();
         return;
@@ -1804,6 +1817,7 @@ fn main() {
     bench_page_faults();
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
+    mounts::run_all_tests();
     virtio::run_tests();
     virtio_task_tests::run_tests();
     fs_permissions::run_all_tests();

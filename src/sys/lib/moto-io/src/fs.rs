@@ -24,6 +24,7 @@ use core::{
 use moto_ipc::io_channel::Msg;
 use moto_rt::Result;
 use moto_sys_io::api_fs;
+pub use moto_sys_io::api_fs::{MountInfo, MountKind};
 
 use async_fs::BLOCK_SIZE;
 pub use async_fs::{
@@ -131,6 +132,26 @@ impl Future for ResponseFuture {
 }
 
 impl FsClient {
+    /// All boot mounts in table order, with per-mount sampled statistics.
+    pub async fn mounts(self: &Rc<Self>) -> Result<alloc::vec::Vec<MountInfo>> {
+        let mut mounts = alloc::vec::Vec::new();
+        let mut cursor = 0;
+        loop {
+            let mut request = api_fs::get_mounts_req_encode(cursor);
+            request.id = self.new_request_id();
+            let response = self.clone().send_recv(request).await?;
+            let (mount, next) = api_fs::get_mounts_resp_decode(response, &self.io_sender)?;
+            mounts.push(mount);
+            if next == api_fs::MOUNTS_END {
+                return Ok(mounts);
+            }
+            if next != cursor + 1 || next >= 256 {
+                return Err(moto_rt::Error::InvalidData);
+            }
+            cursor = next;
+        }
+    }
+
     fn new_request_id(&self) -> u64 {
         self.request_counter.update(|id| id + 1);
         self.request_counter.get()

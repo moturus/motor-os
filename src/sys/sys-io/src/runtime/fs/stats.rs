@@ -7,11 +7,10 @@
 //! [`stats_responder_task`] (running in the FS runtime) answers with a freshly
 //! built snapshot. Best effort, never precise — mirrors `crate::runtime::net::stats`.
 
-use super::FS;
+use super::{FS, mounts};
 use async_fs::FileSystem;
-use moto_async::LocalRwLock;
 use moto_stats::{MetricDescWire, MetricEntry};
-use std::{cell::Cell, rc::Rc, sync::OnceLock};
+use std::{cell::Cell, sync::OnceLock};
 
 /// Data-path performance counters for the FS runtime. Diagnostics only: pure
 /// counters, no behavior. Everything that touches them — the command handlers,
@@ -50,6 +49,8 @@ pub(super) struct FsStats {
     pub pressure_refused: Cell<u64>,
     /// New FS clients dropped at accept under memory pressure.
     pub pressure_refused_clients: Cell<u64>,
+    /// Memfs allocations refused after reclaiming cached pages and resampling.
+    pub reserve_refused: Cell<u64>,
 }
 
 /// Compile-time switch for the TSC timing pairs (`read_ticks`,
@@ -122,32 +123,22 @@ mod ids {
     pub const PAGER_FAILED_FILLS: u32 = 1025;
     pub const SPAWN_SCAN_US: u32 = 1026;
     pub const PAGER_SERVE_US: u32 = 1027;
+    pub const MEMFS_USED_BYTES: u32 = 1028;
+    pub const MEMFS_ENTRIES: u32 = 1029;
+    pub const MEMFS_CACHED_FREE_BYTES: u32 = 1030;
+    pub const FS_RESERVE_REFUSED: u32 = 1031;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
 /// [`descriptors`].
-async fn entries(
-    fs: &FS,
-    stats: &FsStats,
-    channels: u64,
-    locked_files: u64,
-    spawn: &super::spawn::SpawnStats,
-    pager: &super::spawn::pager::Pager,
-) -> Vec<MetricEntry> {
-    let num_blocks = fs.num_blocks();
-    let empty_blocks = fs
-        .empty_blocks()
-        .await
-        .inspect_err(|err| log::error!("FS::empty_blocks() failed: {err:?}"))
-        .unwrap_or(0);
-    let cache_stats = fs.cache_stats();
+pub(super) async fn entries(runtime: &super::FsRuntime) -> Vec<MetricEntry> {
+    let stats = &runtime.fs_stats;
+    let channels = runtime.channel_budget.fs_channels();
+    let locked_files = runtime.exec_locks.borrow().num_locked() as u64;
+    let spawn = &runtime.spawn_stats;
+    let pager = &runtime.pager;
 
-    vec![
-        MetricEntry::global(ids::FS_CAPACITY_BYTES, num_blocks * 4096),
-        MetricEntry::global(ids::FS_AVAILABLE_BYTES, empty_blocks * 4096),
-        MetricEntry::global(ids::FS_CACHE_HITS, cache_stats.hits),
-        MetricEntry::global(ids::FS_CACHE_MISSES, cache_stats.misses),
-        MetricEntry::global(ids::FS_CACHE_DEDUP_WAITS, cache_stats.dedup_waits),
+    let mut metrics = vec![
         MetricEntry::global(ids::FS_READ_MSGS, stats.read_msgs.get()),
         MetricEntry::global(ids::FS_READ_NS_TOTAL, ticks_to_ns(stats.read_ticks.get())),
         MetricEntry::global(ids::FS_READAHEAD_SPAWNS, stats.readahead_spawns.get()),
@@ -166,7 +157,6 @@ async fn entries(
             stats.pressure_refused_clients.get(),
         ),
         MetricEntry::global(ids::FS_CHANNELS, channels),
-        MetricEntry::global(ids::FS_CACHE_CAPACITY_BYTES, cache_stats.capacity * 4096),
         MetricEntry::global(ids::EXEC_LOCKED_FILES, locked_files),
         MetricEntry::global(ids::SPAWNS, spawn.requests.get()),
         MetricEntry::global(ids::SPAWN_BUILD_US, spawn.build_us.get()),
@@ -177,7 +167,66 @@ async fn entries(
         MetricEntry::global(ids::PAGER_FAILED_FILLS, pager.failed_fills.get()),
         MetricEntry::global(ids::SPAWN_SCAN_US, spawn.scan_us.get()),
         MetricEntry::global(ids::PAGER_SERVE_US, pager.serve_us.get()),
-    ]
+        MetricEntry::global(ids::FS_RESERVE_REFUSED, stats.reserve_refused.get()),
+    ];
+    if let Ok(root) = runtime.root()
+        && let Ok(fs) = root.read().await
+        && let Ok(empty) = fs.empty_blocks().await
+        && root.healthy().is_ok()
+    {
+        metrics.extend([
+            MetricEntry::global(ids::FS_CAPACITY_BYTES, fs.num_blocks() * 4096),
+            MetricEntry::global(ids::FS_AVAILABLE_BYTES, empty * 4096),
+        ]);
+        if let Some(cache) = fs.cache_stats() {
+            metrics.extend([
+                MetricEntry::global(ids::FS_CACHE_HITS, cache.hits),
+                MetricEntry::global(ids::FS_CACHE_MISSES, cache.misses),
+                MetricEntry::global(ids::FS_CACHE_DEDUP_WAITS, cache.dedup_waits),
+                MetricEntry::global(ids::FS_CACHE_CAPACITY_BYTES, cache.capacity * 4096),
+            ]);
+        }
+    }
+    if let Some((used, entries, cached)) = memfs_totals(runtime).await {
+        metrics.extend([
+            MetricEntry::global(ids::MEMFS_USED_BYTES, used),
+            MetricEntry::global(ids::MEMFS_ENTRIES, entries),
+            MetricEntry::global(ids::MEMFS_CACHED_FREE_BYTES, cached),
+        ]);
+    }
+    metrics
+}
+
+async fn memfs_totals(runtime: &super::FsRuntime) -> Option<(u64, u64, u64)> {
+    let mut totals = (0, 0, 0);
+    let count = runtime.mounts.borrow().iter().count();
+    for index in 0..count {
+        let (id, kind) = {
+            let table = runtime.mounts.borrow();
+            let mount = table.iter().nth(index)?;
+            (mount.id, mount.kind)
+        };
+        if kind != moto_sys_io::api_fs::MountKind::MemFs {
+            continue;
+        }
+        let entry = mounts::Resolved::on_mount(&runtime.mounts, id, async_fs::ROOT_ID).ok()?;
+        let fs = entry.read().await.ok()?;
+        if let FS::MemFs(fs) = &*fs {
+            totals.0 += fs.used_bytes();
+            totals.1 += fs.entry_count();
+            totals.2 += fs.cached_free_bytes();
+        }
+    }
+    if runtime
+        .mounts
+        .borrow()
+        .iter()
+        .any(|mount| mount.kind == moto_sys_io::api_fs::MountKind::MemFs && mount.corrupted)
+    {
+        None
+    } else {
+        Some(totals)
+    }
 }
 
 /// The metric descriptors this provider exposes (the response to `CMD_DESCRIBE`).
@@ -216,6 +265,10 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::PAGER_FAILED_FILLS, "pager.failed_fills"),
         MetricDescWire::new(ids::SPAWN_SCAN_US, "spawn.scan_us"),
         MetricDescWire::new(ids::PAGER_SERVE_US, "pager.serve_us"),
+        MetricDescWire::new(ids::MEMFS_USED_BYTES, "fs.memfs.used_bytes"),
+        MetricDescWire::new(ids::MEMFS_ENTRIES, "fs.memfs.entries"),
+        MetricDescWire::new(ids::MEMFS_CACHED_FREE_BYTES, "fs.memfs.cached_free_bytes"),
+        MetricDescWire::new(ids::FS_RESERVE_REFUSED, "fs.reserve_refused"),
     ]
 }
 
@@ -257,17 +310,7 @@ async fn stats_responder_task(
     while let Some(req) = requests.recv().await {
         match req {
             StatsRequest::Snapshot(respond_to) => {
-                // Not borrowed across the await below.
-                let locked_files = runtime.exec_locks.borrow().num_locked() as u64;
-                let snapshot = entries(
-                    &*runtime.fs.read().await,
-                    &runtime.fs_stats,
-                    runtime.channel_budget.fs_channels(),
-                    locked_files,
-                    &runtime.spawn_stats,
-                    &runtime.pager,
-                )
-                .await;
+                let snapshot = entries(&runtime).await;
                 // The receiver is gone if the stats-server thread stopped waiting; ignore.
                 let _ = respond_to.send(snapshot);
             }
