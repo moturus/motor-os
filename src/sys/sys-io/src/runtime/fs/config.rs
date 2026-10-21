@@ -9,8 +9,9 @@ use std::rc::Rc;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
+    // Tables first, so that errors in an entry can name it.
     #[serde(default)]
-    mount: Vec<MountConfig>,
+    mount: Vec<toml::Table>,
 }
 
 #[derive(Deserialize)]
@@ -101,12 +102,19 @@ fn parse(text: &str) -> Result<Vec<ValidatedMount>> {
         return Err(invalid("more than 255 mounts"));
     }
     let mut mounts: Vec<ValidatedMount> = Vec::with_capacity(config.mount.len());
-    for mount in config.mount {
+    for (index, table) in config.mount.into_iter().enumerate() {
+        let name = match table.get("path") {
+            Some(toml::Value::String(path)) => path.clone(),
+            _ => format!("#{}", index + 1),
+        };
+        let named = |err: &dyn std::fmt::Display| invalid(format!("mount {name}: {err}"));
         let MountConfig::MemFs {
             path,
             max_size,
             mode: root_mode,
-        } = mount;
+        } = toml::Value::Table(table)
+            .try_into()
+            .map_err(|err| named(&err))?;
         if !path.starts_with('/')
             || path.len() > moto_rt::fs::MAX_PATH_LEN
             || path[1..]
@@ -125,10 +133,13 @@ fn parse(text: &str) -> Result<Vec<ValidatedMount>> {
         {
             return Err(invalid(format!("mount hides an earlier mount: {path}")));
         }
-        let named = |err: std::io::Error| invalid(format!("mount {path}: {err}"));
         mounts.push(ValidatedMount {
-            max_size: max_size.map(size).transpose().map_err(named)?,
-            mode: root_mode.as_deref().map(mode).transpose().map_err(named)?,
+            max_size: max_size.map(size).transpose().map_err(|err| named(&err))?,
+            mode: root_mode
+                .as_deref()
+                .map(mode)
+                .transpose()
+                .map_err(|err| named(&err))?,
             path,
         });
     }
@@ -276,13 +287,23 @@ pub(super) mod self_test {
         ] {
             st_assert!(parse(config).is_err());
         }
-        // Value errors name the rejected entry.
-        for value in ["max_size='12X'", "mode='rwx'"] {
+        // Errors in an entry name it.
+        for value in [
+            "max_size='12X'",
+            "mode='rwx'",
+            "max_size=-1",
+            "mode=123",
+            "unknown=1",
+        ] {
             st_assert!(
                 parse(&format!("[[mount]]\ntype='memfs'\npath='/named'\n{value}"))
                     .is_err_and(|err| err.to_string().contains("/named"))
             );
         }
+        st_assert!(
+            parse("[[mount]]\ntype='memfs'\npath='/a'\n[[mount]]\ntype='memfs'\npath=5")
+                .is_err_and(|err| err.to_string().contains("mount #2:"))
+        );
         st_assert!(
             parse(&format!(
                 "[[mount]]\ntype='memfs'\npath='/{}'",
