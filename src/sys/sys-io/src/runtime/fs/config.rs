@@ -184,15 +184,21 @@ async fn mount_one(
     let point = mounts::Resolved::resolve(table, id)?;
     let (mode, empty) = {
         let fs = point.read().await?;
-        let mode = config
-            .mode
-            .unwrap_or(fs.metadata(role, point.local).await?.permissions()?);
+        let mode = match config.mode {
+            Some(mode) => mode,
+            None => fs.metadata(role, point.local).await?.permissions()?,
+        };
         point.healthy()?;
-        let first = fs.get_first_entry(role, point.local).await?;
-        if let Some(first) = first {
-            point.check_local(first)?;
-        }
-        (mode, first.is_none())
+        // Information only: listing needs `x` on the directory; mounting does not.
+        let empty = match fs.get_first_entry(role, point.local).await {
+            Ok(None) => "yes",
+            Ok(Some(first)) => {
+                point.check_local(first)?;
+                "no"
+            }
+            Err(_) => "unknown",
+        };
+        (mode, empty)
     };
     let ram = super::super::guest_ram_mib() << 20;
     let memfs = memfs::MemFs::new(memfs::MemFsConfig {
@@ -377,6 +383,47 @@ pub(super) mod self_test {
                 .unwrap_err()
                 .kind(),
                 ErrorKind::NotFound
+            );
+
+            // Mounting needs no `x` on the directory, and a configured mode
+            // replaces the shadowed directory's.
+            let closed = root
+                .write()
+                .await
+                .map_err(|err| err.to_string())?
+                .create_entry(
+                    Role::System,
+                    ROOT_ID,
+                    EntryKind::Directory,
+                    "closed",
+                    RolePermissions::all(AccessPermissions::Rw),
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+            let configured = RolePermissions::all(AccessPermissions::Rwx);
+            mount_one(
+                &runtime.mounts,
+                &runtime.free_caches,
+                ValidatedMount {
+                    path: "/closed".into(),
+                    max_size: Some(4096),
+                    mode: Some(configured),
+                },
+                Role::System,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            let closed = runtime.resolve(closed).map_err(|err| err.to_string())?;
+            let mounted = closed
+                .read()
+                .await
+                .map_err(|err| err.to_string())?
+                .metadata(Role::System, closed.local)
+                .await
+                .map_err(|err| err.to_string())?;
+            st_assert_eq!(
+                mounted.permissions().map_err(|err| err.to_string())?,
+                configured
             );
             Ok(())
         })
