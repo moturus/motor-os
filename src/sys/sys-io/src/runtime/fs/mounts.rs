@@ -566,6 +566,7 @@ pub(super) mod self_test {
         );
         st_assert_eq!(
             runtime
+                .root_fs()
                 .read_root_file("/system/cfg/sys-net.toml")
                 .await
                 .unwrap_err()

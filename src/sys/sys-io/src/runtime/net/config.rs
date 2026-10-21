@@ -294,7 +294,7 @@ fn chunk_end(read: usize, len: usize) -> usize {
 }
 
 /// Load net config. Note that we cannot use std::fs::*, as it will block forever.
-pub(super) async fn load(runtime: &super::super::fs::FsRuntime) -> std::io::Result<NetConfig> {
+pub(super) async fn load(runtime: &super::super::fs::RootFs) -> std::io::Result<NetConfig> {
     const CFG_PATH: &str = "/system/cfg/sys-net.toml";
 
     let buf = runtime
@@ -337,7 +337,7 @@ fn resolv_conf_contents(servers: &[IpAddr]) -> String {
 }
 
 pub(super) async fn write_resolv_conf(
-    runtime: &super::super::fs::FsRuntime,
+    runtime: &super::super::fs::RootFs,
     servers: &[IpAddr],
 ) -> std::io::Result<()> {
     const TEMP_NAME: &str = ".resolv.conf.dhcp";

@@ -379,6 +379,20 @@ pub(crate) struct FsRuntime {
     pager: Rc<spawn::pager::Pager>,
 }
 
+/// The root filesystem as the net runtime sees it: its config and resolv.conf.
+#[derive(Clone)]
+pub(crate) struct RootFs(Rc<RefCell<mounts::MountTable>>);
+
+impl RootFs {
+    pub(crate) fn root(&self) -> Result<mounts::Resolved> {
+        mounts::Resolved::on_mount(&self.0, 0, async_fs::ROOT_ID)
+    }
+
+    pub(crate) async fn read_root_file(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        config::read_root_file(&self.0, path).await
+    }
+}
+
 impl FsRuntime {
     fn resolve(&self, internal: EntryId) -> Result<mounts::Resolved> {
         mounts::Resolved::resolve(&self.mounts, internal)
@@ -388,12 +402,12 @@ impl FsRuntime {
         self.resolve(self.entry_ids.decode(wire))
     }
 
-    pub(crate) fn root(&self) -> Result<mounts::Resolved> {
-        mounts::Resolved::on_mount(&self.mounts, 0, async_fs::ROOT_ID)
+    fn root(&self) -> Result<mounts::Resolved> {
+        self.root_fs().root()
     }
 
-    pub(crate) async fn read_root_file(&self, path: &str) -> Result<Option<Vec<u8>>> {
-        config::read_root_file(&self.mounts, path).await
+    pub(crate) fn root_fs(&self) -> RootFs {
+        RootFs(self.mounts.clone())
     }
 
     fn admit_allocation(&self, command: u16, destination: &mounts::Resolved) -> Result<()> {

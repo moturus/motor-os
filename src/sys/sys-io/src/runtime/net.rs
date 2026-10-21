@@ -149,7 +149,7 @@ struct NetRuntime {
     orphan_lingers: Rc<Cell<usize>>,
 
     // Filesystem is used to write log/stats.
-    fs: super::fs::FsRuntime,
+    fs: super::fs::RootFs,
 
     // A fixed temporary filename is safe only while resolver publications are
     // serialized; the newest waiter recomputes the aggregate after acquiring.
@@ -914,7 +914,7 @@ pub(super) async fn init(
     fs: super::fs::FsRuntime,
     channel_budget: Rc<channel_budget::ChannelBudget>,
 ) -> Result<Vec<Rc<virtio_async::virtio_net::NetDevice>>> {
-    let config = config::load(&fs).await?;
+    let config = config::load(&fs.root_fs()).await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");
 
     // Created before the devices: their rx/tx tasks bump the device counters.
@@ -1015,7 +1015,7 @@ pub(super) async fn init(
             fs.free_caches.clone(),
         )),
         orphan_lingers: Rc::new(Cell::new(0)),
-        fs: fs.clone(),
+        fs: fs.root_fs(),
         dns_write_lock: Rc::new(moto_async::LocalMutex::new(())),
         channel_budget,
     };
@@ -1033,7 +1033,7 @@ pub(super) async fn init(
                 .filter(|server| seen.insert(*server))
                 .collect::<Vec<_>>()
         };
-        config::write_resolv_conf(&fs, &initial_dns_servers).await?;
+        config::write_resolv_conf(&runtime.fs, &initial_dns_servers).await?;
         stats::spawn_stats_responder(runtime.clone());
         pressure::spawn_recovery(runtime.clone());
     }
