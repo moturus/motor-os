@@ -329,8 +329,13 @@ fn memory() {
             .stat("/none/tmp")
             .await
             .map_err(|err| err.to_string())?;
-        println!("mounts: initial used {:?}, entries {:?}, cache {}, admission-free {} pages",
-            baseline.used, baseline.entries, metric("fs.memfs.cached_free_bytes")?, free_pages()?);
+        println!(
+            "mounts: initial used {:?}, entries {:?}, cache {}, admission-free {} pages",
+            baseline.used,
+            baseline.entries,
+            metric("fs.memfs.cached_free_bytes")?,
+            free_pages()?
+        );
         let dir = client
             .create_entry(root, EntryKind::Directory, "systest-mounts")
             .await
@@ -367,7 +372,10 @@ fn memory() {
                     "free cache exceeds cap",
                 )?;
                 let after = memfs_mount(&client).await?;
-                check(after.used == working.used && after.entries == working.entries, "cache cycle leaked live storage")?;
+                check(
+                    after.used == working.used && after.entries == working.entries,
+                    "cache cycle leaked live storage",
+                )?;
                 println!("mounts: cache cycle admission-free {} pages", free_pages()?);
             }
             let small = client
@@ -420,18 +428,28 @@ fn memory() {
                 .await
                 .map_err(|err| err.to_string())?;
             held[0] = None;
-            let (disk_dir, _) = client.stat("/user/tmp").await
+            let (disk_dir, _) = client
+                .stat("/user/tmp")
+                .await
                 .map_err(|err| err.to_string())?;
-            let disk_probe = client.create_entry(disk_dir, EntryKind::File, "systest-memfs-disk-probe")
-                .await.map_err(|err| err.to_string())?;
+            let disk_probe = client
+                .create_entry(disk_dir, EntryKind::File, "systest-memfs-disk-probe")
+                .await
+                .map_err(|err| err.to_string())?;
             held[3] = Some(disk_probe);
             let probe = b"root remains usable";
             check(
-                client.write(disk_probe, 0, probe).await
-                    .map_err(|err| err.to_string())? == probe.len(),
+                client
+                    .write(disk_probe, 0, probe)
+                    .await
+                    .map_err(|err| err.to_string())?
+                    == probe.len(),
                 "short disk service write",
             )?;
-            client.delete_entry(disk_probe).await.map_err(|err| err.to_string())?;
+            client
+                .delete_entry(disk_probe)
+                .await
+                .map_err(|err| err.to_string())?;
             held[3] = None;
             client
                 .delete_entry(big)
@@ -439,7 +457,10 @@ fn memory() {
                 .map_err(|err| err.to_string())?;
             held[1] = None;
             let after = memfs_mount(&client).await?;
-            check(after.used == working.used && after.entries == working.entries, "fill/delete leaked live storage")?;
+            check(
+                after.used == working.used && after.entries == working.entries,
+                "fill/delete leaked live storage",
+            )?;
             let recovered = client
                 .create_entry(dir, EntryKind::File, "recovered")
                 .await
@@ -454,7 +475,11 @@ fn memory() {
                 .await
                 .map_err(|err| err.to_string())?;
             held[0] = None;
-            println!("mounts: reserve refused after {size} bytes; recovery PASS, admission-free {} pages", free_pages()?);
+            println!(
+                "mounts: reserve refused after {size} bytes; recovery PASS, \
+                 admission-free {} pages",
+                free_pages()?
+            );
             Ok(())
         }
         .await;
