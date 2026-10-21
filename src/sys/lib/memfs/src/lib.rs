@@ -224,6 +224,23 @@ impl MemFs {
             .map(|id| (encode(*id), self.entries[id].metadata.kind())))
     }
 
+    /// `stat_sync` without the traverse check. A replacing move needs only `w`
+    /// on the directory, so sys-io protects mount points and running
+    /// executables from replacement with this lookup; never answer a client
+    /// with it.
+    pub fn lookup_unchecked(
+        &self,
+        parent: EntryId,
+        name: &str,
+    ) -> Result<Option<(EntryId, EntryKind)>> {
+        validate_filename(name)?;
+        let (_, entry) = self.entry(parent)?;
+        Ok(entry
+            .children()?
+            .get(name)
+            .map(|id| (encode(*id), self.entries[id].metadata.kind())))
+    }
+
     pub fn create_entry_sync(
         &mut self,
         role: Role,

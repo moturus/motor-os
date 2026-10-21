@@ -110,6 +110,18 @@ impl FS {
             FS::MemFs(_) => None,
         }
     }
+
+    /// A name lookup without the traverse check, for sys-io's own protections.
+    async fn lookup_unchecked(
+        &self,
+        parent: EntryId,
+        name: &str,
+    ) -> Result<Option<(EntryId, EntryKind)>> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.lookup_unchecked(parent, name).await,
+            FS::MemFs(fs) => fs.lookup_unchecked(parent, name),
+        }
+    }
 }
 
 #[async_trait(?Send)]
@@ -1639,7 +1651,9 @@ async fn check_replacement(
     fs: &FS,
     name: &str,
 ) -> Result<()> {
-    if let Some((local, _)) = fs.stat(Role::System, parent.local, name).await? {
+    // The backends replace with only `w` on the directory, so the protections
+    // must not depend on traverse rights either.
+    if let Some((local, _)) = fs.lookup_unchecked(parent.local, name).await? {
         let replaced = runtime.resolve(parent.export(local)?)?;
         replaced.protect_root()?;
         refuse_if_executing(runtime, replaced.id)?;

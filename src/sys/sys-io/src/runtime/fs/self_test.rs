@@ -3,8 +3,11 @@ use super::*;
 use moto_ipc::io_channel;
 use moto_sys_io::api_fs::{MountInfo, MountKind};
 
-pub(super) const TESTS: &[crate::self_test::SelfTest] =
-    &[("fs::mount_requests", run), ("fs::mount_records", records)];
+pub(super) const TESTS: &[crate::self_test::SelfTest] = &[
+    ("fs::mount_requests", run),
+    ("fs::mount_records", records),
+    ("fs::replace_without_traverse", replace_without_traverse),
+];
 
 pub(super) fn memfs(cap: u64) -> Result<FS> {
     Ok(FS::MemFs(memfs::MemFs::new(memfs::MemFsConfig {
@@ -490,6 +493,76 @@ async fn requests() -> Result<()> {
         "multi-read rechecks alias origin after waiting",
     )?;
     Ok(())
+}
+
+/// A replacing rename needs only `w` on the destination directory, as in the
+/// backends, while mount roots and running executables there stay protected.
+fn replace_without_traverse() -> std::result::Result<(), String> {
+    moto_async::LocalRuntime::new()
+        .block_on(replacements())
+        .map_err(|err| err.to_string())
+}
+
+async fn replacements() -> Result<()> {
+    let runtime = runtime()?;
+    let root = runtime.root()?;
+    let all = RolePermissions::all(AccessPermissions::Rwx);
+    let mut fs = root.write().await?;
+    let dir = fs
+        .create_entry(
+            Role::System,
+            0,
+            EntryKind::Directory,
+            "w-only",
+            RolePermissions::all(AccessPermissions::Rw),
+        )
+        .await?;
+    let mut targets = Vec::new();
+    for (name, kind) in [
+        ("existing", EntryKind::File),
+        ("running", EntryKind::File),
+        ("point", EntryKind::Directory),
+    ] {
+        targets.push(fs.create_entry(Role::System, dir, kind, name, all).await?);
+    }
+    let mut sources = Vec::new();
+    for name in ["a", "b", "c", "d"] {
+        sources.push(
+            fs.create_entry(Role::None, 0, EntryKind::File, name, all)
+                .await?,
+        );
+    }
+    drop(fs);
+
+    // Mount 0's local IDs are its internal IDs.
+    move_entry(&runtime, Role::None, sources[0], dir, "absent", true).await?;
+    move_entry(&runtime, Role::None, sources[1], dir, "existing", true).await?;
+    ensure(
+        root.read().await?.lookup_unchecked(dir, "existing").await?
+            == Some((sources[1], EntryKind::File)),
+        "replaced entry",
+    )?;
+
+    let not_allowed = |result: Result<()>| {
+        result.err().and_then(|err| err.raw_os_error()) == Some(moto_rt::E_NOT_ALLOWED as i32)
+    };
+    let held = spawn::self_test::hold_executable(&runtime, targets[1]);
+    let replaced = move_entry(&runtime, Role::None, sources[2], dir, "running", true).await;
+    drop(held);
+    ensure(not_allowed(replaced), "running executable replaced")?;
+    runtime.mounts.borrow_mut().insert(
+        memfs(1 << 20)?,
+        MountKind::MemFs,
+        mounts::MountPoint {
+            mount: 0,
+            shadowed: targets[2],
+            path: "/w-only/point".into(),
+        },
+    )?;
+    ensure(
+        not_allowed(move_entry(&runtime, Role::None, sources[3], dir, "point", true).await),
+        "mount root replaced",
+    )
 }
 
 fn records() -> std::result::Result<(), String> {

@@ -680,3 +680,26 @@ fn permission_authority_and_both_parents() {
         assert_eq!(fs.get_parent(SYS, id).await.unwrap(), Some(dir));
     });
 }
+
+#[test]
+fn unchecked_lookup_ignores_traverse_rights() {
+    let mut fs = fs(64 * 1024, 0);
+    let dir = fs
+        .create_entry_sync(SYS, ROOT_ID, EntryKind::Directory, "dir", MODE)
+        .unwrap();
+    let id = fs
+        .create_entry_sync(SYS, dir, EntryKind::File, "file", MODE)
+        .unwrap();
+    fs.set_all_permissions_sync(SYS, dir, RolePermissions::all(AccessPermissions::Rw))
+        .unwrap();
+    error(fs.stat_sync(SYS, dir, "file"), ErrorKind::PermissionDenied);
+    assert_eq!(
+        fs.lookup_unchecked(dir, "file").unwrap(),
+        Some((id, EntryKind::File))
+    );
+    assert_eq!(fs.lookup_unchecked(dir, "absent").unwrap(), None);
+    error(fs.lookup_unchecked(dir, "a/b"), ErrorKind::InvalidFilename);
+    error(fs.lookup_unchecked(id, "file"), ErrorKind::NotADirectory);
+    fs.delete_entry_sync(SYS, id).unwrap();
+    error(fs.lookup_unchecked(id, "file"), ErrorKind::InvalidInput);
+}

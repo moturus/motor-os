@@ -301,6 +301,20 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         Ok(None)
     }
 
+    /// `stat` without the traverse check. A replacing move needs only `w` on
+    /// the directory, so sys-io protects mount points and running executables
+    /// from replacement with this lookup; never answer a client with it.
+    pub async fn lookup_unchecked(
+        &self,
+        parent_id: EntryId,
+        filename: &str,
+    ) -> Result<Option<(EntryId, EntryKind)>> {
+        self.check_err()?;
+        validate_filename(filename)?;
+        self.lookup_child(self.internal_id(parent_id)?, filename)
+            .await
+    }
+
     pub(crate) fn block_cache(&self) -> &async_fs::block_cache::BlockCache<BD> {
         &self.block_cache
     }

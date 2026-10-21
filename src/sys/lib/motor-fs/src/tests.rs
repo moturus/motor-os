@@ -4590,3 +4590,40 @@ fn stat_non_entry_parent() {
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
     rt.block_on(stat_non_entry_parent_test()).unwrap();
 }
+
+// sys-io protects replacement targets with this lookup: the backends let a
+// caller replace an entry with only `w` on the directory.
+async fn lookup_unchecked_test() -> Result<()> {
+    let mut fs = create_fs("motor_fs_lookup_unchecked_test", 256).await?;
+    let role = Role::System;
+    let all = RolePermissions::all(AccessPermissions::Rwx);
+    let dir = fs
+        .create_entry(role, crate::ROOT_DIR_ID, EntryKind::Directory, "dir", all)
+        .await?;
+    let file = fs
+        .create_entry(role, dir, EntryKind::File, "file", all)
+        .await?;
+    fs.set_all_permissions(role, dir, RolePermissions::all(AccessPermissions::Rw))
+        .await?;
+    assert_eq!(
+        fs.stat(role, dir, "file").await.unwrap_err().kind(),
+        ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        fs.lookup_unchecked(dir, "file").await?,
+        Some((file, EntryKind::File))
+    );
+    assert_eq!(fs.lookup_unchecked(dir, "absent").await?, None);
+    assert_eq!(
+        fs.lookup_unchecked(file, "x").await.unwrap_err().kind(),
+        ErrorKind::NotADirectory
+    );
+    Ok(())
+}
+
+#[test]
+fn lookup_unchecked() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(lookup_unchecked_test()).unwrap();
+}

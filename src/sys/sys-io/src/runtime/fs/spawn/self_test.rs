@@ -8,6 +8,21 @@ use moto_ipc::io_channel;
 use moto_sys_io::api_fs;
 use std::task::Poll;
 
+/// A construction reference on an executable for tests outside this module,
+/// released on drop.
+pub(in crate::runtime::fs) struct HeldExecutable {
+    _lock: ConstructionLock,
+}
+
+pub(in crate::runtime::fs) fn hold_executable(
+    runtime: &FsRuntime,
+    entry: EntryId,
+) -> HeldExecutable {
+    HeldExecutable {
+        _lock: ConstructionLock::new(runtime, entry),
+    }
+}
+
 pub(in crate::runtime::fs) async fn quarantined_read(
     runtime: &FsRuntime,
     entry: EntryId,
