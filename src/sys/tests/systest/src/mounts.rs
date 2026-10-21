@@ -108,6 +108,13 @@ fn namespace() {
     );
     assert!(std::fs::exists(format!("{RAM_DIR}/sub")).unwrap());
     assert!(!std::fs::exists(format!("{DISK_DIR}/sub")).unwrap());
+    // Fixtures for copies at or past a source's end (checked below).
+    for (from, to) in [(RAM_DIR, DISK_DIR), (DISK_DIR, RAM_DIR)] {
+        for len in [0, 8192] {
+            std::fs::write(format!("{from}/eof-source-{len}"), vec![5; len]).unwrap();
+            std::fs::write(format!("{to}/eof-target-{len}"), [6; 8192]).unwrap();
+        }
+    }
     assert_eq!(
         std::fs::remove_dir("/none/tmp").unwrap_err().kind(),
         ErrorKind::PermissionDenied
@@ -202,6 +209,38 @@ fn namespace() {
             client.copy_file_range(dst, dst, 0, 65536).await.unwrap(),
             32768
         );
+        // A copy at or past the source's end copies nothing and leaves the
+        // destination alone: same size, no write (same modified time) and no
+        // memfs storage, for empty and block-aligned sources both ways.
+        for (from, to) in [(RAM_DIR, DISK_DIR), (DISK_DIR, RAM_DIR)] {
+            for len in [0, 8192] {
+                let (source, _) = client
+                    .stat(&format!("{from}/eof-source-{len}"))
+                    .await
+                    .unwrap();
+                let (target, _) = client
+                    .stat(&format!("{to}/eof-target-{len}"))
+                    .await
+                    .unwrap();
+                let before = client.metadata(target).await.unwrap();
+                let used = memfs_mount(&client).await.unwrap().used;
+                // Any write would stamp a later modified time.
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                for offset in [len, 1 << 20] {
+                    assert_eq!(
+                        client
+                            .copy_file_range(source, target, offset, 4096)
+                            .await
+                            .unwrap(),
+                        0
+                    );
+                }
+                let after = client.metadata(target).await.unwrap();
+                assert_eq!(after.size, before.size);
+                assert_eq!(after.modified.as_nanos(), before.modified.as_nanos());
+                assert_eq!(memfs_mount(&client).await.unwrap().used, used);
+            }
+        }
         client.flush().await.unwrap();
     });
     let mut file = std::fs::OpenOptions::new()

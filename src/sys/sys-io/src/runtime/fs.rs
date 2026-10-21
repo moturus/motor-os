@@ -1744,6 +1744,11 @@ async fn copy_file_range(
                 let fs = from.read().await?;
                 fs.read(role, from.local, src, &mut buffer[..chunk]).await?
             };
+            if read == 0 {
+                // The source ended: an empty write could still grow or
+                // allocate in the destination.
+                return Ok(0);
+            }
             let mut fs = to.write().await?;
             refuse_if_executing(runtime, to.id)?;
             fs.write(role, to.local, dst, &buffer[..read]).await
