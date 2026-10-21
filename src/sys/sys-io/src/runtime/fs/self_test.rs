@@ -7,6 +7,7 @@ pub(super) const TESTS: &[crate::self_test::SelfTest] = &[
     ("fs::mount_requests", run),
     ("fs::mount_records", records),
     ("fs::replace_without_traverse", replace_without_traverse),
+    ("fs::quarantined_unlock", quarantined_unlock),
 ];
 
 pub(super) fn memfs(cap: u64) -> Result<FS> {
@@ -562,6 +563,68 @@ async fn replacements() -> Result<()> {
     ensure(
         not_allowed(move_entry(&runtime, Role::None, sources[3], dir, "point", true).await),
         "mount root replaced",
+    )
+}
+
+/// A lock holder can still unlock on a quarantined mount; its queued waiter
+/// then gets the mount's error instead of waiting for a disconnect.
+fn quarantined_unlock() -> std::result::Result<(), String> {
+    moto_async::LocalRuntime::new()
+        .block_on(unlock_after_quarantine())
+        .map_err(|err| err.to_string())
+}
+
+async fn unlock_after_quarantine() -> Result<()> {
+    let runtime = runtime()?;
+    let root = runtime.root()?;
+    let file = root
+        .write()
+        .await?
+        .create_entry(
+            Role::System,
+            0,
+            EntryKind::File,
+            "locked",
+            RolePermissions::all(AccessPermissions::Rwx),
+        )
+        .await?;
+    let wire = runtime.entry_ids.encode(file);
+    let listener = io_channel::listen("sys-io-quarantined-unlock-test");
+    let (_client, mut responses) =
+        io_channel::connect("sys-io-quarantined-unlock-test").map_err(map_native_error)?;
+    let (server, _requests) = listener.await.map_err(map_native_error)?;
+    let server = runtime
+        .channel_budget
+        .admit_fs(server)
+        .map_err(|_| std::io::Error::other("self-test channel budget"))?;
+    let lock = |id, open_id, operation| {
+        let mut msg = api_fs::file_lock_msg_encode(wire, open_id, operation);
+        msg.id = id;
+        on_msg(msg, server.clone(), runtime.clone(), Role::None, true, true)
+    };
+
+    lock(1, 1, moto_rt::fs::LOCK_EXCLUSIVE).await;
+    let locked = responses.recv().await.map_err(map_native_error)?;
+    ensure(locked.id == 1 && locked.status() == Ok(()), "lock")?;
+    // Queued behind the holder: no response until the lock is released.
+    lock(2, 2, moto_rt::fs::LOCK_EXCLUSIVE).await;
+    ensure(root.check_local(1 << 112).is_err(), "quarantine")?;
+    lock(3, 1, moto_rt::fs::UNLOCK).await;
+    let unlocked = responses.recv().await.map_err(map_native_error)?;
+    ensure(
+        unlocked.id == 3 && unlocked.status() == Ok(()),
+        "unlock on a quarantined mount",
+    )?;
+    let waiter = responses.recv().await.map_err(map_native_error)?;
+    ensure(
+        waiter.id == 2 && waiter.status() == Err(moto_rt::Error::InvalidData),
+        "queued waiter on a quarantined mount",
+    )?;
+    lock(4, 3, moto_rt::fs::TRY_LOCK_EXCLUSIVE).await;
+    let refused = responses.recv().await.map_err(map_native_error)?;
+    ensure(
+        refused.id == 4 && refused.status() == Err(moto_rt::Error::InvalidData),
+        "new lock on a quarantined mount",
     )
 }
 

@@ -846,10 +846,12 @@ async fn on_cmd_file_lock(
     let request_id = msg.id;
     let (entry_id, open_id, operation) =
         api_fs::file_lock_msg_decode(msg).map_err(map_native_error)?;
-    let access = runtime.decode(entry_id)?;
-    let entry_id = access.id;
     let connection_id = sender.remote_handle().as_u64();
     if operation == moto_rt::fs::UNLOCK {
+        // Releasing touches only lock state, so it skips the quarantine gate:
+        // a holder can still unlock, and queued waiters get the mount's error.
+        let entry_id =
+            mounts::canonical_unchecked(&runtime.mounts, runtime.entry_ids.decode(entry_id));
         let grants = runtime
             .locks
             .borrow_mut()
@@ -865,6 +867,8 @@ async fn on_cmd_file_lock(
         send_lock_grants(grants, &runtime).await;
         return responded.map_err(map_native_error);
     }
+    let access = runtime.decode(entry_id)?;
+    let entry_id = access.id;
     let (mode, blocking) = match operation {
         moto_rt::fs::LOCK_SHARED => (Mode::Shared, true),
         moto_rt::fs::LOCK_EXCLUSIVE => (Mode::Exclusive, true),

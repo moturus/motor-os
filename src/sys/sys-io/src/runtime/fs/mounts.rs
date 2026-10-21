@@ -258,6 +258,16 @@ impl Resolved {
     }
 }
 
+/// An internal ID's canonical identity, ignoring quarantine. Only lock release
+/// uses it: releasing a lock never touches a filesystem.
+pub(super) fn canonical_unchecked(table: &Rc<RefCell<MountTable>>, internal: EntryId) -> EntryId {
+    let (mount, local) = split(internal);
+    table
+        .borrow()
+        .find_by_mount_point(mount, local)
+        .map_or(internal, |alias| join(alias.id, ROOT_ID))
+}
+
 pub(super) async fn stat_path(
     table: &Rc<RefCell<MountTable>>,
     role: Role,
