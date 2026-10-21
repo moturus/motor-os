@@ -336,8 +336,7 @@ pub(super) async fn info(table: &Rc<RefCell<MountTable>>, cursor: u32) -> Result
             match &*fs {
                 FS::MotorFs(fs) => {
                     let blocks = fs.num_blocks();
-                    info.used =
-                        Some((blocks - fs.empty_blocks().await?) * async_fs::BLOCK_SIZE as u64);
+                    info.used = disk_usage(blocks, fs.empty_blocks().await?);
                     info.cap = Some(blocks * async_fs::BLOCK_SIZE as u64);
                 }
                 FS::MemFs(fs) => {
@@ -366,6 +365,14 @@ pub(super) async fn info(table: &Rc<RefCell<MountTable>>, cursor: u32) -> Result
     Ok(info)
 }
 
+/// Disk usage from the device's block count and the superblock's free count.
+/// A corrupt free count yields unknown usage instead of an underflow.
+fn disk_usage(blocks: u64, free: u64) -> Option<u64> {
+    blocks
+        .checked_sub(free)
+        .and_then(|used| used.checked_mul(async_fs::BLOCK_SIZE as u64))
+}
+
 #[cfg(debug_assertions)]
 pub(super) mod self_test {
     use super::*;
@@ -381,6 +388,9 @@ pub(super) mod self_test {
     }
 
     async fn check() -> std::result::Result<(), String> {
+        st_assert_eq!(disk_usage(10, 4), Some(6 * 4096));
+        st_assert_eq!(disk_usage(10, 11), None);
+        st_assert_eq!(disk_usage(u64::MAX, 0), None);
         let checked = async {
             for mount in [0, 1, 65535, 65536, MAX_MOUNT_ID] {
                 for local in [0, 1, 1 << 64, LOCAL_MASK] {
