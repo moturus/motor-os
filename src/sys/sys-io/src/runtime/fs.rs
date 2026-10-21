@@ -1237,7 +1237,6 @@ async fn on_cmd_read(
     let started = stats::now_ticks();
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
     let file = runtime.decode(file_id)?;
-    let file_id = file.id;
 
     // Requests spanning more than one io_page get a multi-page response;
     // see `api_fs::READ_MAX_PAGES`.
@@ -1276,7 +1275,7 @@ async fn on_cmd_read(
             .set(runtime.fs_stats.read_ticks.get() + elapsed);
     }
 
-    maybe_readahead(runtime, file_id, offset, read);
+    maybe_readahead(runtime, file, offset, read);
     Ok(())
 }
 
@@ -1296,7 +1295,6 @@ async fn on_cmd_read_multi(
     len: u16,
 ) -> Result<()> {
     let started = stats::now_ticks();
-    let file_id = file.id;
 
     // `len`/`offset` come from the (untrusted) client: reject anything
     // spanning more chunks than a response can carry.
@@ -1371,7 +1369,7 @@ async fn on_cmd_read_multi(
     // the per-message trigger cheap).
     let end = offset + total as u64;
     if total == len as u32 && end.is_multiple_of(async_fs::BLOCK_SIZE as u64) {
-        spawn_readahead(runtime, file_id, end / async_fs::BLOCK_SIZE as u64);
+        spawn_readahead(runtime, file, end / async_fs::BLOCK_SIZE as u64);
     }
     Ok(())
 }
@@ -1382,7 +1380,7 @@ async fn on_cmd_read_multi(
 /// the current 16-block window into the block cache in the background.
 /// Duplicate device reads with foreground requests are impossible: the block
 /// cache deduplicates concurrent reads of the same block.
-fn maybe_readahead(runtime: FsRuntime, file_id: EntryId, offset: u64, read: usize) {
+fn maybe_readahead(runtime: FsRuntime, file: mounts::Resolved, offset: u64, read: usize) {
     const TRIGGER_WINDOW: u64 = 16; // Matches the moto-io read batch size.
 
     if read != async_fs::BLOCK_SIZE || !offset.is_multiple_of(async_fs::BLOCK_SIZE as u64) {
@@ -1393,13 +1391,10 @@ fn maybe_readahead(runtime: FsRuntime, file_id: EntryId, offset: u64, read: usiz
         return;
     }
 
-    spawn_readahead(runtime, file_id, block_key + TRIGGER_WINDOW);
+    spawn_readahead(runtime, file, block_key + TRIGGER_WINDOW);
 }
 
-fn spawn_readahead(runtime: FsRuntime, file_id: EntryId, first: u64) {
-    let Ok(file) = runtime.resolve(file_id) else {
-        return;
-    };
+fn spawn_readahead(runtime: FsRuntime, file: mounts::Resolved, first: u64) {
     if file.kind != api_fs::MountKind::MotorFs {
         return;
     }
