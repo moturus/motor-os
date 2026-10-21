@@ -229,7 +229,7 @@ async fn mount_one(
         },
     )?;
     caches.add(cache);
-    log::info!("mounted memfs {id} at {path}, cap {cap} bytes, shadowed directory empty: {empty}");
+    log::debug!("mounted memfs {id} at {path}, cap {cap} bytes, shadowed directory empty: {empty}");
     Ok(())
 }
 
