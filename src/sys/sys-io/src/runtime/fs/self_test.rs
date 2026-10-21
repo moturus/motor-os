@@ -68,7 +68,6 @@ async fn requests() -> Result<()> {
     }
     let id = runtime.mounts.borrow_mut().insert(
         child,
-        MountKind::MemFs,
         mounts::MountPoint {
             mount: 0,
             shadowed,
@@ -352,7 +351,6 @@ async fn requests() -> Result<()> {
         let path = format!("/m{index}/'雪\n/{}/{}", "x/".repeat(390), "tail");
         runtime.mounts.borrow_mut().insert(
             memfs(8192)?,
-            MountKind::MemFs,
             mounts::MountPoint {
                 mount: 0,
                 shadowed: 100 + index,
@@ -553,7 +551,6 @@ async fn replacements() -> Result<()> {
     ensure(not_allowed(replaced), "running executable replaced")?;
     runtime.mounts.borrow_mut().insert(
         memfs(1 << 20)?,
-        MountKind::MemFs,
         mounts::MountPoint {
             mount: 0,
             shadowed: targets[2],

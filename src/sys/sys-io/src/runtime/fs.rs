@@ -95,6 +95,13 @@ pub(crate) enum FS {
 }
 
 impl FS {
+    fn kind(&self) -> api_fs::MountKind {
+        match self {
+            FS::MotorFs(_) => api_fs::MountKind::MotorFs,
+            FS::MemFs(_) => api_fs::MountKind::MemFs,
+        }
+    }
+
     /// Best-effort readahead; see [`motor_fs::MotorFs::prefetch`].
     async fn prefetch(&self, file_id: EntryId, first_key: u64, count: u64) {
         match self {

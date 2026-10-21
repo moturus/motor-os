@@ -53,15 +53,11 @@ pub(crate) struct MountTable {
 
 impl MountTable {
     pub fn new(root: FS) -> Self {
-        let kind = match &root {
-            FS::MotorFs(_) => MountKind::MotorFs,
-            FS::MemFs(_) => MountKind::MemFs,
-        };
         Self {
             mounts: vec![Mount {
                 id: 0,
+                kind: root.kind(),
                 fs: Rc::new(LocalRwLock::new(root)),
-                kind,
                 parent: None,
                 corrupted: false,
             }],
@@ -92,12 +88,7 @@ impl MountTable {
         self.mounts.iter()
     }
 
-    pub(super) fn insert(
-        &mut self,
-        fs: FS,
-        kind: MountKind,
-        parent: MountPoint,
-    ) -> Result<MountId> {
+    pub(super) fn insert(&mut self, fs: FS, parent: MountPoint) -> Result<MountId> {
         if self.next_id > MAX_MOUNT_ID {
             return Err(ErrorKind::StorageFull.into());
         }
@@ -111,8 +102,8 @@ impl MountTable {
         let id = self.next_id;
         self.mounts.push(Mount {
             id,
+            kind: fs.kind(),
             fs: Rc::new(LocalRwLock::new(fs)),
-            kind,
             parent: Some(parent),
             corrupted: false,
         });
@@ -451,7 +442,6 @@ pub(super) mod self_test {
             root.check_local(shadowed)?;
             let id = runtime.mounts.borrow_mut().insert(
                 super::super::self_test::memfs(1 << 20)?,
-                MountKind::MemFs,
                 MountPoint {
                     mount: 0,
                     shadowed,
@@ -538,7 +528,6 @@ pub(super) mod self_test {
             .borrow_mut()
             .insert(
                 super::super::self_test::memfs(1 << 20).map_err(|err| err.to_string())?,
-                MountKind::MemFs,
                 MountPoint {
                     mount: 0,
                     shadowed: shadowed + 1,
@@ -600,7 +589,6 @@ pub(super) mod self_test {
                 .borrow_mut()
                 .insert(
                     super::super::self_test::memfs(1 << 20).map_err(|err| err.to_string())?,
-                    MountKind::MemFs,
                     MountPoint {
                         mount: 0,
                         shadowed: 1,

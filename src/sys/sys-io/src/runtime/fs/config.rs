@@ -224,7 +224,6 @@ async fn mount_one(
     let path = config.path;
     let id = table.borrow_mut().insert(
         FS::MemFs(memfs),
-        moto_sys_io::api_fs::MountKind::MemFs,
         mounts::MountPoint {
             mount: point.mount,
             shadowed: point.local,
