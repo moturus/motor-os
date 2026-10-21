@@ -125,10 +125,11 @@ fn parse(text: &str) -> Result<Vec<ValidatedMount>> {
         {
             return Err(invalid(format!("mount hides an earlier mount: {path}")));
         }
+        let named = |err: std::io::Error| invalid(format!("mount {path}: {err}"));
         mounts.push(ValidatedMount {
+            max_size: max_size.map(size).transpose().map_err(named)?,
+            mode: root_mode.as_deref().map(mode).transpose().map_err(named)?,
             path,
-            max_size: max_size.map(size).transpose()?,
-            mode: root_mode.as_deref().map(mode).transpose()?,
         });
     }
     Ok(mounts)
@@ -268,6 +269,13 @@ pub(super) mod self_test {
             "[[mount]]\ntype='memfs'\npath='/a'\n[[mount]]\ntype='memfs'\npath='/a'",
         ] {
             st_assert!(parse(config).is_err());
+        }
+        // Value errors name the rejected entry.
+        for value in ["max_size='12X'", "mode='rwx'"] {
+            st_assert!(
+                parse(&format!("[[mount]]\ntype='memfs'\npath='/named'\n{value}"))
+                    .is_err_and(|err| err.to_string().contains("/named"))
+            );
         }
         st_assert!(
             parse(&format!(
