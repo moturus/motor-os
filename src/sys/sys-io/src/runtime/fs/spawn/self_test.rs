@@ -29,7 +29,7 @@ pub(in crate::runtime::fs) async fn quarantined_read(
 ) -> Result<(), String> {
     let mut page = [0; 4096];
     st_assert_eq!(
-        super::read_exact_at(runtime, Role::System, entry, 0, &mut page)
+        super::read_range(runtime, Role::System, entry, 0, &mut page)
             .await
             .unwrap_err()
             .kind(),

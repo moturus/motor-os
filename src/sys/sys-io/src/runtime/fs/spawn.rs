@@ -106,14 +106,12 @@ impl Drop for ConstructionLock {
 
 /// Reads exactly `dst.len()` bytes at `offset`, block by block.
 async fn read_exact_at(
-    runtime: &FsRuntime,
     role: Role,
-    entry: EntryId,
+    entry: &super::mounts::Resolved,
     mut offset: u64,
     mut dst: &mut [u8],
 ) -> Result<()> {
     let block = async_fs::BLOCK_SIZE as u64;
-    let entry = runtime.resolve(entry)?;
     let fs = entry.read().await?;
     while !dst.is_empty() {
         entry.healthy()?;
@@ -140,23 +138,22 @@ async fn read_range(
 ) -> Result<()> {
     const BATCH: usize = 64 * 4096;
     let block = async_fs::BLOCK_SIZE as u64;
+    let entry = runtime.resolve(entry)?;
     let mut done = 0;
     while done < dst.len() {
         let len = (dst.len() - done).min(BATCH);
         let first_key = (offset + done as u64) / block;
         let last_key = (offset + (done + len) as u64 - 1) / block;
-        let resolved = runtime.resolve(entry)?;
-        if resolved.kind == api_fs::MountKind::MotorFs {
-            resolved
+        if entry.kind == api_fs::MountKind::MotorFs {
+            entry
                 .read()
                 .await?
-                .prefetch(resolved.local, first_key, last_key - first_key + 1)
+                .prefetch(entry.local, first_key, last_key - first_key + 1)
                 .await;
         }
         read_exact_at(
-            runtime,
             role,
-            entry,
+            &entry,
             offset + done as u64,
             &mut dst[done..done + len],
         )
