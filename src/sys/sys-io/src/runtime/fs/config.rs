@@ -195,19 +195,17 @@ async fn mount_one(
     let point = mounts::Resolved::resolve(table, id)?;
     let (mode, empty) = {
         let fs = point.read().await?;
+        let metadata = fs.metadata(role, point.local).await;
+        point.healthy()?;
+        // Information only. A directory's size is its entry count.
+        let empty = match &metadata {
+            Ok(metadata) if metadata.size == 0 => "yes",
+            Ok(_) => "no",
+            Err(_) => "unknown",
+        };
         let mode = match config.mode {
             Some(mode) => mode,
-            None => fs.metadata(role, point.local).await?.permissions()?,
-        };
-        point.healthy()?;
-        // Information only: listing needs `x` on the directory; mounting does not.
-        let empty = match fs.get_first_entry(role, point.local).await {
-            Ok(None) => "yes",
-            Ok(Some(first)) => {
-                point.check_local(first)?;
-                "no"
-            }
-            Err(_) => "unknown",
+            None => metadata?.permissions()?,
         };
         (mode, empty)
     };
