@@ -99,7 +99,16 @@ pub(super) mod self_test {
             st_assert!(!needs_reserve(command, MountKind::MotorFs));
             st_assert_eq!(
                 needs_reserve(command, MountKind::MemFs),
-                [2, 3, 4, 13, 14, 17, 19].contains(&command)
+                [
+                    api_fs::CMD_CREATE_FILE,
+                    api_fs::CMD_CREATE_DIR,
+                    api_fs::CMD_WRITE,
+                    api_fs::CMD_MOVE_ENTRY,
+                    api_fs::CMD_COPY_FILE_RANGE,
+                    api_fs::CMD_MOVE_NOREPLACE,
+                    api_fs::CMD_CREATE_WITH_PERMISSIONS,
+                ]
+                .contains(&command)
             );
         }
         for (ram, cap, cache, reserve) in [
