@@ -299,8 +299,12 @@ pub(super) async fn load(runtime: &super::super::fs::FsRuntime) -> std::io::Resu
 
     let buf = runtime
         .read_root_file(CFG_PATH)
-        .await?
-        .ok_or_else(|| std::io::Error::from(ErrorKind::NotFound))?;
+        .await
+        .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
+        .ok_or_else(|| {
+            log::error!("Loading net config: {CFG_PATH} not found.");
+            std::io::Error::from(ErrorKind::NotFound)
+        })?;
 
     let Ok(config_str) = str::from_utf8(&buf) else {
         log::error!("{}:{} error reading {}.", file!(), line!(), CFG_PATH);
