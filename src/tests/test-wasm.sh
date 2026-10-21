@@ -110,11 +110,13 @@ for vm in "${vms[@]}"; do
   installed=(javy/devtools/bin/javy javy/devtools/bin/wasmi wasmtime/devtools/bin/wasmtime-rt)
   {
     for suite in "${suites[@]}"; do printf 'put "%s" /user/tmp/%s\n' "$(binary "$suite")" "$suite"; done
-    # The tools run as role None, which cannot traverse /user/tmp.
+    # Keep fixtures and retained outputs on disk for the low-RAM qualification.
+    # Role None can traverse this directory; its own TMPDIR remains on memfs.
+    printf 'mkdir /none/wasm-tests\n'
     for addon in javy wasmtime; do
-      printf 'mkdir /none/tmp/%s-tests\n' "$addon"
+      printf 'mkdir /none/wasm-tests/%s-tests\n' "$addon"
       for file in "$test_inputs/$addon"/*; do
-        printf 'put "%s" /none/tmp/%s-tests/%s\n' "$file" "$addon" "${file##*/}"
+        printf 'put "%s" /none/wasm-tests/%s-tests/%s\n' "$file" "$addon" "${file##*/}"
       done
     done
     for tool in "${installed[@]}"; do

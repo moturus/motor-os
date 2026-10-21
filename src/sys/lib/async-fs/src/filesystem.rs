@@ -219,6 +219,12 @@ pub fn perms_monotonic(perms: RolePermissions) -> bool {
 pub type EntryId = u128;
 pub const ROOT_ID: EntryId = 0;
 
+/// Filesystem-local IDs leave bits 56..63 and 112..127 clear. sys-io packs a
+/// 24-bit mount ID there (low 16 bits in the generation word, high 8 in the
+/// block word), then obfuscates the combined ID at the client boundary.
+pub const MAX_FS_BLOCKS: u64 = 1 << 56;
+pub const MAX_FS_GENERATIONS: u64 = 1 << 48;
+
 #[derive(Clone, Copy, Debug, Pod)]
 #[repr(C, align(4))]
 pub struct Timestamp {

@@ -8,7 +8,6 @@ use std::{
     io::ErrorKind,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
-    rc::Rc,
 };
 
 use super::backlog::{DEFAULT_MAX_BACKLOG_GLOBAL, DEFAULT_MAX_BACKLOG_PER_LISTENER};
@@ -295,92 +294,17 @@ fn chunk_end(read: usize, len: usize) -> usize {
 }
 
 /// Load net config. Note that we cannot use std::fs::*, as it will block forever.
-pub(super) async fn load(
-    fs: &Rc<moto_async::LocalRwLock<super::super::fs::FS>>,
-) -> std::io::Result<NetConfig> {
+pub(super) async fn load(runtime: &super::super::fs::RootFs) -> std::io::Result<NetConfig> {
     const CFG_PATH: &str = "/system/cfg/sys-net.toml";
 
-    let fs_mut = fs.read().await;
-    let Some((system_dir, _)) = fs_mut
-        .stat(async_fs::Role::System, async_fs::ROOT_ID, "system")
+    let buf = runtime
+        .read_root_file(CFG_PATH)
         .await
         .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
-    else {
-        log::error!("Loading net config: {CFG_PATH} not found.");
-        return Err(std::io::Error::from(ErrorKind::InvalidInput));
-    };
-    let Some((cfg_dir, _)) = fs_mut
-        .stat(async_fs::Role::System, system_dir, "cfg")
-        .await
-        .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
-    else {
-        log::error!("Loading net config: {CFG_PATH} not found.");
-        return Err(std::io::Error::from(ErrorKind::InvalidInput));
-    };
-    let Some((cfg_file, _)) = fs_mut
-        .stat(async_fs::Role::System, cfg_dir, "sys-net.toml")
-        .await
-        .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
-    else {
-        log::error!("Loading net config: {CFG_PATH} not found.");
-        return Err(std::io::Error::from(ErrorKind::InvalidInput));
-    };
-
-    // Read the whole file, and know that it is whole.
-    //
-    // This was one `read` into a 4096-byte array, with the returned length taken
-    // as the file. Both halves of that were wrong, and both failed *silently*
-    // into a parse of a prefix -- which is the bad case, because a prefix of a
-    // TOML file is usually still valid TOML. A file cut after a complete
-    // `[devices.netN]` table parses fine and simply has fewer devices than the
-    // operator wrote. Nothing would say so.
-    //
-    // The array was one `async_fs::BLOCK_SIZE`, and a config is mostly
-    // explanatory comments, which grow: the shipped one is already over half of
-    // it.
-    //
-    // The loop below reads a block at a time because `FileSystem::read`'s
-    // "cross-block reads may not be supported" is stronger than it sounds --
-    // `MotorFs::read` *fails* such a read rather than returning a short count,
-    // with `cross-block reads are not supported (yet?)`. So a caller cannot
-    // discover the boundary by asking; it has to align its requests to it.
-    let size = fs_mut
-        .metadata(async_fs::Role::System, cfg_file)
-        .await
-        .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
-        .size;
-
-    // A bound is still wanted, because the size comes from the filesystem and
-    // this allocates it. 64 KiB is ~28 times the shipped config and far below
-    // anything worth worrying about allocating.
-    const MAX_CFG_SIZE: u64 = 64 * 1024;
-    if size > MAX_CFG_SIZE {
-        log::error!("{CFG_PATH} is {size} bytes; the limit is {MAX_CFG_SIZE}.");
-        return Err(std::io::Error::from(ErrorKind::InvalidInput));
-    }
-
-    let mut buf = vec![0u8; size as usize];
-    let mut read = 0usize;
-    while read < buf.len() {
-        let chunk = chunk_end(read, buf.len());
-        let n = fs_mut
-            .read(
-                async_fs::Role::System,
-                cfg_file,
-                read as u64,
-                &mut buf[read..chunk],
-            )
-            .await
-            .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?;
-        if n == 0 {
-            // Short of the size the filesystem just reported. Refusing beats
-            // parsing what did arrive, which is the silent-prefix failure this
-            // loop exists to remove.
-            log::error!("{CFG_PATH}: read {read} of {size} bytes before the file ended.");
-            return Err(std::io::Error::from(ErrorKind::InvalidInput));
-        }
-        read += n;
-    }
+        .ok_or_else(|| {
+            log::error!("Loading net config: {CFG_PATH} not found.");
+            std::io::Error::from(ErrorKind::NotFound)
+        })?;
 
     let Ok(config_str) = str::from_utf8(&buf) else {
         log::error!("{}:{} error reading {}.", file!(), line!(), CFG_PATH);
@@ -413,12 +337,13 @@ fn resolv_conf_contents(servers: &[IpAddr]) -> String {
 }
 
 pub(super) async fn write_resolv_conf(
-    fs: &Rc<moto_async::LocalRwLock<super::super::fs::FS>>,
+    runtime: &super::super::fs::RootFs,
     servers: &[IpAddr],
 ) -> std::io::Result<()> {
     const TEMP_NAME: &str = ".resolv.conf.dhcp";
     let contents = resolv_conf_contents(servers);
-    let mut fs = fs.write().await;
+    let root = runtime.root()?;
+    let mut fs = root.write().await?;
 
     let Some((system, _)) = fs
         .stat(async_fs::Role::System, async_fs::ROOT_ID, "system")
@@ -426,15 +351,19 @@ pub(super) async fn write_resolv_conf(
     else {
         return Ok(());
     };
+    let system = root.check_local(system)?;
     let Some((cfg, _)) = fs.stat(async_fs::Role::System, system, "cfg").await? else {
         return Ok(());
     };
+    let cfg = root.check_local(cfg)?;
     let Some((libc, _)) = fs.stat(async_fs::Role::System, cfg, "libc").await? else {
         // The base image has no libc overlay and no resolver file to update.
         return Ok(());
     };
+    let libc = root.check_local(libc)?;
 
     if let Some((stale, _)) = fs.stat(async_fs::Role::System, libc, TEMP_NAME).await? {
+        let stale = root.check_local(stale)?;
         fs.delete_entry(async_fs::Role::System, stale).await?;
     }
     let temp = fs
@@ -450,6 +379,7 @@ pub(super) async fn write_resolv_conf(
             ),
         )
         .await?;
+    let temp = root.check_local(temp)?;
 
     let mut written = 0usize;
     while written < contents.len() {

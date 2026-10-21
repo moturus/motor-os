@@ -2,6 +2,7 @@
 members = [
   # system libraries (legacy, to be refactored)
   "lib/async-fs",
+  "lib/memfs",
   "lib/moto-async",
   "lib/moto-dns",
   "lib/moto-io-internal",

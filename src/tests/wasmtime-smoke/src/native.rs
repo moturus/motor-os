@@ -9,7 +9,7 @@ mod filesystem;
 
 const RUNTIME: &str = "/devtools/bin/wasmtime-rt";
 /// Precompiled fixtures that test-wasm.sh uploads; they are not part of the images.
-const FIXTURES: &str = "/none/tmp/wasmtime-tests";
+const FIXTURES: &str = "/none/wasm-tests/wasmtime-tests";
 /// Upstream p2 socket programs carrying Motor's accepted socket semantics.
 const SOCKET_PROGRAMS: [&str; 13] = [
     "p2_tcp_bind",
@@ -144,9 +144,14 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         0,
     )?;
     suite.refusal(
-        "memories-override",
+        "memories-limited",
         &invocation("0", "-W max-memories=4", "limits-memories"),
         "memory count too high",
+    )?;
+    suite.command(
+        "memories-override",
+        &invocation("0", "-W max-memories=5", "limits-memories"),
+        0,
     )?;
     suite.refusal(
         "memory-too-large",

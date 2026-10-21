@@ -31,7 +31,7 @@ use async_fs::Timestamp;
 use bytemuck::Pod;
 use std::io::Result;
 
-pub const MAX_FILENAME_LEN: usize = 255;
+pub use async_fs::{MAX_FILENAME_LEN, validate_filename};
 pub const RESERVED_BLOCKS: usize = MAX_BLOCKS_IN_TXN_LOG + 2;
 
 pub(crate) const MAX_BLOCKS_IN_TXN: usize = 16;
@@ -209,41 +209,39 @@ impl Superblock {
         self.free_blocks
     }
 
+    /// The free-block accounting error while the freelist is empty: positive
+    /// for a deficit, negative for a surplus. The arithmetic is wide enough
+    /// that a corrupt superblock yields an error instead of an overflow.
+    fn accounting_error(&self) -> Option<i128> {
+        if !self.freelist_head.is_null() {
+            return None;
+        }
+        let accounted = self.empty_area_start as i128
+            + self.free_blocks as i128
+            + MAX_BLOCKS_IN_TXN_LOG as i128;
+        let error = self.num_blocks as i128 - accounted;
+        (error != 0).then_some(error)
+    }
+
     #[inline]
     pub(crate) fn check_accounting(&self) -> Result<()> {
-        if !self.freelist_head.is_null() {
-            Ok(())
-        } else {
-            if self.num_blocks
-                == self.empty_area_start + self.free_blocks + MAX_BLOCKS_IN_TXN_LOG as u64
-            {
-                Ok(())
-            } else {
-                let mut error_count: i64 = (self.num_blocks as i64)
-                    - ((self.empty_area_start + self.free_blocks + MAX_BLOCKS_IN_TXN_LOG as u64)
-                        as i64);
-                let verb = if error_count > 0 {
-                    "deficit"
-                } else {
-                    error_count *= -1;
-                    "surplus"
-                };
-                log::error!(
-                    "Free block accounting error: num_blocks: {} empty_area_start: {} free_blocks: {}\n\tFree block {}: {}",
-                    self.num_blocks,
-                    self.empty_area_start,
-                    self.free_blocks,
-                    verb,
-                    error_count
-                );
-                #[cfg(test)]
-                {
-                    panic!();
-                }
-                #[cfg(not(test))]
-                Err(ErrorKind::InvalidData.into())
-            }
+        let Some(error) = self.accounting_error() else {
+            return Ok(());
+        };
+        log::error!(
+            "Free block accounting error: num_blocks: {} empty_area_start: {} free_blocks: {}\n\tFree block {}: {}",
+            self.num_blocks,
+            self.empty_area_start,
+            self.free_blocks,
+            if error > 0 { "deficit" } else { "surplus" },
+            error.unsigned_abs()
+        );
+        #[cfg(test)]
+        {
+            panic!();
         }
+        #[cfg(not(test))]
+        Err(ErrorKind::InvalidData.into())
     }
 
     /// Allocate a directory entry with a fresh generation, including for files.
@@ -1166,18 +1164,6 @@ impl DirEntryBlock {
     }
 }
 
-pub fn validate_filename(filename: &str) -> Result<()> {
-    if filename.len() > MAX_FILENAME_LEN || filename.contains('/') || filename.starts_with("..") {
-        return Err(ErrorKind::InvalidFilename.into());
-    }
-
-    if filename.trim().len() != filename.len() {
-        return Err(ErrorKind::InvalidFilename.into());
-    }
-
-    Ok(())
-}
-
 // Note: this macro returns a refcell's ref, which clippy flags when held across .await.
 // This may or may not be an issue. In any case, the worse that would happen is a panic,
 // not a silent data corruption.
@@ -1188,3 +1174,29 @@ macro_rules! dir_entry {
 }
 
 pub(crate) use dir_entry;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytemuck::Zeroable;
+
+    #[test]
+    fn corrupt_accounting_does_not_overflow() {
+        let mut sb = Superblock::zeroed();
+        sb.num_blocks = 100;
+        sb.empty_area_start = 2;
+        sb.free_blocks = 100 - 2 - MAX_BLOCKS_IN_TXN_LOG as u64;
+        assert_eq!(sb.accounting_error(), None);
+        sb.free_blocks = u64::MAX;
+        assert_eq!(
+            sb.accounting_error(),
+            Some(100 - 2 - u64::MAX as i128 - MAX_BLOCKS_IN_TXN_LOG as i128)
+        );
+        sb.empty_area_start = u64::MAX;
+        sb.num_blocks = u64::MAX;
+        assert!(sb.accounting_error().is_some_and(|error| error < 0));
+        // Only an empty freelist is checked.
+        sb.freelist_head = BlockNo(2);
+        assert_eq!(sb.accounting_error(), None);
+    }
+}

@@ -149,7 +149,7 @@ struct NetRuntime {
     orphan_lingers: Rc<Cell<usize>>,
 
     // Filesystem is used to write log/stats.
-    fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
+    fs: super::fs::RootFs,
 
     // A fixed temporary filename is safe only while resolver publications are
     // serialized; the newest waiter recomputes the aggregate after acquiring.
@@ -420,8 +420,9 @@ impl NetRuntime {
         // pressure refuses the same way, now with the explicit error rather
         // than a silent drop.
         let at_floor = self.stats.net_listeners_armed.get() == 0;
-        if at_floor || pressure::active() {
-            if pressure::active() {
+        let pressured = self.pressure.active();
+        if at_floor || pressured {
+            if pressured {
                 self.pressure.client_refused();
             }
             self.stats
@@ -910,10 +911,10 @@ impl NetRuntime {
 pub(super) async fn init(
     mut virtio_devices: Vec<Rc<virtio_async::virtio_net::NetDevice>>,
     vsock_device: Option<virtio_async::VirtioDevice>,
-    fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
+    fs: super::fs::FsRuntime,
     channel_budget: Rc<channel_budget::ChannelBudget>,
 ) -> Result<Vec<Rc<virtio_async::virtio_net::NetDevice>>> {
-    let config = config::load(&fs).await?;
+    let config = config::load(&fs.root_fs()).await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");
 
     // Created before the devices: their rx/tx tasks bump the device counters.
@@ -1009,9 +1010,12 @@ pub(super) async fn init(
             config::ram_scaled(completed::DEFAULT_MAX_GLOBAL),
             config::ram_scaled(completed::DEFAULT_MAX_PER_LISTENER),
         )),
-        pressure: Rc::new(pressure::Pressure::new(net_stats.clone())),
+        pressure: Rc::new(pressure::Pressure::new(
+            net_stats.clone(),
+            fs.free_caches.clone(),
+        )),
         orphan_lingers: Rc::new(Cell::new(0)),
-        fs: fs.clone(),
+        fs: fs.root_fs(),
         dns_write_lock: Rc::new(moto_async::LocalMutex::new(())),
         channel_budget,
     };
@@ -1029,7 +1033,7 @@ pub(super) async fn init(
                 .filter(|server| seen.insert(*server))
                 .collect::<Vec<_>>()
         };
-        config::write_resolv_conf(&fs, &initial_dns_servers).await?;
+        config::write_resolv_conf(&runtime.fs, &initial_dns_servers).await?;
         stats::spawn_stats_responder(runtime.clone());
         pressure::spawn_recovery(runtime.clone());
     }

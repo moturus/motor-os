@@ -25,7 +25,9 @@ The smaller `wasm.img` also includes the three tools and their data
 directories. The test inputs (the TypeScript workload, the Linux identity
 digests, two custom Javy plugins and the precompiled Wasmtime fixtures) are
 not installed;
-`src/tests/test-wasm.sh` uploads them to `/none/tmp` on every VM boot during tests.
+`src/tests/test-wasm.sh` uploads them to `/none/wasm-tests` on every VM boot
+during tests. The low-RAM qualification keeps these fixtures and retained
+outputs on disk; the tools' None-role `TMPDIR` still uses memfs at `/none/tmp`.
 
 `wasmtime-rt` runs as role None (`MOTOR_OS_CAPS=0`, `0x100`, `0x200` or
 `0x300`) and needs `--allow-precompiled`.

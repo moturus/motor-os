@@ -10,7 +10,7 @@ mod runner;
 
 const PLUGIN: &str = "/devtools/javy/plugins/default.wasm";
 /// Test inputs that test-wasm.sh uploads; they are not part of the images.
-const TEST_INPUTS: &str = "/none/tmp/javy-tests";
+const TEST_INPUTS: &str = "/none/wasm-tests/javy-tests";
 
 /// Javy compilation and Wasmi execution through the installed tools.
 trait JavyTools {

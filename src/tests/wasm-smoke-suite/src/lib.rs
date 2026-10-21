@@ -30,8 +30,9 @@ impl Suite {
     /// Prints the installed provenance in `sources` and creates a scratch
     /// directory writable by role None.
     pub fn new(name: &'static str, sources: &str) -> Result<Self> {
-        // Role None must be able to traverse the scratch directory's ancestors.
-        let root = PathBuf::from(format!("/none/tmp/{name}-{}", std::process::id()));
+        // Retained outputs stay on disk so the small-VM memory measurements
+        // exclude fixture storage. Child TMPDIR still exercises /none/tmp.
+        let root = PathBuf::from(format!("/none/wasm-tests/{name}-{}", std::process::id()));
         create_writable_dir(&root)?;
         println!("{name}: installed-tool checks; scratch={}", root.display());
         println!("{}", fs::read_to_string(sources)?);
