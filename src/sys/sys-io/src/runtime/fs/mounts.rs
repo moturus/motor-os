@@ -82,6 +82,12 @@ impl MountTable {
         })
     }
 
+    /// A shadowed directory's canonical identity is its mount's root.
+    fn canonical(&self, mount: MountId, local: EntryId) -> (MountId, EntryId) {
+        self.find_by_mount_point(mount, local)
+            .map_or((mount, local), |alias| (alias.id, ROOT_ID))
+    }
+
     pub(super) fn iter(&self) -> impl Iterator<Item = &Mount> {
         self.mounts.iter()
     }
@@ -172,16 +178,12 @@ impl Resolved {
     }
 
     pub fn resolve(table: &Rc<RefCell<MountTable>>, internal: EntryId) -> Result<Self> {
-        let (mut mount, mut local) = split(internal);
-        let origin = mount;
-        {
+        let (origin, local) = split(internal);
+        let (mount, local) = {
             let mounts = table.borrow();
-            mounts.healthy(mount)?;
-            if let Some(alias) = mounts.find_by_mount_point(mount, local) {
-                mount = alias.id;
-                local = ROOT_ID;
-            }
-        }
+            mounts.healthy(origin)?;
+            mounts.canonical(origin, local)
+        };
         let mut resolved = Self::on_mount(table, mount, local)?;
         resolved.origin = (mount != origin).then_some(origin);
         Ok(resolved)
@@ -222,7 +224,10 @@ impl Resolved {
 
     pub fn export(&self, local: EntryId) -> Result<EntryId> {
         self.check_local(local)?;
-        Ok(Self::resolve(&self.table, join(self.mount, local))?.id)
+        let mounts = self.table.borrow();
+        let (mount, local) = mounts.canonical(self.mount, local);
+        mounts.healthy(mount)?;
+        Ok(join(mount, local))
     }
 
     pub fn is_mount_root(&self) -> bool {
@@ -262,10 +267,8 @@ impl Resolved {
 /// uses it: releasing a lock never touches a filesystem.
 pub(super) fn canonical_unchecked(table: &Rc<RefCell<MountTable>>, internal: EntryId) -> EntryId {
     let (mount, local) = split(internal);
-    table
-        .borrow()
-        .find_by_mount_point(mount, local)
-        .map_or(internal, |alias| join(alias.id, ROOT_ID))
+    let (mount, local) = table.borrow().canonical(mount, local);
+    join(mount, local)
 }
 
 pub(super) async fn stat_path(
