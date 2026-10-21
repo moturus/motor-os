@@ -697,10 +697,16 @@ fn served_under_pressure(msg: &moto_ipc::io_channel::Msg, runtime: &FsRuntime) -
     (msg.command == api_fs::CMD_FILE_LOCK
         && api_fs::file_lock_msg_decode(*msg)
             .is_ok_and(|(_, _, operation)| operation == moto_rt::fs::UNLOCK))
-        || (matches!(msg.command, api_fs::CMD_DELETE_ENTRY | api_fs::CMD_RESIZE)
-            && runtime
-                .decode(msg.payload.arg_128())
-                .is_ok_and(|entry| entry.kind == api_fs::MountKind::MemFs))
+        || match msg.command {
+            api_fs::CMD_DELETE_ENTRY => Some(api_fs::delete_entry_msg_decode(*msg)),
+            api_fs::CMD_RESIZE => Some(api_fs::resize_msg_decode(*msg).0),
+            _ => None,
+        }
+        .is_some_and(|entry_id| {
+            runtime
+                .decode(entry_id)
+                .is_ok_and(|entry| entry.kind == api_fs::MountKind::MemFs)
+        })
 }
 
 async fn on_msg(
