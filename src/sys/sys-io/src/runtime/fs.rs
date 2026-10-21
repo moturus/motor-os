@@ -631,13 +631,15 @@ async fn fs_listener(
         // Now that we have a ticket, we can poll for msg.
         match receiver.recv().await {
             Ok(msg) => {
-                let sender = sender.clone();
-                let runtime = runtime.clone();
-                let ticket_tx = ticket_tx.clone();
-                moto_async::LocalRuntime::spawn(async move {
-                    on_msg(msg, sender, runtime, role, can_write, can_spawn).await;
-                    let _ = ticket_tx.send(()).await;
-                });
+                moto_async::LocalRuntime::spawn(request_task(
+                    msg,
+                    sender.clone(),
+                    runtime.clone(),
+                    role,
+                    can_write,
+                    can_spawn,
+                    ticket_tx.clone(),
+                ));
                 requests_since_io += 1;
                 if requests_since_io == IO_YIELD_BUDGET {
                     requests_since_io = 0;
@@ -656,6 +658,22 @@ async fn fs_listener(
             }
         }
     }
+}
+
+/// One request's task. frusa serves allocations up to 4 KiB from its slabs; a
+/// larger task is mapped and unmapped for every request, so handler futures
+/// must not hold big buffers across awaits (checked by a self-test).
+async fn request_task(
+    msg: moto_ipc::io_channel::Msg,
+    sender: channel_budget::ClientSender,
+    runtime: FsRuntime,
+    role: Role,
+    can_write: bool,
+    can_spawn: bool,
+    ticket_tx: moto_async::channel::Sender<()>,
+) {
+    on_msg(msg, sender, runtime, role, can_write, can_spawn).await;
+    let _ = ticket_tx.send(()).await;
 }
 
 /// Freeing a held memfs ID is allowed under pressure. Resize's size-dependent
@@ -1711,7 +1729,8 @@ async fn copy_file_range(
             .copy_file_range(role, from.local, from_offset, to.local, to_offset, size)
             .await;
     }
-    let mut buffer = [0; async_fs::BLOCK_SIZE];
+    // On the heap: a stack buffer would grow every request's task.
+    let mut buffer = spawn::try_zeroed(async_fs::BLOCK_SIZE)?;
     let block = async_fs::BLOCK_SIZE as u64;
     let mut copied = 0;
     while copied < size {

@@ -24,7 +24,7 @@ fn native(code: moto_rt::ErrorCode) -> std::io::Error {
 }
 
 /// A zeroed buffer, or an error instead of aborting sys-io.
-fn try_zeroed(len: usize) -> Result<Vec<u8>> {
+pub(super) fn try_zeroed(len: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(len)

@@ -161,6 +161,23 @@ async fn requests() -> Result<()> {
         responses.recv().await.map_err(map_native_error)
     }
 
+    // Every request allocates its task: keep it within frusa's 4 KiB slabs.
+    let (tickets, _) = moto_async::channel(1);
+    let task = request_task(
+        api_fs::flush_msg_encode(),
+        server.clone(),
+        runtime.clone(),
+        Role::None,
+        true,
+        true,
+        tickets,
+    );
+    ensure(
+        core::mem::size_of_val(&task) <= 4096,
+        "request task exceeds frusa's largest slab",
+    )?;
+    drop(task);
+
     // Alias locks share one canonical identity in either wire-codec mode.
     let alias = runtime.entry_ids.encode(shadowed);
     let canonical = runtime.entry_ids.encode(mounted.id);
