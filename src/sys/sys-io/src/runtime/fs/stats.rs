@@ -1,11 +1,12 @@
 //! Statistics for the FS runtime.
 //!
 //! sys-io's stats provider (`crate::stats_server`) runs on its own thread, but
-//! the FS lives in this single-threaded async runtime (`Rc<LocalRwLock<FS>>`) and
-//! can't be read from there directly. Instead the stats-server thread *polls*
-//! them: it sends a request over a cross-thread channel that
-//! [`stats_responder_task`] (running in the FS runtime) answers with a freshly
-//! built snapshot. Best effort, never precise — mirrors `crate::runtime::net::stats`.
+//! the mounted filesystems live in this single-threaded async runtime (the
+//! mount table, one `LocalRwLock<FS>` per mount) and can't be read from there
+//! directly. Instead the stats-server thread *polls* them: it sends a request
+//! over a cross-thread channel that [`stats_responder_task`] (running in the FS
+//! runtime) answers with a freshly built snapshot. Best effort, never precise —
+//! mirrors `crate::runtime::net::stats`.
 
 use super::{FS, mounts};
 use async_fs::FileSystem;
@@ -81,6 +82,8 @@ fn ticks_to_ns(ticks: u64) -> u64 {
 /// FS metric ids. They are private to sys-io: collectors learn their names
 /// dynamically via `CMD_DESCRIBE` (moto-stats hardcodes no metric ids).
 mod ids {
+    // The data partition (mount 0) only. memfs reports its totals below and
+    // per-mount figures through the mount listing.
     pub const FS_CAPACITY_BYTES: u32 = 1000;
     pub const FS_AVAILABLE_BYTES: u32 = 1001;
 

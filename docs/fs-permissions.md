@@ -24,7 +24,9 @@ Copies between disk and memfs work normally. Renaming between them returns
 one by rename, returns `PermissionDenied`. `remove_dir_all("/none/tmp")` can
 empty the mount before failing to remove its root. Prefer a private subtree
 for temporary work. The native `FsClient::mounts()` API lists all mounts,
-configured paths, capacities and sampled usage for every role.
+configured paths, capacities and sampled usage for every role. sys-io's
+`fs.capacity_bytes` and `fs.available_bytes` metrics describe only the data
+partition; memfs usage appears in the listing and the `fs.memfs.*` totals.
 
 ## Permission model
 
