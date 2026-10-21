@@ -177,10 +177,12 @@ pub(super) async fn entries(runtime: &super::FsRuntime) -> Vec<MetricEntry> {
         && let Ok(empty) = fs.empty_blocks().await
         && root.healthy().is_ok()
     {
-        metrics.extend([
-            MetricEntry::global(ids::FS_CAPACITY_BYTES, fs.num_blocks() * 4096),
-            MetricEntry::global(ids::FS_AVAILABLE_BYTES, empty * 4096),
-        ]);
+        let blocks = fs.num_blocks();
+        let capacity = blocks.checked_mul(async_fs::BLOCK_SIZE as u64);
+        metrics.extend(capacity.map(|bytes| MetricEntry::global(ids::FS_CAPACITY_BYTES, bytes)));
+        // Omitted when a corrupt superblock counts more free blocks than exist.
+        let available = mounts::disk_free(blocks, empty);
+        metrics.extend(available.map(|bytes| MetricEntry::global(ids::FS_AVAILABLE_BYTES, bytes)));
         if let Some(cache) = fs.cache_stats() {
             metrics.extend([
                 MetricEntry::global(ids::FS_CACHE_HITS, cache.hits),

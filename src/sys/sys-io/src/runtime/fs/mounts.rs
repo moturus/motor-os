@@ -360,7 +360,7 @@ pub(super) async fn info(table: &Rc<RefCell<MountTable>>, cursor: u32) -> Result
                 FS::MotorFs(fs) => {
                     let blocks = fs.num_blocks();
                     info.used = disk_usage(blocks, fs.empty_blocks().await?);
-                    info.cap = Some(blocks * async_fs::BLOCK_SIZE as u64);
+                    info.cap = blocks.checked_mul(async_fs::BLOCK_SIZE as u64);
                 }
                 FS::MemFs(fs) => {
                     info.used = Some(fs.used_bytes());
@@ -396,6 +396,13 @@ fn disk_usage(blocks: u64, free: u64) -> Option<u64> {
         .and_then(|used| used.checked_mul(async_fs::BLOCK_SIZE as u64))
 }
 
+/// Free bytes from the device's block count and the superblock's free count.
+/// A corrupt free count yields an unknown value instead of an overflow.
+pub(super) fn disk_free(blocks: u64, free: u64) -> Option<u64> {
+    free.checked_mul(async_fs::BLOCK_SIZE as u64)
+        .filter(|_| free <= blocks)
+}
+
 #[cfg(debug_assertions)]
 pub(super) mod self_test {
     use super::*;
@@ -414,6 +421,9 @@ pub(super) mod self_test {
         st_assert_eq!(disk_usage(10, 4), Some(6 * 4096));
         st_assert_eq!(disk_usage(10, 11), None);
         st_assert_eq!(disk_usage(u64::MAX, 0), None);
+        st_assert_eq!(disk_free(10, 4), Some(4 * 4096));
+        st_assert_eq!(disk_free(10, 11), None);
+        st_assert_eq!(disk_free(u64::MAX, u64::MAX), None);
         let checked = async {
             for mount in [0, 1, 65535, 65536, MAX_MOUNT_ID] {
                 for local in [0, 1, 1 << 64, LOCAL_MASK] {
