@@ -19,7 +19,7 @@ use crossbeam_utils::{Backoff, CachePadded};
 
 use crate::context::Context;
 use crate::err::{RecvTimeoutError, SendTimeoutError, TryRecvError, TrySendError};
-use crate::select::{Operation, SelectHandle, Selected, Token};
+use crate::select::{Operation, Selected, Token};
 use crate::waker::SyncWaker;
 
 /// A slot in a channel.
@@ -129,16 +129,6 @@ impl<T> Channel<T> {
             senders: SyncWaker::new(),
             receivers: SyncWaker::new(),
         })
-    }
-
-    /// Returns a receiver handle to the channel.
-    pub(crate) fn receiver(&self) -> Receiver<'_, T> {
-        Receiver(self)
-    }
-
-    /// Returns a sender handle to the channel.
-    pub(crate) fn sender(&self) -> Sender<'_, T> {
-        Sender(self)
     }
 
     /// Attempts to reserve a slot for sending a message.
@@ -564,83 +554,5 @@ impl<T> Drop for Channel<T> {
                 }
             }
         }
-    }
-}
-
-/// Receiver handle to a channel.
-pub(crate) struct Receiver<'a, T>(&'a Channel<T>);
-
-/// Sender handle to a channel.
-pub(crate) struct Sender<'a, T>(&'a Channel<T>);
-
-impl<T> SelectHandle for Receiver<'_, T> {
-    fn try_select(&self, token: &mut Token) -> bool {
-        self.0.start_recv(token)
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        None
-    }
-
-    fn register(&self, oper: Operation, cx: &Context) -> bool {
-        self.0.receivers.register(oper, cx);
-        self.is_ready()
-    }
-
-    fn unregister(&self, oper: Operation) {
-        self.0.receivers.unregister(oper);
-    }
-
-    fn accept(&self, token: &mut Token, _cx: &Context) -> bool {
-        self.try_select(token)
-    }
-
-    fn is_ready(&self) -> bool {
-        !self.0.is_empty() || self.0.is_disconnected()
-    }
-
-    fn watch(&self, oper: Operation, cx: &Context) -> bool {
-        self.0.receivers.watch(oper, cx);
-        self.is_ready()
-    }
-
-    fn unwatch(&self, oper: Operation) {
-        self.0.receivers.unwatch(oper);
-    }
-}
-
-impl<T> SelectHandle for Sender<'_, T> {
-    fn try_select(&self, token: &mut Token) -> bool {
-        self.0.start_send(token)
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        None
-    }
-
-    fn register(&self, oper: Operation, cx: &Context) -> bool {
-        self.0.senders.register(oper, cx);
-        self.is_ready()
-    }
-
-    fn unregister(&self, oper: Operation) {
-        self.0.senders.unregister(oper);
-    }
-
-    fn accept(&self, token: &mut Token, _cx: &Context) -> bool {
-        self.try_select(token)
-    }
-
-    fn is_ready(&self) -> bool {
-        !self.0.is_full() || self.0.is_disconnected()
-    }
-
-    fn watch(&self, oper: Operation, cx: &Context) -> bool {
-        self.0.senders.watch(oper, cx);
-        self.is_ready()
-    }
-
-    fn unwatch(&self, oper: Operation) {
-        self.0.senders.unwatch(oper);
     }
 }

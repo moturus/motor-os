@@ -6,13 +6,11 @@ use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::time::Duration;
 use moto_rt::time::Instant;
 
-use crate::context::Context;
 use crate::counter;
 use crate::err::{
     RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError, TrySendError,
 };
 use crate::flavors;
-use crate::select::{Operation, SelectHandle, Token};
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     assert!(cap > 0);
@@ -103,7 +101,7 @@ impl<T> Sender<T> {
 
     pub fn same_channel(&self, other: &Self) -> bool {
         match (&self.flavor, &other.flavor) {
-            (SenderFlavor::Array(ref a), SenderFlavor::Array(ref b)) => a == b,
+            (SenderFlavor::Array(a), SenderFlavor::Array(b)) => a == b,
         }
     }
 }
@@ -313,119 +311,5 @@ impl<T> Iterator for IntoIter<T> {
 impl<T> fmt::Debug for IntoIter<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("IntoIter { .. }")
-    }
-}
-
-impl<T> SelectHandle for Sender<T> {
-    fn try_select(&self, token: &mut Token) -> bool {
-        match &self.flavor {
-            SenderFlavor::Array(chan) => chan.sender().try_select(token),
-        }
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        None
-    }
-
-    fn register(&self, oper: Operation, cx: &Context) -> bool {
-        match &self.flavor {
-            SenderFlavor::Array(chan) => chan.sender().register(oper, cx),
-        }
-    }
-
-    fn unregister(&self, oper: Operation) {
-        match &self.flavor {
-            SenderFlavor::Array(chan) => chan.sender().unregister(oper),
-        }
-    }
-
-    fn accept(&self, token: &mut Token, cx: &Context) -> bool {
-        match &self.flavor {
-            SenderFlavor::Array(chan) => chan.sender().accept(token, cx),
-        }
-    }
-
-    fn is_ready(&self) -> bool {
-        match &self.flavor {
-            SenderFlavor::Array(chan) => chan.sender().is_ready(),
-        }
-    }
-
-    fn watch(&self, oper: Operation, cx: &Context) -> bool {
-        match &self.flavor {
-            SenderFlavor::Array(chan) => chan.sender().watch(oper, cx),
-        }
-    }
-
-    fn unwatch(&self, oper: Operation) {
-        match &self.flavor {
-            SenderFlavor::Array(chan) => chan.sender().unwatch(oper),
-        }
-    }
-}
-
-impl<T> SelectHandle for Receiver<T> {
-    fn try_select(&self, token: &mut Token) -> bool {
-        match &self.flavor {
-            ReceiverFlavor::Array(chan) => chan.receiver().try_select(token),
-        }
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        match &self.flavor {
-            ReceiverFlavor::Array(_) => None,
-        }
-    }
-
-    fn register(&self, oper: Operation, cx: &Context) -> bool {
-        match &self.flavor {
-            ReceiverFlavor::Array(chan) => chan.receiver().register(oper, cx),
-        }
-    }
-
-    fn unregister(&self, oper: Operation) {
-        match &self.flavor {
-            ReceiverFlavor::Array(chan) => chan.receiver().unregister(oper),
-        }
-    }
-
-    fn accept(&self, token: &mut Token, cx: &Context) -> bool {
-        match &self.flavor {
-            ReceiverFlavor::Array(chan) => chan.receiver().accept(token, cx),
-        }
-    }
-
-    fn is_ready(&self) -> bool {
-        match &self.flavor {
-            ReceiverFlavor::Array(chan) => chan.receiver().is_ready(),
-        }
-    }
-
-    fn watch(&self, oper: Operation, cx: &Context) -> bool {
-        match &self.flavor {
-            ReceiverFlavor::Array(chan) => chan.receiver().watch(oper, cx),
-        }
-    }
-
-    fn unwatch(&self, oper: Operation) {
-        match &self.flavor {
-            ReceiverFlavor::Array(chan) => chan.receiver().unwatch(oper),
-        }
-    }
-}
-
-pub(crate) unsafe fn write<T>(s: &Sender<T>, token: &mut Token, msg: T) -> Result<(), T> {
-    unsafe {
-        match &s.flavor {
-            SenderFlavor::Array(chan) => chan.write(token, msg),
-        }
-    }
-}
-
-pub(crate) unsafe fn read<T>(r: &Receiver<T>, token: &mut Token) -> Result<T, ()> {
-    unsafe {
-        match &r.flavor {
-            ReceiverFlavor::Array(chan) => chan.read(token),
-        }
     }
 }

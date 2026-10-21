@@ -63,7 +63,7 @@ impl RawChannel {
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_mut<T: Sized>(&self) -> &mut T {
         assert!(core::mem::size_of::<T>() <= self.size);
-        (self.addr as *mut T).as_mut().unwrap_unchecked()
+        unsafe { (self.addr as *mut T).as_mut().unwrap_unchecked() }
     }
 
     /// # Safety
@@ -71,7 +71,7 @@ impl RawChannel {
     /// Assumes RawChannel is properly initialized and contains T.
     pub unsafe fn get<T: Sized>(&self) -> &T {
         assert!(core::mem::size_of::<T>() <= self.size);
-        (self.addr as *const T).as_ref().unwrap_unchecked()
+        unsafe { (self.addr as *const T).as_ref().unwrap_unchecked() }
     }
 
     /// # Safety
@@ -90,7 +90,7 @@ impl RawChannel {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        Ok(core::slice::from_raw_parts_mut(buf, size))
+        Ok(unsafe { core::slice::from_raw_parts_mut(buf, size) })
     }
 
     /// # Safety
@@ -104,7 +104,7 @@ impl RawChannel {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        Ok(core::slice::from_raw_parts(buf, size))
+        Ok(unsafe { core::slice::from_raw_parts(buf, size) })
     }
 
     /// # Safety
@@ -116,7 +116,7 @@ impl RawChannel {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        Ok(core::slice::from_raw_parts(buf, size))
+        Ok(unsafe { core::slice::from_raw_parts(buf, size) })
     }
 
     /// # Safety
@@ -129,7 +129,7 @@ impl RawChannel {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        Ok(core::slice::from_raw_parts_mut(buf, size))
+        Ok(unsafe { core::slice::from_raw_parts_mut(buf, size) })
     }
 
     /// # Safety
@@ -141,7 +141,7 @@ impl RawChannel {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len()) };
         Ok(())
     }
 }

@@ -27,9 +27,6 @@ pub(crate) struct Entry {
 pub(crate) struct Waker {
     /// A list of select operations.
     selectors: Vec<Entry>,
-
-    /// A list of operations waiting to be ready.
-    observers: Vec<Entry>,
 }
 
 impl Waker {
@@ -38,7 +35,6 @@ impl Waker {
     pub(crate) fn new() -> Self {
         Self {
             selectors: Vec::new(),
-            observers: Vec::new(),
         }
     }
 
@@ -105,46 +101,6 @@ impl Waker {
         }
     }
 
-    /// Returns `true` if there is an entry which can be selected by the current thread.
-    #[inline]
-    pub(crate) fn _can_select(&self) -> bool {
-        if self.selectors.is_empty() {
-            false
-        } else {
-            let thread_id = crate::utils::current_thread_id();
-
-            self.selectors.iter().any(|entry| {
-                entry.cx.thread_id() != thread_id && entry.cx.selected() == Selected::Waiting
-            })
-        }
-    }
-
-    /// Registers an operation waiting to be ready.
-    #[inline]
-    pub(crate) fn watch(&mut self, oper: Operation, cx: &Context) {
-        self.observers.push(Entry {
-            oper,
-            packet: ptr::null_mut(),
-            cx: cx.clone(),
-        });
-    }
-
-    /// Unregisters an operation waiting to be ready.
-    #[inline]
-    pub(crate) fn unwatch(&mut self, oper: Operation) {
-        self.observers.retain(|e| e.oper != oper);
-    }
-
-    /// Notifies all operations waiting to be ready.
-    #[inline]
-    pub(crate) fn notify(&mut self) {
-        for entry in self.observers.drain(..) {
-            if entry.cx.try_select(Selected::Operation(entry.oper)).is_ok() {
-                entry.cx.unpark();
-            }
-        }
-    }
-
     /// Notifies all registered operations that the channel is disconnected.
     #[inline]
     pub(crate) fn disconnect(&mut self) {
@@ -158,8 +114,6 @@ impl Waker {
                 entry.cx.unpark();
             }
         }
-
-        self.notify();
     }
 }
 
@@ -167,7 +121,6 @@ impl Drop for Waker {
     #[inline]
     fn drop(&mut self) {
         debug_assert_eq!(self.selectors.len(), 0);
-        debug_assert_eq!(self.observers.len(), 0);
     }
 }
 
@@ -197,10 +150,8 @@ impl SyncWaker {
     pub(crate) fn register(&self, oper: Operation, cx: &Context) {
         let mut inner = self.inner.lock();
         inner.register(oper, cx);
-        self.is_empty.store(
-            inner.selectors.is_empty() && inner.observers.is_empty(),
-            Ordering::SeqCst,
-        );
+        self.is_empty
+            .store(inner.selectors.is_empty(), Ordering::SeqCst);
     }
 
     /// Unregisters an operation previously registered by the current thread.
@@ -208,10 +159,8 @@ impl SyncWaker {
     pub(crate) fn unregister(&self, oper: Operation) -> Option<Entry> {
         let mut inner = self.inner.lock();
         let entry = inner.unregister(oper);
-        self.is_empty.store(
-            inner.selectors.is_empty() && inner.observers.is_empty(),
-            Ordering::SeqCst,
-        );
+        self.is_empty
+            .store(inner.selectors.is_empty(), Ordering::SeqCst);
         entry
     }
 
@@ -222,35 +171,10 @@ impl SyncWaker {
             let mut inner = self.inner.lock();
             if !self.is_empty.load(Ordering::SeqCst) {
                 inner.try_select();
-                inner.notify();
-                self.is_empty.store(
-                    inner.selectors.is_empty() && inner.observers.is_empty(),
-                    Ordering::SeqCst,
-                );
+                self.is_empty
+                    .store(inner.selectors.is_empty(), Ordering::SeqCst);
             }
         }
-    }
-
-    /// Registers an operation waiting to be ready.
-    #[inline]
-    pub(crate) fn watch(&self, oper: Operation, cx: &Context) {
-        let mut inner = self.inner.lock();
-        inner.watch(oper, cx);
-        self.is_empty.store(
-            inner.selectors.is_empty() && inner.observers.is_empty(),
-            Ordering::SeqCst,
-        );
-    }
-
-    /// Unregisters an operation waiting to be ready.
-    #[inline]
-    pub(crate) fn unwatch(&self, oper: Operation) {
-        let mut inner = self.inner.lock();
-        inner.unwatch(oper);
-        self.is_empty.store(
-            inner.selectors.is_empty() && inner.observers.is_empty(),
-            Ordering::SeqCst,
-        );
     }
 
     /// Notifies all threads that the channel is disconnected.
@@ -258,10 +182,8 @@ impl SyncWaker {
     pub(crate) fn disconnect(&self) {
         let mut inner = self.inner.lock();
         inner.disconnect();
-        self.is_empty.store(
-            inner.selectors.is_empty() && inner.observers.is_empty(),
-            Ordering::SeqCst,
-        );
+        self.is_empty
+            .store(inner.selectors.is_empty(), Ordering::SeqCst);
     }
 }
 

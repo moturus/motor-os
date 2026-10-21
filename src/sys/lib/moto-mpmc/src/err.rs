@@ -82,38 +82,6 @@ pub enum RecvTimeoutError {
     Disconnected,
 }
 
-/// An error returned from the [`try_select`] method.
-///
-/// Failed because none of the channel operations were ready.
-///
-/// [`try_select`]: super::Select::try_select
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub struct TrySelectError;
-
-/// An error returned from the [`select_timeout`] method.
-///
-/// Failed because none of the channel operations became ready before the timeout.
-///
-/// [`select_timeout`]: super::Select::select_timeout
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub struct SelectTimeoutError;
-
-/// An error returned from the [`try_ready`] method.
-///
-/// Failed because none of the channel operations were ready.
-///
-/// [`try_ready`]: super::Select::try_ready
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub struct TryReadyError;
-
-/// An error returned from the [`ready_timeout`] method.
-///
-/// Failed because none of the channel operations became ready before the timeout.
-///
-/// [`ready_timeout`]: super::Select::ready_timeout
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub struct ReadyTimeoutError;
-
 impl<T> fmt::Debug for SendError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         "SendError(..)".fmt(f)
@@ -321,17 +289,5 @@ impl RecvTimeoutError {
     /// Returns `true` if the receive operation failed because the channel is disconnected.
     pub fn is_disconnected(&self) -> bool {
         matches!(self, Self::Disconnected)
-    }
-}
-
-impl fmt::Display for TrySelectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        "all operations in select would block".fmt(f)
-    }
-}
-
-impl fmt::Display for SelectTimeoutError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        "timed out waiting on select".fmt(f)
     }
 }

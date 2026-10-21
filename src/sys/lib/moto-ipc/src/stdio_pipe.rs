@@ -52,10 +52,12 @@ impl PipeBuffer {
         PipeBuffer {
             buf_addr,
             work_buf_len,
-            work_buf: core::slice::from_raw_parts_mut(
-                (buf_addr + Self::DATA_OFFSET) as *mut u8,
-                work_buf_len,
-            ),
+            work_buf: unsafe {
+                core::slice::from_raw_parts_mut(
+                    (buf_addr + Self::DATA_OFFSET) as *mut u8,
+                    work_buf_len,
+                )
+            },
             error_code: moto_rt::E_OK,
             ipc_handle,
         }
@@ -510,11 +512,13 @@ impl StdioPipe {
     /// pipe_data must be properly set up.
     pub unsafe fn new_reader(pipe_data: RawPipeData) -> Self {
         Self {
-            buffer: Some(SpinLock::new(PipeBuffer::new(
-                pipe_data.buf_addr,
-                pipe_data.buf_size,
-                SysHandle::from_u64(pipe_data.ipc_handle),
-            ))),
+            buffer: Some(SpinLock::new(unsafe {
+                PipeBuffer::new(
+                    pipe_data.buf_addr,
+                    pipe_data.buf_size,
+                    SysHandle::from_u64(pipe_data.ipc_handle),
+                )
+            })),
             counters: Some(Counters {
                 buf_addr: pipe_data.buf_addr,
                 work_buf_len: pipe_data.buf_size >> 1,
@@ -531,11 +535,13 @@ impl StdioPipe {
     /// pipe_data must be properly set up.
     pub unsafe fn new_writer(pipe_data: RawPipeData) -> Self {
         Self {
-            buffer: Some(SpinLock::new(PipeBuffer::new(
-                pipe_data.buf_addr,
-                pipe_data.buf_size,
-                SysHandle::from_u64(pipe_data.ipc_handle),
-            ))),
+            buffer: Some(SpinLock::new(unsafe {
+                PipeBuffer::new(
+                    pipe_data.buf_addr,
+                    pipe_data.buf_size,
+                    SysHandle::from_u64(pipe_data.ipc_handle),
+                )
+            })),
             counters: Some(Counters {
                 buf_addr: pipe_data.buf_addr,
                 work_buf_len: pipe_data.buf_size >> 1,
@@ -589,14 +595,14 @@ impl StdioPipe {
             return Err(moto_rt::E_NOT_READY);
         }
 
-        if buffer.error_code == moto_rt::E_OK {
-            if let Err(e) = SysCpu::wake(self.handle) {
-                // Cache the error: this read succeeded, so the error surfaces on
-                // a later call, once there is nothing left to hand out. Returning
-                // it now would drop the bytes already copied into the caller's
-                // buffer.
-                buffer.error_code = e;
-            }
+        if buffer.error_code == moto_rt::E_OK
+            && let Err(e) = SysCpu::wake(self.handle)
+        {
+            // Cache the error: this read succeeded, so the error surfaces on
+            // a later call, once there is nothing left to hand out. Returning
+            // it now would drop the bytes already copied into the caller's
+            // buffer.
+            buffer.error_code = e;
         }
 
         Ok(sz)
@@ -1023,6 +1029,109 @@ impl StdioPipe {
     }
 }
 
+#[repr(C)]
+pub struct RawPipeData {
+    pub buf_addr: usize,
+    pub buf_size: usize,
+    pub ipc_handle: u64,
+}
+
+impl RawPipeData {
+    /// Release self (memory, handle).
+    ///
+    /// # Safety
+    ///
+    /// self must be properly initialized.
+    pub unsafe fn release(self, owner_process: SysHandle) {
+        moto_sys::SysObj::put_remote(owner_process, SysHandle::from_u64(self.ipc_handle)).unwrap();
+
+        moto_sys::SysMem::unmap(owner_process, 0, u64::MAX, self.buf_addr as u64).unwrap();
+    }
+
+    pub fn unsafe_copy(&self) -> Self {
+        Self {
+            buf_addr: self.buf_addr,
+            buf_size: self.buf_size,
+            ipc_handle: self.ipc_handle,
+        }
+    }
+}
+
+// Make a simplex pipe. One of the handles must be SysHandle::Self.
+pub fn make_pair(
+    process_1: SysHandle,
+    process_2: SysHandle,
+) -> Result<(RawPipeData, RawPipeData), ErrorCode> {
+    make_pair_with_page_count(process_1, process_2, 1)
+}
+
+/// Make a simplex pipe backed by `page_count` shared small pages.
+///
+/// The ring occupies half the mapping, so `page_count` must be a power of two
+/// to preserve the ring's power-of-two indexing.
+pub fn make_pair_with_page_count(
+    process_1: SysHandle,
+    process_2: SysHandle,
+    page_count: u64,
+) -> Result<(RawPipeData, RawPipeData), ErrorCode> {
+    use moto_sys::syscalls::*;
+
+    if page_count == 0 || !page_count.is_power_of_two() {
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    }
+    let buf_size = sys_mem::PAGE_SIZE_SMALL
+        .checked_mul(page_count)
+        .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+
+    let remote_process = if process_1 == SysHandle::SELF {
+        process_2
+    } else {
+        process_1
+    };
+    let flags = SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE;
+    let (remote, local) = SysMem::map2(
+        remote_process,
+        flags,
+        u64::MAX,
+        u64::MAX,
+        sys_mem::PAGE_SIZE_SMALL,
+        page_count,
+    )?;
+
+    let (h1, h2) = SysObj::create_ipc_pair(process_1, process_2, 0).inspect_err(|_| {
+        SysMem::unmap(remote_process, 0, u64::MAX, remote).unwrap();
+        SysMem::unmap(SysHandle::SELF, 0, u64::MAX, local).unwrap();
+    })?;
+
+    if process_1 == SysHandle::SELF {
+        Ok((
+            RawPipeData {
+                buf_addr: local as usize,
+                buf_size: buf_size as usize,
+                ipc_handle: h1.as_u64(),
+            },
+            RawPipeData {
+                buf_addr: remote as usize,
+                buf_size: buf_size as usize,
+                ipc_handle: h2.as_u64(),
+            },
+        ))
+    } else {
+        Ok((
+            RawPipeData {
+                buf_addr: remote as usize,
+                buf_size: buf_size as usize,
+                ipc_handle: h1.as_u64(),
+            },
+            RawPipeData {
+                buf_addr: local as usize,
+                buf_size: buf_size as usize,
+                ipc_handle: h2.as_u64(),
+            },
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -1331,108 +1440,5 @@ mod tests {
         assert_eq!(buffer.read_after_close(&mut read), Some(3));
         assert_eq!(&read, b"end");
         assert_eq!(buffer.read_after_close(&mut read), Some(0));
-    }
-}
-
-#[repr(C)]
-pub struct RawPipeData {
-    pub buf_addr: usize,
-    pub buf_size: usize,
-    pub ipc_handle: u64,
-}
-
-impl RawPipeData {
-    /// Release self (memory, handle).
-    ///
-    /// # Safety
-    ///
-    /// self must be properly initialized.
-    pub unsafe fn release(self, owner_process: SysHandle) {
-        moto_sys::SysObj::put_remote(owner_process, SysHandle::from_u64(self.ipc_handle)).unwrap();
-
-        moto_sys::SysMem::unmap(owner_process, 0, u64::MAX, self.buf_addr as u64).unwrap();
-    }
-
-    pub fn unsafe_copy(&self) -> Self {
-        Self {
-            buf_addr: self.buf_addr,
-            buf_size: self.buf_size,
-            ipc_handle: self.ipc_handle,
-        }
-    }
-}
-
-// Make a simplex pipe. One of the handles must be SysHandle::Self.
-pub fn make_pair(
-    process_1: SysHandle,
-    process_2: SysHandle,
-) -> Result<(RawPipeData, RawPipeData), ErrorCode> {
-    make_pair_with_page_count(process_1, process_2, 1)
-}
-
-/// Make a simplex pipe backed by `page_count` shared small pages.
-///
-/// The ring occupies half the mapping, so `page_count` must be a power of two
-/// to preserve the ring's power-of-two indexing.
-pub fn make_pair_with_page_count(
-    process_1: SysHandle,
-    process_2: SysHandle,
-    page_count: u64,
-) -> Result<(RawPipeData, RawPipeData), ErrorCode> {
-    use moto_sys::syscalls::*;
-
-    if page_count == 0 || !page_count.is_power_of_two() {
-        return Err(moto_rt::E_INVALID_ARGUMENT);
-    }
-    let buf_size = sys_mem::PAGE_SIZE_SMALL
-        .checked_mul(page_count)
-        .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
-
-    let remote_process = if process_1 == SysHandle::SELF {
-        process_2
-    } else {
-        process_1
-    };
-    let flags = SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE;
-    let (remote, local) = SysMem::map2(
-        remote_process,
-        flags,
-        u64::MAX,
-        u64::MAX,
-        sys_mem::PAGE_SIZE_SMALL,
-        page_count,
-    )?;
-
-    let (h1, h2) = SysObj::create_ipc_pair(process_1, process_2, 0).inspect_err(|_| {
-        SysMem::unmap(remote_process, 0, u64::MAX, remote).unwrap();
-        SysMem::unmap(SysHandle::SELF, 0, u64::MAX, local).unwrap();
-    })?;
-
-    if process_1 == SysHandle::SELF {
-        Ok((
-            RawPipeData {
-                buf_addr: local as usize,
-                buf_size: buf_size as usize,
-                ipc_handle: h1.as_u64(),
-            },
-            RawPipeData {
-                buf_addr: remote as usize,
-                buf_size: buf_size as usize,
-                ipc_handle: h2.as_u64(),
-            },
-        ))
-    } else {
-        Ok((
-            RawPipeData {
-                buf_addr: remote as usize,
-                buf_size: buf_size as usize,
-                ipc_handle: h1.as_u64(),
-            },
-            RawPipeData {
-                buf_addr: local as usize,
-                buf_size: buf_size as usize,
-                ipc_handle: h2.as_u64(),
-            },
-        ))
     }
 }

@@ -1,4 +1,4 @@
-//! Thread-local context used in select.
+//! Thread-local context used by blocking channel operations.
 
 use alloc::sync::Arc;
 use core::ptr;
@@ -10,8 +10,7 @@ use crossbeam_utils::Backoff;
 
 use crate::select::Selected;
 
-/// Thread-local context used in select.
-// This is a private API that is used by the select macro.
+/// Thread-local context used by blocking channel operations.
 #[derive(Debug, Clone)]
 pub struct Context {
     inner: Arc<Inner>,
@@ -100,12 +99,6 @@ impl Context {
             .map_err(|e| e.into())
     }
 
-    /// Returns the selected operation.
-    #[inline]
-    pub fn selected(&self) -> Selected {
-        Selected::from(self.inner.select.load(Ordering::Acquire))
-    }
-
     /// Stores a packet.
     ///
     /// This method must be called after `try_select` succeeds and there is a packet to provide.
@@ -113,19 +106,6 @@ impl Context {
     pub fn store_packet(&self, packet: *mut ()) {
         if !packet.is_null() {
             self.inner.packet.store(packet, Ordering::Release);
-        }
-    }
-
-    /// Waits until a packet is provided and returns it.
-    #[inline]
-    pub fn wait_packet(&self) -> *mut () {
-        let backoff = Backoff::new();
-        loop {
-            let packet = self.inner.packet.load(Ordering::Acquire);
-            if !packet.is_null() {
-                return packet;
-            }
-            backoff.snooze();
         }
     }
 

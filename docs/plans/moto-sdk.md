@@ -42,7 +42,7 @@ filesystem adapter became path-based (2026-10-20; true at the fork revision
 `src/build-addon-sources.sh` pins, which the add-on build checks out). Publishing
 the eleven libraries that serve those slices as separate crates means eleven
 versions to bump for every protocol change and a dependency graph that nobody
-outside the tree uses. These closely coupled libraries total about 26k lines
+outside the tree uses. These closely coupled libraries total about 23k lines
 and become one crate, `moto-sdk`. The three primary published Rust libraries
 are `moto-rt` (runtime ABI, std's dependency), `moto-sys` (syscalls) and
 `moto-sdk` (userspace services); `moto-rt-cabi` remains separately published.
@@ -57,7 +57,7 @@ are deleted. Most call sites change only their prefix
 | Crate (version) | Lines | Module | In-tree consumers today | Outside `src/sys` |
 | --- | --- | --- | --- | --- |
 | fittings (0.1.0) | 125 | `iobuf` | moto-tooling, async-fs, motor-fs | imager |
-| moto-mpmc (0.1.0) | 4513 | `mpmc` (`select!`) | moto-async, moto-io, systest | — |
+| moto-mpmc (0.1.0) | 1786 | `mpmc` | moto-async, moto-io, systest | — |
 | moto-async (0.1.0) | 3412 | `async_runtime` | rt.vdso, sys-io, strobe, sysbox, virtio-async, systest, virtio-task-tests | russhd |
 | moto-ipc (0.2.6; crates.io has 0.2.4) | 4203 | `ipc` (`io_channel`, `sync`, `stdio_pipe`) | rt.vdso, sys-io, strobe, sys-tty, dns-resolver, sysbox, moto-dns, systest | rmux |
 | moto-tooling (0.1.0) | 348 | `tooling` (`mode2048`); its DMA buffer becomes `iobuf::VirtioIoBuf` | sys-io, virtio-async, async-fs, motor-fs | russhd |
@@ -68,7 +68,7 @@ are deleted. Most call sites change only their prefix
 | moto-stats (0.1.0) | 490 | `stats` | sys-io, strobe, sysbox, systest, tokio-tests | rnetbench, rust-analyzer-smoke, wasm-smoke-suite |
 | moto-log (0.1.0) | 317 | `log` | strobe, sys-init, sys-tty, dns-resolver, systest | russhd |
 
-Total: 58 source files, about 25.9k lines, 136 importing files elsewhere in
+Total: 58 source files, about 23.4k lines, 136 importing files elsewhere in
 the tree.
 
 Of the eleven, only moto-ipc is on crates.io (0.2.4). moto-log and
@@ -135,12 +135,8 @@ dead and go with the merge. `moto-sdk` is free on crates.io.
   Tests move with their code. The two integration tests named `fallible`
   need distinct names, such as `mpmc_fallible` and `async_runtime_fallible`,
   under `moto-sdk/tests`. Both are Motor-only native tests since step (c).
-- Inside moved code, `crate::` paths gain the appropriate module prefix.
-  In `select!`, type and function paths gain `$crate::mpmc::`, but exported
-  helper-macro calls keep their root paths: `#[macro_export]` exports at the
-  crate root regardless of the source module. Re-export `select!` under
-  `mpmc` for `moto_sdk::mpmc::select!`; verify expansion from a consuming
-  crate, including recursive helper calls.
+- Inside moved code, `crate::` paths gain the appropriate module prefix. No
+  crate in the merge exports a macro.
 - `src/sys/Cargo.toml`: one member replaces eleven; its `[patch.crates-io]`
   loses the moto-ipc, moto-log and moto-sys-io entries.
 
@@ -201,8 +197,8 @@ also use `IoBuf`. Linux russhd needs `mode2048` for terminal handling.
 All other SDK modules, including `mpmc`, `async_runtime`, `ipc`, `io`,
 `sys_io`, `io_internal`, `stats`, `log` and `iobuf::VirtioIoBuf`, use
 `#[cfg(target_os = "motor")]`, plus any applicable `std`/`test-support` gate.
-Apply the same target split to dependencies and exported macros. Ordinary
-Unix builds do not compile Motor modules, even with `test-support` enabled.
+Apply the same target split to dependencies. Ordinary Unix builds do not
+compile Motor modules, even with `test-support` enabled.
 
 MPMC uses Motor waits/wakeups, thread handles, clocks and a futex-backed
 mutex (`moto-mpmc/src/{utils,context,waker}.rs`). It stays Motor-only; its
@@ -228,8 +224,8 @@ update its source include: it supplies its own syscall stubs and does not
 expose IPC in the Unix SDK. Other host suites (frusa, netstack, moto-sys,
 sys-init's parser, build tooling and application tests) keep their existing
 locations. SFTP scripts remain host-driven tests against the Motor VM.
-Verify consumer use of `mpmc::select!` and the std-only `rt`/`sys` re-exports
-on Motor, including type identity with SDK APIs.
+Verify the std-only `rt`/`sys` re-exports on Motor, including type identity
+with SDK APIs.
 
 Verify production builds in both debug and release without `test-support`,
 including when the test image contains systest.
@@ -316,10 +312,18 @@ core gate is three debug and three release `full-test.sh` runs.
 
 Move moto-mpmc, moto-ipc, moto-stats and moto-log from edition 2021 to 2024;
 the other seven crates are there already. Edition 2024 warns on unsafe
-operations in `unsafe fn` bodies: the 19 such functions (8 in moto-mpmc, 11
-in moto-ipc) get inner `unsafe` blocks. No new warnings. The IPC-sync host
-harness compiles `sync.rs` with `--edition=2021` in
-`src/tests/test-moto-ipc-sync.sh`; change it to 2024 in the same patch.
+operations in `unsafe fn` bodies: the ten bodies without them, all in
+moto-ipc's `sync.rs` and `stdio_pipe.rs`, get inner `unsafe` blocks. No new
+warnings. The IPC-sync host harness compiles `sync.rs` with `--edition=2021`
+in `src/tests/test-moto-ipc-sync.sh`; change it to 2024 in the same patch.
+
+The same patch deletes moto-mpmc's `select!` macro and `Select` API (owner
+ruling 2026-10-21). Nothing in the tree used them, and the macro had not
+compiled since the port: it named a `never` channel the port dropped, and its
+non-blocking rules transmuted a `Result` into an `Option`, which inverts the
+outcome because the port's `Token` has no niche. The select handles, the
+wakers' watch lists and the four select error types go with them. moto-mpmc
+keeps `bounded`, `try_bounded`, the endpoints and their errors.
 Gate: the core gate.
 
 ### (b) Remove `netdev`
@@ -404,8 +408,8 @@ crates and their test binaries, so it fits the existing 1500 s budget of
    `test-wasm.sh` checks prebuilt add-on inputs, so it proves the image, not
    the fork builds.
 4. **Package gate:** verify the distributable against registry dependencies
-   as described above, including std-only exports and macro expansion from a
-   consuming crate. Preserve all checks in the full-test workflow.
+   as described above, including std-only exports. Preserve all checks in the
+   full-test workflow.
 5. **Publish** (owner): publish `moto-sdk` 0.1.0 from `src/sys` after all
    gates pass. moto-rt 0.17.9 and moto-sys 0.3.2 are the existing published
    dependency versions to validate against.

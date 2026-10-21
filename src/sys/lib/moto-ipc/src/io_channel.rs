@@ -15,8 +15,8 @@ use core::{fmt::Debug, sync::atomic::*};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use moto_async::AsFuture;
-use moto_rt::mutex::Mutex;
 use moto_rt::Result;
+use moto_rt::mutex::Mutex;
 use moto_sys::*;
 
 // Although client+server can use any value in QueueEntry::command, it is recommended

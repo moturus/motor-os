@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["motor", "motor-os"]
 repository = "https://github.com/moturus/motor-os"
 description = "Motor OS federated statistics/metrics protocol."
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 moto-ipc = { path = "../moto-ipc", optional = true }

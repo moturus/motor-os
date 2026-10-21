@@ -172,6 +172,6 @@ mod userspace;
 
 #[cfg(feature = "userspace")]
 pub use userspace::{
-    respond_pods, Collector, MetricInfo, PagedRequest, PagedResponse, ProviderInfo,
-    RegisterRequest, RegisterResponse,
+    Collector, MetricInfo, PagedRequest, PagedResponse, ProviderInfo, RegisterRequest,
+    RegisterResponse, respond_pods,
 };

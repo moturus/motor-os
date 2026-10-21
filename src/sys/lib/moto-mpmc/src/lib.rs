@@ -9,23 +9,12 @@ mod counter;
 mod err;
 mod flavors;
 mod select;
-mod select_macro;
 mod utils;
 mod waker;
 
 extern crate alloc;
 
-// Crate internals used by the `select!` macro.
-#[doc(hidden)]
-pub mod internal {
-    pub use crate::select::{select, select_timeout, try_select, SelectHandle};
-}
-
 pub use crate::{
-    channel::{bounded, try_bounded, IntoIter, Iter, Receiver, Sender, TryIter},
-    err::{
-        ReadyTimeoutError, RecvError, RecvTimeoutError, SelectTimeoutError, SendError,
-        SendTimeoutError, TryReadyError, TryRecvError, TrySelectError, TrySendError,
-    },
-    select::{Select, SelectedOperation},
+    channel::{IntoIter, Iter, Receiver, Sender, TryIter, bounded, try_bounded},
+    err::{RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError, TrySendError},
 };

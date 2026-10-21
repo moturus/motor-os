@@ -11,6 +11,6 @@ elif [ "$#" -ne 0 ]; then
   exit 2
 fi
 cd "$ROOT_DIR"
-rustc --edition=2021 --test -D warnings src/tests/moto-ipc-sync.rs \
+rustc --edition=2024 --test -D warnings src/tests/moto-ipc-sync.rs \
   "${RUST_ARGS[@]}" -o "$TEST_DIR/tests"
 "$TEST_DIR/tests"
