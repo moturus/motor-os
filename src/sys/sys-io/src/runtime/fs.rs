@@ -1676,12 +1676,12 @@ async fn move_entry(
     let entry = runtime.resolve(entry)?;
     let parent = runtime.resolve(parent)?;
     entry.protect_root()?;
-    // Root protection precedes CrossesDevices, including the destination.
-    if replace {
-        let fs = parent.read().await?;
-        check_replacement(runtime, &parent, &fs, name).await?;
-    }
     if entry.mount != parent.mount {
+        // Root protection precedes CrossesDevices, including the destination.
+        if replace {
+            let fs = parent.read().await?;
+            check_replacement(runtime, &parent, &fs, name).await?;
+        }
         return Err(ErrorKind::CrossesDevices.into());
     }
     runtime.admit_allocation(
