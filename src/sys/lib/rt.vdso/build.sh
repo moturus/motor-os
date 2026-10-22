@@ -15,9 +15,9 @@ if [ -f "${TARGET_FNAME}" ]; then
 fi
 
 # Keep the freestanding VDSO and its standard-library dependencies abort-only.
-cargo build -Zbuild-std=core,alloc --target x86_64-unknown-motor --features "netdev" $@
+cargo build -Zbuild-std=core,alloc --target x86_64-unknown-motor $@
 
-cargo clippy -Zbuild-std=core,alloc --target x86_64-unknown-motor --features "netdev" $@
+cargo clippy -Zbuild-std=core,alloc --target x86_64-unknown-motor $@
 
 # Don't update the output file if nothings has changed,
 # otherwise sys-io is always relinked, which takes time.

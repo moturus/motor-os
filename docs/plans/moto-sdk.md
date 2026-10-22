@@ -1,6 +1,8 @@
 # moto-sdk: one published crate for Motor OS userspace services
 
-Status: plan, revised 2026-10-21 after two reviews. No implementation changes yet.
+Status: plan, revised 2026-10-21. Preparatory step (a) is committed; step (b)
+is implemented and validated locally, uncommitted. SDK consolidation has not
+started.
 Owner rulings of 2026-10-20:
 crates under `src/sys` reference each other by path; every other crate (in
 `src/bin`, `src/tests`, the forks, the toolchain) takes Motor OS crates from
@@ -357,15 +359,46 @@ today, so this removes real overhead.
   `SysCpu::spawn`, `block_on_sync`, `SyncWaiter`, `thread::sleep`,
   `sched_yield` outside comments) becomes a grep over the module in
   `full-test.sh`.
-- systest: the 26 `internal_helper` calls in `net_driver.rs`,
-  `diagnostics.rs`, `poll.rs` and `tcp.rs` lose their VDSO side. Rewrite a
+- systest and mio-test: networking `internal_helper(0, ..)` calls lose their
+  VDSO side. The separate diagnostic dispatch group (`internal_helper(1, ..)`
+  in `diagnostics.rs`) remains. Rewrite a
   test only where systest can exercise and assert the behavior through its
   SDK instance or public APIs; otherwise remove it and record the coverage
   loss in the commit message. No weakened or empty passing tests. SDK-level
   replacements do not establish coverage of VDSO pool internals.
 
-Gate: the core gate, with the production feature graphs checked for
-`test-support`.
+Gate for this patch (owner ruling 2026-10-21): one debug and one release
+`full-test.sh`, plus one `full-test-dev.sh --release`. The full-test workflow
+checks production feature graphs for `test-support` and the network module's
+no-blocking contract through `test-net-contract.sh`.
+
+Local validation prerequisite: the installed Wasmtime assembly was built from
+`fda311d08cf93052a1af34f50f96271d1ad1b556` and lacked
+`memory64-grow.cwasm`, which stopped the developer gate's WASM phase.
+`src/build-motor-os.sh --wasmtime-only` refreshed it, updating the clean sibling
+`../wasmtime` checkout to the repository's existing pin,
+`08a09edeacd8eb82399f9e4bbbba7d06e7f97292`, and rebuilding the runtime and
+fixtures. Step (b) adds no source patch to that fork. One debug and one release
+`full-test.sh` passed. The complete developer release gate passed after the
+refresh, including both memory64 checks and all 98 Wasmtime commands on each
+image. Formatting and strict Clippy checks passed for the touched crates.
+
+Coverage changes to carry into the step (b) commit message:
+
+- Remove the VDSO pool cold-start coalescing and channel-churn live-allocation
+  tests: they require private pool/allocator introspection.
+- Remove the injected sys-io-unavailable, channel-construction OOM and
+  runtime-construction OOM tests. Their production failure branches remain;
+  their fault-injection switches are deleted.
+- Remove the channel-teardown leak test and the final mio-test leak
+  assertion. Native driver shutdown, reservation accounting and cancellation
+  tests remain, but do not prove that the VDSO pool is empty.
+- Keep the public consecutive-accept readiness test; remove its forced
+  provisioning-failure case and pool-layout assertions. Recovery of the
+  VDSO accept pump after that injected failure is no longer covered.
+- Replace the VDSO writable-registration hook test with a native
+  `maybe_can_write` test that exhausts TX pages and asserts the WRITABLE edge
+  on release. This tests the SDK operation, not VDSO poll registration.
 
 ### (c) Native tests and the preinstalled closure
 

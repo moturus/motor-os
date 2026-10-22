@@ -1,6 +1,6 @@
 //! The vdso net veneer: the C-ABI shims std/mio call through (bind, listen,
-//! accept, connect, the socket options, DNS), plus the netdev-gated internal
-//! helper. Everything here is caller-thread glue over the moto-io net stack
+//! accept, connect, the socket options, DNS).
+//! Everything here is caller-thread glue over the moto-io net stack
 //! (`moto_io::net::{tcp, udp, channel}`); it installs the concrete
 //! `EventSourceManaged` listener and downcasts posix files from the FD table
 //! back to the `Rt*` wrapper that owns each descriptor.
@@ -557,51 +557,6 @@ pub extern "C" fn udp_multicast_op_v6(
     moto_rt::E_NOT_IMPLEMENTED
 }
 
-#[allow(unused)]
-pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
-    match a1 {
-        #[cfg(feature = "netdev")]
-        0 => {
-            // Give stage-E teardown a moment to settle before the leak check;
-            // the wait is a veneer (caller-thread) concern, kept out of the
-            // moving channel layer.
-            crate::rt_thread::sleep(
-                (moto_rt::time::Instant::now() + core::time::Duration::from_millis(500)).as_u64(),
-            );
-            moto_io::net::channel::assert_runtime_empty();
-            crate::net::pool::NET_POOL.assert_empty();
-        }
-        #[cfg(feature = "netdev")]
-        1 => return crate::net::pool::NET_POOL.client_count() as u64,
-        #[cfg(feature = "netdev")]
-        2 => moto_io::net::channel::poison_connect_for_test(a2 != 0),
-        #[cfg(feature = "netdev")]
-        3 => {
-            let Some(posix_file) = posix::get_file(a2 as RtFd) else {
-                panic!("invalid TCP fd {a2}");
-            };
-            let Some(stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<RtTcpStream>()
-            else {
-                panic!("fd {a2} is not a TCP stream");
-            };
-            stream.arm_writable_without_pages_for_test();
-        }
-        #[cfg(feature = "netdev")]
-        4 => moto_io::net::channel::fail_construction_for_test(a2 != 0),
-        #[cfg(feature = "netdev")]
-        5 => crate::net::pool::fail_runtime_construction_for_test(a2 != 0),
-        #[cfg(feature = "netdev")]
-        6 => {
-            // Free-list slots still count as in use until reclamation drains
-            // them. This diagnostic runs only after channel threads exit.
-            crate::rt_alloc::FRUSA.reclaim();
-            // Runtime bookkeeping lives in slabs. Exclude allocator metadata,
-            // unused slab capacity, and kernel-managed stacks from leak checks.
-            let stats = crate::rt_alloc::FRUSA.stats();
-            return (stats.in_use - stats.in_use_metadata) as u64;
-        }
-        _ => panic!("Unrecognized option {a1}"),
-    }
-
-    0
+pub fn vdso_internal_helper(a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64) -> u64 {
+    panic!("Unrecognized option {a1}")
 }

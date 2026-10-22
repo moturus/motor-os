@@ -290,14 +290,6 @@ impl RtTcpStream {
             self.events.on_event(events);
         }
     }
-
-    #[cfg(feature = "netdev")]
-    pub(crate) fn arm_writable_without_pages_for_test(&self) {
-        self.inner.with_tx_pages_exhausted_for_test(|| {
-            assert!(!self.inner.have_write_buffer_space());
-            self.maybe_raise_events(moto_rt::poll::POLL_WRITABLE);
-        });
-    }
 }
 
 /// The `Result`-to-`ErrorCode` shape the raw option ABI returns.

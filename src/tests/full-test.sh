@@ -192,6 +192,7 @@ test_vm_configure_ssh
 "$WD/test-rust-analyzer-size-contract.sh"
 "$WD/test-rustfmt-size-contract.sh"
 "$WD/test-make-driver.sh"
+bash "$WD/test-net-contract.sh"
 python3 "$WD/test-helix-lsp-ready.py"
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-rmux-copy-status.sh" --self-test --release

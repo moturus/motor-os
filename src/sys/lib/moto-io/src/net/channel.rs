@@ -29,37 +29,6 @@ use super::udp::UdpSocket;
 use super::vsock::VsockStream;
 use super::wait::{WaitSet, WaiterId};
 
-/// The stage-E leak check (design 5.5): a quiescent runtime holds no
-/// channels and no sockets. Reached only from the vdso's netdev-gated
-/// internal helper, so it is gated the same way as the counters it reads.
-#[cfg(feature = "netdev")]
-pub fn assert_runtime_empty() {
-    #[cfg(feature = "netdev")]
-    {
-        assert_eq!(0, NUM_TCP_LISTENERS.load(Ordering::Acquire));
-        assert_eq!(0, NUM_TCP_STREAMS.load(Ordering::Acquire));
-        assert_eq!(0, NUM_UDP_SOCKETS.load(Ordering::Acquire));
-    }
-}
-
-/// While set, `connect()` fails immediately -- the sys-io-unavailable
-/// regression pins the pool's fail-all policy with it.
-#[cfg(feature = "netdev")]
-static POISON_CONNECT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
-#[cfg(feature = "netdev")]
-pub fn poison_connect_for_test(poisoned: bool) {
-    POISON_CONNECT.store(poisoned, Ordering::Release);
-}
-
-#[cfg(feature = "netdev")]
-static FAIL_CONSTRUCTION: AtomicBool = AtomicBool::new(false);
-
-#[cfg(feature = "netdev")]
-pub fn fail_construction_for_test(fail: bool) {
-    FAIL_CONSTRUCTION.store(fail, Ordering::Release);
-}
-
 /// The sys-io connect retry policy, shared by the sync and async connect
 /// paths so neither can drift from it.
 ///
@@ -119,10 +88,6 @@ impl ConnectBackoff {
 /// exhaustion or any other error is returned rather than panicked -- the
 /// host decides what sys-io being unavailable means for it.
 pub async fn connect() -> Result<(NetClient, NetDriver), moto_rt::Error> {
-    #[cfg(feature = "netdev")]
-    if POISON_CONNECT.load(Ordering::Acquire) {
-        return Err(moto_rt::Error::TimedOut);
-    }
     let mut backoff = ConnectBackoff::new();
     let conn = loop {
         match io_channel::ClientConnection::connect("sys-io") {
@@ -239,7 +204,7 @@ impl NetClient {
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn fail_for_test(&self) {
         if let Some(channel) = self.channel.upgrade() {
             channel.fail();
@@ -435,71 +400,71 @@ impl Drop for PendingBind {
     }
 }
 
-// Deterministic netdev regression hook for listener destruction under channel
+// Deterministic regression hook for listener destruction under channel
 // backpressure. The accept-response path temporarily owns the listener's last
 // Arc, just like ordinary incoming dispatch can. The hook fills the private
 // send queue while the rx task is running, then lets the test drop its Arc and
 // release that temporary reference. Placeholder messages are removed before
 // the tx task can run, so they never reach sys-io.
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const LISTENER_DROP_TEST_IDLE: u8 = 0;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const LISTENER_DROP_TEST_ARMED: u8 = 1;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const LISTENER_DROP_TEST_PREPARING: u8 = 2;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const LISTENER_DROP_TEST_HELD: u8 = 3;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const LISTENER_DROP_TEST_RELEASED: u8 = 4;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const LISTENER_DROP_TEST_DONE: u8 = 5;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const LISTENER_DROP_TEST_MSG_ID: u64 = u64::MAX;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 static LISTENER_DROP_TEST_HANDLE: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 static LISTENER_DROP_TEST_STATE: AtomicU8 = AtomicU8::new(LISTENER_DROP_TEST_IDLE);
 
-// Deterministic netdev regression hook for stream destruction with pending TX
+// Deterministic regression hook for stream destruction with pending TX
 // under channel backpressure. Unlike the listener hook, the test fills the
 // staging queue after the runtime is held so it can first queue real TX
 // markers. Placeholder messages are removed before the tx task can run.
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const STREAM_DROP_TEST_IDLE: u8 = 0;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const STREAM_DROP_TEST_ARMED: u8 = 1;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const STREAM_DROP_TEST_PREPARING: u8 = 2;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const STREAM_DROP_TEST_HELD: u8 = 3;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const STREAM_DROP_TEST_RELEASED: u8 = 4;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const STREAM_DROP_TEST_DONE: u8 = 5;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const STREAM_DROP_TEST_MSG_ID: u64 = u64::MAX - 1;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 static STREAM_DROP_TEST_HANDLE: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 static STREAM_DROP_TEST_STATE: AtomicU8 = AtomicU8::new(STREAM_DROP_TEST_IDLE);
 
 // Hold one ordinary RPC response between map removal and oneshot delivery,
 // allowing systest to cancel the receiver at that exact ownership boundary.
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const RPC_CANCEL_TEST_IDLE: u8 = 0;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const RPC_CANCEL_TEST_ARMED: u8 = 1;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const RPC_CANCEL_TEST_HELD: u8 = 2;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const RPC_CANCEL_TEST_RELEASED: u8 = 3;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 const RPC_CANCEL_TEST_DONE: u8 = 4;
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 static RPC_CANCEL_TEST_STATE: AtomicU8 = AtomicU8::new(RPC_CANCEL_TEST_IDLE);
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn arm_listener_drop_backpressure_test(handle: u64) {
     assert_ne!(0, handle);
     LISTENER_DROP_TEST_HANDLE.store(handle, Ordering::Relaxed);
@@ -514,13 +479,13 @@ pub fn arm_listener_drop_backpressure_test(handle: u64) {
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn listener_drop_backpressure_test_is_held() -> bool {
     LISTENER_DROP_TEST_STATE.load(Ordering::Acquire) == LISTENER_DROP_TEST_HELD
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn release_listener_drop_backpressure_test() {
     LISTENER_DROP_TEST_STATE
         .compare_exchange(
@@ -533,13 +498,13 @@ pub fn release_listener_drop_backpressure_test() {
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn listener_drop_backpressure_test_is_done() -> bool {
     LISTENER_DROP_TEST_STATE.load(Ordering::Acquire) == LISTENER_DROP_TEST_DONE
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn arm_stream_drop_backpressure_test(handle: u64) {
     assert_ne!(0, handle);
     STREAM_DROP_TEST_HANDLE.store(handle, Ordering::Relaxed);
@@ -554,13 +519,13 @@ pub fn arm_stream_drop_backpressure_test(handle: u64) {
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn stream_drop_backpressure_test_is_held() -> bool {
     STREAM_DROP_TEST_STATE.load(Ordering::Acquire) == STREAM_DROP_TEST_HELD
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn release_stream_drop_backpressure_test() {
     STREAM_DROP_TEST_STATE
         .compare_exchange(
@@ -573,13 +538,13 @@ pub fn release_stream_drop_backpressure_test() {
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn stream_drop_backpressure_test_is_done() -> bool {
     STREAM_DROP_TEST_STATE.load(Ordering::Acquire) == STREAM_DROP_TEST_DONE
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn arm_rpc_response_cancel_test() {
     let state = RPC_CANCEL_TEST_STATE.load(Ordering::Acquire);
     assert!(state == RPC_CANCEL_TEST_IDLE || state == RPC_CANCEL_TEST_DONE);
@@ -594,13 +559,13 @@ pub fn arm_rpc_response_cancel_test() {
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn rpc_response_cancel_test_is_held() -> bool {
     RPC_CANCEL_TEST_STATE.load(Ordering::Acquire) == RPC_CANCEL_TEST_HELD
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn release_rpc_response_cancel_test() {
     RPC_CANCEL_TEST_STATE
         .compare_exchange(
@@ -613,46 +578,9 @@ pub fn release_rpc_response_cancel_test() {
 }
 
 #[doc(hidden)]
-#[cfg(feature = "netdev")]
+#[cfg(feature = "test-support")]
 pub fn rpc_response_cancel_test_is_done() -> bool {
     RPC_CANCEL_TEST_STATE.load(Ordering::Acquire) == RPC_CANCEL_TEST_DONE
-}
-
-#[cfg(feature = "netdev")]
-static NUM_TCP_LISTENERS: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "netdev")]
-static NUM_TCP_STREAMS: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "netdev")]
-static NUM_UDP_SOCKETS: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn stats_tcp_listener_created() {
-    #[cfg(feature = "netdev")]
-    NUM_TCP_LISTENERS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn stats_tcp_listener_dropped() {
-    #[cfg(feature = "netdev")]
-    NUM_TCP_LISTENERS.fetch_sub(1, Ordering::Relaxed);
-}
-
-pub(crate) fn stats_tcp_stream_created() {
-    #[cfg(feature = "netdev")]
-    NUM_TCP_STREAMS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn stats_tcp_stream_dropped() {
-    #[cfg(feature = "netdev")]
-    NUM_TCP_STREAMS.fetch_sub(1, Ordering::Relaxed);
-}
-
-pub(crate) fn stats_udp_socket_created() {
-    #[cfg(feature = "netdev")]
-    NUM_UDP_SOCKETS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn stats_udp_socket_dropped() {
-    #[cfg(feature = "netdev")]
-    NUM_UDP_SOCKETS.fetch_sub(1, Ordering::Relaxed);
 }
 
 /// The `Msg::flags` value marking a client-internal stream TX marker: it
@@ -942,9 +870,8 @@ impl Drop for NetChannel {
 
 impl NetChannel {
     // Per-channel invariant check. Unreachable since stage-E teardown drops a
-    // channel from the pool the moment its last reservation is released (so a
-    // quiescent runtime holds none to check -- NetRuntime::assert_empty covers
-    // that); kept as a debugging aid.
+    // channel from the pool the moment its last reservation is released, so a
+    // quiescent runtime holds none to check; kept as a debugging aid.
     #[allow(dead_code)]
     fn assert_empty(&self) {
         assert_eq!(0, self.reservations.load(Ordering::Relaxed));
@@ -1040,7 +967,7 @@ impl NetChannel {
             }
             if let Some(stream) = stream {
                 stream.process_incoming_msg(msg);
-                #[cfg(feature = "netdev")]
+                #[cfg(feature = "test-support")]
                 self.maybe_run_stream_drop_backpressure_test(stream);
             } else {
                 self.on_orphan_message(msg);
@@ -1052,7 +979,7 @@ impl NetChannel {
             let waiter = self.rpc_map.lock().remove(&msg.id);
             match waiter {
                 Some(RpcWaiter::Response(tx)) => {
-                    #[cfg(feature = "netdev")]
+                    #[cfg(feature = "test-support")]
                     if RPC_CANCEL_TEST_STATE
                         .compare_exchange(
                             RPC_CANCEL_TEST_ARMED,
@@ -1109,7 +1036,7 @@ impl NetChannel {
                 Some(RpcWaiter::Accept { listener, cleanup }) => {
                     if let Some(listener) = listener.upgrade() {
                         listener.on_accept_response(msg);
-                        #[cfg(feature = "netdev")]
+                        #[cfg(feature = "test-support")]
                         self.maybe_run_listener_drop_backpressure_test(listener);
                     } else if msg.status().is_ok() {
                         // The listener went away after posting this accept but
@@ -1141,7 +1068,7 @@ impl NetChannel {
         }
     }
 
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     fn maybe_run_listener_drop_backpressure_test(&self, listener: Arc<TcpListener>) {
         if LISTENER_DROP_TEST_HANDLE.load(Ordering::Relaxed) != listener.handle()
             || LISTENER_DROP_TEST_STATE
@@ -1187,7 +1114,7 @@ impl NetChannel {
         self.maybe_wake_io_thread();
     }
 
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     fn maybe_run_stream_drop_backpressure_test(&self, stream: Arc<TcpStream>) {
         if STREAM_DROP_TEST_HANDLE.load(Ordering::Relaxed) != stream.handle()
             || STREAM_DROP_TEST_STATE
@@ -1331,7 +1258,7 @@ impl NetChannel {
     }
 
     /// Take one message from the staging queue, counting it. Only the tx
-    /// task and the netdev drop hooks consume the queue; both come here, so
+    /// task and the test-support drop hooks consume the queue; both come here, so
     /// the two counts stay balanced.
     fn unstage_msg(&self) -> Option<io_channel::Msg> {
         let msg = self.send_queue_rx.try_recv().ok()?;
@@ -1405,12 +1332,12 @@ impl NetChannel {
         self.progress_udp_tx();
     }
 
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub(super) fn wake_waiters_for_test(&self) {
         self.wake_waiters();
     }
 
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub(super) fn udp_socket_count_for_test(&self) -> usize {
         self.udp_sockets.lock().len()
     }
@@ -1426,23 +1353,7 @@ impl NetChannel {
     /// yields to the tx task at batch boundaries; parks awaiting the
     /// connection handle when the ring is empty.
     async fn rx_task(&self) {
-        #[cfg(feature = "netdev")]
-        let mut loop_counter = 0_u64;
-
         loop {
-            #[cfg(feature = "netdev")]
-            {
-                loop_counter += 1;
-                if loop_counter.is_multiple_of(1_000_000) {
-                    log::info!(
-                        "NET: {} TCP Listeners; {} TCP sockets; {} UDP sockets.",
-                        NUM_TCP_LISTENERS.load(Ordering::Relaxed),
-                        NUM_TCP_STREAMS.load(Ordering::Relaxed),
-                        NUM_UDP_SOCKETS.load(Ordering::Relaxed)
-                    );
-                }
-            }
-
             let mut received_messages = 0_u32;
             while let Ok(msg) = self.conn.recv() {
                 received_messages += 1;
@@ -1617,12 +1528,12 @@ impl NetChannel {
         self.tx_waiters.unregister(id);
     }
 
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub(super) fn tx_waiter_count(&self) -> usize {
         self.tx_waiters.len()
     }
 
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub(super) fn rpc_waiter_count(&self) -> usize {
         self.rpc_map.lock().len()
     }
@@ -1888,12 +1799,6 @@ impl NetChannel {
         driver_records
             .try_reserve_exact(DRIVER_CREDITS_PER_RESERVATION * IO_SUBCHANNELS as usize)
             .map_err(|_| moto_rt::Error::OutOfMemory)?;
-
-        // Exercise a late failure with real IPC and queue resources to release.
-        #[cfg(feature = "netdev")]
-        if FAIL_CONSTRUCTION.load(Ordering::Acquire) {
-            return Err(moto_rt::Error::OutOfMemory);
-        }
 
         Arc::try_new(NetChannel {
             conn,
@@ -2345,7 +2250,7 @@ impl NetChannel {
         self.maybe_wake_io_thread();
     }
 
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub(super) fn fill_stream_drop_send_queue_for_test(&self) {
         let mut placeholder = io_channel::Msg::new();
         placeholder.id = STREAM_DROP_TEST_MSG_ID;

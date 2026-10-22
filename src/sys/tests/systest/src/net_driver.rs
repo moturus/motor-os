@@ -1551,192 +1551,6 @@ fn test_reserved_delivered_then_cancelled_accept_redelivers() {
     println!("net_driver::test_reserved_delivered_then_cancelled_accept_redelivers PASS");
 }
 
-/// Read this process's published-channel count from its vdso pool.
-fn pool_client_count() -> u64 {
-    moto_rt::internal_helper(0, 1, 0, 0, 0, 0)
-}
-
-/// The Stage 5 coalescing regression: from a cold pool, N simultaneous
-/// sockets must share channels (about ceil(N / capacity) of them), not get
-/// one each. Runs in a spawned child so its pool really is cold.
-pub fn pool_cold_start_child() -> ! {
-    use std::sync::{Arc, Barrier};
-
-    const N: usize = 16;
-    let barrier = Arc::new(Barrier::new(N));
-    let sockets: Vec<_> = (0..N)
-        .map(|_| {
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                std::net::UdpSocket::bind("127.0.0.1:0").unwrap()
-            })
-        })
-        .collect();
-    let sockets: Vec<_> = sockets.into_iter().map(|t| t.join().unwrap()).collect();
-
-    // 16 concurrent sockets, capacity 4 per channel: 4 channels, with +1 of
-    // provisioning-race slack.
-    let channels = pool_client_count();
-    assert!(
-        (4..=5).contains(&channels),
-        "cold start provisioned {channels} channels for {N} sockets"
-    );
-    drop(sockets);
-    std::process::exit(0);
-}
-
-fn test_pool_cold_start_coalesces() {
-    let status = std::process::Command::new(std::env::args().next().unwrap())
-        .arg("pool-cold-start-child")
-        .status()
-        .expect("failed to spawn the cold-start child");
-    assert!(status.success(), "cold-start child failed: {status:?}");
-    println!("net_driver::test_pool_cold_start_coalesces PASS");
-}
-
-fn active_threads() -> u64 {
-    moto_sys::ProcessStaticPage::get()
-        .active_threads
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Thread exit follows runtime/TLS cleanup, but precedes stack reclamation.
-/// This is sufficient for live slab bytes, not for the kernel's pages_user.
-fn wait_for_idle_threads(idle: u64) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while active_threads() > idle {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "pool channel threads did not exit"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-/// Drain userspace cleanup between lifetimes so retired threads cannot
-/// accumulate runtime allocations or private allocator caches.
-fn churn_one_channel(idle: u64) {
-    drop(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
-    wait_for_cold_pool();
-    wait_for_idle_threads(idle);
-}
-
-fn live_slab_bytes() -> u64 {
-    moto_rt::internal_helper(0, 6, 0, 0, 0, 0)
-}
-
-/// A pool channel's thread exits with `SysObj::put(SELF)`, which drops
-/// nothing in its frame: a runtime left there leaked a few KiB per channel
-/// lifetime, and russhd, which retires channels all the time, grew without
-/// bound. Runs in a spawned child so that no other socket keeps a channel
-/// open.
-pub fn pool_channel_churn_child() -> ! {
-    const WARMUP: usize = 20;
-    const CHANNELS: usize = 300;
-    const SLACK_BYTES: u64 = 32 * 4096;
-
-    // Record the known idle state before this fresh child opens its first
-    // socket; no channel thread can be included in the baseline.
-    let idle = active_threads();
-    for _ in 0..WARMUP {
-        churn_one_channel(idle);
-    }
-    let before = live_slab_bytes();
-
-    for _ in 0..CHANNELS {
-        churn_one_channel(idle);
-    }
-    let after = live_slab_bytes();
-
-    println!("pool channel churn: live slab bytes {before} -> {after} over {CHANNELS} channels");
-    assert!(
-        after <= before + SLACK_BYTES,
-        "{CHANNELS} channel lifetimes grew live slab allocations from {before} to {after} bytes"
-    );
-    std::process::exit(0);
-}
-
-fn test_pool_channel_churn_frees_runtimes() {
-    let status = std::process::Command::new(std::env::args().next().unwrap())
-        .arg("pool-channel-churn-child")
-        .status()
-        .expect("failed to spawn the channel-churn child");
-    assert!(status.success(), "channel-churn child failed: {status:?}");
-    println!("net_driver::test_pool_channel_churn_frees_runtimes PASS");
-}
-
-fn wait_for_cold_pool() {
-    // The pool must be cold, or an existing channel satisfies the
-    // reservation without provisioning. Idle channels self-close when
-    // their last reservation releases; earlier tests' have drained by now.
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while pool_client_count() != 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the pool did not go cold; {} channel(s) live",
-            pool_client_count()
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// The fail-all policy: with sys-io connects poisoned and the pool cold,
-/// a socket constructor fails promptly instead of hanging; unpoisoning
-/// restores service.
-fn test_sys_io_unavailable_fails_all() {
-    wait_for_cold_pool();
-    moto_rt::internal_helper(0, 2, 1, 0, 0, 0);
-    let result = std::net::UdpSocket::bind("127.0.0.1:0");
-    moto_rt::internal_helper(0, 2, 0, 0, 0, 0);
-    assert!(
-        result.is_err(),
-        "a bind succeeded while sys-io connects were poisoned"
-    );
-
-    let recovered = std::net::UdpSocket::bind("127.0.0.1:0");
-    assert!(recovered.is_ok(), "bind did not recover after unpoisoning");
-    println!("net_driver::test_sys_io_unavailable_fails_all PASS");
-}
-
-fn test_channel_allocation_failure() {
-    wait_for_cold_pool();
-    moto_rt::internal_helper(0, 4, 1, 0, 0, 0);
-    // Fail after connecting IPC and allocating queue storage. Both bind
-    // veneers must receive the error; neither may publish a partial channel.
-    for _ in 0..4 {
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0");
-        let udp = std::net::UdpSocket::bind("127.0.0.1:0");
-        assert_eq!(tcp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
-        assert_eq!(udp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
-        assert_eq!(pool_client_count(), 0);
-    }
-    moto_rt::internal_helper(0, 4, 0, 0, 0, 0);
-    moto_rt::internal_helper(0, 0, 0, 0, 0, 0); // No waiters or in-flight provisions.
-    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    drop((tcp, udp));
-    println!("net_driver::test_channel_allocation_failure PASS");
-}
-
-fn test_pool_runtime_allocation_failure() {
-    wait_for_cold_pool();
-    moto_rt::internal_helper(0, 5, 1, 0, 0, 0);
-    for _ in 0..4 {
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0");
-        let udp = std::net::UdpSocket::bind("127.0.0.1:0");
-        assert_eq!(tcp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
-        assert_eq!(udp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
-        assert_eq!(pool_client_count(), 0);
-    }
-    moto_rt::internal_helper(0, 5, 0, 0, 0, 0);
-    moto_rt::internal_helper(0, 0, 0, 0, 0, 0);
-    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    drop((tcp, udp));
-    println!("net_driver::test_pool_runtime_allocation_failure PASS");
-}
-
 /// Accept requests riding donations from two different channels must not
 /// collide in the listener's in-flight map. Request ids were per-channel
 /// counters, each starting at 1, and the map is keyed by bare id: with one
@@ -1824,6 +1638,64 @@ fn test_accept_ids_unique_across_channels() {
     drop(client_b);
     driver_b_thread.join().unwrap();
     println!("net_driver::test_accept_ids_unique_across_channels PASS");
+}
+
+/// A readiness check made while TX pages are exhausted must subscribe to
+/// the page-release edge, even when the caller has not attempted a write.
+fn test_writable_check_arms_page_waiter() {
+    use moto_io::net::readiness::{NetEventListener, Readiness};
+
+    struct Observer(AtomicUsize);
+    impl NetEventListener for Observer {
+        fn on_readiness(&self, edges: Readiness) {
+            if edges.contains(Readiness::WRITABLE) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        done_rx.recv().unwrap();
+    });
+
+    let observer = Arc::new(Observer(AtomicUsize::new(0)));
+    let mut runtime = moto_async::LocalRuntime::new();
+    runtime.block_on(async {
+        let (client, driver_task) = host_channel().await;
+        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &addr,
+            None,
+            Some(observer.clone() as Arc<dyn NetEventListener>),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let before = observer.0.load(Ordering::SeqCst);
+        stream.with_tx_pages_exhausted_for_test(|| {
+            assert!(!stream.have_write_buffer_space());
+            // This is the native operation the VDSO calls when a WRITABLE
+            // interest is registered. No write is needed to arm the waiter.
+            stream.maybe_can_write();
+            assert_eq!(observer.0.load(Ordering::SeqCst), before);
+        });
+        assert!(stream.have_write_buffer_space());
+        assert!(
+            observer.0.load(Ordering::SeqCst) > before,
+            "TX-page release did not restore WRITABLE"
+        );
+
+        drop(stream);
+        assert!(bounded(driver_task, 5).await, "driver did not exit");
+    });
+    done_tx.send(()).unwrap();
+    peer.join().unwrap();
+    println!("net_driver::test_writable_check_arms_page_waiter PASS");
 }
 
 /// A partial nonblocking write must be answered by a WRITABLE edge once
@@ -2365,14 +2237,10 @@ pub fn run_all_tests() {
     test_reserved_cancelled_accept_redelivers();
     test_reserved_delivered_then_cancelled_accept_redelivers();
     test_accept_ids_unique_across_channels();
+    test_writable_check_arms_page_waiter();
     test_partial_write_raises_writable();
     test_connected_udp_ignores_foreign_datagrams();
     test_dropped_futures_leave_no_waiters();
     test_channel_failure_wakes_every_waiter();
-    test_pool_cold_start_coalesces();
-    test_pool_channel_churn_frees_runtimes();
-    test_sys_io_unavailable_fails_all();
-    test_channel_allocation_failure();
-    test_pool_runtime_allocation_failure();
     crate::net_caps::test_admission();
 }

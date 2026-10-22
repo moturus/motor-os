@@ -24,6 +24,5 @@ crossbeam       = { version = "0.8.4", default-features = false }
 log             = "0.4.28"
 
 [features]
-# Extra runtime checks/assertions (net leak checks), mirrored from the vdso's
-# feature of the same name; wired on by the vdso's `netdev`.
-netdev = []
+# Hooks used only by systest's own networking instance.
+test-support = []

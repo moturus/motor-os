@@ -133,9 +133,9 @@ take the difference.
   (`TMPDIR=/user/tmp MOTOR_OS_CAPS=0x3cc systest`) and grep them out.
 * Reproducers and probes, also `systest` subcommands: `listener-exhaustion-probe [cap]`
   floods listeners and prints sys-io's page counts stage by stage;
-  `test-tcp-shutdown-repro`, `mio-accept-pump-repro`, `stdio-poll-stress`
-  and `udp-rebind-soak` drive the shapes of specific past bugs. Their doc
-  comments in `src/sys/tests/systest/src` say what each one exercises.
+  `test-tcp-shutdown-repro`, `stdio-poll-stress` and `udp-rebind-soak`
+  drive the shapes of specific past bugs. Their doc comments in
+  `src/sys/tests/systest/src` say what each one exercises.
 
 ## Observing a running system
 

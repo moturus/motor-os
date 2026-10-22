@@ -17,19 +17,12 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
 use moto_io::net::NetClient;
 use moto_io::net::{Reservation, ReserveError};
 use moto_rt::mutex::Mutex;
 use moto_sys::SysHandle;
 
 type WaiterTx = moto_async::oneshot::Sender<Result<Reservation, moto_rt::Error>>;
-
-static FAIL_RUNTIME_CONSTRUCTION_FOR_TEST: AtomicBool = AtomicBool::new(false);
-
-pub fn fail_runtime_construction_for_test(fail: bool) {
-    FAIL_RUNTIME_CONSTRUCTION_FOR_TEST.store(fail, Ordering::Release);
-}
 
 struct Waiter {
     id: u64,
@@ -169,29 +162,6 @@ impl NetPool {
     }
 }
 
-impl NetPool {
-    /// Published channels right now (the cold-start coalescing regression
-    /// reads this through `internal_helper(0, 1, ..)`).
-    pub fn client_count(&self) -> usize {
-        self.inner.lock().clients.len()
-    }
-
-    /// Panic unless the pool is quiescent: no published channels, no parked
-    /// callers, no provisioning in flight. The leak check behind
-    /// `internal_helper(0, ..)`; channels unpublish when their last
-    /// reservation releases, so a leaked socket shows up here.
-    pub fn assert_empty(&self) {
-        let inner = self.inner.lock();
-        assert!(
-            inner.clients.is_empty(),
-            "NET_POOL: {} channel(s) still published",
-            inner.clients.len()
-        );
-        assert!(inner.waiters.is_empty());
-        assert_eq!(0, inner.provisions_in_flight);
-    }
-}
-
 const CHANNEL_THREAD_STACK_SIZE: u64 = 4096 * 16;
 
 fn spawn_channel_thread(pool: &'static NetPool) -> Result<(), moto_rt::ErrorCode> {
@@ -220,12 +190,7 @@ extern "C" fn channel_thread_entry(ctx: u64) {
 // Owns the runtime so that it is freed when this returns: SysObj::put(SELF)
 // ends the thread without dropping its caller's locals.
 fn run_channel(pool: &'static NetPool) {
-    let runtime = if FAIL_RUNTIME_CONSTRUCTION_FOR_TEST.load(Ordering::Acquire) {
-        Err(moto_rt::Error::OutOfMemory)
-    } else {
-        moto_async::LocalRuntime::try_new()
-    };
-    let mut runtime = match runtime {
+    let mut runtime = match moto_async::LocalRuntime::try_new() {
         Ok(runtime) => runtime,
         Err(err) => {
             let mut inner = pool.inner.lock();

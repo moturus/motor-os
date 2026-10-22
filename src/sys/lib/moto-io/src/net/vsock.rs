@@ -363,11 +363,7 @@ impl VsockStream {
             Ok(decoded) => decoded,
             Err(error) => {
                 if response.handle != 0 {
-                    let credit = self
-                        .channel_reservation
-                        .as_ref()
-                        .unwrap()
-                        .driver_credit();
+                    let credit = self.channel_reservation.as_ref().unwrap().driver_credit();
                     self.channel()
                         .enqueue_control(credit, api_vsock::close_request(response.handle));
                 }

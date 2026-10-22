@@ -176,8 +176,6 @@ impl Drop for TcpListener {
 
         self.channel().tcp_listener_dropped(self.handle);
 
-        super::channel::stats_tcp_listener_dropped();
-
         // Transfer both the close and the reservation to the driver. Drop
         // never waits for staging/ring room, and the reservation keeps this
         // channel alive until sys-io accepts the close.
@@ -324,13 +322,13 @@ impl TcpListener {
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn channel_tx_waiter_count_for_test(&self) -> usize {
         self.channel().tx_waiter_count()
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn channel_rpc_waiter_count_for_test(&self) -> usize {
         self.channel().rpc_waiter_count()
     }
@@ -400,7 +398,6 @@ impl TcpListener {
             me: me.clone(),
         });
         tcp_listener.channel().tcp_listener_created(&tcp_listener);
-        crate::net::channel::stats_tcp_listener_created();
 
         log::debug!("new TcpListener {:?}", tcp_listener.socket_addr);
 
@@ -571,7 +568,6 @@ impl TcpListener {
             error: AtomicU16::new(moto_rt::E_OK),
             pending_tx: PendingStreamTx::new(),
         });
-        crate::net::channel::stats_tcp_stream_created();
 
         new_stream.channel().tcp_stream_created(&new_stream);
         // Now we can remove the queue.
@@ -836,7 +832,6 @@ impl Drop for TcpStream {
     fn drop(&mut self) {
         let handle = self.handle.load(Ordering::Acquire);
         if handle == 0 {
-            super::channel::stats_tcp_stream_dropped();
             return;
         }
 
@@ -866,7 +861,6 @@ impl Drop for TcpStream {
         assert!(self.recv_queue.lock().is_empty());
 
         channel.tcp_stream_dropped(self.handle());
-        super::channel::stats_tcp_stream_dropped();
 
         if channel.is_failed() {
             drop(reservation);
@@ -945,20 +939,20 @@ impl TcpStream {
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn rx_waiter_count(&self) -> usize {
         self.rx_waiters.len()
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn tx_waiter_count(&self) -> usize {
         self.channel().tx_waiter_count()
     }
 
-    /// Run a netdev test while this stream has no allocatable TX pages.
+    /// Run a test while this stream has no allocatable TX pages.
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn with_tx_pages_exhausted_for_test(&self, f: impl FnOnce()) {
         let mut pages = alloc::vec::Vec::new();
         while let Ok(page) = self.channel().alloc_page(self.subchannel_mask) {
@@ -970,7 +964,7 @@ impl TcpStream {
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn fill_stream_drop_send_queue_for_test(&self) {
         self.channel().fill_stream_drop_send_queue_for_test();
     }
@@ -1152,7 +1146,6 @@ impl TcpStream {
             error: AtomicU16::new(moto_rt::E_OK),
             pending_tx: PendingStreamTx::new(),
         });
-        super::channel::stats_tcp_stream_created();
 
         (new_stream, req)
     }

@@ -26,8 +26,8 @@ pub struct UdpSocket {
     // Taken by close(), which transfers it to the teardown record carrying
     // the socket's release; the channel stays alive through `channel` above.
     channel_reservation: Mutex<Option<ChannelReservation>>,
-    // Only the netdev page-exhaustion test reads it today.
-    #[cfg_attr(not(feature = "netdev"), allow(dead_code))]
+    // The production TX queue owns its own copy of the mask.
+    #[cfg(feature = "test-support")]
     subchannel_mask: u64,
     local_addr: SocketAddr,
     handle: u64,
@@ -119,10 +119,6 @@ impl UdpSocket {
         } else {
             self.channel.enqueue_teardown(reservation, req);
         }
-
-        // Balance stats_udp_socket_created(): the decrement was missing, which
-        // stage-E's assert_empty (now checking num_udp_sockets) would trip on.
-        crate::net::channel::stats_udp_socket_dropped();
     }
 
     /// Discard the datagrams the socket never handed to the channel, and
@@ -249,6 +245,7 @@ impl UdpSocket {
             channel_reservation: Mutex::new(Some(channel_reservation)),
             handle: resp.handle,
             event_listener,
+            #[cfg(feature = "test-support")]
             subchannel_mask,
             tx_queue: Mutex::new(UdpFragmentingQueue::new_tx(resp.handle, subchannel_mask)),
             peer_addr: Mutex::new(None),
@@ -259,7 +256,6 @@ impl UdpSocket {
             me: me.clone(),
         });
         udp_socket.channel().udp_socket_created(&udp_socket);
-        crate::net::channel::stats_udp_socket_created();
 
         log::debug!(
             "new UdpSocket 0x{:x} addr {:?}",
@@ -599,32 +595,32 @@ impl UdpSocket {
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn rx_waiter_count(&self) -> usize {
         self.rx_waiters.len()
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn tx_waiter_count(&self) -> usize {
         self.tx_waiters.len()
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn channel_udp_socket_count_for_test(&self) -> usize {
         self.channel().udp_socket_count_for_test()
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn inject_empty_rx_for_test(&self, source: SocketAddr) {
         self.process_incoming_msg(api_net::udp_socket_tx_rx_empty_msg(self.handle, &source));
     }
 
-    /// Run a netdev test while this socket has no allocatable TX pages.
+    /// Run a test while this socket has no allocatable TX pages.
     #[doc(hidden)]
-    #[cfg(feature = "netdev")]
+    #[cfg(feature = "test-support")]
     pub fn with_tx_pages_exhausted_for_test(&self, f: impl FnOnce()) {
         let mut pages = alloc::vec::Vec::new();
         while let Ok(page) = self.channel().alloc_page(self.subchannel_mask) {
