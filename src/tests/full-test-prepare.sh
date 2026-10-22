@@ -74,6 +74,8 @@ host_build --manifest-path "$ROOT_DIR/src/sys/sys-init/Cargo.toml"
 host_build --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
 host_build --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
 host_build --no-default-features --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
+# Fetches and builds what test-sdk-package.sh then runs offline.
+bash "$WD/test-sdk-package.sh" --prepare "${profile_args[@]}"
 host_build --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
 # The same feature closure full-test.sh tests the netstack under: a different
 # one compiles different code, and would be built again by the suite.

@@ -1,8 +1,8 @@
 # moto-sdk: one published crate for Motor OS userspace services
 
-Status: plan, revised 2026-10-22. Preparatory steps (a), (b), and (c) are
-committed. The merge (step 3) is done in the working tree and passed its gate
-(2026-10-22); it is not committed.
+Status: plan, revised 2026-10-22. Preparatory steps (a), (b), and (c) and the
+merge (step 3) are committed. The package gate (step 4) is in the working
+tree; it is not committed.
 Owner rulings of 2026-10-20:
 crates under `src/sys` reference each other by path; every other crate (in
 `src/bin`, `src/tests`, the forks, the toolchain) takes Motor OS crates from
@@ -316,6 +316,18 @@ registry inputs during preparation; regular tests use cached inputs and locked,
 offline resolution. Local moto-rt is already 0.17.9; verify builds against its
 published version rather than scheduling a version-number sync. moto-sys is
 0.3.2.
+
+`src/tests/test-sdk-package.sh` is this gate. It packages moto-sdk, extracts
+the `.crate` under `build/` and builds it there on its own. On Unix the tests
+run. On Motor OS it builds with `std` (compiling the tests, the re-export
+check among them), with `std` and `test-support`, and with only core and
+alloc. The native tests themselves run in the tree, under `full-test-dev.sh`.
+`src/tests/sdk-package/Cargo.lock` pins the build. Every package in it comes
+from crates.io, and each direct dependency is at the lowest version the
+manifest allows (Cargo's `-Zdirect-minimal-versions`). The script checks
+both, so the declared floors are what is tested. After a dependency change,
+`test-sdk-package.sh --update-lock` writes a new lock. `full-test-prepare.sh`
+fetches and builds; `full-test.sh` then runs it offline and locked.
 
 ## Preparatory steps
 

@@ -318,6 +318,8 @@ else
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
   cargo test --quiet --no-default-features --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
 fi
+# The SDK as crates.io would ship it, built against registry dependencies.
+bash "$WD/test-sdk-package.sh" "${profile_args[@]}"
 
 # The allocator crate (kernel heap and runtime) is host-tested. Release
 # covers the full stress and concurrency step counts.
