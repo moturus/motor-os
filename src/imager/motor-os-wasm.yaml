@@ -48,6 +48,7 @@ assembly_required_executables:
   - "javy/devtools/bin/javy"
   - "javy/devtools/bin/wasmi"
   - "wasmtime/devtools/bin/wasmtime-rt"
+ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
 filesystem: "motor-fs"
 img_name: "motor-os-wasm.qcow2"
 image_format: "qcow2"

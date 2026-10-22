@@ -33,6 +33,8 @@ const SECTOR_SIZE: u32 = 512;
 
 const SOURCE_TREE_EXCLUDED_DIRS: [&str; 4] = [".git", ".lorry", "__pycache__", "target"];
 
+const CA_BUNDLE_DESTINATION: &str = "/system/cfg/ssl/ca-certificates.crt";
+
 #[derive(Debug, Deserialize)]
 struct SourceDirectory {
     source: String,
@@ -53,6 +55,8 @@ struct Config {
     assembly_required_executables: Vec<String>,
     #[serde(default)]
     source_dirs: Vec<SourceDirectory>,
+    #[serde(default)]
+    ca_bundle: Option<String>,
     filesystem: String,
     data_partition_size_mb: u64,
     img_name: String,
@@ -449,6 +453,55 @@ fn add_source_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, de
     add_dir(files, dir_to_add, dest_path, &SOURCE_TREE_EXCLUDED_DIRS);
 }
 
+// The host bundle becomes the guest trust store, replacing any static file there.
+fn add_ca_bundle(files: &mut BTreeMap<PathBuf, String>, bundle: &Path) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    let error = |reason: String| format!("CA bundle '{}': {reason}", bundle.display());
+    let source = fs::canonicalize(bundle).map_err(|e| error(e.to_string()))?;
+    let pem = fs::read_to_string(&source).map_err(|e| error(e.to_string()))?;
+    let certificates = count_pem_certificates(&pem).map_err(error)?;
+    println!(
+        "CA bundle {} has {certificates} certificates and SHA-256 {:x}.",
+        bundle.display(),
+        Sha256::digest(pem.as_bytes())
+    );
+
+    files.retain(|_, destination| destination != CA_BUNDLE_DESTINATION);
+    files.insert(source, CA_BUNDLE_DESTINATION.to_owned());
+    Ok(())
+}
+
+// Text outside PEM blocks is allowed, as in p11-kit bundles; non-certificate blocks are not.
+fn count_pem_certificates(pem: &str) -> Result<usize, String> {
+    let mut certificates = 0;
+    // Inside a certificate: whether it has data yet.
+    let mut open: Option<bool> = None;
+    for (index, line) in pem.lines().map(str::trim_end).enumerate() {
+        let invalid = |what: &str| Err(format!("line {}: {what}", index + 1));
+        let base64 = !line.is_empty()
+            && line
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+        match (open, line) {
+            (None, "-----BEGIN CERTIFICATE-----") => open = Some(false),
+            (None, _) if line.starts_with("-----") => return invalid("not a certificate block"),
+            (None, _) => {}
+            (Some(true), "-----END CERTIFICATE-----") => {
+                certificates += 1;
+                open = None;
+            }
+            (Some(_), _) if base64 => open = Some(true),
+            (Some(_), _) => return invalid("malformed certificate"),
+        }
+    }
+    match (open, certificates) {
+        (Some(_), _) => Err("unterminated certificate".to_owned()),
+        (None, 0) => Err("no certificates".to_owned()),
+        (None, count) => Ok(count),
+    }
+}
+
 fn resolve_image_files(
     files: &BTreeMap<PathBuf, String>,
     directories: &[String],
@@ -787,6 +840,9 @@ fn main() {
         validate_directories(std::slice::from_ref(&dir.destination))
             .unwrap_or_else(|error| panic!("source image destination: {error}"));
         add_source_dir(&mut files, path, destination);
+    }
+    if let Some(bundle) = &config.ca_bundle {
+        add_ca_bundle(&mut files, &motorh.join(bundle)).unwrap_or_else(|error| panic!("{error}"));
     }
 
     let files = resolve_image_files(&files, &config.directories, &policy).unwrap_or_else(|error| {
@@ -1149,18 +1205,93 @@ mod tests {
             .any(|path| path == "/user/cfg/ssh"));
     }
 
+    const IMAGE_CONFIGS: [&str; 6] = [
+        include_str!("../motor-os-base.yaml"),
+        include_str!("../motor-os.yaml"),
+        include_str!("../motor-os-dev.yaml"),
+        include_str!("../motor-os-wasm.yaml"),
+        include_str!("../motor-os-system-tty.yaml"),
+        include_str!("../motor-os-vsock-test.yaml"),
+    ];
+
+    const TEST_CERTIFICATE: &str =
+        include_str!("../../../img_files/motor-os-base/system/cfg/ssl/ssl-cert.pem");
+
     #[test]
     fn every_image_config_requires_the_shared_policy() {
-        for yaml in [
-            include_str!("../motor-os-base.yaml"),
-            include_str!("../motor-os.yaml"),
-            include_str!("../motor-os-dev.yaml"),
-            include_str!("../motor-os-wasm.yaml"),
-            include_str!("../motor-os-system-tty.yaml"),
-            include_str!("../motor-os-vsock-test.yaml"),
-        ] {
+        for yaml in IMAGE_CONFIGS {
             let config: Config = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
+        }
+    }
+
+    #[test]
+    fn every_image_takes_the_host_ca_bundle() {
+        for yaml in IMAGE_CONFIGS {
+            let config: Config = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(
+                config.ca_bundle.as_deref(),
+                Some("/etc/ssl/certs/ca-certificates.crt")
+            );
+        }
+    }
+
+    #[test]
+    fn host_ca_bundle_replaces_a_static_trust_store() {
+        let root =
+            std::env::temp_dir().join(format!("motor-imager-ca-test-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(root.join("static/system/cfg/ssl")).unwrap();
+        fs::write(
+            root.join("static/system/cfg/ssl/ca-certificates.crt"),
+            "stale\n",
+        )
+        .unwrap();
+        fs::write(root.join("host.pem"), TEST_CERTIFICATE).unwrap();
+
+        let mut files = BTreeMap::new();
+        add_static_dir(&mut files, root.join("static"), Path::new("/"));
+        add_ca_bundle(&mut files, &root.join("host.pem")).unwrap();
+        assert_eq!(
+            files.into_iter().collect::<Vec<_>>(),
+            [(
+                root.join("host.pem").canonicalize().unwrap(),
+                CA_BUNDLE_DESTINATION.to_owned()
+            )]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_ca_bundle_is_required() {
+        let missing = std::env::temp_dir().join(format!(
+            "motor-imager-missing-ca-test-{}",
+            std::process::id()
+        ));
+        let mut files = BTreeMap::new();
+        assert!(add_ca_bundle(&mut files, &missing).is_err());
+        assert!(add_ca_bundle(&mut files, &std::env::temp_dir()).is_err());
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn ca_bundles_hold_only_certificates() {
+        assert_eq!(count_pem_certificates(TEST_CERTIFICATE), Ok(1));
+        let labeled = format!("# First\n{TEST_CERTIFICATE}\n# Second\r\n{TEST_CERTIFICATE}");
+        assert_eq!(count_pem_certificates(&labeled), Ok(2));
+
+        let key = "-----BEGIN PRIVATE KEY-----\nMC4CAQAw\n-----END PRIVATE KEY-----\n";
+        for invalid in [
+            String::new(),
+            "# no certificates\n".to_owned(),
+            format!("{TEST_CERTIFICATE}{key}"),
+            TEST_CERTIFICATE.replace("-----END CERTIFICATE-----", ""),
+            "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n".to_owned(),
+            "-----BEGIN CERTIFICATE-----\nMII!\n-----END CERTIFICATE-----\n".to_owned(),
+        ] {
+            assert!(count_pem_certificates(&invalid).is_err(), "{invalid}");
         }
     }
 

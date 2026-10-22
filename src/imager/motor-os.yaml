@@ -38,6 +38,7 @@ assembly_dirs:
   - "rg"
 assembly_required_executables:
   - "rg/system/bin/rg"
+ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
 filesystem: "motor-fs"
 img_name: "motor-os.qcow2"
 image_format: "qcow2"

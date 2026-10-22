@@ -99,6 +99,7 @@ descriptions in [`src/imager`](../src/imager), such as `motor-os-base.yaml`,
 | `assembly_dirs` | Optional list of overlay directories relative to `MOTOR_ASSEMBLY_IMAGE_ROOT`. Appended after `static_dirs`. Defaults to empty. |
 | `assembly_required_executables` | Optional executable checks relative to the same assembly root. Defaults to empty. |
 | `source_dirs` | Optional list of `{source, destination}` mappings. Relative host sources use `REPO ROOT`; destinations are absolute guest directories. Defaults to empty. |
+| `ca_bundle` | Optional host PEM file installed as `/system/cfg/ssl/ca-certificates.crt`. Relative paths use `REPO ROOT`. The build fails unless it exists and contains only certificates; text outside PEM blocks is allowed. |
 
 Source snapshots are added after static overlays and exclude `.git`, `.lorry`,
 `__pycache__`, and `target` directories. Static overlays omit `devtools`
@@ -106,6 +107,13 @@ directories unless the configuration declares `/devtools` or a directory
 below it. File modes come from the
 [permission policy](fs-permissions.md#imager-enforcement), not host ownership
 or host read/write permissions.
+
+The CA bundle is added last and replaces any overlay file at its destination.
+Every image configuration names the build host's
+`/etc/ssl/certs/ca-certificates.crt`, so the guest trust store holds exactly
+the roots the host trusted at build time: hosts with different bundles build
+different images, and a rebuild picks up host CA updates. The imager prints
+the bundle's certificate count and SHA-256.
 
 Configurations with assembly inputs require `MOTOR_ASSEMBLY_IMAGE_ROOT` to
 name a normalized absolute host directory. Assembly paths in YAML must be
