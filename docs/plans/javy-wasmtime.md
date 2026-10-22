@@ -27,12 +27,19 @@ Evidence under `build/` is host-local and not required.
   Wasmtime take `moto-rt` and `moto-sys` from crates.io, and Wasmtime's WASI
   filesystem adapter is path-based over `moto-rt` (see
   [Native filesystem](#native-filesystem-clocks-and-networking)). The tree pins
-  the javy and wasmtime revisions it builds in `src/build-addon-sources.sh`.
-  With the current pins, `make BUILD=release`, both add-on builds and
+  the javy and wasmtime revisions it builds in `src/build-addon-sources.sh`;
+  since 2026-10-22 wasmtime is at `633e7de36`: `08a09edea` plus outgoing
+  `wasi-http` TLS that trusts the system CA bundle (see
+  [Fibers, resource limits and HTTP](#fibers-resource-limits-and-http)).
+  With the 2026-10-20 pins, `make BUILD=release`, both add-on builds and
   `full-test.sh --release` pass (2026-10-20, the owner limited the check to
   that); the wasm matrices under QEMU and Cloud Hypervisor passed the same
   morning with wasmtime `08a09edea` and the same Javy content before its
-  rebase. Tree work is on
+  rebase. Wasmtime `633e7de36` has passed only its add-on build,
+  `make images BUILD=release` and a one-off hermetic HTTPS check of its
+  source: it accepts a server certified by a local CA in the image's bundle
+  and refuses one certified outside it, where `08a09edea` refused the first
+  too (2026-10-22, the owner limited testing to small checks). Tree work is on
   the `wasm` branch.
 - **Done: Linux-parity memory limits** (owner rulings 2026-10-18, in
   [the memory contract](#javy-pipeline-and-memory-backing)). Those fork heads
@@ -656,9 +663,15 @@ follows that feature upstream, and Motor sets it to `false` and requires
 regressions, updating/dropping fixtures on rebase only with a recorded upstream
 reason. Do not freeze p3 behavior or promise broader conformance/patch support.
 
-Keep Rustls/Ring validation, WebPKI roots and native clocks/entropy. Test hermetic
+Keep Rustls/Ring validation and native clocks/entropy. Outgoing TLS trusts the
+system bundle `/system/cfg/ssl/ca-certificates.crt`, as curl, gix and Lorry do,
+instead of the WebPKI roots once compiled into `wasmtime-rt` (wasmtime
+`633e7de36`, 2026-10-22; `crates/wasi-tls`, which `wasmtime-rt` does not build,
+still uses them). Images take the bundle from the build host (`ca_bundle` in
+[docs/imager.md](../imager.md)), so a rebuild on an updated host updates the
+roots, and a test image can name a bundle that adds a local CA. Test hermetic
 local-CA success, wrong-name/IP, expired/not-yet-valid and invalid-chain failures,
-plus streaming failure/cancellation. Define root updates; no Internet in regular
+plus streaming failure/cancellation; no Internet in regular
 tests. Add a representative TypeScript HTTP fixture; the command workload and
 small hello/echo servers do not cover it.
 
@@ -1559,10 +1572,11 @@ kills the thread.
    Motor `P3_DEFAULT=false`. Qualify installed default rejection and explicit
    `-S p3` operation, retaining selected p3 regressions with recorded upstream
    reasons. Output: fork/tree tests and any fixes, evidence.
-4. **3d — TLS.** Rustls/Ring with WebPKI roots over native clocks/entropy;
-   hermetic local-CA tests for success, wrong name/IP, expired/not-yet-valid,
-   invalid chain, and streaming failure/cancellation; a documented root-update
-   procedure; no Internet. Output: fork, tree fixtures.
+4. **3d — TLS.** Rustls/Ring over native clocks/entropy, trusting the image's
+   CA bundle (wasmtime `633e7de36`; roots update with the build host, see
+   [docs/imager.md](../imager.md)); hermetic local-CA tests for success, wrong
+   name/IP, expired/not-yet-valid, invalid chain, and streaming
+   failure/cancellation; no Internet. Output: fork, tree fixtures.
 5. **3e — service masks.** Decide the `CAP_LOG` question in the authority
    contract, then test a wasm service started by sys-init with its service mask
    and outbound HTTP grants audited separately from socket grants. Output:

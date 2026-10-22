@@ -11,7 +11,7 @@
 MOTOR_JAVY_BRANCH=motor-9.1.0
 MOTOR_JAVY_REV="${MOTOR_JAVY_REV:-12a6c52d7dbd62056ead74d8ddea3f8a235f278f}"
 MOTOR_WASMTIME_BRANCH=motor-48.0.1
-MOTOR_WASMTIME_REV="${MOTOR_WASMTIME_REV:-08a09edeacd8eb82399f9e4bbbba7d06e7f97292}"
+MOTOR_WASMTIME_REV="${MOTOR_WASMTIME_REV:-633e7de368b913a696e7e15d4f546c55fc2eadaf}"
 
 # "repo:branch" follows the branch head; "repo:branch:revision" builds that
 # revision of the branch.
