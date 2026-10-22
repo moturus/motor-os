@@ -743,8 +743,11 @@ remaining differences from Cargo that may change.</p>
 <p>Lorry builds Motor OS programs on Motor OS. The developer-image test vendors and
 builds red, gears, and then Lorry itself natively in a VM, from the source snapshots
 under <code>/devtools/src</code>, and checks that the freshly linked build scripts carry
-the expected permissions. Lorry's own suite checks that Lorry built natively on Motor OS
-is byte-identical to Lorry cross-built on Linux. Replacing the repository's Cargo-driven
+the expected permissions. It also runs <code>lorry test</code> offline in
+<code>/devtools/src/motor-os/sys/lib</code>, where the image build has already admitted
+the Motor OS libraries staged there and compiled their dependencies. Lorry's own suite
+checks that Lorry built natively on Motor OS is byte-identical to Lorry cross-built on
+Linux. Replacing the repository's Cargo-driven
 build of every component with Lorry is not there yet. Lorry's
 <code>future-work.md</code> lists what remains: the kernel's custom target and its
 build-std needs, the imager's Linux-only dependencies, admission records for the other

@@ -1,4 +1,4 @@
-#![cfg(not(target_os = "motor"))]
+#![cfg(target_os = "motor")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

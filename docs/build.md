@@ -61,6 +61,20 @@ runtime-only `/devtools/bin/wasmtime-rt`, with Javy's default plugin at
 [WebAssembly on Motor OS](wasm.md) for the installed files and the developer
 image's example under `/devtools/src/wasm`.
 
+The developer image also stages Motor OS library sources in
+`/devtools/src/motor-os/sys/lib` for offline native `lorry test` runs. Their
+crates.io dependencies are an add-on too, locked to `src/sys/Cargo.lock`.
+When that lock changes them, refresh the add-on with:
+
+```sh
+src/build-motor-os.sh --sys-lib-deps-only
+```
+
+`make dev.img` then boots the new image once under QEMU to admit that
+workspace and compile its dependencies: about 10 seconds for a release image
+and 4 minutes for a debug one. So it needs the `moto-tap` network below and no
+other running VM.
+
 The wasm image has a 1 GiB data partition and does not include the native
 development toolchain. The full Wasmtime compiler follows in a later milestone.
 

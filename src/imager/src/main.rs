@@ -1045,7 +1045,8 @@ mod tests {
                 "sed",
                 "rust-analyzer",
                 "javy",
-                "wasmtime"
+                "wasmtime",
+                "sys-lib-deps"
             ]
         );
         assert_eq!(config.assembly_required_executables.len(), 16);
@@ -1116,7 +1117,7 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/devtools/tests/gears"));
-        assert_eq!(config.source_dirs.len(), 3);
+        assert_eq!(config.source_dirs.len(), 8);
         for (source, destination) in [
             ("src/bin/red", "/devtools/src/motor-os/bin/red"),
             ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
@@ -1127,10 +1128,26 @@ mod tests {
                 .iter()
                 .any(|dir| dir.source == source && dir.destination == destination));
         }
-        assert!(config
+        // Library sources for native tests mirror the tree below sys/lib, so
+        // their `../moto-rt` path dependencies resolve on the image.
+        let mut library_sources: Vec<_> = config
             .source_dirs
             .iter()
-            .all(|dir| !dir.destination.starts_with("/devtools/src/motor-os/sys")));
+            .filter(|dir| dir.destination.starts_with("/devtools/src/motor-os/sys/"))
+            .map(|dir| {
+                let name = dir.source.strip_prefix("src/sys/lib/").unwrap();
+                assert_eq!(
+                    dir.destination,
+                    format!("/devtools/src/motor-os/sys/lib/{name}")
+                );
+                name
+            })
+            .collect();
+        library_sources.sort_unstable();
+        assert_eq!(
+            library_sources,
+            ["moto-async", "moto-ipc", "moto-mpmc", "moto-rt", "moto-sys"]
+        );
     }
 
     #[test]

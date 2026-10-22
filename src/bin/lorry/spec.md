@@ -1992,8 +1992,11 @@ Generated launchers require no libc permission entry point.
 Lorry's executable does not bootstrap an OS image. Motor's development image
 installs both roles' configurations with the default policy and limits, and
 exact executable-code grants for Lorry's own dependencies in the Interactive
-one. It installs an empty writable repository per role under
-`/devtools/lorry/<role>/vendor`, but no dependency objects: a fresh project must run
+one. It installs a writable repository per role under
+`/devtools/lorry/<role>/vendor`. The only dependency objects and cache entries
+are the Interactive role's, for the Motor OS library sources the image stages
+in `/devtools/src/motor-os/sys/lib`; the image build vendors and compiles that
+workspace with the image's own Lorry. Any other fresh project must run
 networked `vendor` before its offline build. Imager inputs, debug/release image
 selection, VM launch, and layout validation remain outside this product
 boundary.

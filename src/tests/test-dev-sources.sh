@@ -64,6 +64,8 @@ export MOTO_CHV_RUNTIME_DIR="$VM_RUNTIME_DIR/chv"
 DEV_TMP=/user/tmp/dev-sources
 NATIVE_FIXTURE_DIR="$DEV_TMP/native-tests"
 NATIVE_FIXTURES=(native-fstat.c native-temp.c native-temp.cpp)
+SYS_LIB=/devtools/src/motor-os/sys/lib
+SYS_LIB_CRATES=(moto-rt moto-sys moto-mpmc moto-async moto-ipc)
 LORRY_VENDOR_ENV=""
 if [ "$BUILD" = debug ]; then
   LORRY_VENDOR_ENV="LORRY_CURL_STDERR_SPILL_LIMIT_BYTES=104857600"
@@ -142,6 +144,48 @@ expect_nested_guest_mode() {
   done <<< "$paths"
 }
 
+count_guest_files() {
+  local listing
+  listing="$(vm_ssh "/system/bin/find $1 -type f")" || fail "cannot list $1"
+  awk 'NF { files++ } END { print files + 0 }' <<< "$listing"
+}
+
+# The #[test] functions of a staged source file, named as libtest reports them.
+source_tests() {
+  local tests
+  tests="$(awk -v prefix="$2" '
+    /#\[test\]/ { test = 1; next }
+    test && match($0, /fn [a-z0-9_]+\(/) {
+      print prefix substr($0, RSTART + 3, RLENGTH - 4)
+      test = 0
+    }' "$ROOT_DIR/src/sys/lib/$1")"
+  [ -n "$tests" ] || fail "found no tests in src/sys/lib/$1"
+  printf '%s\n' "$tests"
+}
+
+# The native test may compile only the staged sources, plus the build scripts
+# of dependencies, which Lorry never caches. Every test of the three crates
+# must pass. Lorry reports on stderr; the harnesses' results arrive on stdout,
+# not in step with it.
+check_native_tests() {
+  local progress="$1" results="$2" compiled passed expected missing
+  compiled="$(awk -v staged=" ($SYS_LIB/" '
+    /^Compiling / && index($0, staged) == 0 && !/ \[build script\]$/' "$progress")"
+  [ -z "$compiled" ] && ! grep -q '^Rebuilding global dependency cache$' "$progress" ||
+    fail "native lorry test compiled dependencies that make dev.img prepared: $compiled"
+  passed="$(awk '/^test .* \.\.\. ok$/ { print $2 }' "$results")"
+  expected="$(source_tests moto-mpmc/tests/fallible.rs ''
+    source_tests moto-async/tests/fallible.rs ''
+    source_tests moto-async/src/timeq.rs timeq::
+    source_tests moto-ipc/src/stdio_pipe.rs stdio_pipe::tests::)" ||
+    fail "cannot list the tests of $SYS_LIB"
+  # comm matches each line once, so a name both fallible harnesses use must
+  # pass twice.
+  missing="$(LC_ALL=C comm -23 <(LC_ALL=C sort <<< "$expected") \
+    <(LC_ALL=C sort <<< "$passed"))"
+  [ -z "$missing" ] || fail "native tests did not pass: $(tr '\n' ' ' <<< "$missing")"
+}
+
 . "$WD/vm-test-boot-check.sh"
 
 fail() {
@@ -185,8 +229,16 @@ for package in red gears lorry; do
 done
 vm_ssh "[ ! -e /devtools/src/motor-os/bin/curl ]" ||
   fail "developer image exposes curl as a Motor-native source project"
-vm_ssh "[ ! -e /devtools/src/motor-os/sys ]" ||
-  fail "developer image stages Motor OS library sources under /devtools/src/motor-os/sys"
+# make dev.img admitted the staged library sources, compiled their
+# dependencies, and removed the build tree (src/prepare-dev-image.sh).
+for crate in "${SYS_LIB_CRATES[@]}"; do
+  vm_ssh "[ -f $SYS_LIB/$crate/Cargo.toml ]" ||
+    fail "developer image is missing $SYS_LIB/$crate/Cargo.toml"
+done
+for file in Cargo.toml Cargo.lock .lorry/dependencies-v2.toml; do
+  vm_ssh "[ -f $SYS_LIB/$file ]" || fail "developer image is missing $SYS_LIB/$file"
+done
+vm_ssh "[ ! -e $SYS_LIB/target ]" || fail "developer image contains $SYS_LIB/target"
 for source in "${NATIVE_FIXTURES[@]}"; do
   vm_ssh "[ ! -e /devtools/src/$source ]" ||
     fail "developer image contains test-only source /devtools/src/$source"
@@ -196,9 +248,15 @@ for role in user none; do
     fail "developer image is missing the writable $role Lorry repository"
   vm_ssh "[ -d /devtools/lorry/$role/cache ]" ||
     fail "developer image is missing the $role Lorry cache directory"
-  vm_ssh "[ -z \"\$(/system/bin/find /devtools/lorry/$role/vendor/objects -type f)\" ]" ||
-    fail "developer image contains preinstalled $role Lorry dependency objects"
 done
+# Only the Interactive role holds the library sources' dependencies.
+vm_ssh "[ -z \"\$(/system/bin/find /devtools/lorry/none/vendor/objects -type f)\" ]" ||
+  fail "developer image contains preinstalled none Lorry dependency objects"
+user_objects="$(count_guest_files /devtools/lorry/user/vendor/objects)"
+user_cache_files="$(count_guest_files /devtools/lorry/user/cache)"
+[ "$user_objects" -gt 0 ] || fail "developer image lacks the dependencies of $SYS_LIB"
+[ "$user_cache_files" -gt 0 ] ||
+  fail "developer image lacks the compiled dependencies of $SYS_LIB"
 vm_ssh "[ ! -e /user/cfg/lorry ]" ||
   fail "developer image still contains the old Lorry state directory"
 vm_ssh "[ -f /devtools/lorry/readme.txt ]" ||
@@ -283,9 +341,9 @@ for package in red gears; do
     build-script-build -rwxr-xr-- "Cargo-uplifted $package build scripts"
   vm_ssh "/system/bin/rm -r /devtools/src/motor-os/bin/$package/target"
 done
-vm_ssh "[ -n \"\$(/system/bin/find /devtools/lorry/user/vendor/objects -type f)\" ]" ||
+[ "$(count_guest_files /devtools/lorry/user/vendor/objects)" -gt "$user_objects" ] ||
   fail "Lorry did not populate /devtools/lorry/user/vendor"
-vm_ssh "[ -n \"\$(/system/bin/find /devtools/lorry/user/cache -type f)\" ]" ||
+[ "$(count_guest_files /devtools/lorry/user/cache)" -gt "$user_cache_files" ] ||
   fail "Lorry did not populate /devtools/lorry/user/cache"
 vm_ssh "[ ! -e /user/cfg/lorry ]" ||
   fail "Lorry recreated its old state directory"
@@ -295,6 +353,20 @@ vm_ssh "cd /devtools/src/motor-os/bin/lorry && /devtools/bin/lorry build" ||
   fail "developer image cannot natively build /devtools/src/lorry"
 vm_ssh "/system/bin/cp /devtools/src/motor-os/bin/lorry/target/lorry/debug/lorry $DEV_TMP/native-lorry"
 vm_ssh "/system/bin/rm -r /devtools/src/motor-os/bin/lorry/target"
+
+# The library sources' tests, offline: the image carries the admitted
+# workspace and its compiled dependencies, made with the same four jobs.
+echo "-- Native tests of $SYS_LIB --"
+native_progress="$VM_RUNTIME_DIR/native-tests.err"
+native_results="$VM_RUNTIME_DIR/native-tests.out"
+native_status=0
+vm_ssh "cd $SYS_LIB && /devtools/bin/lorry test -j 4" \
+  > "$native_results" 2> "$native_progress" || native_status=$?
+cat "$native_progress" "$native_results"
+[ "$native_status" -eq 0 ] ||
+  fail "native lorry test in $SYS_LIB failed with status $native_status"
+check_native_tests "$native_progress" "$native_results"
+vm_ssh "/system/bin/rm -r $SYS_LIB/target"
 
 kill -0 "$VMM_PID" 2>/dev/null ||
   fail "owned $TEST_VM_LABEL exited before final teardown"

@@ -37,6 +37,7 @@ usage() {
 	cat << 'EOF'
 Usage: src/build-motor-os.sh [--source-mode managed]
        src/build-motor-os.sh [--javy-only] [--wasmtime-only]
+       src/build-motor-os.sh --sys-lib-deps-only
        src/build-motor-os.sh --source-mode authoring \
          --rust-source /absolute/path/to/rust --authoring-base FULL_COMMIT
 
@@ -51,12 +52,15 @@ Build the complete Motor OS release environment and all four images, including:
   - native rust-analyzer and matching rust-src in the development image;
   - Javy and Wasmi in the development and small wasm images;
   - runtime-only Wasmtime as /devtools/bin/wasmtime-rt in both of those images;
+  - the crates.io dependencies of the Motor OS library sources the development
+    image stages for native tests, as Lorry repository objects;
   - all standard and dev-image Motor OS binaries;
   - base, standard, dev, and wasm images under vm_images/release.
 
 --javy-only and --wasmtime-only build the Javy/Wasmi and runtime-only Wasmtime
 add-ons with the selected installed assembly; they skip toolchain provisioning
-and image construction.
+and image construction. --sys-lib-deps-only likewise vendors only the
+dependencies of the development image's library sources.
 
 Environment:
   MOTORH  Development root for sibling checkouts and build trees.
@@ -70,7 +74,8 @@ stashes, cleans, or updates the supplied Rust and LLVM worktrees.
 
 The build is incremental and safe to rerun. It downloads managed sources and packages,
 uses sudo only at the start, for missing Ubuntu packages and host VM setup, and
-does not start the VM. A re-run discards an interrupted build and builds it again.
+starts a VM only to prepare the development image. A re-run discards an
+interrupted build and builds it again.
 EOF
 }
 
@@ -78,6 +83,7 @@ parse_options() {
 	SOURCE_MODE=managed
 	JAVY_ONLY=false
 	WASMTIME_ONLY=false
+	SYS_LIB_DEPS_ONLY=false
 	RUST_SOURCE=
 	AUTHORING_BASE=
 	while [ "$#" -gt 0 ]; do
@@ -85,6 +91,7 @@ parse_options() {
 			-h|--help) usage; return 2 ;;
 			--javy-only) JAVY_ONLY=true; shift ;;
 			--wasmtime-only) WASMTIME_ONLY=true; shift ;;
+			--sys-lib-deps-only) SYS_LIB_DEPS_ONLY=true; shift ;;
 			--source-mode) [ "$#" -ge 2 ] || die "--source-mode needs a value"; SOURCE_MODE="$2"; shift 2 ;;
 			--rust-source) [ "$#" -ge 2 ] || die "--rust-source needs a value"; RUST_SOURCE="$2"; shift 2 ;;
 			--authoring-base) [ "$#" -ge 2 ] || die "--authoring-base needs a value"; AUTHORING_BASE="$2"; shift 2 ;;
@@ -943,6 +950,52 @@ build_addons() {
 	ensure_wasi_sdk
 	build_javy_addon
 	build_wasmtime_addon
+	ensure_sys_lib_deps
+}
+
+# --- add-on: dependencies of the staged Motor OS library sources ---------------
+# The development image stages src/sys/lib crates for native tests, and
+# `make dev.img` admits and compiles them there offline (src/prepare-dev-image.sh).
+# Their crates.io dependencies come from this overlay: objects of the image's
+# Interactive Lorry repository, fetched by a Lorry built for this host. Fetch
+# takes every package of the workspace's Cargo.lock, whatever features the
+# staged manifests select, so that lock alone decides the overlay; and
+# src/sys/Cargo.lock decides the lock.
+ensure_sys_lib_deps() {
+	local work="$ASSEMBLY_BUILD_ROOT/sys-lib-deps" stamp="$ASSEMBLY_ROOT/ADDON-sys-lib-deps"
+	local overlay="$ASSEMBLY_IMAGE_ROOT/sys-lib-deps" source
+	local repository="$overlay/devtools/lorry/user/vendor"
+	rm -rf "$work"
+	"$MOTOR/src/sys-lib-workspace.sh" "$work/workspace"
+	# The overlay is a function of the lockfile and of this recipe.
+	source="$({ cat "$work/workspace/Cargo.lock"; declare -f ensure_sys_lib_deps; } |
+		sha256sum | cut -d ' ' -f 1)"
+	if [ -d "$repository/objects" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$source" ]; then
+		skip "sys-lib-deps $source"
+		return
+	fi
+	log "fetching the dependencies of the staged Motor OS library sources"
+	rm -f "$stamp"
+	rm -rf "$overlay"
+	CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/host-lorry" \
+		cargo build --manifest-path "$MOTOR/src/bin/lorry/Cargo.toml" --release --locked
+	mkdir -p "$work/home/.config/lorry" "${repository%/*}"
+	cat > "$work/home/.config/lorry/lorry.toml" << EOF
+config-version = 1
+
+[repositories]
+user = "$repository"
+EOF
+	# A private HOME keeps the user's own Lorry configuration out.
+	( cd "$work/workspace" &&
+		RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+		HOME="$work/home" "$ASSEMBLY_BUILD_ROOT/host-lorry/release/lorry" fetch --locked )
+	# The image ships its own repository header; only objects and index records
+	# belong to the overlay.
+	rm -rf "$repository/repository.toml" "$repository/.staging"
+	[ -n "$(find "$repository/objects" -type f)" ] ||
+		die "Lorry fetched no dependency objects into $repository"
+	printf '%s\n' "$source" > "$stamp"
 }
 
 build_helix() {
@@ -991,30 +1044,35 @@ main() {
 		[ "$parse_status" -eq 2 ] && return 0
 		return "$parse_status"
 	}
-	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ]; then
+	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ] || [ "$SYS_LIB_DEPS_ONLY" = true ]; then
 		[ "$SOURCE_MODE" = managed ] ||
-			die "--javy-only and --wasmtime-only use the selected installed toolchain"
+			die "--javy-only, --wasmtime-only and --sys-lib-deps-only use the selected installed toolchain"
 		# Select once, as ordinary builds do, and pass that choice to every step.
 		if [ -z "${RUSTUP_TOOLCHAIN:-}" ]; then
 			RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$MOTOR/rust-toolchain.toml")"
 			[ -n "$RUSTUP_TOOLCHAIN" ] || die "no Rust channel in $MOTOR/rust-toolchain.toml"
 		fi
 		export RUSTUP_TOOLCHAIN
-		local selection=wasm
-		if [ "$WASMTIME_ONLY" = false ]; then selection=javy
-		elif [ "$JAVY_ONLY" = false ]; then selection=wasmtime; fi
-		select_addon_workspaces "$selection"
-		prepare_addon_sources
-		check_addon_lockfiles || die "add-on preflight failed; see $MOTOR/build/addon-lockfiles.log"
+		local wasm=false
+		if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ]; then
+			wasm=true
+			local selection=wasm
+			if [ "$WASMTIME_ONLY" = false ]; then selection=javy
+			elif [ "$JAVY_ONLY" = false ]; then selection=wasmtime; fi
+			select_addon_workspaces "$selection"
+			prepare_addon_sources
+			check_addon_lockfiles || die "add-on preflight failed; see $MOTOR/build/addon-lockfiles.log"
+		fi
 		ASSEMBLY_IMAGE_ROOT="$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)"
 		ASSEMBLY_ROOT="${ASSEMBLY_IMAGE_ROOT%/images}"
 		ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
-		ensure_wasm_guest_toolchain
+		[ "$wasm" = false ] || ensure_wasm_guest_toolchain
 		if [ "$JAVY_ONLY" = true ]; then
 			ensure_wasi_sdk
 			build_javy_addon
 		fi
 		[ "$WASMTIME_ONLY" = false ] || build_wasmtime_addon
+		[ "$SYS_LIB_DEPS_ONLY" = false ] || ensure_sys_lib_deps
 		return
 	fi
 	log "complete Motor OS build starting"

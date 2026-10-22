@@ -1,0 +1,9 @@
+# Motor OS library sources, staged for native tests: run `lorry test` here.
+# `make dev.img` adds Cargo.lock, admits the workspace, and compiles its
+# dependencies into the Interactive Lorry cache; see src/prepare-dev-image.sh.
+[workspace]
+members = ["moto-mpmc", "moto-async", "moto-ipc"]
+# moto-rt and moto-sys are members too, as path dependencies below this root,
+# but are not tested here.
+default-members = ["moto-mpmc", "moto-async", "moto-ipc"]
+resolver = "2"

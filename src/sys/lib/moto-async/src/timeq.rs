@@ -8,7 +8,7 @@ use moto_rt::time::Instant;
 
 extern crate alloc;
 
-#[cfg(all(not(target_os = "motor"), not(feature = "host-construction-test")))]
+#[cfg(not(target_os = "motor"))]
 compile_error!("Only Motor OS targets supported.");
 
 /// Handle to a queued timer.

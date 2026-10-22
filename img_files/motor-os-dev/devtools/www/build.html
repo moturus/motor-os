@@ -591,8 +591,9 @@ rush, rmux, red, russhd, rnetbench, sys-init, and the runtime libraries) and the
 System-console, TUI, and terminal-size tests, then boots the image under QEMU and drives
 it over SSH: systest, mio-test, tokio-tests, crossterm-smoke, SFTP, and the rest. A run is
 limited to fifteen minutes. <code>full-test-dev.sh</code> does the same against the
-developer image, then compiles the source snapshots natively inside the VM and runs
-Lorry's own suite; it wants a 4 GiB VM. <code>full-test-networking.sh</code> is the
+developer image, then compiles the source snapshots natively inside the VM, runs the
+tests of the Motor OS libraries staged there, and runs Lorry's own suite; it wants a
+4 GiB VM. <code>full-test-networking.sh</code> is the
 networking subset with rnetbench throughput runs, and <code>stress-soak.sh</code> keeps one
 VM under concurrent load for as long as you ask, watching for crashes and stalls.</p>
 <p>On the developer image the same test programs are in <code>/devtools/tests</code> and can

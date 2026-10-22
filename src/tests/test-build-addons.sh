@@ -181,6 +181,17 @@ case "$(declare -f build_addons)" in
 	*'ensure_addon lua'*'ensure_addon ripgrep'*'ensure_addon helix'*'ensure_addon sed'*) ;;
 	*) fail "Lua, ripgrep, Helix, and sed are not all add-ons" ;;
 esac
+# The developer image's library sources take their dependencies from an
+# add-on: every package their workspace locks, fetched with Lorry, so the
+# lockfile alone decides when it is stale.
+case "$(declare -f build_addons)" in
+	*ensure_sys_lib_deps*) ;;
+	*) fail "the dependencies of the staged library sources are not an add-on" ;;
+esac
+case "$(declare -f ensure_sys_lib_deps)" in
+	*'src/sys-lib-workspace.sh'*'cat "$work/workspace/Cargo.lock"'*'declare -f ensure_sys_lib_deps'*'fetch --locked'*) ;;
+	*) fail "the library sources' dependencies are not fetched from their locked workspace" ;;
+esac
 case "$(declare -f select_addon_workspaces)" in
 	*'"sed:$SED_BRANCH"'*) ;;
 	*) fail "sed does not follow its fork branch" ;;

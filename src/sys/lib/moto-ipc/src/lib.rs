@@ -6,5 +6,5 @@ extern crate alloc;
 pub mod io_channel;
 pub mod sync;
 
-#[cfg(feature = "stdio-pipe")]
+#[cfg(any(test, feature = "stdio-pipe"))]
 pub mod stdio_pipe;

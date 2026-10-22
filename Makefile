@@ -348,7 +348,9 @@ base.img: boot core sys-base user-base
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS base image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
-# The dev image adds diagnostics, tests, sources, and native toolchains.
+# The dev image adds diagnostics, tests, sources, and native toolchains. A VM
+# then prepares its staged library sources for offline native tests; their
+# dependencies come from src/build-motor-os.sh --sys-lib-deps-only.
 dev.img: assembly-resolved boot core sys user-dev
 	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
@@ -358,6 +360,7 @@ dev.img: assembly-resolved boot core sys user-dev
 		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
 		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
+	"$(ROOT_DIR)/src/prepare-dev-image.sh" $(IMG_CMD)
 	@echo "built the Motor OS dev image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2"
 
 # Release wasm add-ons are prepared by src/build-motor-os.sh --javy-only --wasmtime-only.

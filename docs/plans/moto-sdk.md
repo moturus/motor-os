@@ -1,8 +1,7 @@
 # moto-sdk: one published crate for Motor OS userspace services
 
-Status: plan, revised 2026-10-21. Preparatory step (a) is committed; step (b)
-is implemented and validated locally, uncommitted. SDK consolidation has not
-started.
+Status: plan, revised 2026-10-21. Preparatory steps (a), (b), and (c) are
+committed. SDK consolidation has not started.
 Owner rulings of 2026-10-20:
 crates under `src/sys` reference each other by path; every other crate (in
 `src/bin`, `src/tests`, the forks, the toolchain) takes Motor OS crates from
@@ -17,11 +16,11 @@ patches land before the consolidation (see "Preparatory steps"): the edition
 move, the `netdev` removal, and the native test phase with its dependency
 closure preinstalled on the developer image. moto-io's build script is dropped.
 The developer image stages the sources under test at
-`/devtools/src/motor-os/sys/lib/`; `src/build-motor-os.sh` precompiles the
-dependency closure for the Motor target and the imager installs it into the
-Lorry cache on dev.img, outside every test timeout. Image preparation also
-runs `lorry vendor` for the staged workspace, so the test step runs only
-`lorry test`. Lorry is changed if any of that needs it.
+`/devtools/src/motor-os/sys/lib/`, and the test step runs only `lorry test`.
+Later rulings of 2026-10-21 replaced the host precompile: units built on Linux
+can never be cache hits on Motor (see "Developer image requirement"), so
+`make dev.img` boots the new image once and vendors and compiles there.
+A registry build script may compile in the test step, as under Cargo.
 
 The consolidation itself is one large patch, after the preparatory patches.
 moto-async becomes `async_runtime` (the Rust module spelling of the requested
@@ -240,48 +239,51 @@ their whole dependency closure, and the workspace's admission state. Before
 the merge that is moto-mpmc, moto-async and moto-ipc with moto-rt and
 moto-sys; after it, moto-sdk with moto-rt and moto-sys.
 
-- `src/build-motor-os.sh` fetches and vendors the closure for the Motor
-  target with Lorry, as it fetches every other developer tool, and
-  precompiles it for the Motor target. The assembly carries the repository
-  objects and the compiled dependency units. The imager installs them on
-  dev.img as the user-role Lorry repository (`/devtools/lorry/user/vendor`)
-  and the user-role Lorry cache (`/devtools/lorry/user/cache`). On Motor,
-  Lorry allows a `system` repository only in the Linux base layer, so the
-  preinstalled objects go into the user role. The closure has build scripts
-  (crossbeam-utils, crossbeam, proc-macro2, quote, syn) and proc macros
-  (async-trait, bytemuck_derive); the image's user `lorry.toml` carries their
-  grants, as it does for Lorry's own dependencies.
-- The imager stages the in-tree sources at image build, like the red, gears
-  and lorry sources, under `/devtools/src/motor-os/sys/lib/`, mirroring the
-  tree layout so `../moto-rt` path dependencies resolve (owner ruling
-  2026-10-21).
-- Lorry's compile commands never resolve or admit dependencies; a fresh
-  workspace needs one `lorry vendor` before `lorry test`. The image build
-  does that: the dev.img build runs the host Lorry's
-  `vendor --offline --accept-all` on the staged workspace against the
-  assembly's repository and cache, and ships the result on the image: the
-  workspace's Cargo.lock and `.lorry/dependencies-v2.toml`, and the motor
-  user's approval under `/user/cfg/lorry-workspaces/`. The admission record
-  commits to the staged manifests, so it is regenerated on every image build.
-- The test step runs only `lorry test`, with no vendor call and no network.
-  It compiles the crates under test and their test binaries; every
-  dependency unit is a cache hit. The script checks that the expected tests
-  ran and treats a dependency compiled in the VM, or a vendor demanded by
-  Lorry, as a failure, so neither can hide inside the timeout.
-- Precompilation and vendoring run in the assembly and image builds, outside
-  every test timeout, the way `full-test-prepare.sh` moves builds off
-  `full-test.sh`'s clock.
-- If Lorry needs changes for host-produced repository objects, cache units
-  or admission state to be consumed natively, change Lorry (owner ruling
-  2026-10-21). Likely candidates: reviewing the Motor host/target pair from
-  Linux, and accepting an approval file installed by the imager rather than
-  written by Lorry. Say so explicitly in the patch.
-- A new SDK dependency means a new assembly, like any other devtools change;
-  a manifest change in the staged crates is covered by the image build.
-- Assertions that change: the imager's dev-image test (exactly three source
-  dirs; nothing under `/devtools/src/motor-os/sys`) and
-  `src/tests/test-dev-sources.sh` (no sys sources on the image; empty role
-  repositories at boot). The gate stays release-only.
+Host-built units cannot be native cache hits. Lorry's cache key covers the
+path, size and mtime of the Lorry and rustc binaries, and motor-fs stamps every
+file with the image-build time. The key also covers the host triple and
+rustc's host line. A build script such as crossbeam-utils' must run on Motor,
+and Lorry, like Cargo, never caches build-script executables. So the closure
+is compiled natively, once per image build (owner rulings of 2026-10-21).
+As built for step (c):
+
+- The imager stages the in-tree crates under
+  `/devtools/src/motor-os/sys/lib/`, mirroring the tree so `../moto-rt` path
+  dependencies resolve. A static workspace manifest from `img_files` names the
+  members under test and makes them the default members.
+- `src/sys-lib-workspace.sh` assembles the same workspace on the host. Its
+  Cargo.lock comes from `src/sys/Cargo.lock`, so native tests use the in-tree
+  dependency versions.
+- `src/build-motor-os.sh` has an add-on, `sys-lib-deps`: a host-built Lorry
+  runs `lorry fetch --locked` on that workspace. Fetch takes every package the
+  lockfile names, whatever features are selected, so the lockfile and the
+  recipe alone key the add-on. The assembly overlay goes into the image's
+  user-role repository (`/devtools/lorry/user/vendor`). On Motor, Lorry allows
+  a `system` repository only in the Linux base layer. A changed lockfile needs
+  `src/build-motor-os.sh --sys-lib-deps-only`, like any other devtools change.
+- `make dev.img` runs `src/prepare-dev-image.sh`. It boots the new image once
+  under QEMU, installs the workspace's Cargo.lock, and runs native
+  `lorry vendor --locked --offline --accept-all` and
+  `lorry test --no-run -j 4`. It then removes `target/` and shuts down. The
+  image keeps the admission record, the motor user's approval under
+  `/user/cfg/lorry-workspaces/`, and the compiled dependencies in
+  `/devtools/lorry/user/cache`. This is part of the image build, not of the
+  native test step. It has its own deadline (300 seconds release, 1200 debug;
+  it takes about 10 seconds and 4 minutes), and it succeeds only when the
+  guest shuts down by itself: a forced stop could lose unflushed writes, and
+  any failure removes the image. `--accept-all` gives the workspace
+  Cargo-like trust, so `lorry.toml` needs no grants for it.
+- The test step in `test-dev-sources.sh` runs only `lorry test -j 4`, offline.
+  It fails if a registry library or proc macro compiles, or if Lorry prints
+  "Rebuilding global dependency cache". A registry build script may compile.
+  Every `#[test]` in the three crates' sources must pass.
+  Both runs use four jobs because build-script environments, which include
+  `NUM_JOBS`, enter the cache keys.
+- No Lorry code changed. Its spec and design now say the image ships these
+  objects and cache entries.
+- After the merge the same flow covers `moto-sdk`. Its closure adds proc
+  macros (async-trait, bytemuck_derive), which Lorry caches, and build
+  scripts (proc-macro2, quote, syn), which compile in the test step.
 
 ## Publication and versioning
 
@@ -408,7 +410,9 @@ Coverage changes to carry into the step (b) commit message:
   `moto-async/tests/fallible.rs` from host to Motor, preserving the
   allocation-failure, cleanup and queue assertions. Remove the
   `host-construction-test` feature and the host exception in
-  `moto-async/src/timeq.rs`. stdio-pipe's unit tests stay with the module.
+  `moto-async/src/timeq.rs`. stdio-pipe's unit tests stay with the module;
+  moto-ipc also compiles the module for its own unit tests, so a plain
+  `lorry test` runs them.
 - Remove the host cargo commands for these three crates from `full-test.sh`
   and `full-test-prepare.sh`. Add the native phase to the developer-image
   gate (`test-dev-sources.sh`, run by `full-test-dev.sh --release`), after the
@@ -416,10 +420,9 @@ Coverage changes to carry into the step (b) commit message:
 - The moto-tooling host tests stay: they are portable.
 
 Gate: the core gate plus `full-test-dev.sh --release`. This is the first
-native `lorry test` in any gate. Lorry changes needed for the preinstalled
-repository or cache are approved. The native phase compiles only the three
-crates and their test binaries, so it fits the existing 1500 s budget of
-`test-dev-sources.sh`; precompilation is outside it.
+native `lorry test` in any gate. The native phase compiles only the staged
+crates, their test binaries and crossbeam-utils' build script, in about
+seven seconds; the image build's preparation takes about ten more.
 
 ## Steps
 
